@@ -1442,10 +1442,8 @@ fn color_from_vals(v: &[f64], a: f32) -> [f32; 4] {
 mod tests {
     use super::*;
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A page takes no press: it captures nothing, marks nothing handled
@@ -1456,6 +1454,7 @@ mod tests {
     /// it — which is what the assertions are here to notice.
     #[test]
     fn a_page_takes_no_press_so_the_document_still_drags_to_scroll() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut page = cx.with_vm(PdfPageView::script_new_with_default);
         assert!(
@@ -1478,5 +1477,6 @@ mod tests {
         if let Event::MouseDown(e) = &down {
             assert!(e.handled.get().is_empty(), "a page took a press");
         }
+        });
     }
 }

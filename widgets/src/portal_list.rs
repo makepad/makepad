@@ -4280,6 +4280,10 @@ impl PortalListSet {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::event::ScrollEvent;
     use crate::log_list::LogList;
@@ -4294,47 +4298,59 @@ mod tests {
     /// the page around it stays put.
     #[test]
     fn a_list_between_its_edges_keeps_the_wheel_both_ways() {
+        crate::on_test_cx(|| {
         assert!(list_keeps_scroll_delta(UP, false, false, false));
         assert!(list_keeps_scroll_delta(DOWN, false, false, false));
+        });
     }
 
     /// At the top, a wheel rolled up has nowhere to take the list and goes on
     /// to the page; rolled down it still moves the list and stays.
     #[test]
     fn at_the_top_only_the_wheel_toward_the_top_passes_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(UP, true, false, false));
         assert!(list_keeps_scroll_delta(DOWN, true, false, false));
+        });
     }
 
     /// The same at the bottom, the other way round.
     #[test]
     fn at_the_bottom_only_the_wheel_toward_the_bottom_passes_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(DOWN, false, true, false));
         assert!(list_keeps_scroll_delta(UP, false, true, false));
+        });
     }
 
     /// A list whose rows all fit rests on both edges and never scrolls, so
     /// it takes no wheel from the page it sits on.
     #[test]
     fn a_list_that_fits_passes_every_wheel_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(UP, true, true, false));
         assert!(!list_keeps_scroll_delta(DOWN, true, true, false));
+        });
     }
 
     /// A rubber band past an edge is the list moving: fingers stretching it
     /// keep the delta even at that edge.
     #[test]
     fn a_rubber_band_keeps_what_it_stretches_by() {
+        crate::on_test_cx(|| {
         assert!(list_keeps_scroll_delta(UP, true, true, true));
         assert!(list_keeps_scroll_delta(DOWN, true, true, true));
+        });
     }
 
     /// No delta along the list's axis is nothing to keep: the other axis of
     /// the same event stays free for a scroll view that runs across it.
     #[test]
     fn no_delta_is_never_kept() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(0.0, false, false, false));
         assert!(!list_keeps_scroll_delta(0.0, false, false, true));
+        });
     }
 
     // A list showing five rows from row 10, i.e. rows 10 to 14.
@@ -4347,6 +4363,7 @@ mod tests {
     /// list holds exactly where it is, wherever in the window the row sits.
     #[test]
     fn a_row_already_on_screen_holds_the_list_still() {
+        crate::on_test_cx(|| {
         for index in FIRST..FIRST + WINDOW {
             assert_eq!(
                 first_id_keeping_index_visible(index, FIRST, WINDOW, 0, LEAD),
@@ -4354,12 +4371,14 @@ mod tests {
                 "the list moved for row {index}, which was already showing"
             );
         }
+        });
     }
 
     /// A row that went off the top comes back with the lead above it, so it
     /// isn't pinned to the very edge.
     #[test]
     fn a_row_off_the_top_comes_back_short_of_the_top() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(3, FIRST, WINDOW, 0, LEAD),
             Some(2)
@@ -4368,23 +4387,27 @@ mod tests {
             first_id_keeping_index_visible(9, FIRST, WINDOW, 0, 3),
             Some(6)
         );
+        });
     }
 
     /// The same off the bottom: the row lands one row up from the end of the
     /// window rather than half off it.
     #[test]
     fn a_row_off_the_bottom_comes_back_short_of_the_bottom() {
+        crate::on_test_cx(|| {
         let first = first_id_keeping_index_visible(20, FIRST, WINDOW, 0, LEAD).unwrap();
         assert_eq!(first, 17);
         // 17..22 shows the row with one row after it.
         assert!(first <= 20 && 20 < first + WINDOW);
         assert_eq!(20 - first + LEAD, WINDOW - 1);
+        });
     }
 
     /// The lead is daylight, not a promise: near the start of the range there
     /// is none to be had, and the list stops at the first row it has.
     #[test]
     fn the_lead_never_runs_past_the_start_of_the_range() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(0, FIRST, WINDOW, 0, LEAD),
             Some(0)
@@ -4393,12 +4416,14 @@ mod tests {
             first_id_keeping_index_visible(5, FIRST, WINDOW, 5, LEAD),
             Some(5)
         );
+        });
     }
 
     /// A window with no room for the lead still shows the row itself: the row
     /// is the request, the lead is the manners.
     #[test]
     fn a_window_too_short_for_the_lead_still_shows_the_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(20, FIRST, 1, 0, LEAD),
             Some(20)
@@ -4407,22 +4432,26 @@ mod tests {
             first_id_keeping_index_visible(20, FIRST, 2, 0, 4),
             Some(20)
         );
+        });
     }
 
     /// A list that drew nothing has no window to judge against, so the row is
     /// off screen by definition and comes back at the start of one.
     #[test]
     fn a_list_that_drew_nothing_brings_the_row_to_its_start() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(FIRST, FIRST, 0, 0, LEAD),
             Some(FIRST - LEAD)
         );
+        });
     }
 
     /// A short list resting at its start leaves its gap after the last row,
     /// and the ruling runs on past it.
     #[test]
     fn a_list_resting_at_its_start_rules_the_gap_after_its_last_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_band(true, 0.0, 80.0, 120.0),
             Some(FillerBand {
@@ -4431,12 +4460,14 @@ mod tests {
                 step: 1
             })
         );
+        });
     }
 
     /// A short list resting at its end leaves the gap at the other edge, so
     /// the ruling runs back before the first row instead.
     #[test]
     fn a_list_resting_at_its_end_rules_the_gap_before_its_first_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_band(false, 40.0, 120.0, 120.0),
             Some(FillerBand {
@@ -4445,21 +4476,25 @@ mod tests {
                 step: -1
             })
         );
+        });
     }
 
     /// Rows that reach the edge leave nothing to rule, whichever edge the list
     /// rests on — and neither does a sliver too thin to be a row.
     #[test]
     fn rows_that_fill_the_viewport_leave_nothing_to_rule() {
+        crate::on_test_cx(|| {
         assert_eq!(filler_band(true, 0.0, 120.0, 120.0), None);
         assert_eq!(filler_band(false, 0.0, 120.0, 120.0), None);
         assert_eq!(filler_band(true, 0.0, 119.7, 120.0), None);
+        });
     }
 
     /// The gap takes whole rows at the pitch of the row it continues, and the
     /// last one takes what is left over.
     #[test]
     fn whole_rows_fill_the_gap_and_the_last_one_takes_what_is_left() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(45.0, 20.0, MAX_FILLER_ROWS),
             FillerRun {
@@ -4474,6 +4509,7 @@ mod tests {
                 last: 20.0
             }
         );
+        });
     }
 
     /// A gap shorter than one row is one clamped row: that sliver is the top
@@ -4481,6 +4517,7 @@ mod tests {
     /// ragged edge the ruling is there to remove.
     #[test]
     fn a_gap_shorter_than_a_row_is_one_clamped_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(5.0, 20.0, MAX_FILLER_ROWS),
             FillerRun {
@@ -4488,12 +4525,14 @@ mod tests {
                 last: 5.0
             }
         );
+        });
     }
 
     /// Nothing is ruled without a gap and a row height to rule it by, and a
     /// number that isn't one rules nothing either.
     #[test]
     fn a_row_with_no_height_rules_nothing() {
+        crate::on_test_cx(|| {
         let none = FillerRun {
             rows: 0,
             last: 0.0,
@@ -4504,12 +4543,14 @@ mod tests {
         assert_eq!(filler_run(f64::NAN, 20.0, MAX_FILLER_ROWS), none);
         assert_eq!(filler_run(40.0, f64::NAN, MAX_FILLER_ROWS), none);
         assert_eq!(filler_run(40.0, 20.0, 0), none);
+        });
     }
 
     /// However thin the rows, one draw only ever puts so many of them down;
     /// the rest would be off the far edge anyway.
     #[test]
     fn the_run_of_rows_is_capped() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(1000.0, 1.0, 8),
             FillerRun {
@@ -4518,17 +4559,20 @@ mod tests {
             }
         );
         assert_eq!(filler_run(f64::INFINITY, 1.0, 8).rows, 8);
+        });
     }
 
     /// The striping carries on from the row it continues, forwards past the
     /// last row and backwards before the first.
     #[test]
     fn the_striping_carries_on_from_the_row_it_continues() {
+        crate::on_test_cx(|| {
         assert_eq!(filler_alternate(4, 1), 1.0);
         assert_eq!(filler_alternate(4, 2), 0.0);
         assert_eq!(filler_alternate(5, 1), 0.0);
         assert_eq!(filler_alternate(0, -1), 1.0);
         assert_eq!(filler_alternate(0, -2), 0.0);
+        });
     }
 
     /// Drag-to-scroll asks one question at the press: does a control hold the
@@ -4537,8 +4581,10 @@ mod tests {
     /// scrolled the rack the slider sits in.
     #[test]
     fn a_mouse_press_a_control_holds_starts_no_drag_scroll() {
+        crate::on_test_cx(|| {
         assert!(!press_starts_drag_scroll(true, true, true, false, true));
         assert!(press_starts_drag_scroll(true, true, true, false, false));
+        });
     }
 
     /// The one exemption: a TOUCH that lands on a control still scrolls the
@@ -4546,25 +4592,31 @@ mod tests {
     /// ignores touch captures, so this is about the finger's own press.
     #[test]
     fn a_touch_scrolls_the_list_even_from_a_control() {
+        crate::on_test_cx(|| {
         assert!(press_starts_drag_scroll(true, true, true, true, true));
+        });
     }
 
     /// The list's own three conditions still each veto a drag on their own,
     /// whoever holds the mouse.
     #[test]
     fn a_drag_scroll_still_needs_the_lists_own_leave() {
+        crate::on_test_cx(|| {
         assert!(!press_starts_drag_scroll(false, true, true, true, false));
         assert!(!press_starts_drag_scroll(true, false, true, true, false));
         assert!(!press_starts_drag_scroll(true, true, false, true, false));
+        });
     }
 
     /// Asked again on every move: a control that takes the pointer after the
     /// drag began ends it, and a finger's drag is never ended this way.
     #[test]
     fn a_drag_scroll_stands_down_the_move_a_control_takes_the_mouse() {
+        crate::on_test_cx(|| {
         assert!(drag_scroll_stands_down(false, true));
         assert!(!drag_scroll_stands_down(false, false));
         assert!(!drag_scroll_stands_down(true, true));
+        });
     }
 
     const PANE: DVec2 = dvec2(300.0, 120.0);
@@ -4650,8 +4702,8 @@ mod tests {
     /// back with a row to spare beyond it.
     #[test]
     fn the_list_holds_the_row_it_was_asked_to_keep() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4704,6 +4756,7 @@ mod tests {
             far + LEAD < now + rows,
             "the recalled row landed pinned to the bottom edge: {now} + {rows} for {far}"
         );
+        });
     }
 
     /// The continuation rows are ground, not layout: turning them on under a
@@ -4711,8 +4764,8 @@ mod tests {
     /// it was.
     #[test]
     fn the_continuation_rows_leave_the_real_rows_alone() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..3).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4735,6 +4788,7 @@ mod tests {
             frame(&mut cx, &mut log, &pass, &mut draw_list);
         }
         assert_eq!(place(&cx, &log), before, "the ruling moved the rows it fills after");
+        });
     }
 
     /// The wheel over a list inside a scrolling page: the list keeps every
@@ -4743,8 +4797,8 @@ mod tests {
     /// follows its newest line, which puts this one at its bottom to start.
     #[test]
     fn a_list_keeps_the_wheel_it_moves_by_and_hands_on_the_wheel_past_its_edge() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4782,6 +4836,7 @@ mod tests {
         assert_eq!(place(&cx, &log), (0, 0.0), "the wheel never reached the top");
         assert!(!wheel(&mut cx, &mut log, -60.0, false), "a wheel past the top was kept");
         assert!(wheel(&mut cx, &mut log, 60.0, false), "a wheel down from the top was handed on");
+        });
     }
 
     /// A press through the list's real pointer handling, at `at` over a log of
@@ -4795,8 +4850,7 @@ mod tests {
     /// what the list asks is who holds the mouse, not what kind of control it
     /// is, and a Button takes a press exactly as a Slider's thumb does.
     fn press_over(lines: usize, at: DVec2, touch: bool, control: bool) -> (bool, bool) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..lines).map(|n| format!("log | line {n}")).collect();
         let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
@@ -4884,33 +4938,39 @@ mod tests {
     /// the rack the slider sits in.
     #[test]
     fn a_control_holding_the_mouse_keeps_the_list_around_it_still() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, false, true),
             (false, true),
             "a press the control holds started the list's drag-to-scroll"
         );
+        });
     }
 
     /// And the list is not broken while fixing it: the same press with nothing
     /// holding the mouse is the list's own, and still starts its drag.
     #[test]
     fn a_press_on_bare_list_still_starts_its_drag_scroll() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, false, false),
             (true, false),
             "the list stopped drag-scrolling from a press nothing else holds"
         );
+        });
     }
 
     /// The touch exemption, end to end: a finger that lands on a control still
     /// scrolls the list under it.
     #[test]
     fn a_touch_on_a_control_still_scrolls_the_list_under_it() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, true, true),
             (true, false),
             "a finger on a control stopped scrolling the list under it"
         );
+        });
     }
 
     /// The same rule with the control inside the list rather than over it: a
@@ -4919,6 +4979,7 @@ mod tests {
     /// by it — and a finger's still does.
     #[test]
     fn a_row_holding_the_mouse_keeps_the_list_it_sits_in_still() {
+        crate::on_test_cx(|| {
         let over_a_row = PANE * 0.5;
         assert_eq!(
             press_over(200, over_a_row, false, false),
@@ -4930,6 +4991,7 @@ mod tests {
             (true, false),
             "a finger on a row stopped scrolling the list under it"
         );
+        });
     }
     /// A log of 200 lines drawn until it settles: a real list, taller than its
     /// pane, with a scroll bar showing.
@@ -4972,8 +5034,8 @@ mod tests {
     /// its own scroll bar as an outsider holding the pointer.
     #[test]
     fn a_lists_own_areas_include_its_scroll_bar() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (log, _pass, _list) = drawn_log(&mut cx);
         let list_ref = log.portal_list(&cx, ids!(list));
         let list = list_ref.borrow().expect("the log holds no portal list");
@@ -4988,6 +5050,7 @@ mod tests {
             mine[1].is_valid(&cx) && mine[0] != mine[1],
             "the bar drew no area of its own, so this test proves nothing"
         );
+        });
     }
 
     /// A press on the list's OWN scroll bar belongs to the bar and to nothing
@@ -5001,8 +5064,8 @@ mod tests {
     /// holding it up.
     #[test]
     fn a_press_on_the_lists_own_bar_is_the_bars_alone() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut log, _pass, _list) = drawn_log(&mut cx);
         let list_ref = log.portal_list(&cx, ids!(list));
         let bar = {
@@ -5037,6 +5100,7 @@ mod tests {
         );
         drop(list);
         cx.fingers.first_mouse_button = None;
+        });
     }
 
     /// The other half of the rule for the selection drag: a control can take
@@ -5049,8 +5113,8 @@ mod tests {
     /// stands in for any continuously dragged control.
     #[test]
     fn a_selection_drag_stands_down_when_a_control_takes_the_mouse() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut log, pass, _draw_list) = drawn_log(&mut cx);
         let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
         let mut button_list = DrawList2d::new(&mut cx);
@@ -5103,5 +5167,6 @@ mod tests {
             "the selection drag kept running while a control held the mouse"
         );
         cx.fingers.first_mouse_button = None;
+        });
     }
 }

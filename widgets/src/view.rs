@@ -564,12 +564,17 @@ impl ViewRef {
 
 #[cfg(test)]
 mod contextual_size_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
 
     #[test]
     fn cached_view_re_resolves_contextual_width_after_parent_resize() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut view = cx.with_vm(|vm| {
             crate::script_mod(vm);
             View::script_new_with_default(vm)
@@ -600,11 +605,13 @@ mod contextual_size_tests {
         assert_eq!(resized.width.to_fixed(), Some(200.0));
         assert_eq!(resized.height.to_fixed(), Some(23.0));
         cx.end_turtle();
+        });
     }
 
     #[test]
     fn texture_snapshot_detaches_only_a_completed_cache() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut view = cx.with_vm(|vm| {
             crate::script_mod(vm);
             View::script_new_with_default(vm)
@@ -635,11 +642,16 @@ mod contextual_size_tests {
             CxDrawPassParent::None
         ));
         assert!(!cx.passes[pass_id].live_with_parent);
+        });
     }
 }
 
 #[cfg(test)]
 mod pointer_capture_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
     use std::cell::Cell;
@@ -714,8 +726,7 @@ mod pointer_capture_tests {
     /// A Button stands in for any continuously dragged control: what the rule
     /// asks is who holds the mouse, not what kind of control it is.
     fn press(control: bool) -> Pressed {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        let mut cx = test_cx();
         let mut view = cx.with_vm(View::script_new_with_default);
         let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
         // The two things that make a View hit-test its own area at all.
@@ -783,6 +794,7 @@ mod pointer_capture_tests {
     /// out from under it.
     #[test]
     fn a_control_holding_the_mouse_keeps_the_key_focus_it_took() {
+        crate::on_test_cx(|| {
         let pressed = press(true);
         assert_eq!(
             pressed.focus, pressed.button,
@@ -792,17 +804,20 @@ mod pointer_capture_tests {
             pressed.focus, pressed.view,
             "the container took the control's key focus"
         );
+        });
     }
 
     /// And the View is not broken while fixing it: a press nothing else holds
     /// is its own, and still moves the keyboard to it.
     #[test]
     fn a_press_nothing_else_holds_still_focuses_the_view() {
+        crate::on_test_cx(|| {
         let pressed = press(false);
         assert_eq!(
             pressed.focus, pressed.view,
             "the view stopped grabbing key focus from its own press"
         );
+        });
     }
 
     /// The focus is only one of the press-like states the rule names. A View
@@ -811,6 +826,7 @@ mod pointer_capture_tests {
     /// press the control holding the pointer already owns.
     #[test]
     fn a_control_holding_the_mouse_keeps_the_press_from_being_reported() {
+        crate::on_test_cx(|| {
         assert!(
             !press(true).reported_down,
             "the container reported a press a control was holding"
@@ -819,6 +835,7 @@ mod pointer_capture_tests {
             press(false).reported_down,
             "the view stopped reporting its own press"
         );
+        });
     }
 
     /// And the release that ends it. A View that stood down at the press has
@@ -826,6 +843,7 @@ mod pointer_capture_tests {
     /// a gesture that was never the View's.
     #[test]
     fn a_press_a_view_stood_down_from_reports_no_release() {
+        crate::on_test_cx(|| {
         assert!(
             !press(true).reported_up,
             "the container reported the release of a press it never took"
@@ -834,6 +852,7 @@ mod pointer_capture_tests {
             press(false).reported_up,
             "the view stopped reporting the release of its own press"
         );
+        });
     }
 
     /// A View that scrolls, with content four panes tall so its vertical bar
@@ -865,8 +884,8 @@ mod pointer_capture_tests {
     /// scroll bar as an outsider.
     #[test]
     fn a_views_own_areas_include_its_scroll_bars() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (view, _pass, _list) = scrolling_view(&mut cx);
         let bars = view
             .scroll_bars_obj
@@ -879,6 +898,7 @@ mod pointer_capture_tests {
             &[view.area(), bars[0], bars[1]],
             "a view asked about the pointer with something other than everything it owns"
         );
+        });
     }
 
     /// FIX 2, the one a View can hit on its own: a press on its OWN scroll bar
@@ -888,8 +908,8 @@ mod pointer_capture_tests {
     /// and the press report for a press that was its all along.
     #[test]
     fn a_view_does_not_stand_down_against_its_own_scroll_bar() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut view, _pass, _list) = scrolling_view(&mut cx);
         let uid = view.widget_uid();
 
@@ -922,6 +942,7 @@ mod pointer_capture_tests {
             view.area(),
             "the view refused the key focus of a press on its own scroll bar"
         );
+        });
     }
 }
 

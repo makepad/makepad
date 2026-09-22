@@ -1458,6 +1458,7 @@ mod tests {
     /// and a disabled row are all skipped, in both directions, wrapping.
     #[test]
     fn the_arrows_walk_only_the_rows_that_can_be_chosen() {
+        crate::on_test_cx(|| {
         let l = level();
         assert_eq!(l.step(None, 1), Some(1), "the heading is skipped");
         assert_eq!(l.step(Some(1), 1), Some(2));
@@ -1465,12 +1466,14 @@ mod tests {
         assert_eq!(l.step(Some(5), 1), Some(1), "and it wraps");
         assert_eq!(l.step(None, -1), Some(5), "up from nowhere is the last row");
         assert_eq!(l.step(Some(1), -1), Some(5));
+        });
     }
 
     /// A letter walks the rows starting with it, from after the highlight,
     /// so pressing it again finds the next one rather than sticking.
     #[test]
     fn a_letter_walks_the_rows_that_start_with_it() {
+        crate::on_test_cx(|| {
         let mut l = level();
         assert_eq!(l.typeahead('s'), Some(2), "Save");
         assert_eq!(l.typeahead('o'), Some(1), "Open");
@@ -1480,12 +1483,14 @@ mod tests {
         // A heading and a disabled row never answer, whatever their letter.
         assert_eq!(l.typeahead('f'), None, "the File heading is not selectable");
         assert_eq!(l.typeahead('c'), None, "the disabled Close is not selectable");
+        });
     }
 
     /// Rows are measured where they are drawn: a rule is thinner than a
     /// row, a heading shorter, and the bubble is the sum plus its padding.
     #[test]
     fn the_bubble_is_as_tall_as_the_rows_it_holds() {
+        crate::on_test_cx(|| {
         let size = measure_rows(&rows());
         let expected = MENU_PAD * 2.0 + SECTION_H + ROW_H * 4.0 + SEP_H;
         assert_eq!(size.y, expected);
@@ -1494,6 +1499,7 @@ mod tests {
         assert_eq!(l.row_rect(0).size.y, SECTION_H);
         assert_eq!(l.row_rect(3).size.y, SEP_H);
         assert_eq!(l.row_rect(1).size.y, ROW_H);
+        });
     }
 
     /// The open menu is one fact, and every change of it broadcasts the
@@ -1501,6 +1507,7 @@ mod tests {
     /// once.
     #[test]
     fn one_menu_is_open_and_every_change_says_so_in_order() {
+        crate::on_test_cx(|| {
         let mut open = OpenMenu::default();
         assert_eq!(open.owner(), None);
         assert_eq!(open.set(Some(live_id!(a))), vec![MenuChange::Opened(live_id!(a))]);
@@ -1512,6 +1519,7 @@ mod tests {
             "close before open"
         );
         assert_eq!(open.set(None), vec![MenuChange::Closed(live_id!(b))]);
+        });
     }
 
     /// The app-wide rule and its one exception, in one place: a menu follows
@@ -1519,16 +1527,19 @@ mod tests {
     /// raised the menu is the one holding it.
     #[test]
     fn a_menu_follows_only_a_pointer_that_is_its_own() {
+        crate::on_test_cx(|| {
         assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
         assert!(!menu_follows_pointer(true, false), "another control is being dragged");
         assert!(menu_follows_pointer(true, true), "the press that raised it is still down");
         assert!(menu_follows_pointer(false, true));
+        });
     }
 
     /// Whose press it is, read from where it landed: on the control the menu
     /// hangs off, or somewhere else entirely.
     #[test]
     fn the_press_that_raised_a_menu_is_the_one_that_landed_on_its_anchor() {
+        crate::on_test_cx(|| {
         let anchor = Rect { pos: dvec2(100.0, 40.0), size: dvec2(80.0, 20.0) };
         assert!(raised_by_the_press(anchor, Some(dvec2(140.0, 50.0))));
         assert!(!raised_by_the_press(anchor, Some(dvec2(400.0, 300.0))), "a press on something else");
@@ -1537,6 +1548,7 @@ mod tests {
         // raised it IS that point.
         let at = dvec2(400.0, 300.0);
         assert!(raised_by_the_press(Rect { pos: at, size: dvec2(0.0, 0.0) }, Some(at)));
+        });
     }
 }
 
@@ -1580,11 +1592,8 @@ mod pointer_tests {
         }
     }
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A button to hold the pointer down on, and a layer to raise menus in.
@@ -1673,6 +1682,7 @@ mod pointer_tests {
     /// it.
     #[test]
     fn a_menu_stands_down_for_a_drag_it_was_not_raised_by() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1690,6 +1700,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "", "no row lights from a pointer another control holds");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(is_open(&cx, &root), "and the release chooses nothing");
+        });
     }
 
     /// The other half: a menu raised BY the press that is still held is the
@@ -1697,6 +1708,7 @@ mod pointer_tests {
     /// release on one — and goes on walking and choosing.
     #[test]
     fn a_menu_raised_by_the_held_press_still_walks_and_chooses() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1712,6 +1724,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "Save", "the gesture's own pointer still lights rows");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "and the release chooses the row it ended on");
+        });
     }
 
     /// Dismissal is not a gesture that stands down: a menu left up while
@@ -1719,6 +1732,7 @@ mod pointer_tests {
     /// it, or nothing could ever take it down.
     #[test]
     fn a_press_outside_still_dismisses_a_menu_while_another_control_is_dragged() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1732,5 +1746,6 @@ mod pointer_tests {
         // The second button, since the first is down on the control.
         root.handle_event(&mut cx, &press(dvec2(40.0, 560.0)), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "a press nowhere near the menu closes it all the same");
+        });
     }
 }

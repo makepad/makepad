@@ -574,12 +574,14 @@ mod tests {
     /// cannot end up somewhere it can never be dragged back from.
     #[test]
     fn a_panel_cannot_be_left_off_the_screen() {
+        crate::on_test_cx(|| {
         // Off the right: pulled back so its right edge sits on the edge.
         assert_eq!(span_inboard(900.0, 320.0, 0.0, 1000.0), 680.0);
         // Off the left: the low edge wins.
         assert_eq!(span_inboard(-50.0, 320.0, 0.0, 1000.0), 0.0);
         // Already inside: untouched.
         assert_eq!(span_inboard(100.0, 320.0, 0.0, 1000.0), 100.0);
+        });
     }
 
     /// A panel at 100,100 sized 320x240: its title bar, its close mark and
@@ -596,6 +598,7 @@ mod tests {
     /// the contents.
     #[test]
     fn the_bar_moves_it_the_corner_sizes_it_and_the_close_mark_does_neither() {
+        crate::on_test_cx(|| {
         let (band, close_mark, grip) = handles();
         let take = |at| grab_at(at, band, close_mark, grip, true, true, true, false, true);
         assert_eq!(take(dvec2(200.0, 115.0)), Some(Grab::Move), "the title bar is the handle");
@@ -612,6 +615,7 @@ mod tests {
             grab_at(dvec2(410.0, 330.0), band, close_mark, grip, true, false, true, false, true),
             None
         );
+        });
     }
 
     /// The app-wide rule, at the one place this panel can break it: a
@@ -625,10 +629,12 @@ mod tests {
     /// still tracking.
     #[test]
     fn neither_gesture_starts_while_another_control_holds_the_mouse() {
+        crate::on_test_cx(|| {
         let (band, close_mark, grip) = handles();
         let held = |at| grab_at(at, band, close_mark, grip, true, true, true, true, true);
         assert_eq!(held(dvec2(200.0, 115.0)), None, "the bar stands down");
         assert_eq!(held(dvec2(410.0, 330.0)), None, "and so does the corner");
+        });
     }
 
     /// A press that is not the primary button holds nothing either. It is a
@@ -636,10 +642,12 @@ mod tests {
     /// carrying the panel around.
     #[test]
     fn a_secondary_press_takes_no_handle() {
+        crate::on_test_cx(|| {
         let (band, close_mark, grip) = handles();
         let second = |at| grab_at(at, band, close_mark, grip, true, true, false, false, true);
         assert_eq!(second(dvec2(200.0, 115.0)), None);
         assert_eq!(second(dvec2(410.0, 330.0)), None);
+        });
     }
 
     /// The same rule at the press itself, where no capture exists yet to
@@ -648,17 +656,21 @@ mod tests {
     /// be moving the panel with a pointer that is already somebody's.
     #[test]
     fn a_press_a_control_has_already_taken_takes_no_handle() {
+        crate::on_test_cx(|| {
         let (band, close_mark, grip) = handles();
         let taken = |at| grab_at(at, band, close_mark, grip, true, true, true, false, false);
         assert_eq!(taken(dvec2(200.0, 115.0)), None, "a control in the title bar keeps its press");
         assert_eq!(taken(dvec2(410.0, 330.0)), None, "and one under the corner keeps its press");
+        });
     }
 
     /// A panel wider than the window keeps its low edge on screen rather
     /// than being pushed off the other side to make its width fit.
     #[test]
     fn a_panel_wider_than_the_window_keeps_its_near_edge() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(40.0, 1200.0, 0.0, 1000.0), 0.0);
+        });
     }
 
     // The two above are the decision on its own. What follows presses a
@@ -672,11 +684,8 @@ mod tests {
 
     const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A window-less pass with the overlay a window keeps, which the panel's
@@ -779,6 +788,7 @@ mod tests {
     /// capture had been taken for `is_mouse_held_outside` to find.
     #[test]
     fn a_control_in_the_title_bar_keeps_its_press() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut target = Target::new(&mut cx);
         let root = panel_page(&mut cx, &mut target);
@@ -793,6 +803,7 @@ mod tests {
         let actions = cx.capture_actions(|cx| root.handle_event(cx, &press(at), &mut Scope::empty()));
         assert!(pressed(&actions, &knob), "the press reached the button");
         assert!(handling(&panel).is_none(), "and the handle around it took nothing");
+        });
     }
 
     /// And the handle still works: the bare bar moves the panel. The title
@@ -802,6 +813,7 @@ mod tests {
     /// under it.
     #[test]
     fn the_bare_title_bar_still_moves_the_panel() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut target = Target::new(&mut cx);
         let root = panel_page(&mut cx, &mut target);
@@ -818,5 +830,6 @@ mod tests {
             matches!(handling(&panel), Some(Handling::Move { .. })),
             "the bar took the handle"
         );
+        });
     }
 }

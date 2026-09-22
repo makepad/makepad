@@ -1007,6 +1007,10 @@ impl NumberFieldRef {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
     use std::cell::Cell;
@@ -1048,83 +1052,106 @@ mod tests {
 
     #[test]
     fn a_quantity_stops_at_its_ends() {
+        crate::on_test_cx(|| {
         let b = counting();
         assert_eq!(b.bound(11.0), 10.0);
         assert_eq!(b.bound(-1.0), 0.0);
         assert_eq!(b.bound(4.0), 4.0);
+        });
     }
 
     #[test]
     fn a_cycle_comes_round_instead() {
+        crate::on_test_cx(|| {
         // The reason wrap is not the default: a count that wraps is how a
         // form ends up ordering none of something.
         let b = degrees();
         assert_eq!(b.bound(370.0), 10.0);
         assert_eq!(b.bound(-10.0), 350.0);
         assert_eq!(b.bound(180.0), 180.0);
+        });
     }
 
     #[test]
     fn wrapping_a_long_way_past_the_end_still_lands_in_range() {
+        crate::on_test_cx(|| {
         let b = degrees();
         assert_eq!(b.bound(1090.0), 10.0);
         assert_eq!(b.bound(-730.0), 350.0);
+        });
     }
 
     #[test]
     fn a_zero_width_range_does_not_divide_by_it() {
+        crate::on_test_cx(|| {
         let b = Bounds { min: 5.0, max: 5.0, wrap: true, precision: 0 };
         assert_eq!(b.bound(9.0), 5.0);
+        });
     }
 
     #[test]
     fn the_readout_is_the_value_at_its_precision_then_the_suffix() {
+        crate::on_test_cx(|| {
         assert_eq!(readout(12.0, 0, ""), "12");
         assert_eq!(readout(0.3, 2, "%"), "0.30%");
         assert_eq!(readout(72.5, 1, " kg"), "72.5 kg");
+        });
     }
 
     #[test]
     fn an_apply_that_changes_nothing_writes_nothing() {
+        crate::on_test_cx(|| {
         // Writing the same text again would put the caret back at the end.
         assert_eq!(text_after_apply("1 pcs", "1 pcs", false), None);
+        });
     }
 
     #[test]
     fn an_apply_leaves_an_edit_in_progress_alone() {
+        crate::on_test_cx(|| {
         let text = readout(1.0, 0, " pcs");
         assert_eq!(text_after_apply("17", &text, true), None);
+        });
     }
 
     #[test]
     fn a_press_nothing_else_holds_starts_the_body_scrub() {
+        crate::on_test_cx(|| {
         assert!(body_press_starts_scrub(true, false, false));
+        });
     }
 
     #[test]
     fn a_press_the_step_column_holds_starts_no_second_scrub() {
+        crate::on_test_cx(|| {
         // The column captures its own press and turns it into a drag on this
         // very axis. Were this to return true the value would move twice per
         // point of travel — the bug the rule is about.
         assert!(!body_press_starts_scrub(true, false, true));
+        });
     }
 
     #[test]
     fn only_the_primary_button_and_only_a_mouse_scrub_the_body() {
+        crate::on_test_cx(|| {
         assert!(!body_press_starts_scrub(false, false, false));
         assert!(!body_press_starts_scrub(true, true, false));
+        });
     }
 
     #[test]
     fn a_press_that_has_barely_moved_is_still_neither() {
+        crate::on_test_cx(|| {
         assert_eq!(
             body_drag_after_move(1.0, 1.0, false, false),
             BodyDragMove::Undecided
         );
+        });
     }
 
     #[test]
     fn going_up_further_than_across_makes_it_a_scrub() {
+        crate::on_test_cx(|| {
         assert_eq!(
             body_drag_after_move(2.0, BODY_DRAG_SLOP + 1.0, false, false),
             BodyDragMove::Scrubbing
@@ -1133,26 +1160,32 @@ mod tests {
             body_drag_after_move(2.0, -(BODY_DRAG_SLOP + 1.0), false, false),
             BodyDragMove::Scrubbing
         );
+        });
     }
 
     #[test]
     fn going_across_first_hands_the_press_to_the_text() {
+        crate::on_test_cx(|| {
         assert_eq!(
             body_drag_after_move(BODY_DRAG_SLOP + 1.0, 1.0, false, false),
             BodyDragMove::Given
         );
+        });
     }
 
     #[test]
     fn a_scrub_under_way_stays_a_scrub_however_it_wanders() {
+        crate::on_test_cx(|| {
         assert_eq!(
             body_drag_after_move(500.0, 1.0, true, false),
             BodyDragMove::Scrubbing
         );
+        });
     }
 
     #[test]
     fn a_control_taking_the_mouse_mid_scrub_ends_the_scrub() {
+        crate::on_test_cx(|| {
         assert_eq!(
             body_drag_after_move(0.0, 100.0, true, true),
             BodyDragMove::Given
@@ -1161,6 +1194,7 @@ mod tests {
             body_drag_after_move(0.0, 100.0, false, true),
             BodyDragMove::Given
         );
+        });
     }
 
     fn press() -> Event {
@@ -1176,6 +1210,7 @@ mod tests {
 
     #[test]
     fn a_disabled_field_passes_no_press_key_or_character_to_its_parts() {
+        crate::on_test_cx(|| {
         let character = Event::TextInput(TextInputEvent {
             input: "7".to_string(),
             ..Default::default()
@@ -1188,37 +1223,46 @@ mod tests {
         ] {
             assert!(!reaches_parts(true, &event), "{event:?}");
         }
+        });
     }
 
     #[test]
     fn a_disabled_field_still_gives_its_parts_the_frame_clock() {
+        crate::on_test_cx(|| {
         // The box dims by animating, and an animation only moves on frames:
         // withheld, the box never reached its disabled look.
         assert!(reaches_parts(true, &Event::NextFrame(NextFrameEvent::default())));
+        });
     }
 
     #[test]
     fn a_disabled_field_lets_its_box_hear_that_it_lost_the_keyboard() {
+        crate::on_test_cx(|| {
         // Disabling takes the keyboard away; the box has to be told, or its
         // caret and focus ring stay on.
         let lost = Event::KeyFocusLost(KeyFocusEvent { prev: Area::Empty, focus: Area::Empty });
         assert!(reaches_parts(true, &lost));
+        });
     }
 
     #[test]
     fn an_enabled_field_passes_everything_on() {
+        crate::on_test_cx(|| {
         assert!(reaches_parts(false, &press()));
         assert!(reaches_parts(false, &Event::KeyDown(KeyEvent::default())));
         assert!(reaches_parts(false, &Event::NextFrame(NextFrameEvent::default())));
+        });
     }
 
     #[test]
     fn the_stored_value_is_the_one_that_is_shown() {
+        crate::on_test_cx(|| {
         // Rounding to the shown precision, so a field displaying 0.30 does
         // not hold 0.30000000000000004 and hand it to its host.
         let b = Bounds { min: 0.0, max: 1.0, wrap: false, precision: 2 };
         assert_eq!(b.quantize(0.1 + 0.2), 0.3);
         assert_eq!(b.quantize(0.005), 0.01);
+        });
     }
 
     // The tests below build a whole field from the library's default, apply to
@@ -1228,7 +1272,6 @@ mod tests {
     const FIELD: DVec2 = dvec2(140.0, 24.0);
 
     fn new_field(cx: &mut Cx) -> NumberField {
-        cx.with_vm(crate::script_mod);
         cx.with_vm(NumberField::script_new_with_default)
     }
 
@@ -1278,7 +1321,8 @@ mod tests {
     /// the box went on saying "0".
     #[test]
     fn a_suffix_or_precision_applied_to_a_field_on_screen_is_written_into_its_box() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut field = new_field(&mut cx);
         let text = |field: &NumberField| field.input.as_text_input().text();
         assert_eq!(text(&field), "0");
@@ -1287,6 +1331,7 @@ mod tests {
         assert_eq!(text(&field), "0 pcs");
         script_apply_eval!(cx, field, { precision: 2 });
         assert_eq!(text(&field), "0.00 pcs");
+        });
     }
 
     /// The box draws the hover, focus and disabled it holds. Its shader
@@ -1295,7 +1340,8 @@ mod tests {
     /// box never lit, never showed focus and never dimmed.
     #[test]
     fn the_box_draws_its_hover_focus_and_disabled_look() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut field = new_field(&mut cx);
         let pass = DrawPass::new(&mut cx);
         pass.set_size(&mut cx, FIELD);
@@ -1318,6 +1364,7 @@ mod tests {
         draw(&mut cx, &mut field, &pass, &mut list);
         assert_eq!(look(&cx, &field), [Some(1.0), Some(0.0), Some(1.0)], "disabled");
         assert_eq!(drawn(&cx, field.spin.area(), id!(disabled)), Some(1.0), "the step column");
+        });
     }
 
     /// The catalogue's Disabled control on a field on screen: the text box
@@ -1327,7 +1374,8 @@ mod tests {
     /// there.
     #[test]
     fn a_field_switched_off_on_screen_fades_its_text_box_over_the_next_frames() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut field = new_field(&mut cx);
         let pass = DrawPass::new(&mut cx);
         pass.set_size(&mut cx, FIELD);
@@ -1344,6 +1392,7 @@ mod tests {
         run_frames(&mut cx, &mut field, &[2.0, 2.1, 2.5, 3.0]);
         draw(&mut cx, &mut field, &pass, &mut list);
         assert_eq!(drawn(&cx, field.input.area(), id!(disabled)), Some(0.0), "switched on again");
+        });
     }
 
     fn mouse_down(at: DVec2, button: MouseButton) -> Event {
@@ -1359,6 +1408,7 @@ mod tests {
 
     #[test]
     fn only_a_press_that_could_scrub_asks_for_the_overload() {
+        crate::on_test_cx(|| {
         let at = dvec2(10.0, 10.0);
         assert!(press_may_overload_capture(&mouse_down(at, MouseButton::PRIMARY)));
         assert!(!press_may_overload_capture(&mouse_down(at, MouseButton::SECONDARY)));
@@ -1374,6 +1424,7 @@ mod tests {
             time: 0.0,
             handled: Cell::new(Area::Empty),
         })));
+        });
     }
 
     /// A press at the middle of a drawn field, and whether the FIELD's own
@@ -1381,7 +1432,7 @@ mod tests {
     /// the press — no digit is down, nobody holds a lock — so what turns one
     /// away is the narrowing and nothing else.
     fn co_captures(button: MouseButton) -> bool {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut cx = test_cx();
         let mut field = new_field(&mut cx);
         let pass = DrawPass::new(&mut cx);
         pass.set_size(&mut cx, FIELD);
@@ -1400,7 +1451,9 @@ mod tests {
     /// as the button is down.
     #[test]
     fn a_primary_press_on_the_body_co_captures_the_pointer() {
+        crate::on_test_cx(|| {
         assert!(co_captures(MouseButton::PRIMARY));
+        });
     }
 
     /// And a press that could never become a scrub does not take it. It
@@ -1409,7 +1462,9 @@ mod tests {
     /// until the button came back up.
     #[test]
     fn a_secondary_press_on_the_body_takes_no_capture() {
+        crate::on_test_cx(|| {
         assert!(!co_captures(MouseButton::SECONDARY));
         assert!(!co_captures(MouseButton::MIDDLE));
+        });
     }
 }

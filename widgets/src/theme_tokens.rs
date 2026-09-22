@@ -2383,14 +2383,53 @@ mod sheet_contrast_tests {
         reads_on(ground, ink)
     }
 
-    /// The pairs that fail, as readable lines.
-    fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)], need: f64) -> Vec<String> {
+    struct ThemeSnap {
+        label: String,
+        colors: Vec<(&'static str, Option<u32>)>,
+    }
+
+    /// One walk of every base theme and every sheet. The two contrast tests
+    /// read the same reloads; building the library twelve times per test was
+    /// the whole cost (about 0.25 s each).
+    fn snaps() -> &'static [ThemeSnap] {
+        use std::sync::OnceLock;
+        static SNAPS: OnceLock<Vec<ThemeSnap>> = OnceLock::new();
+        SNAPS.get_or_init(|| {
+            let mut keys = Vec::new();
+            for pairs in [MEANING, SURFACES, VARIANTS] {
+                for (ground, ink) in pairs {
+                    if !keys.contains(ground) {
+                        keys.push(*ground);
+                    }
+                    if !keys.contains(ink) {
+                        keys.push(*ink);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&mut |vm, label| {
+                let colors = keys.iter().map(|key| (*key, val(vm, key))).collect();
+                out.push(ThemeSnap { label: label.to_string(), colors });
+            });
+            out
+        })
+    }
+
+    fn snap_failures(pairs: &[(&str, &str)], need: f64) -> Vec<String> {
         let mut out = Vec::new();
-        for (ground, ink) in pairs {
-            if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
-                let c = reads(g | 0xFF, i);
-                if c < need {
-                    out.push(format!("{label}: {ink} on {ground} = {c:.2}, wanted {need}"));
+        for snap in snaps() {
+            for (ground, ink) in pairs {
+                let color = |name: &str| {
+                    snap.colors.iter().find(|(key, _)| *key == name).and_then(|(_, value)| *value)
+                };
+                if let (Some(ground_color), Some(ink_color)) = (color(ground), color(ink)) {
+                    let contrast = reads(ground_color | 0xFF, ink_color);
+                    if contrast < need {
+                        out.push(format!(
+                            "{}: {ink} on {ground} = {contrast:.2}, wanted {need}",
+                            snap.label
+                        ));
+                    }
                 }
             }
         }
@@ -2399,6 +2438,8 @@ mod sheet_contrast_tests {
 
     /// Walks the base themes and then every sheet, handing each to `check`.
     fn walk(check: &mut dyn FnMut(&mut ScriptVm, &str)) {
+        // A fresh VM: this walk reloads every sheet and uninstalls at the end,
+        // which must not leak into another test's context.
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
@@ -2431,8 +2472,7 @@ mod sheet_contrast_tests {
     /// holds it to the answer.
     #[test]
     fn a_meaning_family_reads_on_its_own_ground_under_every_sheet() {
-        let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| bad.extend(failures(vm, label, MEANING, READABLE)));
+        let bad = snap_failures(MEANING, READABLE);
         assert!(bad.is_empty(), "text below {READABLE}:1 on its own ground:
 {}", bad.join("
 "));
@@ -2460,11 +2500,8 @@ mod sheet_contrast_tests {
     /// on all of them, in every theme and under every sheet.
     #[test]
     fn the_surface_ladder_carries_its_ink_on_every_rung() {
-        let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| {
-            bad.extend(failures(vm, label, SURFACES, READABLE));
-            bad.extend(failures(vm, label, VARIANTS, LEGIBLE));
-        });
+        let mut bad = snap_failures(SURFACES, READABLE);
+        bad.extend(snap_failures(VARIANTS, LEGIBLE));
         assert!(bad.is_empty(), "ink that does not hold on its rung:
 {}", bad.join("
 "));
@@ -2506,10 +2543,13 @@ mod sheet_contrast_tests {
 
 #[cfg(test)]
 mod equalizer_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::sheet_contrast_tests::{MEANING, SURFACES, VARIANTS};
     use super::*;
     use crate::desktop_style::StyleSheet;
-    use crate::makepad_platform::Cx;
     use std::collections::BTreeMap;
     use std::sync::OnceLock;
 
@@ -2851,7 +2891,7 @@ mod equalizer_tests {
         static CACHE: OnceLock<BlendCache> = OnceLock::new();
         CACHE.get_or_init(|| {
             let mut cache = BlendCache::new();
-            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let mut cx = test_cx();
             cx.with_vm(|vm| cache.fill(vm, &BlendTheme::all()));
             cache
         })

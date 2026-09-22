@@ -920,10 +920,8 @@ mod tests {
     use crate::makepad_draw::event::{LongPressEvent, TouchPoint, TouchState, TouchUpdateEvent};
     use crate::makepad_script::{script, ScriptMod};
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// What a test draws into. The areas read after a draw live in the pass
@@ -997,6 +995,7 @@ mod tests {
     /// around several controls it is the wrapper's own again.
     #[test]
     fn a_tip_around_one_control_walks_as_the_control_does_now() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut one = tip(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1023,6 +1022,7 @@ mod tests {
         let walk = several.walk(&mut cx);
         assert_eq!(walk.width, Size::Fixed(33.0));
         assert_eq!(walk.height, Size::Fixed(44.0));
+        });
     }
 
     /// A bounded Fill with a margin beside a fixed sibling: the box keeps its
@@ -1030,6 +1030,7 @@ mod tests {
     /// directly rather than after a wrapper that took the whole Fill share.
     #[test]
     fn a_bounded_fill_with_a_margin_lands_where_the_bare_control_does() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut root = view(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1056,6 +1057,7 @@ mod tests {
         assert_eq!(below(bare, 40.0), tipped);
         assert_eq!(rect(&cx, &at(&root, &[1, 0])), tipped, "the tip hangs from the control's rect");
         assert_eq!(below(rect(&cx, &at(&root, &[0, 1])), 40.0), rect(&cx, &at(&root, &[1, 1])));
+        });
     }
 
     /// A control whose walk the host turns at runtime: a grip that is a
@@ -1064,6 +1066,7 @@ mod tests {
     /// it keeps the share the bare layout gives it.
     #[test]
     fn a_walk_turned_at_runtime_moves_the_wrapper_with_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut root = view(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1103,12 +1106,14 @@ mod tests {
         let grip = rect(&cx, &at(&root, &[1, 1, 0]));
         assert_eq!(grip.size, dvec2(7.0, 100.0), "the turned grip is full height");
         assert_eq!(rect(&cx, &at(&root, &[1, 0])).size.x, 293.0, "the Fill beside it takes the rest");
+        });
     }
 
     /// A wrapper around a hidden control is hidden itself, so its row closes
     /// up exactly as it does for the bare hidden control.
     #[test]
     fn a_hidden_control_leaves_no_gap_for_its_tip() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut root = view(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1127,12 +1132,14 @@ mod tests {
         let mut target = Target::new(&mut cx, dvec2(300.0, 60.0));
         target.draw(&mut cx, &mut root);
         assert_eq!(below(rect(&cx, &at(&root, &[0, 1])), 30.0), rect(&cx, &at(&root, &[1, 1])));
+        });
     }
 
     /// A control that yields mid-draw hands its step up through the wrapper
     /// and is resumed through it, finishing where the bare control would.
     #[test]
     fn a_yielding_control_resumes_through_its_tip() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut root = view(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1158,6 +1165,7 @@ mod tests {
         drop(cx2d);
         drop(draw);
         assert_eq!(rect(&cx, &at(&root, &[1])).pos.x, 30.0);
+        });
     }
 
     fn tip_layer(cx: &mut Cx) -> TipLayer {
@@ -1219,6 +1227,7 @@ mod tests {
     /// control losing focus take down a tip somebody else raised.
     #[test]
     fn focus_moving_along_tipped_controls_keeps_the_tip_it_reached() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         // The layer times its reveal against the app clock.
         cx.init_cx_os();
@@ -1254,6 +1263,7 @@ mod tests {
         });
         layer.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
         assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty).as_deref(), Some("host"));
+        });
     }
 
     /// A tip the key focus raised is there to say what the control is. Once
@@ -1264,6 +1274,7 @@ mod tests {
     /// control is not the typing's to take down.
     #[test]
     fn typing_into_a_control_takes_down_the_tip_its_focus_raised() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         cx.init_cx_os();
         let mut root = view(&mut cx, script! {
@@ -1326,6 +1337,7 @@ mod tests {
             Some("pointer"),
             "typing elsewhere leaves the pointer's tip"
         );
+        });
     }
 
     /// A finger has no hover. A tap hands a tipped button the key focus, and
@@ -1336,6 +1348,7 @@ mod tests {
     /// when the finger lifts.
     #[test]
     fn a_finger_shows_a_tip_only_while_a_long_press_holds_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         cx.init_cx_os();
         let mut root = view(&mut cx, script! {
@@ -1417,6 +1430,7 @@ mod tests {
             None,
             "lifted, gone"
         );
+        });
     }
 
     fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
@@ -1436,6 +1450,7 @@ mod tests {
 
     #[test]
     fn tip_pointer_aims_at_the_control_from_below_and_above() {
+        crate::on_test_cx(|| {
         let anchor = r(300.0, 100.0, 80.0, 24.0);
         let (_, side, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Bottom);
         assert_eq!(side, Side::Bottom);
@@ -1443,10 +1458,12 @@ mod tests {
         let (_, side, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Top);
         assert_eq!(side, Side::Top);
         assert_eq!(point, dvec2(340.0, 100.0 - TIP_GAP + TIP_ARROW - 0.5));
+        });
     }
 
     #[test]
     fn tip_pointer_turns_a_quarter_turn_beside_the_control() {
+        crate::on_test_cx(|| {
         // A one-line bubble is too short for its corners and a pointer
         // between them, so a side pointer sits at the middle of the edge.
         let anchor = r(300.0, 100.0, 80.0, 24.0);
@@ -1456,10 +1473,12 @@ mod tests {
         let (_, side, point) = hang(anchor, dvec2(100.0, 24.0), TipPlace::Right);
         assert_eq!(side, Side::Right);
         assert_eq!(point, dvec2(380.0 + TIP_GAP - TIP_ARROW + 0.5, 112.0));
+        });
     }
 
     #[test]
     fn tip_pointer_slides_along_the_bubble_the_window_pushed() {
+        crate::on_test_cx(|| {
         // Too near the window's left edge to centre: the bubble is pushed
         // right and the pointer still lands under the control's middle.
         let anchor = r(0.0, 100.0, 40.0, 24.0);
@@ -1471,18 +1490,22 @@ mod tests {
         let anchor = r(0.0, 100.0, 10.0, 24.0);
         let (rect, _, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Bottom);
         assert_eq!(point.x, rect.pos.x + 0.5 + TIP_BUBBLE_R + TIP_ARROW);
+        });
     }
 
     #[test]
     fn tip_pointer_stays_off_the_corner_of_a_short_tip_on_a_wide_control() {
+        crate::on_test_cx(|| {
         let anchor = r(100.0, 100.0, 260.0, 24.0);
         let (rect, _, point) = hang(anchor, dvec2(60.0, 24.0), TipPlace::BottomStart);
         assert_eq!(rect.pos.x, 100.0);
         assert_eq!(point.x, 160.0 - 0.5 - TIP_BUBBLE_R - TIP_ARROW);
+        });
     }
 
     #[test]
     fn tip_beside_a_small_control_moves_to_aim_at_its_middle() {
+        crate::on_test_cx(|| {
         // Lined up with the top of a control shorter than the bubble, the
         // pointer's middle-of-the-edge would be below the control's middle:
         // the bubble moves up until the two meet.
@@ -1496,13 +1519,16 @@ mod tests {
         assert_eq!(side, Side::Bottom);
         assert_eq!(point.x, anchor.center().x);
         assert!(rect.pos.x < anchor.pos.x);
+        });
     }
 
     #[test]
     fn tip_without_a_pointer_lines_up_with_the_control() {
+        crate::on_test_cx(|| {
         let anchor = r(300.0, 100.0, 16.0, 12.0);
         let (placed, pointer) = hang_bubble(anchor, dvec2(100.0, 24.0), dvec2(800.0, 600.0), TipPlace::BottomStart, false);
         assert!(pointer.is_none());
         assert_eq!(placed.rect.pos, dvec2(300.0, 112.0 + TIP_GAP));
+        });
     }
 }

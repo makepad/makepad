@@ -737,10 +737,20 @@ fn keep_alive_serves_256_then_closes() {
 
 #[test]
 fn slowloris_partial_header_times_out() {
-    let (server, _tokens, _fake, dir) = start(false);
+    // Production `McpServer::start` still arms HEAD_DEADLINE_MS (10 s). The
+    // close path is the same `next_request` deadline; 80 ms is long enough
+    // to show the socket is held until that budget and short enough that the
+    // binary is not a 10 s sleep. Half the budget is the floor: an immediate
+    // reject would be a different failure.
+    assert_eq!(HEAD_DEADLINE_MS, 10_000);
+    const DEADLINE_MS: u64 = 80;
+    let dir = temp_dir("srv");
+    let tokens = Arc::new(TokenStore::open(&dir).unwrap());
+    let fake = Arc::new(Fake { huge: false, calls: Mutex::new(Vec::new()) });
+    let server = McpServer::start_with_head_deadline(tokens, fake, DEADLINE_MS).unwrap();
     let port = port_from_url(&server.url());
-    let budget = Duration::from_millis(HEAD_DEADLINE_MS + 1000);
-    let mut stream = connect(port, HEAD_DEADLINE_MS + 1000);
+    let budget = Duration::from_millis(DEADLINE_MS + 1000);
+    let mut stream = connect(port, DEADLINE_MS + 1000);
     stream.write_all(b"POST /mc").unwrap();
 
     let start = Instant::now();
@@ -748,9 +758,12 @@ fn slowloris_partial_header_times_out() {
     let result = stream.read(&mut buf);
     let elapsed = start.elapsed();
     assert!(
+        elapsed >= Duration::from_millis(DEADLINE_MS / 2),
+        "partial head closed in {elapsed:?}, before the {DEADLINE_MS} ms slowloris budget"
+    );
+    assert!(
         elapsed <= budget,
-        "slowloris hang {elapsed:?} exceeded deadline {} ms + 1 s",
-        HEAD_DEADLINE_MS
+        "slowloris hang {elapsed:?} exceeded deadline {DEADLINE_MS} ms + 1 s"
     );
     match result {
         Ok(0) => {}

@@ -1229,11 +1229,8 @@ mod tests {
     /// A context with the library registered, and whatever registering the
     /// rest of it had to say about shaders thrown away, so that what a test
     /// reads afterwards is its own.
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
-        let _ = crate::makepad_draw::makepad_platform::shader_error::take();
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// One draw of a grid, in a pass of its own.
@@ -1312,6 +1309,7 @@ mod tests {
 
     #[test]
     fn a_release_picks_only_when_it_was_a_tap_and_opens_only_with_no_key_held() {
+        crate::on_test_cx(|| {
         let bare = KeyModifiers::default();
         let ctrl = KeyModifiers {
             control: true,
@@ -1323,12 +1321,14 @@ mod tests {
         assert_eq!(ItemGrid::pick_outcome(true, 2, ctrl), PickOutcome::Press);
         // After a drag or a hold there is nothing left to pick.
         assert_eq!(ItemGrid::pick_outcome(false, 1, bare), PickOutcome::Nothing);
+        });
     }
 
     /// A finger held on an item flips it, and flips it back: the touch
     /// route to holding several.
     #[test]
     fn a_finger_held_on_an_item_flips_it() {
+        crate::on_test_cx(|| {
         let mut picker = ItemGridPicker::new(SelectionMode::Many);
         picker.set_count(6);
         picker.press_with(2, SelectionGesture::Toggle);
@@ -1336,10 +1336,12 @@ mod tests {
         assert_eq!(picker.chosen(), vec![2, 4]);
         picker.press_with(2, SelectionGesture::Toggle);
         assert_eq!(picker.chosen(), vec![4]);
+        });
     }
 
     #[test]
     fn down_moves_by_the_column_count_and_up_moves_back() {
+        crate::on_test_cx(|| {
         assert_eq!(
             ItemGridPicker::step_for(KeyCode::ArrowDown, 4, 3),
             Some(SelectionStep::By(4))
@@ -1379,10 +1381,12 @@ mod tests {
             ItemGridPicker::step_for(KeyCode::ArrowDown, 0, 0),
             Some(SelectionStep::By(1))
         );
+        });
     }
 
     #[test]
     fn a_page_key_moves_by_the_rows_on_screen() {
+        crate::on_test_cx(|| {
         assert_eq!(
             ItemGridPicker::step_for(KeyCode::PageDown, 4, 5),
             Some(SelectionStep::By(20))
@@ -1401,10 +1405,12 @@ mod tests {
             ItemGridPicker::step_for(KeyCode::PageUp, usize::MAX, usize::MAX),
             Some(SelectionStep::By(-isize::MAX))
         );
+        });
     }
 
     #[test]
     fn the_arrows_walk_the_grid_and_take_what_they_land_on() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(20);
         picker.press(5, KeyModifiers::default());
         assert_eq!(picker.chosen(), vec![5]);
@@ -1426,10 +1432,12 @@ mod tests {
         assert_eq!(picker.cursor(), Some(19));
         picker.key(KeyCode::Home, KeyModifiers::default(), 4, 3);
         assert_eq!(picker.cursor(), Some(0));
+        });
     }
 
     #[test]
     fn a_sweep_runs_in_item_order_and_not_as_a_rectangle() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(20);
         picker.press(2, KeyModifiers::default());
         picker.press(9, shift());
@@ -1438,10 +1446,12 @@ mod tests {
         // between the two, and it stays the same run when the grid reflows
         // to five across and the rectangle would have moved.
         assert_eq!(picker.chosen(), vec![2, 3, 4, 5, 6, 7, 8, 9]);
+        });
     }
 
     #[test]
     fn the_primary_key_walks_past_things_and_the_space_bar_decides() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(20);
         picker.press(4, KeyModifiers::default());
         let change = picker.key(KeyCode::ArrowDown, primary(), 4, 3);
@@ -1457,10 +1467,12 @@ mod tests {
         // Twice is off again.
         picker.toggle_cursor();
         assert_eq!(picker.chosen(), vec![4]);
+        });
     }
 
     #[test]
     fn one_at_a_time_keeps_the_last_press_only() {
+        crate::on_test_cx(|| {
         let mut picker = ItemGridPicker::new(SelectionMode::One);
         picker.set_count(20);
         picker.press(3, KeyModifiers::default());
@@ -1474,10 +1486,12 @@ mod tests {
         picker.set_mode(SelectionMode::Many);
         assert_eq!(picker.mode(), SelectionMode::Many);
         assert!(picker.chosen().is_empty());
+        });
     }
 
     #[test]
     fn a_press_past_the_end_of_the_set_is_not_a_press() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(20);
         let change = picker.press(20, KeyModifiers::default());
         assert!(!change.any());
@@ -1490,10 +1504,12 @@ mod tests {
             .key(KeyCode::ArrowDown, KeyModifiers::default(), 4, 3)
             .any());
         assert_eq!(empty.cursor(), None);
+        });
     }
 
     #[test]
     fn a_set_that_shrinks_lets_go_of_the_items_that_left() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(20);
         picker.press(4, KeyModifiers::default());
         picker.press(15, primary());
@@ -1513,10 +1529,12 @@ mod tests {
         assert_eq!(picker.cursor(), None);
         // The count is what the questions are answered against.
         assert_eq!(picker.count(), 10);
+        });
     }
 
     #[test]
     fn everything_can_be_taken_and_let_go_of() {
+        crate::on_test_cx(|| {
         let mut picker = grid_of(6);
         assert!(picker.select_all().any());
         assert_eq!(picker.chosen(), vec![0, 1, 2, 3, 4, 5]);
@@ -1528,10 +1546,12 @@ mod tests {
         assert_eq!(picker.chosen(), vec![1, 3]);
         assert!(picker.is_selected(3));
         assert!(!picker.is_selected(99));
+        });
     }
 
     #[test]
     fn the_item_under_a_point_is_the_one_whose_face_holds_it() {
+        crate::on_test_cx(|| {
         let cells = vec![
             ItemRect {
                 index: 12,
@@ -1553,10 +1573,12 @@ mod tests {
         // rarely item zero.
         assert_eq!(ItemRect::find(&cells, 13), Some(rect(110.0, 0.0, 100.0, 50.0)));
         assert_eq!(ItemRect::find(&cells, 0), None);
+        });
     }
 
     #[test]
     fn an_item_that_is_not_wholly_on_screen_has_to_be_revealed() {
+        crate::on_test_cx(|| {
         let view = rect(0.0, 0.0, 300.0, 200.0);
         let cells = vec![
             ItemRect {
@@ -1577,10 +1599,12 @@ mod tests {
         assert!(ItemRect::needs_reveal(&cells, view, 400));
         assert!(ItemRect::is_whole(rect(0.0, 10.0, 100.0, 50.0), view));
         assert!(!ItemRect::is_whole(rect(-10.0, 10.0, 100.0, 50.0), view));
+        });
     }
 
     #[test]
     fn the_band_the_scroll_bar_is_drawn_in_is_the_bars_and_not_the_last_columns() {
+        crate::on_test_cx(|| {
         let view = rect(0.0, 0.0, 300.0, 200.0);
         // Two items across a viewport they share whole, the way the column
         // arithmetic divides it: the last of them ends where the viewport
@@ -1623,10 +1647,12 @@ mod tests {
         );
         // And a set with nothing in it has nothing off screen.
         assert_eq!(ItemRect::scroll_bar_band(&[], view, 0, 10.0), None);
+        });
     }
 
     #[test]
     fn a_press_the_grid_cannot_be_seen_at_does_not_take_the_keyboard() {
+        crate::on_test_cx(|| {
         let visible = rect(0.0, 100.0, 300.0, 200.0);
         // The ordinary press: inside the part on screen, nothing else
         // holding it.
@@ -1668,6 +1694,7 @@ mod tests {
             dvec2(150.0, 150.0),
             false
         ));
+        });
     }
 
     /// The app-wide pointer-capture rule, on the one press-driven thing the
@@ -1679,6 +1706,7 @@ mod tests {
     /// grid must not take the keyboard off the control being dragged.
     #[test]
     fn a_press_another_control_holds_does_not_take_the_keyboard() {
+        crate::on_test_cx(|| {
         let visible = rect(0.0, 100.0, 300.0, 200.0);
         let point = dvec2(150.0, 150.0);
         assert!(
@@ -1694,6 +1722,7 @@ mod tests {
         // capture on the way past, so reading the capture list first would
         // refuse the keyboard on every ordinary press.
         assert!(ItemGrid::keeps_keys(visible, Some(visible), point, true));
+        });
     }
 
     /// The keyboard rule is asked the same question by a finger as by a
@@ -1702,6 +1731,7 @@ mod tests {
     /// is most likely to be driven from.
     #[test]
     fn a_finger_begins_a_press_the_same_way_a_mouse_button_does() {
+        crate::on_test_cx(|| {
         let at = dvec2(150.0, 150.0);
         let mouse = Event::MouseDown(MouseDownEvent {
             abs: at,
@@ -1745,12 +1775,14 @@ mod tests {
         // either, since that is what decides whose press it was.
         let claimed = Area::Empty;
         assert_eq!(ItemGrid::press_start(&mouse).map(|(_, a)| a), Some(claimed));
+        });
     }
 
     /// The pointer path end to end: a real draw, a real press on a face,
     /// and an answer in items.
     #[test]
     fn a_press_on_an_item_picks_that_item_and_says_which() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = drawn_grid(&mut cx, 400, dvec2(400.0, 300.0));
         assert!(
@@ -1768,12 +1800,14 @@ mod tests {
             .filter_widget_actions_cast::<ItemGridAction>(grid.widget_uid())
             .collect();
         assert_eq!(said, vec![ItemGridAction::Picked(cell.index)]);
+        });
     }
 
     /// The band along the right edge is the bar's, and the grid claiming it
     /// is what would stop the bar being dragged or even hovered.
     #[test]
     fn a_press_in_the_scroll_bar_band_is_left_to_the_layout() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = drawn_grid(&mut cx, 400, dvec2(400.0, 300.0));
         let view = grid.view;
@@ -1797,12 +1831,14 @@ mod tests {
             answered.size.x <= band.size.x && band.contains(answered.center()),
             "the press never reached the bar: {answered:?}"
         );
+        });
     }
 
     /// And the same point in a grid that all fits is an ordinary part of
     /// the item, because a layout with nothing hidden draws no bar.
     #[test]
     fn a_grid_that_all_fits_answers_presses_right_across_its_width() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = drawn_grid(&mut cx, 3, dvec2(400.0, 300.0));
         let view = grid.view;
@@ -1818,6 +1854,7 @@ mod tests {
         assert_eq!(ItemRect::index_under(&grid.cells, point), Some(cell.index));
         press_at(&mut cx, &mut grid, point);
         assert_eq!(grid.chosen(), vec![cell.index]);
+        });
     }
 
     /// The space past the last row is the layout's, not an item's: it is
@@ -1825,6 +1862,7 @@ mod tests {
     /// it through to get there.
     #[test]
     fn a_press_past_the_last_row_is_left_to_the_layout() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = drawn_grid(&mut cx, 3, dvec2(400.0, 300.0));
         let view = grid.view;
@@ -1848,6 +1886,7 @@ mod tests {
         // what scrolls, and a press it never sees is a list that cannot be
         // flung.
         assert_eq!(claimed.rect(&cx), grid.area.rect(&cx));
+        });
     }
 
     /// The ring is the grid's own pixels, drawn on the item the keys are
@@ -1855,6 +1894,7 @@ mod tests {
     /// mistake in the pixel function fails here.
     #[test]
     fn the_ring_is_drawn_on_the_item_the_cursor_stands_on() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = drawn_grid(&mut cx, 400, dvec2(400.0, 300.0));
         let cell = *grid
@@ -1873,6 +1913,7 @@ mod tests {
             cell.rect,
             "the ring is not on the item the keys are standing on"
         );
+        });
     }
 
     /// A selection put in from outside is shown and not merely held: the
@@ -1880,6 +1921,7 @@ mod tests {
     /// cannot see is a restore they have to go looking for.
     #[test]
     fn a_restored_selection_is_scrolled_to() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let size = dvec2(400.0, 300.0);
         let mut grid = drawn_grid(&mut cx, 1000, size);
@@ -1905,5 +1947,6 @@ mod tests {
             .expect("the layout is a tile list")
             .first_visible_item();
         assert_eq!(first, 900 / columns * columns);
+        });
     }
 }

@@ -3841,10 +3841,8 @@ mod tests {
     use super::*;
     use crate::text_input::{TextInputAction, TextInputRef};
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A grid built from its own type default, the way an app's DSL builds
@@ -3907,6 +3905,7 @@ mod tests {
     /// typing carries on from the seed instead of landing in front of it.
     #[test]
     fn edit_cell_seats_an_editor_holding_the_text_with_the_caret_after_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -3914,16 +3913,19 @@ mod tests {
         assert_eq!(editor(&grid).text(), "abc");
         assert_eq!(editor(&grid).cursor().index, 3);
         assert_eq!(grid.active_cell(), Some((4, 1)), "the selection follows the edit");
+        });
     }
 
     #[test]
     fn a_cell_the_grid_does_not_have_seats_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 25, 1, "abc");
         assert_eq!(grid.editing(), None);
         grid.edit_cell(&mut cx, 1, 3, "abc");
         assert_eq!(grid.editing(), None);
+        });
     }
 
     /// Return hands the host the text the field holds, puts the editor
@@ -3931,6 +3933,7 @@ mod tests {
     /// next row.
     #[test]
     fn return_commits_what_the_field_holds_and_steps_down() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -3943,10 +3946,12 @@ mod tests {
         assert_eq!(edited(&out), vec![(4, 1, "abcd".to_string())]);
         assert_eq!(grid.editing(), None);
         assert_eq!(grid.active_cell(), Some((5, 1)));
+        });
     }
 
     #[test]
     fn shift_return_steps_up_and_tab_steps_sideways() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         let shift = KeyModifiers {
@@ -3969,12 +3974,14 @@ mod tests {
         let action = from_editor(&grid, TextInputAction::KeyDownUnhandled(tab(true)));
         deliver(&mut cx, &mut grid, vec![action]);
         assert_eq!(grid.active_cell(), Some((4, 0)));
+        });
     }
 
     /// Stepping stops at the edge: a Return on the last row commits and
     /// stays, rather than walking off the grid.
     #[test]
     fn stepping_off_the_last_row_stays_on_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 19, 1, "a");
@@ -3984,6 +3991,7 @@ mod tests {
         );
         deliver(&mut cx, &mut grid, vec![action]);
         assert_eq!(grid.active_cell(), Some((19, 1)));
+        });
     }
 
     /// Escape puts the editor away and says so, and says nothing about a
@@ -3991,6 +3999,7 @@ mod tests {
     /// had. The selection stays on the cell that was being edited.
     #[test]
     fn escape_puts_the_editor_away_and_reports_no_value() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -4005,6 +4014,7 @@ mod tests {
         );
         assert_eq!(grid.editing(), None);
         assert_eq!(grid.active_cell(), Some((4, 1)));
+        });
     }
 
     /// The editor losing the keyboard — a click on another cell, or on
@@ -4012,6 +4022,7 @@ mod tests {
     /// and the selection is left wherever the click put it.
     #[test]
     fn losing_the_keyboard_commits_without_stepping() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -4021,6 +4032,7 @@ mod tests {
         assert_eq!(edited(&out), vec![(4, 1, "abcd".to_string())]);
         assert_eq!(grid.editing(), None);
         assert_eq!(grid.active_cell(), Some((4, 1)));
+        });
     }
 
     /// The field drops the keyboard before it reports the Return, so the
@@ -4029,6 +4041,7 @@ mod tests {
     /// person on the row they just finished.
     #[test]
     fn a_return_and_the_focus_loss_it_causes_are_one_stepping_commit() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -4042,6 +4055,7 @@ mod tests {
         let out = deliver(&mut cx, &mut grid, actions);
         assert_eq!(edited(&out).len(), 1);
         assert_eq!(grid.active_cell(), Some((5, 1)));
+        });
     }
 
     /// Commit before restart: seating a second editor while one is live
@@ -4049,6 +4063,7 @@ mod tests {
     /// on every request never loses an edit.
     #[test]
     fn a_second_edit_commits_the_first_before_it_starts() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "first");
@@ -4061,11 +4076,13 @@ mod tests {
         assert_eq!(grid.editing(), Some((2, 0)));
         assert_eq!(editor(&grid).text(), "second");
         assert_eq!(grid.active_cell(), Some((2, 0)));
+        });
     }
 
     /// The host's own commit and cancel, for a control outside the grid.
     #[test]
     fn the_host_can_commit_or_cancel_from_outside() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         let uid = grid.widget_uid();
@@ -4095,12 +4112,14 @@ mod tests {
             grid.cancel_edit(cx);
         });
         assert_eq!(emitted.len(), 0);
+        });
     }
 
     /// An editor's reports are only read while it is seated: after a
     /// cancel, the focus loss the cancel itself causes must not commit.
     #[test]
     fn a_focus_loss_after_the_editor_is_gone_commits_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
@@ -4108,6 +4127,7 @@ mod tests {
         grid.cancel_edit(&mut cx);
         let out = deliver(&mut cx, &mut grid, vec![lost]);
         assert!(edited(&out).is_empty(), "{out:?}");
+        });
     }
 
     /// A grid that shrinks under the editor puts it away rather than
@@ -4116,6 +4136,7 @@ mod tests {
     /// commit for every editor that closes.
     #[test]
     fn a_grid_that_shrinks_under_the_editor_puts_it_away_and_says_so() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 15, 1, "abc");
@@ -4129,17 +4150,20 @@ mod tests {
             "the dropped edit was not reported: {out:?}"
         );
         assert!(deliver(&mut cx, &mut grid, Vec::new()).is_empty(), "reported twice");
+        });
     }
 
     /// A cell asked for before the first draw is scrolled to on that
     /// draw, not measured against a viewport that has no size yet.
     #[test]
     fn an_edit_before_the_first_draw_waits_for_a_viewport_to_scroll_in() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.edit_cell(&mut cx, 4, 1, "abc");
         assert_eq!((grid.scroll.x, grid.scroll.y), (0.0, 0.0), "scrolled against nothing");
         assert_eq!(grid.scroll_pending, Some((4, 1)));
+        });
     }
     /// The editor is drawn every frame, on screen or off, so its area is
     /// always the current frame's and the keyboard leaving it - what a
@@ -4149,6 +4173,7 @@ mod tests {
     /// and the focus loss still commits.
     #[test]
     fn an_edit_scrolled_out_of_view_still_commits_when_the_keyboard_leaves() {
+        crate::on_test_cx(|| {
         use crate::makepad_draw::cx_draw::CxDraw;
         fn frame(cx: &mut Cx, grid: &mut DataGrid, pass: &DrawPass, draw_list: &mut DrawList2d) {
             let event = DrawEvent::default();
@@ -4201,6 +4226,7 @@ mod tests {
         let out = deliver(&mut cx, &mut grid, lost);
         assert_eq!(edited(&out), vec![(4, 1, "abc".to_string())]);
         assert_eq!(grid.editing(), None);
+        });
     }
 
     fn mods(shift: bool, control: bool) -> KeyModifiers {
@@ -4271,6 +4297,7 @@ mod tests {
     /// host's picks are made. The keys select nothing either.
     #[test]
     fn a_press_with_the_selection_off_selects_nothing_and_reports_the_modifiers() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.selection = GridSelectMode::Off;
@@ -4291,6 +4318,7 @@ mod tests {
         });
         assert!(out.is_empty(), "{out:?}");
         assert_eq!(grid.selection(), None);
+        });
     }
 
     /// A grid switched off holds no selection, whether one was left from
@@ -4298,6 +4326,7 @@ mod tests {
     /// Return and typing, which act on a selection, raise nothing.
     #[test]
     fn a_grid_with_the_selection_off_holds_none_and_its_keys_find_none() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.selection = GridSelectMode::Rows;
@@ -4321,6 +4350,7 @@ mod tests {
             }
         });
         assert!(out.is_empty(), "{out:?}");
+        });
     }
 
     /// A list picks rows. A press anywhere in one selects all of it, shift
@@ -4328,6 +4358,7 @@ mod tests {
     /// selection rather than a cell.
     #[test]
     fn a_press_with_rows_selects_the_whole_row() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.selection = GridSelectMode::Rows;
@@ -4347,6 +4378,7 @@ mod tests {
         grid.handle_key_down(&mut cx, &key(KeyCode::ArrowDown, KeyModifiers::default()));
         let sel = grid.selection().unwrap();
         assert_eq!((sel.kind, sel.row_range()), (GridSelectKind::Rows, (8, 8)));
+        });
     }
 
     /// A heading press on a list sorts and says so, and that is all: the
@@ -4354,6 +4386,7 @@ mod tests {
     /// spreadsheet still selects the column, as it always has.
     #[test]
     fn a_heading_press_with_rows_or_off_changes_only_the_sort() {
+        crate::on_test_cx(|| {
         for mode in [GridSelectMode::Rows, GridSelectMode::Off] {
             let mut cx = cx();
             let mut grid = grid(&mut cx);
@@ -4380,6 +4413,7 @@ mod tests {
         grid.click_header(&mut cx, 1, KeyModifiers::default());
         let sel = grid.selection().expect("the spreadsheet lost its column pick");
         assert_eq!((sel.kind, sel.col_range()), (GridSelectKind::Cols, (1, 1)));
+        });
     }
 
     fn released(actions: &[DataGridAction]) -> Vec<(usize, usize, KeyModifiers)> {
@@ -4411,6 +4445,7 @@ mod tests {
     /// it goes down and again as it comes up, with the keys held then.
     #[test]
     fn a_press_and_release_in_place_is_clicked_then_released() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         let at = middle(&grid, 2, 1);
@@ -4423,12 +4458,14 @@ mod tests {
         assert!(matches!((down, up), (Some(down), Some(up)) if down < up), "{out:?}");
         assert_eq!(released(&out), vec![(2, 1, mods(true, false))]);
         assert!(matches!(grid.interact, Interact::None), "the press outlived its release");
+        });
     }
 
     /// Four points of wobble between down and up is still a click, in a
     /// grid that carries rows and in one that does not.
     #[test]
     fn four_points_of_travel_is_still_a_click() {
+        crate::on_test_cx(|| {
         for row_drag in [false, true] {
             let mut cx = cx();
             let mut grid = laid_out(&mut cx);
@@ -4443,6 +4480,7 @@ mod tests {
             assert_eq!(released(&out).len(), 1, "row_drag {row_drag}: {out:?}");
             assert!(carried(&out).is_empty(), "row_drag {row_drag}: {out:?}");
         }
+        });
     }
 
     /// Six points with `row_drag` on carries the row, and the grid says so
@@ -4451,6 +4489,7 @@ mod tests {
     /// the view does not scroll however far past the edge it goes.
     #[test]
     fn six_points_with_row_drag_carries_the_row_and_does_nothing_else() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.row_drag = true;
@@ -4467,12 +4506,14 @@ mod tests {
         assert!(released(&out).is_empty(), "{out:?}");
         assert_eq!(grid.selection(), Some(GridSelection::single(2, 1)));
         assert_eq!(grid.scroll, DVec2::default(), "the carry scrolled the grid");
+        });
     }
 
     /// The rows cut short under a held press leave the line pressed
     /// behind: coming up is no click on it, and travelling carries nothing.
     #[test]
     fn a_press_on_a_line_the_rows_no_longer_reach_neither_releases_nor_carries() {
+        crate::on_test_cx(|| {
         for (row_drag, travel) in [(false, 0.0), (true, 0.0), (true, 6.0)] {
             let mut cx = cx();
             let mut grid = laid_out(&mut cx);
@@ -4488,12 +4529,14 @@ mod tests {
             assert!(released(&out).is_empty(), "row_drag {row_drag}, {travel}: {out:?}");
             assert!(carried(&out).is_empty(), "row_drag {row_drag}, {travel}: {out:?}");
         }
+        });
     }
 
     /// With `row_drag` off a press still drags out a rectangle, as it
     /// always has, and a drag is not a click.
     #[test]
     fn without_row_drag_a_drag_still_selects_a_rectangle() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         let (from, to) = (middle(&grid, 1, 0), middle(&grid, 3, 2));
@@ -4506,6 +4549,7 @@ mod tests {
         assert_eq!((sel.kind, sel.anchor, sel.head), (GridSelectKind::Cells, (1, 0), (3, 2)));
         assert!(carried(&out).is_empty(), "{out:?}");
         assert!(released(&out).is_empty(), "{out:?}");
+        });
     }
 
     /// Rows of three heights, scrolled part way: every row on screen is
@@ -4514,6 +4558,7 @@ mod tests {
     /// row is gets one answer from both.
     #[test]
     fn row_rect_and_row_at_give_back_each_others_answer() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_row_height(1, 40.0);
@@ -4537,11 +4582,13 @@ mod tests {
         }
         assert!(seen > 6, "the test looked at almost nothing ({seen})");
         assert_eq!(grid.row_rect(20), None);
+        });
     }
 
     /// Clearing the overrides puts every row back on the default pitch.
     #[test]
     fn clearing_the_row_heights_restores_uniform_rows() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_row_height(0, 50.0);
@@ -4554,12 +4601,14 @@ mod tests {
             assert_eq!((rect.pos.y, rect.size.y), (top + pitch * row as f64, pitch), "row {row}");
         }
         assert_eq!(grid.row_at(dvec2(60.0, top + pitch * 2.5)), Some(2));
+        });
     }
 
     /// Above the rows — the heading strip, or above the grid — and below
     /// the last row or below the grid, there is no row.
     #[test]
     fn a_point_above_or_below_the_rows_has_no_row() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         let data = grid.vp.data_rect;
@@ -4573,6 +4622,7 @@ mod tests {
         let below_last = grid.row_rect(2).map(|r| r.pos.y + r.size.y + 1.0).unwrap();
         assert!(below_last < data.pos.y + data.size.y);
         assert_eq!(grid.row_at(dvec2(60.0, below_last)), None, "under the last row");
+        });
     }
 
     /// The middle of a column heading, where a pointer presses it.
@@ -4601,6 +4651,7 @@ mod tests {
     /// press while a row is held asks for nothing.
     #[test]
     fn a_secondary_press_on_a_cell_or_a_heading_asks_for_a_menu_and_changes_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.sortable = true;
@@ -4636,6 +4687,7 @@ mod tests {
             grid.context_press(cx, cell);
         });
         assert!(menus(&out).is_empty(), "{out:?}");
+        });
     }
 
     /// A grid drawn into a window-less pass, so real pointer events can
@@ -4753,6 +4805,7 @@ mod tests {
     /// other, never a menu.
     #[test]
     fn only_the_secondary_button_asks_for_a_menu_and_it_takes_no_focus() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
@@ -4777,6 +4830,7 @@ mod tests {
         assert!(cx.has_key_focus(grid.area), "a primary press still takes the keyboard");
         let out = sent(&mut cx, &mut grid, mouse_up(at, MouseButton::PRIMARY, ctrl));
         assert_eq!(released(&out), vec![(2, 1, ctrl)]);
+        });
     }
 
     /// Widths a host sets from its draw loop, fitted to the width the grid
@@ -4785,6 +4839,7 @@ mod tests {
     /// too, rather than a frame later.
     #[test]
     fn widths_set_in_the_draw_loop_land_in_the_frame_being_drawn() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.set_grid_size(20, 6);
@@ -4805,6 +4860,7 @@ mod tests {
         assert_eq!(first_row(&cells), vec![(measured / 6.0).floor(); 6]);
         assert_eq!(grid.visible_counts().1, 6);
         assert_eq!(cells.len(), 6 * grid.visible_counts().0, "a cell was handed out twice or not at all");
+        });
     }
 
     /// Every push replaces all the widths: a shorter list puts the columns
@@ -4813,6 +4869,7 @@ mod tests {
     /// move at once.
     #[test]
     fn a_shorter_list_of_widths_puts_the_rest_back_on_the_default() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_col_widths(&mut cx, &[200.0, 100.0, 100.0]);
@@ -4823,6 +4880,7 @@ mod tests {
         grid.set_col_widths(&mut cx, &[5.0]);
         assert_eq!(grid.col_widths(), vec![grid.min_col_width, 96.0, 96.0]);
         assert_eq!(grid.hit_zone(at), HitZone::Cell { row, display_col: 1 });
+        });
     }
 
     /// With nothing declared every heading is the stock one: centred, in
@@ -4831,6 +4889,7 @@ mod tests {
     /// default one.
     #[test]
     fn a_heading_and_the_pointer_look_as_they_always_have_until_declared() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.sortable = true;
@@ -4846,6 +4905,7 @@ mod tests {
         assert_eq!(grid.header_look(2), stock(None));
         assert!(!grid.headers_have_own_text());
         assert_eq!(grid.hover_cursor(middle(&grid, 2, 1)), MouseCursor::Default);
+        });
     }
 
     /// Declared in the markup, the sorted heading takes its own colour and
@@ -4854,6 +4914,7 @@ mod tests {
     /// pointer while an edge still offers the drag.
     #[test]
     fn a_declared_heading_look_and_pointer_are_what_the_grid_uses() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let declared = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -4892,6 +4953,7 @@ mod tests {
         let edge = dvec2(x + w, heading(&grid, 0).y);
         assert_eq!(grid.hover_cursor(edge), MouseCursor::ColResize);
         assert_eq!(grid.hover_cursor(heading(&grid, 0)), MouseCursor::Default);
+        });
     }
 
     /// The label's place: centred with the marks ignored, as ever; at the
@@ -4899,6 +4961,7 @@ mod tests {
     /// with no room starts at the padding whatever the alignment.
     #[test]
     fn a_label_sits_across_its_heading_and_clear_of_the_marks_on_the_right() {
+        crate::on_test_cx(|| {
         let rect = Rect {
             pos: dvec2(100.0, 0.0),
             size: dvec2(120.0, 28.0),
@@ -4911,6 +4974,7 @@ mod tests {
         let between = header_label_x(rect, pad, tw, 0.75, marks);
         assert!(between > header_label_x(rect, pad, tw, 0.5, marks) && between < right);
         assert_eq!(header_label_x(rect, pad, 200.0, 1.0, marks), 106.0);
+        });
     }
 
     /// A cell text too wide for its cell is cut the padding short of the
@@ -4921,6 +4985,7 @@ mod tests {
     /// than to a negative width.
     #[test]
     fn a_cut_cell_text_stops_the_padding_short_of_the_next_column() {
+        crate::on_test_cx(|| {
         let rect = Rect {
             pos: dvec2(100.0, 40.0),
             size: dvec2(80.0, 22.0),
@@ -4944,6 +5009,7 @@ mod tests {
         assert_eq!(cell_text_clip(rect, pad, 200.0).size.x, 74.0);
         assert_eq!(cell_text_clip(rect, 0.0, 200.0).size.x, 79.0);
         assert_eq!(cell_text_clip(Rect { pos: rect.pos, size: dvec2(4.0, 22.0) }, pad, 30.0).size.x, 0.0);
+        });
     }
 
     fn tips_raised(
@@ -4963,6 +5029,7 @@ mod tests {
     /// column is dragged.
     #[test]
     fn a_heading_with_a_tip_raises_it_and_leaving_takes_it_down() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_header_tips(vec!["the first".into(), String::new(), "the third".into()]);
@@ -5008,11 +5075,13 @@ mod tests {
             grid.hover_tip(cx, Some(third));
         });
         assert_eq!(out, vec![TipAction::HoverIn("the first".into(), shown)], "{out:?}");
+        });
     }
 
     /// A grid given no tips raises nothing from its headings at all.
     #[test]
     fn a_grid_without_tips_raises_none() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         let (first, second) = (heading(&grid, 0), heading(&grid, 1));
@@ -5022,6 +5091,7 @@ mod tests {
             grid.hover_tip(cx, None);
         });
         assert!(out.is_empty(), "{out:?}");
+        });
     }
 
     fn selections(actions: &[DataGridAction]) -> usize {
@@ -5038,6 +5108,7 @@ mod tests {
     /// no click.
     #[test]
     fn a_drag_to_scroll_moves_the_grid_by_the_travel_and_nothing_else() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.drag_scrolling = true;
@@ -5075,6 +5146,7 @@ mod tests {
         });
         assert_eq!(released(&out).len(), 1, "{out:?}");
         assert_eq!(grid.scroll, DVec2::default());
+        });
     }
 
     /// The same through the grid's own pointer handling, and off by
@@ -5082,6 +5154,7 @@ mod tests {
     /// leaves the view where it was.
     #[test]
     fn a_drag_on_a_drawn_grid_scrolls_only_when_asked() {
+        crate::on_test_cx(|| {
         for drag_scrolling in [false, true] {
             let mut cx = cx();
             let mut grid = grid(&mut cx);
@@ -5102,6 +5175,7 @@ mod tests {
                 assert_eq!((sel.anchor, sel.head), ((5, 1), (3, 1)));
             }
         }
+        });
     }
 
     /// A press a widget in a cell took is that widget's alone. The grid
@@ -5116,6 +5190,7 @@ mod tests {
     /// the grid's own hits after) lives nowhere else.
     #[test]
     fn a_press_a_cell_widget_took_never_presses_or_scrolls_the_grid() {
+        crate::on_test_cx(|| {
         // A drag on bare cells is the grid's own, so what follows is
         // about the editor holding the press and not about a drag that
         // does nothing anywhere.
@@ -5161,6 +5236,7 @@ mod tests {
             "the grid started a gesture from a press a cell widget holds"
         );
 
+        });
     }
 
     /// A column edge dragged is a control that holds the pointer: it goes
@@ -5169,6 +5245,7 @@ mod tests {
     /// decides who a moving pointer belongs to.
     #[test]
     fn a_column_resize_keeps_the_pointer_outside_the_grid() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
@@ -5192,6 +5269,7 @@ mod tests {
             .filter(|a| matches!(a, DataGridAction::ColumnResized { .. }))
             .count();
         assert_eq!(resized, 1, "the release outside the grid ended no resize: {out:?}");
+        });
     }
 
     /// The columns as a frame hands them out, left to right: each one's
@@ -5224,6 +5302,7 @@ mod tests {
     /// sorted or clicked on the way.
     #[test]
     fn a_heading_dropped_past_another_moves_its_column_and_reports_the_order() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.allow_col_reorder = true;
@@ -5260,6 +5339,7 @@ mod tests {
         assert_eq!(grid.col_widths(), vec![60.0, 80.0, 100.0]);
         let cells = frame.draw(&mut cx, &mut grid, |_, _| {});
         assert_eq!(drawn_columns(&cells), vec![(1, 60.0), (2, 80.0), (0, 100.0)]);
+        });
     }
 
     /// Four points of travel on a heading is a press, which sorts, and
@@ -5267,6 +5347,7 @@ mod tests {
     /// heading dragged all the way across is still only a press.
     #[test]
     fn a_heading_that_does_not_travel_or_may_not_move_is_only_pressed() {
+        crate::on_test_cx(|| {
         for (allow, travel) in [(true, 4.0), (false, 200.0)] {
             let mut cx = cx();
             let mut grid = grid(&mut cx);
@@ -5282,6 +5363,7 @@ mod tests {
             assert_eq!(grid.col_order(), vec![0, 1, 2]);
             assert_eq!(grid.sort(), Some((0, true)));
         }
+        });
     }
 
     /// The host puts the columns in an order of its own: the grid draws
@@ -5291,6 +5373,7 @@ mod tests {
     /// changes nothing, and their own order puts the columns back.
     #[test]
     fn the_host_sets_the_order_and_the_widths_go_with_their_columns() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_col_widths(&mut cx, &[100.0, 60.0, 80.0]);
@@ -5317,6 +5400,7 @@ mod tests {
         assert!(grid.set_col_order(&mut cx, &[0, 1, 2]));
         assert!(grid.col_order.is_none());
         assert_eq!(grid.col_widths(), vec![100.0, 60.0, 80.0]);
+        });
     }
 
     /// Unmovable columns keep their place: a badge column first and a
@@ -5324,6 +5408,7 @@ mod tests {
     /// between them dropped beyond either lands next to it instead.
     #[test]
     fn unmovable_columns_keep_their_place() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.set_grid_size(20, 4);
@@ -5357,6 +5442,7 @@ mod tests {
         let out = sent(&mut cx, &mut grid, mouse_up(dvec2(right_edge, 14.0), MouseButton::PRIMARY, none));
         cx.fingers.first_mouse_button = None;
         assert_eq!(order_changes(&out), vec![vec![0, 1, 2, 3]], "dropped past the controls, it lands in front of them");
+        });
     }
 
     /// Widths waiting for columns the grid does not have, from a longer
@@ -5364,6 +5450,7 @@ mod tests {
     /// wait when the host orders the columns there are.
     #[test]
     fn an_order_leaves_the_widths_past_the_last_column_where_they_are() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.set_col_widths(&mut cx, &[100.0, 60.0, 80.0, 70.0]);
@@ -5378,6 +5465,7 @@ mod tests {
         assert!(grid.set_col_order(&mut cx, &[0, 2, 1]));
         assert_eq!(grid.col_widths(), vec![140.0, 100.0, 120.0]);
         assert_eq!(grid.col_width(3), 70.0, "the width the fourth column left moved");
+        });
     }
 
     fn carry_moves(actions: &[DataGridAction]) -> Vec<DVec2> {
@@ -5405,6 +5493,7 @@ mod tests {
     /// keys held then, once. A press that carried nothing reports neither.
     #[test]
     fn a_carried_row_reports_every_move_and_where_it_was_let_go() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.row_drag = true;
@@ -5439,6 +5528,7 @@ mod tests {
             });
             assert!(carry_moves(&out).is_empty() && carry_ends(&out).is_empty(), "{out:?}");
         }
+        });
     }
 
     /// The gap is in front of the row level with the pointer above that
@@ -5450,6 +5540,7 @@ mod tests {
     /// rows.
     #[test]
     fn the_gap_for_a_carried_row_is_either_side_of_the_middle_of_the_row_level_with_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         // Rows 26 high, but row 1 is 60: row 0 from 0 to 26, row 1 from 26
@@ -5497,6 +5588,7 @@ mod tests {
         assert_eq!(grid.row_gap_at(at(150.0)), Some(3), "under the last row");
         grid.set_grid_size(0, 3);
         assert_eq!(grid.row_gap_at(at(5.0)), None, "no rows");
+        });
     }
 
     fn next_frame(frame: NextFrame, time: f64) -> Event {
@@ -5516,6 +5608,7 @@ mod tests {
     /// the headings, above, below or beside the grid.
     #[test]
     fn a_carry_at_an_edge_scrolls_only_when_asked_and_faster_nearer_the_edge() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.row_drag = true;
@@ -5587,6 +5680,7 @@ mod tests {
         assert_eq!(carry_moves(&out), vec![near_top, near_top, below]);
         assert_eq!(carry_ends(&out).len(), 1);
         assert_eq!(grid.row_drag_frame, None, "a frame outlived the carry");
+        });
     }
 
     /// What one pointer event raised, the heading tips and the grid's own
@@ -5615,6 +5709,7 @@ mod tests {
     /// release until the pointer leaves it.
     #[test]
     fn a_tip_keeps_off_an_edge_and_a_press_takes_it_down_and_still_resizes() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.set_grid_size(20, 4);
@@ -5670,6 +5765,7 @@ mod tests {
         let third = heading(&grid, 2);
         let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(third));
         assert!(matches!(tips[..], [TipAction::HoverIn(..)]), "{tips:?}");
+        });
     }
 
     /// An edge takes hold six points either side of it, the nearest edge
@@ -5677,6 +5773,7 @@ mod tests {
     /// so a narrow column keeps a middle.
     #[test]
     fn an_edge_takes_hold_six_points_either_side_and_leaves_a_narrow_column_a_middle() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         grid.min_col_width = 8.0;
@@ -5699,6 +5796,7 @@ mod tests {
         assert_eq!(zone(&grid, second + 3.5), Some(1));
         assert_eq!(zone(&grid, second + 6.0), None, "the narrow column's middle");
         assert_eq!(zone(&grid, second + 12.0 - 3.5), Some(2));
+        });
     }
 
     /// Off by default, `header_edges` draws nothing; on, a line one point
@@ -5706,6 +5804,7 @@ mod tests {
     /// middle half of its height, and the last column has none.
     #[test]
     fn heading_edges_fall_on_the_column_edges_and_the_last_column_has_none() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut grid = laid_out(&mut cx);
         assert!(grid.header_edge_rects().is_empty());
@@ -5730,5 +5829,6 @@ mod tests {
         grid.set_grid_size(20, 2);
         grid.compute_viewport();
         assert_eq!(grid.header_edge_rects().len(), 1, "the last column drew an edge");
+        });
     }
 }
