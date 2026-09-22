@@ -133,7 +133,8 @@ pub(crate) fn orphan_sweep_locks(areas: &[Area]) {
 /// later case's Escape.
 #[cfg(test)]
 pub(crate) fn reset_for_test(cx: &mut Cx) {
-    cx.set_global(EscapeClaim::default());
+    // `set_global` keeps an existing global; this one must be replaced.
+    *cx.global::<EscapeClaim>() = EscapeClaim::default();
     let _ = ORPHANED_LOCKS.try_with(|orphans| orphans.borrow_mut().clear());
 }
 pub(crate) fn release_orphaned_sweep_locks(cx: &mut Cx) {
@@ -487,6 +488,22 @@ pub fn slide_for_pointer(placed: Placed, anchor: Rect, bounds: Rect, keep: f64) 
 
 #[cfg(test)]
 mod tests {
+    /// The pooled test contexts are handed from case to case with one
+    /// event id between them: the last case's claim must not refuse the
+    /// next case's Escape.
+    #[test]
+    fn a_pooled_context_forgets_the_last_claim() {
+        crate::on_test_cx(|| {
+            {
+                let mut cx = crate::checkout_test_cx();
+                assert!(super::claim_escape(&mut cx), "a fresh context has no claim");
+                assert!(!super::claim_escape(&mut cx), "one event is claimed once");
+            }
+            let mut cx = crate::checkout_test_cx();
+            assert!(super::claim_escape(&mut cx), "the next case is not refused by the last one's claim");
+        });
+    }
+
     use super::*;
 
     fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
