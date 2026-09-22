@@ -1267,6 +1267,7 @@ mod tests {
             allowed_errors: vec![],
             no_vision: true,
             parallel: 2,
+            deep_tests: false,
             machines: Default::default(),
         };
         let judge = crate::uihub::JudgeWorker::start(&config.model, true).unwrap();

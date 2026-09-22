@@ -1,6 +1,7 @@
 //! Native build/test/fleet API, kept separate from the remote app protocol.
 use super::*;
 use crate::cargo::{self, CargoResult, Options};
+use makepad_strict_json::{self as json, Value};
 
 fn field_text(vm: &mut ScriptVm, v: ScriptValue, key: LiveId) -> Result<Option<String>> {
     let v = object_field(vm, v, key);
@@ -386,6 +387,11 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
     packages.dedup();
     let apps = json_value(vm, Value::Arr(packages.iter().map(json::s).collect()));
     vm.bx.heap.set_value_def(ci, id!(apps).into(), apps);
+    // The deep run (every crate's tests) is opt-in: `deep_tests = true` in
+    // ci.toml, or `ci --deep`.
+    let deep_tests = rt(vm).config.deep_tests;
+    let deep = json_value(vm, Value::Bool(deep_tests));
+    vm.bx.heap.set_value_def(ci, id!(deep).into(), deep);
     vm.add_method(ci, id_lut!(exclusive), script_args!(), |vm, _| {
         if allow(vm) {
             let r = rt(vm);
@@ -446,31 +452,157 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             }
             let r = (|| {
                 let v = value(vm, args, id!(options));
-                let mut argv = vec!["test".into()];
-                if object_field(vm, v, id!(workspace)).as_bool() == Some(true) {
-                    argv.push("--workspace".into());
+                let workspace = object_field(vm, v, id!(workspace)).as_bool() == Some(true);
+                let mut packages = fields(vm, v, id!(packages))?;
+                if let Some(package) = field_text(vm, v, id!(package))? {
+                    packages.push(package);
+                }
+                let dirs = fields(vm, v, id!(dirs))?;
+                let budget = object_field(vm, v, id!(budget_secs)).as_number().unwrap_or(120.0);
+                let cap = object_field(vm, v, id!(cap_secs)).as_number().unwrap_or(600.0);
+                let at_once_asked = object_field(vm, v, id!(at_once)).as_number();
+                let extra = fields(vm, v, id!(args))?;
+                let mut opts = options(vm, v)?;
+                if !workspace && packages.is_empty() && dirs.is_empty() {
+                    return Err("test requires workspace: true, package, packages or dirs".into());
+                }
+                if !(1.0..=86400.0).contains(&cap) || !(1.0..=86400.0).contains(&budget) {
+                    return Err("cap_secs and budget_secs are seconds, 1 to 86400".into());
+                }
+                let totals_json = |t: &crate::pipeline::TestResults| {
+                    json::obj(vec![
+                        ("passed", Value::Int(t.passed as i64)),
+                        ("failed", Value::Int(t.failed as i64)),
+                        ("failed_names", Value::Arr(t.failed_names.iter().map(json::s).collect())),
+                    ])
+                };
+                if rt(vm).validate {
+                    let host = rt(vm).host.target.clone();
+                    cargo::command_args(&["test".into(), "--release".into(), "--no-run".into()], &opts, &host)?;
+                    return Ok(totals_json(&Default::default()));
+                }
+                // The directories name their packages through cargo metadata.
+                if !dirs.is_empty() {
+                    let root = rt(vm).run.root.clone();
+                    let args = vec!["metadata".to_string(), "--no-deps".into(), "--format-version=1".into()];
+                    let meta = rt(vm).run.cargo_command("cargo", &args, &root, &[], 60)?;
+                    if meta.output.code != 0 {
+                        return Err(meta.detail());
+                    }
+                    let found = crate::test_run::packages_under(&meta.output.out, &root, &dirs)?;
+                    if found.is_empty() {
+                        return Err(format!("no packages under {}", dirs.join(", ")));
+                    }
+                    packages.extend(found);
+                }
+                packages.sort();
+                packages.dedup();
+                let selection: Vec<String> = if workspace {
+                    vec!["--workspace".into()]
                 } else {
-                    let package = field_text(vm, v, id!(package))?
-                        .ok_or("test requires package or workspace")?;
-                    argv.extend(["-p".into(), package.clone()]);
-                    if let Some(m) = package_manifest(vm, &package) {
-                        argv.extend(["--manifest-path".into(), m]);
+                    packages.iter().flat_map(|p| ["-p".to_string(), p.clone()]).collect()
+                };
+                // 1. Every test binary, built once, in release.
+                let mut build = vec!["test".to_string(), "--release".into(), "--no-run".into()];
+                build.extend(selection.iter().cloned());
+                build.extend(extra.iter().cloned());
+                let built = cargo_call(vm, build, opts.clone(), None)?;
+                if built.output.code != 0 {
+                    return Err(format!("test build failed\n{}", built.detail()));
+                }
+                let binaries = crate::test_run::binaries_from_json(&built.output.out);
+                if binaries.is_empty() {
+                    return Err("cargo built no test binaries".into());
+                }
+                // 2. Run them, several at a time, each one timed and capped.
+                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                let (mut at_once, threads) = crate::test_run::plan(cpus);
+                if let Some(n) = at_once_asked {
+                    at_once = (n as usize).clamp(1, 64);
+                }
+                let step = rt(vm).step;
+                let started = std::time::Instant::now();
+                let outcomes = crate::test_run::run_all(
+                    &mut rt(vm).run,
+                    &binaries,
+                    at_once,
+                    threads,
+                    std::time::Duration::from_secs(cap as u64),
+                    step,
+                );
+                // 3. The doc tests, through cargo, as one command: for the
+                // selected packages that have a library (cargo refuses --doc
+                // for one without), or the whole workspace.
+                let mut with_libs: Vec<String> = binaries
+                    .iter()
+                    .filter(|b| b.name.ends_with(" lib"))
+                    .map(|b| b.package.clone())
+                    .collect();
+                with_libs.sort();
+                with_libs.dedup();
+                let doc_selection: Vec<String> = if workspace {
+                    vec!["--workspace".into()]
+                } else {
+                    with_libs.iter().flat_map(|p| ["-p".to_string(), p.clone()]).collect()
+                };
+                let doc_out = if doc_selection.is_empty() {
+                    None
+                } else {
+                    let mut doc = vec!["test".to_string(), "--release".into(), "--doc".into()];
+                    doc.extend(doc_selection);
+                    if !extra.iter().any(|a| a == "--no-fail-fast") {
+                        doc.push("--no-fail-fast".into());
+                    }
+                    doc.extend(extra.iter().cloned());
+                    opts.allow_fail = true;
+                    Some(cargo_call(vm, doc, opts, None)?)
+                };
+                let doc_failed = doc_out.as_ref().is_some_and(|d| d.output.code != 0);
+                let doc_results = doc_out
+                    .as_ref()
+                    .map(|d| crate::pipeline::test_results(&d.output.out))
+                    .unwrap_or_default();
+                let wall = started.elapsed().as_secs_f64();
+                let binaries_total = crate::test_run::totals(&outcomes);
+                let mut totals = binaries_total.clone();
+                totals.passed += doc_results.passed;
+                totals.failed += doc_results.failed;
+                totals.failed_names.extend(doc_results.failed_names.iter().cloned());
+                let summary = format!(
+                    "{} test binaries, {at_once} at a time, {wall:.0} s: {} passed, {} failed; doc tests {} passed, {} failed. Slowest:\n{}",
+                    binaries.len(), binaries_total.passed, binaries_total.failed, doc_results.passed, doc_results.failed,
+                    crate::test_run::table(&outcomes, 12)
+                );
+                {
+                    let r = rt(vm);
+                    r.run.log(&summary);
+                    if let Some(i) = r.step {
+                        r.run.annotate(i, &summary);
                     }
                 }
-                argv.extend(fields(vm, v, id!(args))?);
-                let mut opts = options(vm, v)?;
-                opts.allow_fail = true;
-                let out = cargo_call(vm, argv, opts, None)?;
-                let totals = cargo::test_json(&out.output.out);
-                rt(vm).run.evidence.push(totals.clone());
-                if out.output.code != 0 {
-                    return Err(format!(
-                        "tests failed: {}\n{}",
-                        totals.to_json(),
-                        out.detail()
-                    ));
+                let json_totals = totals_json(&totals);
+                rt(vm).run.evidence.push(json_totals.clone());
+                let broken: Vec<_> = outcomes.iter().filter(|o| o.failed()).collect();
+                if !broken.is_empty() || doc_failed {
+                    let mut lines = vec![format!("tests failed: {}", json_totals.to_json())];
+                    for o in &broken {
+                        let how = if o.hung { format!("hung after {:.0} s", o.seconds) } else { format!("exit {}", o.code) };
+                        lines.push(format!(
+                            "{} ({how}): {}\n  full output: {}",
+                            o.name,
+                            o.error.lines().take(6).collect::<Vec<_>>().join(" / "),
+                            o.log.display()
+                        ));
+                    }
+                    if let Some(d) = doc_out.as_ref().filter(|d| d.output.code != 0) {
+                        lines.push(format!("doc tests: {}", d.detail().lines().take(8).collect::<Vec<_>>().join(" / ")));
+                    }
+                    return Err(lines.join("\n"));
                 }
-                Ok(totals)
+                if wall > budget {
+                    warning(vm, &format!("the tests took {wall:.0} s of a {budget:.0} s budget; the slowest are named in the step"));
+                }
+                Ok(json_totals)
             })();
             result(vm, r)
         },

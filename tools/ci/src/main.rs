@@ -11,6 +11,7 @@ mod remote;
 mod report;
 mod runner;
 mod smoke;
+mod test_run;
 mod uihub;
 mod wall;
 mod watch;
@@ -25,6 +26,7 @@ pub struct Options {
     accept_license: bool,
     model: Option<String>,
     no_vision: bool,
+    deep: bool,
 }
 impl Options {
     fn parse() -> process::Result<Self> {
@@ -52,12 +54,13 @@ impl Options {
                 "--install" => result.install = true,
                 "--accept-license" => result.accept_license = true,
                 "--no-vision" => result.no_vision = true,
+                "--deep" => result.deep = true,
                 "--model" => {
                     i += 1;
                     result.model = Some(args.get(i).ok_or("--model needs an ID")?.clone());
                 }
                 "--help" | "-h" => {
-                    println!("ci [--run [ci.splash] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--remote]");
+                    println!("ci [--run [ci.splash] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--deep] [--remote]");
                     std::process::exit(0);
                 }
                 s if s == "--remote"
@@ -86,6 +89,9 @@ impl Options {
             config.model = model.clone();
         }
         config.no_vision = self.no_vision;
+        if self.deep {
+            config.deep_tests = true;
+        }
         Ok(config)
     }
 }

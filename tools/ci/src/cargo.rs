@@ -1,6 +1,6 @@
 //! Cargo mechanics shared by the script natives and remote machines.
 use crate::{
-    pipeline::{test_results, warning_counts},
+    pipeline::warning_counts,
     process::{Output, Result},
     report::{strings, Run},
     watch,
@@ -423,17 +423,6 @@ pub fn rendered_diagnostic(line: &str) -> Option<String> {
                 .then(|| line.into())
         }
     }
-}
-pub fn test_json(out: &str) -> Value {
-    let r = test_results(out);
-    json::obj(vec![
-        ("passed", Value::Int(r.passed as i64)),
-        ("failed", Value::Int(r.failed as i64)),
-        (
-            "failed_names",
-            Value::Arr(r.failed_names.iter().map(json::s).collect()),
-        ),
-    ])
 }
 pub fn binary_path(root: &std::path::Path, binary: &str) -> Result<PathBuf> {
     if binary.is_empty() || binary.contains(['/', '\\']) || binary == ".." {

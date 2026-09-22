@@ -232,7 +232,7 @@ mod tests {
         let config = Config {
             remote: "origin".into(), branches: vec!["work".into()], poll_secs: 60,
             checkout: root.clone(), skip_apps: vec!["private".into()], model: "test".into(),
-            targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1,
+            targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1, deep_tests: false,
             machines: Default::default(),
         };
         let (targets, scripts) = discover(&root, &config).unwrap();

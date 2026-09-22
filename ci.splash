@@ -28,10 +28,19 @@ ci.check_targets({
     targets: ci.host.targets
 })
 
-ci.step("tests", fn(){
-    // Every failing test target in one run, not only the first one.
-    ci.test({workspace: true args: ["--no-fail-fast"] timeout_secs: 10800})
+// The platform's own tests, in release, every binary timed: two minutes is
+// the budget, and going over it turns this block orange and names the slow ones.
+ci.step("platform tests", fn(){
+    ci.test({dirs: ["platform", "draw", "widgets", "tools/ci"] budget_secs: 120})
 })
+
+// Every other crate's tests: the deep run, opt-in with `deep_tests = true` in
+// ci.toml or `ci --deep`.
+if ci.deep {
+    ci.step("deep tests", fn(){
+        ci.test({workspace: true budget_secs: 1200 cap_secs: 900 timeout_secs: 10800})
+    })
+}
 
 // Optional native Windows coverage, with [machines.windows] in ci.toml:
 // let win = ci.machine("windows")

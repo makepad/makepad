@@ -39,6 +39,8 @@ pub struct Config {
     pub allowed_errors: Vec<String>,
     pub no_vision: bool,
     pub parallel: usize,
+    /// Run every crate's tests, not only the platform's own. Off by default.
+    pub deep_tests: bool,
     pub machines: BTreeMap<String, crate::machine::Machine>,
 }
 impl Config {
@@ -160,6 +162,12 @@ impl Config {
             allowed_errors: array("allowed_errors", Vec::new())?,
             no_vision: false,
             parallel: parallel as usize,
+            deep_tests: doc
+                .root
+                .get("deep_tests")
+                .map(|v| v.as_bool().ok_or("deep_tests must be true or false"))
+                .transpose()?
+                .unwrap_or(false),
             machines,
         })
     }

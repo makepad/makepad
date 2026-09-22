@@ -288,26 +288,27 @@ impl Widget for CiWall {
                         format!("{} done · {}", p + w + f, clock(state.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(state.seconds))),
                     ]
                 }
+                // The time sits beside the count: one line fewer on every card.
                 "red" => vec![
-                    state.steps.iter().find(|s| s.state == "failed").map(short).unwrap_or_else(|| "failed".into()),
+                    format!(
+                        "{} · {}",
+                        state.steps.iter().find(|s| s.state == "failed").map(short).unwrap_or_else(|| "failed".into()),
+                        clock(state.seconds)
+                    ),
                     state.detail.lines().next().unwrap_or("").trim_start_matches("VERDICT: NO - ").into(),
-                    clock(state.seconds),
                 ],
                 "orange" => vec![
-                    format!("{w} warning{}", if w == 1 { "" } else { "s" }),
+                    format!("{w} warning{} · {}", if w == 1 { "" } else { "s" }, clock(state.seconds)),
                     state.detail.lines().next().unwrap_or("").into(),
-                    clock(state.seconds),
                 ],
-                "green" => vec![format!("{p} passed"), clock(state.seconds)],
+                "green" => vec![format!("{p} passed · {}", clock(state.seconds))],
                 // Untested is grey and says so; what an earlier run said is
                 // history, told in the detail, never on the wall.
                 _ => vec!["untested".into()],
             };
             let lines: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();
             for (index, line) in lines.iter().enumerate() {
-                let y = if r.size.y >= 110.0 && index + 1 == lines.len() && lines.len() > 1 {
-                    r.size.y - 12.0 - font * 1.4
-                } else {12.0 + name_font * 1.33 + index as f64 * (font * 1.4)};
+                let y = 12.0 + name_font * 1.33 + index as f64 * (font * 1.4);
                 if y + font > r.size.y - 12.0 {
                     break;
                 }
