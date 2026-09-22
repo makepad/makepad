@@ -36,12 +36,16 @@ script_mod! {
                 let sz = 4.5
                 let c = self.rect_size * vec2(0.5, 0.5)
 
-                // Draw background
-                let bg = self.bg_color
-                    .mix(self.bg_color_hover, self.hover)
-                    .mix(self.bg_color_down, self.down);
+                // Draw background. Cross-fade premultiplied: the resting face is
+                // transparent BLACK, so mixing straight-alpha drags rgb down toward black
+                // on the way up, and `fill` multiplies by alpha a second time. That makes
+                // the composite quadratic in `hover` and it dips ~47/255 darker than either
+                // end halfway through the 100ms fade -- a dark flash trailing the pointer.
+                let bg = Pal.premul(self.bg_color)
+                    .mix(Pal.premul(self.bg_color_hover), self.hover)
+                    .mix(Pal.premul(self.bg_color_down), self.down);
                 sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
-                sdf.fill(bg);
+                sdf.fill_premul(bg);
 
                 let color = self.color
                     .mix(self.color_hover, self.hover)

@@ -37,6 +37,9 @@ pub struct WindowGeom {
     pub dpi_factor: f64,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
+    /// Maximize-or-fullscreen, not true fullscreen: only macOS reports real
+    /// fullscreen here, Windows and X11 report maximized, Wayland reports
+    /// either. Don't hide window chrome off this without checking the platform.
     pub is_fullscreen: bool,
     pub is_topmost: bool,
     pub position: Vec2d,
