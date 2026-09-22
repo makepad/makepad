@@ -56,7 +56,7 @@ script_mod! {
                     }
                     apply: {
                         hovered: snap(1.0)
-                        pressed: snap(1.0)
+                        pressed: 0.0
                     }
                 }
 
