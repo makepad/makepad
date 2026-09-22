@@ -436,8 +436,13 @@ impl Widget for RadioButton {
                 }
                 self.set_key_focus(cx);
             }
-            Hit::FingerUp(_fe) => {
-                self.animator_play(cx, ids!(hover.on));
+            Hit::FingerUp(fe) => {
+                // Touch never gets a hover-out, so only a hovering pointer stays hovered here.
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, ids!(hover.on));
+                } else {
+                    self.animator_play(cx, ids!(hover.off));
+                }
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(active.on));
                     cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
