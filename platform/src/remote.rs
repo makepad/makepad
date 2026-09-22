@@ -1132,20 +1132,18 @@ mod imp {
             pending |= present_captures(cx, &mut present);
             if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
                 cx.request_remote_window_present(window);
+                // The input has been applied above, whatever the present
+                // does: a frame that cannot be submitted now (the window is
+                // busy presenting) or a pass that stays dirty is painted on
+                // a later beat, and the waiters resolve on that repaint. An
+                // answer of "retry" here made drivers send the input again,
+                // and a busy app took every key twice ("bbrowser").
                 match present(cx, window) {
-                    Some(false) => {
-                        FRAME_WAITERS.with_borrow_mut(|waiters| {
-                            for (_, tx, _, _) in waiters.drain(..) {
-                                let _ = tx.send(Reply::Err(
-                                    "requested input frame could not be submitted; retry".into(),
-                                ));
-                            }
-                        });
-                    }
-                    // the pass stays dirty; the next beat paints it and the
-                    // waiters resolve on its repaint
-                    None => pending = true,
                     Some(true) => {}
+                    Some(false) | None => {
+                        cx.request_remote_window_present(window);
+                        pending = true;
+                    }
                 }
             }
             resolve_frame_waiters(cx);
@@ -2122,9 +2120,9 @@ mod imp {
              /activity         native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in /s)\n\
              \x20                 native input increments user_seq; injected input does not. No input contents are recorded\n\
              \x20                 mutations need 2 seconds without native input; with if_user_seq=N they are also refused once the person intervened after N; held pointer/touch input stays active\n\
-             \x20                 HTTP 409 user_interacting/user_intervened means STOP automation; reads remain available. Resume only after user handoff\n\
+             \x20                 HTTP 409 user_interacting/user_intervened rejects this sequence; inspect applied/state before retrying with a fresh activity counter\n\
              \x20                 all replies include X-Makepad-User-Seq[-Start]; changed epochs invalidate test/capture attribution\n\
-             \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
+             \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — a normal window close, not a crash\n\
              /g?w=&scale=&raw= grab window w (default: first). returns {{\"png\":path,\"w\":id,\"sz\":[w,h],\"capture_ms\":ms,\"encode_ms\":ms}}; raw=1 sends image/png bytes\n\
              \x20                 standalone macOS: pending Draw + immediate present at UI arming, before later input; no animation tick. Other backends: next render\n\
              /gseq?n=8&every_ms=50&scale=1  a separate present per deadline; n=1..64, every_ms>=8, span<=60s; {{\"png\":[paths],\"frames\":[per-frame timings]}}\n\
@@ -2157,7 +2155,7 @@ mod imp {
              /close?w=ID       close one window the normal way\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
-             finish owned tests with /gq (or /quit); if the user intervened, leave their app running — never force-close on 409\n\
+             finish owned tests with /gq (or /quit); a conflict invalidates the sequence evidence, not authorization for the active workflow\n\
              add &wait=1 to any input route to answer only after the next frame is drawn (so a following /g sees it)\n\
              add &w=ID to target a window; omit for the first one. ordinary errors are {{\"err\":\"...\"}} with status 404; interaction conflicts use 409\n\
              POST the same routes with a flat JSON body ({{\"x\":10,\"y\":20}}) when quoting query strings is painful\n",

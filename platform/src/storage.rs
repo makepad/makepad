@@ -564,14 +564,23 @@ fn validate_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Bytes the volume holding `path` has available to this process, as the
 /// operating system reports them; `path` must exist. What an application
 /// has to size a store by, instead of a figure of its own.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn volume_available_bytes(path: &std::path::Path) -> Result<u64, StorageError> {
     native::volume_available_bytes(path)
 }
 
+/// The browser does not say how much its origin may store.
+#[cfg(target_arch = "wasm32")]
+pub fn volume_available_bytes(_path: &std::path::Path) -> Result<u64, StorageError> {
+    Err(StorageError::Unsupported(
+        "the volume's free space is not known in the browser".into(),
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod native {
     use {
         super::*,

@@ -80,14 +80,15 @@ impl Runtime {
         }
         let remote = app.remote.as_ref().ok_or("remote unavailable")?;
         self.run.log(&format!("{} GET {route}", app.name));
-        // An app that could not place an input on a frame (it was busy
-        // presenting) has done nothing and says "retry": ask again.
+        // A grab the bridge could not place, or a grab budget that is full,
+        // ends in "; retry": ask again. An input is never asked again: the
+        // app applied it when it took the request, whatever it answered
+        // about the frame after it, and a second request is a second key.
         let mut attempt = 0;
         let result = loop {
             let result = remote.request(route, mutate);
-            // Every such answer of the bridge ends in "; retry" (an input frame
-            // or a grab it could not place, a grab budget that is full).
-            let again = matches!(&result, Err(e) if e.to_string().contains("; retry"));
+            let again = !applies_input(route)
+                && matches!(&result, Err(e) if e.to_string().contains("; retry"));
             if !again || attempt == 5 {
                 break result;
             }
@@ -430,6 +431,15 @@ fn character_key(c: char) -> Result<(String, bool)> {
         _ => Err(format!("type_text does not support character {c:?}")),
     }
 }
+/// The routes that apply an input to the app when it takes the request
+/// (keys, pointer, text, a dropped file, the tweaker, the AI pane): a
+/// second request is a second input, so these are never asked again.
+fn applies_input(route: &str) -> bool {
+    ["/k?", "/m?", "/t?", "/click?", "/drop?", "/tweak?", "/ai?"]
+        .iter()
+        .any(|prefix| route.starts_with(prefix))
+}
+
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| {
@@ -1250,6 +1260,15 @@ fn execute(
 mod tests {
     use super::*;
     use crate::{process::Control, report::Notify};
+    #[test]
+    fn an_input_route_is_never_asked_twice_a_grab_is() {
+        for route in ["/k?k=down&c=KeyB&wait=1", "/m?k=click&x=1&y=2", "/t?t=browser", "/click?x=1&y=2", "/drop?path=/a&x=1&y=1"] {
+            assert!(applies_input(route), "{route}");
+        }
+        for route in ["/g", "/gseq?n=8", "/log?n=10", "/gq", "/quit", "/activity", "/snap?q=x"] {
+            assert!(!applies_input(route), "{route}");
+        }
+    }
     #[test]
     fn contract_scripts_execute_on_real_vm_without_io() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
