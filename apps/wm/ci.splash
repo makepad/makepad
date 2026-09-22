@@ -23,7 +23,7 @@ ci.step("check other platforms", fn(){
 ci.step("build the apps the desk will open", fn(){
     ci.build({package: "makepad-terminal" binary: "terminal"})
     // The terminal starts its shell through this helper, next to it.
-    ci.build({package: "makepad-screen" binary: "makepad-screen"})
+    ci.build({package: "makepad-agents" binary: "agents"})
     ci.build({package: "makepad-browser" binary: "browser"})
 })
 

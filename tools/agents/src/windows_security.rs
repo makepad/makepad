@@ -480,7 +480,7 @@ pub fn pipe_pair(inbound: bool) -> io::Result<(File, File)> {
         inherit: 0,
     };
     let name = wide(std::ffi::OsStr::new(&format!(
-        "\\\\.\\pipe\\makepad-screen-{}",
+        "\\\\.\\pipe\\makepad-agents-{}",
         random_token().map_err(io::Error::other)?
     )));
     let raw = unsafe {

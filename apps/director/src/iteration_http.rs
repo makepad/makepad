@@ -984,7 +984,7 @@ fn flow_http_publish_discovery(control: &Path, url: &str) -> Result<(), String> 
     if url.len() > 255 {
         return Err("Lane HTTP discovery exceeds its bound".into());
     }
-    makepad_screen::protocol::write_private(
+    makepad_agents::protocol::write_private(
         &control.join("http-url"),
         format!("{url}\n").as_bytes(),
     )

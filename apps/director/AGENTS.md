@@ -21,8 +21,9 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
 
 ## Persistent terminal connections
 
-- `tools/agents` (or `tools/agents.ps1` on Windows) builds the release helper
-  and opens its Rust TUI. The binary also opens the TUI with no command, or
+- `cargo build --release -p makepad-agents` builds the `agents` executable
+  (`target/release/agents`; put that directory on the PATH, or link the binary
+  into one, to run it as `agents`). It opens its Rust TUI with no command, or
   with `agents --state-dir <sessions> --cwd <project>`. Up/Down selects, Enter
   connects nonexclusively, C starts Codex, A starts Claude, R refreshes, and Q
   exits the browser. Four selectable new-agent rows launch Codex, Codex
@@ -40,8 +41,8 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   stop checks the selected session identity and retains saved session files.
   The browser lists only this helper's scoped sessions, not system terminals.
 - Build the repository helper alongside Studio with
-  `cargo build --release -p makepad-screen -p makepad-director`. Director uses the
-  sibling `makepad-screen` executable from `tools/screen`; never install or
+  `cargo build --release -p makepad-agents -p makepad-director`. Director uses the
+  sibling `agents` executable (the `makepad-agents` crate in `tools/agents`); never install or
   discover a GNU Screen/tmux replacement from PATH.
 - The helper supports macOS/Linux PTYs and Windows ConPTY, with shared terminal
   parsing/rendering and a platform-specific local connection transport. Windows
@@ -53,13 +54,13 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
 - Each lane's Connect icon selects a running PTY from this Studio state directory.
   Connections are nonexclusive; connecting another view leaves existing clients
   and the lane's original session running. An external terminal can use the same
-  helper: `makepad-screen attach --state-dir <studio-state>/agent_sessions
+  helper: `makepad-agents attach --state-dir <studio-state>/agent_sessions
   --session <session-id>`. Ctrl+D detaches that client and leaves the agent
   running. This is the host's only hotkey; other keys pass through unchanged.
   Literal control bytes inside bracketed paste are never detach shortcuts.
 - Attachments retain their terminal's own default text, background, cursor and
   indexed palette colors. Project only explicit app color overrides and their
-  resets. For an external terminal, use `makepad-screen start --attach` with
+  resets. For an external terminal, use `makepad-agents start --attach` with
   the ordinary start arguments: it samples the terminal's colors before the
   child starts, so startup OSC queries receive real theme values. The captured
   theme remains stable while detached or viewed from another terminal. Direct
@@ -126,8 +127,8 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   Green means the agent actually reports the item implemented, not merely planned.
 - The backing terminal receives `MAKEPAD_STUDIO_FLOW_ID`,
   `MAKEPAD_STUDIO_CONTROL_DIR`, and `MAKEPAD_STUDIO_CLI`. At startup and resume,
-  The PTY host also supplies `MAKEPAD_SCREEN_SESSION` and
-  `MAKEPAD_SCREEN_STATE_DIR`; `director-flow` resolves the current owning lane
+  The PTY host also supplies `MAKEPAD_AGENTS_SESSION` and
+  `MAKEPAD_AGENTS_STATE_DIR`; `director-flow` resolves the current owning lane
   from these on every call, including after splitting a lane. Do not override
   them or pass another lane identity. Fetch the compact context (roles, todo/requirement revisions, tasks,
   and build gate):

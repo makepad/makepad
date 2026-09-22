@@ -1218,9 +1218,9 @@ impl Host {
         let program = std::env::current_exe()
             .map_err(err)?
             .with_file_name(if cfg!(windows) {
-                "makepad-screen.exe"
+                "agents.exe"
             } else {
-                "makepad-screen"
+                "agents"
             });
         let output = Command::new(program)
             .arg("name")

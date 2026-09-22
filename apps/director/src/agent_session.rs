@@ -1,4 +1,4 @@
-//! Studio owns attachment clients, while its tools/screen Rust host owns each
+//! Studio owns attachment clients, while its tools/agents Rust host owns each
 //! agent's real PTY. Stopping this worker or dropping a terminal never stops
 //! that server. Only an explicit `stop` request terminates a durable session.
 
@@ -969,9 +969,9 @@ mod native {
                 .map_err(|e| e.to_string())?
                 .parent()
                 .ok_or("Studio executable has no directory")?
-                .join("makepad-screen");
+                .join("agents");
             if !fs::metadata(&program).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0) {
-                return Err("Build the repository's tools/screen binary alongside Studio: cargo build --release -p makepad-screen -p makepad-director. No external software was installed or started".into());
+                return Err("Build the repository's tools/agents binary alongside Studio: cargo build --release -p makepad-agents -p makepad-director. No external software was installed or started".into());
             }
             Ok(Self {
                 program,
@@ -995,7 +995,7 @@ mod native {
             if let Some(text) = &saved {
                 let pin = TransportRecord::deserialize_ron(text)
                     .map_err(|_| "Invalid saved terminal transport identity")?;
-                if pin.version != 2 || pin.config != "makepad-screen-v1" {
+                if pin.version != 2 || pin.config != "makepad-agents-v1" {
                     if !restoring {
                         return Err("This lane belongs to the previous GNU Screen backend. Its process was left untouched; explicitly resume it after the old session has ended".into());
                     }
@@ -1013,15 +1013,15 @@ mod native {
             }
             let (status, version) =
                 self.run_command(Command::new(&self.program).arg("--version"), stop)?;
-            if !status.success() || !version.trim().starts_with("makepad-screen ") {
+            if !status.success() || !version.trim().starts_with("agents ") {
                 return Err(
-                    "The sibling executable is not the repository's makepad-screen helper".into(),
+                    "The sibling executable is not the repository's makepad-agents helper".into(),
                 );
             }
             let pin = TransportRecord {
                 version: 2,
                 program: self.program.to_string_lossy().into(),
-                config: "makepad-screen-v1".into(),
+                config: "makepad-agents-v1".into(),
                 screen_version: version.trim().into(),
                 truecolor: true,
             };

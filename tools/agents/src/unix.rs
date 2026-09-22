@@ -289,7 +289,7 @@ impl AsRawFd for Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
-            eprintln!("makepad-screen: PTY cleanup: {error}");
+            eprintln!("makepad-agents: PTY cleanup: {error}");
         }
     }
 }

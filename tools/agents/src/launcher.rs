@@ -252,7 +252,7 @@ impl Default for Menu {
 pub fn resolve_state_dir(state: Option<PathBuf>, workspace: &Path) -> Result<PathBuf, String> {
     let state = state
         .or_else(|| {
-            std::env::var_os("MAKEPAD_SCREEN_STATE_DIR")
+            std::env::var_os("MAKEPAD_AGENTS_STATE_DIR")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
         })

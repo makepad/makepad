@@ -1,7 +1,7 @@
 //! Windows management worker for the repository's persistent ConPTY host.
 //! Presentation clients never own or implicitly replace the hosted process.
 use super::*;
-use makepad_screen::protocol::{create_private, private_directory, read_private, write_private};
+use makepad_agents::protocol::{create_private, private_directory, read_private, write_private};
 use makepad_strict_json::{self as json, Value};
 use std::{
     ffi::c_void,
@@ -620,9 +620,9 @@ impl Backend {
             .map_err(|e| e.to_string())?
             .parent()
             .ok_or("Studio executable has no directory")?
-            .join("makepad-screen.exe");
+            .join("agents.exe");
         if !regular_executable(&program) {
-            return Err("Build makepad-screen.exe alongside Studio: cargo build --release -p makepad-screen -p makepad-director".into());
+            return Err("Build makepad-agents.exe alongside Studio: cargo build --release -p makepad-agents -p makepad-director".into());
         }
         // Validate presentation quoting before any hosted process is created.
         cmd_quote(&program)?;
@@ -771,7 +771,7 @@ impl Backend {
             let record = TransportRecord::deserialize_ron(&text)
                 .map_err(|_| "Invalid terminal transport identity")?;
             if record.version != 2
-                || record.config != "makepad-screen-v1"
+                || record.config != "makepad-agents-v1"
                 || !regular_executable(Path::new(&record.program))
             {
                 return Err("This terminal was created by another or unavailable transport; it was not replaced".into());
@@ -789,13 +789,13 @@ impl Backend {
         }
         let (status, version) =
             self.run_command(Command::new(&self.program).arg("--version"), stop)?;
-        if !status.success() || !version.trim().starts_with("makepad-screen ") {
+        if !status.success() || !version.trim().starts_with("agents ") {
             return Err("The sibling executable is not the repository PTY host".into());
         }
         let record = TransportRecord {
             version: 2,
             program: self.program.to_string_lossy().into_owned(),
-            config: "makepad-screen-v1".into(),
+            config: "makepad-agents-v1".into(),
             screen_version: version.trim().to_owned(),
             truecolor: true,
         };
@@ -872,9 +872,9 @@ impl Backend {
                 cmd_quote(&state_dir)?,
                 id
             ),
-            backend: "makepad-screen",
+            backend: "agents",
             transport_program: self.program.to_string_lossy().into_owned(),
-            transport_version: "makepad-screen protocol 1 · ConPTY".into(),
+            transport_version: "makepad-agents protocol 1 · ConPTY".into(),
             transport_warning: None,
             scrollback_lines: SCROLLBACK_LINES,
             cwd,

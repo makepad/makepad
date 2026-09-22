@@ -13,7 +13,7 @@ ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-di
 // and window manager scripts ask for it; built here it is a cache answer for
 // them instead of a cargo run that waits on the test build below.
 ci.step("build the pty helper", fn(){
-    ci.build({package: "makepad-screen" binary: "makepad-screen"})
+    ci.build({package: "makepad-agents" binary: "agents"})
 })
 
 ci.shared()

@@ -141,7 +141,7 @@ fn attach_inner(
     }
     match result {
         Ok(reason) => {
-            eprintln!("makepad-screen: {} · {}", location.session_id, reason);
+            eprintln!("makepad-agents: {} · {}", location.session_id, reason);
             Ok(())
         }
         Err(error) => Err(error),

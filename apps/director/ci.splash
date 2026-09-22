@@ -18,7 +18,7 @@ ci.step("check other platforms", fn(){
 // Director embeds a terminal, and on macOS a terminal starts its shell
 // through the pty helper that lives next to the app.
 ci.step("build the pty helper", fn(){
-    ci.build({package: "makepad-screen" binary: "makepad-screen"})
+    ci.build({package: "makepad-agents" binary: "agents"})
 })
 
 let app = ci.launch({package: "makepad-director" binary: "director" cwd: "."})

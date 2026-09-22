@@ -49,7 +49,7 @@ makepad-code-arch = { path = "../../libs/code_arch" }
 makepad-git = { path = "../../libs/git" }
 
 [target.'cfg(windows)'.dependencies]
-makepad-screen = { path = "../../tools/screen" }
+makepad-agents = { path = "../../tools/agents" }
 
 [dev-dependencies]
 makepad-draw = { path = "../../draw" }

@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use makepad_screen::{protocol::SessionLocation, server, terminal::HostedTerminal};
+use makepad_agents::{protocol::SessionLocation, server, terminal::HostedTerminal};
 use makepad_strict_json::{self as json, Value};
 use std::{
     fs,
@@ -50,7 +50,7 @@ fn osc_and_current_session_cli_names_reach_list_and_attached_client() {
     let root = std::env::temp_dir().join(format!(
         "screen-names-{}-{}",
         std::process::id(),
-        makepad_screen::protocol::random_token().unwrap()
+        makepad_agents::protocol::random_token().unwrap()
     ));
     fs::create_dir(&root).unwrap();
     let root = root.canonicalize().unwrap();
@@ -58,7 +58,7 @@ fn osc_and_current_session_cli_names_reach_list_and_attached_client() {
         state: root.join("sessions"),
         root,
     };
-    let binary = env!("CARGO_BIN_EXE_makepad-screen");
+    let binary = env!("CARGO_BIN_EXE_agents");
     let output = Command::new(binary)
         .args(["start", "--state-dir"])
         .arg(&session.state)
@@ -131,7 +131,7 @@ fn shell_started_session_is_listed_with_osc_title_in_workspace_scope() {
     let root = std::env::temp_dir().join(format!(
         "screen-inventory-{}-{}",
         std::process::id(),
-        makepad_screen::protocol::random_token().unwrap()
+        makepad_agents::protocol::random_token().unwrap()
     ));
     fs::create_dir(&root).unwrap();
     let root = root.canonicalize().unwrap();
@@ -139,14 +139,14 @@ fn shell_started_session_is_listed_with_osc_title_in_workspace_scope() {
         state: root.join("local/agent_state/studio/iteration-verification/state/agent_sessions"),
         root,
     };
-    makepad_screen::protocol::private_directory(&session.state, true).unwrap();
-    let binary = env!("CARGO_BIN_EXE_makepad-screen");
+    makepad_agents::protocol::private_directory(&session.state, true).unwrap();
+    let binary = env!("CARGO_BIN_EXE_agents");
     // A shell starts the session before any Studio/client attaches. Omit cwd
     // and state flags, as in tools/agents start --session NAME -- COMMAND.
     let output = Command::new(binary)
         .current_dir(&session.root)
-        .env_remove("MAKEPAD_SCREEN_STATE_DIR")
-        .env_remove("MAKEPAD_SCREEN_SESSION")
+        .env_remove("MAKEPAD_AGENTS_STATE_DIR")
+        .env_remove("MAKEPAD_AGENTS_SESSION")
         .args([
             "start",
             "--session",
@@ -170,18 +170,18 @@ fn shell_started_session_is_listed_with_osc_title_in_workspace_scope() {
             let mut list = Command::new(binary);
             list.arg("list")
                 .current_dir(&session.root)
-                .env_remove("MAKEPAD_SCREEN_STATE_DIR");
+                .env_remove("MAKEPAD_AGENTS_STATE_DIR");
             match scope {
                 "explicit" => {
                     // Explicit scope wins over an unrelated inherited scope.
                     list.arg("--state-dir")
                         .arg(&session.state)
-                        .env("MAKEPAD_SCREEN_STATE_DIR", session.root.join("empty"));
+                        .env("MAKEPAD_AGENTS_STATE_DIR", session.root.join("empty"));
                 }
                 "inherited" => {
                     // Outside the workspace, the inherited scope still wins.
                     list.current_dir(&session.state)
-                        .env("MAKEPAD_SCREEN_STATE_DIR", &session.state);
+                        .env("MAKEPAD_AGENTS_STATE_DIR", &session.state);
                 }
                 _ => {}
             }
@@ -230,7 +230,7 @@ fn shell_started_session_is_listed_with_osc_title_in_workspace_scope() {
 
 #[test]
 fn title_changes_project_to_existing_and_new_clients() {
-    use makepad_screen::snapshot::Projection;
+    use makepad_agents::snapshot::Projection;
     let mut source = HostedTerminal::new(80, 24, 100);
     let mut client = HostedTerminal::new(80, 24, 100);
     let mut projection = Projection::default();

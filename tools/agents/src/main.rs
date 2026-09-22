@@ -1,20 +1,20 @@
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn main() {
     #[cfg(target_os = "macos")]
-    makepad_screen::pty_spawn::exec_helper();
+    makepad_agents::pty_spawn::exec_helper();
     if let Err(error) = native_main() {
-        eprintln!("makepad-screen: {error}");
+        eprintln!("makepad-agents: {error}");
         std::process::exit(1);
     }
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn main() {
-    eprintln!("makepad-screen supports macOS, Linux and Windows");
+    eprintln!("makepad-agents supports macOS, Linux and Windows");
     std::process::exit(2);
 }
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn native_main() -> Result<(), String> {
-    use makepad_screen::{
+    use makepad_agents::{
         client,
         protocol::{valid_session, SessionLocation},
         server::{self, StartOptions},
@@ -39,7 +39,7 @@ fn native_main() -> Result<(), String> {
         if args.next().is_some() {
             return Err("--version takes no other arguments".into());
         }
-        println!("makepad-screen {} (protocol 1)", env!("CARGO_PKG_VERSION"));
+        println!("agents {} (protocol 1)", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if ![
@@ -58,7 +58,7 @@ fn native_main() -> Result<(), String> {
     let mut read_only = false;
     let mut restart = false;
     let mut attach = false;
-    let mut theme = makepad_screen::theme::Theme::default();
+    let mut theme = makepad_agents::theme::Theme::default();
     let mut instance = None;
     let mut lock_fd = None;
     let mut command = Vec::<OsString>::new();
@@ -111,7 +111,7 @@ fn native_main() -> Result<(), String> {
             "--restart" if operation == "start" => restart = true,
             "--attach" if operation == "start" => attach = true,
             "--theme" if operation == "serve" => {
-                theme = makepad_screen::theme::Theme::decode(
+                theme = makepad_agents::theme::Theme::decode(
                     &args
                         .next()
                         .ok_or("--theme requires colors")?
@@ -125,7 +125,7 @@ fn native_main() -> Result<(), String> {
                     .ok_or("Color requires an RGB value")?
                     .into_string()
                     .map_err(|_| "Invalid color")?;
-                let rgb = makepad_screen::term::color::parse_color_spec(&value)
+                let rgb = makepad_agents::term::color::parse_color_spec(&value)
                     .ok_or("Invalid RGB color")?;
                 theme.colors[if flag == "--foreground" { 256 } else { 257 }] = Some(rgb);
             }
@@ -154,13 +154,13 @@ fn native_main() -> Result<(), String> {
         if session.is_some() || !command.is_empty() {
             return Err("agents accepts only --state-dir and --cwd".into());
         }
-        return makepad_screen::launcher::run(state_dir, cwd);
+        return makepad_agents::launcher::run(state_dir, cwd);
     }
     if operation == "start" && cwd.is_none() {
         cwd = Some(std::env::current_dir().map_err(|e| e.to_string())?);
     }
     let state_dir = if matches!(operation, "list" | "start") {
-        Some(makepad_screen::launcher::resolve_state_dir(
+        Some(makepad_agents::launcher::resolve_state_dir(
             state_dir,
             &cwd.clone()
                 .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?),
@@ -169,8 +169,8 @@ fn native_main() -> Result<(), String> {
         state_dir
     };
     let state_dir = state_dir
-        .or_else(|| std::env::var_os("MAKEPAD_SCREEN_STATE_DIR").map(PathBuf::from))
-        .ok_or("--state-dir is required (or run inside a makepad-screen session)")?;
+        .or_else(|| std::env::var_os("MAKEPAD_AGENTS_STATE_DIR").map(PathBuf::from))
+        .ok_or("--state-dir is required (or run inside a makepad-agents session)")?;
     if !state_dir.is_absolute() {
         return Err("--state-dir must be absolute".into());
     }
@@ -182,8 +182,8 @@ fn native_main() -> Result<(), String> {
         return Ok(());
     }
     let session = session
-        .or_else(|| std::env::var("MAKEPAD_SCREEN_SESSION").ok())
-        .ok_or("--session is required (or run inside a makepad-screen session)")?;
+        .or_else(|| std::env::var("MAKEPAD_AGENTS_SESSION").ok())
+        .ok_or("--session is required (or run inside a makepad-agents session)")?;
     if !valid_session(&session) {
         return Err(
             "Session ID must be 1..48 ASCII letters, digits, hyphens or underscores".into(),

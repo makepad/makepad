@@ -458,7 +458,7 @@ impl Write for Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
-            eprintln!("makepad-screen: ConPTY cleanup: {error}");
+            eprintln!("makepad-agents: ConPTY cleanup: {error}");
         }
     }
 }

@@ -188,12 +188,12 @@ impl Host {
 
 #[cfg(windows)]
 fn cli_private_dir(path: &Path, create: bool) -> Result<(), String> {
-    makepad_screen::protocol::private_directory(path, create)
+    makepad_agents::protocol::private_directory(path, create)
 }
 
 #[cfg(windows)]
 fn cli_read(path: &Path, limit: usize) -> Result<String, String> {
-    String::from_utf8(makepad_screen::protocol::read_private(path, limit)?)
+    String::from_utf8(makepad_agents::protocol::read_private(path, limit)?)
         .map_err(|_| "Control input must be valid UTF-8".into())
 }
 
@@ -220,7 +220,7 @@ fn cli_publish_lane_binding(path: &Path, text: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(err(error)),
     }
-    makepad_screen::protocol::write_private(path, text.as_bytes())
+    makepad_agents::protocol::write_private(path, text.as_bytes())
 }
 
 #[cfg(windows)]
@@ -231,7 +231,7 @@ fn cli_publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
         return Err("Control publication exceeds its bound".into());
     }
     let temporary = parent.join(format!(".tmp-{}", cli_request_id()));
-    makepad_screen::protocol::create_private(&temporary, bytes)?;
+    makepad_agents::protocol::create_private(&temporary, bytes)?;
     // A completed private file is linked into place exactly once. Never
     // replace another caller's request or a durable outcome under the same ID.
     let result = fs::hard_link(&temporary, path).map_err(err);
@@ -356,8 +356,8 @@ fn cli_private_read(path: &Path, limit: usize) -> Result<String, String> {
 /// Resolve every invocation through the stable daemon identity. A mirrored
 /// presentation cannot retarget the session by changing inherited flow vars.
 pub fn cli_environment_scope() -> Result<(String, PathBuf), String> {
-    let session = std::env::var_os("MAKEPAD_SCREEN_SESSION");
-    let state = std::env::var_os("MAKEPAD_SCREEN_STATE_DIR");
+    let session = std::env::var_os("MAKEPAD_AGENTS_SESSION");
+    let state = std::env::var_os("MAKEPAD_AGENTS_STATE_DIR");
     if session.is_some() || state.is_some() {
         let session = session
             .and_then(|value| value.into_string().ok())

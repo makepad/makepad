@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 mod tests {
-    use makepad_screen::pty_spawn::spawn;
+    use makepad_agents::pty_spawn::spawn;
     use std::{
         ffi::{c_char, c_void},
         io,
@@ -98,7 +98,7 @@ mod tests {
                 let mut child = spawn(
                     &command,
                     slave.as_raw_fd(),
-                    std::path::Path::new(env!("CARGO_BIN_EXE_makepad-screen")),
+                    std::path::Path::new(env!("CARGO_BIN_EXE_agents")),
                 )?;
                 let sid = unsafe { getsid(child.id() as i32) };
                 let foreground = unsafe { tcgetpgrp(master.as_raw_fd()) };

@@ -160,7 +160,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
-    "tools/screen",
+    "tools/agents",
     "tools/ci",
     "libs/system_speech",
     # === tests ===

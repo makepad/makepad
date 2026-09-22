@@ -2,7 +2,7 @@ use crate::{
     protocol::*,
     snapshot::Projection,
     terminal::HostedTerminal,
-    windows::{self as unix, Pty},
+    unix::{self, Pty},
 };
 use makepad_strict_json::{self as json, Value};
 use std::{
@@ -10,14 +10,16 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::windows::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
 };
-
-use crate::windows::{Listener as UnixListener, Stream as UnixStream};
 
 const MAX_CLIENTS: usize = 16;
 const MAX_QUEUE: usize = 16 * 1024 * 1024 + 64 * 1024;
@@ -42,11 +44,11 @@ impl StartOptions {
         if self.cwd.to_str().is_none()
             || self.program.is_empty()
             || self.args.len() > 256
-            || self.program.as_encoded_bytes().len()
+            || self.program.as_bytes().len()
                 + self
                     .args
                     .iter()
-                    .map(|arg| arg.as_encoded_bytes().len())
+                    .map(|arg| arg.as_bytes().len())
                     .sum::<usize>()
                 > 64 * 1024
         {
@@ -63,8 +65,8 @@ impl StartOptions {
             .chain(std::iter::once(self.program.as_os_str()))
             .chain(self.args.iter().map(OsString::as_os_str))
         {
-            bytes.extend_from_slice(&(part.as_encoded_bytes().len() as u64).to_be_bytes());
-            bytes.extend_from_slice(part.as_encoded_bytes());
+            bytes.extend_from_slice(&(part.as_bytes().len() as u64).to_be_bytes());
+            bytes.extend_from_slice(part.as_bytes());
         }
         crate::digest::hex(&crate::digest::sha256(&bytes))
     }
@@ -81,7 +83,7 @@ fn claim(location: &SessionLocation) -> Result<Option<Value>, String> {
                 || !value
                     .get("instance")
                     .and_then(Value::as_str)
-                    .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .is_some_and(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
             {
                 return Err(
                     "Screen claim identity is corrupt or belongs to another session".into(),
@@ -191,7 +193,7 @@ pub fn status(state_dir: &Path, session: &str) -> Result<Value, String> {
                     if SessionLock::acquire(&location)?.is_none() {
                         return Err(error);
                     }
-                    match unix::connect(&location, Duration::from_millis(200)) {
+                    match unix::connect(&location.socket_path, Duration::from_millis(200)) {
                         Ok(_) => return Err(error),
                         Err(e)
                             if matches!(
@@ -357,7 +359,7 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
         return running_status(&location, &previous).map_err(|_| "Screen startup is already claimed; attach or inspect later, do not rerun the command".into());
     };
     if location.validate_socket()? {
-        match unix::connect(&location, Duration::from_millis(200)) {
+        match unix::connect(&location.socket_path, Duration::from_millis(200)) {
             Ok(_) => {
                 return Err(
                     "A live screen endpoint exists without its expected ownership lock".into(),
@@ -408,10 +410,11 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
         read_private(&log_path, 1024 * 1024)?;
     }
     let mut log_options = OpenOptions::new();
-    log_options
-        .create(true)
-        .append(true)
-        .custom_flags(0x00200000);
+    log_options.create(true).append(true).mode(0o600);
+    #[cfg(target_os = "macos")]
+    log_options.custom_flags(0x100);
+    #[cfg(target_os = "linux")]
+    log_options.custom_flags(0x20000);
     let log = log_options.open(&log_path).map_err(error)?;
     if log.metadata().map_err(error)?.len() > 512 * 1024 {
         log.set_len(0).map_err(error)?;
@@ -439,10 +442,11 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
         .arg("--")
         .arg(&options.program)
         .args(&options.args)
-        .stdin(Stdio::from(lock.inherited_file()?))
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .creation_flags(0x00000008 | 0x01000000);
+        .stderr(Stdio::from(log));
+    // Detach in the new helper at serve entry, keeping this launch on the
+    // standard library's posix_spawn path (no pre_exec/fork).
     let spawned = command.spawn();
     lock.inherit(false)?;
     let mut child = match spawned {
@@ -490,6 +494,7 @@ fn finish_claim(
 }
 include!("host.rs");
 pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<(), String> {
+    unix::detach_session().map_err(error)?;
     options.validate()?;
     let location = SessionLocation::open(&options.state_dir, &options.session_id, false)?;
     let _lock = unsafe { SessionLock::from_inherited(&location, lock_fd)? };
@@ -509,10 +514,10 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
         options.rows,
         &[
             (
-                OsStr::new("MAKEPAD_SCREEN_SESSION"),
+                OsStr::new("MAKEPAD_AGENTS_SESSION"),
                 OsStr::new(&options.session_id),
             ),
-            (OsStr::new("MAKEPAD_SCREEN_STATE_DIR"), state),
+            (OsStr::new("MAKEPAD_AGENTS_STATE_DIR"), state),
         ],
     ) {
         Ok(pty) => pty,
@@ -521,16 +526,11 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
             return Err(format!("Screen PTY startup failed: {e}"));
         }
     };
-    let listener = UnixListener::bind().map_err(error)?;
-    let endpoint = json::obj(vec![
-        ("version", Value::Int(VERSION as i64)),
-        ("session_id", json::s(&location.session_id)),
-        ("state_dir", json::s(location.state_dir.to_string_lossy())),
-        ("instance", json::s(instance)),
-        ("port", Value::Int(listener.port().map_err(error)?.into())),
-        ("token", json::s(listener.token())),
-    ]);
-    create_private(&location.socket_path, endpoint.to_json().as_bytes())?;
+    let listener = UnixListener::bind(&location.socket_path)
+        .map_err(|e| format!("Cannot bind the screen session socket: {e}"))?;
+    fs::set_permissions(&location.socket_path, fs::Permissions::from_mode(0o600)).map_err(error)?;
+    listener.set_nonblocking(true).map_err(error)?;
+    let socket_identity = fs::symlink_metadata(&location.socket_path).map_err(error)?;
     let mut host = Host {
         location: location.clone(),
         terminal: HostedTerminal::with_theme(
@@ -571,9 +571,8 @@ pub fn serve(mut options: StartOptions, instance: &str, lock_fd: i32) -> Result<
     let phase = if result.is_ok() { "ended" } else { "failed" };
     let code = result.as_ref().ok().copied().flatten();
     let finalized = finish_claim(&location, instance, phase, code);
-    if location
-        .endpoint()
-        .is_ok_and(|value| value.get("instance").and_then(Value::as_str) == Some(instance))
+    if fs::symlink_metadata(&location.socket_path)
+        .is_ok_and(|m| m.dev() == socket_identity.dev() && m.ino() == socket_identity.ino())
     {
         let _ = fs::remove_file(&location.socket_path);
     }
