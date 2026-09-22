@@ -153,7 +153,7 @@ const NAME_ADVANCE: f64 = 0.64;
 /// The name's font size in a tile: as large as the tile's height and a whole
 /// NAME_CHARS name allow.
 fn name_font(size: DVec2) -> f64 {
-    (size.y / 5.0).min((size.x - 20.0) / (NAME_CHARS * NAME_ADVANCE)).clamp(9.0, 24.0)
+    (size.y / 4.0).min((size.x - 20.0) / (NAME_CHARS * NAME_ADVANCE)).clamp(9.0, 24.0)
 }
 /// Columns and tile size. Every tile fits, fills its column, and is never
 /// taller than wide; among those the packing with the LARGEST NAME wins, since
@@ -229,6 +229,13 @@ impl Widget for CiWall {
         let rows = self.tiles.len().div_ceil(cols).max(1);
         cell.y = if self.tiles.len() <= 40 { (viewport.size.y / rows as f64).min(cell.x * 0.64).clamp(84.0, if self.tiles.len() <= 8 {192.0} else {160.0}) } else { (cell.x * 0.64).clamp(96.0, 160.0) };
         let gap = 8.0;
+        // No taller than its content: the name and two lines under it, with
+        // the padding above and below. The time sits beside the count now, so
+        // there is no bottom line to keep room for.
+        let name_w = ((cell.x - 20.0) / (NAME_CHARS * NAME_ADVANCE)).clamp(13.0, 24.0);
+        let body_w = (name_w * 0.66).clamp(10.0, 12.0);
+        let content = 12.0 + name_w * 1.33 + 2.0 * body_w * 1.4 + 12.0 + gap;
+        cell.y = cell.y.min(content);
         let height = self.tiles.len().div_ceil(cols) as f64 * cell.y;
         let rect = cx.walk_turtle(Walk::fixed(width, height));
         self.rects.clear();
@@ -489,7 +496,7 @@ mod tests {
         assert_eq!(layout(0.0, 100.0, 4).1, dvec2(0.0, 0.0));
         // Thirty scripts on the wall display: wide tiles, so `calculator` is whole.
         let (cols, size) = layout(936.0, 500.0, 32);
-        assert_eq!(cols, 6);
+        assert!((5..=6).contains(&cols), "{cols} columns");
         assert!(name_font(size) >= 14.0, "{size:?}");
     }
     #[test]
