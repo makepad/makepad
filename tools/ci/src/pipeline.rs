@@ -172,6 +172,7 @@ pub fn run_once(
     let records = persisted.clone();
     let errors = save_error.clone();
     let directory = base.to_path_buf();
+    let under_test = tip.to_string();
     let live_notify: Notify = std::sync::Arc::new(move |update| {
         if let Ok(mut state) = records.lock() {
             let mut changed = false;
@@ -188,6 +189,8 @@ pub fn run_once(
                     detail: String::new(),
                     scripts: Vec::new(),
                 });
+                // The header names the tip being tested, not the last one tested.
+                b.tip = under_test.clone();
                 match &update {
                     Update::Scripts(_, scripts) => {
                         report::merge_scripts(&mut b.scripts, scripts);
