@@ -56,7 +56,7 @@ script_mod! {
                     }
                     apply: {
                         hovered: snap(1.0)
-                        pressed: snap(1.0)
+                        pressed: 0.0
                     }
                 }
 
@@ -1320,7 +1320,8 @@ impl Widget for HtmlLink {
                     );
                 }
                 Hit::FingerUp(fu) => {
-                    if fu.is_over {
+                    // Touch never gets a hover-out, so only a hovering pointer stays hovered here.
+                    if fu.is_over && fu.device.has_hovers() {
                         cx.set_cursor(MouseCursor::Hand);
                         self.animator_play(cx, ids!(hover.on));
                     } else {
