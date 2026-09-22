@@ -443,16 +443,18 @@ impl Widget for RadioButton {
                 } else {
                     self.animator_play(cx, ids!(hover.off));
                 }
-                if self.animator_in_state(cx, ids!(active.off)) {
-                    self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
-                } else if self.independent {
-                    // A boolean of its own: the second click turns it off and
-                    // still speaks, so the host can flip its state.
-                    self.animator_play(cx, ids!(active.off));
-                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                if fe.is_over {
+                    if self.animator_in_state(cx, ids!(active.off)) {
+                        self.animator_play(cx, ids!(active.on));
+                        cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                    } else if self.independent {
+                        // A boolean of its own: the second click turns it off and
+                        // still speaks, so the host can flip its state.
+                        self.animator_play(cx, ids!(active.off));
+                        cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                    }
+                    // A radio in a GROUP does not toggle off when clicked again.
                 }
-                // A radio in a GROUP does not toggle off when clicked again.
             }
             Hit::FingerMove(_fe) => {}
             _ => (),
