@@ -131,8 +131,11 @@ impl Widget for Tooltip {
         match event {
             Event::BackPressed { .. }
             | Event::MouseDown(_)
-            | Event::MouseUp(_)
-            | Event::Scroll(_) => {
+            | Event::MouseUp(_) => {
+                self.hide(cx);
+            }
+            // Fingers resting on a trackpad send zero-delta scrolls, which aren't an interaction.
+            Event::Scroll(scroll) if scroll.scroll != Vec2d::default() => {
                 self.hide(cx);
             }
             Event::TouchUpdate(TouchUpdateEvent { touches, .. }) => {
