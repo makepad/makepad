@@ -565,6 +565,13 @@ fn validate_key(key: &str) -> Result<(), StorageError> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Bytes the volume holding `path` has available to this process, as the
+/// operating system reports them; `path` must exist. What an application
+/// has to size a store by, instead of a figure of its own.
+pub fn volume_available_bytes(path: &std::path::Path) -> Result<u64, StorageError> {
+    native::volume_available_bytes(path)
+}
+
 pub(crate) mod native {
     use {
         super::*,
@@ -711,7 +718,7 @@ pub(crate) mod native {
         target_pointer_width = "64",
         not(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
     ))]
-    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+    pub fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
@@ -747,7 +754,7 @@ pub(crate) mod native {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
-    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+    pub fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
@@ -788,7 +795,7 @@ pub(crate) mod native {
     }
 
     #[cfg(windows)]
-    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+    pub fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
         use std::os::windows::ffi::OsStrExt;
         unsafe extern "system" {
             fn GetDiskFreeSpaceExW(
@@ -809,7 +816,7 @@ pub(crate) mod native {
     }
 
     #[cfg(not(any(windows, all(unix, target_pointer_width = "64"))))]
-    fn volume_available_bytes(_path: &Path) -> Result<u64, StorageError> {
+    pub fn volume_available_bytes(_path: &Path) -> Result<u64, StorageError> {
         Err(StorageError::Unsupported(
             "native storage quota estimate is unsupported on this target".into(),
         ))
