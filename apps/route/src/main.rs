@@ -202,7 +202,7 @@ mod ui_parity_tests {
         }
         assert_eq!(
             ui.button(&cx, ids!(location_button)).text(),
-            "Fetch current location"
+            "Locate me"
         );
     }
 }

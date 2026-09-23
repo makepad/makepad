@@ -9,8 +9,9 @@ script_mod! {
     let Ink = Label{padding: 0 max_lines: 1 text_overflow: TextOverflow.Ellipsis draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 10.5}}}
     let Meta = NotesMeta{}
     let Tap = NotesTap{}
-    let IconTap = Tap{glyph := Icon{width: 20 height: 20 icon_walk: Walk{width: 20 height: 20} draw_icon.color: theme.color_focus}}
-    let TextTap = Tap{width: Fit{min: 44} flow: Right padding: Inset{left: 8 right: 8} caption := Ink{draw_text.color: theme.color_focus draw_text.text_style: theme.font_bold{font_size: 10.5}}}
+    // Toolbar targets are 48 x 48 (compose, format, undo and the rest).
+    let IconTap = Tap{width: 48 height: 48 glyph := Icon{width: 20 height: 20 icon_walk: Walk{width: 20 height: 20} draw_icon.color: theme.color_focus}}
+    let TextTap = Tap{width: Fit{min: 48} height: 48 flow: Right padding: Inset{left: 8 right: 8} caption := Ink{draw_text.color: theme.color_focus draw_text.text_style: theme.font_bold{font_size: 10.5}}}
     let Back = Tap{width: Fit flow: Right padding: Inset{left: 8 right: 8} spacing: 4 nav_name: "Back"
         glyph := Icon{width: 16 height: 20 draw_icon +: {color: theme.color_focus svg: crate_resource("self:resources/icons/back.svg")}}
         caption := Ink{draw_text +: {color: theme.color_focus text_style: theme.font_bold{font_size: 10.5}}}
@@ -30,17 +31,19 @@ script_mod! {
             draw_bg +: {pixel: fn(){return vec4(0.0)}}
             draw_text +: {color: theme.color_text color_empty: theme.color_text_meta text_style: theme.font_regular{font_size: 10.5}}
         }
-        clear := IconTap{visible: false nav_name: "Clear search" glyph.draw_icon.svg: crate_resource("self:resources/icons/clear.svg")}
+        clear := IconTap{visible: false width: 40 height: 40 nav_name: "Clear search" glyph.draw_icon.svg: crate_resource("self:resources/icons/clear.svg")}
     }
     let FolderRow = Plain{
         height: 44 flow: Overlay
         selection := NotesSelection{}
+        // 16 pt margins, a 24 pt icon and a 12 pt gap: the text and the
+        // separator both start at 52.
         tap := Tap{
-            width: Fill height: Fill flow: Right padding: Inset{left: 20 right: 20} spacing: 10
-            icon := Icon{width: 18 height: 18 icon_walk: Walk{width: 18 height: 18} draw_icon +: {color: theme.color_focus svg: crate_resource("self:resources/icons/folder.svg")}}
+            width: Fill height: Fill flow: Right padding: Inset{left: 16 right: 16} spacing: 12
+            icon := Icon{width: 24 height: 24 icon_walk: Walk{width: 24 height: 24} draw_icon +: {color: theme.color_focus svg: crate_resource("self:resources/icons/folder.svg")}}
             name := Ink{width: Fill}
             count := Meta{width: Fit draw_text.text_style.font_size: 9.75 paper: theme.color_bg_container}
-            chevron := Plain{visible: false width: 12 height: 12 glyph := Icon{width: 12 height: 12 draw_icon +: {color: theme.color_text_meta svg: crate_resource("self:resources/icons/chevron.svg")}}}
+            chevron := Plain{visible: false width: 20 height: 20 glyph := Icon{width: 20 height: 20 icon_walk: Walk{width: 20 height: 20} draw_icon +: {color: theme.color_text_meta svg: crate_resource("self:resources/icons/chevron.svg")}}}
         }
         rule := Rule{visible: false bottom: true margin: Inset{left: 52}}
     }
@@ -77,11 +80,11 @@ script_mod! {
         }
     }
     let NotesTools = GlassPanel{
-        width: Fill height: 48 flow: Right spacing: 4 padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+        width: Fill height: 48 flow: Right spacing: 4 padding: Inset{left: 8 right: 8}
         draw_bg +: {corner_radius: 10 fallback_color: theme.color_bg_app tint_color: theme.color_bg_app}
         format := TextTap{nav_name: "Formatting" caption.text: "Aa"}
-        bold := TextTap{visible: false nav_name: "Bold" caption.text: "B" width: 44}
-        italic := TextTap{visible: false nav_name: "Italic" caption.text: "I" width: 44 caption.draw_text.text_style: theme.font_bold_italic{font_size: 12.75}}
+        bold := TextTap{visible: false nav_name: "Bold" caption.text: "B" width: 48}
+        italic := TextTap{visible: false nav_name: "Italic" caption.text: "I" width: 48 caption.draw_text.text_style: theme.font_bold_italic{font_size: 12.75}}
         checklist := Checklist{}
         undo := Undo{}
         redo := Redo{}
@@ -90,11 +93,18 @@ script_mod! {
     }
     let CompactFolders = Paper{
         flow: Down
-        nav := Plain{height: 56}
+        nav := Plain{height: 16}
+        // The title on the card's 16 pt edge, the section caption on the
+        // rows' text inset. The insets live on wrapping Views: a Label
+        // applies its own padding twice.
         scroll := ScrollYView{
             width: Fill height: Fill flow: Down
-            title := Ink{width: Fill height: 52 padding: Inset{left: 20} text: "Folders" draw_text.text_style: theme.font_bold{font_size: 25.5}}
-            account := Meta{width: Fill height: 36 padding: Inset{left: 20 top: 8} text: "On This Device" draw_text.text_style: theme.font_bold{font_size: 11.25}}
+            Plain{height: 36 padding: Inset{left: 16} align: Align{y: 0.5}
+                title := Ink{width: Fill text: "Folders" draw_text.text_style: theme.font_bold{font_size: 21}}
+            }
+            Plain{height: 40 padding: Inset{left: 32 bottom: 8} align: Align{y: 1.0}
+                account := Meta{width: Fill text: "On This Device" draw_text.text_style: theme.font_bold{font_size: 11.25}}
+            }
             group := RoundedView{width: Fill height: Fit flow: Down margin: Inset{left: 16 right: 16} draw_bg +: {color: theme.color_inset border_radius: 8 border_size: 0} rows := FolderRows{}}
         }
         dock := Plain{height: 64 flow: Right padding: Inset{left: 16 right: 16} align: Align{y: 0.5} space := Plain{} compose := Compose{}}
@@ -148,7 +158,7 @@ script_mod! {
                 notes_list := Paper{
                     width: 320 flow: Down
                     header := Ink{width: Fill height: 56 padding: Inset{left: 16} align: Align{y: 0.5} draw_text.text_style: theme.font_bold{font_size: 15}}
-                    short_header := Plain{visible: false height: 44 flow: Right align: Align{y: 0.5} folders := IconTap{nav_name: "Folders" glyph.draw_icon.svg: crate_resource("self:resources/icons/folder.svg")} collection := Ink{width: Fill} compose := Compose{}}
+                    short_header := Plain{visible: false height: 48 flow: Right align: Align{y: 0.5} folders := IconTap{nav_name: "Folders" glyph.draw_icon.svg: crate_resource("self:resources/icons/folder.svg")} collection := Ink{width: Fill} compose := Compose{}}
                     search_slot := Plain{height: 48 padding: Inset{left: 12 right: 12 top: 2 bottom: 2} search := Search{}}
                     rows := NoteRows{}
                     count := Meta{width: Fill height: 24 align: Align{x: 0.5 y: 0.5}}
@@ -204,12 +214,12 @@ script_mod! {
                     }
                     formatting := ScrollYView{
                         visible: false width: Fill height: Fit flow: Down
-                        styles := Plain{height: 44 flow: Right
+                        styles := Plain{height: 48 flow: Right
                             style_title := TextTap{width: Fill nav_name: "Title" caption.text: "Title"}
                             style_heading := TextTap{width: Fill nav_name: "Heading" caption.text: "Heading"}
                             style_body := TextTap{width: Fill nav_name: "Body" caption.text: "Body"}
                         }
-                        marks := Plain{height: 44 flow: Right
+                        marks := Plain{height: 48 flow: Right
                             bold := TextTap{width: Fill nav_name: "Bold" caption.text: "Bold"}
                             italic := TextTap{width: Fill nav_name: "Italic" caption.text: "Italic"}
                             bullets := IconTap{width: Fill nav_name: "Bullets" glyph.draw_icon.svg: crate_resource("self:resources/icons/bullets.svg")}
