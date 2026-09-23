@@ -120,37 +120,95 @@ pub fn is_thumbnailable(path: &Path) -> bool {
 }
 
 /// Classify a directory entry.
+///
+/// The scan calls this once per file. Matching the extension in place, without
+/// allocating a lowercased `String`, is what keeps that from becoming its own
+/// tax once the directory read itself is no longer one stat per file.
 pub fn kind_for(path: &Path, is_dir: bool) -> FileKind {
     if is_dir {
         return FileKind::Folder;
     }
-    let ext = extension_of(path);
-    if ext == "pdf" {
-        return FileKind::Pdf;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return match path.file_name() {
+            Some(name) => classify_name(name.as_bytes()),
+            None => FileKind::Generic,
+        };
     }
-    if IMAGE_EXTS.contains(&ext.as_str()) {
-        return FileKind::Image;
+    #[cfg(not(unix))]
+    {
+        let ext_owned = extension_of(path);
+        let dotfile = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+        let ext = if ext_owned.is_empty() {
+            None
+        } else {
+            Some(ext_owned.as_bytes())
+        };
+        classify_extension(ext, dotfile)
     }
-    if CODE_EXTS.contains(&ext.as_str()) {
-        return FileKind::Code;
-    }
-    if TEXT_EXTS.contains(&ext.as_str()) {
-        return FileKind::Text;
-    }
-    if AUDIO_EXTS.contains(&ext.as_str()) {
-        return FileKind::Audio;
-    }
-    if VIDEO_EXTS.contains(&ext.as_str()) {
-        return FileKind::Video;
-    }
-    if ARCHIVE_EXTS.contains(&ext.as_str()) {
-        return FileKind::Archive;
+}
+
+#[cfg(unix)]
+fn classify_name(name: &[u8]) -> FileKind {
+    let dotfile = name.first() == Some(&b'.');
+    // The same rule as `Path::extension`: a leading dot is not an extension
+    // (`.zshrc`), and the extension is the bytes after the last dot.
+    let ext = match name.iter().rposition(|byte| *byte == b'.') {
+        Some(0) | None => None,
+        Some(dot) => {
+            let ext = &name[dot + 1..];
+            if ext.is_empty() { None } else { Some(ext) }
+        }
+    };
+    classify_extension(ext, dotfile)
+}
+
+fn ext_eq(ext: &[u8], known: &str) -> bool {
+    ext.len() == known.len()
+        && ext
+            .iter()
+            .zip(known.bytes())
+            .all(|(byte, expected)| byte.to_ascii_lowercase() == expected)
+}
+
+fn ext_one_of(ext: &[u8], known: &[&str]) -> bool {
+    known.iter().any(|name| ext_eq(ext, name))
+}
+
+fn classify_extension(ext: Option<&[u8]>, dotfile: bool) -> FileKind {
+    if let Some(ext) = ext {
+        if ext_eq(ext, "pdf") {
+            return FileKind::Pdf;
+        }
+        if ext_one_of(ext, IMAGE_EXTS) {
+            return FileKind::Image;
+        }
+        if ext_one_of(ext, CODE_EXTS) {
+            return FileKind::Code;
+        }
+        if ext_one_of(ext, TEXT_EXTS) {
+            return FileKind::Text;
+        }
+        if ext_one_of(ext, AUDIO_EXTS) {
+            return FileKind::Audio;
+        }
+        if ext_one_of(ext, VIDEO_EXTS) {
+            return FileKind::Video;
+        }
+        if ext_one_of(ext, ARCHIVE_EXTS) {
+            return FileKind::Archive;
+        }
+        return FileKind::Generic;
     }
     // Dotfiles with no extension (.zshrc, .gitconfig) read as text.
-    if ext.is_empty() && path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
-        return FileKind::Text;
+    if dotfile {
+        FileKind::Text
+    } else {
+        FileKind::Generic
     }
-    FileKind::Generic
 }
 
 /// The kind class a file's colour comes from: the index into the map palette's
