@@ -77,6 +77,7 @@ pub mod nav_control;
 pub mod nav_list;
 pub mod tweaker;
 pub mod reflect;
+pub mod relief;
 pub mod ai_slot;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
@@ -278,6 +279,7 @@ pub use crate::{
     fold_button::*,
     fold_header::*,
     gauss_view::*,
+    relief::*,
     glass_panel::*,
     grid::*,
 
@@ -586,6 +588,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    crate::relief::script_mod(vm);
     crate::grid::script_mod(vm);
     crate::rubber_view::script_mod(vm);
 

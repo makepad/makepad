@@ -1107,6 +1107,16 @@ impl Window {
         } else {
             self.overlay.begin(cx);
         }
+        // The pass the body draws into, for the relief buffer: window-shaped
+        // only when it is the window itself or its supersampled scene.
+        let relief_body = if self.use_sploded || self.use_gauss_capture {
+            None
+        } else if self.use_ssaa {
+            Some(self.ssaa_stack.scene_pass.draw_pass_id())
+        } else {
+            Some(self.pass.handle.draw_pass_id())
+        };
+        crate::relief::begin_window_relief_frame(cx, window_id, relief_body);
 
         Redrawing::yes()
     }
@@ -1184,6 +1194,7 @@ impl Window {
             self.overlay.end(cx);
         }
         let window_id = self.window.handle.window_id();
+        crate::relief::end_window_relief_frame(cx, window_id);
         if finish_window_gauss_frame(cx, window_id) {
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
         }
