@@ -89,7 +89,9 @@ use current source for API signatures and working examples.
   is running. When the replacement is ready, gracefully close and restart
   that workflow's app without asking the user to close it. Verify the old
   process exits and launch the replacement with the same workspace and state.
-  This applies to Studio flows and standalone evaluations.
+  This applies to Studio flows and standalone evaluations. An app being open
+  is not a reason to defer a build, ask for permission, or require the user
+  to close it.
 - A validated revision requires `cargo check` for its supported platforms with
   zero warnings/errors, the existing native tests on the current host, and a
   release build/runtime check when applicable. Use the repository's actual
@@ -148,19 +150,32 @@ use current source for API signatures and working examples.
   gracefully close the previous workflow instance and verify its exit.
 - Remote windows stay visible but unfocused. Do not activate them or use
   `MAKEPAD_FOCUS=1` unless the user explicitly asks to bring one forward.
-- Before remote automation, read `/activity` and preserve its `user_seq` as
-  `if_user_seq` on mutating requests. HTTP 409 or a changed response
-  `X-Makepad-User-Seq` means the human intervened: stop the test and leave
-  that instance running. Do not refresh the counter and retry, force-quit,
-  or restart it automatically. Resume with a fresh counter only after the
-  user hands control back. See [App remote control](docs/agents/app-remote.md).
+- User interaction with an app in the active development workflow does not
+  suspend agent testing or require a handoff. Continue inspecting, driving,
+  closing and restarting that app as needed, preserving its workspace and
+  saved state. This is the user's standing authorization (2026-09-22).
+- Read `/activity` and use `if_user_seq` for each bounded input sequence.
+  A changed counter or HTTP 409 invalidates that sequence's evidence, not
+  authorization to continue: inspect whether the action was applied, read a
+  fresh counter and retry or restart the sequence without asking permission.
+  Never replay an already-applied toggle or edit blindly. See
+  [App remote control](docs/agents/app-remote.md).
 - Subagent verification runs use `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote`.
   Only the main session opens a visible inspection window; avoid duplicates.
+- CEF apps keep their browser profile (cookies, logins) at
+  `$HOME/.makepad-cef/<executable name>` unless `MAKEPAD_CEF_PROFILE_DIR`
+  names one, so a renamed or hash-pinned binary silently starts empty. When
+  replacing a user's CEF app, launch it with `MAKEPAD_CEF_PROFILE_DIR` set to
+  the profile the user's instance was already using. Hidden native tests set
+  their own distinct test profile. Never run two instances on the user's
+  profile at once. `MAKEPAD_HOME` and asset roots are separate state; keep
+  them as they were.
 - Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
   or an app-provided capture hook. OS/window/display screenshots are forbidden.
   If native chrome or another app matters, ask the user for an image.
-- A `user closed` log entry means the human dismissed the window. Do not
-  interpret it as a crash or relaunch it.
+- A `user closed` log entry means the human dismissed the window, not a crash.
+  Continue the active workflow, including launching a needed replacement,
+  unless the user has asked to stop.
 - Finish test sessions with `GET /gq` (grab and quit). If grabbing is
   unavailable, use `/close` and/or `/quit`. Verify your process exits;
   only fall back to stopping its exact owned PID if graceful cleanup fails.
