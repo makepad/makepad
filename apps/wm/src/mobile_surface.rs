@@ -1,5 +1,5 @@
 //! Phone chrome drawn around compositor-owned application surfaces.
-use crate::{desktop::DesktopStyle, desk::WmState, mobile::*, mobile_tiles::{self, HomeLayout, TileSlot, TILE_RADIUS}, shell::{alpha, rgb, ui::{rect, HAlign, Ico, ShellDraw}}};
+use crate::{desktop::DesktopStyle, desk::WmState, mobile::*, mobile_tiles::{self, HomeLayout, HomeMetrics, TileSlot}, shell::{alpha, rgb, ui::{rect, HAlign, Ico, ShellDraw}}};
 use makepad_widgets::{app_icon::AppIconDraw, gauss_view::{GaussRoundedView, GaussBlurSnapshot, GlassProfile}, *};
 use crate::desktop::DrawDesktopChrome;
 mod search;
@@ -110,6 +110,44 @@ script_mod! {
 
 use std::collections::HashMap;
 
+/// Dark ink over light app bands (#1D1B20) and its relative luminance.
+const BAND_DARK_INK: (u8, u8, u8) = (29, 27, 32);
+const BAND_DARK_LUMA: f32 = 0.0113;
+/// WCAG contrast ratio of two relative luminances.
+fn contrast(a: f32, b: f32) -> f32 { (a.max(b) + 0.05) / (a.min(b) + 0.05) }
+/// The ink for a bar over an app band of luminance `luma`: white or dark,
+/// whichever contrasts more, and, when even that one misses `target`, the
+/// wash (a colour with its alpha) that text needs under it to reach it —
+/// black under white ink, white under dark ink.
+fn band_ink(luma: f32, target: f32) -> (Vec4f, Vec4f) {
+    let (white, dark) = (contrast(1.0, luma), contrast(BAND_DARK_LUMA, luma));
+    let (r, g, b) = BAND_DARK_INK;
+    let none = vec4(0.0, 0.0, 0.0, 0.0);
+    if dark > white {
+        if dark >= target {
+            return (rgb(r, g, b), none);
+        }
+        // Lift what is under the dark ink to the luminance `target` needs;
+        // a white wash of alpha `a` moves light about `a` of the way up.
+        let needed = target * (BAND_DARK_LUMA + 0.05) - 0.05;
+        let a = ((needed - luma) / (1.0 - luma).max(1e-4)).clamp(0.0, 1.0);
+        return (rgb(r, g, b), alpha(rgb(255, 255, 255), (a + 0.08).min(0.9)));
+    }
+    if white >= target {
+        return (rgb(255, 255, 255), none);
+    }
+    // Darken what is under white ink to the luminance `target` allows: a
+    // black wash of alpha `a` scales the sRGB values by (1 - a), light by
+    // about (1 - a)^2.2.
+    let allowed = 1.05 / target - 0.05;
+    let a = 1.0 - (allowed / luma.max(1e-4)).clamp(0.0, 1.0).powf(1.0 / 2.2);
+    (rgb(255, 255, 255), alpha(rgb(0, 0, 0), (a + 0.05).min(0.9)))
+}
+
+/// The Android home page's clock and date block under the status bar:
+/// 8 above, the 56-tall clock, the 20-tall date.
+const ANDROID_HEADER: f64 = 84.0;
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct PhoneSurface {
     #[uid] uid: WidgetUid,
@@ -152,6 +190,16 @@ pub struct PhoneSurface {
     #[rust] search_pointer: bool,
     #[rust] pub search_scroll_max: f64,
     #[rust] pub pad_left: f64,
+    /// The relative luminance of the app's own rows under the status and
+    /// the navigation bar (desk/phone.rs `Bands`), each None when that bar
+    /// is not the app's: the bars pick their ink against it.
+    #[rust] pub band_luma: (Option<f32>, Option<f32>),
+    /// Band colour sampling (desk/phone.rs `Bands`): off for the session
+    /// on a backend without texture readback; how many samples were asked
+    /// and how many draws the sampler itself caused (the rest measure).
+    #[rust] pub band_sampling_off: bool,
+    #[rust] pub band_samples: u64,
+    #[rust] pub band_redraws: u64,
     #[redraw] #[rust] area: Area,
 }
 impl PhoneSurface {
@@ -171,8 +219,14 @@ impl PhoneSurface {
         self.app_icons.push((hit, app.to_string(), icon));
     }
     pub fn begin(&mut self) { self.hits.clear(); self.app_icons.clear(); }
+    /// A filled rect whose corners show `radius` on screen (the chrome
+    /// shader hands the SDF half of `self.chrome.radius`, and the SDF box
+    /// draws twice its argument).
+    /// A square one is a hard-edged quad: an SDF edge that ends on the
+    /// screen's edge leaves a device pixel of what is under it showing.
     fn rounded(&mut self, cx: &mut Cx2d, r: Rect, radius: f32, color: Vec4f) {
-        self.chrome.radius = radius*2.0;
+        if radius <= 0.0 {self.d.solid(cx, r, color); return;}
+        self.chrome.radius = radius;
         self.chrome.bevel = 0.0; self.chrome.color = color;
         self.chrome.draw_abs(cx,r);
     }
@@ -201,12 +255,19 @@ impl PhoneSurface {
     /// the big clock.
     fn home_top(style: DesktopStyle, screen: Rect, chrome: PhoneChrome) -> f64 {
         let landscape=screen.size.x>screen.size.y;
-        screen.pos.y + chrome.top_reserve(screen) + if landscape {20.0} else if style==DesktopStyle::Ios {28.0} else {114.0}
+        screen.pos.y + chrome.top_reserve(screen) + if landscape {20.0} else if style==DesktopStyle::Ios {28.0} else {ANDROID_HEADER+16.0}
+    }
+    /// Today as the Android home page reads it under the clock: "Wednesday
+    /// 23 September". Empty where the platform cannot say.
+    fn today() -> String {
+        const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        crate::shell::bar::local_now().map(|now| format!("{} {} {}",
+            WEEKDAYS[now.weekday as usize % 7], now.day, crate::shell::panels::MONTH_NAMES[(now.month as usize).clamp(1,12)-1])).unwrap_or_default()
     }
     /// The home page's regions for this screen: the tiles this build has
     /// (apps.rs `Launchable`), favorites, dock.
     pub fn home_layout(style: DesktopStyle, screen: Rect, chrome: PhoneChrome, launchable: &crate::apps::Launchable) -> HomeLayout {
-        mobile_tiles::home_layout_for(screen, Self::home_top(style, screen, chrome), Self::home_dock(screen, chrome), &mobile_tiles::tile_apps(launchable))
+        mobile_tiles::home_layout_for(screen, Self::home_top(style, screen, chrome), Self::home_dock(screen, chrome), &mobile_tiles::tile_apps(launchable), HomeMetrics::of(style))
     }
     /// Where a window zooms out of and back into: its tile for a tile app,
     /// the dock's centre otherwise.
@@ -233,7 +294,7 @@ impl PhoneSurface {
         self.use_fonts(style==DesktopStyle::Ios);
         let (face, ink)=Self::card_colors(style, dark);
         let r=slot.rect;
-        self.rounded(cx, r, TILE_RADIUS as f32, alpha(face, 0.82*opacity));
+        self.rounded(cx, r, HomeMetrics::of(style).tile_radius as f32, alpha(face, 0.82*opacity));
         let wide=slot.kind==mobile_tiles::TileKind::Wide;
         let icon=if wide {52.0} else {46.0};
         let ink=alpha(ink, opacity);
@@ -267,7 +328,7 @@ impl PhoneSurface {
         let dock=Self::home_dock(screen, chrome);
         let h=58.0;
         let r=rect(dock.pos.x, dock.pos.y-h-12.0, dock.size.x, h);
-        self.rounded(cx, r, 18.0, alpha(face, 0.9*opacity));
+        self.rounded(cx, r, if style==DesktopStyle::Android {16.0} else {36.0}, alpha(face, 0.9*opacity));
         let ink=alpha(ink, opacity);
         let headline=if text.starts_with("provision failed") {"Could not set up apps"} else {"Setting up apps for the first time"};
         self.label(cx,rect(r.pos.x+14.0,r.pos.y+9.0,r.size.x-28.0,22.0),headline,13.0,true,ink);
@@ -293,7 +354,7 @@ impl PhoneSurface {
         let layout=Self::home_layout(style,screen,phone.chrome,launchable);
         if let Some(slot)=layout.tiles.iter().find(|s|s.app==app) {return Some(slot.rect);}
         let landscape=screen.size.x>screen.size.y;
-        let size=if landscape {44.0}else{60.0};
+        let size=if landscape {HomeMetrics::of(style).landscape_icon}else{60.0};
         let cell=layout.favorites.size.x/layout.columns.max(1) as f64;
         if let Some(index)=phone.home.icons.iter().take(layout.capacity).position(|id|id==app) {
             let r=mobile_tiles::favorite_cell(&layout,index);
@@ -355,8 +416,10 @@ impl PhoneSurface {
         // The page's own frame, panned; the dock and the dots stay put.
         let page=Rect{pos:screen.pos+dvec2(pan,0.0),size:screen.size};
         if !ios && !landscape {
-            self.label(cx,rect(page.pos.x+24.0,page.pos.y+48.0,page.size.x-48.0,58.0),&phone.clock,48.0,false,alpha(ink,opacity));
-            self.label(cx,rect(page.pos.x+24.0,page.pos.y+110.0,page.size.x-48.0,26.0),"Makepad",15.0,false,alpha(ink,opacity*0.8));
+            // The clock (48/56) and today's date (14/20) under the status bar.
+            let top=page.pos.y+phone.chrome.top_reserve(page)+8.0;
+            self.label(cx,rect(page.pos.x+16.0,top,page.size.x-32.0,56.0),&phone.clock,48.0,false,alpha(ink,opacity));
+            self.label(cx,rect(page.pos.x+16.0,top+56.0,page.size.x-32.0,20.0),&Self::today(),14.0,false,alpha(ink,opacity*0.8));
         }
         let layout=Self::home_layout(style,page,phone.chrome,&state.launchable);
         let home=phone.screen==PhoneScreen::Home && drawer<0.5;
@@ -378,7 +441,9 @@ impl PhoneSurface {
         let label_of=|id:&str|ids.iter().find(|(i,_)|i==id).map(|(_,l)|l.clone()).unwrap_or_else(||id.to_string());
         // The page: the arranged order, as many as fit above the dock. The
         // rest live in the App Library / the drawer.
-        let size=if landscape {44.0}else{60.0};
+        let metrics=HomeMetrics::of(style);
+        let size=if landscape {metrics.landscape_icon}else{60.0};
+        let (label_size,label_gap,label_h)=metrics.label;
         let icons: Vec<String>=phone.home.icons.iter().take(layout.capacity).cloned().collect();
         let cell=layout.favorites.size.x/layout.columns.max(1) as f64;
         for (index,id) in icons.iter().enumerate() {
@@ -393,7 +458,7 @@ impl PhoneSurface {
             if held.as_deref()==Some(id.as_str()) {continue;}
             let tilt=(edit.jiggle(index,now).to_radians()) as f32;
             self.icons.draw_rotated(cx,id,style,rect(at.x,at.y,size,size),opacity,ink,tilt);
-            self.label(cx,rect(at.x+(size-cell)*0.5,at.y+size+4.0,cell,20.0),&label_of(id),11.0,false,alpha(ink,opacity));
+            self.label(cx,rect(at.x+(size-cell)*0.5,at.y+size+label_gap,cell,label_h),&label_of(id),label_size,false,alpha(ink,opacity));
         }
         let dock=Self::home_dock(screen,phone.chrome);
         // The dock and the dots stay while the pages pan; they fade under
@@ -435,23 +500,25 @@ impl PhoneSurface {
             // swiping left) opens the library.
             let r=rect(screen.pos.x+(screen.size.x-60.0)*0.5,dock.pos.y-30.0,60.0,24.0);
             let here=(1.0-drawer).max(0.35);
-            self.rounded(cx,rect(r.pos.x+15.0,r.pos.y+8.0,8.0,8.0),4.0,alpha(ink,here*opacity.max(1.0-drawer)));
+            self.rounded(cx,rect(r.pos.x+15.0,r.pos.y+8.0,8.0,8.0),8.0,alpha(ink,here*opacity.max(1.0-drawer)));
             let lib=rect(r.pos.x+34.0,r.pos.y+6.0,12.0,12.0);
             let there=0.45+0.55*drawer;
-            self.rounded(cx,lib,3.0,alpha(ink,there*opacity.max(1.0-drawer)));
+            self.rounded(cx,lib,6.0,alpha(ink,there*opacity.max(1.0-drawer)));
             for (dx,dy) in [(2.5,2.5),(6.5,2.5),(2.5,6.5),(6.5,6.5)] {
-                self.rounded(cx,rect(lib.pos.x+dx,lib.pos.y+dy,3.0,3.0),1.0,alpha(ink,0.9*opacity.max(1.0-drawer)));
+                self.rounded(cx,rect(lib.pos.x+dx,lib.pos.y+dy,3.0,3.0),2.0,alpha(ink,0.9*opacity.max(1.0-drawer)));
             }
             if home {self.hits.push((rect(r.pos.x-20.0,r.pos.y-6.0,100.0,36.0),PhoneHit::Drawer));}
         } else if home {
+            // The label where it always sat; its target a thumb's 120 x 48.
             let r=rect(screen.pos.x+(screen.size.x-100.0)*0.5,dock.pos.y-32.0,100.0,28.0);
-            self.label(cx,r,"All apps  ↑",12.0,false,ink);self.hits.push((r,PhoneHit::Drawer));
+            self.label(cx,r,"All apps  ↑",14.0,false,alpha(ink,opacity));
+            self.hits.push((rect(r.pos.x-10.0,r.pos.y-10.0,120.0,48.0),PhoneHit::Drawer));
         }
         if edit.active {
             // "Done" leaves edit mode; so does a tap beside the icons.
             let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0;
             let done=rect(screen.pos.x+screen.size.x-84.0,top,68.0,32.0);
-            self.rounded(cx,done,16.0,alpha(if state.style.dark {rgb(60,60,70)}else{rgb(255,255,255)},0.92));
+            self.rounded(cx,done,32.0,alpha(if state.style.dark {rgb(60,60,70)}else{rgb(255,255,255)},0.92));
             self.label(cx,done,"Done",14.0,true,if state.style.dark {rgb(255,255,255)}else{rgb(20,20,26)});
             self.hits.push((done,PhoneHit::Done));
             // The held icon rides under the finger, lifted and shadowed.
@@ -462,7 +529,7 @@ impl PhoneSurface {
                 let s=base*scale;
                 let centre=drag.pos-drag.grab;
                 let r=rect(centre.x-s*0.5,centre.y-s*0.5,s,s);
-                self.rounded(cx,rect(r.pos.x+3.0,r.pos.y+6.0+4.0*lift as f64,r.size.x-6.0,r.size.y-6.0),14.0,alpha(rgb(0,0,0),0.28*lift));
+                self.rounded(cx,rect(r.pos.x+3.0,r.pos.y+6.0+4.0*lift as f64,r.size.x-6.0,r.size.y-6.0),28.0,alpha(rgb(0,0,0),0.28*lift));
                 self.icons.draw(cx,&drag.id,style,r,1.0,ink);
             }
         }
@@ -491,25 +558,30 @@ impl PhoneSurface {
         let extent=drawer_extent(screen,state.phone.chrome);
         let lift=(1.0-progress)*extent;
         let corner=(28.0*((1.0-progress)*6.0).clamp(0.0,1.0)) as f32;
-        let sheet=Rect{pos:screen.pos+dvec2(0.0,lift),size:dvec2(screen.size.x,screen.size.y-lift+corner as f64)};
+        // A point past either side, so its soft edge falls off the screen.
+        let sheet=Rect{pos:screen.pos+dvec2(-1.0,lift),size:dvec2(screen.size.x+2.0,screen.size.y-lift+corner as f64)};
         self.rounded(cx,sheet,corner,if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)});
         // The sheet's content rides with it, laid out for the open sheet.
         let screen=Rect{pos:screen.pos+dvec2(0.0,lift),size:screen.size};
         let ink=if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)};
         let pill=self.draw_search(cx,state,screen,ink,None,1.0);
         if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
-        let top=pill.pos.y+pill.size.y+18.0;
+        // The grid starts 16 under the search bar and keeps its pitch (104 a
+        // row upright, 88 on its side); only a list too long for the sheet
+        // packs its rows tighter.
+        let top=pill.pos.y+pill.size.y+16.0;
         let columns=if landscape {7}else{4};
-        let cell=(screen.size.x-24.0)/columns as f64;
+        let cell=(screen.size.x-32.0)/columns as f64;
         let rows=(ids.len()+columns-1)/columns;
-        let bottom=screen.pos.y+screen.size.y-38.0;
-        let row_h=((bottom-top)/rows.max(1) as f64).clamp(64.0,104.0);
-        let size=if landscape {44.0}else{60.0};
+        let bottom=screen.pos.y+screen.size.y-state.phone.chrome.bottom_reserve(screen)-8.0;
+        let pitch=if landscape {88.0}else{104.0};
+        let row_h=pitch.min((bottom-top)/rows.max(1) as f64).max(64.0);
+        let size=if landscape {48.0}else{60.0};
         for (index,(id,label)) in ids.iter().enumerate() {
-            let r=rect(screen.pos.x+12.0+(index%columns)as f64*cell,top+(index/columns)as f64*row_h,cell,row_h);
+            let r=rect(screen.pos.x+16.0+(index%columns)as f64*cell,top+(index/columns)as f64*row_h,cell,row_h);
             let icon=rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size);
             self.icons.draw(cx,id,style,icon,1.0,ink);
-            self.label(cx,rect(r.pos.x,r.pos.y+size+4.0,cell,20.0),label,11.0,false,ink);
+            self.label(cx,rect(r.pos.x,r.pos.y+size+8.0,cell,16.0),label,12.0,false,ink);
             if arrived {self.app_hit(r,id,icon);}
         }
     }
@@ -555,7 +627,7 @@ impl PhoneSurface {
             let x=left+(index%columns)as f64*(cw+gap);
             let y=top+(index/columns)as f64*(ch+24.0);
             let card=rect(x,y,cw,ch);
-            self.rounded(cx,card,18.0,alpha(rgb(255,255,255),if dark {0.10}else{0.55}));
+            self.rounded(cx,card,36.0,alpha(rgb(255,255,255),if dark {0.10}else{0.55}));
             let pad=12.0;
             let cell=((cw-pad*2.0)/2.0).min((ch-pad*2.0)/2.0);
             let ox=card.pos.x+(cw-cell*2.0)*0.5;
@@ -584,7 +656,15 @@ impl PhoneSurface {
         let phone=&state.phone;
         self.pressed=phone.gesture.as_ref().and_then(|g|g.hit.clone());
         let ios=state.style.target==DesktopStyle::Ios;
-        let ink=if (phone.screen==PhoneScreen::App || phone.screen==PhoneScreen::Drawer || !ios) && !state.style.dark {rgb(25,25,30)}else{rgb(255,255,255)};
+        let on_app=phone.screen==PhoneScreen::App;
+        let (top_luma,bottom_luma)=if on_app {self.band_luma} else {(None,None)};
+        let top_luma=top_luma.filter(|_|phone.band_from_app);
+        // Over the app's own band: the ink with the higher contrast, and a
+        // backing under the text where neither reaches 4.5:1.
+        let (ink,backing)=match top_luma {
+            Some(luma)=>band_ink(luma,4.5),
+            None=>(if (on_app || phone.screen==PhoneScreen::Drawer || !ios) && !state.style.dark {rgb(25,25,30)}else{rgb(255,255,255)},vec4(0.0,0.0,0.0,0.0)),
+        };
         let chrome=phone.chrome;
         // The status strip's ground while an app is open — under the fake
         // bar, or under the phone's real one; the clock, island, wifi and
@@ -596,47 +676,86 @@ impl PhoneSurface {
             self.rounded(cx,rect(screen.pos.x,screen.pos.y,screen.size.x,status_h),0.0,if state.style.dark {rgb(24,24,28)}else{rgb(248,248,252)});
         }
         if chrome.fake_status() {
+            if backing.w>0.0 {
+                let h=22.0f64.min(status_h-4.0);
+                let y=screen.pos.y+(status_h-h)*0.5;
+                // Centred on the clock's label (16 in, 62 wide) and on the wifi +
+                // battery group.
+                self.rounded(cx,rect(screen.pos.x+12.0,y,70.0,h),h as f32,backing);
+                self.rounded(cx,rect(screen.pos.x+screen.size.x-76.0,y,66.0,h),h as f32,backing);
+            }
             self.label(cx,rect(screen.pos.x+16.0,screen.pos.y,62.0,status_h),&phone.clock,13.0,true,ink);
-            if ios && screen.size.x<screen.size.y {self.rounded(cx,rect(screen.pos.x+screen.size.x*0.5-45.0,screen.pos.y+7.0,90.0,23.0),12.0,rgb(0,0,0));}
-            if !ios && screen.size.x<screen.size.y {self.rounded(cx,rect(screen.pos.x+screen.size.x*0.5-5.0,screen.pos.y+13.0,10.0,10.0),5.0,rgb(0,0,0));}
+            if ios && screen.size.x<screen.size.y {self.rounded(cx,rect(screen.pos.x+screen.size.x*0.5-45.0,screen.pos.y+7.0,90.0,23.0),24.0,rgb(0,0,0));}
+            if !ios && screen.size.x<screen.size.y {self.rounded(cx,rect(screen.pos.x+screen.size.x*0.5-5.0,screen.pos.y+13.0,10.0,10.0),10.0,rgb(0,0,0));}
             self.d.icon_centered(cx,Ico::Wifi,rect(screen.pos.x+screen.size.x-69.0,screen.pos.y,22.0,status_h),14.0,ink);
-            self.rounded(cx,rect(screen.pos.x+screen.size.x-40.0,screen.pos.y+(status_h-11.0)*0.5,23.0,11.0),3.0,alpha(ink,0.45));
-            self.rounded(cx,rect(screen.pos.x+screen.size.x-38.0,screen.pos.y+(status_h-7.0)*0.5,16.0,7.0),1.5,ink);
+            self.rounded(cx,rect(screen.pos.x+screen.size.x-40.0,screen.pos.y+(status_h-11.0)*0.5,23.0,11.0),6.0,alpha(ink,0.45));
+            self.rounded(cx,rect(screen.pos.x+screen.size.x-38.0,screen.pos.y+(status_h-7.0)*0.5,16.0,7.0),3.0,ink);
         }
         if phone.overview>0.01 {
+            // Each card's header over it, in the ink of the backdrop:
+            // Android 12 above the card, its 24 icon, 8, the 14/20 title
+            // (`draw_recents_scrim`); iOS as it was, white on the glass.
+            let head=Self::recents_ink(state.style.target,state.style.dark);
             for (index,client) in phone.order.iter().enumerate() {
                 if let Some(slot)=state.clients.get(client) {
-                    let card=card_rect(screen,chrome,index as f64,phone.cards.page);
+                    let card=card_rect_for(state.style.target,screen,chrome,index as f64,phone.cards.page);
                     if card.pos.x+card.size.x<screen.pos.x || card.pos.x>screen.pos.x+screen.size.x {continue;}
-                    self.icons.draw(cx,&slot.app,state.style.target,rect(card.pos.x+2.0,card.pos.y-36.0,26.0,26.0),phone.overview as f32,ink);
-                    self.d.label_elided(cx,rect(card.pos.x+36.0,card.pos.y-36.0,card.size.x-36.0,26.0),true,13.0,alpha(rgb(255,255,255),phone.overview as f32),HAlign::Left,slot.display_title());
+                    if ios {
+                        self.icons.draw(cx,&slot.app,state.style.target,rect(card.pos.x+2.0,card.pos.y-36.0,26.0,26.0),phone.overview as f32,ink);
+                        self.d.label_elided(cx,rect(card.pos.x+36.0,card.pos.y-36.0,card.size.x-36.0,26.0),true,13.0,alpha(rgb(255,255,255),phone.overview as f32),HAlign::Left,slot.display_title());
+                    } else {
+                        let y=card.pos.y-12.0-24.0;
+                        self.icons.draw(cx,&slot.app,state.style.target,rect(card.pos.x,y,24.0,24.0),phone.overview as f32,head);
+                        self.d.label_elided(cx,rect(card.pos.x+32.0,y,card.size.x-32.0,24.0),true,14.0,alpha(head,phone.overview as f32),HAlign::Left,slot.display_title());
+                    }
                     if phone.screen==PhoneScreen::Recents {self.hits.push((card,PhoneHit::Card(*client)));}
                 }
             }
-            if phone.order.is_empty() {self.label(cx,screen,"No recent apps",20.0,false,ink);}
+            if phone.order.is_empty() {self.label(cx,screen,"No recent apps",20.0,false,if ios {ink} else {alpha(head,phone.overview as f32)});}
         }
         if phone.keyboard>0.5 {self.draw_keyboard(cx,state,screen,backdrop);}
         // The bottom strip: the fake home indicator, or the ground under
         // the phone's real one. A tap there goes home either way.
         let bottom_h=chrome.bottom_reserve(screen);
         let bottom=rect(screen.pos.x,screen.pos.y+screen.size.y-bottom_h,screen.size.x,bottom_h);
-        if (phone.screen==PhoneScreen::App || phone.keyboard>0.5) && bottom_h>0.0 {
+        // Under an open app the desk stretched the app's bottom rows down
+        // there already; the keyboard sits on the shell's own ground.
+        let app_nav=bottom_luma.is_some() && phone.keyboard<=0.5;
+        if (phone.screen==PhoneScreen::App || phone.keyboard>0.5) && bottom_h>0.0 && !app_nav {
             self.rounded(cx,bottom,0.0,if state.style.dark {rgb(28,28,31)}else{rgb(244,244,248)});
         }
-        let nav_ink=if phone.screen==PhoneScreen::App || phone.keyboard>0.5 {
+        let nav_ink=if let Some(luma)=bottom_luma.filter(|_|app_nav) {
+            // A 3:1 graphic: one of the two inks always reaches it.
+            band_ink(luma,3.0).0
+        }else if phone.screen==PhoneScreen::App || phone.keyboard>0.5 {
             if state.style.dark {rgb(238,238,242)}else{rgb(30,30,34)}
-        }else if phone.screen==PhoneScreen::Drawer && !state.style.dark {rgb(30,30,34)}else{rgb(255,255,255)};
+        }else if phone.screen==PhoneScreen::Drawer && !state.style.dark {rgb(30,30,34)}
+        // Android's Recents sits on its tonal scrim: the header's ink.
+        else if !ios && phone.overview>0.5 {Self::recents_ink(state.style.target,state.style.dark)}
+        else {rgb(255,255,255)};
         // iOS skin on a real Android phone: still draw the home pill so
         // there is a way out of an in-process app (the OS Home button
         // leaves wmdyn entirely; Back is gesture-nav and never arrives).
         if chrome.fake_indicator() || ios {
-            self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0),2.0,nav_ink);
+            self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0),4.0,nav_ink);
         }
         if bottom_h>0.0 {self.hits.push((bottom,PhoneHit::Home));}
         if !ios && phone.keyboard>0.5 {
             let back=rect(bottom.pos.x+12.0,bottom.pos.y-10.0,40.0,34.0);
             self.d.icon_centered(cx,Ico::ChevronLeft,back,16.0,nav_ink);self.hits.push((back,PhoneHit::Back));
         }
+    }
+    /// Recents' ink: white over iOS's dark frosted backdrop; Android's
+    /// tonal scrim takes the theme's on-surface ink.
+    fn recents_ink(style: DesktopStyle, dark: bool) -> Vec4f {
+        if style==DesktopStyle::Ios || dark {if style==DesktopStyle::Ios {rgb(255,255,255)} else {rgb(230,225,229)}} else {rgb(29,27,32)}
+    }
+    /// Android's Recents backdrop over the blurred home page: a tonal
+    /// surface (light #F3EDF7, dark #1C1B1F) at 60 %, so the headers read
+    /// whatever the wallpaper is. iOS keeps its frosted glass alone.
+    pub fn draw_recents_scrim(&mut self, cx: &mut Cx2d, screen: Rect, style: DesktopStyle, dark: bool, opacity: f32) {
+        if style==DesktopStyle::Ios || opacity<0.01 {return;}
+        self.rounded(cx,screen,0.0,alpha(if dark {rgb(28,27,31)} else {rgb(243,237,247)},0.6*opacity));
     }
     fn draw_keyboard(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, backdrop: Option<GaussBlurSnapshot>) {
         let phone=&state.phone;
@@ -682,8 +801,8 @@ impl PhoneSurface {
         let mut face=if accent {if ios {rgb(0,122,255)}else{rgb(103,80,164)}}else if dark {rgb(75,72,83)}else{rgb(255,255,255)};
         if self.pressed.as_ref()==Some(&hit) {face=if ios {rgb(180,185,196)}else{rgb(190,165,235)};}
         let inside=rect(r.pos.x+3.0,r.pos.y+3.0,(r.size.x-6.0).max(1.0),(r.size.y-8.0).max(1.0));
-        self.rounded(cx,rect(inside.pos.x,inside.pos.y+1.0,inside.size.x,inside.size.y),if ios {6.0}else{12.0},alpha(rgb(0,0,0),0.22));
-        self.rounded(cx,inside,if ios {6.0}else{12.0},face);
+        self.rounded(cx,rect(inside.pos.x,inside.pos.y+1.0,inside.size.x,inside.size.y),if ios {12.0}else{16.0},alpha(rgb(0,0,0),0.22));
+        self.rounded(cx,inside,if ios {12.0}else{16.0},face);
         let ink=if dark || accent {rgb(255,255,255)}else{rgb(22,20,28)};
         // Control keys are icons: mobile text fonts need not contain the
         // desktop keyboard's Unicode shift/delete symbols.
@@ -728,4 +847,30 @@ impl Widget for PhoneSurface {
         DrawStep::done()
     }
     fn handle_event(&mut self,_cx:&mut Cx,_event:&Event,_scope:&mut Scope) {}
+}
+
+#[cfg(test)]
+mod band_ink_tests {
+    use super::*;
+    /// Luminance of an sRGB colour.
+    fn luma(c: Vec4f) -> f32 {
+        let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        0.2126 * lin(c.x) + 0.7152 * lin(c.y) + 0.0722 * lin(c.z)
+    }
+    /// Over any band the status text reaches 4.5:1 against what is under
+    /// it: the band itself, or the band under its wash.
+    #[test]
+    fn status_ink_reaches_four_and_a_half_over_any_band() {
+        for step in 0..=100 {
+            let l = step as f32 / 100.0;
+            let (ink, wash) = band_ink(l, 4.5);
+            // The band's sRGB grey of luminance l, under the wash.
+            let grey = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+            let under = grey * (1.0 - wash.w) + wash.x * wash.w;
+            let under = vec4(under, under, under, 1.0);
+            let ratio = contrast(luma(ink), luma(under));
+            assert!(ratio >= 4.5, "luma {l}: {ratio:.2}:1");
+            if wash.w == 0.0 { assert!(contrast(luma(ink), l) >= 4.5); }
+        }
+    }
 }
