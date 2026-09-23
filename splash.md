@@ -580,7 +580,8 @@ A host that enforces per-request permissions should call
 `Splash::set_host_io_only(true)` **before** the first `set_text`. The selection
 is host-owned, cannot be relaxed for that Splash, and is inherited by nested
 Splashes. `CxSplashVmExt::alloc_splash_vm_with_host_io()` provides the same mode
-for hosts allocating isolates directly. `allow_net: true` cannot override it.
+for hosts allocating isolates directly, which must dispatch and draw the guest's
+widgets inside `with_isolate`, as Splash does. `allow_net: true` cannot override it.
 
 In this mode scripts use the existing `host.request` bridge for external I/O:
 
@@ -603,9 +604,11 @@ Granting one request must never enable a native networking runtime for the guest
 Direct HTTP, WebSockets, raw sockets, and listeners are rejected. Resource
 constructors are checked at the native entrypoint, including aliases retained in
 the widget prelude. Native browser launch, media playback, clipboard export,
-file pickers, and drag export are suppressed while the isolate is installed.
-Browser, MapView, ScreenCap, and Window constructors are not registered in the
-restricted isolate. Splash installs its own context while dispatching/drawing
+file pickers, drag export, and menu bar changes are suppressed while the isolate
+is installed, and `Html`/`Markdown` links don't emit their URLs as actions.
+Browser, MapView, ScreenCap, Window, WindowMenu, and CachedWidget constructors
+are not registered in the restricted isolate. Script callbacks run within the
+same per-call budget as other entries into an isolate. Splash installs its own context while dispatching/drawing
 children, so native widget behavior cannot accidentally borrow host authority.
 Per-Splash stylesheet re-evaluation is disabled in this mode; restricted
 isolates retain the trusted boot theme chosen with `set_splash_theme`.

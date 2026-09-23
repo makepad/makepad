@@ -435,6 +435,8 @@ fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_i
     // Boot-time storage checks see a fresh jail; validation never opens the
     // app's retained files. Only an exclusively created directory is owned.
     let scratch = ValidationScratch::new(vm_id);
+    #[cfg(test)]
+    LAST_VALIDATION_JAIL.with_borrow_mut(|jail| *jail = scratch.as_ref().map(|scratch| scratch.0.clone()));
     let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
     if let Some(scratch) = &scratch {
         crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.0.clone()));
@@ -492,9 +494,26 @@ fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_i
 /// A validation-only jail; a collision never opens or deletes an existing path.
 struct ValidationScratch(std::path::PathBuf);
 
+#[cfg(test)]
+thread_local! {
+    /// The jail of this thread's last validation, so tests can check that it's gone.
+    static LAST_VALIDATION_JAIL: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 impl ValidationScratch {
     fn new(vm_id: SplashVmId) -> Option<Self> {
-        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        // The web has no temp directory, so validation runs there without a jail.
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        // Unique within this process, and hard to guess from outside it.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let salt = {
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new().build_hasher().finish()
+        };
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -503,7 +522,7 @@ impl ValidationScratch {
         }
         for attempt in 0..16 {
             let path = std::env::temp_dir().join(format!(
-                "splash_validate_{}_{}_{epoch}_{attempt}", std::process::id(), vm_id.0,
+                "splash_validate_{}_{}_{count}_{salt:x}_{attempt}", std::process::id(), vm_id.0,
             ));
             match builder.create(&path) {
                 Ok(()) => return Some(Self(path)),
@@ -992,7 +1011,7 @@ mod host_io_validation_tests {
     use super::*;
 
     #[test]
-    fn host_io_validation_removes_its_temporary_storage() {
+    fn validation_scratch_is_removed_on_drop() {
         let scratch = ValidationScratch::new(MAIN_SPLASH_VM_ID).unwrap();
         let path = scratch.0.clone();
         std::fs::write(path.join("private.json"), "private").unwrap();
@@ -1018,6 +1037,20 @@ mod host_io_validation_tests {
         assert!(errors.is_empty(), "{errors:?}");
         let errors = validate_splash_body_with_host_io(&mut cx, source);
         assert!(errors.is_empty(), "a second validation must have fresh storage: {errors:?}");
-        assert!(crate::splash_host::take_splash_host_requests().is_empty());
+    }
+
+    #[test]
+    fn host_io_validation_removes_its_storage_and_host_requests() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let source = r#"fs.write("/items.json", "validation only")
+            mod.host.request("network.http", {url: "https://example.invalid/"}, fn(result) {})
+            Label{text: "safe"}
+        "#;
+        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        assert!(errors.is_empty(), "{errors:?}");
+        let jail = LAST_VALIDATION_JAIL.with_borrow_mut(Option::take).expect("validation had a jail");
+        assert!(!jail.exists(), "validation left its jail behind");
+        assert!(crate::splash_host::take_splash_host_requests().is_empty(), "validation leaked a host request");
     }
 }

@@ -1158,6 +1158,7 @@ impl Cx {
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 

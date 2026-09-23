@@ -117,6 +117,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
     crate::desktop_style::gc_heaps(cx,&dead_heaps);
+    crate::cached_widget::gc_heaps(cx, &dead_heaps);
     // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
     // frees that address for the next isolate, and a leftover entry would hand
     // the newcomer a dead heap's handle. See `CxScriptResources::gc_heaps`.
@@ -366,6 +367,16 @@ fn with_splash_budget<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm) -> R) 
     out
 }
 
+/// Runs `f` with a Splash budget if it's an isolate's work and no budget is running yet,
+/// e.g., an event handler dispatched while `with_isolate` has the isolate installed.
+fn with_isolate_budget<R>(vm: &mut ScriptVm, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+    if vm_id != MAIN_SPLASH_VM_ID && vm.bx.run_budget.is_none() {
+        with_splash_budget(vm, f)
+    } else {
+        f(vm)
+    }
+}
+
 pub trait CxSplashVmExt {
     fn alloc_splash_vm(&mut self) -> SplashVmId;
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
@@ -521,7 +532,7 @@ impl CxSplashVmExt for Cx {
         // isolate's heap.
         let current = self.global::<CxWidgetAsync>().current_vm_id;
         if current == vm_id {
-            return self.with_vm(f);
+            return self.with_vm(|vm| with_isolate_budget(vm, vm_id, f));
         }
         if vm_id == MAIN_SPLASH_VM_ID {
             if current != MAIN_SPLASH_VM_ID {
@@ -547,7 +558,7 @@ impl CxSplashVmExt for Cx {
     ) -> R {
         let current = self.global::<CxWidgetAsync>().current_vm_id;
         if current == vm_id {
-            return self.with_vm_thread(thread_id, f);
+            return self.with_vm_thread(thread_id, |vm| with_isolate_budget(vm, vm_id, f));
         }
         if vm_id == MAIN_SPLASH_VM_ID {
             if current != MAIN_SPLASH_VM_ID {
@@ -2092,6 +2103,11 @@ mod host_io_tests {
     #[test]
     fn host_io_blocks_native_http_sockets_listeners_and_resource_aliases() {
         let (mut cx, id) = context();
+        // With a network runtime present, only the host I/O guards can refuse these calls.
+        with_isolate(&mut *cx, id, |cx| {
+            let net = cx.net.clone();
+            cx.script_data.std.net = Some(net);
+        });
         let attempts = [
             script! { mod.net.http_request(mod.net.HttpRequest{url: "http://127.0.0.1:9/private"}, mod.net.HttpEvents{}) },
             script! { mod.net.socket_stream(mod.net.SocketStreamOptions{host: "127.0.0.1", port: "9"}) },
@@ -2104,14 +2120,14 @@ mod host_io_tests {
         ];
         for attempt in attempts {
             cx.with_script_vm_id(id, |vm| {
+                vm.bx.captured_errors = Some(Vec::new());
                 let value = vm.eval(attempt);
                 let errors = vm.take_errors();
-                assert!(value.is_err() || !errors.is_empty(), "native I/O unexpectedly succeeded");
-                assert!(errors.is_empty() || errors.iter().any(|error| error.contains("host request")), "unexpected errors: {errors:?}");
+                assert!(value.is_err(), "native I/O unexpectedly succeeded");
+                assert!(errors.iter().any(|error| error.contains("host request")), "unexpected errors: {errors:?}");
             });
         }
         with_isolate(&mut *cx, id, |cx| {
-            assert!(cx.script_data.std.net.is_none());
             assert!(cx.script_data.std.data.http_requests.is_empty());
             assert!(cx.script_data.std.data.http_servers.is_empty());
             assert!(cx.script_data.std.data.socket_streams.borrow().is_empty());
@@ -2145,11 +2161,32 @@ mod host_io_tests {
         let (mut cx, id) = context();
         cx.with_script_vm_id(id, |vm| {
             let widgets = vm.module(id!(widgets));
-            for key in [id!(Window), id!(ScreenCap), id!(ScreenCapBase), id!(Browser), id!(MapView)] {
+            let mut keys = vec![
+                id!(Window), id!(WindowBase), id!(ScreenCap), id!(ScreenCapBase),
+                id!(WindowMenu), id!(WindowMenuBase), id!(CachedWidget),
+            ];
+            if cfg!(feature = "cef") {
+                keys.extend([id!(Browser), id!(BrowserBase)]);
+            }
+            if cfg!(feature = "maps") {
+                keys.extend([id!(MapView), id!(MapViewBase)]);
+            }
+            for key in keys {
                 let value = vm.bx.heap.value(widgets, key.into(), NoTrap);
                 assert!(value.is_nil() || value.is_err(), "unsafe widget {key:?} was registered");
             }
         });
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn installed_isolates_run_with_a_budget() {
+        let (mut cx, id) = context();
+        // E.g., an `on_change` handler dispatched while a restricted Splash has its isolate installed.
+        let is_budgeted = with_isolate(&mut *cx, id, |cx| {
+            cx.with_script_vm_id(id, |vm| vm.bx.run_budget.is_some())
+        });
+        assert!(is_budgeted);
         cx.free_splash_vm(id);
     }
 

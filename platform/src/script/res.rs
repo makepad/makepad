@@ -461,7 +461,11 @@ impl Cx {
                 .resources
                 .http_resources
                 .push(CxScriptHttpResource { request_id, abs_path: path.to_string() });
-            self.http_request(request_id, HttpRequest::new(url, Default::default()));
+            // This fetches the app's own package file, which a restricted isolate's draw can need too,
+            // so it skips the guard that `http_request` applies to guest requests.
+            if let Err(err) = self.net.http_start(request_id, HttpRequest::new(url, Default::default())) {
+                crate::error!("http_request failed for {}: {}", request_id.0, err);
+            }
         }
     }
 

@@ -381,7 +381,8 @@ pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
             visible: false
         }
     });
-    crate::window_menu::script_mod(vm);
+    // A guest must not replace the app's own menu bar.
+    if !host_io_only { crate::window_menu::script_mod(vm); }
     crate::nav_control::script_mod(vm);
     crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
@@ -420,7 +421,8 @@ pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
     crate::reorder_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 
-    crate::cached_widget::script_mod(vm);
+    // Its singletons would let a guest reach widgets the host or other isolates cached.
+    if !host_io_only { crate::cached_widget::script_mod(vm); }
     crate::root::script_mod(vm);
 
     crate::tab_close_button::script_mod(vm);
