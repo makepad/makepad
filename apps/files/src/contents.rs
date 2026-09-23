@@ -539,6 +539,10 @@ pub struct FileContents {
     /// The icon size, an index into [`ZOOM_LEVELS`].
     #[rust]
     zoom: usize,
+    /// The phone layout: 14/20 names in a 40 pt two-line slot, 8 pt below
+    /// the picture.
+    #[rust]
+    phone: bool,
     /// The file being renamed in place, if any.
     #[rust]
     renaming: Option<PathBuf>,
@@ -616,6 +620,14 @@ impl FileContents {
         self.zoom = zoom.min(ZOOM_LEVELS.len() - 1);
         self.view.redraw(cx);
         ZOOM_LEVELS[self.zoom].0
+    }
+
+    /// Switch the tiles between the phone's type and spacing and the desk's.
+    pub fn set_phone(&mut self, cx: &mut Cx, phone: bool) {
+        if self.phone != phone {
+            self.phone = phone;
+            self.view.redraw(cx);
+        }
     }
 
     /// Rebuild the display order from the filter, the sort and the expansions.
@@ -1078,6 +1090,12 @@ impl FileContents {
         let rows = self.rows.len().div_ceil(columns);
         let (tile_width, row_height, thumb_height) =
             ZOOM_LEVELS[self.zoom.min(ZOOM_LEVELS.len() - 1)];
+        // The phone's names are 14 pt, two lines, 8 pt under the picture; two
+        // lines at that size need a 44 pt slot (40 clips the second line's
+        // descenders), and the row grows to hold them (10 + picture + 8 +
+        // 44 + 6).
+        let (name_size, name_gap, name_slot) = if self.phone { (10.5, 8.0, 48.0) } else { (9.5, 6.0, 40.0) };
+        let row_height = if self.phone { row_height.max(thumb_height + 72.0) } else { row_height };
         // The picture never touches the tile's edges: the name below it needs
         // the same optical margin the small size already had.
         let thumb_width = (tile_width - 24.0).max(24.0);
@@ -1119,6 +1137,12 @@ impl FileContents {
                     width: #(thumb_width)
                     height: #(thumb_height)
                 });
+                let mut body = cell.widget(cx, ids!(tile_body));
+                script_apply_eval!(cx, body, { spacing: #(name_gap) });
+                let mut slot = cell.widget(cx, ids!(tile_name_slot));
+                script_apply_eval!(cx, slot, { height: #(name_slot) });
+                let mut name = cell.widget(cx, ids!(tile_name));
+                script_apply_eval!(cx, name, { draw_text.text_style.font_size: #(name_size) });
                 if position >= self.rows.len() {
                     cell.widget(cx, ids!(tile_sel)).set_visible(cx, false);
                     cell.widget(cx, ids!(tile_edit_box)).set_visible(cx, false);
