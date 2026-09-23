@@ -835,6 +835,13 @@ impl ClockView {
         if !force && self.last_time == Some(now) {
             return;
         }
+        // Showing only the tile (no second hand, minutes on the digital
+        // face): a new second changes nothing it shows, and redrawing the
+        // full face behind it made the app (and its host) repaint every
+        // second at rest. The full face catches up when it shows (`force`).
+        if !force && !self.countdown.running() && self.face(cx) == HostedViewMode::Tile && self.last_time.is_some_and(|t| t.hour == now.hour && t.minute == now.minute && t.date_text() == now.date_text()) {
+            return;
+        }
         self.last_time = Some(now);
         for id in [ids!(face_full), ids!(face_tile)] {
             if let Some(mut face) = self.view.widget(cx, id).borrow_mut::<ClockFace>() {
@@ -1365,6 +1372,8 @@ impl Widget for ClockView {
         let face = self.face(cx);
         if face != self.last_face {
             self.last_face = face;
+            // The full face was left behind while only the tile showed.
+            self.refresh_clock(cx, true);
             if face == HostedViewMode::Full {
                 match activity(self.alarm.ringing(), self.countdown_alert, self.countdown.active(), self.stopwatch.running()) {
                     Activity::AlarmRinging => self.select_mode(cx, 1, false),

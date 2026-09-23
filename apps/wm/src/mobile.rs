@@ -303,6 +303,11 @@ pub const OPEN_SECS: f64 = 0.25;
 /// How long after the last interaction the phone keeps painting (the
 /// wallpaper's drift, a settling ease) before it rests.
 pub const INTERACTION_TAIL_SECS: f64 = 1.0;
+/// The wallpaper comes back up to speed over this long when touched…
+pub const WALLPAPER_RAMP_SECS: f64 = 0.6;
+/// …and its speed decays with this time constant once the phone rests
+/// (about 5 s to a standstill).
+pub const WALLPAPER_SETTLE_SECS: f64 = 1.2;
 
 #[derive(Clone)]
 pub struct PhoneGesture {
@@ -442,6 +447,12 @@ impl HomeEdit {
 pub const SWIPE_HOLD_SECS: f64 = 0.15;
 /// Points per second upward at release that make a flick.
 pub const SWIPE_FLICK_SPEED: f64 = 500.0;
+/// Android: the travel up a lifted app needs to go home (Quickstep's
+/// `motion_pause_detector_min_displacement_from_app`, 36 dp).
+pub const LIFT_HOME_MIN: f64 = 36.0;
+/// Android: a lifted app whose finger moves slower than this (Quickstep's
+/// motion pause, 0.0285 dp/ms) has paused — the switcher.
+pub const LIFT_PAUSE_SPEED: f64 = 28.5;
 
 /// Where an upward swipe from the bottom edge goes, the way a phone decides
 /// it: a FLICK (still moving fast at release, or released far up the
@@ -459,11 +470,22 @@ pub fn bottom_swipe_target(
     held: bool,
     vy: f64,
 ) -> Option<PhoneHit> {
+    // Android (Quickstep `calculateEndTarget`): a lifted app goes home once
+    // it travelled 36 dp up, to the switcher if it paused, else drops back.
+    if android && from == PhoneScreen::App {
+        if delta.y > -LIFT_HOME_MIN {
+            return None;
+        }
+        return Some(if held { PhoneHit::Recents } else { PhoneHit::Home });
+    }
     if delta.y >= -45.0 {
         return None;
     }
+    // On Android's Home the strip is where multitasking lives: any swipe
+    // up from it (a flick too — Home is already home) opens the running
+    // apps. The all-apps drawer is a swipe up anywhere ABOVE the strip.
     if from == PhoneScreen::Home && android {
-        return Some(PhoneHit::Drawer);
+        return Some(PhoneHit::Recents);
     }
     if from == PhoneScreen::Recents {
         return Some(PhoneHit::Home);
@@ -474,6 +496,7 @@ pub fn bottom_swipe_target(
     if held {
         return Some(PhoneHit::Recents);
     }
+
     let far = delta.y < -screen_height * 0.33;
     let quick = duration < 0.30 && delta.y < -100.0;
     let flick = vy < -SWIPE_FLICK_SPEED && delta.y <= -48.0;
@@ -484,6 +507,19 @@ pub fn bottom_swipe_target(
 pub struct PhoneState {
     pub clock: String,
     pub wallpaper_time: f64,
+    /// The wallpaper's own animation clock: it runs at `wallpaper_speed`,
+    /// which is 1 while the phone is in use and decays to a standstill
+    /// after (`step_wallpaper`) — then the phone paints nothing.
+    pub wallpaper_phase: f64,
+    pub wallpaper_speed: f64,
+    /// Touch events carry the OS's own clock (Android: its uptime), the
+    /// phone's frames and `last_interaction` the app's: this is added to a
+    /// touch's time (set at each touch start). A mismatch left the
+    /// interaction tail always "just now" — the phone never rested — and a
+    /// long press never due.
+    pub touch_time_offset: f64,
+    /// The frame clock minus `seconds_since_app_start`, from the last frame.
+    pub frame_clock_delta: f64,
     pub screen: PhoneScreen,
     pub client: Option<ClientId>,
     pub order: Vec<ClientId>,
@@ -558,33 +594,42 @@ pub struct Lift {
     pub blend: f64,
     pub blend_v: f64,
 }
-/// Where a bottom swipe holds the open app: its centre rides `dy_up`
-/// points up and `dx` sideways exactly with the finger (gain 1 in screen
-/// pixels), while it shrinks about that centre toward the switcher's card
-/// scale over the first 30 % of the screen and a little further past that
-/// — so its bottom edge leads the finger, the way a phone's own gesture
-/// lifts the window. `card_scale` is the Recents card's share of the app
-/// rect.
+/// Where a bottom swipe holds the open app (Pixel Launcher's swipe-up,
+/// Quickstep `SwipeUpAnimationLogic` + `AnimatorControllerWithResistance`):
+/// its BOTTOM edge stays under the finger — `dy_up` points up and `dx`
+/// sideways, gain 1 in screen pixels. Over the travel `L` from the app's
+/// bottom to its Recents card's bottom the window shrinks LINEARLY to the
+/// card's scale (`card_scale`), so its bottom reaches the card's exactly
+/// when the finger does; past that it keeps shrinking, easing (decelerate)
+/// toward half size by the time the finger reaches the top of the screen.
 pub fn lift_rect(app: Rect, card_scale: f64, dy_up: f64, dx: f64, screen_height: f64) -> Rect {
     let d = dy_up.max(0.0);
-    let h = screen_height.max(1.0);
-    let early = (d / (h * 0.30)).clamp(0.0, 1.0);
-    let late = ((d - h * 0.30) / (h * 0.40)).clamp(0.0, 1.0);
-    let centre = app.pos + app.size * 0.5 + dvec2(dx, -d);
-    // The card never rides off the top: past the curve it shrinks as much
-    // as keeping its top edge on the app area's top needs (down to 30 %).
-    let fit = 2.0 * (centre.y - app.pos.y) / app.size.y.max(1.0);
-    let scale = ((1.0 - (1.0 - card_scale) * early) * (1.0 - 0.18 * late)).min(fit).max(0.3);
+    let c = card_scale.clamp(0.3, 1.0);
+    let tracking = (app.size.y * (1.0 - c) * 0.5 + 4.0).max(1.0);
+    let scale = if d <= tracking {
+        1.0 + (c - 1.0) * d / tracking
+    } else {
+        // The travel left until the finger is at the top of the screen.
+        let rest = (screen_height.min(app.pos.y + app.size.y) - tracking).max(1.0);
+        let t = ((d - tracking) / rest).clamp(0.0, 1.0);
+        let decel = 1.0 - (1.0 - t) * (1.0 - t);
+        c + (LIFT_FLOOR - c).min(0.0) * decel
+    };
+    let bottom = app.pos.y + app.size.y - d;
+    let centre_x = app.pos.x + app.size.x * 0.5 + dx;
     let size = app.size * scale;
-    Rect { pos: centre - size * 0.5, size }
+    Rect { pos: dvec2(centre_x - size.x * 0.5, bottom - size.y), size }
 }
+/// The smallest the lifted app gets, finger at the top of the screen
+/// (Quickstep's resistance floor).
+pub const LIFT_FLOOR: f64 = 0.5;
 /// The Recents card's share of the app rect in this orientation.
 pub fn card_scale(screen: Rect) -> f64 {
     if screen.size.x > screen.size.y { 0.74 } else { 0.76 }
 }
 impl Default for PhoneState {
     fn default() -> Self {
-        Self { clock: "9:41".into(), wallpaper_time: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
+        Self { clock: "9:41".into(), wallpaper_time: 0.0, wallpaper_phase: 0.0, wallpaper_speed: 0.0, touch_time_offset: 0.0, frame_clock_delta: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
             openness: 0.0, overview: 0.0, openness_v: 0.0, overview_v: 0.0, launch_from: None, origin: None, cards: Paging::default(), pager: Paging::default(), home_pages: 1, drawer: 0.0,
             home: HomeOrder::default(), home_order_loaded: false, edit: HomeEdit::default(), last_interaction: 0.0, dismiss_y: 0.0, gesture: None, touch: None,
             keyboard: 0.0, keyboard_target: 0.0, keyboard_sent_height: 0.0, keyboard_client: None,
@@ -632,6 +677,16 @@ impl PhoneState {
         // Either way the finger that tapped no longer drags the pages.
         let page = if self.screen == PhoneScreen::Drawer { self.pager.target() } else { self.pager.target().min(self.last_home_page()) };
         self.pager.set_target(page, self.page_count());
+        // Picked from the switcher: the app grows out of its card, only
+        // `overview` easing down. From a switcher entered on Home its
+        // openness was 0, and the two springs together pulled the card
+        // toward the (small) icon before it grew — a shrink, then the
+        // scale-up.
+        if self.screen == PhoneScreen::Recents {
+            self.openness = 1.0;
+            self.openness_v = 0.0;
+            self.overview_v = self.overview_v.min(0.0);
+        }
         self.screen = PhoneScreen::App;
         self.dismiss_y = 0.0;
     }
@@ -824,6 +879,22 @@ impl PhoneState {
     /// The phone still needs frames at `now`: something eases, a finger is
     /// down, edit mode jiggles, or the interaction tail has not run out.
     /// After that the phone rests and paints nothing until touched.
+    /// Advance the wallpaper by `dt`: full speed while `active` (a finger, an
+    /// ease, the interaction tail), then its speed decays over a few seconds
+    /// to rest. True while it still moves.
+    pub fn step_wallpaper(&mut self, dt: f64, active: bool) -> bool {
+        if active {
+            self.wallpaper_speed = (self.wallpaper_speed + dt / WALLPAPER_RAMP_SECS).min(1.0);
+        } else {
+            self.wallpaper_speed *= (-dt / WALLPAPER_SETTLE_SECS).exp();
+            if self.wallpaper_speed < 0.01 {
+                self.wallpaper_speed = 0.0;
+            }
+        }
+        self.wallpaper_phase += dt * self.wallpaper_speed;
+        self.wallpaper_speed > 0.0
+    }
+
     pub fn wants_frames(&self, now: f64, moving: bool) -> bool {
         moving || self.gesture.is_some() || self.edit.active || now - self.last_interaction < INTERACTION_TAIL_SECS
     }
@@ -868,10 +939,10 @@ pub fn mix_rect(a: Rect, b: Rect, t: f64) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// A bottom swipe carries the open app with the finger: its centre
-    /// moves exactly as far as the finger, its bottom edge at least as far,
-    /// while it shrinks toward the card — never the old gain of about 0.3
-    /// (the card mix alone).
+    /// A bottom swipe carries the open app with the finger: its bottom edge
+    /// stays under the finger (within 2 pt) the whole drag while it shrinks
+    /// toward the card — never the old gain of about 0.3 (the card mix
+    /// alone), nor a centre-anchored card whose bottom outruns the finger.
     #[test]
     fn bottom_swipe_card_follows_the_finger() {
         for size in [dvec2(412.0, 892.0), dvec2(892.0, 412.0)] {
@@ -887,14 +958,16 @@ mod tests {
                 phone.lift_follow(dvec2(0.0, -dy), screen);
                 let r = phone.lift.unwrap().rect;
                 let bottom = bottom0 - (r.pos.y + r.size.y);
-                let centre = centre0 - (r.pos.y + r.size.y * 0.5);
-                assert!((centre - dy).abs() <= dy * 0.05, "centre moved {centre} for a finger travel of {dy}");
-                assert!(bottom >= dy * 0.95, "bottom moved {bottom} for {dy}");
-                if r.size.x / app.size.x > 0.301 {
-                    assert!(r.pos.y >= app.pos.y - 0.5, "the card's top stays on screen ({} < {})", r.pos.y, app.pos.y);
-                }
+                assert!((bottom - dy).abs() <= 2.0, "bottom moved {bottom} for a finger travel of {dy}");
+                let _ = centre0;
                 let scale = r.size.x / app.size.x;
-                assert!(scale <= last_scale + 1e-9 && scale >= 0.3 - 1e-9, "scale {scale}");
+                assert!(scale <= last_scale + 1e-9 && scale >= LIFT_FLOOR - 1e-9, "scale {scale}");
+                // Linear to the card's scale over the tracking travel.
+                let c = card_scale(screen);
+                let tracking = app.size.y * (1.0 - c) * 0.5 + 4.0;
+                if dy <= tracking {
+                    assert!((scale - (1.0 + (c - 1.0) * dy / tracking)).abs() < 1e-6);
+                }
                 last_scale = scale;
             }
             // Released: the lift hands over to the springs without a jump.
@@ -995,8 +1068,90 @@ mod tests {
         assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-80.0), h, 0.6, false, -100.0), Some(PhoneHit::Recents));
         // From the switcher every upward swipe leaves it.
         assert_eq!(bottom_swipe_target(PhoneScreen::Recents, false, up(-60.0), h, 0.9, true, 0.0), Some(PhoneHit::Home));
-        // Android's home page opens the drawer instead.
-        assert_eq!(bottom_swipe_target(PhoneScreen::Home, true, up(-200.0), h, 0.1, false, -900.0), Some(PhoneHit::Drawer));
+        // Android's Home: the strip is multitasking, a flick included.
+        assert_eq!(bottom_swipe_target(PhoneScreen::Home, true, up(-200.0), h, 0.1, false, -900.0), Some(PhoneHit::Recents));
+        assert_eq!(bottom_swipe_target(PhoneScreen::Home, true, up(-300.0), h, 0.8, true, 0.0), Some(PhoneHit::Recents));
+    }
+
+    /// Android's Home by where the finger starts: in the bottom strip it is
+    /// a bottom (multitasking) swipe, anywhere above it the drawer's.
+    /// The wallpaper slows down to a standstill after the last interaction
+    /// (no jump: its phase only advances by its own speed) and then asks
+    /// for no frames; a touch brings it back up to speed.
+    /// Switching to an app grows it monotonically from where it is (its
+    /// card, or its icon) to full screen: never a shrink first.
+    #[test]
+    fn switching_to_an_app_only_grows() {
+        let screen = Rect { pos: dvec2(0.0, 0.0), size: dvec2(412.0, 892.0) };
+        let icon = Rect { pos: dvec2(40.0, 600.0), size: dvec2(60.0, 60.0) };
+        for (entered_from_app, via_recents) in [(false, true), (true, true), (false, false)] {
+            let mut phone = PhoneState::default();
+            phone.order = vec![1 as ClientId, 2 as ClientId];
+            if entered_from_app { phone.client = Some(1 as ClientId); phone.openness = 1.0; }
+            if via_recents { phone.screen = PhoneScreen::Recents; phone.overview = 1.0; }
+            let target = 2 as ClientId;
+            phone.activate(target);
+            let app = app_rect(screen, phone.chrome);
+            let rect = |p: &PhoneState| {
+                let index = p.order.iter().position(|c| *c == target).unwrap() as f64;
+                let card = card_rect_for(DesktopStyle::Android, screen, p.chrome, index, p.cards.page);
+                mix_rect(mix_rect(icon, app, p.openness), card, p.overview)
+            };
+            let mut last = rect(&phone).size.x;
+            for _ in 0..240 {
+                phone.step(1.0 / 120.0);
+                let w = rect(&phone).size.x;
+                assert!(w >= last - 0.01, "from_app={entered_from_app} recents={via_recents}: width {w} < {last}");
+                last = w;
+            }
+            assert!((last - app.size.x).abs() < 0.5, "it ends full screen ({last})");
+        }
+    }
+
+    #[test]
+    fn wallpaper_settles_then_rests() {
+        let mut phone = PhoneState::default();
+        let dt = 1.0 / 120.0;
+        for _ in 0..240 { assert!(phone.step_wallpaper(dt, true)); }
+        assert!((phone.wallpaper_speed - 1.0).abs() < 1e-9);
+        let mut steps = 0;
+        let mut last = phone.wallpaper_phase;
+        let mut last_step = f64::MAX;
+        while phone.step_wallpaper(dt, false) {
+            let step = phone.wallpaper_phase - last;
+            assert!(step <= last_step + 1e-12, "it only slows down");
+            last_step = step;
+            last = phone.wallpaper_phase;
+            steps += 1;
+            assert!(steps < 120 * 10, "it comes to rest");
+        }
+        assert!(steps > 120 * 3, "a slow settle, not a stop ({steps} frames)");
+        let rest = phone.wallpaper_phase;
+        assert!(!phone.step_wallpaper(dt, false));
+        assert_eq!(phone.wallpaper_phase, rest, "at rest it does not move");
+        assert!(phone.step_wallpaper(dt, true), "a touch starts it again");
+        assert!(phone.wallpaper_phase - rest < dt, "without a jump");
+    }
+
+    #[test]
+    fn android_home_swipe_start_zones() {
+        let screen = Rect { pos: dvec2(0.0, 0.0), size: dvec2(412.0, 892.0) };
+        let chrome = PhoneChrome::Device { insets: SafeAreaInsets { top: 42.0, right: 0.0, bottom: 24.0, left: 0.0 } };
+        let strip_top = screen.size.y - chrome.bottom_reserve(screen) - 4.0;
+        assert!(chrome.bottom_zone(screen, dvec2(206.0, screen.size.y - 6.0)));
+        assert!(chrome.bottom_zone(screen, dvec2(206.0, strip_top + 1.0)));
+        for y in [100.0, 450.0, strip_top - 20.0] {
+            assert!(!chrome.bottom_zone(screen, dvec2(206.0, y)), "{y} is the drawer's");
+        }
+        let up = |dy| dvec2(0.0, dy);
+        for (dy, dur, held, vy) in [(-120.0, 0.1, false, -1500.0), (-300.0, 0.6, false, -300.0), (-200.0, 0.8, true, 0.0)] {
+            assert_eq!(bottom_swipe_target(PhoneScreen::Home, true, up(dy), 892.0, dur, held, vy), Some(PhoneHit::Recents));
+        }
+        assert_eq!(bottom_swipe_target(PhoneScreen::Home, true, up(-20.0), 892.0, 0.1, false, 0.0), None);
+        // From an app: 36 dp up goes home, a pause the switcher, less drops back.
+        assert_eq!(bottom_swipe_target(PhoneScreen::App, true, up(-40.0), 892.0, 0.5, false, -60.0), Some(PhoneHit::Home));
+        assert_eq!(bottom_swipe_target(PhoneScreen::App, true, up(-300.0), 892.0, 0.9, true, 0.0), Some(PhoneHit::Recents));
+        assert_eq!(bottom_swipe_target(PhoneScreen::App, true, up(-30.0), 892.0, 0.1, false, -900.0), None);
     }
 
     #[test]

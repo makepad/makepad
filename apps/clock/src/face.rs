@@ -124,9 +124,12 @@ pub struct ClockFace {
 
 impl ClockFace {
     /// Point the hands at a wall-clock time; redraws only when a hand moved.
+    /// A face without its second hand (the home tile) steps its minute hand
+    /// once a minute: it redraws, and its host repaints, once a minute
+    /// instead of every second.
     pub fn set_time(&mut self, cx: &mut Cx, hour: u32, minute: u32, second: u32) {
         let tau = std::f32::consts::TAU;
-        let s = second as f32;
+        let s = if self.draw_face.show_seconds > 0.5 { second as f32 } else { 0.0 };
         let m = minute as f32 + s / 60.0;
         let h = (hour % 12) as f32 + m / 60.0;
         let (ha, ma, sa) = (h / 12.0 * tau, m / 60.0 * tau, s / 60.0 * tau);

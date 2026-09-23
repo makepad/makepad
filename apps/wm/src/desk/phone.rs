@@ -51,7 +51,11 @@ script_mod! {
                 // Opaque: the edge row can be partly transparent (the app's
                 // clear showing through its root's edge).
                 if max(jumps.x,max(jumps.y,jumps.z))<0.1 {
-                    let own=self.image.sample(uv)
+                    // A smooth row (a sky): its mean, flat. Never the row's
+                    // pixels stretched down, nor its gradient across: either
+                    // extruded whatever crossed the row (a cloud, an icon)
+                    // into vertical warp.
+                    let own=(s0+s1+s2+s3+s4+s5+s6+s7+s8+s9+s10+s11+s12+s13+s14+s15)/16.0
                     return vec4(own.xyz/max(own.w,0.001),1.0)*self.opacity
                 }
                 // Content in the row: its most common colour — the sample
@@ -292,6 +296,8 @@ const BAND_EDGE: f32 = 0.03;
 const BAND_INSET_PX: f64 = 2.0;
 /// How tall the band rows are, in points.
 const BAND_ROWS: f64 = 2.0;
+/// How far a flat band's colour fades into the app (points).
+const BAND_FADE: f64 = 16.0;
 
 /// sRGB byte to linear light.
 fn linear(c: u8) -> f32 {
@@ -483,6 +489,17 @@ impl WmDesk {
             self.draw_panel.color=color;
             self.draw_panel.alpha=opacity;
             self.draw_panel.draw_abs(cx,band);
+            // A flat bar met the app's busy edge (Weather's clouds) at a hard
+            // seam: the bar's colour fades into the app over BAND_FADE
+            // points instead, a scrim rather than a cut.
+            const SLICES:usize=8;
+            let slice=BAND_FADE/SLICES as f64;
+            for i in 0..SLICES {
+                let t=(i as f64+0.5)/SLICES as f64;
+                let y=if below {band.pos.y-(i as f64+1.0)*slice} else {band.pos.y+band.size.y+i as f64*slice};
+                self.draw_panel.alpha=opacity*((1.0-t)*(1.0-t)) as f32;
+                self.draw_panel.draw_abs(cx,Rect{pos:dvec2(band.pos.x,y),size:dvec2(band.size.x,slice)});
+            }
             self.draw_panel.color=saved;
         } else {
             // Until a sample says otherwise, the edge rows' live mean: the
@@ -492,6 +509,14 @@ impl WmDesk {
             // where the rows cannot be read back at all.
             self.draw_phone.row_mean=1.0;
             self.draw_band_rows(cx,capture,full,band,below,opacity);
+            // The same colour fades into the app (see the solid case).
+            const SLICES:usize=8;
+            let slice=BAND_FADE/SLICES as f64;
+            for i in 0..SLICES {
+                let t=(i as f64+0.5)/SLICES as f64;
+                let y=if below {band.pos.y-(i as f64+1.0)*slice} else {band.pos.y+band.size.y+i as f64*slice};
+                self.draw_band_rows(cx,capture,full,Rect{pos:dvec2(band.pos.x,y),size:dvec2(band.size.x,slice)},below,opacity*((1.0-t)*(1.0-t)) as f32);
+            }
             self.draw_phone.row_mean=0.0;
         }
         self.compositor.as_mut().unwrap().content(band);
@@ -749,7 +774,7 @@ impl WmDesk {
         let app=mobile::app_rect(screen,phone.chrome);
         self.compositor.get_or_insert_with(||BackdropCompositor::new(cx)).begin(cx);
         self.phone_ui.begin();
-        self.phone_ui.draw_wallpaper(cx,screen,style,dark,phone.wallpaper_time);
+        self.phone_ui.draw_wallpaper(cx,screen,style,dark,phone.wallpaper_phase);
         self.compositor.as_mut().unwrap().content(screen);
         let home_backdrop=if style==crate::desktop::DesktopStyle::Ios && phone.openness<0.999 {
             // The dock's profile decides the pyramid it needs (mip0 and its

@@ -450,8 +450,10 @@ impl App {
             if self.state.as_ref().is_some_and(|s|s.style.target.mobile()) {
                 let dt=if self.phone_time==0.0 {1.0/60.0}else{(frame.time-self.phone_time).clamp(0.001,0.05)};
                 self.phone_time=frame.time;
+                let since_start = cx.seconds_since_app_start();
                 let phone = &mut self.state_mut().phone;
                 phone.wallpaper_time = frame.time;
+                phone.frame_clock_delta = frame.time - since_start;
                 let moving = phone.step(dt);
                 // A finger resting on a home icon this long picks it up:
                 // edit mode opens and the icon lifts under the finger.
@@ -470,7 +472,11 @@ impl App {
                 // Frames only while something moves, a finger is down, edit
                 // mode jiggles, or for a second after: the phone at rest
                 // paints nothing.
-                let wants = self.state_mut().phone.wants_frames(frame.time, moving);
+                let active = self.state_mut().phone.wants_frames(frame.time, moving);
+                // The wallpaper runs down slowly after that, then the phone
+                // paints nothing.
+                let wallpaper = self.state_mut().phone.step_wallpaper(dt, active);
+                let wants = active || wallpaper;
                 if wants {self.phone_frame=cx.new_next_frame();}
                 // The tiles follow the phone state every frame: a window
                 // takes its compact face only once its dismissal settled.
@@ -688,7 +694,14 @@ impl App {
                 TouchState::Stop => PhonePointerPhase::Up,
                 TouchState::Stable => return owned.is_some() || !self.state_mut().phone.accepts_app_input(),
             };
-            let handled = self.phone_pointer_at(cx, phase, point.abs, point.time, true, 0.0);
+            // The touch's own clock mapped onto the frame clock, once per
+            // touch so its samples keep their spacing (the velocity).
+            if point.state == TouchState::Start {
+                let now = cx.seconds_since_app_start() + self.state_mut().phone.frame_clock_delta;
+                self.state_mut().phone.touch_time_offset = now - point.time;
+            }
+            let time = point.time + self.state_mut().phone.touch_time_offset;
+            let handled = self.phone_pointer_at(cx, phase, point.abs, time, true, 0.0);
             if point.state == TouchState::Start && handled && self.state_mut().phone.gesture.is_some() {
                 self.state_mut().phone.touch = Some(point.uid);
             }
@@ -817,7 +830,12 @@ impl App {
                         if let Some(client)=phone.order.get(1).copied() {self.phone_action(cx,PhoneHit::Card(client));}
                     }else{
                         let android=self.state_mut().style.target==desktop::DesktopStyle::Android;
-                        let held=time-g.last_time>crate::mobile::SWIPE_HOLD_SECS;
+                        // Paused: the finger rested before lifting, or (Android,
+                        // Quickstep's motion pause) it was all but still once it
+                        // had travelled 36 dp.
+                        let held=time-g.last_time>crate::mobile::SWIPE_HOLD_SECS
+                            || (android && g.screen==PhoneScreen::App && delta.y<=-crate::mobile::LIFT_HOME_MIN
+                                && velocity.y.abs()<crate::mobile::LIFT_PAUSE_SPEED);
                         let target=crate::mobile::bottom_swipe_target(g.screen,android,delta,screen.size.y,time-g.time,held,velocity.y)
                             .unwrap_or(PhoneHit::Home);
                         log!("wm: bottom swipe dy={:.0} dur={:.2}s held={} vy={:.0} -> {:?}",delta.y,time-g.time,held,velocity.y,target);
