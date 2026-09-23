@@ -702,7 +702,7 @@ impl Cx {
                     Ok(msgs) => {
                         let mut batch = msgs.0;
                         let closed = self.stdin_drain_host_batches(&mut batch);
-                        Self::stdin_coalesce_host_batch(&mut batch);
+                        Self::stdin_coalesce_host_ticks(&mut batch);
                         let ticked = batch.iter().any(|msg| matches!(msg, StudioToApp::Tick));
                         for msg in batch {
                             if self.hosted_handle_msg(msg, &mut windows) {

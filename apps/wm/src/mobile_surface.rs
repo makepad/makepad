@@ -200,9 +200,24 @@ pub struct PhoneSurface {
     #[rust] pub band_sampling_off: bool,
     #[rust] pub band_samples: u64,
     #[rust] pub band_redraws: u64,
+    /// The home screen's scale about the screen centre while it draws
+    /// (Android: All Apps pushing it back, a launch, the reveal after a
+    /// swipe home); 1 elsewhere.
+    #[rust] xf: Option<(Vec2d, f64)>,
     #[redraw] #[rust] area: Area,
 }
 impl PhoneSurface {
+    /// `r` under the home screen's current scale.
+    pub fn home_xf(&self, r: Rect) -> Rect {
+        match self.xf {
+            Some((c, s)) => Rect { pos: c + (r.pos - c) * s, size: r.size * s },
+            None => r,
+        }
+    }
+    /// The scale `r` would get for a home scale `(centre, scale)`.
+    pub fn scale_rect(r: Rect, centre: Vec2d, scale: f64) -> Rect {
+        Rect { pos: centre + (r.pos - centre) * scale, size: r.size * scale }
+    }
     pub fn hit(&self, p: Vec2d) -> Option<PhoneHit> {
         self.hits.iter().rev().find(|(r,_)| r.contains(p)).map(|(_,h)|h.clone())
     }
@@ -231,6 +246,7 @@ impl PhoneSurface {
         self.chrome.draw_abs(cx,r);
     }
     fn label(&mut self, cx: &mut Cx2d, r: Rect, label: &str, size: f64, bold: bool, color: Vec4f) {
+        let (r, size) = match self.xf { Some((_, s)) => (self.home_xf(r), size * s), None => (r, size) };
         self.d.label_elided(cx,r,bold,size,color,HAlign::Center,label);
     }
     fn use_fonts(&mut self, ios: bool) {
@@ -390,6 +406,10 @@ impl PhoneSurface {
     }
 
     pub fn draw_home(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, backdrop: Option<GaussBlurSnapshot>) {
+        self.draw_home_scaled(cx, state, screen, backdrop);
+        self.xf = None;
+    }
+    fn draw_home_scaled(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, backdrop: Option<GaussBlurSnapshot>) {
         let phone=&state.phone;
         let style=state.style.target;
         let ios=style==DesktopStyle::Ios;
@@ -402,8 +422,13 @@ impl PhoneSurface {
         let pan=if ios {-phone.drawer*screen.size.x} else {0.0};
         // Android's page stays as it is under the rising sheet (which the
         // desk draws over the live tiles, `draw_android_drawer_layer`).
-        let opacity=(1.0-phone.openness*0.85) as f32;
+        // Android: the Pixel Launcher's home never fades under an opening
+        // app (the app covers it); it scales (and hides at 40 % of All
+        // Apps, and reveals after a swipe home) — `home_look`.
+        let (home_scale,home_alpha)=phone.home_look();
+        let opacity=if ios {(1.0-phone.openness*0.85) as f32} else {home_alpha as f32};
         if opacity<0.01 && drawer<0.001 {return;}
+        self.xf=(!ios && (home_scale-1.0).abs()>1e-4).then(||(screen.pos+screen.size*0.5,home_scale));
         let landscape=screen.size.x>screen.size.y;
         let apps=crate::shell::launcher::apps(&state.launchable);
         let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
@@ -457,7 +482,8 @@ impl PhoneSurface {
             if home {self.app_hit(r,id,rect(at.x,at.y,size,size));}
             if held.as_deref()==Some(id.as_str()) {continue;}
             let tilt=(edit.jiggle(index,now).to_radians()) as f32;
-            self.icons.draw_rotated(cx,id,style,rect(at.x,at.y,size,size),opacity,ink,tilt);
+            let r=self.home_xf(rect(at.x,at.y,size,size));
+            self.icons.draw_rotated(cx,id,style,r,opacity,ink,tilt);
             self.label(cx,rect(at.x+(size-cell)*0.5,at.y+size+label_gap,cell,label_h),&label_of(id),label_size,false,alpha(ink,opacity));
         }
         let dock=Self::home_dock(screen,phone.chrome);
@@ -492,7 +518,8 @@ impl PhoneSurface {
             if home {self.app_hit(r,id,rect(at.x,at.y,58.0,58.0));}
             if held.as_deref()==Some(id.as_str()) {continue;}
             let tilt=(edit.jiggle(index+7,now).to_radians()) as f32;
-            self.icons.draw_rotated(cx,id,style,rect(at.x,at.y,58.0,58.0),opacity,ink,tilt);
+            let r=self.home_xf(rect(at.x,at.y,58.0,58.0));
+            self.icons.draw_rotated(cx,id,style,r,opacity,ink,tilt);
         }
         if ios {
             // The page indicator follows the pager: this page's dot gives
@@ -543,11 +570,9 @@ impl PhoneSurface {
         let phone=&state.phone;
         if state.style.target==DesktopStyle::Ios || phone.drawer<=0.001 || (phone.screen==PhoneScreen::App && phone.openness>=0.999) {return;}
         self.use_fonts(false);
-        let progress=phone.drawer.clamp(0.0,1.0);
-        self.rounded(cx,screen,0.0,alpha(rgb(0,0,0),(0.12*progress) as f32));
         let apps=crate::shell::launcher::apps(&state.launchable);
         let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
-        // `drawer` past 1 is the rubber band: the sheet follows it up.
+        // `drawer` past 1 is the overscroll: the grid stretches.
         self.draw_android_drawer(cx,state,screen,&ids,phone.drawer.min(1.2));
     }
     /// Android's app drawer: a sheet with every launchable app on one grid.
@@ -555,16 +580,18 @@ impl PhoneSurface {
         let style=state.style.target;
         let landscape=screen.size.x>screen.size.y;
         let arrived=progress>0.5;
-        let extent=drawer_extent(screen,state.phone.chrome);
-        let lift=(1.0-progress)*extent;
-        let corner=(28.0*((1.0-progress)*6.0).clamp(0.0,1.0)) as f32;
-        // A point past either side, so its soft edge falls off the screen.
-        let sheet=Rect{pos:screen.pos+dvec2(-1.0,lift),size:dvec2(screen.size.x+2.0,screen.size.y-lift+corner as f64)};
-        self.rounded(cx,sheet,corner,if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)});
-        // The sheet's content rides with it, laid out for the open sheet.
-        let screen=Rect{pos:screen.pos+dvec2(0.0,lift),size:screen.size};
-        let ink=if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)};
-        let pill=self.draw_search(cx,state,screen,ink,None,1.0);
+        // The Pixel Launcher's All Apps on a phone (Launcher3
+        // `AllAppsTransitionController`): full screen, its ground fading in
+        // over 11.7..40 % of the drag, its content over 40..80 % while it
+        // rises the last 300 dp; past the top the grid stretches.
+        let (_,_,ground,content,shift)=crate::launcher_motion::all_apps_frame(progress);
+        let stretch=1.0+(progress-1.0).max(0.0)*0.6;
+        let _=drawer_extent(screen,state.phone.chrome);
+        self.rounded(cx,screen,0.0,alpha(if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)},ground as f32));
+        if content<=0.001 {return;}
+        let screen=Rect{pos:screen.pos+dvec2(0.0,shift.max(0.0)),size:screen.size};
+        let ink=alpha(if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)},content as f32);
+        let pill=self.draw_search(cx,state,screen,ink,None,content as f32);
         if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
         // The grid starts 16 under the search bar and keeps its pitch (104 a
         // row upright, 88 on its side); only a list too long for the sheet
@@ -575,12 +602,12 @@ impl PhoneSurface {
         let rows=(ids.len()+columns-1)/columns;
         let bottom=screen.pos.y+screen.size.y-state.phone.chrome.bottom_reserve(screen)-8.0;
         let pitch=if landscape {88.0}else{104.0};
-        let row_h=pitch.min((bottom-top)/rows.max(1) as f64).max(64.0);
+        let row_h=pitch.min((bottom-top)/rows.max(1) as f64).max(64.0)*stretch;
         let size=if landscape {48.0}else{60.0};
         for (index,(id,label)) in ids.iter().enumerate() {
             let r=rect(screen.pos.x+16.0+(index%columns)as f64*cell,top+(index/columns)as f64*row_h,cell,row_h);
             let icon=rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size);
-            self.icons.draw(cx,id,style,icon,1.0,ink);
+            self.icons.draw(cx,id,style,icon,content as f32,ink);
             self.label(cx,rect(r.pos.x,r.pos.y+size+8.0,cell,16.0),label,12.0,false,ink);
             if arrived {self.app_hit(r,id,icon);}
         }

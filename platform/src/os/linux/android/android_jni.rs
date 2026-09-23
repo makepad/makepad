@@ -859,15 +859,59 @@ pub extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnLongClick(
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     env: *mut jni_sys::JNIEnv,
-    _: jni_sys::jclass,
+    class: jni_sys::jclass,
     event: jni_sys::jobject,
 ) {
+    let time = unsafe { ndk_utils::call_long_method!(env, event, "getEventTime", "()J") } as i64;
+    unsafe { surface_on_touch(env, class, event, time as f64 / 1000.0) };
+}
+
+/// The event with its nanosecond time.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouchNanos(
+    env: *mut jni_sys::JNIEnv,
+    class: jni_sys::jclass,
+    event: jni_sys::jobject,
+    time_nanos: jni_sys::jlong,
+) {
+    unsafe { surface_on_touch(env, class, event, time_nanos as f64 / 1.0e9) };
+}
+
+/// One of a move's batched samples: every pointer where it was then.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouchHistory(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    event: jni_sys::jobject,
+    history: jni_sys::jint,
+    time_nanos: jni_sys::jlong,
+) {
+    let touch_count = unsafe { ndk_utils::call_int_method!(env, event, "getPointerCount", "()I") };
+    let mut touches = Vec::with_capacity(touch_count as usize);
+    for touch_index in 0..touch_count {
+        let id = unsafe { ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index) };
+        let x = unsafe { ndk_utils::call_float_method!(env, event, "getHistoricalX", "(II)F", touch_index, history) };
+        let y = unsafe { ndk_utils::call_float_method!(env, event, "getHistoricalY", "(II)F", touch_index, history) };
+        touches.push(TouchPoint {
+            state: TouchState::Move,
+            uid: id as u64,
+            rotation_angle: 0.0,
+            force: 1.0,
+            radius: dvec2(0.0, 0.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+            abs: dvec2(x as f64, y as f64),
+            time: time_nanos as f64 / 1.0e9,
+        });
+    }
+    send_from_java_message(FromJavaMessage::Touch(touches));
+}
+
+unsafe fn surface_on_touch(env: *mut jni_sys::JNIEnv, _: jni_sys::jclass, event: jni_sys::jobject, time_secs: f64) {
     let action_masked =
         unsafe { ndk_utils::call_int_method!(env, event, "getActionMasked", "()I") };
     let action_index = unsafe { ndk_utils::call_int_method!(env, event, "getActionIndex", "()I") };
     let touch_count = unsafe { ndk_utils::call_int_method!(env, event, "getPointerCount", "()I") };
-
-    let time = unsafe { ndk_utils::call_long_method!(env, event, "getEventTime", "()J") } as i64;
 
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
@@ -915,7 +959,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
-            time: time as f64 / 1000.0,
+            time: time_secs,
         });
     }
     send_from_java_message(if action_masked == 3 {
@@ -1629,6 +1673,13 @@ pub unsafe fn to_java_open_url(url: &str) {
     let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
     ndk_utils::call_void_method!(env, get_activity(), "openUrl", "(Ljava/lang/String;)V", url);
     (**env).DeleteLocalRef.unwrap()(env, url);
+}
+
+/// `MakepadActivity.performHaptic`: a system haptic (`kind`: 0 click,
+/// 1 virtual key, 2 tick) on the activity's window.
+pub unsafe fn to_java_haptic(kind: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "performHaptic", "(I)V", kind as jni_sys::jint);
 }
 
 /// `MakepadActivity.copyContentUri`: the bytes of a picked `content://`

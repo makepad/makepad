@@ -180,6 +180,10 @@ struct Bands {
     /// The top and bottom rows once read: their mean (see `BandRows`).
     top: Option<BandRows>,
     bottom: Option<BandRows>,
+    /// The last rows read for any key (a Recents card opening changes the
+    /// key): the bars keep the app's last colour until a new sample lands,
+    /// instead of flashing the theme's ground for a few frames.
+    last: (Option<BandRows>, Option<BandRows>),
     /// What the rows were read for: a new viewport, density, appearance or
     /// skin drops them.
     key: Option<BandKey>,
@@ -272,6 +276,7 @@ impl Bands {
         let mut changed = false;
         if moved(self.top, top) { self.top = Some(top); changed = true; }
         if moved(self.bottom, bottom) { self.bottom = Some(bottom); changed = true; }
+        self.last = (Some(top), Some(bottom));
         changed
     }
 }
@@ -387,6 +392,26 @@ impl WmDesk {
         self.items.get(&client).and_then(|item| item.borrow::<MpRunView>())
             .is_some_and(|view| view.arrival_fade() < 1.0)
     }
+    /// Where a lifted app released home lands (Android, Quickstep): its
+    /// home icon or tile, else an icon-sized circle centred on the dock row.
+    /// The rect and its corner radius.
+    pub fn phone_home_target(&self,state:&WmState,client:ClientId)->(Rect,f64) {
+        let phone=&state.phone;
+        let style=state.style.target;
+        let screen=phone.viewport;
+        let app_id=state.clients.get(&client).map(|s|s.app.clone()).unwrap_or_default();
+        if let Some(tile)=phone.tiles.get(client).map(|t|t.app.clone()) {
+            let r=PhoneSurface::launch_origin(style,screen,phone.chrome,&state.launchable,Some(tile.as_str()));
+            return (r,HomeMetrics::of(style).tile_radius);
+        }
+        if let Some(r)=self.phone_ui.home_rect_of(style,screen,phone,&state.launchable,&app_id) {
+            return (r,r.size.x.min(r.size.y)*0.5);
+        }
+        let dock=PhoneSurface::home_dock(screen,phone.chrome);
+        let side=58.0;
+        let r=Rect{pos:dvec2(screen.pos.x+(screen.size.x-side)*0.5,dock.pos.y+(dock.size.y-side)*0.5),size:dvec2(side,side)};
+        (r,side*0.5)
+    }
     pub fn phone_hit(&self,p:Vec2d)->Option<PhoneHit> {self.phone_ui.hit(p)}
     pub fn phone_icon_at(&self,p:Vec2d,app:&str)->Option<Rect> {self.phone_ui.icon_at(p,app)}
     pub fn phone_search_event(&mut self,cx:&mut Cx,event:&Event,state:&mut WmState)->bool {
@@ -462,6 +487,7 @@ impl WmDesk {
         if !open {return;}
         let fresh=frame.bands.key==Some(key);
         let (top_rows,bottom_rows)=if fresh {(frame.bands.top,frame.bands.bottom)} else {(None,None)};
+        let (top_rows,bottom_rows)=(top_rows.or(frame.bands.last.0),bottom_rows.or(frame.bands.last.1));
         let theme=ground_luma(ground);
         if let Some(r)=top {
             self.present_capture_band(cx,capture,app,r,opacity,top_rows.and_then(|t|t.solid()));
@@ -660,8 +686,13 @@ impl WmDesk {
         // iOS pans the page (tiles included) off to the left as the library
         // arrives; Android's tiles fade under its rising sheet.
         let ios=style==crate::desktop::DesktopStyle::Ios;
-        let opacity=(1.0-phone.openness*0.85) as f32;
+        // Android: scaled with the home screen (`home_look`), recorded at
+        // their own size — only where they are shown scales.
+        let (home_scale,home_alpha)=phone.home_look();
+        let opacity=if ios {(1.0-phone.openness*0.85) as f32} else {home_alpha as f32};
         if opacity<0.01 || phone.drawer>=0.999 {return;}
+        let centre=screen.pos+screen.size*0.5;
+        let at=|r:Rect| if ios {r} else {PhoneSurface::scale_rect(r,centre,home_scale)};
         let page=if ios {Rect{pos:screen.pos+dvec2(-phone.drawer*screen.size.x,0.0),size:screen.size}} else {screen};
         let layout=PhoneSurface::home_layout(style,page,phone.chrome,&state.launchable);
         // Everything the placeholders need, read before any tile draws.
@@ -690,7 +721,7 @@ impl WmDesk {
                         stored.tile_pending=Some(pending);
                         let capture=stored.tile.as_mut().unwrap();
                         capture.frame.freeze(cx);
-                        self.present_capture(cx,capture,slot.rect,opacity,HomeMetrics::of(style).tile_radius as f32);
+                        self.present_capture(cx,capture,at(slot.rect),opacity,(HomeMetrics::of(style).tile_radius*if ios {1.0} else {home_scale}) as f32);
                         self.phone_frames.insert(client,stored);
                         continue;
                     }
@@ -718,7 +749,7 @@ impl WmDesk {
                         capture.frame.freeze(cx);
                     }
                     if ready {
-                        self.present_capture(cx,&capture,slot.rect,opacity,HomeMetrics::of(style).tile_radius as f32);
+                        self.present_capture(cx,&capture,at(slot.rect),opacity,(HomeMetrics::of(style).tile_radius*if ios {1.0} else {home_scale}) as f32);
                         shown=true;
                     }
                     stored.tile=Some(capture);
@@ -727,7 +758,7 @@ impl WmDesk {
                     // stands in until the client is back in it.
                     capture.frame.freeze(cx);
                     if capture.size==slot.rect.size {
-                        self.present_capture(cx,capture,slot.rect,opacity,HomeMetrics::of(style).tile_radius as f32);
+                        self.present_capture(cx,capture,at(slot.rect),opacity,(HomeMetrics::of(style).tile_radius*if ios {1.0} else {home_scale}) as f32);
                         shown=true;
                     }
                 }
@@ -735,14 +766,18 @@ impl WmDesk {
             }
             if !shown {
                 let (headline,detail)=crate::mobile_tiles::placeholder_text(&status,connected,gave_up);
-                self.phone_ui.draw_tile_placeholder(cx,slot,style,dark,opacity,headline,&detail);
-                self.compositor.as_mut().unwrap().content(slot.rect);
+                let mut shown_slot=slot;
+                shown_slot.rect=at(slot.rect);
+                self.phone_ui.draw_tile_placeholder(cx,shown_slot,style,dark,opacity,headline,&detail);
+                self.compositor.as_mut().unwrap().content(shown_slot.rect);
             }
         }
     }
     pub(super) fn draw_phone_scene(&mut self,cx:&mut Cx2d,scope:&mut Scope,screen:Rect) {
         let state=scope.data.get_mut::<WmState>().unwrap();
         state.phone.viewport=screen;
+        state.phone.android=state.style.target==crate::desktop::DesktopStyle::Android;
+        state.phone.density=cx.current_dpi_factor();
         state.phone.order.retain(|c|state.clients.contains_key(c));
         if state.phone.client.is_some_and(|c|!state.clients.contains_key(&c)) {
             state.phone.client=state.phone.order.first().copied();
@@ -849,7 +884,26 @@ impl WmDesk {
                     }
                     None=>springs,
                 }
+            }else if phone.android && phone.neighbours<1.0 {
+                // Quickstep: the neighbours stay pushed off to the sides
+                // until the lift pauses, then slide in (300 ms).
+                let side=if index as f64>=phone.cards.page {1.0} else {-1.0};
+                Rect{pos:card.pos+dvec2(side*(1.0-phone.neighbours)*screen.size.x,0.0),size:card.size}
             }else{card};
+            // Android: a launch from the icon and a flight home run on the
+            // Pixel Launcher's own curves and springs (`launcher_motion`).
+            let mut motion:Option<(f32,f32,f32)>=None;
+            if foreground && phone.android {
+                if let Some(e)=phone.open_elapsed {
+                    let (r,radius,alpha)=crate::launcher_motion::open_window(zoom_from,app,e);
+                    display=r;
+                    motion=Some((radius as f32,alpha as f32,1.0));
+                } else if let Some(flight)=phone.flight {
+                    display=flight.rect();
+                    let a=flight.window_alpha() as f32;
+                    motion=Some((flight.radius() as f32,a,a));
+                }
+            }
             if phone.gesture.as_ref().is_some_and(|g|g.hit==Some(PhoneHit::Card(client))) {display.pos.y+=phone.dismiss_y;}
             if display.pos.x+display.size.x<screen.pos.x || display.pos.x>screen.pos.x+screen.size.x {continue;}
             // A tile client's window frames are trusted only in its full
@@ -857,7 +911,7 @@ impl WmDesk {
             // card keeps the last full-screen capture, whatever arrives.
             let full_ready=phone.tiles.get(client).map_or(true,|t|t.full_ready());
             let mut stored=self.phone_frames.remove(&client).unwrap_or_default();
-            let radius=((1.0-phone.openness).max(phone.overview)*HomeMetrics::of(style).card_radius)as f32;
+            let radius=motion.map_or(((1.0-phone.openness).max(phone.overview)*HomeMetrics::of(style).card_radius)as f32,|m|m.0);
             // Zooming between its icon and full screen the app is one solid
             // card: its own ground and icon from the first frame (the icon it
             // grew out of), the app's picture crossfading in over that
@@ -866,10 +920,11 @@ impl WmDesk {
             // A swipe home from an app raised `overview` with the finger; the
             // app still shrinks home as one solid card, not a fading card.
             let zooming=foreground && phone.screen!=PhoneScreen::Recents && phone.openness<0.999;
-            let opacity=if zooming {((phone.openness-0.05)/0.45).clamp(0.0,1.0) as f32}
+            let opacity=if let Some(m)=motion {m.1}
+                else if zooming {((phone.openness-0.05)/0.45).clamp(0.0,1.0) as f32}
                 else if foreground {phone.openness.max(phone.overview) as f32}else{phone.overview as f32};
             if zooming {
-                let solid=(phone.openness/if lands {0.05}else{0.5}).clamp(0.0,1.0) as f32;
+                let solid=motion.map_or((phone.openness/if lands {0.05}else{0.5}).clamp(0.0,1.0) as f32,|m|m.2);
                 // Zooming out of (or back into) its live home tile: the
                 // tile's own last face is the card's ground, so the app
                 // crossfades into the tile instead of landing on a blank

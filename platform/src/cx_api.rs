@@ -151,6 +151,10 @@ impl<'a> CxSystemBrowser<'a> {
     }
 }
 
+/// A system haptic (`Cx::haptic_feedback`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HapticFeedback { Click, VirtualKey, Tick }
+
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
 
@@ -1498,6 +1502,17 @@ impl Cx {
     /// Copies the given string to the clipboard.
     ///
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
+    /// A system haptic (Android: the window's `performHapticFeedback`;
+    /// a no-op elsewhere and in hosted children, which have no window).
+    pub fn haptic_feedback(&mut self, kind: HapticFeedback) {
+        #[cfg(all(target_os = "android", not(linux_direct)))]
+        if !crate::os::linux::android::android_hosted::is_hosted() {
+            let kind = match kind { HapticFeedback::Click => 0, HapticFeedback::VirtualKey => 1, HapticFeedback::Tick => 2 };
+            unsafe { crate::os::linux::android::android_jni::to_java_haptic(kind) };
+        }
+        let _ = kind;
+    }
+
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops
             .push_back(CxOsOp::CopyToClipboard(content.to_owned()));

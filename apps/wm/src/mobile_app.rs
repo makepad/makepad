@@ -477,6 +477,11 @@ impl App {
                 // paints nothing.
                 let wallpaper = self.state_mut().phone.step_wallpaper(dt, active);
                 let wants = active || wallpaper;
+                // The shell's haptics (Launcher's call sites).
+                for h in std::mem::take(&mut self.state_mut().phone.haptics) {
+                    use crate::launcher_motion::Haptic;
+                    cx.haptic_feedback(match h { Haptic::Click => HapticFeedback::Click, Haptic::VirtualKey => HapticFeedback::VirtualKey, Haptic::Tick => HapticFeedback::Tick });
+                }
                 if wants {self.phone_frame=cx.new_next_frame();}
                 // The tiles follow the phone state every frame: a window
                 // takes its compact face only once its dismissal settled.
@@ -739,6 +744,13 @@ impl App {
                     if matches!(old,PhoneScreen::Home|PhoneScreen::Drawer) && !bottom {self.state_mut().phone.library_drag_begin();}
                     self.state_mut().phone.gesture=Some(PhoneGesture::new(p,time,hit.clone(),bottom,edge,old));
                     self.state_mut().phone.last_interaction=time;
+                    if bottom && old==PhoneScreen::App {
+                        // Quickstep: the neighbours stay off to the sides
+                        // until the lift pauses.
+                        let phone=&mut self.state_mut().phone;
+                        phone.lift_paused=false;phone.lift_slow=0;phone.lift_settle=None;
+                        if phone.android {phone.neighbours=0.0;phone.neighbours_target=0.0;}
+                    }
                     // Edit mode: a finger on an icon carries it at once.
                     if self.state_mut().phone.edit.active && !bottom {
                         if let Some(PhoneHit::App(id))=&hit {
@@ -771,10 +783,33 @@ impl App {
                     // under it as it crosses the others.
                     let slot=self.drop_slot_at(p);
                     self.state_mut().phone.drag_icon_to(p,slot);
-                }else if g.bottom && delta.y < -8.0 {
+                }else if g.bottom && delta.y < -(if android {crate::launcher_motion::QUICKSTEP_SLOP} else {8.0}) {
                     let from=g.screen;
+                    let _=g;
+                    // Android: the slop is taken off the travel, so the
+                    // window does not jump when tracking starts.
+                    let delta=if android {dvec2(delta.x,delta.y+crate::launcher_motion::QUICKSTEP_SLOP)} else {delta};
                     phone.bottom_drag(from,delta.y,screen.size.y);
-                    if from==PhoneScreen::App {phone.lift_follow(delta,screen);}
+                    if from==PhoneScreen::App {
+                        phone.lift_follow(delta,screen);
+                        // Quickstep's motion pause: after 36 dp up, two
+                        // samples slower than 0.0285 dp/ms; un-paused only
+                        // faster than 1.4 dp/ms. A click and the neighbours.
+                        if android {
+                            let speed=phone.gesture.as_ref().map_or(0.0,|g|g.release_velocity(time).length());
+                            if !phone.lift_paused && -delta.y>=crate::mobile::LIFT_HOME_MIN {
+                                phone.lift_slow=if speed<crate::mobile::LIFT_PAUSE_SPEED {phone.lift_slow+1} else {0};
+                                if phone.lift_slow>=2 {
+                                    phone.lift_paused=true;
+                                    phone.neighbours_target=1.0;
+                                    phone.haptics.push(crate::launcher_motion::Haptic::Click);
+                                }
+                            } else if phone.lift_paused && speed>=1400.0 {
+                                phone.lift_paused=false;phone.lift_slow=0;
+                                phone.neighbours_target=0.0;
+                            }
+                        }
+                    }
                 }else if g.screen==PhoneScreen::Drawer && (phone.search_focused || !phone.search_query.is_empty()) {
                     phone.search_scroll=(phone.search_scroll.min(search_scroll_max)-last.y).clamp(0.0,search_scroll_max);
                 }else if g.screen==PhoneScreen::Recents {
@@ -800,7 +835,8 @@ impl App {
                     let undecided=g.pan.is_none();
                     if g.lock_axis(delta,!android)==Some(true) {
                         let d=if undecided {delta}else{last};
-                        if android {let extent=drawer_extent(screen,phone.chrome);phone.library_drag_move(d.y,extent);}
+                        // All Apps rises 300 dp for the whole drag (linear).
+                        if android {phone.library_drag_move(d.y,crate::launcher_motion::ALL_APPS_SHIFT);}
                         else {phone.library_drag_move(d.x,screen.size.x);}
                     }
                 }
@@ -833,13 +869,36 @@ impl App {
                         // Paused: the finger rested before lifting, or (Android,
                         // Quickstep's motion pause) it was all but still once it
                         // had travelled 36 dp.
-                        let held=time-g.last_time>crate::mobile::SWIPE_HOLD_SECS
-                            || (android && g.screen==PhoneScreen::App && delta.y<=-crate::mobile::LIFT_HOME_MIN
-                                && velocity.y.abs()<crate::mobile::LIFT_PAUSE_SPEED);
-                        let target=crate::mobile::bottom_swipe_target(g.screen,android,delta,screen.size.y,time-g.time,held,velocity.y)
-                            .unwrap_or(PhoneHit::Home);
+                        let lifted=android && g.screen==PhoneScreen::App;
+                        let held=if lifted {
+                            self.state_mut().phone.lift_paused
+                                || time-g.last_time>0.3 && delta.y<=-crate::mobile::LIFT_HOME_MIN
+                        } else {time-g.last_time>crate::mobile::SWIPE_HOLD_SECS};
+                        let target=crate::mobile::bottom_swipe_target(g.screen,android,delta,screen.size.y,time-g.time,held,velocity.y);
                         log!("wm: bottom swipe dy={:.0} dur={:.2}s held={} vy={:.0} -> {:?}",delta.y,time-g.time,held,velocity.y,target);
-                        self.phone_action(cx,target);
+                        if lifted {
+                            // Quickstep: home flies into the icon on springs,
+                            // Recents settles with an overshoot, too short
+                            // drops back into the app.
+                            match target {
+                                Some(PhoneHit::Home)=>{
+                                    let client=self.state_mut().phone.client;
+                                    let to=client.and_then(|c|{
+                                        let state=self.state.as_ref()?;
+                                        self.desk(cx).borrow::<WmDesk>().map(|d|d.phone_home_target(state,c))
+                                    });
+                                    if let Some((to,radius))=to {self.state_mut().phone.fly_home(to,radius,velocity);}
+                                    self.phone_action(cx,PhoneHit::Home);
+                                }
+                                Some(PhoneHit::Recents)=>{
+                                    self.state_mut().phone.settle_lift(true);
+                                    self.phone_action(cx,PhoneHit::Recents);
+                                }
+                                _=>self.state_mut().phone.settle_lift(false),
+                            }
+                        } else {
+                            self.phone_action(cx,target.unwrap_or(PhoneHit::Home));
+                        }
                     }
                 }else if g.edge && delta.x>70.0 {self.phone_action(cx,PhoneHit::Back);}
                 else if g.screen==PhoneScreen::Recents && g.pan==Some(false) && {
@@ -848,7 +907,10 @@ impl App {
                     let card=card_rect(screen,self.state_mut().phone.chrome,0.0,0.0);
                     delta.y < -(96.0f64).max(card.size.y*0.25) || (velocity.y < -900.0 && delta.y < -32.0)
                 } {
-                    if let Some(PhoneHit::Card(client))=g.hit {self.request_close(cx,client);self.state_mut().phone.navigate(PhoneScreen::Recents);}
+                    if let Some(PhoneHit::Card(client))=g.hit {
+                        self.state_mut().phone.haptics.push(crate::launcher_motion::Haptic::Tick);
+                        self.request_close(cx,client);self.state_mut().phone.navigate(PhoneScreen::Recents);
+                    }
                 }else if !g.committed {
                     // Never past the slop: a tap. Once the finger travelled
                     // it was a drag to the end, whatever it came back to.
@@ -874,7 +936,12 @@ impl App {
                     let (v,extent,flick)=if android {(velocity.y,drawer_extent(screen,chrome),crate::mobile::DRAWER_FLICK_SPEED)}
                         else {(velocity.x,screen.size.x,crate::mobile::PAGE_FLICK_SPEED)};
                     let v=if g.pan==Some(true) {v} else {0.0};
-                    self.state_mut().phone.library_release(v,extent,flick);
+                    if android {
+                        let from_drawer=g.screen==PhoneScreen::Drawer;
+                        self.state_mut().phone.all_apps_release(-v,from_drawer);
+                    } else {
+                        self.state_mut().phone.library_release(v,extent,flick);
+                    }
                 }
                 // A card drag that never owned the sideways axis settles from rest.
                 if self.state_mut().phone.cards.dragging() {

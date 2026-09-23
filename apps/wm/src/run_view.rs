@@ -285,6 +285,10 @@ pub struct MpRunView {
     /// Tick or of any Down/Up/Scroll so their order holds.
     #[rust]
     pending_move: Option<RemoteMouseMove>,
+    /// Paced (Android): the finger's earlier samples since the last Tick,
+    /// oldest first — the child's velocity tracker needs every sample.
+    #[rust]
+    move_history: Vec<RemoteMouseMove>,
     #[rust]
     last_rect: Rect,
     #[rust]
@@ -422,11 +426,19 @@ impl MpRunView {
         self.child_mouse_cancel = caps.mouse_cancel;
     }
 
-    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
-        let mut msgs = Vec::with_capacity(2);
+    /// The pointer samples owed to the child, oldest first.
+    fn take_moves(&mut self, msgs: &mut Vec<StudioToApp>) {
+        for mv in self.move_history.drain(..) {
+            msgs.push(StudioToApp::MouseMove(mv));
+        }
         if let Some(mv) = self.pending_move.take() {
             msgs.push(StudioToApp::MouseMove(mv));
         }
+    }
+
+    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
+        let mut msgs = Vec::with_capacity(2);
+        self.take_moves(&mut msgs);
         msgs.push(msg);
         self.emit_to_app(cx, client, msgs);
     }
@@ -500,9 +512,7 @@ impl MpRunView {
 
     fn append_tick(&mut self, target: RunTarget, msgs: &mut Vec<StudioToApp>) {
         trace_host(&format!("tick c{}", target.client));
-        if let Some(mv) = self.pending_move.take() {
-            msgs.push(StudioToApp::MouseMove(mv));
-        }
+        self.take_moves(msgs);
         msgs.push(StudioToApp::Tick);
         if makepad_error_log::trace_enabled("pace") {
             log!("pace wm tick_tx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, target.client);
@@ -581,6 +591,7 @@ impl MpRunView {
         self.tick_frame_pending = false;
         self.want_tick(cx);
         self.pending_move = None;
+        self.move_history.clear();
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.swapchain = None;
@@ -1610,13 +1621,33 @@ impl Widget for MpRunView {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
                     trace_host("mm");
                     // Held until the next Tick (or the next edge): one
-                    // position per frame is all a frame can show.
+                    // position per frame is all a frame can show. Paced
+                    // (Android), every sample goes (the child's velocity
+                    // tracker wants them all), and a move with no Tick
+                    // out goes at once with its own Tick rather than
+                    // waiting for the next display frame.
+                    let paced = self.paced(cx);
+                    if paced {
+                        if let Some(prev) = self.pending_move.take() {
+                            if self.move_history.len() >= 32 {
+                                self.move_history.remove(0);
+                            }
+                            self.move_history.push(prev);
+                        }
+                    }
                     self.pending_move = Some(RemoteMouseMove {
                         x: local.x,
                         y: local.y,
                         time: e.time,
                         modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                     });
+                    if paced && self.tick_outstanding.is_none() && !self.paint_holds_tick(cx) {
+                        let mut msgs = Vec::new();
+                        self.append_tick(target, &mut msgs);
+                        self.emit_to_app(cx, target.client, msgs);
+                    } else if paced {
+                        self.want_tick(cx);
+                    }
                 }
             }
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {

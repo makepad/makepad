@@ -586,6 +586,35 @@ pub struct PhoneState {
     /// drawn exactly there; after release it springs to 0, handing the app
     /// over to the openness/overview springs without a jump.
     pub lift: Option<Lift>,
+    /// The Android skin: its motion follows the Pixel Launcher
+    /// (`launcher_motion`); the fields below drive it.
+    pub android: bool,
+    /// Device pixels per point (the spec's px speeds are converted with it).
+    pub density: f64,
+    /// An app opening from its icon: seconds since the tap (500 ms, then
+    /// cleared). `openness` follows it linearly.
+    pub open_elapsed: Option<f64>,
+    /// A lifted app released home, flying into its icon.
+    pub flight: Option<crate::launcher_motion::HomeFlight>,
+    /// The home screen revealing after a swipe home: seconds since.
+    pub reveal_elapsed: Option<f64>,
+    /// Recents' neighbour cards: 0 pushed off to the sides, 1 attached.
+    pub neighbours: f64,
+    pub neighbours_target: f64,
+    /// A lift paused (Quickstep's motion pause): the switcher on release.
+    pub lift_paused: bool,
+    /// Consecutive slow move samples toward a pause.
+    pub lift_slow: u32,
+    /// The released lift settling into its card or back (`lift.blend`).
+    pub lift_settle: Option<crate::launcher_motion::Tween>,
+    /// `overview` on a timed ease (a Recents card opening).
+    pub overview_tween: Option<crate::launcher_motion::Tween>,
+    /// The All Apps panel settling (pager pages).
+    pub drawer_tween: Option<crate::launcher_motion::Tween>,
+    /// Haptics asked for since the host last took them.
+    pub haptics: Vec<crate::launcher_motion::Haptic>,
+    /// The Recents page last ticked for.
+    pub card_tick_page: i64,
 }
 /// See [`PhoneState::lift`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -637,7 +666,10 @@ impl Default for PhoneState {
             ime: HashMap::new(), shift: false, symbols: false,
             desktop_size: None, desktop_clients: Vec::new(), desktop_style: DesktopStyle::Omarchy, viewport: Rect::default(),
             chrome: PhoneChrome::default(), band_from_app: false,
-            tiles: HomeTiles::default(), lift: None }
+            tiles: HomeTiles::default(), lift: None,
+            android: false, density: 1.0, open_elapsed: None, flight: None, reveal_elapsed: None,
+            neighbours: 1.0, neighbours_target: 1.0, lift_paused: false, lift_slow: 0, lift_settle: None,
+            overview_tween: None, drawer_tween: None, haptics: Vec::new(), card_tick_page: 0 }
     }
 }
 impl PhoneState {
@@ -686,7 +718,20 @@ impl PhoneState {
             self.openness = 1.0;
             self.openness_v = 0.0;
             self.overview_v = self.overview_v.min(0.0);
+            // Android: the card grows to full screen in 336 ms on
+            // TOUCH_RESPONSE (Quickstep `RECENTS_LAUNCH_DURATION`).
+            if self.android {
+                self.overview_tween = Some(crate::launcher_motion::Tween::new(self.overview, 0.0, crate::launcher_motion::RECENTS_LAUNCH_SECS, crate::launcher_motion::Curve::TouchResponse));
+            }
+        } else if self.android && self.openness < 0.5 && self.flight.is_none() {
+            // Android: opened from its icon or tile — 500 ms, emphasized
+            // curves, out of a circle the icon's size.
+            self.open_elapsed = Some(0.0);
+            self.openness = 0.0;
+            self.openness_v = 0.0;
         }
+        self.flight = None;
+        self.reveal_elapsed = None;
         self.screen = PhoneScreen::App;
         self.dismiss_y = 0.0;
     }
@@ -700,6 +745,16 @@ impl PhoneState {
         let count = self.page_count();
         let page = if screen == PhoneScreen::Drawer { self.library_page() } else { self.pager.target().round().min(self.last_home_page()) };
         self.pager.set_target(page, count);
+        // Android: All Apps opens in 600 ms and closes in 300 ms when not
+        // dragged (Launcher `config_allAppsOpenDuration`/`CloseDuration`).
+        self.drawer_tween = None;
+        if self.android && (screen == PhoneScreen::Drawer || self.drawer > 0.001) && page != self.pager.page {
+            let secs = if screen == PhoneScreen::Drawer { 0.6 } else { 0.3 };
+            self.drawer_tween = Some(crate::launcher_motion::Tween::new(self.pager.page, page, secs, crate::launcher_motion::Curve::Decelerate));
+            if screen == PhoneScreen::Drawer {
+                self.haptics.push(crate::launcher_motion::Haptic::VirtualKey);
+            }
+        }
     }
     /// The pager's pages: the home page(s), then the library.
     pub fn page_count(&self) -> usize {
@@ -714,6 +769,8 @@ impl PhoneState {
     /// The finger lands on the home page or the library: the pager holds
     /// its page until the finger lifts.
     pub fn library_drag_begin(&mut self) {
+        // A settling panel stops under the finger.
+        self.drawer_tween = None;
         self.pager.drag_begin();
     }
     /// The finger moved `d` points along the pan (right positive on iOS,
@@ -798,7 +855,14 @@ impl PhoneState {
         let (open, overview) = self.spring_targets();
         let mut active = false;
         let dragging = self.gesture.as_ref().is_some_and(|g| g.bottom);
-        for (value, speed, target) in [(&mut self.openness, &mut self.openness_v, open), (&mut self.overview, &mut self.overview_v, overview)] {
+        // Android's timed and spring-driven motion (`launcher_motion`) runs
+        // the values it owns; the generic springs leave those alone.
+        let (timed_open, timed_overview) = self.step_android(dt, dragging, &mut active);
+        for (value, speed, target, timed) in [(&mut self.openness, &mut self.openness_v, open, timed_open), (&mut self.overview, &mut self.overview_v, overview, timed_overview)] {
+            if timed {
+                *speed = 0.0;
+                continue;
+            }
             if dragging {
                 *speed = 0.0;
                 continue;
@@ -813,7 +877,7 @@ impl PhoneState {
             }
             active |= *value != target;
         }
-        if let Some(lift) = self.lift.as_mut() {
+        if let Some(lift) = self.lift.as_mut().filter(|_| self.lift_settle.is_none()) {
             if !dragging {
                 (lift.blend, lift.blend_v) = spring_step(lift.blend, lift.blend_v, 0.0, dt);
                 if lift.blend.abs() < 0.001 && lift.blend_v.abs() < 0.01 {
@@ -827,8 +891,27 @@ impl PhoneState {
         if (self.keyboard_target - self.keyboard).abs() < 0.25 { self.keyboard = self.keyboard_target; }
         active |= self.keyboard != self.keyboard_target;
         active |= self.cards.step(dt);
-        active |= self.pager.step(dt);
+        if let Some(mut tween) = self.drawer_tween.take() {
+            let (page, going) = tween.step(dt);
+            if going && !self.pager.dragging() {
+                self.pager.set(page);
+                self.drawer_tween = Some(tween);
+                active = true;
+            } else if !self.pager.dragging() {
+                self.pager.set(tween.to);
+            }
+        } else {
+            active |= self.pager.step(dt);
+        }
         self.drawer = self.pager.page - self.last_home_page();
+        // A Recents page crossed: a low tick.
+        if self.android && self.screen == PhoneScreen::Recents {
+            let page = self.cards.page.round() as i64;
+            if page != self.card_tick_page {
+                self.card_tick_page = page;
+                self.haptics.push(crate::launcher_motion::Haptic::Tick);
+            }
+        }
         // Edit mode is an animation for as long as it lasts: the jiggle
         // asks for frames, the held icon's lift eases up and back down.
         let lift = if self.edit.active && self.edit.drag.is_some() { 1.0 } else { 0.0 };
@@ -836,6 +919,153 @@ impl PhoneState {
         if (self.edit.lift - lift).abs() < 0.002 { self.edit.lift = lift; }
         active |= self.edit.active || self.edit.lift != lift;
         active
+    }
+    /// Android's motion for one frame (see the fields above): which of
+    /// `openness` / `overview` it drove this frame.
+    fn step_android(&mut self, dt: f64, dragging: bool, active: &mut bool) -> (bool, bool) {
+        use crate::launcher_motion as lm;
+        let mut timed_open = false;
+        let mut timed_overview = false;
+        if let Some(e) = self.open_elapsed.as_mut() {
+            *e += dt;
+            self.openness = (*e / lm::APP_OPEN_SECS).min(1.0);
+            timed_open = true;
+            *active = true;
+            if *e >= lm::APP_OPEN_SECS.max(lm::LAUNCH_HOME_SECS) {
+                self.open_elapsed = None;
+            }
+        }
+        if let Some(flight) = self.flight.as_mut() {
+            let going = flight.step(dt);
+            self.openness = (1.0 - flight.progress.x).clamp(0.0, 1.0);
+            timed_open = true;
+            *active = true;
+            if !going {
+                self.flight = None;
+                self.openness = 0.0;
+            }
+        }
+        if let Some(e) = self.reveal_elapsed.as_mut() {
+            *e += dt;
+            *active = true;
+            if *e >= lm::REVEAL_SECS {
+                self.reveal_elapsed = None;
+            }
+        }
+        if let Some(mut tween) = self.overview_tween.take() {
+            let (v, going) = tween.step(dt);
+            self.overview = v.clamp(0.0, 1.0);
+            timed_overview = true;
+            *active = true;
+            if going { self.overview_tween = Some(tween); }
+        }
+        if !dragging {
+            if let Some(mut tween) = self.lift_settle.take() {
+                let (blend, going) = tween.step(dt);
+                *active = true;
+                match self.lift.as_mut() {
+                    Some(lift) if going => {
+                        lift.blend = blend;
+                        self.lift_settle = Some(tween);
+                    }
+                    _ => self.lift = None,
+                }
+            }
+        }
+        if self.neighbours != self.neighbours_target {
+            let step = dt / lm::RECENTS_ATTACH_SECS;
+            self.neighbours = if self.neighbours < self.neighbours_target {
+                (self.neighbours + step).min(self.neighbours_target)
+            } else {
+                (self.neighbours - step).max(self.neighbours_target)
+            };
+            *active = true;
+        }
+        (timed_open, timed_overview)
+    }
+    /// The home screen's scale and alpha for this frame (Android): All Apps
+    /// pushing it back and hiding it at 40 %, a launch pushing it to 0.97,
+    /// the reveal after a swipe home bringing it from 0.85.
+    pub fn home_look(&self) -> (f64, f64) {
+        use crate::launcher_motion as lm;
+        if !self.android {
+            return (1.0, 1.0);
+        }
+        let (mut scale, mut alpha, _, _, _) = lm::all_apps_frame(self.drawer.max(0.0));
+        if let Some(e) = self.open_elapsed {
+            scale *= lm::launch_home_scale(e);
+        } else if self.screen == PhoneScreen::App && self.openness >= 0.999 {
+            scale *= lm::LAUNCH_HOME_SCALE;
+        }
+        if let Some(e) = self.reveal_elapsed {
+            let (s, a) = lm::reveal(e);
+            scale *= s;
+            alpha *= a;
+        }
+        (scale, alpha)
+    }
+    /// A lifted app released to Home (Android): it flies into `to` (its
+    /// icon, or the dock-row circle), the home reveals behind it.
+    pub fn fly_home(&mut self, to: Rect, to_radius: f64, velocity: Vec2d) {
+        let Some(lift) = self.lift.take() else { return };
+        let from_radius = crate::mobile_tiles::HomeMetrics::of(DesktopStyle::Android).card_radius;
+        self.flight = Some(crate::launcher_motion::HomeFlight::new(lift.rect, from_radius, to, to_radius, velocity, self.density));
+        self.reveal_elapsed = Some(0.0);
+        self.lift_settle = None;
+        self.openness = 1.0;
+        self.openness_v = 0.0;
+        self.overview = 0.0;
+        self.overview_v = 0.0;
+        self.neighbours = 0.0;
+        self.neighbours_target = 0.0;
+    }
+    /// A released lift settles into its Recents card (overshoot) or back
+    /// into the app (decelerate), in Quickstep's 350 ms.
+    pub fn settle_lift(&mut self, to_recents: bool) {
+        use crate::launcher_motion as lm;
+        let Some(lift) = self.lift.as_ref() else { return };
+        let (duration, curve) = if to_recents {
+            (lm::swipe_settle_secs(1.0 - self.overview.min(1.0)).max(0.2), lm::Curve::Overshoot)
+        } else {
+            (lm::swipe_settle_secs(self.overview.max(0.3)), lm::Curve::Decelerate)
+        };
+        self.lift_settle = Some(lm::Tween::new(lift.blend, 0.0, duration, curve));
+        if to_recents {
+            self.overview = 1.0;
+            self.overview_v = 0.0;
+            self.neighbours_target = 1.0;
+        } else {
+            self.overview = 0.0;
+            self.overview_v = 0.0;
+        }
+    }
+    /// The All Apps panel released (Android, Launcher's rules): a fling
+    /// faster than 1 dp/ms goes its way, else it opens past 40 % from Home
+    /// or closes under 60 % from All Apps; it settles on Launcher's
+    /// duration and curve. `v` points/s, up positive.
+    pub fn all_apps_release(&mut self, v_up: f64, from_drawer: bool) {
+        use crate::launcher_motion as lm;
+        let count = self.page_count();
+        self.pager.cancel_drag(count);
+        let p = self.drawer;
+        let open = if v_up.abs() > lm::ALL_APPS_FLING {
+            v_up > 0.0
+        } else if from_drawer {
+            p >= lm::ALL_APPS_CLOSE_AT
+        } else {
+            p > lm::ALL_APPS_OPEN_AT
+        };
+        let target = if open { self.library_page() } else { self.last_home_page() };
+        let (secs, fast) = lm::all_apps_settle(target - self.pager.page, v_up, self.density);
+        self.drawer_tween = Some(lm::Tween::new(self.pager.page, target, secs, if fast { lm::Curve::Scroll } else { lm::Curve::ScrollCubic }));
+        if open && !from_drawer {
+            self.haptics.push(lm::Haptic::VirtualKey);
+        }
+        self.search_focused = false;
+        self.keyboard_target = 0.0;
+        self.dismiss_y = 0.0;
+        self.screen = if open { PhoneScreen::Drawer } else { PhoneScreen::Home };
+        if self.screen != PhoneScreen::Home { self.leave_edit(); }
     }
     /// A bottom drag in flight, `dy` points up the screen (negative). From
     /// a full-screen app the app pulls into its card (`openness` stays 1,

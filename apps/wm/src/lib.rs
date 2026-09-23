@@ -30,6 +30,7 @@ mod desktop;
 mod desktop_app;
 mod snap;
 mod mobile;
+mod launcher_motion;
 mod mobile_surface;
 mod mobile_app;
 mod mobile_tiles;

@@ -493,7 +493,18 @@ class MakepadSurface
             }
         }
 
-        MakepadNative.surfaceOnTouch(event);
+        // Every sample the input system batched into this move goes first
+        // (a fling's velocity is read from all of them), then the event.
+        if (actionMasked == MotionEvent.ACTION_MOVE) {
+            int history = event.getHistorySize();
+            for (int h = 0; h < history; h++) {
+                long nanos = event.getHistoricalEventTime(h) * 1000000L;
+                MakepadNative.surfaceOnTouchHistory(event, h, nanos);
+            }
+        }
+        // (The build's SDK predates getEventTimeNanos: millisecond times.)
+        long nanos = event.getEventTime() * 1000000L;
+        MakepadNative.surfaceOnTouchNanos(event, nanos);
         return retval;
     }
 
@@ -2228,6 +2239,19 @@ public class MakepadActivity
             }
         }
         return "";
+    }
+
+    // `cx.haptic_feedback`: 0 click, 1 virtual key, 2 tick (the Pixel
+    // Launcher's EFFECT_CLICK, VIRTUAL_KEY and low tick call sites).
+    public void performHaptic(final int kind) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                int constant = kind == 1 ? android.view.HapticFeedbackConstants.VIRTUAL_KEY
+                    : kind == 2 ? android.view.HapticFeedbackConstants.CLOCK_TICK
+                    : android.view.HapticFeedbackConstants.CONTEXT_CLICK;
+                getWindow().getDecorView().performHapticFeedback(constant);
+            }
+        });
     }
 
     // `cx.open_url`: hand the URL to whatever the system opens it with.

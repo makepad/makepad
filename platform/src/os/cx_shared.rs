@@ -1699,6 +1699,26 @@ impl Cx {
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(any(not(linux_direct), use_vulkan))]
+    /// Only the Ticks of a batch fold into its last; every pointer sample
+    /// stays (a touch child's velocity tracker needs each one).
+    #[allow(dead_code)]
+    pub(crate) fn stdin_coalesce_host_ticks(msgs: &mut Vec<StudioToApp>) {
+        let ticks = msgs.iter().filter(|msg| matches!(msg, StudioToApp::Tick)).count();
+        if ticks < 2 {
+            return;
+        }
+        let mut seen = 0;
+        msgs.retain(|msg| {
+            if matches!(msg, StudioToApp::Tick) {
+                seen += 1;
+                seen == ticks
+            } else {
+                true
+            }
+        });
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn stdin_coalesce_host_batch(msgs: &mut Vec<StudioToApp>) {
         let ticks = msgs
             .iter()
