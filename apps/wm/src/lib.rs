@@ -656,6 +656,7 @@ pub struct App {
     #[rust] phone_time: f64,
     /// The storage read of the home page's order, answered in `Event::Storage`.
     #[rust] home_order_request: Option<StorageRequestId>,
+    #[rust] shell_look_request: Option<StorageRequestId>,
 }
 
 /// A warm instance's own swapchain: the host end of the frames a DORMANT
@@ -4941,6 +4942,7 @@ impl AppMain for App {
         self.phone_animation_event(cx,event);
         if let Event::Storage(responses) = event {
             self.home_order_response(cx, responses);
+            self.shell_look_response(cx, responses);
         }
         if let Some(ne) = self.style_frame.is_event(event) {
             if self.state.is_some() {

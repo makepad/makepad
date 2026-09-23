@@ -265,6 +265,13 @@ impl Tween {
     }
 }
 
+/// The home screen behind the switcher recedes to the launcher's hint
+/// scale (Quickstep HINT state, 0.92) as it fades.
+pub const OVERVIEW_HOME_SCALE: f64 = 0.92;
+/// The wallpaper behind the switcher dims by the launcher's overview scrim
+/// (100/255).
+pub const OVERVIEW_SCRIM: f64 = 100.0 / 255.0;
+
 /// Recents: neighbour cards slide in over 300 ms when the lift pauses.
 pub const RECENTS_ATTACH_SECS: f64 = 0.3;
 /// Swipe-up settle into Recents / back into the app (Quickstep

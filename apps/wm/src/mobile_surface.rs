@@ -541,6 +541,9 @@ impl PhoneSurface {
             self.label(cx,r,"All apps  ↑",14.0,false,alpha(ink,opacity));
             self.hits.push((rect(r.pos.x-10.0,r.pos.y-10.0,120.0,48.0),PhoneHit::Drawer));
         }
+        if home && !edit.active {
+            self.draw_look_switcher(cx,state,screen,opacity);
+        }
         if edit.active {
             // "Done" leaves edit mode; so does a tap beside the icons.
             let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0;
@@ -560,6 +563,50 @@ impl PhoneSurface {
                 self.icons.draw(cx,&drag.id,style,r,1.0,ink);
             }
         }
+    }
+    /// The home screen's look switcher: Light · Dark · iOS, a compact
+    /// segmented pill at the top right (by the date on Android's portrait
+    /// home), native to each skin: Material's tonal segmented button with a
+    /// filled selection, iOS's frosted segmented control with a white
+    /// thumb. Not scaled with the home: it is chrome.
+    fn draw_look_switcher(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, opacity: f32) {
+        let phone=&state.phone;
+        let style=state.style.target;
+        let ios=style==DesktopStyle::Ios;
+        let dark=state.style.dark;
+        let landscape=screen.size.x>screen.size.y;
+        let selected=if ios {2} else if dark {1} else {0};
+        let (seg_w,h)=(42.0,30.0);
+        let w=seg_w*3.0;
+        // On Android's portrait home it sits on the clock's row, right of
+        // the centred clock; elsewhere (iOS, landscape: the tiles start
+        // right under the status bar) centred above the page dots / the
+        // "All apps" row.
+        let r=if ios || landscape {
+            let dock=Self::home_dock(screen,phone.chrome);
+            rect(screen.pos.x+(screen.size.x-w)*0.5,dock.pos.y-32.0-8.0-h,w,h)
+        } else {
+            let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0+(56.0-h)*0.5;
+            rect(screen.pos.x+screen.size.x-16.0-w,top,w,h)
+        };
+        let saved=self.xf.take();
+        let ink=if dark {rgb(255,255,255)} else {rgb(31,27,38)};
+        if ios {
+            self.rounded(cx,r,(h*0.5) as f32,alpha(if dark {rgb(60,60,67)} else {rgb(118,118,128)},0.24*opacity));
+        } else {
+            self.rounded(cx,r,(h*0.5) as f32,alpha(if dark {rgb(43,41,48)} else {rgb(243,237,247)},0.92*opacity));
+        }
+        for (i,label) in ["Light","Dark","iOS"].iter().enumerate() {
+            let seg=rect(r.pos.x+i as f64*seg_w,r.pos.y,seg_w,h);
+            if i==selected {
+                let thumb=rect(seg.pos.x+2.0,seg.pos.y+2.0,seg_w-4.0,h-4.0);
+                let fill=if ios {if dark {rgb(99,99,102)} else {rgb(255,255,255)}} else if dark {rgb(74,68,88)} else {rgb(232,222,248)};
+                self.rounded(cx,thumb,((h-4.0)*0.5) as f32,alpha(fill,opacity));
+            }
+            self.label(cx,seg,label,12.0,i==selected,alpha(ink,opacity*if i==selected {1.0} else {0.72}));
+            self.hits.push((seg,PhoneHit::Look(i as u8)));
+        }
+        self.xf=saved;
     }
     /// Android's app drawer over the home page and its live tiles (the desk
     /// calls it after compositing them): a scrim that deepens to 12 %, then
@@ -699,7 +746,9 @@ impl PhoneSurface {
         let status_h=chrome.top_reserve(screen);
         // On the phone the desk paints the band from the app's own frame
         // (`band_from_app`); the desktop skin keeps its readable fake bar.
-        if phone.screen==PhoneScreen::App && status_h>0.0 && !phone.band_from_app {
+        // Only over the open app itself: while it is lifted into a card
+        // (`overview`) the strip would be a white band over the switcher.
+        if phone.screen==PhoneScreen::App && status_h>0.0 && !phone.band_from_app && phone.overview<0.001 && phone.lift.is_none() {
             self.rounded(cx,rect(screen.pos.x,screen.pos.y,screen.size.x,status_h),0.0,if state.style.dark {rgb(24,24,28)}else{rgb(248,248,252)});
         }
         if chrome.fake_status() {
@@ -721,7 +770,7 @@ impl PhoneSurface {
         if phone.overview>0.01 {
             // Each card's header over it, in the ink of the backdrop:
             // Android 12 above the card, its 24 icon, 8, the 14/20 title
-            // (`draw_recents_scrim`); iOS as it was, white on the glass.
+            // (the dimmed wallpaper); iOS as it was, white on the glass.
             let head=Self::recents_ink(state.style.target,state.style.dark);
             for (index,client) in phone.order.iter().enumerate() {
                 if let Some(slot)=state.clients.get(client) {
@@ -775,15 +824,10 @@ impl PhoneSurface {
     }
     /// Recents' ink: white over iOS's dark frosted backdrop; Android's
     /// tonal scrim takes the theme's on-surface ink.
-    fn recents_ink(style: DesktopStyle, dark: bool) -> Vec4f {
-        if style==DesktopStyle::Ios || dark {if style==DesktopStyle::Ios {rgb(255,255,255)} else {rgb(230,225,229)}} else {rgb(29,27,32)}
-    }
-    /// Android's Recents backdrop over the blurred home page: a tonal
-    /// surface (light #F3EDF7, dark #1C1B1F) at 60 %, so the headers read
-    /// whatever the wallpaper is. iOS keeps its frosted glass alone.
-    pub fn draw_recents_scrim(&mut self, cx: &mut Cx2d, screen: Rect, style: DesktopStyle, dark: bool, opacity: f32) {
-        if style==DesktopStyle::Ios || opacity<0.01 {return;}
-        self.rounded(cx,screen,0.0,alpha(if dark {rgb(28,27,31)} else {rgb(243,237,247)},0.6*opacity));
+    /// Ink over the switcher's backdrop: the launcher dims the wallpaper
+    /// (overview scrim) in both appearances, so it is light ink on both.
+    fn recents_ink(style: DesktopStyle, _dark: bool) -> Vec4f {
+        if style==DesktopStyle::Ios {rgb(255,255,255)} else {rgb(240,236,244)}
     }
     fn draw_keyboard(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, backdrop: Option<GaussBlurSnapshot>) {
         let phone=&state.phone;

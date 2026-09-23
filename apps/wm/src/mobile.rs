@@ -105,6 +105,8 @@ pub enum PhoneHit {
     ClearSearch, CancelSearch,
     /// Edit mode's "Done" pill.
     Done,
+    /// The home screen's look switcher: 0 light, 1 dark, 2 the iOS skin.
+    Look(u8),
 }
 
 /// How far past its ends a paged scroller or the library follows the
@@ -689,7 +691,7 @@ impl PhoneState {
     }
     /// The home page is on screen at all (tiles need drawing and driving).
     pub fn home_visible(&self) -> bool {
-        self.screen != PhoneScreen::App || self.openness < 0.999
+        self.screen != PhoneScreen::App || self.openness < 0.999 || (self.android && self.overview > 0.001)
     }
     pub fn activate(&mut self, client: ClientId) {
         self.search_focused = false;
@@ -737,6 +739,14 @@ impl PhoneState {
     }
     pub fn navigate(&mut self, screen: PhoneScreen) {
         self.search_focused = false;
+        if screen == PhoneScreen::Recents {
+            // The switcher shows every card: a paused lift slides them in
+            // (`settle_lift`), anything else has them there at once.
+            if self.lift_settle.is_none() {
+                self.neighbours = 1.0;
+            }
+            self.neighbours_target = 1.0;
+        }
         self.screen = screen;
         self.keyboard_target = 0.0;
         self.gesture = None;
@@ -1002,6 +1012,12 @@ impl PhoneState {
             scale *= s;
             alpha *= a;
         }
+        // The switcher: the home screen recedes toward the launcher's hint
+        // scale (0.92) and fades out, continuously with `overview`; the
+        // wallpaper stays and dims (`recents_dim`).
+        let o = self.overview.clamp(0.0, 1.0);
+        scale *= 1.0 + (lm::OVERVIEW_HOME_SCALE - 1.0) * o;
+        alpha *= 1.0 - o;
         (scale, alpha)
     }
     /// A lifted app released to Home (Android): it flies into `to` (its
@@ -1030,13 +1046,11 @@ impl PhoneState {
             (lm::swipe_settle_secs(self.overview.max(0.3)), lm::Curve::Decelerate)
         };
         self.lift_settle = Some(lm::Tween::new(lift.blend, 0.0, duration, curve));
+        // The switcher's backdrop eases with the card, never a jump.
+        self.overview_tween = Some(lm::Tween::new(self.overview, if to_recents { 1.0 } else { 0.0 }, duration, lm::Curve::Decelerate));
+        self.overview_v = 0.0;
         if to_recents {
-            self.overview = 1.0;
-            self.overview_v = 0.0;
             self.neighbours_target = 1.0;
-        } else {
-            self.overview = 0.0;
-            self.overview_v = 0.0;
         }
     }
     /// The All Apps panel released (Android, Launcher's rules): a fling
@@ -1336,6 +1350,41 @@ mod tests {
             }
             assert!((last - app.size.x).abs() < 0.5, "it ends full screen ({last})");
         }
+    }
+
+    /// Android's switcher: cards are there when it is opened from Home (the
+    /// neighbours only wait for a paused lift), the backdrop eases with a
+    /// settling lift instead of jumping, and the home screen behind it
+    /// recedes continuously.
+    #[test]
+    fn android_switcher_cards_and_backdrop_are_continuous() {
+        let mut phone = PhoneState::default();
+        phone.android = true;
+        phone.order = vec![1 as ClientId];
+        phone.neighbours = 0.0;
+        phone.neighbours_target = 0.0;
+        phone.navigate(PhoneScreen::Recents);
+        assert_eq!(phone.neighbours, 1.0, "from Home every card shows at once");
+
+        let mut phone = PhoneState::default();
+        phone.android = true;
+        phone.screen = PhoneScreen::App;
+        phone.client = Some(1 as ClientId);
+        phone.openness = 1.0;
+        phone.overview = 0.3;
+        phone.lift = Some(Lift { rect: Rect::default(), blend: 1.0, blend_v: 0.0 });
+        phone.settle_lift(true);
+        phone.navigate(PhoneScreen::Recents);
+        let mut last = phone.overview;
+        assert!((last - 0.3).abs() < 1e-9, "no jump at release");
+        for _ in 0..120 {
+            phone.step(1.0 / 120.0);
+            assert!(phone.overview >= last - 1e-9 && phone.overview - last < 0.2, "eases up");
+            last = phone.overview;
+        }
+        assert!((phone.overview - 1.0).abs() < 1e-6);
+        let (s, a) = phone.home_look();
+        assert!(a < 1e-6 && s < 1.0, "the home has receded and faded behind the cards");
     }
 
     #[test]

@@ -139,6 +139,9 @@ pub const THEME_KEY: &str = "theme";
 /// The key the home page's arranged icon order is kept under (mobile_tiles
 /// `HomeOrder::to_document`).
 pub const HOME_ORDER_KEY: &str = "home.order";
+/// The phone shell's look (`android-light|android-dark|ios-light|ios-dark`),
+/// set by the home screen's switcher.
+pub const SHELL_LOOK_KEY: &str = "shell.look";
 
 /// Remember the theme the person chose: the omarchy-style state file
 /// beside the themes natively (what the next start and every child reads),

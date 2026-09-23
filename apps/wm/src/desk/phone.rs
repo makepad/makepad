@@ -826,12 +826,23 @@ impl WmDesk {
             self.phone_ui.draw_android_drawer_layer(cx,state,screen);
             self.compositor.as_mut().unwrap().content(screen);
         }
-        if phone.overview>0.001 {
+        if phone.overview>0.001 && phone.android {
+            // The launcher's switcher: the wallpaper (the home screen has
+            // receded and faded, `home_look`) dimmed by its overview scrim,
+            // continuously with `overview` — no tonal surface, in light or
+            // dark.
+            let dim=(phone.overview.clamp(0.0,1.0)*crate::launcher_motion::OVERVIEW_SCRIM) as f32;
+            let saved=self.draw_panel.color;
+            self.draw_panel.color=vec4(0.0,0.0,0.0,1.0);
+            self.draw_panel.alpha=dim;
+            self.draw_panel.draw_abs(cx,screen);
+            self.draw_panel.color=saved;
+            self.compositor.as_mut().unwrap().content(screen);
+        } else if phone.overview>0.001 {
             let blur = (phone.overview.clamp(0.0, 1.0) * 3.0) as f32;
             self.phone_ui.overview_glass.set_blurriness(cx, blur);
             let backdrop=self.compositor.as_mut().unwrap().backdrop(cx,screen,blur as f64);
             self.phone_ui.overview_glass.draw_surface_with_backdrop(cx,screen,Some(backdrop),phone.overview as f32);
-            self.phone_ui.draw_recents_scrim(cx,screen,style,dark,phone.overview as f32);
             self.compositor.as_mut().unwrap().content(screen);
         }
         let mut order=phone.order.clone();

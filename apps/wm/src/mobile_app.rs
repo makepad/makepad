@@ -326,6 +326,7 @@ impl App {
     /// `home_order_response`.
     pub(super) fn load_home_order(&mut self,cx:&mut Cx) {
         self.home_order_request=Some(cx.storage(host::STORAGE).get(cx,host::HOME_ORDER_KEY));
+        self.shell_look_request=Some(cx.storage(host::STORAGE).get(cx,host::SHELL_LOOK_KEY));
     }
     pub(super) fn home_order_response(&mut self,cx:&mut Cx,responses:&[StorageResponse]) {
         let Some(id)=self.home_order_request else {return};
@@ -340,6 +341,41 @@ impl App {
         self.state_mut().phone.home_order_loaded=true;
         self.ensure_home_order();
         self.redraw_all(cx);
+    }
+    /// The home screen's look switcher: 0 light, 1 dark (the Android
+    /// skin), 2 the iOS skin (in the current appearance). Applied live —
+    /// the shell and every hosted app restyle in place, none restarts —
+    /// and kept as `shell.look` in the WM's storage.
+    pub(super) fn set_phone_look(&mut self,cx:&mut Cx,look:u8) {
+        use crate::desktop::DesktopStyle;
+        let (style,dark)=match look {
+            0=>(DesktopStyle::Android,false),
+            1=>(DesktopStyle::Android,true),
+            _=>(DesktopStyle::Ios,self.state_mut().style.dark),
+        };
+        let current=self.state_mut().style.clone();
+        if current.target==style && current.dark==dark {return;}
+        self.state_mut().style.dark=dark;
+        self.set_desktop_style(cx,style);
+        let doc=format!("{}-{}",if style==DesktopStyle::Ios {"ios"} else {"android"},if dark {"dark"} else {"light"});
+        let _=cx.storage(host::STORAGE).set(cx,host::SHELL_LOOK_KEY,doc.into_bytes());
+        self.animate_phone(cx);
+    }
+    /// The saved look (`shell.look`), applied once storage answers.
+    pub(super) fn shell_look_response(&mut self,cx:&mut Cx,responses:&[StorageResponse]) {
+        let Some(id)=self.shell_look_request else {return};
+        let Some(response)=responses.iter().find(|r|r.request_id==id) else {return};
+        self.shell_look_request=None;
+        if self.state.is_none() || !self.state_mut().style.target.mobile() {return;}
+        let Ok(StorageResult::Value(Some(bytes)))=&response.result else {return};
+        let look=match std::str::from_utf8(bytes).unwrap_or("") {
+            "android-light"=>0,
+            "android-dark"=>1,
+            "ios-light"|"ios-dark"=>2,
+            _=>return,
+        };
+        if look==2 {self.state_mut().style.dark=bytes.ends_with(b"dark");}
+        self.set_phone_look(cx,look);
     }
     /// The person arranged something: the document replaces the old one.
     fn save_home_order(&mut self,cx:&mut Cx) {
@@ -575,6 +611,7 @@ impl App {
                 window.resize(cx,dvec2(size.y,size.x));
             }
             PhoneHit::Style=>self.open_style_menu(cx),
+            PhoneHit::Look(look)=>self.set_phone_look(cx,look),
             PhoneHit::Appearance=>{
                 let focused=self.state_mut().phone.search_focused;
                 self.toggle_desktop_appearance(cx);
