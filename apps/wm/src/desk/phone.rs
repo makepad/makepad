@@ -967,7 +967,20 @@ impl WmDesk {
                         self.record_capture(cx,scope,client,&mut capture,app,true);
                         capture.settle(app.size,style,dark);
                     }else{capture.frame.freeze(cx);}
-                    if crossfade {self.present_capture_window(cx,&capture,app,display,opacity,radius);}
+                    // A tile app showing its tile while the look changed:
+                    // its full picture is of the old look and no full frame
+                    // comes until it opens. Its card is its current tile on
+                    // its own ground instead of a stale light (or dark) page.
+                    let old_look=!full_ready && !foreground && (capture.style!=style || capture.dark!=dark);
+                    let tile_now=stored.tile.as_ref().filter(|t|old_look && t.style==style && t.dark==dark && t.size.x>0.0);
+                    if let Some(tile)=tile_now {
+                        self.phone_ui.draw_launch_card_ground(cx,display,&app_id,style,dark,ground,opacity,radius);
+                        let scale=(display.size.x*0.86/tile.size.x).min(display.size.y*0.6/tile.size.y.max(1.0));
+                        let size=tile.size*scale;
+                        let at=Rect{pos:display.pos+(display.size-size)*0.5,size};
+                        self.present_capture(cx,tile,at,opacity,(HomeMetrics::of(style).tile_radius*scale) as f32);
+                    }
+                    else if crossfade {self.present_capture_window(cx,&capture,app,display,opacity,radius);}
                     else {self.present_capture(cx,&capture,display,opacity,radius);}
                     if refresh {stored.bands.recorded(band_key,content_changed);}
                     self.present_bands(cx,&mut stored,&capture,app,foreground && phone.openness>0.999,band,nav_band,opacity,ground,band_key,&mut band_painted,&mut band_luma);

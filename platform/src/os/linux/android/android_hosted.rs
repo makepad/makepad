@@ -987,7 +987,11 @@ impl Cx {
     /// response, an event) left work for the UI: ask the host for a Tick
     /// (a host that ticks on demand would never send one otherwise).
     fn hosted_request_frame_if_dirty(&mut self) {
-        if !self.new_next_frames.is_empty() || self.need_redrawing() || SignalToUI::any_pending() {
+        // A restyle (the host's appearance changed) runs on the next Tick
+        // too: an idle child otherwise kept its old look until touched.
+        if !self.new_next_frames.is_empty() || self.need_redrawing() || SignalToUI::any_pending()
+            || self.pending_style_reload || self.pending_live_edit_request
+        {
             if !WAKE_SENT.swap(true, Ordering::Relaxed) {
                 Self::hosted_send(AppToStudio::RequestAnimationFrame);
             }

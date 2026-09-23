@@ -446,6 +446,24 @@ impl PhoneSurface {
             self.label(cx,rect(page.pos.x+16.0,top,page.size.x-32.0,56.0),&phone.clock,48.0,false,alpha(ink,opacity));
             self.label(cx,rect(page.pos.x+16.0,top+56.0,page.size.x-32.0,20.0),&Self::today(),14.0,false,alpha(ink,opacity*0.8));
         }
+        if ios {
+            // Drawn before any icon: the icons share one vector batch, and
+            // a dock icon drawn after the glass joined the page icons' batch
+            // BELOW it (an empty glass dock on the phone).
+            // The material's dock profile for this appearance (or its opaque
+            // twin under Reduce Transparency), then the press response: a
+            // finger on a dock icon flattens the lens to 85% in 80 ms and lets
+            // it back over 260 ms (design §3), on the phone's own frame clock.
+            let dark=state.style.dark;
+            let profile=if state.accessibility.reduce_transparency {GlassProfile::dock(dark).opaque(dark)}else{GlassProfile::dock(dark)};
+            self.glass.apply_profile(cx,&profile);
+            let on_dock=phone.gesture.as_ref().and_then(|g|g.hit.as_ref()).is_some_and(|h|matches!(h,PhoneHit::App(id) if phone.home.dock.contains(id)));
+            let now=phone.wallpaper_time;
+            let press=self.step_dock_press(now,on_dock,state.accessibility.reduce_motion);
+            let ripple_age=if on_dock && !state.accessibility.reduce_motion {(now-self.dock_press_at) as f32}else{1000.0};
+            self.glass.set_press_response(cx,press,ripple_age,0.35);
+            self.glass.draw_surface_with_backdrop(cx,Self::home_dock(screen,phone.chrome),backdrop,opacity*(1.0-drawer));
+        }
         let layout=Self::home_layout(style,page,phone.chrome,&state.launchable);
         let home=phone.screen==PhoneScreen::Home && drawer<0.5;
         // The tiles themselves are composited by the desk (their captures
@@ -490,21 +508,6 @@ impl PhoneSurface {
         // The dock and the dots stay while the pages pan; they fade under
         // the library (Android's sheet simply covers them).
         let opacity=if ios {opacity*(1.0-drawer)} else {opacity};
-        if ios {
-            // The material's dock profile for this appearance (or its opaque
-            // twin under Reduce Transparency), then the press response: a
-            // finger on a dock icon flattens the lens to 85% in 80 ms and lets
-            // it back over 260 ms (design §3), on the phone's own frame clock.
-            let dark=state.style.dark;
-            let profile=if state.accessibility.reduce_transparency {GlassProfile::dock(dark).opaque(dark)}else{GlassProfile::dock(dark)};
-            self.glass.apply_profile(cx,&profile);
-            let on_dock=phone.gesture.as_ref().and_then(|g|g.hit.as_ref()).is_some_and(|h|matches!(h,PhoneHit::App(id) if phone.home.dock.contains(id)));
-            let now=phone.wallpaper_time;
-            let press=self.step_dock_press(now,on_dock,state.accessibility.reduce_motion);
-            let ripple_age=if on_dock && !state.accessibility.reduce_motion {(now-self.dock_press_at) as f32}else{1000.0};
-            self.glass.set_press_response(cx,press,ripple_age,0.35);
-            self.glass.draw_surface_with_backdrop(cx,dock,backdrop,opacity);
-        }
         // The dock: the arranged dock apps, sharing its width.
         let dock_ids: Vec<String>=phone.home.dock.clone();
         for (index,id) in dock_ids.iter().enumerate() {
@@ -565,8 +568,8 @@ impl PhoneSurface {
         }
     }
     /// The home screen's look switcher: Light · Dark · iOS, a compact
-    /// segmented pill at the top right (by the date on Android's portrait
-    /// home), native to each skin: Material's tonal segmented button with a
+    /// segmented pill in one fixed place above the dock row, native to
+    /// each skin: Material's tonal segmented button with a
     /// filled selection, iOS's frosted segmented control with a white
     /// thumb. Not scaled with the home: it is chrome.
     fn draw_look_switcher(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, opacity: f32) {
@@ -574,21 +577,14 @@ impl PhoneSurface {
         let style=state.style.target;
         let ios=style==DesktopStyle::Ios;
         let dark=state.style.dark;
-        let landscape=screen.size.x>screen.size.y;
         let selected=if ios {2} else if dark {1} else {0};
         let (seg_w,h)=(42.0,30.0);
         let w=seg_w*3.0;
-        // On Android's portrait home it sits on the clock's row, right of
-        // the centred clock; elsewhere (iOS, landscape: the tiles start
-        // right under the status bar) centred above the page dots / the
-        // "All apps" row.
-        let r=if ios || landscape {
-            let dock=Self::home_dock(screen,phone.chrome);
-            rect(screen.pos.x+(screen.size.x-w)*0.5,dock.pos.y-32.0-8.0-h,w,h)
-        } else {
-            let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0+(56.0-h)*0.5;
-            rect(screen.pos.x+screen.size.x-16.0-w,top,w,h)
-        };
+        // One place in every skin and orientation, so switching never moves
+        // it: centred above the dock's row of page dots / "All apps", 8 pt
+        // clear of it — a band both home screens leave free.
+        let dock=Self::home_dock(screen,phone.chrome);
+        let r=rect(screen.pos.x+(screen.size.x-w)*0.5,dock.pos.y-32.0-8.0-h,w,h);
         let saved=self.xf.take();
         let ink=if dark {rgb(255,255,255)} else {rgb(31,27,38)};
         if ios {
