@@ -3238,8 +3238,15 @@ impl CxOsApi for Cx {
             .as_secs_f64()
     }
 
-    fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
-        crate::error!("open_url not implemented on this platform");
+    fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        // A hosted child has no JVM to start an Intent with: its WM does.
+        if super::android_hosted::is_hosted() {
+            Cx::send_studio_message(crate::studio::AppToStudio::Relay(
+                crate::studio::ChildRelay::OpenUrl { url: url.to_string() },
+            ));
+            return;
+        }
+        unsafe { android_jni::to_java_open_url(url) };
     }
 
     fn in_xr_mode(&self) -> bool {

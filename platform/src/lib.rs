@@ -99,6 +99,9 @@ pub mod web_socket;
 pub mod audio_stream;
 
 pub mod file_dialogs;
+pub mod hosted_relay;
+#[cfg(any(linux_direct, test))]
+mod direct_clipboard;
 
 mod media_api;
 mod media_host;

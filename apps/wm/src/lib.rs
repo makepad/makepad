@@ -15,6 +15,7 @@
 #![allow(dead_code)] // shell surface (icons, OSD, panels) built ahead of the flows that use it
 pub use makepad_widgets;
 use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskHandle};
+use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
 use makepad_widgets::*;
 
 mod ai_bus;
@@ -505,6 +506,11 @@ pub struct App {
     /// `--gallery`: the shell-surface gallery instead of a desktop.
     #[rust]
     gallery: bool,
+    /// What the WM does for hosted children that have no OS window or JVM
+    /// of their own (HTTP with TLS, the clipboard menu, URLs, permission
+    /// prompts, file pickers): platform hosted_relay.rs.
+    #[rust]
+    relay: HostRelayServer,
     /// What the shell bar's status modules show, sampled on the tick.
     #[rust]
     bar_sample: BarData,
@@ -1706,8 +1712,19 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Answers for hosted children's relays, each to its client.
+    fn send_relays(&self, answers: Vec<(ClientId, makepad_widgets::makepad_platform::studio::HostRelay)>) {
+        let Some(state) = self.state.as_ref() else { return };
+        for (client, relay) in answers {
+            if let Some(sender) = state.clients.get(&client).and_then(|slot| slot.sender.as_ref()) {
+                send_to_app(sender, vec![StudioToApp::Relay(relay)]);
+            }
+        }
+    }
+
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("wm: removing client {}", client);
+        self.relay.forget_client(cx, client);
         // A finger held on the closing app lets go of it first.
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
             if desk.phone_finger_on(client) {
@@ -2845,6 +2862,26 @@ impl App {
             }
             AppToStudio::SetClipboard(text) => {
                 cx.copy_to_clipboard(&text);
+            }
+            AppToStudio::Relay(relay) => {
+                // Only a client the WM launched and still holds a channel to
+                // is served (the hub listens on 127.0.0.1 with no per-launch
+                // token yet; see local/agent_state/wm-protocol/report.md).
+                let known = self.state.as_ref().is_some_and(|state| {
+                    state.clients.get(&client).is_some_and(|slot| slot.sender.is_some())
+                });
+                if !known {
+                    log!("wm: relay from unknown client {} ignored", client);
+                    return;
+                }
+                // The child's window starts where its view is drawn.
+                let origin = self
+                    .desk(cx)
+                    .borrow_mut::<WmDesk>()
+                    .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.area().rect(cx).pos))
+                    .unwrap_or_default();
+                let answers = self.relay.on_child(cx, client, origin, relay);
+                self.send_relays(answers);
             }
             AppToStudio::Custom(json) => {
                 // What the child's pointer input understands: a child that
@@ -4586,6 +4623,8 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let answers = self.relay.on_actions(cx, actions);
+        self.send_relays(answers);
         if self.gallery {
             let gallery = self.ui.widget(cx, ids!(shell_gallery));
             {
@@ -4829,6 +4868,10 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event, Event::NetworkResponses(_) | Event::PermissionResult(_)) {
+            let answers = self.relay.on_event(event);
+            self.send_relays(answers);
+        }
         if matches!(cx.os_type(), OsType::LinuxDirect) && matches!(event, Event::MouseMove(_)) {
             if let Some(mut window) = self.ui.window(cx, ids!(main_window)).borrow_mut() {
                 window.handle_direct_mouse_cursor(cx, event);

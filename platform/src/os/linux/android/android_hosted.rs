@@ -29,7 +29,7 @@ use {
         web_socket::WebSocketMessage,
         window::CxWindowPool,
     },
-    makepad_studio_protocol::{AppToStudio, StudioToApp, StudioToAppVec},
+    makepad_studio_protocol::{AppToStudio, ChildRelay, RelayPermission, StudioToApp, StudioToAppVec},
     std::{
         collections::HashMap,
         io::{Read, Write},
@@ -368,6 +368,12 @@ pub(crate) struct HostedWindow {
 impl Cx {
     fn hosted_send(msg: AppToStudio) {
         Cx::send_studio_message(msg);
+    }
+
+    fn hosted_file_dialog(kind: &str, dialog: &crate::file_dialogs::FileDialog) {
+        Self::hosted_send(AppToStudio::Relay(ChildRelay::FileDialog(
+            crate::hosted_relay::relay_file_dialog(kind, dialog),
+        )));
     }
 
     /// The hosted child's whole life: bring up a headless renderer, announce
@@ -760,6 +766,37 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     Self::hosted_send(AppToStudio::SetClipboard(content));
                 }
+                // What needs the JVM goes to the WM (hosted_relay.rs); the
+                // answers come back as StudioToApp::Relay.
+                CxOsOp::ShowClipboardActions { has_selection, rect, keyboard_shift } => {
+                    Self::hosted_send(AppToStudio::Relay(ChildRelay::ShowClipboardActions {
+                        has_selection,
+                        x: rect.pos.x,
+                        y: rect.pos.y,
+                        width: rect.size.x,
+                        height: rect.size.y,
+                        keyboard_shift,
+                    }));
+                }
+                CxOsOp::HideClipboardActions => {
+                    Self::hosted_send(AppToStudio::Relay(ChildRelay::HideClipboardActions));
+                }
+                CxOsOp::CheckPermission { permission, request_id } => {
+                    Self::hosted_send(AppToStudio::Relay(ChildRelay::CheckPermission(RelayPermission {
+                        request_id,
+                        permission: crate::hosted_relay::permission_name(permission).into(),
+                    })));
+                }
+                CxOsOp::RequestPermission { permission, request_id } => {
+                    Self::hosted_send(AppToStudio::Relay(ChildRelay::RequestPermission(RelayPermission {
+                        request_id,
+                        permission: crate::hosted_relay::permission_name(permission).into(),
+                    })));
+                }
+                CxOsOp::SelectFileDialog(dialog) => Self::hosted_file_dialog("select_file", &dialog),
+                CxOsOp::SaveFileDialog(dialog) => Self::hosted_file_dialog("save_file", &dialog),
+                CxOsOp::SelectFolderDialog(dialog) => Self::hosted_file_dialog("select_folder", &dialog),
+                CxOsOp::SaveFolderDialog(dialog) => Self::hosted_file_dialog("save_folder", &dialog),
                 _ => {}
             }
         }

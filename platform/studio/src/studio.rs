@@ -3,6 +3,7 @@ use crate::gpu::{AppToHostGpu, HostToAppGpu};
 use crate::hub_protocol::FrameCodec;
 use crate::keyboard::{KeyEvent, TextInputEvent};
 use crate::mouse::KeyModifiers;
+use crate::relay::{ChildRelay, HostRelay};
 use crate::shared_framebuf::{PresentableDraw, SharedSwapchain};
 use makepad_error_log::LogLevel;
 use makepad_micro_serde::*;
@@ -314,6 +315,11 @@ pub enum AppToStudio {
     /// The host paces its next Tick on this, so a slow child never has
     /// more than one frame's worth of ticks and pointer moves queued.
     TickDone,
+    /// A system service the child cannot reach itself (no OS window, no
+    /// JVM): the host performs it and answers with `StudioToApp::Relay`.
+    /// APPENDED LAST (ordinal tags, see `StudioToApp::MouseCancel`); only
+    /// children that know their host serves relays send it.
+    Relay(ChildRelay),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -480,6 +486,9 @@ pub enum StudioToApp {
     /// and drops that batch — which is why hosts send a cancel as a batch of
     /// its own (`RunView`), so nothing else is lost with it.
     MouseCancel(RemoteMouseUp),
+    /// The host's answer to an `AppToStudio::Relay` (an HTTP response, a
+    /// permission result, a picked file). APPENDED LAST.
+    Relay(HostRelay),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson)]
@@ -510,6 +519,19 @@ mod studio_to_app_tag_tests {
         u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
+    fn app_tag(msg: AppToStudio) -> u16 {
+        let bytes = msg.serialize_bin();
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    }
+
+    /// `AppToStudio` is tagged the same way; `Relay` went after `TickDone`.
+    #[test]
+    fn app_to_studio_tags_are_unchanged_and_relay_is_last() {
+        assert_eq!(app_tag(AppToStudio::SetClipboard(String::new())), 21);
+        assert_eq!(app_tag(AppToStudio::TickDone), 25);
+        assert_eq!(app_tag(AppToStudio::Relay(crate::relay::ChildRelay::HideClipboardActions)), 26);
+    }
+
     /// The binary encoding tags `StudioToApp` variants by ordinal: a variant
     /// added anywhere but last renumbers every one after it, and a host and a
     /// child one revision apart then decode each other's movement, keys and
@@ -525,6 +547,7 @@ mod studio_to_app_tag_tests {
         assert_eq!(tag(StudioToApp::None), 23);
         assert_eq!(tag(StudioToApp::Kill), 24);
         assert_eq!(tag(StudioToApp::MouseCancel(RemoteMouseUp::default())), 26);
+        assert_eq!(tag(StudioToApp::Relay(crate::relay::HostRelay::FileDialog(Default::default()))), 27);
         // And it round-trips.
         let bytes = StudioToApp::MouseCancel(RemoteMouseUp { x: 3.0, ..Default::default() }).serialize_bin();
         assert!(matches!(StudioToApp::deserialize_bin(&bytes), Ok(StudioToApp::MouseCancel(e)) if e.x == 3.0));

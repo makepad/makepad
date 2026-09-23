@@ -1622,6 +1622,35 @@ pub unsafe fn to_java_copy_to_clipboard(content: String) {
     );
 }
 
+/// `MakepadActivity.openUrl`: an ACTION_VIEW Intent for `url`.
+pub unsafe fn to_java_open_url(url: &str) {
+    let env = attach_jni_env();
+    let Ok(url) = CString::new(url) else { return };
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+    ndk_utils::call_void_method!(env, get_activity(), "openUrl", "(Ljava/lang/String;)V", url);
+    (**env).DeleteLocalRef.unwrap()(env, url);
+}
+
+/// `MakepadActivity.copyContentUri`: the bytes of a picked `content://`
+/// document into the plain file `dest`.
+pub unsafe fn to_java_copy_content_uri(uri: &str, dest: &str) -> bool {
+    let env = attach_jni_env();
+    let (Ok(uri), Ok(dest)) = (CString::new(uri), CString::new(dest)) else { return false };
+    let uri = ((**env).NewStringUTF.unwrap())(env, uri.as_ptr());
+    let dest = ((**env).NewStringUTF.unwrap())(env, dest.as_ptr());
+    let ok = ndk_utils::call_bool_method!(
+        env,
+        get_activity(),
+        "copyContentUri",
+        "(Ljava/lang/String;Ljava/lang/String;)Z",
+        uri,
+        dest
+    );
+    (**env).DeleteLocalRef.unwrap()(env, uri);
+    (**env).DeleteLocalRef.unwrap()(env, dest);
+    ok != 0
+}
+
 pub unsafe fn to_java_paste_from_clipboard() -> String {
     let env = attach_jni_env();
     let result = ndk_utils::call_object_method!(

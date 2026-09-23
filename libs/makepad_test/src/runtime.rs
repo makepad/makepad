@@ -1166,6 +1166,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
         StudioToApp::Gpu(_) => "Gpu",
+        StudioToApp::Relay(_) => "Relay",
     }
 }
 

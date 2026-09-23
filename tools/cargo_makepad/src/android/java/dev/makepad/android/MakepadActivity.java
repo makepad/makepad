@@ -2230,6 +2230,43 @@ public class MakepadActivity
         return "";
     }
 
+    // `cx.open_url`: hand the URL to whatever the system opens it with.
+    // Hosted child processes of a window manager ask the WM for this.
+    public void openUrl(final String url) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Log.e("Makepad", "openUrl failed for " + url + ": " + e);
+                }
+            }
+        });
+    }
+
+    // Copy a picked `content://` document into `dest` (a plain file the
+    // app owns), so a process without a JVM can open it. Returns false
+    // when the document cannot be read.
+    public boolean copyContentUri(String uri, String dest) {
+        try (java.io.InputStream in = getContentResolver().openInputStream(Uri.parse(uri));
+             java.io.FileOutputStream out = new java.io.FileOutputStream(dest)) {
+            if (in == null) {
+                return false;
+            }
+            byte[] buffer = new byte[65536];
+            int n;
+            while ((n = in.read(buffer)) > 0) {
+                out.write(buffer, 0, n);
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e("Makepad", "copyContentUri failed for " + uri + ": " + e);
+            return false;
+        }
+    }
+
     private String getApplicationName() {
         ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
         CharSequence appName = applicationInfo.loadLabel(getPackageManager());

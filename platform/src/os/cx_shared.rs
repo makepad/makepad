@@ -949,6 +949,7 @@ impl Cx {
                     self.call_event_handler(&Event::Custom(data));
                 }
             }
+            StudioToApp::Relay(relay) => self.handle_host_relay(relay),
             StudioToApp::KeepAlive | StudioToApp::None => {}
             StudioToApp::LiveChange { file_name, content } => {
                 self.script_data
