@@ -306,6 +306,11 @@ struct LaunchRecord {
     provider: AgentProvider,
     program: String,
     environment: Vec<(String, String)>,
+    /// `Some(false)`: Director started default Claude config with
+    /// `CLAUDE_CONFIG_DIR` absent or empty. `Some(true)`: nonempty
+    /// override. `None`: legacy or unknown. Not rewritten from today's
+    /// Director env on reattach.
+    claude_config_explicit: Option<bool>,
 }
 #[derive(SerRon, DeRon)]
 struct TransportRecord {
@@ -555,6 +560,28 @@ fn evidence_rows(path: &Path) -> Result<Vec<Value>, String> {
     }
     Ok(rows)
 }
+/// Grok's evidence is its `summary.json`: one JSON object, written
+/// pretty-printed over many lines, with the conversation under `info`. The
+/// line reader above is for the other providers' JSON-lines history and finds
+/// no row in it, so this file is read whole as one bounded document. Every
+/// failure is reported; none reads as "no match".
+fn grok_summary(path: &Path) -> Result<Value, String> {
+    const LIMIT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    owned_evidence_file(path)?
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Conversation evidence cannot be read")?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Grok's conversation summary exceeds its 1 MiB read bound".into());
+    }
+    let summary = json::parse_depth(&bytes, 32)
+        .map_err(|error| format!("Grok's conversation summary is not valid JSON: {error}"))?;
+    if !matches!(summary, Value::Obj(_)) {
+        return Err("Grok's conversation summary is not a JSON object".into());
+    }
+    Ok(summary)
+}
 fn evidence_matches(identity: &ResumeIdentity) -> Result<(), String> {
     if !uuid(&identity.conversation_id)
         || !Path::new(&identity.cwd).is_absolute()
@@ -574,7 +601,12 @@ fn evidence_matches(identity: &ResumeIdentity) -> Result<(), String> {
     if !path.starts_with(&home) {
         return Err("Conversation evidence escaped its provider directory".into());
     }
-    if !evidence_rows(&path)?.iter().any(|row| {
+    let rows = if identity.provider == AgentProvider::Grok {
+        vec![grok_summary(&path)?]
+    } else {
+        evidence_rows(&path)?
+    };
+    if !rows.iter().any(|row| {
         let (value, field) = match identity.provider {
             AgentProvider::Fable => (row, "sessionId"),
             AgentProvider::Codex
@@ -1113,7 +1145,23 @@ impl Backend {
                 .discover_opened(id, info, &supervisor, root, &proof, provider, stop)
                 .map(Some);
         }
-        let home = provider_home(provider)?;
+        let home = if let Some(saved) = self.saved_resume(id)? {
+            if saved.provider == AgentProvider::Fable {
+                Path::new(&saved.provider_home)
+                    .canonicalize()
+                    .map_err(|_| "Saved Claude config directory is unavailable")?
+            } else {
+                provider_home(provider)?
+            }
+        } else if self
+            .launch_record(id)?
+            .and_then(|launch| launch.claude_config_explicit)
+            == Some(false)
+        {
+            default_claude_config_home()?
+        } else {
+            provider_home(provider)?
+        };
         let metadata = claude_metadata(&home, root.pid, proof.start)?;
         let conversation = metadata
             .get("sessionId")
@@ -1211,6 +1259,113 @@ impl Backend {
                 "Agent session ended or is unavailable; no replacement process was started".into()
             })
     }
+    /// The lane's context directory inside its own working directory,
+    /// `<cwd>\local\director\agent_context`. `cwd` is canonical, and every
+    /// component below it must be a real directory: a junction, symbolic link
+    /// or any other reparse point could lead the file out of the working root
+    /// (back into Director's state, for one), so it is refused, never
+    /// followed. With `create`, missing directories are made; without it a
+    /// missing one is `None`. Only these fixed names are looked at.
+    fn provider_context_dir(cwd: &Path, create: bool) -> Result<Option<PathBuf>, String> {
+        let mut dir = cwd.to_path_buf();
+        for name in PROVIDER_CONTEXT_DIRECTORY {
+            dir.push(name);
+            let metadata = match fs::symlink_metadata(&dir) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !create {
+                        return Ok(None);
+                    }
+                    match fs::create_dir(&dir) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(format!("{}: {error}", dir.display())),
+                    }
+                    fs::symlink_metadata(&dir).map_err(|error| error.to_string())?
+                }
+                Err(error) => return Err(format!("{}: {error}", dir.display())),
+            };
+            if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+                return Err(format!(
+                    "{} is not a plain directory; a link or reparse point there is not followed",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(Some(dir))
+    }
+    /// Write this lane's startup context file and return the provider's first
+    /// prompt, which only names it. The file is a real file inside the lane's
+    /// working directory (see `provider_context_dir`), written with the
+    /// helper's private atomic write and read back through its private,
+    /// no-reparse read before use: a lane is never started with a missing or
+    /// empty context, nor with one that resolves outside its working root. It
+    /// is rewritten on every start and resume; a lane that is only reattached
+    /// gets nothing typed into it.
+    fn provider_bootstrap(&self, record: &Record) -> Result<String, String> {
+        let name = provider_context_name(&record.session_id, record.created_at_ms)?;
+        let text = provider_context_text();
+        let unwritten = |error: String| {
+            format!("This lane's startup context file {name} under {} is unusable ({error}); the provider was not started", record.cwd)
+        };
+        let cwd = Path::new(&record.cwd)
+            .canonicalize()
+            .map_err(|_| unwritten("the lane's working directory is unavailable".into()))?;
+        let dir = Self::provider_context_dir(&cwd, true)
+            .map_err(unwritten)?
+            .ok_or_else(|| unwritten("its directory could not be made".into()))?;
+        let ignore = dir.join(".gitignore");
+        if fs::symlink_metadata(&ignore).is_err() {
+            // A courtesy to repositories that do not ignore `local/`.
+            let _ = create_private(&ignore, PROVIDER_CONTEXT_IGNORE.as_bytes());
+        }
+        let path = dir.join(&name);
+        write_private(&path, text.as_bytes()).map_err(unwritten)?;
+        if read_private(&path, 16 * 1024).map_err(unwritten)? != text.as_bytes() {
+            return Err(unwritten("it does not read back as written".into()));
+        }
+        // `cwd` is canonical: the file the provider is sent to is the one
+        // inside that root, under the names the filesystem really has.
+        let path = path
+            .canonicalize()
+            .ok()
+            .filter(|path| path.starts_with(&cwd))
+            .ok_or_else(|| unwritten("it does not resolve inside the working directory".into()))?;
+        // A canonical path carries the verbatim prefix; a provider's file
+        // tool is given the ordinary drive path.
+        let shown = path
+            .to_str()
+            .ok_or_else(|| unwritten("its path is not valid Unicode".into()))?;
+        let shown = match shown.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with(r"UNC\") => rest,
+            _ => shown,
+        };
+        provider_bootstrap_prompt(shown)
+    }
+    /// Remove the context file this lane wrote, after an explicit lane
+    /// deletion. The path is derived from the lane's own durable record
+    /// (session id, creation time and canonical working directory). Session
+    /// id plus record creation time distinguishes ordinary records; it is
+    /// not proof against copied or same-ms records. It must be reached
+    /// through plain directories and pass the helper's private read (a
+    /// bounded regular file, no reparse point, owned by this user with a
+    /// private ACL). Anything else is left where it is, and so are the
+    /// directories: other lanes there use them.
+    fn remove_provider_context(record: &Record) {
+        let Ok(name) = provider_context_name(&record.session_id, record.created_at_ms) else {
+            return;
+        };
+        let Ok(cwd) = Path::new(&record.cwd).canonicalize() else {
+            return;
+        };
+        let Ok(Some(dir)) = Self::provider_context_dir(&cwd, false) else {
+            return;
+        };
+        let path = dir.join(name);
+        if read_private(&path, 16 * 1024).is_ok() {
+            let _ = fs::remove_file(path);
+        }
+    }
     fn launch(
         &self,
         record: &Record,
@@ -1241,6 +1396,11 @@ impl Backend {
         {
             command.args(self.arguments(&record.session_id)?);
         }
+        // Same inheritance rule as the Unix backend: strip hosting, run and
+        // foreign callback context first, then apply this lane's own values.
+        for key in INHERITED_CONTEXT_KEYS {
+            command.env_remove(key);
+        }
         for (key, value) in &launch.environment {
             command.env(key, value);
         }
@@ -1259,27 +1419,44 @@ impl Backend {
                 }
                 match launch.provider {
                     AgentProvider::Codex => {
-                        command
-                            .arg("resume")
-                            .arg(&identity.conversation_id)
-                            .env("CODEX_HOME", &identity.provider_home);
-                    }
-                    AgentProvider::Fable => {
-                        command
-                            .arg("--resume")
-                            .arg(&identity.conversation_id)
-                            .env("CLAUDE_CONFIG_DIR", &identity.provider_home);
+                        command.env("CODEX_HOME", &identity.provider_home);
                     }
                     AgentProvider::Grok => {
-                        command
-                            .arg("--resume")
-                            .arg(&identity.conversation_id)
-                            .env("GROK_HOME", &identity.provider_home);
+                        command.env("GROK_HOME", &identity.provider_home);
+                    }
+                    AgentProvider::Fable => {
+                        let explicit = claude_config_explicit_for_resume(
+                            launch.claude_config_explicit,
+                            &identity.provider_home,
+                        )?;
+                        if explicit {
+                            command.env("CLAUDE_CONFIG_DIR", &identity.provider_home);
+                        } else {
+                            let saved = Path::new(&identity.provider_home)
+                                .canonicalize()
+                                .map_err(|_| "Saved Claude config directory is unavailable")?;
+                            if saved != default_claude_config_home()? {
+                                return Err(
+                                    "Saved Claude home is not the default config directory; CLAUDE_CONFIG_DIR was not unset"
+                                        .into(),
+                                );
+                            }
+                            command.env_remove("CLAUDE_CONFIG_DIR");
+                        }
                     }
                     _ => return Err("This provider has no verified resume adapter".into()),
                 }
+            } else if launch.provider == AgentProvider::Fable
+                && launch.claude_config_explicit == Some(false)
+            {
+                command.env_remove("CLAUDE_CONFIG_DIR");
             }
-            command.arg(format!("{PROVIDER_BOOTSTRAP} This is Windows: adapt the shell examples to PowerShell or cmd.exe; invoke the executable in MAKEPAD_STUDIO_CLI with --url to resolve this same lane. Never execute the POSIX environment wrapper."));
+            // After the executable and a node entry script, if there is one.
+            command.args(provider_arguments(
+                launch.provider,
+                identity.map(|identity| identity.conversation_id.as_str()),
+                self.provider_bootstrap(record)?,
+            )?);
         }
         let (status, _) = self.run_command(&mut command, stop)?;
         if !status.success() {
@@ -1325,6 +1502,11 @@ impl Backend {
             provider,
             program: program.to_string_lossy().into_owned(),
             environment,
+            claude_config_explicit: if provider == AgentProvider::Fable {
+                claude_config_explicit_from_env()
+            } else {
+                None
+            },
         };
         let record = Record {
             version: 1,
@@ -1332,6 +1514,13 @@ impl Backend {
             cwd: cwd.to_string_lossy().into_owned(),
             created_at_ms: timestamp_ms(),
         };
+        // A lane whose context file cannot be written is not claimed at all,
+        // rather than claimed and left without a provider. Failed claims
+        // retain that context file: another starter may own that filename
+        // (same session id and created_at_ms).
+        if provider != AgentProvider::Shell {
+            self.provider_bootstrap(&record)?;
+        }
         create_private(
             &self.file(&record.session_id, ".ron"),
             record.serialize_ron().as_bytes(),
@@ -1374,8 +1563,164 @@ impl Backend {
         evidence_matches(&identity)?;
         Ok(identity)
     }
+    /// Whether this session was abandoned: its PTY host ended without
+    /// finishing its claim (killed, crashed, or the machine restarted) and
+    /// nothing it owned is left. The helper then refuses `status` with
+    /// "startup was interrupted … requires explicit --restart", which is
+    /// right for launching but would make such a lane impossible to stop or
+    /// delete. The proof is positive and fail-closed, the same as on Unix:
+    ///
+    /// - the claim is version 1, names this session and state directory,
+    ///   carries a real instance id and is in phase `starting`.
+    ///   `ended`/`failed` is not this case (Ok(false)); any other phase is
+    ///   refused.
+    /// - the session lease can be taken. The host keeps that exclusive
+    ///   handle for its whole life, so no host exists. A held lease means a
+    ///   host is starting, running or stopping: Ok(false).
+    /// - no endpoint answers. One that does is refused.
+    /// - the host record for this instance exists, is well
+    ///   formed and the program it names is gone: a live process with that
+    ///   pid created before that host recorded itself is still the lane's
+    ///   program and is refused; a later one is a reused pid. An earlier
+    ///   instance's record does not prove this attempt ended. A process
+    ///   that cannot be inspected is refused, and so is a missing record:
+    ///   it is unknown whether a program was left behind.
+    /// - the proven root AI, when one was saved, has exited.
+    ///
+    /// Ok(false) leaves the helper's own refusal standing. Nothing is
+    /// started, restarted, signalled or rewritten here.
+    fn abandoned(&self, id: &str) -> Result<bool, String> {
+        use makepad_agents::protocol::{SessionLocation, SessionLock, VERSION};
+        let refused = |what: &str| format!("{what}; nothing was stopped or deleted");
+        let object = |path: &Path, what: &str| -> Result<Value, String> {
+            match json::parse_depth(&read_private(path, 16 * 1024)?, 8) {
+                Ok(value @ Value::Obj(_)) => Ok(value),
+                _ => Err(refused(&format!("The terminal's {what} is malformed"))),
+            }
+        };
+        let valid_instance = |value: &Value| {
+            value
+                .get("instance")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+        };
+        let identified = |value: &Value| {
+            value.get("version").and_then(Value::as_u64) == Some(VERSION)
+                && value.get("session_id").and_then(Value::as_str) == Some(id)
+        };
+        let location = SessionLocation::open(&self.records, id, false)?;
+        let claim = match fs::symlink_metadata(&location.claim_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => object(&location.claim_path, "startup claim")?,
+        };
+        if !identified(&claim)
+            || claim.get("state_dir").and_then(Value::as_str) != location.state_dir.to_str()
+            || !valid_instance(&claim)
+        {
+            return Err(refused("The terminal's startup claim belongs to another session or carries no valid instance"));
+        }
+        match claim.get("phase").and_then(Value::as_str) {
+            Some("starting") => {}
+            Some("ended" | "failed") => return Ok(false),
+            _ => {
+                return Err(refused(
+                    "The terminal's startup claim is in an unknown phase",
+                ))
+            }
+        }
+        let Some(_lease) = SessionLock::acquire(&location)? else {
+            return Ok(false);
+        };
+        if location.validate_socket()? {
+            match makepad_agents::windows::connect(&location, Duration::from_millis(200)) {
+                Ok(_) => {
+                    return Err(refused(
+                        "A live terminal endpoint answers without its ownership lease",
+                    ));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        match fs::symlink_metadata(&location.metadata_path) {
+            // A host starts its program before it binds its endpoint and
+            // writes this record: one killed in between leaves a program
+            // nobody recorded, so a missing record proves nothing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err("Director cannot prove that this terminal ended: its host is gone and left no record of the program it started, so that program may still be running. Nothing was stopped or deleted, and the lane keeps its identity".into());
+            }
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {
+                // The record must name this claim's host. An earlier
+                // instance's dead child does not prove a newer attempt ended:
+                // the host can die between spawn and metadata write.
+                let saved = object(&location.metadata_path, "last host record")?;
+                if !identified(&saved) || !valid_instance(&saved) {
+                    return Err(refused("The terminal's last host record belongs to another session or carries no valid instance"));
+                }
+                let claim_instance = claim.get("instance").and_then(Value::as_str);
+                let saved_instance = saved.get("instance").and_then(Value::as_str);
+                if claim_instance != saved_instance {
+                    return Err("cannot prove this terminal ended; host record belongs to an earlier instance; nothing stopped or deleted".into());
+                }
+                let child = saved
+                    .get("child_pid")
+                    .and_then(Value::as_u64)
+                    .filter(|pid| *pid > 4 && *pid <= u32::MAX as u64);
+                let started = saved.get("started_at_ms").and_then(Value::as_u64);
+                let (Some(child), Some(started)) = (child, started) else {
+                    return Err(refused(
+                        "The terminal's last host record names no program or start time",
+                    ));
+                };
+                if let Some(proof) = ProcessProof::open(child as u32)? {
+                    // FILETIME ticks: 100 ns since 1601. The program is
+                    // created moments before its host records itself; one
+                    // created well after that is another process with a
+                    // reused pid.
+                    let recorded = started
+                        .checked_add(11_644_473_600_000)
+                        .and_then(|ms| ms.checked_add(5_000))
+                        .and_then(|ms| ms.checked_mul(10_000))
+                        .ok_or_else(|| {
+                            refused("The terminal's last host record has an invalid start time")
+                        })?;
+                    if proof.start <= recorded {
+                        return Err(format!("This terminal's host is gone but its program (pid {child}) is still running; end it first. Nothing was stopped or deleted"));
+                    }
+                }
+            }
+        }
+        if let Some(identity) = self.saved_resume(id)? {
+            Self::verify_exited(&identity)
+                .map_err(|error| format!("{error}. Nothing was stopped or deleted"))?;
+        }
+        Ok(true)
+    }
     fn stop_session(&self, id: &str, stop: &AtomicBool) -> Result<SessionOutcome, String> {
-        let Some(info) = self.existing(id, stop)? else {
+        // The durable creation record comes first: without a valid one
+        // nothing below is this lane's to stop, abandoned or not.
+        if self.record(id)?.is_none() {
+            return Err("Unknown terminal; reattachment cannot create a replacement".into());
+        }
+        let existing = match self.existing(id, stop) {
+            Ok(existing) => existing,
+            // The helper could not report the session. When that is because
+            // it was abandoned, there is nothing left to stop; every other
+            // refusal stands as it is.
+            Err(error) => {
+                if !self.abandoned(id)? {
+                    return Err(error);
+                }
+                None
+            }
+        };
+        let Some(info) = existing else {
             return Ok(match self.saved_resume(id)? {
                 Some(identity) => SessionOutcome::StoppedWithResume(identity),
                 None => SessionOutcome::Stopped,
@@ -1453,6 +1798,12 @@ impl Backend {
         if let Some(identity) = &identity {
             evidence_matches(identity)?;
             Self::verify_exited(identity)?;
+            if launch.provider != identity.provider
+                && (launch.provider == AgentProvider::Fable
+                    || identity.provider == AgentProvider::Fable)
+            {
+                launch.claude_config_explicit = None;
+            }
             launch.provider = identity.provider;
             launch.program = identity.program.clone();
         } else if launch.provider != AgentProvider::Shell {
@@ -1590,9 +1941,16 @@ impl Backend {
 pub(super) fn delete_lane_session(state: PathBuf, tab: u64, id: &str) -> Result<(), String> {
     let backend = Backend::open(state)?;
     let stop = AtomicBool::new(false);
+    let record = backend.record(id)?;
     backend.stop_session(id, &stop)?;
     backend.select_view(tab, None, &stop)?;
     backend.mcp_tokens.revoke(id)?;
+    // The lane's context file in its working directory goes with it, once its
+    // terminal is known to have ended and only when it is provably this
+    // lane's own. The caller then removes the session's state files.
+    if let Some(record) = &record {
+        Backend::remove_provider_context(record);
+    }
     Ok(())
 }
 

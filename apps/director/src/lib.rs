@@ -10,6 +10,7 @@ use makepad_widgets::*;
 
 pub mod activity;
 pub mod agent_session;
+pub mod agent_tree;
 pub mod ai;
 pub mod architecture;
 pub use makepad_workspace::appearance;
@@ -30,6 +31,7 @@ pub mod surface;
 pub mod surface_pump;
 pub mod usage;
 pub mod usage_codex;
+pub mod usage_grok;
 pub mod usage_history_view;
 pub mod usage_stall;
 pub mod workspace;
@@ -136,7 +138,30 @@ script_mod! {
                 connect_terminal := Button{width: 24 height: 22 text: ">_" padding: 0}
             }
         }
-        term := MpTerm{}
+        // Agent transcripts draw U+23BF, U+23F5 and U+23FA. The terminal's own
+        // members cover none of the first two, so the bundled math font is
+        // appended as the last fallback of both weights. `+:` keeps the
+        // inherited members in order, and row metrics stay the first member's.
+        term := MpTerm{
+            draw_text +: {
+                text_style +: {
+                    font_family +: {
+                        math := FontMember{
+                            res: crate_resource("makepad_widgets:resources/NewCMMath-Regular.otf")
+                            asc: 0.0 desc: 0.0
+                        }
+                    }
+                }
+            }
+            bold_text_style +: {
+                font_family +: {
+                    math := FontMember{
+                        res: crate_resource("makepad_widgets:resources/NewCMMath-Regular.otf")
+                        asc: 0.0 desc: 0.0
+                    }
+                }
+            }
+        }
     }
 
     mod.widgets.StudioDisk = View{
@@ -178,6 +203,13 @@ script_mod! {
         Card{
             SectionTitle{text: "Fable"}
             claude_usage_report := Label{
+                width: Fill height: Fit padding: 0 text: "Waiting for first query"
+                draw_text +: {color: theme.color_text wrap: Words}
+            }
+        }
+        Card{
+            SectionTitle{text: "Grok"}
+            grok_usage_report := Label{
                 width: Fill height: Fit padding: 0 text: "Waiting for first query"
                 draw_text +: {color: theme.color_text wrap: Words}
             }
