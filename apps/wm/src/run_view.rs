@@ -235,6 +235,28 @@ pub struct MpRunView {
     /// its acknowledgement can start the next frame without another beat.
     #[rust]
     tick_deferred: bool,
+    /// A frame of the child arrived and the desk has not painted it yet.
+    /// On Android the child draws straight into the shared images the desk
+    /// samples, with no GPU fence between the two processes: its next Tick
+    /// waits for this paint (or `tick_fallback`), so the child can never
+    /// run ahead and overwrite the image the desk is still reading — a
+    /// resize used to answer with two back-to-back frames and tear the
+    /// tile-to-app zoom.
+    #[rust]
+    flip_unpainted: Option<f64>,
+    /// The desk's frame after a child frame arrived: whether or not this
+    /// view drew in it (a tile waiting for its face is not drawn), the desk
+    /// is past sampling anything older, so the hold lifts there too.
+    #[rust]
+    paint_frame: NextFrame,
+    /// Ticks sent to the child and `TickDone`s back. The child reads its
+    /// messages in order and draws only inside a Tick, so once every Tick
+    /// sent before some message is acknowledged, each later frame was drawn
+    /// after that message (the phone's tile faces fence on this).
+    #[rust]
+    ticks_sent: u64,
+    #[rust]
+    ticks_done: u64,
     /// The pointer's latest position since the last Tick went out: the
     /// child sees at most one MouseMove per frame, flushed ahead of the
     /// Tick or of any Down/Up/Scroll so their order holds.
@@ -373,12 +395,20 @@ impl MpRunView {
         (self.tick_period * 4.0).max(0.050)
     }
 
+    /// The next Tick waits for the desk to paint the child's last frame
+    /// (see `flip_unpainted`).
+    fn paint_holds_tick(&self) -> bool {
+        cfg!(target_os = "android")
+            && self.flip_unpainted.is_some_and(|at| crate::host::now() - at < self.tick_fallback())
+    }
+
     fn append_tick(&mut self, target: RunTarget, msgs: &mut Vec<StudioToApp>) {
         trace_host(&format!("tick c{}", target.client));
         if let Some(mv) = self.pending_move.take() {
             msgs.push(StudioToApp::MouseMove(mv));
         }
         msgs.push(StudioToApp::Tick);
+        self.ticks_sent += 1;
         self.tick_outstanding = Some(crate::host::now());
         self.tick_deferred = false;
     }
@@ -386,7 +416,15 @@ impl MpRunView {
     /// Return one tick credit. If a timer beat was missed while the child
     /// rendered, service that retained request now instead of quantizing a
     /// slightly late child to half the compositor's frame rate.
+    /// (Ticks sent, TickDones received) — see `ticks_sent`.
+    pub fn tick_counts(&self) -> (u64, u64) {
+        (self.ticks_sent, self.ticks_done)
+    }
+
     pub fn tick_done(&mut self, cx: &mut Cx) {
+        // The child coalesces queued Ticks into one TickDone: it answers the
+        // newest Tick sent.
+        self.ticks_done = self.ticks_sent;
         if let Some(target) = self.current_target {
             trace_host(&format!("ack c{}", target.client));
         }
@@ -398,7 +436,7 @@ impl MpRunView {
             self.tick_deferred = false;
             return;
         }
-        if self.tick_deferred {
+        if self.tick_deferred && !self.paint_holds_tick() {
             if let Some(target) = self.current_target {
                 let mut msgs = Vec::new();
                 self.append_tick(target, &mut msgs);
@@ -411,6 +449,8 @@ impl MpRunView {
         if self.current_target == target {
             return;
         }
+        self.ticks_sent = 0;
+        self.ticks_done = 0;
         let had_target = self.current_target.is_some();
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
@@ -494,6 +534,11 @@ impl MpRunView {
         let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
             return false;
         };
+        // A frame bigger than the image it names was clipped by the child
+        // (drawn before it had the bigger frames): never stretch it.
+        if presentable_draw.width > swapchain.alloc_width || presentable_draw.height > swapchain.alloc_height {
+            return false;
+        }
 
         let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
             return false;
@@ -835,6 +880,10 @@ impl MpRunView {
                 self.current_target.map(|t| t.client).unwrap_or(0)
             ));
             self.pending_draw = None;
+            if cfg!(target_os = "android") {
+                self.flip_unpainted = Some(crate::host::now());
+                self.paint_frame = cx.new_next_frame();
+            }
             self.present_ok_count += 1;
             if self.present_ok_count == 1 {
                 // Whatever frames come in first, they fade in quickly
@@ -1033,6 +1082,19 @@ impl MpRunView {
             .or_else(|| self.outbox.as_ref().and_then(|sender| sender.error()))
     }
 
+    /// The child is about to be told it is `size` (a phone tile opening
+    /// full screen): give it frames that big now. Its frames are otherwise
+    /// sized where the view is drawn — for a tile opening, only once a
+    /// full-size frame confirmed the face, which needs frames that big: the
+    /// child used to break that loop by drawing its first full frame into
+    /// the tile's small frames, clipped (the zoom's smeared frame).
+    pub fn prepare_size(&mut self, cx: &mut Cx, size: Vec2d, dpi_factor: f64) {
+        let Some(target) = self.current_target else { return };
+        self.target_size = Some(size);
+        let rect = Rect { pos: self.last_rect.pos, size };
+        self.ensure_swapchain_for_rect(cx, rect, dpi_factor, target);
+    }
+
     pub fn set_target_size(&mut self, size: Option<Vec2d>) {
         self.target_size = size;
     }
@@ -1193,6 +1255,7 @@ impl Widget for MpRunView {
         }
 
         if self.present_ok_count > 0 {
+            self.flip_unpainted = None;
             trace_host(&format!(
                 "paint c{}",
                 target.map(|t| t.client).unwrap_or(0)
@@ -1295,6 +1358,9 @@ impl Widget for MpRunView {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let target = self.current_target;
+        if self.paint_frame.is_event(event).is_some() {
+            self.flip_unpainted = None;
+        }
 
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
@@ -1331,7 +1397,7 @@ impl Widget for MpRunView {
                             }
                             Some(_) => false,
                         };
-                        if due {
+                        if due && !self.paint_holds_tick() {
                             self.append_tick(target, &mut msgs);
                         }
                     }

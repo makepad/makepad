@@ -1101,6 +1101,12 @@ impl App {
     /// four cargo builds into the same target-dir lock at once, and they
     /// would only queue behind each other anyway.
     fn top_up_warm_pool(&mut self, cx: &mut Cx) {
+        // A phone keeps no desktop warm pool: each child is a whole process
+        // (~190 MB), the desktop apps it warms (terminal, browser, task) are
+        // not in the APK, and the phone shell starts its own tile clients.
+        if cfg!(target_os = "android") {
+            return;
+        }
         let Some(app) = self.warm_pool.next_missing(host::now()) else {
             return;
         };
@@ -2806,7 +2812,7 @@ impl App {
                 // Which of the phone's captures this frame may refresh: a
                 // tile client's frames are sorted by size, so a card never
                 // shows a stretched tile and a tile never a squeezed window.
-                let face = self.note_client_frame_face(client, pd.width, pd.height);
+                let face = self.note_client_frame_face(cx, client, pd.width, pd.height);
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.note_client_frame(client, face);
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))

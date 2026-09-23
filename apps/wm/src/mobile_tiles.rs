@@ -414,6 +414,12 @@ pub struct TileClient {
     /// trustworthy (a full-screen card is never a stretched tile, a tile is
     /// never a squeezed window).
     pub confirmed: bool,
+    /// A process client: the Ticks it had been sent when the face went out
+    /// (and when). A frame drawn before the child read the face can have
+    /// the new SIZE already (the run view announces its rect on its own)
+    /// with the OLD face — the tile's dial blown up to full screen — so a
+    /// frame confirms the face only once those Ticks are acknowledged.
+    pub fence: Option<(u64, f64)>,
 }
 
 impl TileClient {
@@ -482,7 +488,7 @@ impl HomeTiles {
     /// already had open (its tile is an extra face of that window).
     pub fn bind(&mut self, app: &str, client: ClientId, background: bool) {
         self.clients.retain(|t| t.app != app && t.client != client);
-        self.clients.push(TileClient { app: app.to_string(), client, background, sent: None, confirmed: false });
+        self.clients.push(TileClient { app: app.to_string(), client, background, sent: None, confirmed: false, fence: None });
     }
 
     /// The client is gone (died, closed): its tile is empty again.
@@ -537,7 +543,26 @@ impl HomeTiles {
     /// belongs to, or None for a stale frame from the previous viewport.
     /// Before anything was sent the client is in its default full face.
     pub fn note_frame(&mut self, client: ClientId, size: Vec2d) -> Option<Face> {
+        self.note_frame_acked(client, size, u64::MAX, 0.0)
+    }
+    /// The face was sent to a process client that had been sent `ticks`
+    /// Ticks by then (`now`): see `TileClient::fence`.
+    pub fn set_fence(&mut self, client: ClientId, ticks: u64, now: f64) {
+        if let Some(t) = self.get_mut(client) {
+            t.fence = Some((ticks, now));
+        }
+    }
+    /// `note_frame` for a process client that has acknowledged `acked`
+    /// Ticks: a frame that may predate the face belongs to neither face.
+    /// The fence lapses after `FACE_FENCE_SECS` so no face waits forever.
+    pub fn note_frame_acked(&mut self, client: ClientId, size: Vec2d, acked: u64, now: f64) -> Option<Face> {
         let t = self.get_mut(client)?;
+        if let Some((ticks, at)) = t.fence {
+            if acked < ticks && now - at < FACE_FENCE_SECS {
+                return None;
+            }
+            t.fence = None;
+        }
         let Some((face, viewport)) = t.sent else { return Some(Face::Full) };
         if same_size(viewport, size) {
             t.confirmed = true;
@@ -570,6 +595,11 @@ impl HomeTiles {
         self.attempts.remove(app);
     }
 }
+
+/// How long a face waits for the child to acknowledge the Ticks sent
+/// before it (`TileClient::fence`) before any frame of the right size
+/// confirms it anyway.
+pub const FACE_FENCE_SECS: f64 = 0.5;
 
 /// A frame size matches a viewport within the rounding the host's DPI
 /// scaling introduces.
@@ -785,6 +815,29 @@ mod tests {
         assert!(tiles.get(7).is_none());
         assert_eq!(tiles.forget_client(9).as_deref(), Some("clock"));
         assert_eq!(tiles.client_of("clock"), None);
+    }
+
+    /// A process child hears its new size from the run view before it
+    /// reads the new face: a full-size frame drawn in the OLD face (the
+    /// tile's dial blown up to the screen) must not confirm the Full face.
+    /// Only a frame after every Tick sent before the face was acknowledged
+    /// does — or any right-sized frame once the fence lapsed.
+    #[test]
+    fn a_full_face_waits_for_the_ticks_sent_before_it() {
+        let mut tiles = HomeTiles::default();
+        tiles.bind("clock", 5, true);
+        let full = dvec2(412.0, 816.0);
+        tiles.note_sent(5, Face::Full, full);
+        tiles.set_fence(5, 10, 1.0);
+        assert_eq!(tiles.note_frame_acked(5, full, 9, 1.05), None, "drawn before the face was read");
+        assert!(!tiles.get(5).unwrap().full_ready());
+        assert_eq!(tiles.note_frame_acked(5, full, 10, 1.07), Some(Face::Full));
+        assert!(tiles.get(5).unwrap().full_ready());
+        // A child that never acknowledges is not stuck forever.
+        tiles.note_sent(5, Face::Tile, dvec2(180.0, 180.0));
+        tiles.note_sent(5, Face::Full, full);
+        tiles.set_fence(5, 20, 2.0);
+        assert_eq!(tiles.note_frame_acked(5, full, 12, 2.0 + FACE_FENCE_SECS + 0.01), Some(Face::Full));
     }
 
     #[test]

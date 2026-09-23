@@ -623,6 +623,15 @@ impl Cx {
         if self.need_redrawing() {
             crate::trace!("hosted", "draw at tick {tick}");
             self.call_draw_event(time_now);
+            // The first draw at a new size lays its text out while the
+            // glyphs are still being made (its own redraw request is refused
+            // inside the draw): draw once more BEFORE the frame goes out, so
+            // the host never sees — and never confirms a face with — a frame
+            // without its text (the tile-to-app zoom flashed one).
+            if REDRAW_AFTER_FIRST.load(Ordering::Relaxed) {
+                self.redraw_all();
+                self.call_draw_event(time_now);
+            }
         }
         let flipped = self.hosted_repaint(windows, time_now as f32);
         if flipped && REDRAW_AFTER_FIRST.swap(false, Ordering::Relaxed) {
@@ -662,6 +671,20 @@ impl Cx {
                     let count = swapchain.images.len();
                     if count == 0 {
                         continue;
+                    }
+                    // A resize outgrows the frames the host had shared: the
+                    // bigger ones are on their way. Drawing into the old,
+                    // smaller image clips the frame, and the host shows it
+                    // stretched with its edges smeared (the tile-to-app zoom
+                    // glitch). Stay dirty until the new frames are imported.
+                    let dpi = self.passes[draw_pass_id].dpi_factor.unwrap_or(1.0);
+                    if let Some(rect) = self.get_pass_rect(draw_pass_id, dpi) {
+                        if (rect.size.x * dpi).ceil() as u32 > swapchain.alloc_width
+                            || (rect.size.y * dpi).ceil() as u32 > swapchain.alloc_height
+                        {
+                            crate::trace!("hosted", "blocked: pass {:?} outgrows the {}x{} frames", rect.size * dpi, swapchain.alloc_width, swapchain.alloc_height);
+                            continue;
+                        }
                     }
                     let index = window.present_index % count;
                     let image = &swapchain.images[index];
@@ -813,6 +836,21 @@ impl Cx {
 impl Cx {
     pub(crate) fn android_poll_debug_grab(&mut self) {
         static LAST: Mutex<(Option<std::time::Instant>, String)> = Mutex::new((None, String::new()));
+        // `setprop debug.makepad.grab burst-<tag>-<count>`: the next <count>
+        // presented frames, one file each (grab-<tag>-NN.png) — a transition
+        // frame by frame.
+        static BURST: Mutex<(String, u32, u32)> = Mutex::new((String::new(), 0, 0));
+        if let Ok(mut burst) = BURST.lock() {
+            if burst.1 > 0 {
+                if let Some(dir) = unsafe { external_files_dir() } {
+                    let path = std::path::PathBuf::from(dir).join(format!("grab-{}-{:02}.png", burst.0, burst.2));
+                    self.capture_next_frame_to_file(path);
+                }
+                burst.1 -= 1;
+                burst.2 += 1;
+                return;
+            }
+        }
         let Ok(mut last) = LAST.lock() else { return };
         if last.0.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400)) {
             return;
@@ -832,6 +870,15 @@ impl Cx {
             crate::error!("grab: the app has no external files directory");
             return;
         };
+        if let Some(rest) = value.strip_prefix("burst-") {
+            if let Some((tag, count)) = rest.rsplit_once('-') {
+                if let (Ok(count), Ok(mut burst)) = (count.parse::<u32>(), BURST.lock()) {
+                    crate::log!("grab: burst of {count} frames -> {dir}/grab-{tag}-NN.png");
+                    *burst = (tag.to_string(), count.min(120), 0);
+                    return;
+                }
+            }
+        }
         let path = std::path::PathBuf::from(dir).join(format!("grab-{value}.png"));
         crate::log!("grab: next frame -> {}", path.display());
         self.capture_next_frame_to_file(path);

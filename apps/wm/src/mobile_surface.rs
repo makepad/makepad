@@ -736,8 +736,9 @@ impl PhoneSurface {
         // iOS skin on a real Android phone: still draw the home pill so
         // there is a way out of an in-process app (the OS Home button
         // leaves wmdyn entirely; Back is gesture-nav and never arrives).
-        if chrome.fake_indicator() || ios {
-            self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0),4.0,nav_ink);
+        if let Some(pill)=chrome.shell_pill(screen).or_else(||ios.then(||rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0))) {
+            // Rounded by its height: Sdf2d draws twice the radius given.
+            self.rounded(cx,pill,pill.size.y as f32,nav_ink);
         }
         if bottom_h>0.0 {self.hits.push((bottom,PhoneHit::Home));}
         if !ios && phone.keyboard>0.5 {

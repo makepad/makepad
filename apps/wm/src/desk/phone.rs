@@ -24,7 +24,10 @@ script_mod! {
             }
             let sdf=Sdf2d.viewport(self.pos*self.rect_size)
             sdf.box(0.0,0.0,self.rect_size.x,self.rect_size.y,self.radius)
-            sdf.fill(self.image.sample(uv)*self.opacity)
+            // The capture is premultiplied already: `fill` would multiply
+            // by alpha again — opacity squared, the grey ghost of a card
+            // fading in or out.
+            sdf.fill_premul(self.image.sample(uv)*self.opacity)
             return sdf.result
         }
     }
@@ -70,6 +73,11 @@ impl Capture {
 pub(super) struct PhoneFrame {
     full: Option<Capture>,
     tile: Option<Capture>,
+    /// A tile face not confirmed yet (back from full screen) is recorded
+    /// here, driving the child at the tile viewport, while the last good
+    /// tile capture keeps standing in — never a "Loading…" placeholder
+    /// over a tile that was showing a moment ago.
+    tile_pending: Option<Capture>,
     bands: Bands,
 }
 
@@ -562,13 +570,40 @@ impl WmDesk {
                 let mut stored=self.phone_frames.remove(&client).unwrap_or_default();
                 if entry.in_tile_face() {
                     let ready=entry.tile_ready();
-                    let mut capture=stored.tile.take().unwrap_or_else(||Capture::new(cx,style,dark));
+                    let module=self.module_clients.contains(&client);
+                    // Not confirmed, and a good tile capture of this size is
+                    // there: drive the child into a scratch capture and keep
+                    // showing the good one.
+                    let good=stored.tile.as_ref().is_some_and(|c|!c.stale(slot.rect.size,style,dark));
+                    if !ready && good && !module {
+                        let mut pending=stored.tile_pending.take().unwrap_or_else(||Capture::new(cx,style,dark));
+                        self.record_capture(cx,scope,client,&mut pending,slot.rect,false);
+                        pending.settle(slot.rect.size,style,dark);
+                        stored.tile_pending=Some(pending);
+                        let capture=stored.tile.as_mut().unwrap();
+                        capture.frame.freeze(cx);
+                        self.present_capture(cx,capture,slot.rect,opacity,HomeMetrics::of(style).tile_radius as f32);
+                        self.phone_frames.insert(client,stored);
+                        continue;
+                    }
+                    // Promote the pending capture; the old tile capture is
+                    // KEPT (as the next pending one), never dropped: the
+                    // client's run view was drawn into it, and a dropped
+                    // pass/draw list is reused while that view's area still
+                    // points at it — its next frame then landed in whatever
+                    // took the slot (the clock tile drawn over Weather).
+                    let fresh=stored.tile_pending.take();
+                    let forced=fresh.is_some();
+                    let mut capture=match fresh {
+                        Some(fresh)=>{stored.tile_pending=stored.tile.take();fresh}
+                        None=>stored.tile.take().unwrap_or_else(||Capture::new(cx,style,dark)),
+                    };
                     // Not confirmed yet: keep the child driven at the tile
                     // viewport every frame; confirmed: only when it drew.
                     // A MODULE draws inside this very pass — no swapchain
                     // delivers its later frames — so its tile is recorded
                     // on every home draw, the way any visible widget is.
-                    if !ready || self.client_arriving(client) || capture.stale(slot.rect.size,style,dark) || self.module_clients.contains(&client) {
+                    if forced || !ready || self.client_arriving(client) || capture.stale(slot.rect.size,style,dark) || module {
                         self.record_capture(cx,scope,client,&mut capture,slot.rect,false);
                         capture.settle(slot.rect.size,style,dark);
                     } else {
@@ -687,10 +722,25 @@ impl WmDesk {
             let card=mobile::card_rect_for(style,screen,phone.chrome,index as f64,phone.cards.page);
             let (app_id,ground)=faces.get(&client).cloned().unwrap_or_default();
             let mut lands=true;
+            let mut zoom_from=Rect::default();
             let mut display=if foreground {
                 let (icon,has_place)=self.phone_zoom_origin(&phone,&launchable,style,screen,app,client,&app_id);
                 lands=has_place;
-                mobile::mix_rect(mobile::mix_rect(icon,app,phone.openness),card,phone.overview)
+                zoom_from=icon;
+                let springs=mobile::mix_rect(mobile::mix_rect(icon,app,phone.openness),card,phone.overview);
+                // Held by a bottom swipe: exactly where the finger put it;
+                // let go, it travels straight from there to where the
+                // springs are heading (the icon, its card, or back to full)
+                // — never through the springs' in-flight rect, which grows
+                // back toward full size on its way home.
+                match phone.lift {
+                    Some(lift)=>{
+                        let (open,overview)=phone.spring_targets();
+                        let end=mobile::mix_rect(mobile::mix_rect(icon,app,open),card,overview);
+                        mobile::mix_rect(if phone.gesture.is_some() {springs} else {end},lift.rect,lift.blend)
+                    }
+                    None=>springs,
+                }
             }else{card};
             if phone.gesture.as_ref().is_some_and(|g|g.hit==Some(PhoneHit::Card(client))) {display.pos.y+=phone.dismiss_y;}
             if display.pos.x+display.size.x<screen.pos.x || display.pos.x>screen.pos.x+screen.size.x {continue;}
@@ -712,7 +762,16 @@ impl WmDesk {
                 else if foreground {phone.openness.max(phone.overview) as f32}else{phone.overview as f32};
             if zooming {
                 let solid=(phone.openness/if lands {0.05}else{0.5}).clamp(0.0,1.0) as f32;
-                self.phone_ui.draw_launch_card_ground(cx,display,&app_id,style,dark,ground,solid,radius);
+                // Zooming out of (or back into) its live home tile: the
+                // tile's own last face is the card's ground, so the app
+                // crossfades into the tile instead of landing on a blank
+                // icon card that the tile then replaces.
+                let tile_ground=stored.tile.as_ref().filter(|c|lands && !c.stale(zoom_from.size,style,dark));
+                if let Some(tile)=tile_ground {
+                    self.present_capture(cx,tile,display,solid,radius);
+                } else {
+                    self.phone_ui.draw_launch_card_ground(cx,display,&app_id,style,dark,ground,solid,radius);
+                }
             }
             // A crossfade tile app between its tile and full screen: its
             // full frame shows through a window that grows from the tile's

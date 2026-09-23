@@ -268,9 +268,16 @@ script_mod! {
         tape_empty := EmptyHistory{}
     }
 
-    let IconBtn = glass.GlassButton{
-        width: 48 height: 48 text: "" padding: 0 spacing: 0
+    // Flat, not glass (as the landscape bar's): a glass disc refracts what
+    // lies beside it into a coloured sliver next to its icon.
+    let IconBtn = ButtonFlat{
+        width: 48 height: 48 text: "" margin: 0 padding: 0 spacing: 0
+        align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 24 height: 24}
+        draw_bg +: {
+            color: theme.color_inset_1 color_hover: theme.color_inset_hover color_down: theme.color_inset_down
+            border_size: 0.0 border_radius: 24.0
+        }
     }
 
     let CalculatorSurface = View{

@@ -51,11 +51,33 @@ impl PhoneChrome {
     pub fn bottom_reserve(&self, _screen: Rect) -> f64 {
         match self {
             PhoneChrome::Simulated => 24.0,
+            // Android: the WM's own home strip, with its own pill — the OS's
+            // handle leaves the WM for the system launcher. Where the surface
+            // runs under the navigation bar (edge to edge) the OS owns its
+            // gesture band there (no app can defer or exclude it), so the
+            // strip sits above that band; a surface that ends above the
+            // system bars (insets.bottom 0) has no band of the OS's inside it.
+            PhoneChrome::Device { insets } if cfg!(target_os = "android") => {
+                let os_band = if insets.bottom > 0.5 { insets.bottom.max(ANDROID_SYSTEM_GESTURE_BAND) } else { 0.0 };
+                os_band + ANDROID_SHELL_STRIP
+            }
             // Real phones with gesture nav often report 0 here (the OS
             // already reserved the nav strip). Keep a tappable home bar
             // inside the app so we are not stuck in an in-process tile.
             PhoneChrome::Device { insets } => insets.bottom.max(28.0),
         }
+    }
+    /// Where the WM draws its own home pill: the Android phone's shell
+    /// strip above the OS gesture band, else the middle of the bottom
+    /// reserve. `None` where the OS draws the only indicator (iOS).
+    pub fn shell_pill(&self, screen: Rect) -> Option<Rect> {
+        let bottom = screen.pos.y + screen.size.y - self.bottom_reserve(screen);
+        let (top, h, pill) = match self {
+            PhoneChrome::Simulated => (bottom, self.bottom_reserve(screen), 4.0),
+            PhoneChrome::Device { .. } if cfg!(target_os = "android") => (bottom, ANDROID_SHELL_STRIP, 5.0),
+            PhoneChrome::Device { .. } => return None,
+        };
+        Some(Rect { pos: dvec2(screen.pos.x + screen.size.x * 0.5 - 60.0, top + (h - pill) * 0.5), size: dvec2(120.0, pill) })
     }
     /// The shell's home gesture zone: the bottom reserve plus a few points
     /// of slack. A press here is the shell's (a tap goes Home, a swipe up
@@ -66,6 +88,12 @@ impl PhoneChrome {
         p.y > screen.pos.y + screen.size.y - self.bottom_reserve(screen) - 4.0
     }
 }
+
+/// The Android system's own bottom gesture band (its mandatory system
+/// gestures inset: 78 px at 2.44x = 32 pt on the Pixel 11 Pro XL).
+pub const ANDROID_SYSTEM_GESTURE_BAND: f64 = 32.0;
+/// The WM's home strip above it: tall enough to find with a thumb.
+pub const ANDROID_SHELL_STRIP: f64 = 32.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhoneScreen { #[default] Home, App, Recents, Drawer }
@@ -517,6 +545,42 @@ pub struct PhoneState {
     /// The home page's live app tiles (mobile_tiles.rs): which client shows
     /// which tile and in which face.
     pub tiles: HomeTiles,
+    /// The open app held by a bottom swipe: where the finger put it (see
+    /// [`lift_rect`]). While the finger is down `blend` is 1 and the app is
+    /// drawn exactly there; after release it springs to 0, handing the app
+    /// over to the openness/overview springs without a jump.
+    pub lift: Option<Lift>,
+}
+/// See [`PhoneState::lift`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lift {
+    pub rect: Rect,
+    pub blend: f64,
+    pub blend_v: f64,
+}
+/// Where a bottom swipe holds the open app: its centre rides `dy_up`
+/// points up and `dx` sideways exactly with the finger (gain 1 in screen
+/// pixels), while it shrinks about that centre toward the switcher's card
+/// scale over the first 30 % of the screen and a little further past that
+/// — so its bottom edge leads the finger, the way a phone's own gesture
+/// lifts the window. `card_scale` is the Recents card's share of the app
+/// rect.
+pub fn lift_rect(app: Rect, card_scale: f64, dy_up: f64, dx: f64, screen_height: f64) -> Rect {
+    let d = dy_up.max(0.0);
+    let h = screen_height.max(1.0);
+    let early = (d / (h * 0.30)).clamp(0.0, 1.0);
+    let late = ((d - h * 0.30) / (h * 0.40)).clamp(0.0, 1.0);
+    let centre = app.pos + app.size * 0.5 + dvec2(dx, -d);
+    // The card never rides off the top: past the curve it shrinks as much
+    // as keeping its top edge on the app area's top needs (down to 30 %).
+    let fit = 2.0 * (centre.y - app.pos.y) / app.size.y.max(1.0);
+    let scale = ((1.0 - (1.0 - card_scale) * early) * (1.0 - 0.18 * late)).min(fit).max(0.3);
+    let size = app.size * scale;
+    Rect { pos: centre - size * 0.5, size }
+}
+/// The Recents card's share of the app rect in this orientation.
+pub fn card_scale(screen: Rect) -> f64 {
+    if screen.size.x > screen.size.y { 0.74 } else { 0.76 }
 }
 impl Default for PhoneState {
     fn default() -> Self {
@@ -528,7 +592,7 @@ impl Default for PhoneState {
             ime: HashMap::new(), shift: false, symbols: false,
             desktop_size: None, desktop_clients: Vec::new(), desktop_style: DesktopStyle::Omarchy, viewport: Rect::default(),
             chrome: PhoneChrome::default(), band_from_app: false,
-            tiles: HomeTiles::default() }
+            tiles: HomeTiles::default(), lift: None }
     }
 }
 impl PhoneState {
@@ -552,7 +616,7 @@ impl PhoneState {
     }
     pub fn activate(&mut self, client: ClientId) {
         self.search_focused = false;
-        if self.client != Some(client) { self.keyboard_target = 0.0; }
+        if self.client != Some(client) { self.keyboard_target = 0.0; self.lift = None; }
         self.client = Some(client);
         self.order.retain(|c| *c != client);
         self.order.insert(0, client);
@@ -676,12 +740,7 @@ impl PhoneState {
         // app (its card is the app pulled in, and tapping it opens it
         // back up), 0 from Home (cards only — nothing to pull, nothing to
         // wobble while the switcher fades in).
-        let open = match self.screen {
-            PhoneScreen::App if self.client.is_some() => 1.0,
-            PhoneScreen::Recents if self.client.is_some() && self.openness > 0.5 => 1.0,
-            _ => 0.0,
-        };
-        let overview = if self.screen == PhoneScreen::Recents { 1.0 } else { 0.0 };
+        let (open, overview) = self.spring_targets();
         let mut active = false;
         let dragging = self.gesture.as_ref().is_some_and(|g| g.bottom);
         for (value, speed, target) in [(&mut self.openness, &mut self.openness_v, open), (&mut self.overview, &mut self.overview_v, overview)] {
@@ -698,6 +757,16 @@ impl PhoneState {
                 *speed = 0.0;
             }
             active |= *value != target;
+        }
+        if let Some(lift) = self.lift.as_mut() {
+            if !dragging {
+                (lift.blend, lift.blend_v) = spring_step(lift.blend, lift.blend_v, 0.0, dt);
+                if lift.blend.abs() < 0.001 && lift.blend_v.abs() < 0.01 {
+                    self.lift = None;
+                } else {
+                    active = true;
+                }
+            }
         }
         self.keyboard += (self.keyboard_target - self.keyboard) * t;
         if (self.keyboard_target - self.keyboard).abs() < 0.25 { self.keyboard = self.keyboard_target; }
@@ -723,6 +792,24 @@ impl PhoneState {
         if from == PhoneScreen::App {
             self.openness = 1.0;
         }
+    }
+    /// The open app follows a bottom swipe: `delta` is the finger's travel
+    /// since it went down (points; up is negative y). See [`lift_rect`].
+    pub fn lift_follow(&mut self, delta: Vec2d, screen: Rect) {
+        let app = app_rect(screen, self.chrome);
+        let rect = lift_rect(app, card_scale(screen), -delta.y, delta.x, screen.size.y);
+        self.lift = Some(Lift { rect, blend: 1.0, blend_v: 0.0 });
+    }
+    /// Where `openness` and `overview` are heading: 1/0 for the open app,
+    /// the switcher keeps the openness it was entered with (1 from an app,
+    /// 0 from Home).
+    pub fn spring_targets(&self) -> (f64, f64) {
+        let open = match self.screen {
+            PhoneScreen::App if self.client.is_some() => 1.0,
+            PhoneScreen::Recents if self.client.is_some() && self.openness > 0.5 => 1.0,
+            _ => 0.0,
+        };
+        (open, if self.screen == PhoneScreen::Recents { 1.0 } else { 0.0 })
     }
     pub fn accepts_app_input(&self) -> bool {
         self.screen == PhoneScreen::App && self.gesture.is_none()
@@ -766,8 +853,7 @@ pub fn card_rect(screen: Rect, chrome: PhoneChrome, index: f64, page: f64) -> Re
 /// the skin's card gap apart (`HomeMetrics::card_gap`).
 pub fn card_rect_for(style: DesktopStyle, screen: Rect, chrome: PhoneChrome, index: f64, page: f64) -> Rect {
     let app = app_rect(screen, chrome);
-    let scale = if screen.size.x > screen.size.y { 0.74 } else { 0.76 };
-    let size = app.size * scale;
+    let size = app.size * card_scale(screen);
     Rect { pos: app.pos + (app.size - size) * 0.5 + dvec2((index-page)*card_pitch(style, screen, chrome), -4.0), size }
 }
 /// From one Recents card to the next: a card's width and the gap.
@@ -782,6 +868,46 @@ pub fn mix_rect(a: Rect, b: Rect, t: f64) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A bottom swipe carries the open app with the finger: its centre
+    /// moves exactly as far as the finger, its bottom edge at least as far,
+    /// while it shrinks toward the card — never the old gain of about 0.3
+    /// (the card mix alone).
+    #[test]
+    fn bottom_swipe_card_follows_the_finger() {
+        for size in [dvec2(412.0, 892.0), dvec2(892.0, 412.0)] {
+            let screen = Rect { pos: dvec2(0.0, 0.0), size };
+            let mut phone = PhoneState::default();
+            phone.chrome = PhoneChrome::Device { insets: SafeAreaInsets { top: 66.0, right: 0.0, bottom: 24.2, left: 0.0 } };
+            let app = app_rect(screen, phone.chrome);
+            let (bottom0, centre0) = (app.pos.y + app.size.y, app.pos.y + app.size.y * 0.5);
+            let mut last_scale = 1.0;
+            for step in 1..=40 {
+                let dy = step as f64 * size.y * 0.02;
+                phone.bottom_drag(PhoneScreen::App, -dy, size.y);
+                phone.lift_follow(dvec2(0.0, -dy), screen);
+                let r = phone.lift.unwrap().rect;
+                let bottom = bottom0 - (r.pos.y + r.size.y);
+                let centre = centre0 - (r.pos.y + r.size.y * 0.5);
+                assert!((centre - dy).abs() <= dy * 0.05, "centre moved {centre} for a finger travel of {dy}");
+                assert!(bottom >= dy * 0.95, "bottom moved {bottom} for {dy}");
+                if r.size.x / app.size.x > 0.301 {
+                    assert!(r.pos.y >= app.pos.y - 0.5, "the card's top stays on screen ({} < {})", r.pos.y, app.pos.y);
+                }
+                let scale = r.size.x / app.size.x;
+                assert!(scale <= last_scale + 1e-9 && scale >= 0.3 - 1e-9, "scale {scale}");
+                last_scale = scale;
+            }
+            // Released: the lift hands over to the springs without a jump.
+            phone.gesture = None;
+            let before = phone.lift.unwrap().rect;
+            phone.step(1.0 / 120.0);
+            let after = phone.lift.map(|l| l.blend).unwrap_or(0.0);
+            assert!(after > 0.9 && after < 1.0, "blend {after} right after release");
+            assert!(before.size.x > 0.0);
+            for _ in 0..240 { phone.step(1.0 / 120.0); }
+            assert!(phone.lift.is_none(), "the lift settles and lets go");
+        }
+    }
     #[test]
     fn both_orientations_reserve_system_bars_and_keep_selected_card_inside() {
         for size in [phone_size(DesktopStyle::Ios), phone_size(DesktopStyle::Android)] {

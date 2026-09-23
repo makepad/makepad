@@ -165,6 +165,15 @@ impl App {
         msgs.push(StudioToApp::Custom(json));
         send_to_app(&sender, msgs);
         self.state_mut().phone.tiles.note_sent(client, face, viewport);
+        let ticks = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |cx, v| {
+            if face == Face::Full && viewport.x >= 1.0 && viewport.y >= 1.0 {
+                v.prepare_size(cx, viewport, dpi);
+            }
+            v.tick_counts().0
+        }));
+        if let Some(ticks) = ticks {
+            self.state_mut().phone.tiles.set_fence(client, ticks, host::now());
+        }
         self.animate_phone(cx);
         true
     }
@@ -194,13 +203,14 @@ impl App {
     /// A frame from `client` landed: which face does it belong to? Tile
     /// clients answer by size (a stale frame from the previous viewport
     /// belongs to neither capture); every other client is in its full face.
-    pub(super) fn note_client_frame_face(&mut self, client: ClientId, width: u32, height: u32) -> Option<Face> {
+    pub(super) fn note_client_frame_face(&mut self, cx: &mut Cx, client: ClientId, width: u32, height: u32) -> Option<Face> {
         let tiles = &mut self.state_mut().phone.tiles;
         if !tiles.is_tile_client(client) { return Some(Face::Full); }
         let dpi = if self.dpi_factor > 0.0 { self.dpi_factor } else { 1.0 };
         let size = dvec2(width as f64 / dpi, height as f64 / dpi);
+        let acked = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |_, v| v.tick_counts().1)).unwrap_or(u64::MAX);
         let tiles = &mut self.state_mut().phone.tiles;
-        let face = tiles.note_frame(client, size);
+        let face = tiles.note_frame_acked(client, size, acked, host::now());
         if face.is_some() {
             if let Some(app) = tiles.get(client).map(|t| t.app.clone()) { tiles.note_healthy(&app); }
         }
@@ -751,6 +761,7 @@ impl App {
                 }else if g.bottom && delta.y < -8.0 {
                     let from=g.screen;
                     phone.bottom_drag(from,delta.y,screen.size.y);
+                    if from==PhoneScreen::App {phone.lift_follow(delta,screen);}
                 }else if g.screen==PhoneScreen::Drawer && (phone.search_focused || !phone.search_query.is_empty()) {
                     phone.search_scroll=(phone.search_scroll.min(search_scroll_max)-last.y).clamp(0.0,search_scroll_max);
                 }else if g.screen==PhoneScreen::Recents {
