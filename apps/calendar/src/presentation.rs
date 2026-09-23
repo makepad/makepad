@@ -241,8 +241,15 @@ pub fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
         size: dvec2(w.max(0.0), h.max(0.0)),
     }
 }
+/// One physical pixel.
 pub fn hairline(cx: &Cx2d) -> f64 {
-    0.5_f64.max(1.0 / cx.current_dpi_factor())
+    1.0 / cx.current_dpi_factor()
+}
+/// `v` moved onto the nearest physical-pixel boundary, so a hairline at a
+/// fractional column edge covers one device pixel instead of two half ones.
+pub fn snap_px(cx: &Cx2d, v: f64) -> f64 {
+    let dpi = cx.current_dpi_factor();
+    (v * dpi).round() / dpi
 }
 pub fn text_at(cx: &mut Cx2d, text: &mut DrawText, r: Rect, value: &str, align: Align) {
     if r.size.x < 2.0 || r.size.y < 2.0 {
