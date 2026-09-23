@@ -1792,7 +1792,11 @@ impl CxVulkan {
             self.destroy_swapchain();
             self.destroy_surface();
 
-            unsafe { ndk_sys::ANativeWindow_release(self.window) };
+            // `suspend_surface` (SurfaceDestroyed: switching away from the
+            // app) already released the old window and left it null.
+            if !self.window.is_null() {
+                unsafe { ndk_sys::ANativeWindow_release(self.window) };
+            }
             self.window = window;
 
             self.surface = Self::create_surface(&self.android_surface_loader, window)?;
