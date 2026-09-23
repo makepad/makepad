@@ -584,7 +584,8 @@ impl WidgetMatchEvent for AiChatPanel {
                 } else if item.button(cx, ids!(deny_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, false, now);
                     self.view.redraw(cx);
-                } else if item.view(cx, ids!(tool_head)).finger_up(actions).is_some() {
+                // A press taken away (the list scrolled under it) toggles nothing.
+                } else if item.view(cx, ids!(tool_head)).finger_up(actions).is_some_and(|e| !e.cancelled) {
                     self.ensure_engine().toggle_tool(&call_id);
                     self.view.redraw(cx);
                 }

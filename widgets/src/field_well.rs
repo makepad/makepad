@@ -329,7 +329,7 @@ impl Widget for FieldWell {
                 self.focus_input(cx);
                 self.redraw(cx);
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) if !fe.cancelled => {
                 // Not redundant with the press. A focused TextInput drops
                 // its own focus on a mouse-up outside its rect — a rule
                 // that is right for a bare field and wrong for one in a

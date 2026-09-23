@@ -185,7 +185,7 @@ pub struct DesktopButton {
 
 impl Widget for DesktopButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
 

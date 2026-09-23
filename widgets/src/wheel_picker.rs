@@ -1296,8 +1296,16 @@ impl Widget for WheelPicker {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 let col = grab.col;
-                let (velocity, travel) = estimate_release_velocity(&self.spins[col].samples);
-                let carry = if travel.abs() > FLING_MIN_TOTAL_DELTA {
+                // A press taken away is no tap and no throw: the drum settles
+                // from rest on the nearest row.
+                let (velocity, travel) = if fe.cancelled {
+                    (0.0, 0.0)
+                } else {
+                    estimate_release_velocity(&self.spins[col].samples)
+                };
+                let carry = if fe.cancelled {
+                    0.0
+                } else if travel.abs() > FLING_MIN_TOTAL_DELTA {
                     // The finger's velocity is the drum's, negated.
                     spin_travel(-velocity, FLING_DECEL_RATE_PER_MS)
                 } else if !grab.caught {

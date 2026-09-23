@@ -1334,7 +1334,8 @@ impl FileContents {
                             out.push(self.hit(cx, position, event.tap_count >= 2, event.modifiers));
                         }
                         if let Some(event) = tile.finger_up(actions) {
-                            self.drop(&mut out, event.abs);
+                            // A press taken away drops nothing.
+                            if event.cancelled { self.press_at = None; } else { self.drop(&mut out, event.abs); }
                         }
                     }
                 }
@@ -1351,7 +1352,8 @@ impl FileContents {
                         out.push(self.hit(cx, position, event.tap_count >= 2, event.modifiers));
                     }
                     if let Some(event) = row.finger_up(actions) {
-                        self.drop(&mut out, event.abs);
+                        // A press taken away drops nothing.
+                            if event.cancelled { self.press_at = None; } else { self.drop(&mut out, event.abs); }
                     }
                 }
             }

@@ -1415,6 +1415,16 @@ impl ShellMenu {
             return self.next_pointer(cx, event);
         }
         match event {
+            // The OS took the menu's touch away: the press ends here — no row
+            // activates, the menu stays as it is — and the next touch starts
+            // fresh.
+            Event::FingerCancel(e) => {
+                let owned = self.touch_press.is_some_and(|(uid, _, _)| e.digit_id == live_id_num!(touch, uid).into());
+                if owned {
+                    self.touch_press = None;
+                }
+                return owned;
+            }
             Event::TouchUpdate(update) => {
                 use makepad_platform::event::TouchState;
                 for point in &update.touches {

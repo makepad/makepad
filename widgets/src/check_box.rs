@@ -955,10 +955,11 @@ impl Widget for CheckBox {
                     });
                 }
             }
-            Hit::FingerUp(_fe) => {
+            Hit::FingerUp(fe) => {
                 self.animator_play(cx, ids!(press.off));
                 if let Some(drag) = self.drag.take() {
-                    if drag.moved {
+                    // A cancelled press leaves the switch where the press put it.
+                    if drag.moved && !fe.cancelled {
                         // The side the knob was released on wins, which may
                         // undo the flip the press made.
                         let on = drag.pos > 0.5;

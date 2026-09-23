@@ -1433,7 +1433,7 @@ impl GlassRadio {
 
 impl Widget for GlassRadio {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1812,7 +1812,7 @@ impl GlassButton {
 
 impl Widget for GlassButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             // Hidden mid-press, it will not hear the release: put the lens at
             // rest now, so it is not shown flat when it comes back.
             if !self.press.is_at_rest() {
@@ -2149,7 +2149,7 @@ impl GlassSlider {
 
 impl Widget for GlassSlider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -2444,7 +2444,7 @@ impl GlassSegmented {
 
 impl Widget for GlassSegmented {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -3491,6 +3491,17 @@ impl Widget for GlassFloatingSurface {
                     }
                 }
             },
+            // The mouse press that moves the surface taken away itself: the
+            // move ends where it is (the surface already stands there) and
+            // the cancel goes on to the content.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if self.drag.take().is_some() {
+                    self.hot = 0.0;
+                    let (pos, size) = (self.pos, self.size);
+                    self.say(cx, GlassFloatingSurfaceAction::Placed { pos, size });
+                    self.redraw(cx);
+                }
+            }
             Event::MouseUp(_) => {
                 if self.drag.take().is_some() {
                     self.hot = 0.0;
@@ -3849,6 +3860,50 @@ mod tests {
             modifiers: KeyModifiers::default(),
             handled: Cell::new(Area::Empty),
             time: 0.0,
+        })
+    }
+
+    /// A cancel belongs to the gesture it names. A moving surface keeps its
+    /// mouse move through a cancel of another pointer (a touch) and through
+    /// a cancel of some other capture of its still-held mouse press; only
+    /// its own mouse press taken away ends the move, where it stands.
+    #[test]
+    fn only_the_surfaces_own_taken_away_press_ends_its_move() {
+        crate::on_test_cx(|| {
+        let (mut cx, mut surface, _pass) = glass_surface();
+        surface.shown = true;
+        surface.drag = Some(Drag::Move { held_at: dvec2(150.0, 110.0), from: dvec2(100.0, 100.0) });
+        let touch: crate::event::DigitId = live_id_num!(touch, 5).into();
+        let mouse: crate::event::DigitId = live_id!(mouse).into();
+        let other = finger_cancel(&mut cx, touch, crate::event::DigitDevice::Touch { uid: 5 }, true);
+        surface.handle_event(&mut cx, &other, &mut Scope::empty());
+        assert!(surface.drag.is_some(), "a touch's cancel ended the mouse move");
+        let partial = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, false);
+        surface.handle_event(&mut cx, &partial, &mut Scope::empty());
+        assert!(surface.drag.is_some(), "a cancel of another capture of the held press ended the move");
+        let own = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, true);
+        let actions = cx.capture_actions(|cx| surface.handle_event(cx, &own, &mut Scope::empty()));
+        assert!(surface.drag.is_none(), "its own press taken away did not end the move");
+        let placed = actions.iter().any(|a| {
+            matches!(a.as_widget_action().map(|w| w.cast::<GlassFloatingSurfaceAction>()), Some(GlassFloatingSurfaceAction::Placed { .. }))
+        });
+        assert!(placed, "the move's end was not reported where it stands");
+        });
+    }
+
+    /// A `FingerCancel` for `digit`; with `taken_away` the press itself was
+    /// cancelled first (`cancel_digit`), as a host or the OS does.
+    fn finger_cancel(cx: &mut Cx, digit: crate::event::DigitId, device: crate::event::DigitDevice, taken_away: bool) -> Event {
+        if taken_away {
+            cx.fingers.cancel_digit(digit);
+        }
+        Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device,
+            abs: dvec2(1.0, 1.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
         })
     }
 

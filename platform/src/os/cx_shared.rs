@@ -763,6 +763,31 @@ impl Cx {
         abs
     }
 
+    /// A host's `StudioToApp::MouseCancel`: a real cancellation, not a
+    /// release. Every capture of the mouse is cancelled and hears
+    /// `Event::FingerCancel` (which hidden widgets admit too); then the
+    /// button is released without any MouseUp being dispatched.
+    pub(crate) fn dispatch_hosted_mouse_cancel(
+        &mut self,
+        e: &makepad_studio_protocol::RemoteMouseUp,
+        window_id: crate::window::WindowId,
+        pos: crate::makepad_math::DVec2,
+    ) {
+        let digit_id = live_id!(mouse).into();
+        let button = crate::event::MouseButton::from_bits_retain(e.button_raw_bits);
+        self.fingers.cancel_digit(digit_id);
+        self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id,
+            digit_id,
+            device: crate::event::DigitDevice::Mouse { button },
+            abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
+            time: e.time,
+            modifiers: e.modifiers.into_key_modifiers(),
+        }));
+        self.fingers.mouse_up(button);
+        self.fingers.cycle_hover_area(live_id!(mouse).into());
+    }
+
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,
@@ -799,6 +824,11 @@ impl Cx {
                 }));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
+            }
+            StudioToApp::MouseCancel(e) => {
+                self.dispatch_hosted_mouse_cancel(&e, window_id, pos);
+                self.update_pointer_capture_pacing();
+                self.send_studio_key_focus_rect_response();
             }
             StudioToApp::MouseUp(e) => {
                 let event = crate::event::MouseUpEvent {
@@ -1129,6 +1159,17 @@ impl Cx {
             self.invoke_event_handler(event);
         }
         drop(dispatch_guard);
+        // A claim during this event cancelled presses that were already
+        // handled earlier in it: each loser gets its terminal cancelled
+        // FingerUp now, before any further input, from a dispatch of its own.
+        let pending = self.fingers.take_pending_cancels(0.0);
+        if !pending.is_empty() {
+            let now = self.seconds_since_app_start();
+            for mut cancel in pending {
+                cancel.time = now;
+                self.inner_call_event_handler(&Event::FingerCancel(cancel));
+            }
+        }
         if perf_timing {
             if let Some(t0) = perf_t0 {
                 self.perf_monitor.add(
@@ -1518,6 +1559,37 @@ mod tests {
         assert_eq!(calls.get(), 2);
     }
 
+    /// A host's `StudioToApp::MouseCancel` reaches the child as a real
+    /// cancellation — `Event::FingerCancel`, which hidden widgets admit —
+    /// never as a MouseUp, and the mouse's press is retired afterwards.
+    #[test]
+    fn a_hosted_mouse_cancel_is_a_finger_cancel_not_a_mouse_up() {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let mut cx = Cx::new(Box::new(move |_cx, event| {
+            log.borrow_mut().push(event.name().to_string());
+        }));
+        let window = crate::window::WindowId(0, 0);
+        cx.fingers.mouse_down(crate::event::MouseButton::PRIMARY, window);
+        cx.fingers.capture_digit(live_id!(mouse).into(), Area::Empty, Area::Empty, 0.0, crate::makepad_math::dvec2(5.0, 5.0));
+        assert!(cx.fingers.any_areas_captured());
+        // The studio arm is exactly this plus the app-only capture pacing.
+        cx.dispatch_hosted_mouse_cancel(
+            &makepad_studio_protocol::RemoteMouseUp {
+                button_raw_bits: crate::event::MouseButton::PRIMARY.bits(),
+                x: 5.0,
+                y: 5.0,
+                ..Default::default()
+            },
+            window,
+            crate::makepad_math::dvec2(0.0, 0.0),
+        );
+        let seen = seen.borrow();
+        assert!(seen.iter().any(|n| n == "FingerCancel"), "no FingerCancel: {seen:?}");
+        assert!(!seen.iter().any(|n| n == "MouseUp"), "the cancel was dispatched as a MouseUp: {seen:?}");
+        assert!(!cx.fingers.any_areas_captured(), "the cancelled press was not retired");
+    }
+
     #[test]
     fn panicking_event_handler_is_restored() {
         let calls = Rc::new(Cell::new(0));
@@ -1556,6 +1628,7 @@ impl Cx {
         gpusim,
         target_os = "macos",
         target_os = "windows",
+        target_os = "android",
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(any(not(linux_direct), use_vulkan))]
@@ -1602,6 +1675,7 @@ impl Cx {
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
+        target_os = "android",
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]

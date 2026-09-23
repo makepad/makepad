@@ -3505,6 +3505,37 @@ impl Widget for DataGrid {
                 Interact::CellPress { .. } => self.move_cell_press(cx, fe.abs),
                 Interact::None => (),
             },
+            // A press taken away (a list or the host took the finger): a
+            // live resize keeps the size it reached and says so; nothing else
+            // happens — no header click, no column move, no cell release or
+            // row drop.
+            Hit::FingerUp(fe) if fe.cancelled => {
+                match std::mem::take(&mut self.interact) {
+                    Interact::ColResize { display_col, .. } => {
+                        let col = self.display_to_data(display_col);
+                        cx.widget_action(
+                            uid,
+                            DataGridAction::ColumnResized {
+                                col,
+                                display_col,
+                                width: self.col_sizes.size_of(display_col),
+                            },
+                        );
+                    }
+                    Interact::RowResize { row, .. } => {
+                        cx.widget_action(
+                            uid,
+                            DataGridAction::RowResized {
+                                row,
+                                height: self.row_sizes.size_of(row),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+                cx.set_cursor(MouseCursor::Default);
+                self.area.redraw(cx);
+            }
             Hit::FingerUp(fe) => {
                 match std::mem::take(&mut self.interact) {
                     Interact::ColResize { display_col, .. } => {

@@ -142,6 +142,10 @@ pub struct PhoneSurface {
     #[live] wallpaper: DrawQuad,
     #[rust] icons: AppIconDraw,
     #[rust] hits: Vec<(Rect, PhoneHit)>,
+    /// Every app hit with the icon actually drawn for it (a tile, a home
+    /// or dock icon, a drawer or library icon, a search row's icon): what
+    /// the app zooms out of when that hit launches it.
+    #[rust] app_icons: Vec<(Rect, String, Rect)>,
     #[find] #[live] search: WidgetRef,
     #[rust] search_style: Option<(bool, bool)>,
     #[rust] search_rect: Rect,
@@ -157,7 +161,16 @@ impl PhoneSurface {
     pub fn hit_rect(&self, hit: &PhoneHit) -> Option<Rect> {
         self.hits.iter().find(|(_, h)| h == hit).map(|(r, _)| *r)
     }
-    pub fn begin(&mut self) { self.hits.clear(); }
+    /// The icon drawn for `app`'s hit under `p`.
+    pub fn icon_at(&self, p: Vec2d, app: &str) -> Option<Rect> {
+        self.app_icons.iter().rev().find(|(hit, id, _)| id == app && hit.contains(p)).map(|(_, _, icon)| *icon)
+    }
+    /// An app hit, with the icon drawn for it.
+    fn app_hit(&mut self, hit: Rect, app: &str, icon: Rect) {
+        self.hits.push((hit, PhoneHit::App(app.to_string())));
+        self.app_icons.push((hit, app.to_string(), icon));
+    }
+    pub fn begin(&mut self) { self.hits.clear(); self.app_icons.clear(); }
     fn rounded(&mut self, cx: &mut Cx2d, r: Rect, radius: f32, color: Vec4f) {
         self.chrome.radius = radius*2.0;
         self.chrome.bevel = 0.0; self.chrome.color = color;
@@ -260,13 +273,38 @@ impl PhoneSurface {
         self.label(cx,rect(r.pos.x+14.0,r.pos.y+9.0,r.size.x-28.0,22.0),headline,13.0,true,ink);
         self.label(cx,rect(r.pos.x+14.0,r.pos.y+31.0,r.size.x-28.0,20.0),text,11.0,false,alpha(ink,0.7*opacity));
     }
-    /// A window opened straight from its tile, before its first full-size
-    /// frame: the launch card the zoom-in plays over.
-    pub fn draw_launch_card(&mut self, cx: &mut Cx2d, r: Rect, app: &str, style: DesktopStyle, dark: bool, opacity: f32, radius: f32) {
+    /// The solid card an app zooms in on (and out of): its own ground (a
+    /// module's `color_bg_app`, else the style's card face) with its icon
+    /// centred, as large as the card allows up to 72 pt — at the start of
+    /// the zoom the card IS the icon it grew out of. Also what shows before
+    /// a window's first full-size frame.
+    pub fn draw_launch_card_ground(&mut self, cx: &mut Cx2d, r: Rect, app: &str, style: DesktopStyle, dark: bool, ground: Option<Vec4f>, opacity: f32, radius: f32) {
         let (face, ink)=Self::card_colors(style, dark);
-        self.rounded(cx, r, radius, alpha(face, opacity));
-        let size=(r.size.x.min(r.size.y)*0.3).clamp(24.0,72.0);
+        self.rounded(cx, r, radius, alpha(ground.unwrap_or(face), opacity));
+        let size=r.size.x.min(r.size.y).min(72.0);
         self.icons.draw(cx,app,style,rect(r.pos.x+(r.size.x-size)*0.5,r.pos.y+(r.size.y-size)*0.5,size,size),opacity,alpha(ink,opacity));
+    }
+    /// Where `app` sits on the home page right now, if it has a place
+    /// there: its live tile, or its icon on the page or in the dock. What
+    /// an app closes back into.
+    pub fn home_rect_of(&self, style: DesktopStyle, screen: Rect, phone: &PhoneState, launchable: &crate::apps::Launchable, app: &str) -> Option<Rect> {
+        let app=app.trim_start_matches("apps.");
+        if app.is_empty() {return None;}
+        let layout=Self::home_layout(style,screen,phone.chrome,launchable);
+        if let Some(slot)=layout.tiles.iter().find(|s|s.app==app) {return Some(slot.rect);}
+        let landscape=screen.size.x>screen.size.y;
+        let size=if landscape {44.0}else{60.0};
+        let cell=layout.favorites.size.x/layout.columns.max(1) as f64;
+        if let Some(index)=phone.home.icons.iter().take(layout.capacity).position(|id|id==app) {
+            let r=mobile_tiles::favorite_cell(&layout,index);
+            return Some(rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size));
+        }
+        if let Some(index)=phone.home.dock.iter().position(|id|id==app) {
+            let dock=Self::home_dock(screen,phone.chrome);
+            let r=mobile_tiles::dock_cell(dock,phone.home.dock.len(),index);
+            return Some(rect(r.pos.x+(r.size.x-58.0)*0.5,r.pos.y+12.0,58.0,58.0));
+        }
+        None
     }
     /// The dock's press value at `now`: 0 → 1 in 80 ms while a dock icon is
     /// held, back to 0 over 260 ms (cubic ease-out) after. Instant under
@@ -301,15 +339,17 @@ impl PhoneSurface {
         // the rubber band past either end). Android's drawer is a sheet
         // that rises over a fading page.
         let pan=if ios {-phone.drawer*screen.size.x} else {0.0};
-        let opacity=((1.0-phone.openness*0.85) as f32)*(if ios {1.0} else {1.0-drawer});
+        // Android's page stays as it is under the rising sheet (which the
+        // desk draws over the live tiles, `draw_android_drawer_layer`).
+        let opacity=(1.0-phone.openness*0.85) as f32;
         if opacity<0.01 && drawer<0.001 {return;}
         let landscape=screen.size.x>screen.size.y;
         let apps=crate::shell::launcher::apps(&state.launchable);
         let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
-        if drawer>0.001 {
-            if ios {self.draw_app_library(cx,state,screen,&ids,phone.drawer as f32,backdrop.clone());} else {self.draw_android_drawer(cx,state,screen,&ids,drawer);}
-            if drawer>0.999 {return;}
+        if drawer>0.001 && ios {
+            self.draw_app_library(cx,state,screen,&ids,phone.drawer as f32,backdrop.clone());
         }
+        if drawer>0.999 {return;}
         if opacity<0.01 {return;}
         let ink=if !ios && !state.style.dark {rgb(31,27,38)}else{rgb(255,255,255)};
         // The page's own frame, panned; the dock and the dots stay put.
@@ -323,7 +363,7 @@ impl PhoneSurface {
         // The tiles themselves are composited by the desk (their captures
         // or placeholders); the page owns their hit regions.
         if home {
-            for slot in &layout.tiles {self.hits.push((slot.rect,PhoneHit::App(slot.app.into())));}
+            for slot in &layout.tiles {self.app_hit(slot.rect,slot.app,slot.rect);}
         }
         // Edit mode: every icon rocks on its own phase, the held one lifts
         // and follows the finger, the others ease aside as the order
@@ -349,7 +389,7 @@ impl PhoneSurface {
                 *at=*at+(target-*at)*ease;
                 *at
             } else {target};
-            if home {self.hits.push((r,PhoneHit::App(id.clone())));}
+            if home {self.app_hit(r,id,rect(at.x,at.y,size,size));}
             if held.as_deref()==Some(id.as_str()) {continue;}
             let tilt=(edit.jiggle(index,now).to_radians()) as f32;
             self.icons.draw_rotated(cx,id,style,rect(at.x,at.y,size,size),opacity,ink,tilt);
@@ -357,8 +397,8 @@ impl PhoneSurface {
         }
         let dock=Self::home_dock(screen,phone.chrome);
         // The dock and the dots stay while the pages pan; they fade under
-        // the library.
-        let opacity=opacity*(1.0-drawer);
+        // the library (Android's sheet simply covers them).
+        let opacity=if ios {opacity*(1.0-drawer)} else {opacity};
         if ios {
             // The material's dock profile for this appearance (or its opaque
             // twin under Reduce Transparency), then the press response: a
@@ -384,7 +424,7 @@ impl PhoneSurface {
                 *at=*at+(target-*at)*ease;
                 *at
             } else {target};
-            if home {self.hits.push((r,PhoneHit::App(id.clone())));}
+            if home {self.app_hit(r,id,rect(at.x,at.y,58.0,58.0));}
             if held.as_deref()==Some(id.as_str()) {continue;}
             let tilt=(edit.jiggle(index+7,now).to_radians()) as f32;
             self.icons.draw_rotated(cx,id,style,rect(at.x,at.y,58.0,58.0),opacity,ink,tilt);
@@ -427,15 +467,35 @@ impl PhoneSurface {
             }
         }
     }
+    /// Android's app drawer over the home page and its live tiles (the desk
+    /// calls it after compositing them): a scrim that deepens to 12 %, then
+    /// an opaque sheet that rises with the finger point for point
+    /// (`drawer_extent`), its top corners rounding off as it leaves the
+    /// top edge.
+    pub fn draw_android_drawer_layer(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect) {
+        let phone=&state.phone;
+        if state.style.target==DesktopStyle::Ios || phone.drawer<=0.001 || (phone.screen==PhoneScreen::App && phone.openness>=0.999) {return;}
+        self.use_fonts(false);
+        let progress=phone.drawer.clamp(0.0,1.0);
+        self.rounded(cx,screen,0.0,alpha(rgb(0,0,0),(0.12*progress) as f32));
+        let apps=crate::shell::launcher::apps(&state.launchable);
+        let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        // `drawer` past 1 is the rubber band: the sheet follows it up.
+        self.draw_android_drawer(cx,state,screen,&ids,phone.drawer.min(1.2));
+    }
     /// Android's app drawer: a sheet with every launchable app on one grid.
-    fn draw_android_drawer(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, ids: &[(String,String)], progress: f32) {
+    fn draw_android_drawer(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, ids: &[(String,String)], progress: f64) {
         let style=state.style.target;
         let landscape=screen.size.x>screen.size.y;
         let arrived=progress>0.5;
-        // The drawer sheet slides up with the finger.
-        let screen=Rect{pos:screen.pos+dvec2(0.0,((1.0-progress) as f64)*screen.size.y*0.35),size:screen.size};
-        self.rounded(cx,screen,0.0,alpha(if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)},progress));
-        let ink=alpha(if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)},progress);
+        let extent=drawer_extent(screen,state.phone.chrome);
+        let lift=(1.0-progress)*extent;
+        let corner=(28.0*((1.0-progress)*6.0).clamp(0.0,1.0)) as f32;
+        let sheet=Rect{pos:screen.pos+dvec2(0.0,lift),size:dvec2(screen.size.x,screen.size.y-lift+corner as f64)};
+        self.rounded(cx,sheet,corner,if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)});
+        // The sheet's content rides with it, laid out for the open sheet.
+        let screen=Rect{pos:screen.pos+dvec2(0.0,lift),size:screen.size};
+        let ink=if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)};
         let pill=self.draw_search(cx,state,screen,ink,None,1.0);
         if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
         let top=pill.pos.y+pill.size.y+18.0;
@@ -447,9 +507,10 @@ impl PhoneSurface {
         let size=if landscape {44.0}else{60.0};
         for (index,(id,label)) in ids.iter().enumerate() {
             let r=rect(screen.pos.x+12.0+(index%columns)as f64*cell,top+(index/columns)as f64*row_h,cell,row_h);
-            self.icons.draw(cx,id,style,rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size),1.0,ink);
+            let icon=rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size);
+            self.icons.draw(cx,id,style,icon,1.0,ink);
             self.label(cx,rect(r.pos.x,r.pos.y+size+4.0,cell,20.0),label,11.0,false,ink);
-            if arrived {self.hits.push((r,PhoneHit::App(id.clone())));}
+            if arrived {self.app_hit(r,id,icon);}
         }
     }
     /// iOS's App Library: a search field over category cards, each card a
@@ -504,7 +565,7 @@ impl PhoneSurface {
                     let slot=rect(ox+(n%2)as f64*cell,oy+(n/2)as f64*cell,cell,cell);
                     let r=rect(slot.pos.x+(cell-big)*0.5,slot.pos.y+(cell-big)*0.5,big,big);
                     self.icons.draw(cx,app,style,r,1.0,ink);
-                    if arrived {self.hits.push((slot,PhoneHit::App((*app).to_string())));}
+                    if arrived {self.app_hit(slot,app,r);}
                 } else {
                     // The fourth cell: up to four more, small but tappable.
                     let k=n-3;
@@ -513,7 +574,7 @@ impl PhoneSurface {
                     let step=big-mini;
                     let r=rect(inner.pos.x+(k%2)as f64*step,inner.pos.y+(k/2)as f64*step,mini,mini);
                     self.icons.draw(cx,app,style,r,1.0,ink);
-                    if arrived {self.hits.push((rect(r.pos.x-2.0,r.pos.y-2.0,mini+4.0,mini+4.0),PhoneHit::App((*app).to_string())));}
+                    if arrived {self.app_hit(rect(r.pos.x-2.0,r.pos.y-2.0,mini+4.0,mini+4.0),app,r);}
                 }
             }
             self.label(cx,rect(card.pos.x,card.pos.y+ch+2.0,cw,20.0),name,12.0,false,alpha(ink,0.85));

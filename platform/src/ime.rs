@@ -60,6 +60,30 @@ impl HostedBack {
     }
 }
 
+/// What a hosted child's pointer input understands beyond the baseline
+/// protocol, announced once right after `AppToStudio::AfterStartup` on the
+/// existing `Custom` channel (older hosts route unknown custom JSON to their
+/// bus and ignore it). `mouse_cancel`: the child decodes
+/// `StudioToApp::MouseCancel` and ends the press as a cancellation; a host
+/// never sends that message to a child that did not say so.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct HostedPointerCaps { pub mouse_cancel: bool }
+#[derive(SerJson, DeJson)]
+struct PointerCapsEnvelope { makepad_pointer_caps: HostedPointerCaps }
+impl HostedPointerCaps {
+    /// What this build of the platform understands.
+    pub fn current() -> Self {
+        Self { mouse_cancel: true }
+    }
+    pub fn to_json(&self) -> String {
+        PointerCapsEnvelope { makepad_pointer_caps: self.clone() }.serialize_json()
+    }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_pointer_caps\"") { return None; }
+        PointerCapsEnvelope::deserialize_json(json).ok().map(|e| e.makepad_pointer_caps)
+    }
+}
+
 script_mod! {
     mod.ime = {
         InputMode: mod.std.set_type_default() do #(InputMode::script_api(vm)),

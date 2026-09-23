@@ -834,6 +834,27 @@ impl Browser {
         }
     }
 
+    /// End a press the page holds as well as this build of the CEF binding
+    /// allows without a release: the pointer leaves the page with no button
+    /// held, and NO mouse-up is sent. A real downstream cancellation
+    /// (`CefBrowserHost::SendCaptureLostEvent`) has no wrapper in the
+    /// committed `makepad_cef` yet; an up — even off the page — can commit a
+    /// drag the page captured (Pointer Events send captured events to the
+    /// capturing element) or click. So the page is left holding its press
+    /// until the person's next click ends it: nothing is committed. When the
+    /// binding gains `send_capture_lost_event`, call it here instead.
+    #[cfg(feature = "cef")]
+    fn send_mouse_cancel_internal(&mut self, modifiers: KeyModifiers, button: MouseButton) {
+        self.pressed_buttons.remove(button);
+        let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons);
+        if let Some(browser) = &mut self.cef_browser {
+            let off = -10_000;
+            if let Err(err) = browser.send_mouse_move(off, off, cef_modifiers, true) {
+                log!("Browser mouse cancel failed: {err}");
+            }
+        }
+    }
+
     #[cfg(feature = "cef")]
     fn send_mouse_wheel_internal(
         &mut self,
@@ -1238,6 +1259,15 @@ impl Widget for Browser {
                 }
                 Hit::FingerMove(fe) if !pointer_held_elsewhere => {
                     self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+                }
+                // The press was taken away (a list or the host took the finger):
+                // the page must let go of it too, but nothing may click.
+                Hit::FingerUp(fe) if fe.cancelled => {
+                    let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
+                    if self.pressed_buttons.contains(button) {
+                        self.send_mouse_cancel_internal(fe.modifiers, button);
+                    }
+                    self.pressed_buttons.remove(button);
                 }
                 Hit::FingerUp(fe) => {
                     let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);

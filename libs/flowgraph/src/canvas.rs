@@ -3597,21 +3597,29 @@ impl Widget for FlowCanvas {
                     MouseCursor::Default
                 });
                 match self.drag.take() {
-                    Some(Drag::Pan { start, .. }) => {
-                        if (fu.abs - start).length() <= DRAG_THRESHOLD && self.selected.is_some() {
+                    Some(Drag::Pan { start, select, .. }) => {
+                        // A press taken away is no click: nothing deselects.
+                        if select
+                            && !fu.cancelled
+                            && (fu.abs - start).length() <= DRAG_THRESHOLD
+                            && self.selected.is_some()
+                        {
                             self.selected = None;
                             cx.widget_action(self.uid, FlowCanvasAction::Select(None));
                         }
                     }
                     Some(Drag::Node {
-                        index, origin, moved, ..
+                        index,
+                        origin,
+                        moved,
+                        ..
                     }) => {
                         if moved {
-                            if let Some(node) = self
-                                .graph
-                                .as_ref()
-                                .and_then(|graph| graph.nodes.get(index))
+                            if let Some(node) =
+                                self.graph.as_mut().and_then(|graph| graph.nodes.get_mut(index))
                             {
+                                node.at = origin;
+                                self.wire_cache_dirty = true;
                                 cx.widget_action(
                                     self.uid,
                                     FlowCanvasAction::Edit(CanvasEdit::Move {
@@ -3637,26 +3645,71 @@ impl Widget for FlowCanvas {
                             );
                         }
                     }
-                    Some(drag @ Drag::Wire { .. }) => self.finish_wire_drag(cx, drag),
+                    Some(Drag::Wire {
+                        from,
+                        from_port,
+                        ty,
+                        picked_up,
+                        ..
+                    }) if fu.cancelled => {
+                        // Taken away (a list or the host took the finger): no
+                        // connect, reconnect or disconnect — a picked-up wire
+                        // stays where it was, nothing was edited yet.
+                        let _ = (from, from_port, ty, picked_up);
+                        self.compatible.clear();
+                    }
+                    Some(Drag::Wire {
+                        from,
+                        from_port,
+                        ty,
+                        picked_up,
+                        ..
+                    }) => {
+                        // Release may arrive outside the clip without a final
+                        // move; never commit the last in-bounds hover target.
+                        let target = self.port_at(fu.abs).and_then(|hit| {
+                            (!hit.output && self.compatible.contains(&(hit.node, hit.port)))
+                                .then_some((hit.node, hit.port))
+                        });
+                        self.finish_wire_drag(
+                            cx,
+                            Drag::Wire {
+                                from,
+                                from_port,
+                                ty,
+                                pos: fu.abs,
+                                target,
+                                picked_up,
+                            },
+                        );
+                    }
                     None => {}
                 }
+                self.preview_wire = None;
                 self.area.redraw(cx);
             }
-            Hit::KeyDown(ke) => match ke.key_code {
+            Hit::KeyDown(ke) if policy.keyboard => match ke.key_code {
                 KeyCode::Delete | KeyCode::Backspace => {
                     if let Some(selection) = self.selected.take() {
                         let edit = match selection {
                             Selection::Node(node) => CanvasEdit::Delete { node },
                             Selection::Edge {
-                                to_node, to_port, ..
-                            } => CanvasEdit::Disconnect { to_node, to_port },
+                                to_node,
+                                to_port,
+                                key,
+                                ..
+                            } => CanvasEdit::Disconnect {
+                                to_node,
+                                to_port,
+                                key,
+                            },
                         };
                         cx.widget_action(self.uid, FlowCanvasAction::Edit(edit));
                         cx.widget_action(self.uid, FlowCanvasAction::Select(None));
                         self.area.redraw(cx);
                     }
                 }
-                KeyCode::Home => self.fit(cx),
+                KeyCode::Home if navigation && self.drag.is_none() => self.fit(cx),
                 KeyCode::Escape => {
                     self.drag = None;
                     self.armed_type = None;

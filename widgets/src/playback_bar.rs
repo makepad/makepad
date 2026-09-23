@@ -860,7 +860,12 @@ impl Widget for PlaybackBar {
                 if !dragging {
                     return;
                 }
-                let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
+                // A press taken away ends where the gesture last put the bar,
+                // not wherever the finger was when it was taken.
+                let fraction = match (&self.hold, fe.cancelled) {
+                    (Some(hold), true) => hold.fraction,
+                    _ => self.fraction_at_x(fe.abs.x, fe.rect),
+                };
                 self.drive(cx, fraction, fe.time, Stroke::Up);
                 if let Some(hold) = &mut self.hold {
                     hold.down = false;

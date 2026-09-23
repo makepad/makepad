@@ -66,6 +66,8 @@ pub use desktop::DesktopStyle;
 pub use run_view::MpRunViewAction;
 pub use makepad_app_module;
 pub use makepad_wm_theme;
+#[cfg(target_os = "android")]
+pub use host::android_prepare_children;
 
 use std::collections::HashMap;
 
@@ -1706,6 +1708,12 @@ impl App {
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("wm: removing client {}", client);
+        // A finger held on the closing app lets go of it first.
+        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
+            if desk.phone_finger_on(client) {
+                desk.cancel_phone_finger(cx);
+            }
+        }
         // A module instance: the tile lets go of the root FIRST, then the
         // instance and its isolate go (module_host.rs). The bus hears an
         // Unregister for it below, like for any client.
@@ -1771,6 +1779,14 @@ impl App {
         // window on its first open — the same client, seated in the layout.
         self.promote_tile_client(cx, client);
         if self.state_mut().style.target.mobile() {
+            // Another app coming to the front takes the finger off the old one.
+            let held_elsewhere = self
+                .desk(cx)
+                .borrow::<WmDesk>()
+                .is_some_and(|d| d.phone_finger_active() && !d.phone_finger_on(client));
+            if held_elsewhere {
+                self.cancel_app_finger(cx);
+            }
             self.state_mut().phone.activate(client);
             // In front now: its full face and full viewport go out at once,
             // so the zoom-in never plays over a compact frame.
@@ -2831,6 +2847,14 @@ impl App {
                 cx.copy_to_clipboard(&text);
             }
             AppToStudio::Custom(json) => {
+                // What the child's pointer input understands: a child that
+                // never says so gets no `MouseCancel` (see MpRunView).
+                if let Some(caps) = makepad_platform::ime::HostedPointerCaps::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |_, v| v.set_pointer_caps(caps));
+                    }
+                    return;
+                }
                 if let Some(back) = makepad_platform::ime::HostedBack::parse(&json) {
                     if back.handled == Some(false) && self.state_mut().phone.client == Some(client) {
                         self.state_mut().phone.navigate(mobile::PhoneScreen::Home);
@@ -4841,6 +4865,12 @@ impl AppMain for App {
             if let Some(state) = self.state.as_mut() {
                 state.phone.chrome.set_insets(ev.new_geom.safe_area_insets);
             }
+            // A new phone size takes the finger away (what it held moved).
+            if ev.old_geom.inner_size != ev.new_geom.inner_size
+                && self.state.as_ref().is_some_and(|s| s.style.target.mobile())
+            {
+                self.cancel_phone_input(cx);
+            }
             if ev.old_geom.inner_size != ev.new_geom.inner_size {
                 if let Some(mut scene) = self.ui.widget(cx, ids!(scene)).borrow_mut::<scene::WmScene>() {scene.cut(cx);}
             }
@@ -4858,6 +4888,11 @@ impl AppMain for App {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         if !self.gallery {
             self.linux_controls_event(cx, event);
+        }
+        if let Event::WindowLostFocus(_) = event {
+            if self.state.as_ref().is_some_and(|s| s.style.target.mobile()) {
+                self.cancel_phone_input(cx);
+            }
         }
         if let Event::WindowDragQuery(dq) = event {
             // Caption-less window: the bar strip is the drag handle; the
@@ -4884,6 +4919,11 @@ impl AppMain for App {
                 }
             }
         }
+        // The phone skin's simulated finger owns its press until it lifts:
+        // its moves and release go to the app before any shell surface.
+        if self.state.is_some() && self.phone_finger_route(cx, event) {
+            return;
+        }
         // The shell menu (and, for move/down/up, an open bar flyout) is
         // modal: while it is up, the pointer event is exclusively its own
         // — see `shell_menu_pointer` / `shell_panel_pointer`. Taken before
@@ -4892,7 +4932,7 @@ impl AppMain for App {
         if self.state.is_some()
             && matches!(
                 event,
-                Event::TouchUpdate(_) | Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
+                Event::TouchUpdate(_) | Event::FingerCancel(_) | Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
             )
             && (self.shell_menu_pointer(cx, event) || self.shell_panel_pointer(cx, event))
         {

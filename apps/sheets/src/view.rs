@@ -1242,6 +1242,11 @@ impl MpSheets {
                 }
                 true
             }
+            // The mouse press itself taken away fills nothing; not consumed.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) && self.fill.is_some() => {
+                self.fill = None;
+                false
+            }
             Event::MouseUp(_) if self.fill.is_some() => {
                 if let Some(f) = self.fill.take() {
                     self.commit_fill(cx, f);

@@ -519,6 +519,8 @@ impl Widget for CalendarMonthCanvas {
         match event {
             Event::MouseDown(e) if r.contains(e.abs) => self.swipe_origin = Some(e.abs),
             Event::MouseUp(e) => finish = Some(e.abs),
+            // The press itself taken away swipes nowhere.
+            Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id) => self.swipe_origin = None,
             Event::TouchUpdate(e) => {
                 for t in &e.touches {
                     match t.state {

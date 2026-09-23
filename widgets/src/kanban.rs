@@ -1217,11 +1217,16 @@ impl Widget for KanbanBoard {
                 self.drag = Some(drag);
                 self.drag_edge_autoscroll(cx);
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) => {
                 let Some(drag) = self.drag.take() else {
                     return;
                 };
                 self.pointer = None;
+                // Taken away: the card goes back where it was, nothing moves.
+                if fe.cancelled {
+                    self.draw_bg.redraw(cx);
+                    return;
+                }
                 if let Some((from_column, from, to_column, slot)) = drag.commit() {
                     match self.board.apply(from_column, from, to_column, slot) {
                         KanbanLanding::Moved { to } => {

@@ -1611,6 +1611,16 @@ impl Cx {
         self.fingers.promote_capture_over(over)
     }
 
+    /// `area` takes the gesture of the finger `digit_id` (a scroller that
+    /// starts scrolling): it becomes the finger's one owner and every other
+    /// capture of it is cancelled. False when the gesture is not `area`'s
+    /// to take (see `CxFingers::claim_gesture`) — then it must stand down.
+    /// On success the owner dispatches `Event::FingerCancel` to its
+    /// children so the presses it took end at once.
+    pub fn claim_finger_gesture(&mut self, digit_id: crate::event::DigitId, area: Area) -> bool {
+        self.fingers.claim_gesture(digit_id, area)
+    }
+
     pub fn sweep_unlock(&mut self, value: Area) {
         self.fingers.sweep_unlock(value);
     }

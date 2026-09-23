@@ -839,6 +839,10 @@ impl Widget for DropDown2 {
                 }
             }
 
+            // The press taken away selects nothing.
+            if matches!(event, Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id)) {
+                self.opening_click = false;
+            }
             if let Event::MouseUp(e) = event {
                 match self.hit_zone(e.abs) {
                     PopupHit::Item(i) => {

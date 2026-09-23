@@ -469,6 +469,17 @@ pub enum StudioToApp {
     None,
     Kill,
     Gpu(HostToAppGpu),
+    /// The host took the press away (its own gesture claimed the finger, or
+    /// it rotated/closed the view): the app ends the press as a
+    /// cancellation — no click, no fling — and releases the button.
+    ///
+    /// APPENDED LAST on purpose: the binary encoding tags variants by
+    /// ordinal, so every existing variant keeps its tag. A child built
+    /// before this variant cannot decode it: its `deserialize_bin` of the
+    /// batch fails, it logs "Cant parse studio websocket binary payload"
+    /// and drops that batch — which is why hosts send a cancel as a batch of
+    /// its own (`RunView`), so nothing else is lost with it.
+    MouseCancel(RemoteMouseUp),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson)]
@@ -487,5 +498,35 @@ impl StudioToApp {
         let mut json = self.serialize_json();
         json.push('\n');
         json
+    }
+}
+
+#[cfg(test)]
+mod studio_to_app_tag_tests {
+    use super::*;
+
+    fn tag(msg: StudioToApp) -> u16 {
+        let bytes = msg.serialize_bin();
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    }
+
+    /// The binary encoding tags `StudioToApp` variants by ordinal: a variant
+    /// added anywhere but last renumbers every one after it, and a host and a
+    /// child one revision apart then decode each other's movement, keys and
+    /// frames as the wrong messages. The existing tags are pinned here to
+    /// their values before `MouseCancel`, which was appended last.
+    #[test]
+    fn existing_tags_are_unchanged_and_mouse_cancel_is_last() {
+        assert_eq!(tag(StudioToApp::Tick), 9);
+        assert_eq!(tag(StudioToApp::MouseUp(RemoteMouseUp::default())), 11);
+        assert_eq!(tag(StudioToApp::MouseMove(RemoteMouseMove::default())), 12);
+        assert_eq!(tag(StudioToApp::TextCopy), 17);
+        assert_eq!(tag(StudioToApp::TextCut), 18);
+        assert_eq!(tag(StudioToApp::None), 23);
+        assert_eq!(tag(StudioToApp::Kill), 24);
+        assert_eq!(tag(StudioToApp::MouseCancel(RemoteMouseUp::default())), 26);
+        // And it round-trips.
+        let bytes = StudioToApp::MouseCancel(RemoteMouseUp { x: 3.0, ..Default::default() }).serialize_bin();
+        assert!(matches!(StudioToApp::deserialize_bin(&bytes), Ok(StudioToApp::MouseCancel(e)) if e.x == 3.0));
     }
 }

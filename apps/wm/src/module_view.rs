@@ -249,8 +249,13 @@ impl Widget for MpModuleView {
         if matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_)) && !self.focused {
             return;
         }
-        if let Event::MouseDown(e) = event {
-            if self.area.is_valid(cx) && self.area.rect(cx).contains(e.abs) {
+        let press = match event {
+            Event::MouseDown(e) => Some(e.abs),
+            Event::TouchUpdate(e) => e.touches.iter().find(|t| t.state == makepad_widgets::makepad_platform::event::TouchState::Start).map(|t| t.abs),
+            _ => None,
+        };
+        if let Some(abs) = press {
+            if self.area.is_valid(cx) && self.area.rect(cx).contains(abs) {
                 if let Some(client) = self.client {
                     // The WM moves focus here (and back to us through
                     // `focus_keyboard`), exactly as for a process tile.

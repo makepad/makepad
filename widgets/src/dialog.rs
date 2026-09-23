@@ -915,6 +915,16 @@ impl Widget for Dialog {
                         return;
                     }
                 }
+                // The mouse press itself taken away: the sheet goes back to
+                // the detent it had; nothing changes detent, nothing
+                // dismisses. The cancel still goes on to the content.
+                Event::FingerCancel(c)
+                    if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) && self.drag_from.is_some() =>
+                {
+                    self.drag_from = None;
+                    self.live_extent = detent_extent(self.detent, base, self.pass_extent);
+                    self.modal.redraw(cx);
+                }
                 Event::MouseUp(_) => {
                     if self.drag_from.take().is_some() {
                         let collapsed = SHEET_COLLAPSED.min(base);
@@ -953,6 +963,13 @@ impl Widget for Dialog {
                 // before: the press that opened the dialog landed while
                 // there was no dialog to hear it.
                 Event::MouseDown(me) => self.press_on_card = !off_card(me.abs),
+                // The mouse press itself taken away: its release will not
+                // come, so there is nothing left to suppress. A cancel of only
+                // some capture of a press still held (a list recycled a row)
+                // leaves the protection in place for the real release.
+                Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                    self.press_on_card = false
+                }
                 Event::MouseUp(me) => {
                     if !std::mem::take(&mut self.press_on_card) && off_card(me.abs) {
                         self.answer(cx, DialogAction::Dismissed);
@@ -1670,6 +1687,62 @@ mod tests {
         assert_eq!(reports(&actions, &sheet), vec![], "no answer of any kind");
         assert!(sheet.as_dialog().is_open(), "the sheet stayed up");
         });
+    }
+
+    /// A cancel that ends only some capture of a mouse press still held (a
+    /// list recycled the row the press landed on) leaves the dialog's
+    /// protection in place: the real release off the card, when it comes, is
+    /// still not read as a press on the scrim.
+    #[test]
+    fn a_partial_cancel_keeps_a_card_press_from_dismissing_on_its_release() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    sheet := BottomSheet{title: "Choices"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        open_in_place(&mut cx, &mut target, &root, ids!(sheet));
+        let sheet = root.widget(&cx, ids!(sheet));
+        let card = sheet.widget(&cx, ids!(content)).area().rect(&cx);
+        assert!(card.size.x > 0.0, "the card is drawn");
+        sheet.handle_event(&mut cx, &press(card.pos + card.size * 0.5), &mut Scope::empty());
+        // Some capture of the still-held press is cancelled — not the press.
+        let mouse: crate::event::DigitId = live_id!(mouse).into();
+        let partial = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, false);
+        sheet.handle_event(&mut cx, &partial, &mut Scope::empty());
+        let outside = dvec2(20.0, 20.0);
+        assert!(!card.contains(outside));
+        let actions = cx.capture_actions(|cx| sheet.handle_event(cx, &release(outside), &mut Scope::empty()));
+        assert_eq!(reports(&actions, &sheet), vec![], "the card press's release dismissed the sheet");
+        assert!(sheet.as_dialog().is_open());
+        });
+    }
+
+    /// A `FingerCancel` for `digit`; with `taken_away` the press itself was
+    /// cancelled first (`cancel_digit`), as a host or the OS does.
+    fn finger_cancel(cx: &mut Cx, digit: crate::event::DigitId, device: crate::event::DigitDevice, taken_away: bool) -> Event {
+        if taken_away {
+            cx.fingers.cancel_digit(digit);
+        }
+        Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device,
+            abs: dvec2(1.0, 1.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
+        })
     }
 
     /// A control that takes the pointer AFTER the drag started stops it

@@ -363,6 +363,7 @@ impl App {
         phone.edit.drag=Some(IconDrag{id:id.to_string(),slot,pos:p,grab:p-centre});
     }
     pub(super) fn configure_phone_mode(&mut self,cx:&mut Cx,previous:desktop::DesktopStyle,style:desktop::DesktopStyle) {
+        self.cancel_phone_input(cx);
         let window=self.ui.window(cx,ids!(main_window));
         if style.mobile() && !previous.mobile() {
             let size=window.get_inner_size(cx);
@@ -404,6 +405,31 @@ impl App {
         self.phone_time=0.0;
         if style.mobile() {self.ensure_home_order();}
         self.animate_phone(cx);
+    }
+    /// The app's simulated finger is taken away (see `cancel_phone_finger`).
+    pub(super) fn cancel_app_finger(&mut self,cx:&mut Cx) {
+        if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {desk.cancel_phone_finger(cx);}
+    }
+    /// The one reset for everything the phone's pointer owns, when it is
+    /// taken away rather than released (rotation, a style switch, a new
+    /// window size, lost focus): the app's simulated finger is cancelled
+    /// (no click, no fling, captures retired) and the shell's gesture is
+    /// dropped with every half-dragged surface settling from rest. No
+    /// release action runs; the frame chain winds down as the springs rest.
+    pub(super) fn cancel_phone_input(&mut self,cx:&mut Cx) {
+        if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {desk.cancel_phone_finger(cx);}
+        if self.state.is_none() {return;}
+        if self.state_mut().phone.cancel_gesture() {self.save_home_order(cx);}
+        self.animate_phone(cx);
+    }
+    /// The simulated finger's moves and lift, before any shell surface can
+    /// take them (lib.rs calls this ahead of the menus and the toolbar).
+    pub(super) fn phone_finger_route(&mut self,cx:&mut Cx,event:&Event)->bool {
+        if !matches!(event,Event::MouseMove(_)|Event::MouseDown(_)|Event::MouseUp(_)) {return false;}
+        let Some(state)=self.state.as_ref() else {return false};
+        if !state.style.target.mobile() {return false;}
+        let (front,accepts)=(state.phone.foreground(),state.phone.accepts_app_input());
+        self.desk(cx).borrow_mut::<WmDesk>().is_some_and(|mut d|d.phone_finger_route(cx,event,front,accepts))
     }
     pub(super) fn phone_toolbar_hit(&self,cx:&Cx,p:Vec2d)->Option<PhoneHit> {
         if !self.state.as_ref().is_some_and(|s|s.style.target.mobile()) {return None;}
@@ -495,6 +521,12 @@ impl App {
         self.animate_phone(cx);
     }
     pub(crate) fn phone_action(&mut self,cx:&mut Cx,hit:PhoneHit) {
+        // Anything that changes what is in front, or who takes input, takes
+        // the app's finger away first — at once, not at the next pointer event.
+        if !matches!(hit,PhoneHit::Key(_)|PhoneHit::Shift|PhoneHit::Symbols|PhoneHit::HideKeyboard
+            |PhoneHit::ClearSearch|PhoneHit::CancelSearch|PhoneHit::Appearance) {
+            self.cancel_app_finger(cx);
+        }
         // In edit mode an icon is for arranging, not launching.
         if self.state_mut().phone.edit.active && matches!(hit,PhoneHit::App(_)) {return;}
         match hit {
@@ -518,8 +550,7 @@ impl App {
             PhoneHit::Done=>self.state_mut().phone.leave_edit(),
             PhoneHit::Rotate=>{
                 let window=self.ui.window(cx,ids!(main_window));let size=window.get_inner_size(cx);
-                self.state_mut().phone.gesture=None;
-                self.state_mut().phone.touch=None;
+                self.cancel_phone_input(cx);
                 window.resize(cx,dvec2(size.y,size.x));
             }
             PhoneHit::Style=>self.open_style_menu(cx),
@@ -621,6 +652,17 @@ impl App {
     }
     pub(super) fn phone_pointer(&mut self,cx:&mut Cx,event:&Event)->bool {
         if !self.state_mut().style.target.mobile() {return false;}
+        // The OS took the shell's touch away (a system gesture, an alert):
+        // not a release — nothing navigates; every half-dragged surface
+        // settles from rest.
+        if let Event::FingerCancel(e)=event {
+            let owned=self.state_mut().phone.touch;
+            if owned.is_some_and(|uid|e.digit_id==live_id_num!(touch,uid).into()) {
+                self.cancel_phone_input(cx);
+                return true;
+            }
+            return false;
+        }
         if let Event::TouchUpdate(update) = event {
             use makepad_platform::event::TouchState;
             let owned = self.state_mut().phone.touch;
@@ -693,12 +735,11 @@ impl App {
             PhonePointerPhase::Move=>{
                 let phone=&mut self.state_mut().phone;
                 let Some(g)=phone.gesture.as_mut() else{return phone.screen!=PhoneScreen::App;};
-                let delta=p-g.start;let last=p-g.last;g.last=p;g.track(p);
+                let delta=p-g.start;let last=p-g.last;
+                // The release speed is measured over the last 80 ms of the
+                // path, by time, not per event.
+                g.sample(p,time);g.last=p;g.track(p);
                 phone.last_interaction=time;
-                // The release speed is the last segments', smoothed a
-                // little so one jittery sample cannot make or break a flick.
-                let dt=time-g.last_time;
-                if dt>0.0005 {g.vy=g.vy*0.4+(last.y/dt)*0.6;g.vx=g.vx*0.4+(last.x/dt)*0.6;g.last_time=time;}
                 let android=self.state.as_ref().is_some_and(|s|s.style.target==desktop::DesktopStyle::Android);
                 let phone=&mut self.state_mut().phone;
                 let g=phone.gesture.as_mut().unwrap();
@@ -713,25 +754,39 @@ impl App {
                 }else if g.screen==PhoneScreen::Drawer && (phone.search_focused || !phone.search_query.is_empty()) {
                     phone.search_scroll=(phone.search_scroll.min(search_scroll_max)-last.y).clamp(0.0,search_scroll_max);
                 }else if g.screen==PhoneScreen::Recents {
-                    if delta.y.abs()>delta.x.abs()*1.2 {phone.dismiss_y=delta.y.min(0.0);}
-                    else {let width=card_rect(screen,phone.chrome,0.0,0.0).size.x+22.0;let count=phone.order.len();phone.cards.drag_move(last.x,width,count);}
+                    // One axis per drag: sideways pages the cards, up
+                    // dismisses the one under the finger. The travel before
+                    // the axis was decided is not lost.
+                    let undecided=g.pan.is_none();
+                    match g.lock_axis(delta,true) {
+                        Some(true)=>{
+                            let width=crate::mobile::card_pitch(if android {desktop::DesktopStyle::Android}else{desktop::DesktopStyle::Ios},screen,phone.chrome);let count=phone.order.len();
+                            phone.cards.drag_move(if undecided {delta.x}else{last.x},width,count);
+                        }
+                        Some(false)=>phone.dismiss_y=delta.y.min(0.0),
+                        None=>{}
+                    }
                 }else if g.edge {phone.openness=(1.0-delta.x.max(0.0)/screen.size.x*0.6).clamp(0.4,1.0);}
-                else if matches!(g.screen,PhoneScreen::Home|PhoneScreen::Drawer) && !g.bottom && !phone.edit.active && (g.pan.is_some() || delta.length()>12.0) {
+                else if matches!(g.screen,PhoneScreen::Home|PhoneScreen::Drawer) && !g.bottom && !phone.edit.active {
                     // The home pages and the library pan with the finger:
                     // sideways on iOS (the page slides off as the library
-                    // slides in), up on Android (its drawer is a sheet).
-                    // The axis is decided once, by the first travel.
-                    let pan=*g.pan.get_or_insert(if android {delta.y.abs()>=delta.x.abs()} else {delta.x.abs()>=delta.y.abs()});
-                    if pan {
-                        if android {phone.library_drag_move(last.y,screen.size.y*0.45);}
-                        else {phone.library_drag_move(last.x,screen.size.x);}
+                    // slides in), up on Android (its drawer is a sheet that
+                    // stays under the finger over its whole travel). The
+                    // axis is decided once, past the slop.
+                    let undecided=g.pan.is_none();
+                    if g.lock_axis(delta,!android)==Some(true) {
+                        let d=if undecided {delta}else{last};
+                        if android {let extent=drawer_extent(screen,phone.chrome);phone.library_drag_move(d.y,extent);}
+                        else {phone.library_drag_move(d.x,screen.size.x);}
                     }
                 }
                 self.animate_phone(cx);true
             }
             PhonePointerPhase::Up=>{
-                let Some(g)=self.state_mut().phone.gesture.take() else{return self.state_mut().phone.screen!=PhoneScreen::App;};
+                let Some(mut g)=self.state_mut().phone.gesture.take() else{return self.state_mut().phone.screen!=PhoneScreen::App;};
                 let delta=p-g.start;
+                if p!=g.last {g.sample(p,time);g.last=p;g.track(p);}
+                let velocity=g.release_velocity(time);
                 self.state_mut().phone.last_interaction=time;
                 let android=self.state_mut().style.target==desktop::DesktopStyle::Android;
                 if self.state_mut().phone.edit.drag.is_some() {
@@ -739,7 +794,7 @@ impl App {
                     // it eases down into it and the document is saved.
                     self.state_mut().phone.edit.drag=None;
                     self.save_home_order(cx);
-                }else if self.state_mut().phone.edit.active && delta.length()<12.0 && !g.long_pressed {
+                }else if self.state_mut().phone.edit.active && !g.committed && !g.long_pressed {
                     // A tap beside the icons, or on Done, leaves edit mode.
                     match g.hit.clone().filter(|h|Some(h)==hit.as_ref()) {
                         Some(PhoneHit::Done)|None=>self.state_mut().phone.leave_edit(),
@@ -752,35 +807,50 @@ impl App {
                     }else{
                         let android=self.state_mut().style.target==desktop::DesktopStyle::Android;
                         let held=time-g.last_time>crate::mobile::SWIPE_HOLD_SECS;
-                        let target=crate::mobile::bottom_swipe_target(g.screen,android,delta,screen.size.y,time-g.time,held,g.vy)
+                        let target=crate::mobile::bottom_swipe_target(g.screen,android,delta,screen.size.y,time-g.time,held,velocity.y)
                             .unwrap_or(PhoneHit::Home);
-                        log!("wm: bottom swipe dy={:.0} dur={:.2}s held={} vy={:.0} -> {:?}",delta.y,time-g.time,held,g.vy,target);
+                        log!("wm: bottom swipe dy={:.0} dur={:.2}s held={} vy={:.0} -> {:?}",delta.y,time-g.time,held,velocity.y,target);
                         self.phone_action(cx,target);
                     }
                 }else if g.edge && delta.x>70.0 {self.phone_action(cx,PhoneHit::Back);}
-                else if g.screen==PhoneScreen::Recents && delta.y < -90.0 && delta.y.abs()>delta.x.abs()*1.2 {
+                else if g.screen==PhoneScreen::Recents && g.pan==Some(false) && {
+                    // Thrown up far enough (a quarter of the card, at least
+                    // 96 pt), or flicked up: the card goes.
+                    let card=card_rect(screen,self.state_mut().phone.chrome,0.0,0.0);
+                    delta.y < -(96.0f64).max(card.size.y*0.25) || (velocity.y < -900.0 && delta.y < -32.0)
+                } {
                     if let Some(PhoneHit::Card(client))=g.hit {self.request_close(cx,client);self.state_mut().phone.navigate(PhoneScreen::Recents);}
-                }else if delta.length()<12.0 {
+                }else if !g.committed {
+                    // Never past the slop: a tap. Once the finger travelled
+                    // it was a drag to the end, whatever it came back to.
                     let tapped=g.hit.clone().filter(|h|Some(h)==hit.as_ref());
+                    if let Some(PhoneHit::App(app))=&tapped {
+                        // The zoom opens out of the icon that was drawn under the finger.
+                        let origin=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.phone_icon_at(g.start,app));
+                        let in_drawer=self.state_mut().phone.screen==PhoneScreen::Drawer;
+                        self.state_mut().phone.launch_from=origin.map(|r|(r,in_drawer));
+                    }
                     if let Some(hit)=tapped {self.phone_action(cx,hit);}
                     // A tap beside the cards leaves the switcher, as on a phone.
                     else if g.screen==PhoneScreen::Recents && g.hit.is_none() {self.phone_action(cx,PhoneHit::Home);}
-                }else if g.screen==PhoneScreen::Recents {
+                }else if g.screen==PhoneScreen::Recents && g.pan==Some(true) {
                     // The cards flip to the nearest page, or one further on a flick.
-                    let width=card_rect(screen,self.state_mut().phone.chrome,0.0,0.0).size.x+22.0;
+                    let width=crate::mobile::card_pitch(self.state_mut().style.target,screen,self.state_mut().phone.chrome);
                     let count=self.state_mut().phone.order.len();
-                    self.state_mut().phone.cards.drag_end(g.vx,width,count);
+                    self.state_mut().phone.cards.drag_end(velocity.x,width,count,crate::mobile::CARD_FLICK_SPEED);
                 }
                 if self.state_mut().phone.pager.dragging() {
                     // The pages settle: the nearest, or one further on a flick.
-                    let (v,extent)=if android {(g.vy,screen.size.y*0.45)} else {(g.vx,screen.size.x)};
+                    let chrome=self.state_mut().phone.chrome;
+                    let (v,extent,flick)=if android {(velocity.y,drawer_extent(screen,chrome),crate::mobile::DRAWER_FLICK_SPEED)}
+                        else {(velocity.x,screen.size.x,crate::mobile::PAGE_FLICK_SPEED)};
                     let v=if g.pan==Some(true) {v} else {0.0};
-                    self.state_mut().phone.library_release(v,extent);
+                    self.state_mut().phone.library_release(v,extent,flick);
                 }
+                // A card drag that never owned the sideways axis settles from rest.
                 if self.state_mut().phone.cards.dragging() {
-                    let width=card_rect(screen,self.state_mut().phone.chrome,0.0,0.0).size.x+22.0;
                     let count=self.state_mut().phone.order.len();
-                    self.state_mut().phone.cards.drag_end(0.0,width,count);
+                    self.state_mut().phone.cards.cancel_drag(count);
                 }
                 self.state_mut().phone.dismiss_y=0.0;
                 self.animate_phone(cx);true

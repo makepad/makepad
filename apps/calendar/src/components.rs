@@ -570,6 +570,8 @@ impl Widget for CalendarControlGroup {
             Event::MouseMove(e) => Some((e.abs, 0.5, 0.1)),
             Event::MouseDown(e) => Some((e.abs, 1.0, 0.07)),
             Event::MouseUp(e) => Some((e.abs, 0.5, 0.12)),
+            // The press itself taken away: the pressed look lets go.
+            Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id) => Some((e.abs, 0.0, 0.12)),
             Event::TouchUpdate(e) => e.touches.first().map(|t| {
                 (
                     t.abs,

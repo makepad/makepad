@@ -298,7 +298,8 @@ impl Widget for Modal {
             // * If there was a click/tap in the background area, outside of the inner `content` view.
             let should_close = back_pressed
                 || match bg_area_hit {
-                    Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
+                    // A press taken away dismisses nothing.
+                    Hit::FingerUp(fe) => !fe.cancelled && !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || (owns_cancel && (

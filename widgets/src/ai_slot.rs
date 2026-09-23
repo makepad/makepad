@@ -317,6 +317,15 @@ impl AiChatSlot {
                 cx.set_cursor(MouseCursor::Crosshair);
                 true
             }
+            // The mouse press itself taken away: no region is picked. Not
+            // consumed: the cancel goes on to whatever else holds the press.
+            Event::FingerCancel(c)
+                if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) && self.region_start.is_some() =>
+            {
+                self.region_start = None;
+                cx.redraw_all();
+                false
+            }
             Event::MouseUp(e) if e.window_id == window_id => {
                 if let Some(start) = self.region_start.take() {
                     let end = clamp(e.abs);
@@ -628,6 +637,7 @@ pub fn window_intercept(
         match event {
             Event::MouseDown(e) if e.window_id == window_id => s.press_outside = !inside,
             Event::MouseUp(e) if e.window_id == window_id => s.press_outside = false,
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => s.press_outside = false,
             _ => {}
         }
         (s.showing(), inside && !stands_down)

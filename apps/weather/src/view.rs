@@ -797,14 +797,15 @@ impl Widget for WeatherView {
             }
         }
         if let Event::Actions(actions) = event {
-            if self.view.widget(cx, ids!(locations)).borrow::<GlassButton>().is_some_and(|b| b.clicked(actions)) {
+            if self.view.view(cx, ids!(locations)).finger_up(actions).is_some_and(|fe| fe.is_over) {
                 self.set_sheet(cx, true);
             }
             if self.view.widget(cx, ids!(scrim_sheet)).view(cx, &[]).finger_down(actions).is_some() {
                 self.set_sheet(cx, false);
             }
             for (i, row) in [ids!(city_0), ids!(city_1), ids!(city_2), ids!(city_3)].iter().enumerate() {
-                if self.view.view(cx, *row).finger_up(actions).is_some() {
+                // A press taken away (a list or the host took the finger) is no tap.
+                if self.view.view(cx, *row).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
                     self.select_city(cx, i);
                     if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
                         dots.set(cx, CITIES.len(), self.state.city);
@@ -812,7 +813,7 @@ impl Widget for WeatherView {
                     self.set_sheet(cx, false);
                 }
             }
-            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some() {
+            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
                 self.fetch(cx);
                 self.set_sheet(cx, false);
             }

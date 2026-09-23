@@ -473,6 +473,11 @@ impl Widget for RadioButton {
                 }
                 self.set_key_focus(cx);
             }
+            // A press taken away (a list scrolled under it) lets go and
+            // selects nothing.
+            Hit::FingerUp(fe) if fe.cancelled => {
+                self.animator_play(cx, ids!(hover.off));
+            }
             Hit::FingerUp(_fe) => {
                 self.animator_play(cx, ids!(hover.on));
                 if self.animator_in_state(cx, ids!(active.off)) {

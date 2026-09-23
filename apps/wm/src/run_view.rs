@@ -190,6 +190,14 @@ pub struct MpRunView {
     /// files keeps the keyboard so its arrows go on dialing.
     #[rust(true)]
     takes_key_focus: bool,
+    /// The child announced it decodes `StudioToApp::MouseCancel`
+    /// (`HostedPointerCaps`); until it does, a cancelled press is relayed the
+    /// way an older child can take it (see the FingerUp relay).
+    #[rust]
+    child_mouse_cancel: bool,
+    /// The one log line for a child that cannot take a cancellation.
+    #[rust]
+    logged_no_mouse_cancel: bool,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -331,6 +339,11 @@ impl MpRunView {
     /// A press, release or scroll: the pointer position it happened at
     /// goes out first, in the same batch, so the child sees the move
     /// before the edge exactly as the host did.
+    /// What the child said its pointer input understands.
+    pub fn set_pointer_caps(&mut self, caps: makepad_widgets::makepad_platform::ime::HostedPointerCaps) {
+        self.child_mouse_cancel = caps.mouse_cancel;
+    }
+
     fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
         let mut msgs = Vec::with_capacity(2);
         if let Some(mv) = self.pending_move.take() {
@@ -1381,11 +1394,32 @@ impl Widget for MpRunView {
                 cx.set_cursor(MouseCursor::Default);
             }
             Hit::FingerUp(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
+                // A press the WM took away is relayed as a cancellation: the
+                // app lets go of it without clicking or flinging. A child
+                // that never announced `MouseCancel` is sent nothing — the
+                // WM never cancelled its presses before, and any release
+                // could commit what the press started.
+                if e.cancelled && !self.child_mouse_cancel {
+                    if !std::mem::replace(&mut self.logged_no_mouse_cancel, true) {
+                        log!("wm: client {} does not take MouseCancel; its cancelled presses are not relayed", target.client);
+                    }
+                    return;
+                }
+                // A cancel is owed even when the view's area is gone; where
+                // it lands does not matter, it clicks nothing.
+                let local = self.local_from_area(cx, e.abs).or_else(|| e.cancelled.then(Default::default));
+                let release = if e.cancelled && self.child_mouse_cancel { StudioToApp::MouseCancel } else { StudioToApp::MouseUp };
+                if let Some(local) = local {
+                    // A cancel travels in a batch of its own.
+                    if e.cancelled {
+                        if let Some(mv) = self.pending_move.take() {
+                            self.emit_to_app(cx, target.client, vec![StudioToApp::MouseMove(mv)]);
+                        }
+                    }
                     self.emit_after_pending_move(
                         cx,
                         target.client,
-                        StudioToApp::MouseUp(RemoteMouseUp {
+                        release(RemoteMouseUp {
                             button_raw_bits: Self::default_mouse_button(&e.device).bits(),
                             x: local.x,
                             y: local.y,

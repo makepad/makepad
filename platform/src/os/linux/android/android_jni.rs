@@ -115,6 +115,9 @@ pub enum FromJavaMessage {
         time: f64,
     },
     Touch(Vec<TouchPoint>),
+    /// `ACTION_CANCEL`: the system took every pointer away; each is a Stop
+    /// dispatched as a cancellation.
+    TouchCancel(Vec<TouchPoint>),
     Character {
         character: u32,
     },
@@ -475,6 +478,10 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
     let mut env: *mut jni_sys::JNIEnv = std::ptr::null_mut();
+    // A hosted child process (android_hosted.rs) has no JVM at all.
+    if get_java_vm().is_null() {
+        return env;
+    }
     let attach_current_thread = (**get_java_vm()).AttachCurrentThread.unwrap();
 
     let res = attach_current_thread(get_java_vm(), &mut env, std::ptr::null_mut());
@@ -887,7 +894,10 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
 
         touches.push(TouchPoint {
             state: {
-                if action_index == touch_index {
+                if action_masked == 3 {
+                    // ACTION_CANCEL ends every pointer of the gesture.
+                    TouchState::Stop
+                } else if action_index == touch_index {
                     match action_masked {
                         0 | 5 => TouchState::Start,
                         1 | 6 => TouchState::Stop,
@@ -908,7 +918,11 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             time: time as f64 / 1000.0,
         });
     }
-    send_from_java_message(FromJavaMessage::Touch(touches));
+    send_from_java_message(if action_masked == 3 {
+        FromJavaMessage::TouchCancel(touches)
+    } else {
+        FromJavaMessage::Touch(touches)
+    });
 }
 
 #[no_mangle]
@@ -1579,6 +1593,9 @@ unsafe fn open_raw_asset(filepath: &str, mode: ::std::os::raw::c_uint) -> Option
 }
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
+    if super::android_hosted::is_hosted() {
+        return super::android_hosted::load_asset(filepath);
+    }
     let (asset, length) = open_raw_asset(filepath, ndk_sys::AASSET_MODE_BUFFER)?;
     let mut buffer = Vec::new();
     buffer.resize(length.max(0) as usize, 0u8);

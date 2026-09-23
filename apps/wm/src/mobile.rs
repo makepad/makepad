@@ -80,45 +80,91 @@ pub enum PhoneHit {
 }
 
 /// How far past its ends a paged scroller or the library follows the
-/// finger: a third of the overshoot, the phone's rubber band.
+/// finger: the rubber band starts at this share of the overshoot and
+/// saturates toward [`RUBBER_LIMIT`] points.
 pub const RUBBER: f64 = 0.35;
-/// A sideways flick this fast (pages per second) flips one page on
-/// release whatever the drag distance was.
-pub const FLICK_PAGES_PER_SEC: f64 = 1.2;
-/// A vertical flick this fast (points per second) completes the library's
+pub const RUBBER_LIMIT: f64 = 64.0;
+/// A sideways flick this fast (points per second), after [`FLICK_TRAVEL`]
+/// points of travel, flips the home pages one page its way whatever the
+/// distance was.
+pub const PAGE_FLICK_SPEED: f64 = 480.0;
+/// The same for the switcher's cards.
+pub const CARD_FLICK_SPEED: f64 = 650.0;
+/// A vertical flick this fast (points per second) completes the drawer's
 /// open or close.
-pub const DRAWER_FLICK_SPEED: f64 = 700.0;
+pub const DRAWER_FLICK_SPEED: f64 = 600.0;
+pub const FLICK_TRAVEL: f64 = 16.0;
+/// A slow release settles where the finger's speed would carry the page
+/// in this long: the nearest page to that projection.
+pub const PROJECT_SECS: f64 = 0.12;
+/// Gesture ownership: a finger is a drag once it travels this far, and
+/// takes an axis once one leads the other by [`AXIS_LOCK`].
+pub const TOUCH_SLOP: f64 = 8.0;
+pub const AXIS_LOCK: f64 = 1.2;
+/// The release speed is the finger's over this last stretch of time; a
+/// finger that rested this long before lifting was not moving at all.
+pub const VELOCITY_WINDOW: f64 = 0.08;
+pub const VELOCITY_REST: f64 = 0.12;
 
-/// Rubber band: inside `[0, max]` the value is the finger's; beyond, only
-/// a fraction of the overshoot.
-pub fn rubber_band(raw: f64, max: f64) -> f64 {
+/// The motion every surface of the shell settles with: a critically damped
+/// spring (mass 1, stiffness 900, damping 60 — 30 per second), seeded with
+/// the finger's speed at release so a flick carries on and a slow release
+/// eases from rest. About 0.3 s from rest to rest over any distance.
+pub const SPRING_OMEGA: f64 = 30.0;
+
+/// One exact step of the spring toward `target` over `dt`: the position
+/// and velocity after it (the closed-form solution, so no step size can
+/// make it overshoot or wobble).
+pub fn spring_step(x: f64, v: f64, target: f64, dt: f64) -> (f64, f64) {
+    let w = SPRING_OMEGA;
+    let e0 = x - target;
+    let b = v + w * e0;
+    let decay = (-w * dt).exp();
+    let e = (e0 + b * dt) * decay;
+    let v = (v - w * b * dt) * decay;
+    (target + e, v)
+}
+
+/// Rubber band, in points past the ends: the finger's own travel inside
+/// `[0, max]`; beyond it a band that starts at [`RUBBER`] of the overshoot
+/// and never gives more than [`RUBBER_LIMIT`] points.
+pub fn rubber_band(raw: f64, max: f64, unit: f64) -> f64 {
+    let band = |over: f64| {
+        let d = over.abs() * unit.max(1.0);
+        over.signum() * (RUBBER * d / (1.0 + RUBBER * d / RUBBER_LIMIT)) / unit.max(1.0)
+    };
     if raw < 0.0 {
-        raw * RUBBER
+        band(raw)
     } else if raw > max {
-        max + (raw - max) * RUBBER
+        max + band(raw - max)
     } else {
         raw
     }
 }
 
-/// A paged scroller the finger drives — the switcher's cards, and the
-/// same shape for any paged surface. While dragging the page follows the
-/// finger 1:1 (rubber band past the ends); on release it flips to the
-/// nearest page, or exactly one page in the flick's direction when the
-/// finger was fast, and eases there once. A settled scroller requests no
-/// frames (`step` returns false).
+/// A paged scroller the finger drives — the switcher's cards, the home
+/// pages and the drawer. While dragging the page follows the finger 1:1
+/// (rubber band past the ends); on release a flick flips exactly one page
+/// its way, a slower release settles on the page nearest to where its
+/// speed projects, and the spring carries the finger's speed into the
+/// settle. A settled scroller requests no frames (`step` returns false).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Paging {
     /// The page shown, fractional between pages.
     pub page: f64,
     target: f64,
+    /// Pages per second: the spring's speed (seeded by the release).
+    velocity: f64,
+    /// Points per page, from the last drag: what "a quarter point" is in
+    /// pages when the spring decides it has arrived.
+    unit: f64,
     /// A drag in flight: the page it started on, the finger's travel so far.
     drag: Option<(f64, f64)>,
 }
 
 impl Default for Paging {
     fn default() -> Self {
-        Paging { page: 0.0, target: 0.0, drag: None }
+        Paging { page: 0.0, target: 0.0, velocity: 0.0, unit: 400.0, drag: None }
     }
 }
 
@@ -130,34 +176,52 @@ impl Paging {
         self.drag.is_some()
     }
     pub fn settled(&self) -> bool {
-        self.drag.is_none() && self.page == self.target
+        self.drag.is_none() && self.page == self.target && self.velocity == 0.0
     }
-    /// The finger lands; the page it holds is the drag's origin.
+    /// The finger lands; the page it holds is the drag's origin. A page
+    /// still settling stops where it is, under the finger.
     pub fn drag_begin(&mut self) {
         self.drag = Some((self.page, 0.0));
         self.target = self.page;
+        self.velocity = 0.0;
     }
     /// The finger moved `dx` points (right positive) over pages `width`
     /// points wide: the page follows, the ends rubber-band.
     pub fn drag_move(&mut self, dx: f64, width: f64, count: usize) {
         let Some((start, travel)) = self.drag.as_mut() else { return };
         *travel += dx;
-        let raw = *start - *travel / width.max(1.0);
-        self.page = rubber_band(raw, Self::max(count));
+        let width = width.max(1.0);
+        let raw = *start - *travel / width;
+        self.unit = width;
+        self.page = rubber_band(raw, Self::max(count), width);
     }
     /// The finger lifts at `vx` points per second (right positive): a flick
-    /// flips one page its way, anything slower settles on the nearest.
-    pub fn drag_end(&mut self, vx: f64, width: f64, count: usize) {
-        self.drag = None;
-        let flick = vx / width.max(1.0);
-        let target = if flick < -FLICK_PAGES_PER_SEC {
+    /// (faster than `flick_speed` after [`FLICK_TRAVEL`] points) flips one
+    /// page its way; anything slower settles on the page nearest to where
+    /// its speed projects, never more than one page from where the drag
+    /// began. The spring starts at the finger's speed.
+    pub fn drag_end(&mut self, vx: f64, width: f64, count: usize, flick_speed: f64) {
+        let Some((start, travel)) = self.drag.take() else { return };
+        let width = width.max(1.0);
+        self.unit = width;
+        let flick = travel.abs() >= FLICK_TRAVEL && vx.abs() > flick_speed;
+        let target = if flick && vx < 0.0 {
             self.page.floor() + 1.0
-        } else if flick > FLICK_PAGES_PER_SEC {
+        } else if flick {
             self.page.ceil() - 1.0
         } else {
-            self.page.round()
+            (self.page - vx * PROJECT_SECS / width).round().clamp(start.round() - 1.0, start.round() + 1.0)
         };
         self.target = target.clamp(0.0, Self::max(count));
+        self.velocity = -vx / width;
+    }
+    /// The drag is taken away (not released): the page settles on the
+    /// nearest page from rest, no flick, no projection.
+    pub fn cancel_drag(&mut self, count: usize) {
+        if self.drag.take().is_some() {
+            self.target = self.page.round().clamp(0.0, Self::max(count));
+            self.velocity = 0.0;
+        }
     }
     /// A wheel or key step: one page, eased.
     pub fn flip(&mut self, by: i64, count: usize) {
@@ -169,6 +233,7 @@ impl Paging {
     pub fn set(&mut self, page: f64) {
         self.page = page;
         self.target = page;
+        self.velocity = 0.0;
         self.drag = None;
     }
     /// The page it is going to (or holds).
@@ -180,17 +245,19 @@ impl Paging {
         self.drag = None;
         self.target = page.clamp(0.0, Self::max(count));
     }
-    /// One eased step toward the settled page; true while still moving.
+    /// One spring step toward the settled page; true while still moving.
+    /// It rests once it is within a quarter point and slower than five
+    /// points a second.
     pub fn step(&mut self, dt: f64) -> bool {
-        if self.drag.is_some() {
+        if self.drag.is_some() || self.settled() {
             return false;
         }
-        let t = 1.0 - (-dt * 14.0).exp();
-        self.page += (self.target - self.page) * t;
-        if (self.target - self.page).abs() < 0.0005 {
+        (self.page, self.velocity) = spring_step(self.page, self.velocity, self.target, dt);
+        if (self.target - self.page).abs() * self.unit < 0.25 && self.velocity.abs() * self.unit < 5.0 {
             self.page = self.target;
+            self.velocity = 0.0;
         }
-        self.page != self.target
+        !self.settled()
     }
 }
 
@@ -226,6 +293,16 @@ pub struct PhoneGesture {
     pub last_time: f64,
     pub vy: f64,
     pub vx: f64,
+    /// The finger's recent path, [`VELOCITY_WINDOW`] and a little more:
+    /// what the release speed is measured over.
+    samples: Vec<(f64, Vec2d)>,
+    /// Where the finger last settled: `last_time` moves only once the
+    /// finger leaves this spot by more than [`LONG_PRESS_SLOP`], so a
+    /// twitch at the end of a hold does not undo the hold.
+    rest_at: Vec2d,
+    /// The finger travelled past [`TOUCH_SLOP`]: this is a drag from here
+    /// to its release, never a tap.
+    pub committed: bool,
     pub hit: Option<PhoneHit>,
     pub bottom: bool,
     pub edge: bool,
@@ -234,12 +311,64 @@ pub struct PhoneGesture {
 
 impl PhoneGesture {
     pub fn new(p: Vec2d, time: f64, hit: Option<PhoneHit>, bottom: bool, edge: bool, screen: PhoneScreen) -> Self {
-        PhoneGesture { start: p, last: p, time, max_travel: 0.0, long_pressed: false, pan: None, last_time: time, vy: 0.0, vx: 0.0, hit, bottom, edge, screen }
+        PhoneGesture { start: p, last: p, time, max_travel: 0.0, long_pressed: false, pan: None, last_time: time, vy: 0.0, vx: 0.0, samples: vec![(time, p)], rest_at: p, committed: false, hit, bottom, edge, screen }
+    }
+    /// The finger is at `p` at `time`: its speed is the travel over the last
+    /// [`VELOCITY_WINDOW`] seconds of samples, measured by time rather
+    /// than per event, so a fast mouse and a 120 Hz finger agree.
+    pub fn sample(&mut self, p: Vec2d, time: f64) {
+        if (p - self.rest_at).length() > LONG_PRESS_SLOP {
+            self.rest_at = p;
+            self.last_time = time;
+        }
+        // A pause longer than a rest breaks the path: what came before it
+        // says nothing about the speed now.
+        if self.samples.last().is_some_and(|(t, _)| time - *t > VELOCITY_REST) {
+            self.samples.clear();
+        }
+        self.samples.push((time, p));
+        // Keep one sample at or before the window's start, so the window
+        // always has a boundary to measure from.
+        let start = time - VELOCITY_WINDOW;
+        while self.samples.len() > 2 && self.samples[1].0 <= start {
+            self.samples.remove(0);
+        }
+        let (t0, p0) = self.samples[0];
+        let from = if t0 < start && self.samples.len() > 1 {
+            // Interpolate the finger's place at the window's start.
+            let (t1, p1) = self.samples[1];
+            let k = ((start - t0) / (t1 - t0).max(1e-9)).clamp(0.0, 1.0);
+            (start, p0 + (p1 - p0) * k)
+        } else {
+            (t0, p0)
+        };
+        let dt = time - from.0;
+        let v = if dt > 0.004 { (p - from.1) / dt } else { dvec2(0.0, 0.0) };
+        self.vx = v.x;
+        self.vy = v.y;
+    }
+    /// The speed at release `now`: nothing if the finger rested before it
+    /// lifted.
+    pub fn release_velocity(&self, now: f64) -> Vec2d {
+        if now - self.last_time > VELOCITY_REST { dvec2(0.0, 0.0) } else { dvec2(self.vx, self.vy) }
+    }
+    /// The axis this drag owns, decided once: past [`TOUCH_SLOP`], the
+    /// first axis to lead the other by [`AXIS_LOCK`] (or the longer one
+    /// once the finger is well past the slop). `Some(true)` = the
+    /// `primary` axis (x when `primary_x`), `None` = not decided yet.
+    pub fn lock_axis(&mut self, delta: Vec2d, primary_x: bool) -> Option<bool> {
+        if self.pan.is_none() && delta.length() > TOUCH_SLOP {
+            let (a, b) = if primary_x { (delta.x.abs(), delta.y.abs()) } else { (delta.y.abs(), delta.x.abs()) };
+            if a > b * AXIS_LOCK { self.pan = Some(true); }
+            else if b > a * AXIS_LOCK || delta.length() > TOUCH_SLOP * 3.0 { self.pan = Some(a >= b); }
+        }
+        self.pan
     }
     /// The finger moved to `p`: the farthest travel is remembered, so a
     /// finger that wandered and came back is no long press.
     pub fn track(&mut self, p: Vec2d) {
         self.max_travel = self.max_travel.max((p - self.start).length());
+        self.committed |= self.max_travel > TOUCH_SLOP;
     }
     /// A long press is due: held [`LONG_PRESS_SECS`] within the slop and
     /// not fired yet. The caller marks it fired.
@@ -284,7 +413,7 @@ impl HomeEdit {
 /// to mean "hold" (the switcher) rather than a flick home.
 pub const SWIPE_HOLD_SECS: f64 = 0.15;
 /// Points per second upward at release that make a flick.
-pub const SWIPE_FLICK_SPEED: f64 = 400.0;
+pub const SWIPE_FLICK_SPEED: f64 = 500.0;
 
 /// Where an upward swipe from the bottom edge goes, the way a phone decides
 /// it: a FLICK (still moving fast at release, or released far up the
@@ -311,10 +440,16 @@ pub fn bottom_swipe_target(
     if from == PhoneScreen::Recents {
         return Some(PhoneHit::Home);
     }
+    // A finger that rested before lifting asked for the switcher, however
+    // far it went; otherwise a flick, a long swipe or a short quick one
+    // goes home.
+    if held {
+        return Some(PhoneHit::Recents);
+    }
     let far = delta.y < -screen_height * 0.33;
     let quick = duration < 0.30 && delta.y < -100.0;
-    let flick = vy < -SWIPE_FLICK_SPEED;
-    Some(if far || (!held && (flick || quick)) { PhoneHit::Home } else { PhoneHit::Recents })
+    let flick = vy < -SWIPE_FLICK_SPEED && delta.y <= -48.0;
+    Some(if far || flick || quick { PhoneHit::Home } else { PhoneHit::Recents })
 }
 
 #[derive(Clone)]
@@ -326,6 +461,15 @@ pub struct PhoneState {
     pub order: Vec<ClientId>,
     pub openness: f64,
     pub overview: f64,
+    /// The springs' speeds under `openness` and `overview` (per second).
+    pub openness_v: f64,
+    pub overview_v: f64,
+    /// Where the open app zooms out of: the icon or tile that was tapped
+    /// (screen rect), for the client it opened. `launch_from` holds the
+    /// tapped rect until the client is activated; `origin_in_drawer` says
+    /// the tap was in the drawer, which is not there to close back into.
+    pub launch_from: Option<(Rect, bool)>,
+    pub origin: Option<(ClientId, Rect, bool)>,
     /// The switcher's cards, paged by the finger.
     pub cards: Paging,
     /// The home pager: the home page(s) then the App Library as the last
@@ -377,7 +521,7 @@ pub struct PhoneState {
 impl Default for PhoneState {
     fn default() -> Self {
         Self { clock: "9:41".into(), wallpaper_time: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
-            openness: 0.0, overview: 0.0, cards: Paging::default(), pager: Paging::default(), home_pages: 1, drawer: 0.0,
+            openness: 0.0, overview: 0.0, openness_v: 0.0, overview_v: 0.0, launch_from: None, origin: None, cards: Paging::default(), pager: Paging::default(), home_pages: 1, drawer: 0.0,
             home: HomeOrder::default(), home_order_loaded: false, edit: HomeEdit::default(), last_interaction: 0.0, dismiss_y: 0.0, gesture: None, touch: None,
             keyboard: 0.0, keyboard_target: 0.0, keyboard_sent_height: 0.0, keyboard_client: None,
             search_query: String::new(), search_focused: false, search_scroll: 0.0,
@@ -414,7 +558,16 @@ impl PhoneState {
         self.order.insert(0, client);
         self.cards.set(0.0);
         self.leave_edit();
-        self.pager.set_target(self.pager.target().min(self.last_home_page()), self.page_count());
+        // Opened from the drawer, the drawer stays behind the zoom until the
+        // app covers it (`step` puts the pages back home then, unseen).
+        if let Some((rect, in_drawer)) = self.launch_from.take() {
+            self.origin = Some((client, rect, in_drawer));
+        } else if self.origin.is_some_and(|(c, _, _)| c != client) {
+            self.origin = None;
+        }
+        // Either way the finger that tapped no longer drags the pages.
+        let page = if self.screen == PhoneScreen::Drawer { self.pager.target() } else { self.pager.target().min(self.last_home_page()) };
+        self.pager.set_target(page, self.page_count());
         self.screen = PhoneScreen::App;
         self.dismiss_y = 0.0;
     }
@@ -456,15 +609,34 @@ impl PhoneState {
     /// The finger lifts at `v` points per second along the pan: a flick
     /// flips one page its way, anything slower settles on the nearest;
     /// the screen follows the page it settles on. Eased from here.
-    pub fn library_release(&mut self, v: f64, extent: f64) {
+    pub fn library_release(&mut self, v: f64, extent: f64, flick_speed: f64) {
         let count = self.page_count();
-        self.pager.drag_end(v, extent, count);
+        self.pager.drag_end(v, extent, count, flick_speed);
         let screen = if self.pager.target() >= self.library_page() - 0.5 { PhoneScreen::Drawer } else { PhoneScreen::Home };
         self.search_focused = false;
         self.screen = screen;
         self.keyboard_target = 0.0;
         self.dismiss_y = 0.0;
         if screen != PhoneScreen::Home { self.leave_edit(); }
+    }
+    /// Whatever the finger was doing is taken away — the phone rotated, the
+    /// style changed, the window lost focus: no release action runs, every
+    /// half-dragged surface settles from rest where it is nearest, a carried
+    /// icon stays in the slot it holds. True when a carried icon was set
+    /// down (its order wants saving).
+    pub fn cancel_gesture(&mut self) -> bool {
+        let gesture = self.gesture.take();
+        self.touch = None;
+        self.dismiss_y = 0.0;
+        self.cards.cancel_drag(self.order.len());
+        if self.pager.dragging() {
+            self.pager.cancel_drag(self.page_count());
+            if matches!(self.screen, PhoneScreen::Home | PhoneScreen::Drawer) {
+                self.screen = if self.pager.target() >= self.library_page() - 0.5 { PhoneScreen::Drawer } else { PhoneScreen::Home };
+            }
+        }
+        if gesture.is_some() { self.openness_v = 0.0; self.overview_v = 0.0; }
+        self.edit.drag.take().is_some()
     }
     /// Edit mode opens (a long press on an icon): the jiggle clock starts
     /// at `now`.
@@ -494,6 +666,12 @@ impl PhoneState {
     }
     pub fn step(&mut self, dt: f64) -> bool {
         let t = 1.0 - (-dt * 19.0).exp();
+        // The app covers the screen: whatever it opened over (the drawer)
+        // goes back to the home page behind it, where Home will find it.
+        if self.screen == PhoneScreen::App && self.openness >= 0.999 && self.pager.target() > self.last_home_page() {
+            let home = self.last_home_page();
+            self.pager.set(home);
+        }
         // Recents keeps whatever openness it was entered with: 1 from an
         // app (its card is the app pulled in, and tapping it opens it
         // back up), 0 from Home (cards only — nothing to pull, nothing to
@@ -506,12 +684,20 @@ impl PhoneState {
         let overview = if self.screen == PhoneScreen::Recents { 1.0 } else { 0.0 };
         let mut active = false;
         let dragging = self.gesture.as_ref().is_some_and(|g| g.bottom);
-        for (value, target) in [(&mut self.openness, open), (&mut self.overview, overview)] {
-            if !dragging {
-                *value += (target - *value) * t;
-                if (*value - target).abs() < 0.001 { *value = target; }
-                active |= *value != target;
+        for (value, speed, target) in [(&mut self.openness, &mut self.openness_v, open), (&mut self.overview, &mut self.overview_v, overview)] {
+            if dragging {
+                *speed = 0.0;
+                continue;
             }
+            if *value == target && *speed == 0.0 {
+                continue;
+            }
+            (*value, *speed) = spring_step(*value, *speed, target, dt);
+            if (*value - target).abs() < 0.001 && speed.abs() < 0.01 {
+                *value = target;
+                *speed = 0.0;
+            }
+            active |= *value != target;
         }
         self.keyboard += (self.keyboard_target - self.keyboard) * t;
         if (self.keyboard_target - self.keyboard).abs() < 0.25 { self.keyboard = self.keyboard_target; }
@@ -566,11 +752,28 @@ pub fn app_rect(screen: Rect, chrome: PhoneChrome) -> Rect {
     let bottom = chrome.bottom_reserve(screen);
     Rect { pos: screen.pos + dvec2(0.0, top), size: dvec2(screen.size.x, (screen.size.y - top - bottom).max(1.0)) }
 }
+/// How far the Android drawer sheet travels, and so how far the finger
+/// drags it: from the bottom of the app area (just above the home
+/// indicator) to the top of the screen. One extent for the finger and the
+/// sheet, so the sheet stays under the finger.
+pub fn drawer_extent(screen: Rect, chrome: PhoneChrome) -> f64 {
+    (screen.size.y - chrome.bottom_reserve(screen)).max(1.0)
+}
 pub fn card_rect(screen: Rect, chrome: PhoneChrome, index: f64, page: f64) -> Rect {
+    card_rect_for(DesktopStyle::Ios, screen, chrome, index, page)
+}
+/// Card `index` in `style`'s Recents with `page` in the middle; cards sit
+/// the skin's card gap apart (`HomeMetrics::card_gap`).
+pub fn card_rect_for(style: DesktopStyle, screen: Rect, chrome: PhoneChrome, index: f64, page: f64) -> Rect {
     let app = app_rect(screen, chrome);
     let scale = if screen.size.x > screen.size.y { 0.74 } else { 0.76 };
     let size = app.size * scale;
-    Rect { pos: app.pos + (app.size - size) * 0.5 + dvec2((index-page)*(size.x+22.0), -4.0), size }
+    Rect { pos: app.pos + (app.size - size) * 0.5 + dvec2((index-page)*card_pitch(style, screen, chrome), -4.0), size }
+}
+/// From one Recents card to the next: a card's width and the gap.
+pub fn card_pitch(style: DesktopStyle, screen: Rect, chrome: PhoneChrome) -> f64 {
+    let scale = if screen.size.x > screen.size.y { 0.74 } else { 0.76 };
+    app_rect(screen, chrome).size.x * scale + crate::mobile_tiles::HomeMetrics::of(style).card_gap
 }
 pub fn mix_rect(a: Rect, b: Rect, t: f64) -> Rect {
     Rect { pos: a.pos + (b.pos-a.pos)*t, size: a.size + (b.size-a.size)*t }
@@ -656,8 +859,10 @@ mod tests {
         assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-220.0), h, 0.45, false, -700.0), Some(PhoneHit::Home));
         // The same distance, but the finger rested before letting go — the switcher.
         assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-220.0), h, 0.45, true, 0.0), Some(PhoneHit::Recents));
-        // Released far up the screen: home, held or not.
-        assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-400.0), h, 1.2, true, 0.0), Some(PhoneHit::Home));
+        // Released far up the screen without resting: home.
+        assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-400.0), h, 1.2, false, -80.0), Some(PhoneHit::Home));
+        // The hold wins over the distance: rested before lifting, the switcher.
+        assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-400.0), h, 1.2, true, 0.0), Some(PhoneHit::Recents));
         // Short and quick (the bridge's injected swipe): home.
         assert_eq!(bottom_swipe_target(PhoneScreen::App, false, up(-120.0), h, 0.1, false, 0.0), Some(PhoneHit::Home));
         // Slow, short, not moving: the switcher.
@@ -677,7 +882,7 @@ mod tests {
         cards.drag_move(-150.0, width, count);
         assert!((cards.page - 0.5).abs() < 1e-9);
         // A slow release settles on the nearest page, eased, then rests.
-        cards.drag_end(-50.0, width, count);
+        cards.drag_end(-50.0, width, count, CARD_FLICK_SPEED);
         let mut frames = 0;
         while cards.step(1.0 / 60.0) { frames += 1; assert!(frames < 200); }
         assert_eq!(cards.page, 1.0);
@@ -686,13 +891,13 @@ mod tests {
         // A short drag with a fast flick advances exactly one page.
         cards.drag_begin();
         cards.drag_move(-20.0, width, count);
-        cards.drag_end(-2000.0, width, count);
+        cards.drag_end(-2000.0, width, count, CARD_FLICK_SPEED);
         while cards.step(1.0 / 60.0) {}
         assert_eq!(cards.page, 2.0);
         // A flick back goes one page back, never several.
         cards.drag_begin();
         cards.drag_move(30.0, width, count);
-        cards.drag_end(3000.0, width, count);
+        cards.drag_end(3000.0, width, count, CARD_FLICK_SPEED);
         while cards.step(1.0 / 60.0) {}
         assert_eq!(cards.page, 1.0);
         // The ends rubber-band and settle back.
@@ -700,14 +905,14 @@ mod tests {
         cards.drag_begin();
         cards.drag_move(300.0, width, count);
         assert!(cards.page < 0.0 && cards.page > -0.5, "a third of the overshoot: {}", cards.page);
-        cards.drag_end(0.0, width, count);
+        cards.drag_end(0.0, width, count, CARD_FLICK_SPEED);
         while cards.step(1.0 / 60.0) {}
         assert_eq!(cards.page, 0.0);
         cards.set(3.0);
         cards.drag_begin();
         cards.drag_move(-600.0, width, count);
         assert!(cards.page > 3.0 && cards.page < 3.8);
-        cards.drag_end(-5000.0, width, count);
+        cards.drag_end(-5000.0, width, count, CARD_FLICK_SPEED);
         while cards.step(1.0 / 60.0) {}
         assert_eq!(cards.page, 3.0, "a flick past the last page stays on it");
     }
@@ -726,7 +931,7 @@ mod tests {
         phone.step(1.0 / 60.0);
         assert!((phone.drawer - 0.3).abs() < 1e-9);
         // Released short and slow: back home, eased.
-        phone.library_release(-50.0, width);
+        phone.library_release(-50.0, width, PAGE_FLICK_SPEED);
         assert_eq!(phone.screen, PhoneScreen::Home);
         let mut frames = 0;
         while phone.step(1.0 / 60.0) { frames += 1; assert!(frames < 200); }
@@ -735,7 +940,7 @@ mod tests {
         // A flick completes the open whatever the distance.
         phone.library_drag_begin();
         phone.library_drag_move(-30.0, width);
-        phone.library_release(-1500.0, width);
+        phone.library_release(-1500.0, width, PAGE_FLICK_SPEED);
         assert_eq!(phone.screen, PhoneScreen::Drawer);
         while phone.step(1.0 / 60.0) {}
         assert_eq!(phone.drawer, 1.0);
@@ -743,14 +948,14 @@ mod tests {
         phone.library_drag_begin();
         phone.library_drag_move(-200.0, width);
         assert!(phone.drawer > 1.0 && phone.drawer < 1.2, "{}", phone.drawer);
-        phone.library_release(0.0, width);
+        phone.library_release(0.0, width, PAGE_FLICK_SPEED);
         while phone.step(1.0 / 60.0) {}
         assert_eq!((phone.screen, phone.drawer), (PhoneScreen::Drawer, 1.0));
         // Coming back: the same pan the other way, a flick right closes.
         phone.library_drag_begin();
         phone.library_drag_move(80.4, width);
         assert!((phone.drawer - 0.8).abs() < 1e-6);
-        phone.library_release(1500.0, width);
+        phone.library_release(1500.0, width, PAGE_FLICK_SPEED);
         assert_eq!(phone.screen, PhoneScreen::Home);
         while phone.step(1.0 / 60.0) {}
         assert_eq!(phone.drawer, 0.0);
@@ -883,5 +1088,136 @@ mod tests {
         phone.navigate(PhoneScreen::Recents);
         for _ in 0..80 { phone.step(1.0/60.0); }
         assert!(!phone.home_settled(), "Recents keeps every card in its full face");
+    }
+
+    #[test]
+    fn the_spring_settles_in_a_third_of_a_second_and_carries_the_release_speed() {
+        // From rest one page away: arrives without overshoot, then rests.
+        let mut p = Paging::default();
+        p.set(0.0);
+        p.drag_begin();
+        p.drag_move(-1.0, 400.0, 3);
+        p.drag_end(0.0, 400.0, 3, PAGE_FLICK_SPEED);
+        assert_eq!(p.target(), 0.0, "a nudge settles back");
+        let mut p = Paging::default();
+        p.set_target(1.0, 3);
+        let mut t = 0.0;
+        while p.step(1.0 / 120.0) {
+            t += 1.0 / 120.0;
+            assert!(p.page <= 1.0 + 1e-9, "critically damped: no overshoot");
+            assert!(t < 0.5);
+        }
+        assert!(t > 0.2 && t < 0.4, "about 0.3 s: {t}");
+        // A flick's speed carries into the first frame; a slow release eases from rest.
+        let first = |v: f64| {
+            let mut p = Paging::default();
+            p.drag_begin();
+            p.drag_move(-100.0, 400.0, 3);
+            let at = p.page;
+            p.drag_end(v, 400.0, 3, PAGE_FLICK_SPEED);
+            p.step(1.0 / 60.0);
+            p.page - at
+        };
+        assert!(first(-2000.0) > first(-10.0) * 2.0);
+        assert!(first(-2000.0) > 0.05, "a flick moves the page at once: {}", first(-2000.0));
+    }
+
+    #[test]
+    fn the_release_speed_is_the_last_80_ms_and_zero_after_a_rest() {
+        let mut g = PhoneGesture::new(dvec2(0.0, 800.0), 0.0, None, true, false, PhoneScreen::App);
+        // Slow start, fast finish: only the recent stretch counts.
+        for i in 1..=10 { let t = i as f64 * 0.016; g.sample(dvec2(0.0, 800.0 - i as f64 * 2.0), t); g.last = dvec2(0.0, 800.0 - i as f64 * 2.0); }
+        for i in 1..=6 { let t = 0.16 + i as f64 * 0.016; let y = 780.0 - i as f64 * 30.0; g.sample(dvec2(0.0, y), t); g.last = dvec2(0.0, y); }
+        let v = g.release_velocity(0.26);
+        assert!(v.y < -1500.0 && v.y > -2200.0, "{}", v.y);
+        assert_eq!(g.release_velocity(0.26 + VELOCITY_REST + 0.01), dvec2(0.0, 0.0), "rested before lifting");
+    }
+
+    #[test]
+    fn a_drag_takes_one_axis_past_the_slop() {
+        let mut g = PhoneGesture::new(dvec2(0.0, 0.0), 0.0, None, false, false, PhoneScreen::Home);
+        assert_eq!(g.lock_axis(dvec2(5.0, 1.0), true), None, "inside the slop");
+        assert_eq!(g.lock_axis(dvec2(10.0, 9.0), true), None, "no axis leads yet");
+        assert_eq!(g.lock_axis(dvec2(20.0, 9.0), true), Some(true));
+        assert_eq!(g.lock_axis(dvec2(0.0, 90.0), true), Some(true), "decided once");
+        let mut g = PhoneGesture::new(dvec2(0.0, 0.0), 0.0, None, false, false, PhoneScreen::Home);
+        assert_eq!(g.lock_axis(dvec2(2.0, -30.0), true), Some(false));
+    }
+
+    #[test]
+    fn the_drawer_sheet_travels_with_the_finger() {
+        let screen = Rect { pos: dvec2(0.0, 32.0), size: dvec2(412.0, 860.0) };
+        let extent = drawer_extent(screen, PhoneChrome::Simulated);
+        let mut phone = PhoneState::default();
+        phone.library_drag_begin();
+        phone.library_drag_move(-200.0, extent);
+        // The sheet's top rises (1 - drawer) * extent from the bottom: 200 pt.
+        assert!(((1.0 - phone.drawer) * extent - (extent - 200.0)).abs() < 1e-6);
+        // Slow and short: back down; the same distance flicked: open.
+        phone.library_release(-100.0, extent, DRAWER_FLICK_SPEED);
+        assert_eq!(phone.screen, PhoneScreen::Home);
+        phone.library_drag_begin();
+        phone.library_drag_move(-150.0, extent);
+        phone.library_release(-1500.0, extent, DRAWER_FLICK_SPEED);
+        assert_eq!(phone.screen, PhoneScreen::Drawer);
+    }
+
+    #[test]
+    fn a_pause_breaks_the_path_and_a_twitch_does_not_undo_a_hold() {
+        // Codex's case: fast to 32 ms, a hold, release with 1 pt of jitter at 240 ms.
+        let mut g = PhoneGesture::new(dvec2(0.0, 800.0), 0.0, None, true, false, PhoneScreen::App);
+        for (t, y) in [(0.016, 768.0), (0.032, 736.0)] { g.sample(dvec2(0.0, y), t); g.last = dvec2(0.0, y); }
+        g.sample(dvec2(0.0, 735.0), 0.240);
+        assert_eq!(g.release_velocity(0.240), dvec2(0.0, 0.0), "no stale flick across the pause");
+        assert!(0.240 - g.last_time > SWIPE_HOLD_SECS, "the twitch kept the hold");
+        // The window's start is interpolated: a steady 1000 pt/s reads 1000.
+        let mut g = PhoneGesture::new(dvec2(0.0, 0.0), 0.0, None, false, false, PhoneScreen::Home);
+        for i in 1..=20 { let t = i as f64 * 0.013; g.sample(dvec2(t * 1000.0, 0.0), t); }
+        assert!((g.vx - 1000.0).abs() < 1.0, "{}", g.vx);
+    }
+
+    #[test]
+    fn a_finger_past_the_slop_is_a_drag_to_the_end() {
+        let mut g = PhoneGesture::new(dvec2(100.0, 100.0), 0.0, None, false, false, PhoneScreen::Home);
+        g.track(dvec2(104.0, 100.0));
+        assert!(!g.committed);
+        g.track(dvec2(109.5, 100.0));
+        g.track(dvec2(100.0, 100.0));
+        assert!(g.committed, "came back to where it started, still a drag");
+    }
+
+    #[test]
+    fn a_release_on_the_page_with_speed_still_moves_and_rests_only_when_slow() {
+        let mut p = Paging::default();
+        p.set(1.0);
+        p.drag_begin();
+        p.drag_move(0.0, 400.0, 3);
+        p.drag_end(-300.0, 400.0, 3, PAGE_FLICK_SPEED);
+        assert_eq!(p.target(), 1.0);
+        assert!(!p.settled(), "on the page but still moving");
+        let before = p.page;
+        assert!(p.step(1.0 / 60.0), "a moving page asks for frames");
+        assert!((p.page - before).abs() * 400.0 > 1.0, "the release speed carried: {}", (p.page - before) * 400.0);
+        while p.step(1.0 / 60.0) {}
+        assert!(p.settled() && p.page == 1.0);
+    }
+
+    #[test]
+    fn a_gesture_taken_away_settles_from_rest_and_runs_no_release() {
+        let mut phone = PhoneState::default();
+        phone.gesture = Some(PhoneGesture::new(dvec2(0.0, 800.0), 0.0, None, false, false, PhoneScreen::Home));
+        phone.library_drag_begin();
+        phone.library_drag_move(-600.0, 868.0);
+        assert!(phone.drawer > 0.5);
+        phone.cards.drag_begin();
+        phone.cards.drag_move(-100.0, 300.0, 3);
+        assert!(!phone.cancel_gesture(), "no icon was carried");
+        assert!(phone.gesture.is_none() && !phone.pager.dragging() && !phone.cards.dragging());
+        assert_eq!(phone.screen, PhoneScreen::Drawer, "nearest: the drawer");
+        while phone.step(1.0 / 60.0) {}
+        assert_eq!((phone.drawer, phone.cards.page), (1.0, 0.0));
+        assert!(!phone.wants_frames(100.0, false), "and the phone rests");
+        phone.edit.drag = Some(IconDrag { id: "sheets".into(), slot: Slot::Icon(0), pos: dvec2(0.0, 0.0), grab: dvec2(0.0, 0.0) });
+        assert!(phone.cancel_gesture(), "a carried icon is set down in its slot");
     }
 }

@@ -1316,7 +1316,9 @@ impl Widget for TileGrid {
             Hit::FingerUp(fu) => {
                 cx.set_cursor(MouseCursor::Default);
                 if let Some((_, _, moved)) = self.drag.take() {
-                    if !moved {
+                    // A press taken away (a list or the host took the finger)
+                    // clicks nothing.
+                    if !moved && !fu.cancelled {
                         let world = self.screen_to_world(fu.abs);
                         if let Some(rank) = self.item_at(world) {
                             let item = &self.items[rank];

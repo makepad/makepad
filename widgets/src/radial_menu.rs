@@ -2163,6 +2163,14 @@ impl RadialMenu {
                 self.press_while_open(cx, me.abs, follows);
                 true
             }
+            // The press taken away picks nothing: the menu it holds closes.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if follows && self.open.is_some() {
+                    self.cancel(cx);
+                }
+                // Not consumed: the cancel goes on to anything else holding it.
+                false
+            }
             Event::MouseUp(me) => {
                 if follows {
                     self.release_at(cx, me.abs);
@@ -2288,6 +2296,12 @@ impl RadialMenu {
             Hit::FingerMove(fe) => self.pointer_at(cx, fe.abs),
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.pointer_at(cx, fe.abs),
             Hit::FingerHoverOut(_) => self.pointer_left(cx),
+            // A press taken away picks nothing: the menu it holds closes.
+            Hit::FingerUp(fe) if fe.is_primary_hit() && fe.cancelled => {
+                if self.open.is_some() {
+                    self.cancel(cx);
+                }
+            }
             Hit::FingerUp(fe) if fe.is_primary_hit() => self.release_at(cx, fe.abs),
             Hit::KeyDown(ke) => {
                 if self.open.is_some() {
@@ -2678,6 +2692,7 @@ impl Widget for RadialMenu {
         if self.swallow_up {
             let released = match event {
                 Event::MouseUp(_) => true,
+                Event::FingerCancel(c) => c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id),
                 Event::TouchUpdate(te) => te.touches.iter().any(|touch| touch.state == TouchState::Stop),
                 _ => false,
             };

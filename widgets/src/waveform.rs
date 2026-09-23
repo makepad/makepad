@@ -2205,8 +2205,11 @@ impl Widget for Waveform {
                         // changed: on a long recording one point is a real
                         // number of seconds, so every click would otherwise
                         // be a tiny silent edit.
+                        // A press taken away picks nothing.
                         if (fe.abs.x - self.press_x).abs() <= PICK_SLOP {
-                            cx.widget_action(uid, WaveformAction::MarkerPicked(i));
+                            if !fe.cancelled {
+                                cx.widget_action(uid, WaveformAction::MarkerPicked(i));
+                            }
                         } else if let Some(marker) = self.parsed_markers.get(i) {
                             let at = marker.at;
                             cx.widget_action(uid, WaveformAction::MarkerMoved(i, at));

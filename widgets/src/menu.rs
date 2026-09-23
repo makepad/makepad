@@ -1247,6 +1247,10 @@ impl Widget for MenuLayer {
                 self.held_press = None;
                 self.raised_by_held_press = false;
             }
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                self.held_press = None;
+                self.raised_by_held_press = false;
+            }
             _ => {}
         }
         if self.next_frame.is_event(event).is_some() && !self.levels.is_empty() {
@@ -1282,7 +1286,9 @@ impl Widget for MenuLayer {
         }
         // The release that belongs to a dismissing press: eat it, then drop
         // the grab, unless a fresh menu is already up.
-        if let Event::MouseUp(_) = event {
+        if matches!(event, Event::MouseUp(_))
+            || matches!(event, Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id))
+        {
             if self.swallow_up {
                 self.swallow_up = false;
                 if self.levels.is_empty() {
@@ -1337,6 +1343,13 @@ impl Widget for MenuLayer {
                         cx.action(MenuAction::ClickAway { at: e.abs });
                     }
                 }
+            }
+            // The mouse press itself taken away chooses no row.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                for level in &mut self.levels {
+                    level.press = None;
+                }
+                self.redraw_menus(cx);
             }
             Event::MouseUp(e) => {
                 for level in &mut self.levels {

@@ -1195,7 +1195,8 @@ impl ClockView {
         if self.view.view(cx, ids!(menu_scrim)).finger_down(actions).is_some() {
             self.set_menu(cx, false);
         }
-        if self.view.view(cx, ids!(next_alarm)).finger_up(actions).is_some() {
+        // A press taken away (a list or the host took the finger) is no tap.
+        if self.view.view(cx, ids!(next_alarm)).finger_up(actions).is_some_and(|e| !e.cancelled) {
             self.select_mode(cx, 1, true);
         }
         if self.view.button(cx, ids!(alarm_add)).clicked(actions) {

@@ -1202,11 +1202,19 @@ impl Widget for Carousel {
                 }
                 let frame = self.frame(fe.rect.size.x, fe.rect.size.y);
                 let pitch = frame.pitch();
-                let (velocity, travel) = estimate_release_velocity(&self.samples);
+                // A press taken away chooses nothing and throws nothing: the
+                // strip settles from rest on the nearest stop.
+                let (velocity, travel) = if fe.cancelled {
+                    (0.0, 0.0)
+                } else {
+                    estimate_release_velocity(&self.samples)
+                };
                 // The finger's velocity is the strip's, negated, and the
                 // strip counts in items rather than in pixels.
                 let items_per_s = -velocity / pitch;
-                let carry = if travel.abs() > FLING_MIN_TOTAL_DELTA {
+                let carry = if fe.cancelled {
+                    0.0
+                } else if travel.abs() > FLING_MIN_TOTAL_DELTA {
                     spin_travel(items_per_s, FLING_DECEL_RATE_PER_MS)
                 } else if grab.caught {
                     0.0

@@ -5120,6 +5120,20 @@ impl Widget for MapView {
         // drawn on top of the map must win the hit test (EventOrder::Up
         // dispatches them first).
         let hit = event.hits(cx, self.draw_bg.area());
+        // The press was taken away (a list or the host took the finger): the
+        // camera stays where the gesture left it; the pan, pinch or rotate
+        // it was in ends here — no tap, no long press, no settle — and no
+        // touch state survives into the next press on the same finger id.
+        if let Hit::FingerUp(fe) = &hit {
+            if fe.cancelled {
+                self.touch_gesture = TouchGesture::None;
+                self.drag_start_abs = None;
+                self.rotate_drag = None;
+                self.gesture_panned = false;
+                self.redraw(cx);
+                return;
+            }
+        }
         if let Event::TouchUpdate(touch_event) = event {
             if self.handle_touch_update(cx, touch_event, &hit) {
                 return;

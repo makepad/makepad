@@ -1765,8 +1765,8 @@ impl Widget for FabValueInput {
                         self.drag_publishes
                     );
                     cx.widget_action(uid, FabValueInputAction::Ended(self.value));
-                } else {
-                    // A click. The zone at release decides: arrows step,
+                } else if !fe.cancelled {
+                    // A click (a press taken away is none). The zone at release decides: arrows step,
                     // the middle opens text entry with the value selected.
                     let rect = self.draw_bg.area().rect(cx);
                     let zone = field_zone(fe.abs.x - rect.pos.x, rect.size.x, rect.size.y);
@@ -1956,7 +1956,13 @@ impl Widget for FabColorWheel {
             }
             Hit::FingerUp(fe) => {
                 if self.drag.is_some() {
-                    self.apply_pointer(cx, uid, fe.abs, true);
+                    if fe.cancelled {
+                        // Taken away: the colour stays the last one the drag
+                        // set, and the edit ends there.
+                        cx.widget_action(uid, ColorWheelAction::Ended(self.hsv()));
+                    } else {
+                        self.apply_pointer(cx, uid, fe.abs, true);
+                    }
                     self.drag = None;
                 }
             }

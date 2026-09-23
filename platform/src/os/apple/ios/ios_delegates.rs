@@ -580,7 +580,7 @@ pub fn define_mtk_view() -> *const Class {
 
     extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
         on_touch(this, event, TouchState::Stop);
-        IosApp::send_touch_update();
+        IosApp::send_touch_cancel();
     }
 
     // Hardware-keyboard shortcuts, handled app-wide like desktop (MakepadView is

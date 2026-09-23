@@ -1,6 +1,7 @@
 use super::*;
 use crate::mobile::{self, PhoneHit, PhoneScreen};
 use crate::mobile_tiles::{Face, TILE_RADIUS};
+use makepad_widgets::makepad_platform::event::{DigitDevice, DigitId, FingerCancelEvent, TouchPoint, TouchState, TouchUpdateEvent};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -77,11 +78,35 @@ impl WmDesk {
         self.draw_phone.radius = radius * 0.5;
         self.draw_phone.draw_abs(cx, rect);
     }
+    /// Where the open app zooms out of and back into. Opening: the icon or
+    /// tile that was tapped. Closing: its tile or home icon if the home page
+    /// has one, else a short shrink toward the middle of the screen (an app
+    /// opened from the drawer has nothing on the home page to go back to).
+    /// False with the fallback: nothing to land on, so the card fades as it goes.
+    fn phone_zoom_origin(&self,phone:&crate::mobile::PhoneState,launchable:&crate::apps::Launchable,style:crate::desktop::DesktopStyle,screen:Rect,app:Rect,client:ClientId,app_id:&str)->(Rect,bool) {
+        let tapped=phone.origin.filter(|(c,_,_)|*c==client);
+        if phone.screen==PhoneScreen::App {
+            if let Some((_,rect,in_drawer))=tapped {
+                // A home icon's hit is its whole cell; the zoom starts from the icon.
+                if !in_drawer {if let Some(icon)=self.phone_ui.home_rect_of(style,screen,phone,launchable,app_id) {return (icon,true);}}
+                return (rect,true);
+            }
+        } else if let Some(rect)=self.phone_ui.home_rect_of(style,screen,phone,launchable,app_id) {
+            return (rect,true);
+        } else if tapped.is_some_and(|(_,_,in_drawer)|!in_drawer) {
+            return (tapped.unwrap().1,true);
+        }
+        let tile=phone.tiles.get(client).map(|t|t.app.as_str());
+        if tile.is_some() {return (PhoneSurface::launch_origin(style,screen,phone.chrome,launchable,tile),true);}
+        let size=app.size*0.4;
+        (Rect {pos:app.pos+(app.size-size)*0.5+dvec2(0.0,app.size.y*0.15),size},false)
+    }
     fn client_arriving(&self, client: ClientId) -> bool {
         self.items.get(&client).and_then(|item| item.borrow::<MpRunView>())
             .is_some_and(|view| view.arrival_fade() < 1.0)
     }
     pub fn phone_hit(&self,p:Vec2d)->Option<PhoneHit> {self.phone_ui.hit(p)}
+    pub fn phone_icon_at(&self,p:Vec2d,app:&str)->Option<Rect> {self.phone_ui.icon_at(p,app)}
     pub fn phone_search_event(&mut self,cx:&mut Cx,event:&Event,state:&mut WmState)->bool {
         let enabled=state.style.target.mobile() && state.phone.screen==PhoneScreen::Drawer;
         self.phone_ui.search_event(cx,event,&mut state.phone,enabled)
@@ -179,8 +204,8 @@ impl WmDesk {
         // iOS pans the page (tiles included) off to the left as the library
         // arrives; Android's tiles fade under its rising sheet.
         let ios=style==crate::desktop::DesktopStyle::Ios;
-        let opacity=((1.0-phone.openness*0.85)*(if ios {1.0} else {1.0-phone.drawer.clamp(0.0,1.0)})) as f32;
-        if opacity<0.01 || (ios && phone.drawer>=0.999) {return;}
+        let opacity=(1.0-phone.openness*0.85) as f32;
+        if opacity<0.01 || phone.drawer>=0.999 {return;}
         let page=if ios {Rect{pos:screen.pos+dvec2(-phone.drawer*screen.size.x,0.0),size:screen.size}} else {screen};
         let layout=PhoneSurface::home_layout(style,page,phone.chrome,&state.launchable);
         // Everything the placeholders need, read before any tile draws.
@@ -257,6 +282,8 @@ impl WmDesk {
         }
         let phone=state.phone.clone();
         let launchable=state.launchable.clone();
+        // Each client's app id and ground, for the zoom's solid card.
+        let faces:HashMap<ClientId,(String,Option<Vec4f>)>=state.clients.iter().map(|(c,s)|(*c,(s.app.clone(),s.ground))).collect();
         let style=state.style.target;
         let dark=state.style.dark;
         let app=mobile::app_rect(screen,phone.chrome);
@@ -273,6 +300,12 @@ impl WmDesk {
         self.phone_ui.draw_home(cx,state,screen,home_backdrop);
         self.compositor.as_mut().unwrap().content(screen);
         if phone.home_visible() {self.draw_home_tiles(cx,scope,screen);}
+        // Android's drawer is a sheet over the page AND its live tiles.
+        if phone.drawer>0.001 && style==crate::desktop::DesktopStyle::Android {
+            let state=scope.data.get_mut::<WmState>().unwrap();
+            self.phone_ui.draw_android_drawer_layer(cx,state,screen);
+            self.compositor.as_mut().unwrap().content(screen);
+        }
         if phone.overview>0.001 {
             let blur = (phone.overview.clamp(0.0, 1.0) * 3.0) as f32;
             self.phone_ui.overview_glass.set_blurriness(cx, blur);
@@ -301,8 +334,11 @@ impl WmDesk {
             if foreground && phone.openness<0.001 {continue;}
             let index=phone.order.iter().position(|c|*c==client).unwrap_or(0);
             let card=mobile::card_rect(screen,phone.chrome,index as f64,phone.cards.page);
+            let (app_id,ground)=faces.get(&client).cloned().unwrap_or_default();
+            let mut lands=true;
             let mut display=if foreground {
-                let icon=PhoneSurface::launch_origin(style,screen,phone.chrome,&launchable,phone.tiles.get(client).map(|t|t.app.as_str()));
+                let (icon,has_place)=self.phone_zoom_origin(&phone,&launchable,style,screen,app,client,&app_id);
+                lands=has_place;
                 mobile::mix_rect(mobile::mix_rect(icon,app,phone.openness),card,phone.overview)
             }else{card};
             if phone.gesture.as_ref().is_some_and(|g|g.hit==Some(PhoneHit::Card(client))) {display.pos.y+=phone.dismiss_y;}
@@ -312,8 +348,21 @@ impl WmDesk {
             // card keeps the last full-screen capture, whatever arrives.
             let full_ready=phone.tiles.get(client).map_or(true,|t|t.full_ready());
             let mut stored=self.phone_frames.remove(&client).unwrap_or_default();
-            let opacity=if foreground {phone.openness as f32}else{phone.overview as f32};
             let radius=((1.0-phone.openness).max(phone.overview)*26.0)as f32;
+            // Zooming between its icon and full screen the app is one solid
+            // card: its own ground and icon from the first frame (the icon it
+            // grew out of), the app's picture crossfading in over that
+            // during the first half of the zoom, out during the last half
+            // of the way back. Nothing of the home page shows through it.
+            // A swipe home from an app raised `overview` with the finger; the
+            // app still shrinks home as one solid card, not a fading card.
+            let zooming=foreground && phone.screen!=PhoneScreen::Recents && phone.openness<0.999;
+            let opacity=if zooming {((phone.openness-0.05)/0.45).clamp(0.0,1.0) as f32}
+                else if foreground {phone.openness.max(phone.overview) as f32}else{phone.overview as f32};
+            if zooming {
+                let solid=(phone.openness/if lands {0.05}else{0.5}).clamp(0.0,1.0) as f32;
+                self.phone_ui.draw_launch_card_ground(cx,display,&app_id,style,dark,ground,solid,radius);
+            }
             // A crossfade tile app between its tile and full screen: its
             // full frame shows through a window that grows from the tile's
             // rect to the app's, pixels in place (the app put its tile
@@ -351,8 +400,7 @@ impl WmDesk {
                 None=>{
                     // Opened straight from its tile and no full-size frame
                     // yet: a plain launch card, never the squeezed tile.
-                    let app_id=phone.tiles.get(client).map(|t|t.app.clone()).unwrap_or_default();
-                    self.phone_ui.draw_launch_card(cx,display,&app_id,style,dark,opacity,radius);
+                    self.phone_ui.draw_launch_card_ground(cx,display,&app_id,style,dark,ground,1.0,radius);
                     self.compositor.as_mut().unwrap().content(display);
                 }
             }
@@ -379,8 +427,109 @@ impl WmDesk {
         let state=scope.data.get_mut::<WmState>().unwrap();
         let input=matches!(event,Event::TouchUpdate(_)|Event::MouseDown(_)|Event::MouseUp(_)|Event::MouseMove(_)|Event::Scroll(_)|Event::KeyDown(_)|Event::KeyUp(_)|Event::TextInput(_));
         let client=state.phone.client;
-        if input && !state.phone.accepts_app_input() {return;}
+        let accepts=state.phone.accepts_app_input();
+        // The desktop skin is a phone: the primary mouse button is a finger
+        // to the app, so its lists drag and fling and its rows tell a tap
+        // from a scroll the way they do on the device. Hover does not exist
+        // on a touch screen; the wheel and the keyboard stay as they are.
+        // The press starts here, once the shell has passed on it; its moves
+        // and its lift are routed before the shell sees them
+        // (`phone_finger_route`).
+        let simulated=state.phone.chrome.fake_status() && client.is_some_and(|c|self.module_clients.contains(&c));
+        if simulated && matches!(event,Event::MouseMove(_)|Event::MouseDown(_)|Event::MouseUp(_)) {
+            if let (Event::MouseDown(e),Some(client),true,None)=(event,client,accepts,self.phone_finger.as_ref()) {
+                if e.button.contains(MouseButton::PRIMARY) {
+                    self.phone_finger=Some(PhoneFinger {client,abs:e.abs,time:e.time,window_id:e.window_id,modifiers:e.modifiers});
+                    self.dispatch_phone_finger(cx,TouchState::Start);
+                }
+            }
+            return;
+        }
+        if input && !accepts {return;}
         let items:Vec<_>=self.items.iter().filter(|(c,_)|!input || Some(**c)==client).map(|(_,w)|w.clone()).collect();
         for item in items {item.handle_event(cx,event,scope);}
     }
+    pub fn phone_finger_active(&self)->bool {self.phone_finger.is_some()}
+    /// The finger is down on `client`.
+    pub fn phone_finger_on(&self,client:ClientId)->bool {self.phone_finger.as_ref().is_some_and(|f|f.client==client)}
+    /// The simulated finger's moves and lift, taken before the shell's own
+    /// pointer handling so nothing in between (the toolbar, a menu, a
+    /// gesture zone) can swallow its release. A finger whose app is no
+    /// longer the one in front taking input is cancelled instead. True when
+    /// the event was the finger's.
+    pub fn phone_finger_route(&mut self,cx:&mut Cx,event:&Event,front:Option<ClientId>,accepts:bool)->bool {
+        let Some(finger)=self.phone_finger.as_ref() else {return false};
+        if !matches!(event,Event::MouseMove(_)|Event::MouseDown(_)|Event::MouseUp(_)) {return false;}
+        if front!=Some(finger.client) || !accepts || !self.items.contains_key(&finger.client) {
+            self.cancel_phone_finger(cx);
+            return true;
+        }
+        match event {
+            Event::MouseMove(e)=>{
+                let f=self.phone_finger.as_mut().unwrap();
+                f.abs=e.abs;f.time=e.time;f.modifiers=e.modifiers;
+                self.dispatch_phone_finger(cx,TouchState::Move);
+            }
+            Event::MouseUp(e) if e.button.contains(MouseButton::PRIMARY)=>{
+                let f=self.phone_finger.as_mut().unwrap();
+                f.abs=e.abs;f.time=e.time;f.modifiers=e.modifiers;
+                self.dispatch_phone_finger(cx,TouchState::Stop);
+                self.phone_finger=None;
+            }
+            // Another button while the finger is down belongs to nobody.
+            _=>{}
+        }
+        true
+    }
+    /// The finger is taken away mid-press (the phone rotated, the app
+    /// closed or left the front, the style changed, the window lost focus,
+    /// the shell navigated): every capture of it is cancelled, the app gets
+    /// `Event::FingerCancel` — each widget still holding the press ends it
+    /// with a cancelled FingerUp (no click, no fling), wherever the finger
+    /// is — and the digit is retired, even if nothing was left to hear it.
+    pub fn cancel_phone_finger(&mut self,cx:&mut Cx) {
+        let Some(f)=self.phone_finger.take() else {return};
+        let digit_id:DigitId=live_id_num!(touch,PHONE_FINGER).into();
+        cx.fingers.cancel_digit(digit_id);
+        let cancel=Event::FingerCancel(FingerCancelEvent {
+            window_id:f.window_id,digit_id,device:DigitDevice::Touch {uid:PHONE_FINGER},
+            // Its own moment: the cancel is one dispatch of its own, never
+            // the dispatch that already showed a claim's cancel to a widget.
+            abs:f.abs,time:cx.seconds_since_app_start().max(f.time+1e-6),modifiers:f.modifiers,
+        });
+        if let Some(item)=self.items.get(&f.client).cloned() {
+            item.handle_event(cx,&cancel,&mut Scope::empty());
+        }
+        cx.fingers.process_touch_update_end(&[TouchPoint {
+            state:TouchState::Stop,abs:f.abs,time:f.time,uid:PHONE_FINGER,rotation_angle:0.0,force:1.0,radius:dvec2(1.0,1.0),
+            handled:std::cell::Cell::new(Area::Empty),sweep_lock:std::cell::Cell::new(Area::Empty),
+        }]);
+    }
+    fn dispatch_phone_finger(&mut self,cx:&mut Cx,state:TouchState) {
+        let Some(f)=self.phone_finger.as_ref() else {return};
+        let touch=TouchUpdateEvent {time:f.time,window_id:f.window_id,modifiers:f.modifiers,touches:vec![TouchPoint {
+            state,abs:f.abs,time:f.time,uid:PHONE_FINGER,rotation_angle:0.0,force:1.0,radius:dvec2(1.0,1.0),
+            handled:std::cell::Cell::new(Area::Empty),sweep_lock:std::cell::Cell::new(Area::Empty),
+        }]};
+        // The press's tap count is the mouse press's own (the platform
+        // counted it); only the capture/hover bookkeeping runs after.
+        let event=Event::TouchUpdate(touch);
+        if let Some(item)=self.items.get(&f.client).cloned() {
+            item.handle_event(cx,&event,&mut Scope::empty());
+        }
+        if let Event::TouchUpdate(touch)=&event {cx.fingers.process_touch_update_end(&touch.touches);}
+    }
+}
+
+/// The simulated phone's one finger: far from any real touch id.
+const PHONE_FINGER:u64=0x5157_0000_0001;
+
+/// The primary mouse button held on the open app, presented to it as a
+/// finger: which client it landed on and where it is now.
+pub(super) struct PhoneFinger {
+    client: ClientId,
+    abs: Vec2d,
+    time: f64,
+    window_id: WindowId,
+    modifiers: KeyModifiers,
 }

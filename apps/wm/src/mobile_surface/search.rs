@@ -69,6 +69,7 @@ impl PhoneSurface {
             Event::MouseDown(e) => Some((e.abs, true, false)),
             Event::MouseMove(e) => Some((e.abs, false, false)),
             Event::MouseUp(e) => Some((e.abs, false, true)),
+            Event::FingerCancel(_) => owned_cancel(event, self.search_pointer),
             Event::TouchUpdate(e) => e.touches.first().map(|t| {
                 (
                     t.abs,
@@ -281,18 +282,44 @@ impl PhoneSurface {
                 alpha(ink, 0.12),
             );
             let y0 = y.max(top);
-            self.hits.push((
+            self.app_hit(
                 rect(row.pos.x, y0, row.size.x, (y + 56.0).min(bottom) - y0),
-                PhoneHit::App(id.clone()),
-            ));
+                id,
+                rect(row.pos.x + 4.0, y + 6.0, 44.0, 44.0),
+            );
         }
         cx.end_turtle();
+    }
+}
+
+/// A press taken away ends like a lift, but only for the gesture the field
+/// owns (`search_pointer`; its own capture gets its terminal FingerUp):
+/// any other gesture's cancel is not the field's and goes on to the shell's
+/// cancel/reset (`phone_pointer`).
+fn owned_cancel(event: &Event, owns_gesture: bool) -> Option<(DVec2, bool, bool)> {
+    match event {
+        Event::FingerCancel(e) if owns_gesture => Some((e.abs, false, true)),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_the_fields_own_gesture_ends_on_a_cancel_here() {
+        let cancel = Event::FingerCancel(makepad_platform::event::FingerCancelEvent {
+            window_id: makepad_platform::WindowId(0, 0),
+            digit_id: live_id_num!(touch, 3).into(),
+            device: makepad_platform::event::DigitDevice::Touch { uid: 3 },
+            abs: dvec2(10.0, 20.0),
+            time: 1.0,
+            modifiers: Default::default(),
+        });
+        assert_eq!(owned_cancel(&cancel, true), Some((dvec2(10.0, 20.0), false, true)), "the field's own press ends as a lift");
+        assert_eq!(owned_cancel(&cancel, false), None, "another gesture's cancel is left to the shell");
+        assert_eq!(owned_cancel(&Event::Signal, true), None);
+    }
     #[test]
     fn search_matches_every_word_in_names_and_ids_and_sorts_labels() {
         let apps = vec![

@@ -3087,6 +3087,21 @@ impl Widget for FloatingAction {
                 self.release_moving_item(cx, me.abs);
                 self.release_at(cx, me.abs);
             }
+            // The mouse press itself taken away: its bookkeeping ends as a
+            // release's would, but nothing is picked.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if self.swallow_up {
+                    self.swallow_up = false;
+                    if !self.open {
+                        self.unlock(cx);
+                    }
+                }
+                self.pressed_item = None;
+                if std::mem::take(&mut self.opening_press) && self.open && self.lock_pending {
+                    self.lock_pending = false;
+                    self.lock(cx);
+                }
+            }
             // Touch never becomes a mouse press: without this arm a set
             // opens on a phone and a tap outside never puts it away. The
             // first touch only.

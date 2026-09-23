@@ -563,7 +563,7 @@ impl PopupMenuItem {
                 self.animator_play(cx, ids!(active.on));
             }
             Hit::FingerUp(se) if se.is_primary_hit() => {
-                if !se.is_sweep {
+                if !se.is_sweep && !se.cancelled {
                     dispatch_action(cx, PopupMenuItemAction::WasSelected);
                 } else {
                     self.animator_play(cx, ids!(hover.off));
