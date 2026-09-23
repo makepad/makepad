@@ -207,7 +207,7 @@ pub fn toolbar_menu(mode: ViewMode, show_hidden: bool, chat: bool, terminal: boo
 
 pub fn storage_menu(projection: MapProjection, filter_open: bool, scan_all: bool) -> Vec<MenuRow> {
     let mut rows = Vec::new();
-    for (value, title) in [(MapProjection::Flat, "Flat"), (MapProjection::Ortho, "Isometric"), (MapProjection::Persp, "Perspective")] {
+    for (value, title) in [(MapProjection::Flat, "2D"), (MapProjection::Ortho, "2.5D"), (MapProjection::Persp, "Perspective")] {
         rows.push(MenuRow::new(MenuAction::SetProjection(value), &format!("{}{}", if projection == value {"• "} else {"   "}, title), ""));
     }
     rows.push(MenuRow::new(MenuAction::StorageFilter, if filter_open {"Hide Filters"} else {"Show Filters"}, "").sep());

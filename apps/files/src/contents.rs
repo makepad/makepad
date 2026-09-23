@@ -350,8 +350,9 @@ script_mod! {
     }
 }
 
-/// The ways to look at a folder. The last three are one treemap under three
-/// projections — flat, extruded, perspective — sharing scan, camera and pick.
+/// The ways to look at a folder. Treemap is one scan drawn flat (2D),
+/// extruded (2.5D) or in perspective — the toolbar picks which, and the
+/// scan, camera and pick are shared.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ViewMode {
     #[default]

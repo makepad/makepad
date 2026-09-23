@@ -600,11 +600,32 @@ script_mod! {
                                         }
                                     }
                                 }
-                                treemap_button := ToolButton{
+                                // The tile view, three ways: flat 2D, extruded
+                                // 2.5D, and perspective. One scan, one pick.
+                                View{width: 8 height: 1}
+                                proj_flat := ToolButton{
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/treemap.svg")
+                                            color: mod.mpf.fg
+                                        }
+                                    }
+                                }
+                                proj_ortho := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/treemap25.svg")
+                                            color: mod.mpf.fg
+                                        }
+                                    }
+                                }
+                                proj_persp := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/treemap3d.svg")
                                             color: mod.mpf.fg
                                         }
                                     }
@@ -1346,15 +1367,19 @@ const COLUMN_ROWS: [(&[LiveId], model::SortKey); 5] = [
     (ids!(menu_permissions), model::SortKey::Permissions),
 ];
 
-const MODE_BUTTONS: [(&[LiveId], ViewMode); 4] = [
+const MODE_BUTTONS: [(&[LiveId], ViewMode); 3] = [
     (ids!(icons_button), ViewMode::Icons),
     (ids!(list_button), ViewMode::List),
     (ids!(compact_button), ViewMode::Compact),
-    (ids!(treemap_button), ViewMode::Treemap),
 ];
 
-/// The projection switch on the map's own strip: how the block view renders,
-/// not which view is open.
+/// The tile view. Each button opens the treemap in that projection: flat
+/// 2D, extruded 2.5D, perspective. The scan, camera and pick are shared.
+const PROJ_BUTTONS: [(&[LiveId], MapProjection); 3] = [
+    (ids!(proj_flat), MapProjection::Flat),
+    (ids!(proj_ortho), MapProjection::Ortho),
+    (ids!(proj_persp), MapProjection::Persp),
+];
 
 /// The phone's view switch: its three segments and the view each opens.
 const PHONE_SEGMENTS: [(&[LiveId], ViewMode); 3] = [
@@ -2117,7 +2142,7 @@ impl FilesView {
         self.view.view(cx, ids!(phone_navigation)).set_visible(cx, narrow);
         self.view.view(cx, ids!(sidebar)).set_visible(cx, !narrow);
         self.view.view(cx, ids!(view_modes)).set_visible(cx, !narrow);
-        for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button)] {
+        for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(proj_flat),ids!(proj_ortho),ids!(proj_persp)] {
             self.view.widget(cx,path).set_visible(cx,!narrow);
         }
         if narrow {self.with_contents(cx,|contents,cx|contents.set_zoom(cx,0));}
@@ -2188,6 +2213,7 @@ impl FilesView {
                 .widget(cx, ids!(btn_sel))
                 .set_visible(cx, button_mode == mode);
         }
+        self.style_projection_buttons(cx);
         self.style_phone_segments(cx, mode);
         // Storage options share the main toolbar. Preserve the map's pick
         // and filter sidebar when changing views.
@@ -2220,6 +2246,7 @@ impl FilesView {
         self.with_contents(cx, |contents, cx| {
             contents.treemap(cx).set_projection(cx, projection);
         });
+        self.style_projection_buttons(cx);
         self.report(cx);
         self.view.redraw(cx);
     }
@@ -2238,6 +2265,21 @@ impl FilesView {
             let color = if on { lit } else { Vec4f::default() };
             let mut pill = self.view.widget(cx, id).widget(cx, ids!(seg_pill));
             script_apply_eval!(cx, pill, {draw_bg +: {color: #(color)}});
+        }
+    }
+
+    /// Light the tile-view button that matches the projection on screen.
+    /// The other folder views leave all three dark.
+    fn style_projection_buttons(&mut self, cx: &mut Cx) {
+        let on_map = self
+            .tabs
+            .get(self.tab)
+            .is_some_and(|tab| tab.mode.is_treemap());
+        for (id, projection) in PROJ_BUTTONS {
+            self.view
+                .widget(cx, id)
+                .widget(cx, ids!(btn_sel))
+                .set_visible(cx, on_map && projection == self.projection);
         }
     }
 
@@ -4876,6 +4918,7 @@ impl FilesView {
         // The block view's saved rendering and whether its filter sidebar
         // was left open — both come back exactly as they were left.
         self.projection = match model::pref_get("projection").as_deref() {
+            Some("flat") => MapProjection::Flat,
             Some("ortho") => MapProjection::Ortho,
             Some("persp") => MapProjection::Persp,
             _ => MapProjection::default(),
@@ -4941,7 +4984,7 @@ impl FilesView {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        for id in [ids!(back_button),ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
+        for id in [ids!(back_button),ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(proj_flat),ids!(proj_ortho),ids!(proj_persp),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
             let mut button=self.view.view(cx,id);
             let hover=button.finger_hover_in(actions).is_some();
             if hover || button.finger_hover_out(actions).is_some() {
@@ -5006,6 +5049,14 @@ impl FilesView {
         for (id, mode) in MODE_BUTTONS {
             if self.view.view(cx, id).finger_down(actions).is_some() {
                 self.set_mode(cx, mode);
+            }
+        }
+        if !self.tabs.is_empty() {
+            for (id, projection) in PROJ_BUTTONS {
+                if self.view.view(cx, id).finger_down(actions).is_some() {
+                    self.set_projection_choice(cx, projection);
+                    self.set_mode(cx, ViewMode::Treemap);
+                }
             }
         }
         for (id, storage) in [(ids!(menu_button), false), (ids!(storage_button), true)] {
