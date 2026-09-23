@@ -43,6 +43,33 @@ pub struct Frame {
     pub pixels: Vec<u32>,
 }
 
+/// Times sampled inside a capture callback, before its payload is copied.
+///
+/// `callback_unix_ms` has the same epoch and units as [`AudioPacket::pts_ms`],
+/// but is the callback's time, not an audio presentation timestamp. The
+/// monotonic value is elapsed time since this browser was created; it is a
+/// separate clock useful for detecting wall-clock jumps, not a Unix time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CaptureTimestamp {
+    pub callback_unix_ms: i64,
+    pub callback_elapsed_ns: u64,
+    /// Committed main-frame document navigation. Same-document history and
+    /// fragment changes do not advance this epoch.
+    pub navigation_epoch: u64,
+}
+
+/// A software paint together with its capture-callback identity.
+///
+/// The timestamp describes painting, not a decoded video's media PTS. A
+/// consumer must measure AV synchronization rather than assume those are
+/// interchangeable. Accelerated paints do not produce this CPU payload.
+#[derive(Debug)]
+pub struct CapturedFrame {
+    pub frame: Frame,
+    pub sequence: u64,
+    pub timestamp: CaptureTimestamp,
+}
+
 /// What a page's audio is captured as. Chromium mixes and resamples the
 /// page's output to this before the first packet, so the embedder names the
 /// format its own audio path wants and never converts a rate.
@@ -87,6 +114,9 @@ pub struct AudioPacket {
     /// Presentation time, milliseconds since the Unix epoch. A gap between
     /// one packet's end and the next one's `pts_ms` is audio that was dropped.
     pub pts_ms: i64,
+    /// Callback clocks and the document epoch captured when this audio
+    /// stream started. A late packet from an old stream keeps its old epoch.
+    pub capture: CaptureTimestamp,
     pub samples: Vec<f32>,
 }
 
@@ -247,6 +277,10 @@ impl Browser {
         Ok(())
     }
 
+    pub fn request_repaint(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     pub fn set_url(&mut self, _url: &str) -> Result<()> {
         Ok(())
     }
@@ -266,6 +300,10 @@ impl Browser {
         _modifiers: u32,
         _mouse_leave: bool,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn send_capture_lost_event(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -311,6 +349,14 @@ impl Browser {
 
     pub fn take_frame(&mut self) -> Option<Frame> {
         None
+    }
+
+    pub fn try_take_frame(&mut self) -> Option<CapturedFrame> {
+        None
+    }
+
+    pub fn navigation_epoch(&self) -> u64 {
+        0
     }
 
     pub fn is_accelerated(&self) -> bool {

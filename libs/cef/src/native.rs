@@ -1,6 +1,7 @@
 use crate::{
     ffi, AudioCaptureConfig, AudioCaptureStats, AudioEvent, AudioFormat, AudioPacket,
-    BootstrapResult, ConsoleMessage, Error, Evaluation, Frame, Result, TEXT_INPUT_MODE_NONE,
+    BootstrapResult, CapturedFrame, CaptureTimestamp, ConsoleMessage, Error, Evaluation, Frame,
+    Result, TEXT_INPUT_MODE_NONE,
 };
 
 /// A diagnostic line on stderr that survives a closed pipe. A browser hosted
@@ -37,7 +38,7 @@ use std::slice;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -384,10 +385,20 @@ struct CefString {
     clear: unsafe extern "C" fn(*mut ffi::cef_string_t),
 }
 
+struct CaptureClock(Instant);
+
+impl Default for CaptureClock {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
 #[derive(Default)]
 struct SharedBrowserState {
     view: Mutex<ViewState>,
-    frame: Mutex<Option<Frame>>,
+    frame: Mutex<Option<CapturedFrame>>,
+    capture_clock: CaptureClock,
+    navigation_epoch: AtomicU64,
     closing: AtomicBool,
     editable_focus: AtomicBool,
     /// Accelerated paint: the copy destination and the frame statistics.
@@ -444,6 +455,7 @@ struct AudioTap {
     /// `Stopped` to a full queue.
     streaming: AtomicBool,
     epoch: AtomicU32,
+    navigation_epoch: AtomicU64,
     sample_rate: AtomicU32,
     channels: AtomicU32,
     channel_layout: AtomicU32,
@@ -2303,12 +2315,25 @@ impl SharedBrowserState {
         };
     }
 
-    fn set_frame(&self, frame: Frame) {
+    fn set_frame(&self, frame: CapturedFrame) {
         *self.frame.lock().unwrap() = Some(frame);
     }
 
-    fn take_frame(&self) -> Option<Frame> {
-        self.frame.lock().unwrap().take()
+    fn try_take_frame(&self) -> Option<CapturedFrame> {
+        let frame = self.frame.try_lock().ok()?.take()?;
+        // A queued paint from the previous document cannot be relabeled as
+        // content from a navigation that committed before the UI drained it.
+        (frame.timestamp.navigation_epoch == self.navigation_epoch.load(Ordering::Acquire))
+            .then_some(frame)
+    }
+
+    fn capture_timestamp(&self, navigation_epoch: u64) -> CaptureTimestamp {
+        let callback_elapsed_ns = self.capture_clock.0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let callback_unix_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(time) => time.as_millis().min(i64::MAX as u128) as i64,
+            Err(error) => -(error.duration().as_millis().min(i64::MAX as u128) as i64),
+        };
+        CaptureTimestamp { callback_unix_ms, callback_elapsed_ns, navigation_epoch }
     }
 
     fn editable_focus(&self) -> bool {
@@ -2695,6 +2720,8 @@ unsafe extern "system" fn audio_on_stream_started(
     let Some(tap) = audio_tap(self_) else {
         return;
     };
+    let state = &(*(self_ as *mut AudioHandler)).state;
+    tap.navigation_epoch.store(state.navigation_epoch.load(Ordering::Acquire), Ordering::Release);
     if !params.is_null() {
         let params = &*params;
         tap.sample_rate
@@ -2726,6 +2753,8 @@ unsafe extern "system" fn audio_on_stream_packet(
     let Some(tap) = audio_tap(self_) else {
         return;
     };
+    let state = &(*(self_ as *mut AudioHandler)).state;
+    let capture = state.capture_timestamp(tap.navigation_epoch.load(Ordering::Acquire));
     if !tap.enabled.load(Ordering::Acquire) || data.is_null() || frames <= 0 {
         return;
     }
@@ -2769,6 +2798,7 @@ unsafe extern "system" fn audio_on_stream_packet(
         channels: channels as u32,
         frames,
         pts_ms: pts,
+        capture,
         samples,
     };
     match tap.events.try_send(AudioEvent::Packet(packet)) {
@@ -2935,9 +2965,10 @@ unsafe extern "system" fn render_on_paint(
         return;
     }
     let render = self_ as *mut RenderHandler;
+    let state: &SharedBrowserState = &(*render).state;
+    let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
     let pixels =
         slice::from_raw_parts(buffer as *const u32, width as usize * height as usize).to_vec();
-    let state: &SharedBrowserState = &(*render).state;
     let n = state.software_frames.fetch_add(1, Ordering::AcqRel) + 1;
     let milestone = matches!(n, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000);
     let trace = cef_debug();
@@ -2952,10 +2983,14 @@ unsafe extern "system" fn render_on_paint(
             say!("[makepad-cef] {message}");
         }
     }
-    state.set_frame(Frame {
-        width: width as usize,
-        height: height as usize,
-        pixels,
+    state.set_frame(CapturedFrame {
+        frame: Frame {
+            width: width as usize,
+            height: height as usize,
+            pixels,
+        },
+        sequence: n,
+        timestamp,
     });
 }
 
@@ -3336,6 +3371,23 @@ unsafe extern "system" fn load_on_loading_state_change(
     });
 }
 
+/// CEF calls this after navigation commit. Unlike the display generation,
+/// it excludes titles, favicons, failed navigations and same-page history.
+unsafe extern "system" fn load_on_load_start(
+    self_: *mut ffi::cef_load_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    frame: *mut ffi::cef_frame_t,
+    _transition_type: ffi::cef_transition_type_t,
+) {
+    let is_main = !frame.is_null() && (*frame).is_main.is_some_and(|is_main| is_main(frame) != 0);
+    release_param(frame);
+    release_param(browser);
+    if is_main {
+        let handler = &*(self_ as *mut LoadHandler);
+        handler.state.navigation_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 /// Popups (`window.open`, target=_blank) never become native windows here:
 /// the request is cancelled and its URL queued for the embedder to open as a
 /// tab.
@@ -3410,7 +3462,7 @@ impl LoadHandler {
                     has_at_least_one_ref: Some(load_has_at_least_one_ref),
                 },
                 on_loading_state_change: Some(load_on_loading_state_change),
-                on_load_start: None,
+                on_load_start: Some(load_on_load_start),
                 on_load_end: None,
                 on_load_error: None,
             },
@@ -4231,6 +4283,18 @@ impl Browser {
         })
     }
 
+    /// Ask for a genuine repaint of the whole view (`invalidate(PET_VIEW)`):
+    /// a still page delivers a fresh paint with its own callback timestamp.
+    /// UI thread only; changes nothing about the page.
+    pub fn request_repaint(&mut self) -> Result<()> {
+        self.with_host(|host| unsafe {
+            if let Some(invalidate) = (*host).invalidate {
+                invalidate(host, ffi::PET_VIEW);
+            }
+            Ok(())
+        })
+    }
+
     pub fn set_url(&mut self, url: &str) -> Result<()> {
         let runtime = runtime()?;
         let url = CefString::new(
@@ -4295,6 +4359,19 @@ impl Browser {
                 &event,
                 mouse_leave as c_int,
             );
+            Ok(())
+        })
+    }
+
+    /// Tell the page it lost mouse capture: Chromium ends any drag or
+    /// pressed-button gesture it was tracking without delivering a mouse-up
+    /// (so nothing is clicked). For an embedder that stops routing input to
+    /// this browser mid-gesture.
+    pub fn send_capture_lost_event(&mut self) -> Result<()> {
+        self.with_host(|host| unsafe {
+            (*host)
+                .send_capture_lost_event
+                .ok_or_else(|| Error::new("cef_browser_host_t::send_capture_lost_event missing"))?(host);
             Ok(())
         })
     }
@@ -4419,6 +4496,7 @@ impl Browser {
                 capture: Mutex::new(AudioCaptureSide { spare, held: None }),
                 streaming: AtomicBool::new(false),
                 epoch: AtomicU32::new(0),
+                navigation_epoch: AtomicU64::new(0),
                 sample_rate: AtomicU32::new(0),
                 channels: AtomicU32::new(0),
                 channel_layout: AtomicU32::new(0),
@@ -4526,7 +4604,21 @@ impl Browser {
     }
 
     pub fn take_frame(&mut self) -> Option<Frame> {
-        self.state.take_frame()
+        self.try_take_frame().map(|captured| captured.frame)
+    }
+
+    /// Take the latest software paint without waiting for its producer.
+    /// `None` also means the publication slot is currently busy; try again
+    /// on a later pump. The returned timestamps were sampled in the paint
+    /// callback, never at this drain. Must run on the CEF pump thread.
+    pub fn try_take_frame(&mut self) -> Option<CapturedFrame> {
+        self.state.try_take_frame()
+    }
+
+    /// Committed main-frame document epoch, independent of audio restarts
+    /// and display-state changes. Zero precedes the first committed load.
+    pub fn navigation_epoch(&self) -> u64 {
+        self.state.navigation_epoch.load(Ordering::Acquire)
     }
 }
 
