@@ -135,9 +135,9 @@ mod.theme.color_outset_1_empty = #211f26
 mod.theme.color_outset_2_empty = #211f26
 use mod.res.*
 use mod.text.*
-mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 // The Architecture map's categorical palette (top-level directory ownership), kind stripes and status roles.
 mod.theme.color_map_1 = #286cab
 mod.theme.color_map_1_a = #075d8f

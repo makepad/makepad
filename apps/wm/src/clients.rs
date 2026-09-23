@@ -344,13 +344,21 @@ fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
 /// Resolve a sibling binary of the running wm executable (`.exe` on
 /// Windows, where a bare name never exists).
 pub fn resolve_bin(bin: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let mut path = dir.join(bin);
-    if cfg!(windows) {
-        path.set_extension("exe");
+    // Android: every app is a library the launcher runs (host.rs).
+    #[cfg(target_os = "android")]
+    {
+        crate::host::android_app_binary(bin).map(|(launcher, _)| launcher)
     }
-    path.exists().then_some(path)
+    #[cfg(not(target_os = "android"))]
+    {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let mut path = dir.join(bin);
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        path.exists().then_some(path)
+    }
 }
 
 /// The cargo to launch with: whatever is on PATH, else the rustup default.
@@ -959,6 +967,13 @@ pub fn launch_argv(
         }
         None => resolve_bin(&app.bin).ok_or_else(|| format!("binary not found: {}", app.bin))?,
     };
+    // Android: the launcher's first argument is the app library it runs.
+    #[cfg(target_os = "android")]
+    if root.is_none() {
+        if let Some((_, lib)) = crate::host::android_app_binary(&app.bin) {
+            args.push(lib.to_string_lossy().to_string());
+        }
+    }
     args.push("--stdin-loop".to_string());
     args.extend(app.args.iter().cloned());
     args.extend(extra_args.iter().cloned());

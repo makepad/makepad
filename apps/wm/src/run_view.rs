@@ -268,6 +268,10 @@ pub struct MpRunView {
     is_hovered: bool,
     #[rust]
     ime_pos: Option<Vec2d>,
+    /// On a phone: the caret of the child's focused text field, while it has
+    /// one (`HostedImeState`); the soft keyboard shows only then.
+    #[rust]
+    child_ime: Option<Vec2d>,
     /// While the tile rect is being ANIMATED, the layout's settled target
     /// size. The quad draws at the animated rect; the swapchain and the
     /// child's WindowGeomChange always use this, so a tween never causes
@@ -340,6 +344,15 @@ impl MpRunView {
     /// goes out first, in the same batch, so the child sees the move
     /// before the edge exactly as the host did.
     /// What the child said its pointer input understands.
+    /// The child's text field took (`show`) or gave up the keyboard.
+    pub fn set_child_ime(&mut self, cx: &mut Cx, ime: makepad_widgets::makepad_platform::ime::HostedImeState) {
+        self.child_ime = ime.visible.then(|| dvec2(ime.x, ime.y + ime.height));
+        if !ime.visible && crate::host::device_phone() && cx.has_key_focus(self.area) {
+            cx.hide_text_ime();
+        }
+        self.redraw(cx);
+    }
+
     pub fn set_pointer_caps(&mut self, caps: makepad_widgets::makepad_platform::ime::HostedPointerCaps) {
         self.child_mouse_cancel = caps.mouse_cancel;
     }
@@ -1263,9 +1276,13 @@ impl Widget for MpRunView {
         }
         self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
-        if target.is_some() && cx.has_key_focus(self.area) {
+        // On a phone ShowTextIME raises the soft keyboard: only while the
+        // child has a focused text field, never for the tile's focus alone.
+        let wants_ime = !crate::host::device_phone() || self.child_ime.is_some();
+        if target.is_some() && wants_ime && cx.has_key_focus(self.area) {
             let ime = self
-                .ime_pos
+                .child_ime
+                .or(self.ime_pos)
                 .unwrap_or_else(|| dvec2(rect.size.x * 0.5, rect.size.y * 0.5));
             // This anchors the native candidate window for a remote process.
             // It is not a text-input request from the WM or a module client.

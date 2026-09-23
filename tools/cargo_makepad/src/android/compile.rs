@@ -434,7 +434,7 @@ fn rewrite_relative_toml_value(line: &mut String, key: &str, crate_dir: &Path) {
     }
 }
 
-fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String {
+pub(crate) fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String {
     let mut out = String::with_capacity(cargo_toml.len() + 256);
     for raw_line in cargo_toml.lines() {
         let mut line = raw_line.to_string();
@@ -447,7 +447,7 @@ fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String 
     out
 }
 
-fn extract_workspace_patch_sections(workspace_manifest: &str) -> String {
+pub(crate) fn extract_workspace_patch_sections(workspace_manifest: &str) -> String {
     let mut out = String::new();
     let mut current_section: Option<String> = None;
     let mut current_body = Vec::new();

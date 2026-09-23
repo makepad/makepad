@@ -736,15 +736,22 @@ impl CxVulkan {
         self.frame_resources.buffers.push(buffer);
     }
 
+    /// A renderer with no window: a hosted child draws every pass into
+    /// textures, its window pass into the host's shared hardware buffers
+    /// (`android_hosted`), so it has no surface and no swapchain.
+    #[cfg(target_os = "android")]
+    pub fn new_headless(width: u32, height: u32) -> Result<Self, String> {
+        Self::new(std::ptr::null_mut(), width, height)
+    }
+
+    /// The renderer for `window`, or a headless one when `window` is null.
     #[cfg(target_os = "android")]
     pub fn new(
         window: *mut ndk_sys::ANativeWindow,
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        if window.is_null() {
-            return Err("Android Vulkan init failed: null ANativeWindow".to_string());
-        }
+        let headless = window.is_null();
 
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| format!("Android Vulkan init failed: Entry::load: {e:?}"))?;
@@ -796,15 +803,17 @@ impl CxVulkan {
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
 
-        unsafe { ANativeWindow_acquire(window) };
-
-        let create_surface_result = Self::create_surface(&android_surface_loader, window);
-        let surface = match create_surface_result {
-            Ok(surface) => surface,
-            Err(err) => {
-                unsafe { ndk_sys::ANativeWindow_release(window) };
-                unsafe { instance.destroy_instance(None) };
-                return Err(err);
+        let surface = if headless {
+            vk::SurfaceKHR::null()
+        } else {
+            unsafe { ANativeWindow_acquire(window) };
+            match Self::create_surface(&android_surface_loader, window) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    unsafe { ndk_sys::ANativeWindow_release(window) };
+                    unsafe { instance.destroy_instance(None) };
+                    return Err(err);
+                }
             }
         };
 
@@ -813,8 +822,10 @@ impl CxVulkan {
             Ok(pick) => pick,
             Err(err) => {
                 unsafe {
-                    surface_loader.destroy_surface(surface, None);
-                    ndk_sys::ANativeWindow_release(window);
+                    if !headless {
+                        surface_loader.destroy_surface(surface, None);
+                        ndk_sys::ANativeWindow_release(window);
+                    }
                     instance.destroy_instance(None);
                 }
                 return Err(err);
@@ -1043,10 +1054,12 @@ impl CxVulkan {
             .create_repaint_ring()
             .map_err(|err| format!("Android Vulkan init failed: {err}"))?;
 
-        if let Err(err) = vulkan.recreate_swapchain() {
-            return Err(format!(
-                "Android Vulkan init failed: recreate_swapchain: {err}"
-            ));
+        if !headless {
+            if let Err(err) = vulkan.recreate_swapchain() {
+                return Err(format!(
+                    "Android Vulkan init failed: recreate_swapchain: {err}"
+                ));
+            }
         }
 
         vulkan.try_enable_debug_messenger();
@@ -3522,6 +3535,17 @@ impl CxVulkan {
         height: usize,
     ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
+        // A hosted child's window pass draws into the host's buffer as it was
+        // imported (`bind_shared_hardware_buffer`); never reallocate it.
+        #[cfg(target_os = "android")]
+        if self
+            .textures
+            .get(&texture_key)
+            .is_some_and(|resource| resource.hardware_buffer.is_some())
+        {
+            cx.textures[texture_id].alloc_render(width, height);
+            return Ok(());
+        }
         #[cfg(target_os = "linux")]
         if self.is_shared_image(texture_id) {
             let resource = &self.textures[&texture_key];
@@ -5519,6 +5543,26 @@ impl CxVulkan {
         width: u32,
         height: u32,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_imported_hardware_buffer_texture_resource_with_usage(
+            hardware_buffer,
+            width,
+            height,
+            vk::ImageUsageFlags::SAMPLED,
+        )
+    }
+
+    /// Import `hardware_buffer` as a texture with `usage`: sampled for the
+    /// camera and for a host reading a hosted child's frames, a colour
+    /// attachment too for the child that draws into it. A shared frame's
+    /// memory is dedicated to its image, as the external-memory rules ask.
+    #[cfg(target_os = "android")]
+    fn create_imported_hardware_buffer_texture_resource_with_usage(
+        &mut self,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<VulkanTextureResource, String> {
         if hardware_buffer.is_null() {
             return Err("Android Vulkan camera import failed: null AHardwareBuffer".to_string());
         }
@@ -5570,7 +5614,7 @@ impl CxVulkan {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -5594,10 +5638,14 @@ impl CxVulkan {
 
         let mut import_info =
             vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(hardware_buffer.cast());
-        let alloc_info = vk::MemoryAllocateInfo::default()
+        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+        let mut alloc_info = vk::MemoryAllocateInfo::default()
             .push_next(&mut import_info)
             .allocation_size(allocation_size.max(memory_req.size))
             .memory_type_index(memory_type_index);
+        if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
+            alloc_info = alloc_info.push_next(&mut dedicated);
+        }
         let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }.map_err(|e| {
             unsafe {
                 self.device.destroy_image(image, None);
@@ -6261,6 +6309,50 @@ impl CxVulkan {
         }
 
         Ok(crate::event::video_playback::VideoYuvMetadata::disabled())
+    }
+
+    /// Back `texture_id` with `hardware_buffer`, a frame shared between a
+    /// host and a hosted child: sampled on the host, drawn into by the child
+    /// (`render_target`). The resource holds its own buffer reference.
+    #[cfg(target_os = "android")]
+    pub fn bind_shared_hardware_buffer(
+        &mut self,
+        texture_id: TextureId,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+        render_target: bool,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        if self.textures.get(&texture_key).and_then(|resource| resource.hardware_buffer)
+            == Some(hardware_buffer)
+        {
+            return Ok(());
+        }
+        if let Some(old_resource) = self.textures.remove(&texture_key) {
+            self.retire_texture_resource(old_resource);
+        }
+        let usage = if render_target {
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::COLOR_ATTACHMENT
+        } else {
+            vk::ImageUsageFlags::SAMPLED
+        };
+        let resource = self.create_imported_hardware_buffer_texture_resource_with_usage(
+            hardware_buffer,
+            width,
+            height,
+            usage,
+        )?;
+        self.textures.insert(texture_key, resource);
+        Ok(())
+    }
+
+    /// Wait until the GPU has finished everything submitted so far: a hosted
+    /// child tells its host a frame is ready only once it is.
+    #[cfg(target_os = "android")]
+    pub fn wait_queue_idle(&self) -> Result<(), String> {
+        unsafe { self.device.queue_wait_idle(self.queue) }
+            .map_err(|e| format!("queue_wait_idle failed: {e:?}"))
     }
 
     #[cfg(target_os = "android")]
@@ -8402,6 +8494,10 @@ impl CxVulkan {
         for (index, family) in queue_families.iter().enumerate() {
             if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 continue;
+            }
+            // A headless renderer presents nothing: graphics is enough.
+            if surface == vk::SurfaceKHR::null() {
+                return Ok(index as u32);
             }
             let supports_surface = unsafe {
                 surface_loader.get_physical_device_surface_support(

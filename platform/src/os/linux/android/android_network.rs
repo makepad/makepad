@@ -408,6 +408,12 @@ impl NetworkBackend for AndroidNetworkShimBackend {
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
+        // A hosted child process has no JVM to make the request with.
+        if super::android_hosted::is_hosted() {
+            return Err(NetworkError::backend(
+                "http is not available to a hosted Android child yet",
+            ));
+        }
         let internal_request_id = self.next_internal_id();
         {
             let mut state = self
@@ -570,9 +576,15 @@ pub(crate) fn install_network_backend_shim() {
         let backend = Arc::new(AndroidNetworkShimBackend::new());
         let _ = SHIM_BACKEND.set(backend.clone());
         crate::makepad_network::register_android_backend_shim(backend);
-        crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
-            AndroidSocketStreamFactoryImpl,
-        ));
+        if super::android_hosted::is_hosted() {
+            crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
+                super::android_hosted::HostedSocketFactory,
+            ));
+        } else {
+            crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
+                AndroidSocketStreamFactoryImpl,
+            ));
+        }
     });
 }
 

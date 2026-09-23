@@ -1903,6 +1903,11 @@ pub unsafe fn to_java_socket_stream_close(stream_id: LiveId) {
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
+        // A hosted child process has no JVM to list devices with; AAudio
+        // still opens the default device.
+        if env.is_null() {
+            return Vec::new();
+        }
         let string_array = ndk_utils::call_object_method!(
             env,
             get_activity(),

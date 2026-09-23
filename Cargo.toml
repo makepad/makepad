@@ -5,6 +5,8 @@ workspace.members = [
     "apps/wm",
     "apps/wm-all",
     "apps/wm-dyn",
+    "apps/wm-android",
+    "apps/wm-android/launch",
     "apps/wm-dyn/engine",
     "apps/aichat",
     "apps/finance",

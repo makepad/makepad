@@ -97,6 +97,10 @@ pub(crate) fn wake_ui_event_loop() {
 
 #[cfg(target_os = "android")]
 pub(crate) fn wake_ui_event_loop() {
+    // A hosted child's loop waits on its host socket, not on Java.
+    if android::android_hosted::is_hosted() {
+        return;
+    }
     android::android_jni::send_from_java_message(
         android::android_jni::FromJavaMessage::RenderLoop,
     );

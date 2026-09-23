@@ -1730,6 +1730,9 @@ impl Cx {
         // Live edits
         self.run_live_edit_if_needed("android");
 
+        // `setprop debug.makepad.grab <n>`: the app's own frame grab.
+        self.android_poll_debug_grab();
+
         // Platform operations
         self.handle_platform_ops();
     }

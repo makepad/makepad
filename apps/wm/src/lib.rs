@@ -2863,6 +2863,9 @@ impl App {
                     return;
                 }
                 if let Some(ime) = makepad_platform::ime::HostedImeState::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.set_child_ime(cx, ime));
+                    }
                     self.state_mut().phone.ime.insert(client,ime);
                     self.sync_phone_keyboard(cx);
                     return;
