@@ -249,6 +249,29 @@ pub struct MpRunView {
     /// is past sampling anything older, so the hold lifts there too.
     #[rust]
     paint_frame: NextFrame,
+    /// Paced ticking (Android with GPU-fenced frames, see `paced`): the
+    /// display frame the next Tick goes out on, while one is wanted.
+    #[rust]
+    tick_frame: NextFrame,
+    #[rust]
+    tick_frame_pending: bool,
+    /// The child asked for another frame (`RequestAnimationFrame`, sent at
+    /// the end of every Tick it still animates, and from any thread when a
+    /// signal needs its UI loop).
+    #[rust]
+    child_wants_frame: bool,
+    /// Input went to the child since its last Tick: it draws on the next.
+    #[rust]
+    input_since_tick: bool,
+    /// The child's next timer is due (`HostedWake`).
+    #[rust]
+    wake_timer: Timer,
+    /// A slow safety beat while paced; a child that never asks is still
+    /// pumped now and then.
+    /// The child fences its frames (`HostedFenced`): paced ticking and no
+    /// paint hold apply to it only then.
+    #[rust]
+    child_fenced: bool,
     /// Ticks sent to the child and `TickDone`s back. The child reads its
     /// messages in order and draws only inside a Tick, so once every Tick
     /// sent before some message is acknowledged, each later frame was drawn
@@ -354,9 +377,29 @@ impl ScriptHook for MpRunView {
 }
 
 impl MpRunView {
-    fn emit_to_app(&self, cx: &mut Cx, client: ClientId, msgs: Vec<StudioToApp>) {
+    fn emit_to_app(&mut self, cx: &mut Cx, client: ClientId, msgs: Vec<StudioToApp>) {
         if msgs.is_empty() {
             return;
+        }
+        let with_tick = msgs.iter().any(|msg| matches!(msg, StudioToApp::Tick));
+        if !with_tick && msgs.iter().any(|msg| {
+            matches!(
+                msg,
+                StudioToApp::MouseDown(_)
+                    | StudioToApp::MouseUp(_)
+                    | StudioToApp::MouseMove(_)
+                    | StudioToApp::MouseCancel(_)
+                    | StudioToApp::Scroll(_)
+                    | StudioToApp::Pinch(_)
+                    | StudioToApp::KeyDown(_)
+                    | StudioToApp::KeyUp(_)
+                    | StudioToApp::TextInput(_)
+                    | StudioToApp::TextCopy
+                    | StudioToApp::TextCut
+            )
+        }) {
+            self.input_since_tick = true;
+            self.want_tick(cx);
         }
         let msg_bin = StudioToAppVec(msgs).serialize_bin();
         cx.widget_action(self.uid, MpRunViewAction::ForwardToApp { client, msg_bin });
@@ -395,9 +438,62 @@ impl MpRunView {
         (self.tick_period * 4.0).max(0.050)
     }
 
+    /// Android with GPU-fenced frames: the child is ticked on the display's
+    /// frames, and only while it has something to do (it asked for a frame,
+    /// input went to it, a timer of its is due, it is still starting up) —
+    /// an idle child is never woken. Elsewhere a fixed interval beat.
+    fn paced(&self, cx: &Cx) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            self.child_fenced && cx.hosted_frames_fenced()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = cx;
+            false
+        }
+    }
+
+    /// Paced: tick on the next display frame.
+    fn want_tick(&mut self, cx: &mut Cx) {
+        if self.tick_frame_pending || self.current_target.is_none() || !self.paced(cx) {
+            return;
+        }
+        self.tick_frame_pending = true;
+        self.tick_frame = cx.new_next_frame();
+    }
+
+    pub fn set_child_fenced(&mut self, cx: &mut Cx, on: bool) {
+        self.child_fenced = on;
+        self.child_wants_frame = true;
+        self.want_tick(cx);
+    }
+
+    /// The child's `RequestAnimationFrame`.
+    pub fn child_frame_request(&mut self, cx: &mut Cx) {
+        self.child_wants_frame = true;
+        self.want_tick(cx);
+    }
+
+    /// The child's next timer is due in `seconds` (paced only).
+    pub fn child_wake_in(&mut self, cx: &mut Cx, seconds: f64) {
+        if !self.paced(cx) {
+            return;
+        }
+        cx.stop_timer(self.wake_timer);
+        self.wake_timer = cx.start_timeout(seconds.clamp(0.0, 60.0));
+    }
+
     /// The next Tick waits for the desk to paint the child's last frame
     /// (see `flip_unpainted`).
-    fn paint_holds_tick(&self) -> bool {
+    fn paint_holds_tick(&self, cx: &Cx) -> bool {
+        // With GPU fences between the two processes the child's next write
+        // waits for the desk's reads on the GPU, not here.
+        #[cfg(target_os = "android")]
+        if self.child_fenced && cx.hosted_frames_fenced() {
+            return false;
+        }
+        let _ = cx;
         cfg!(target_os = "android")
             && self.flip_unpainted.is_some_and(|at| crate::host::now() - at < self.tick_fallback())
     }
@@ -408,9 +504,14 @@ impl MpRunView {
             msgs.push(StudioToApp::MouseMove(mv));
         }
         msgs.push(StudioToApp::Tick);
+        if makepad_error_log::trace_enabled("pace") {
+            log!("pace wm tick_tx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, target.client);
+        }
         self.ticks_sent += 1;
         self.tick_outstanding = Some(crate::host::now());
         self.tick_deferred = false;
+        self.child_wants_frame = false;
+        self.input_since_tick = false;
     }
 
     /// Return one tick credit. If a timer beat was missed while the child
@@ -436,7 +537,7 @@ impl MpRunView {
             self.tick_deferred = false;
             return;
         }
-        if self.tick_deferred && !self.paint_holds_tick() {
+        if self.tick_deferred && !self.paint_holds_tick(cx) {
             if let Some(target) = self.current_target {
                 let mut msgs = Vec::new();
                 self.append_tick(target, &mut msgs);
@@ -469,6 +570,16 @@ impl MpRunView {
         self.current_target = target;
         self.tick_outstanding = None;
         self.tick_deferred = false;
+        // A new child is not paced until it says it fences: the interval
+        // beat runs again for it.
+        self.child_fenced = false;
+        if self.tick_timer.0 == 0 {
+            self.tick_timer = cx.start_interval(self.tick_period);
+        }
+        // Paced: a new child starts ticking at once (its bootstrap).
+        self.child_wants_frame = true;
+        self.tick_frame_pending = false;
+        self.want_tick(cx);
         self.pending_move = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
@@ -818,6 +929,7 @@ impl MpRunView {
         if rect_changed || needs_new_swapchain {
             self.bootstrap_pending = true;
             self.bootstrap_tick_count = 0;
+            self.want_tick(cx);
         }
 
         self.last_rect = rect;
@@ -874,6 +986,9 @@ impl MpRunView {
     }
 
     pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
+        if makepad_error_log::trace_enabled("pace") {
+            log!("pace wm flip_rx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, self.current_target.map(|t| t.client).unwrap_or(0));
+        }
         if self.try_present_draw(cx, presentable_draw) {
             trace_host(&format!(
                 "pd c{}",
@@ -923,6 +1038,7 @@ impl MpRunView {
         self.first_present_at = None;
         self.bootstrap_pending = true;
         self.bootstrap_tick_count = 0;
+        self.want_tick(cx);
         self.redraw_countdown = self.redraw_countdown.max(240);
         self.redraw(cx);
     }
@@ -1362,8 +1478,36 @@ impl Widget for MpRunView {
             self.flip_unpainted = None;
         }
 
+        let mut beat = false;
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
+                if self.paced(cx) {
+                    // Paced from here on: the interval beat stops (a fenced
+                    // child stays fenced for its life).
+                    cx.stop_timer(self.tick_timer);
+                    self.tick_timer = Timer::empty();
+                    self.child_wants_frame = true;
+                    self.want_tick(cx);
+                } else if target.is_none() {
+                    // No child: nothing to beat for (a view without a
+                    // client woke the loop at 125 Hz for nothing);
+                    // `set_target` starts it again.
+                    cx.stop_timer(self.tick_timer);
+                    self.tick_timer = Timer::empty();
+                } else {
+                    beat = true;
+                }
+            } else if self.wake_timer.is_timer(timer_event).is_some() {
+                self.child_wants_frame = true;
+                self.want_tick(cx);
+            }
+        }
+        if self.tick_frame.is_event(event).is_some() {
+            self.tick_frame_pending = false;
+            beat = true;
+        }
+        if beat {
+            {
                 if let Some(target) = target {
                     let mut msgs = Vec::new();
                     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -1382,7 +1526,14 @@ impl Widget for MpRunView {
                             msgs.extend(self.build_bootstrap_msgs(cx, target));
                         }
                     }
-                    if !frozen {
+                    let paced = self.paced(cx);
+                    // Paced: a Tick only when the child has something to do.
+                    let wanted = !paced
+                        || should_bootstrap
+                        || self.child_wants_frame
+                        || self.input_since_tick
+                        || self.pending_move.is_some();
+                    if !frozen && wanted {
                         self.tick_deferred = true;
                         let now = crate::host::now();
                         let due = match self.tick_outstanding {
@@ -1397,9 +1548,17 @@ impl Widget for MpRunView {
                             }
                             Some(_) => false,
                         };
-                        if due && !self.paint_holds_tick() {
+                        if due && !self.paint_holds_tick(cx) {
                             self.append_tick(target, &mut msgs);
+                        } else if paced {
+                            // Busy child: look again next frame (its TickDone
+                            // sends the deferred Tick sooner; the fallback
+                            // needs frames to be noticed).
+                            self.want_tick(cx);
                         }
+                    }
+                    if paced && should_bootstrap {
+                        self.want_tick(cx);
                     }
                     self.emit_to_app(cx, target.client, msgs);
                 }

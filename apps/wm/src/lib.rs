@@ -609,6 +609,11 @@ pub struct App {
     /// Drives the dormant instances (see `pump_warm`).
     #[rust]
     warm_tick: Timer,
+    /// What the bar last showed (`update_bar`): it redraws only when that
+    /// changes, not on every second's tick — an idle phone repainted once a
+    /// second for a clock that shows minutes.
+    #[rust]
+    bar_shown: String,
     /// When each warm client was last ticked. Kept apart from `WarmFrame`
     /// because the FIRST ticks are what make a frame possible at all — see
     /// `pump_warm`.
@@ -2852,6 +2857,13 @@ impl App {
                     }
                 }
             }
+            AppToStudio::RequestAnimationFrame => {
+                if !self.is_warm(client) && !self.ai_bus.is_pane(client) {
+                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                        d.with_run_view(cx, client, |cx, v| v.child_frame_request(cx))
+                    });
+                }
+            }
             AppToStudio::TickDone => {
                 crate::run_view::trace_host(&format!("rx-tickdone c{}", client));
                 // A warm instance is pumped by heartbeat, not by a tile.
@@ -2902,6 +2914,18 @@ impl App {
                     if back.handled == Some(false) && self.state_mut().phone.client == Some(client) {
                         self.state_mut().phone.navigate(mobile::PhoneScreen::Home);
                         self.animate_phone(cx);
+                    }
+                    return;
+                }
+                if let Some(fenced) = makepad_platform::ime::HostedFenced::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.set_child_fenced(cx, fenced.on));
+                    }
+                    return;
+                }
+                if let Some(wake) = makepad_platform::ime::HostedWake::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.child_wake_in(cx, wake.in_secs));
                     }
                     return;
                 }
@@ -3359,14 +3383,20 @@ impl App {
         data.open_panel = self.shell_panel_open;
         // The middle window control reads "restore" while maximized.
         data.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
+        let window_controls = shell::bar::window_controls_default()
+            && !matches!(cx.os_type(), OsType::LinuxDirect);
+        let shown = format!("{:?} {}", data, window_controls);
+        if shown == self.bar_shown {
+            return;
+        }
+        self.bar_shown = shown;
         let bar = self.ui.widget(cx, ids!(shell_bar));
         {
             let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
             if let Some(b) = borrowed.as_mut() {
                 b.data = data;
                 // The direct-display session has no outer window to control.
-                b.window_controls = shell::bar::window_controls_default()
-                    && !matches!(cx.os_type(), OsType::LinuxDirect);
+                b.window_controls = window_controls;
             }
         }
         self.redraw_all(cx);
@@ -4521,6 +4551,12 @@ impl MatchEvent for App {
         // The warm pool's pump. Started even when the pool is off: it
         // costs one no-op wakeup and keeps the timer id stable.
         self.warm_tick = cx.start_interval(WARM_PUMP);
+        // Nothing to pump (no pool, or a phone, which keeps none): no 20 Hz
+        // wakeup of an idle WM.
+        if !self.warm_pool.enabled() || cfg!(target_os = "android") {
+            cx.stop_timer(self.warm_tick);
+            self.warm_tick = Timer::empty();
+        }
         if !self.warm_pool.enabled() {
             if self.processes() {
                 log!("wm: warm pool disabled (MAKEPAD_WM_NO_WARM)");

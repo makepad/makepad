@@ -27,6 +27,8 @@ mod vulkan_profile;
 #[cfg(target_os = "android")]
 #[path = "vulkan_android.rs"]
 mod android_frames;
+#[cfg(target_os = "android")]
+pub use android_frames::HostedSyncRole;
 // Only the direct (DRM/KMS) event loop paces on this; windowed Linux builds
 // never ask.
 #[cfg(all(target_os = "linux", linux_direct))]
@@ -224,6 +226,9 @@ struct FrameResources {
     /// destroyed with the frame, after its fence, never at replacement.
     retired_textures: Vec<VulkanTextureResource>,
     retired_geometries: Vec<VulkanGeometryResource>,
+    /// Semaphores this frame's submission waited on (imported hosted-frame
+    /// fences); destroyed after its fence.
+    sync_semaphores: Vec<vk::Semaphore>,
 }
 
 #[cfg(target_os = "android")]
@@ -625,6 +630,8 @@ pub struct CxVulkan {
     /// `frame_serial_in_flight` are the open slot's while a repaint records.
     #[cfg(target_os = "android")]
     repaints: android_frames::RepaintRing,
+    #[cfg(target_os = "android")]
+    hosted_sync: android_frames::HostedSync,
     #[cfg(target_os = "linux")]
     profile: vulkan_profile::VulkanProfile,
     #[cfg(target_os = "linux")]
@@ -856,10 +863,23 @@ impl CxVulkan {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_extensions = [
+        // Hosted frames fence each other with SYNC_FD semaphores
+        // (`HostedSync`) when the device has them.
+        let sync_fd_supported = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .map(|exts| {
+                exts.iter().any(|ext| {
+                    (unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) })
+                        == vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME
+                })
+            })
+            .unwrap_or(false);
+        let mut device_extensions = vec![
             vk::KHR_SWAPCHAIN_NAME.as_ptr(),
             vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
         ];
+        if sync_fd_supported {
+            device_extensions.push(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME.as_ptr());
+        }
         let mut sampler_ycbcr_features =
             vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
                 .sampler_ycbcr_conversion(true);
@@ -1054,10 +1074,13 @@ impl CxVulkan {
             xr_in_flight_frames: Vec::new(),
             xr_in_flight_index: 0,
             repaints: android_frames::RepaintRing::default(),
+            hosted_sync: Default::default(),
         };
         vulkan.repaints = vulkan
             .create_repaint_ring()
             .map_err(|err| format!("Android Vulkan init failed: {err}"))?;
+        let instance = vulkan.instance.clone();
+        vulkan.init_hosted_sync(&instance, sync_fd_supported);
 
         if !headless {
             if let Err(err) = vulkan.recreate_swapchain() {
@@ -1468,6 +1491,7 @@ impl CxVulkan {
             xr_in_flight_frames: Vec::new(),
             xr_in_flight_index: 0,
             repaints: android_frames::RepaintRing::default(),
+            hosted_sync: Default::default(),
         };
         vulkan.repaints = vulkan
             .create_repaint_ring()
@@ -1599,6 +1623,9 @@ impl CxVulkan {
         for resource in frame_resources.retired_geometries.drain(..) {
             Self::destroy_buffer_with(device, resource.vertex_buffer);
             Self::destroy_buffer_with(device, resource.index_buffer);
+        }
+        for semaphore in frame_resources.sync_semaphores.drain(..) {
+            unsafe { device.destroy_semaphore(semaphore, None) };
         }
     }
 
@@ -3516,6 +3543,8 @@ impl CxVulkan {
             self.recreate_swapchain()?;
         }
 
+        #[cfg(target_os = "android")]
+        crate::trace!("pace", "wm present_done={:.2} record_ms={:.3} present_ms={:.3}", super::android::android_hosted::pace_ms(), recorded.duration_since(image_acquired).as_secs_f64() * 1000.0, recorded.elapsed().as_secs_f64() * 1000.0);
         crate::trace!(
             "gpu.present",
             "present time={:.6} fence_wait_ms={:.3} acquire_wait_ms={:.3} record_ms={:.3} present_ms={:.3} packets={} instances={}",
@@ -5463,7 +5492,9 @@ impl CxVulkan {
                 .map_err(|e| format!("reset Vulkan frame fence: {e:?}"))?;
             #[cfg(target_os = "linux")]
             let result = self.shared_submit(info);
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "android")]
+            let result = self.hosted_sync_queue_submit(info, self.in_flight_fence);
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             let result = self.device.queue_submit(self.queue, &[*info], self.in_flight_fence);
             if let Err(err) = result {
                 // An unsuccessful submission does not signal its reset fence.
@@ -9047,6 +9078,8 @@ impl Drop for CxVulkan {
         self.destroy_xr_in_flight_frames();
         #[cfg(target_os = "android")]
         self.destroy_repaint_ring();
+        #[cfg(target_os = "android")]
+        self.destroy_hosted_sync();
         self.retained_instances.clear();
         self.destroy_geometry_resources();
         #[cfg(target_os = "linux")]

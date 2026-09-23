@@ -22,7 +22,7 @@ use {
         event::{finger::TouchState, Event, WindowGeom},
         makepad_math::*,
         makepad_micro_serde::*,
-        os::linux::vulkan::CxVulkan,
+        os::linux::vulkan::{CxVulkan, HostedSyncRole},
         os::shared_framebuf::{HostSwapchain, PollTimer, PresentableDraw, PresentableImageId},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
@@ -33,7 +33,7 @@ use {
     std::{
         collections::HashMap,
         io::{Read, Write},
-        os::fd::AsRawFd,
+        os::fd::{AsRawFd, OwnedFd},
         sync::{
             atomic::{AtomicBool, Ordering},
             Mutex, OnceLock,
@@ -52,6 +52,31 @@ static REDRAW_AFTER_FIRST: AtomicBool = AtomicBool::new(true);
 /// The host's finger is down on this app (a MouseMove without it is the
 /// host's hover, which a touch screen does not have).
 static TOUCH_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// A worker thread's signal already asked the host for a Tick (cleared by
+/// the Tick): the loop sleeps on the host socket, so a signal wakes it by
+/// asking the host.
+static WAKE_SENT: AtomicBool = AtomicBool::new(false);
+
+/// Hosted child: `wake_ui_event_loop` from any thread.
+pub(crate) fn hosted_wake() {
+    // The network runtime also wakes the loop for every host message; those
+    // are read by the loop itself. Only a raised signal needs a Tick.
+    if !SignalToUI::any_pending() {
+        return;
+    }
+    if !WAKE_SENT.swap(true, Ordering::Relaxed) {
+        crate::trace!("pace", "child signal wake");
+        Cx::send_studio_message(AppToStudio::RequestAnimationFrame);
+    }
+}
+
+/// This child fences its frames with SYNC_FDs (`HostedSync`) rather than
+/// waiting for its GPU before each flip.
+static FENCED: AtomicBool = AtomicBool::new(false);
+
+/// Host: its submissions wait on children's frame fds (`HostedSyncRole::Host`).
+static HOST_FENCED: AtomicBool = AtomicBool::new(false);
 
 /// True in a hosted child process (no JVM: every JNI path must stay shut).
 pub fn is_hosted() -> bool {
@@ -215,16 +240,204 @@ pub fn start_frame_server() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// GPU sync between host and children (`HostedSync` in vulkan_android.rs).
+// A child hands the host the SYNC_FD of each frame's submission instead of
+// waiting for its GPU; the host's next submission waits on it. The host's
+// own latest submission fd goes back to a child before it draws into a
+// shared image again, so that write waits for the host's reads.
+// ---------------------------------------------------------------------------
+
+/// Header bit: an acquire fd rides on this message (low bits: key length).
+const OP_ACQUIRE: u32 = 0x8000_0000;
+/// Header value: the child asks for the host's latest release fd.
+const OP_RELEASE: u32 = 0x4000_0000;
+
+/// Per child connection, the newest frame fd the host has not waited on yet
+/// (a child's submissions complete in order: the newest covers the older).
+fn acquire_fds() -> &'static Mutex<HashMap<u64, OwnedFd>> {
+    static MAP: OnceLock<Mutex<HashMap<u64, OwnedFd>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn release_fd() -> &'static Mutex<Option<OwnedFd>> {
+    static FD: Mutex<Option<OwnedFd>> = Mutex::new(None);
+    &FD
+}
+
+/// Host: the children's frame fds its next submission waits on.
+pub(crate) fn take_acquire_fds() -> Vec<OwnedFd> {
+    acquire_fds().lock().map(|mut map| map.drain().map(|(_, fd)| fd).collect()).unwrap_or_default()
+}
+
+/// Host: the fd of its latest submission (it signals once every read of a
+/// shared image submitted so far is done).
+pub(crate) fn publish_release_fd(fd: OwnedFd) {
+    if let Ok(mut slot) = release_fd().lock() {
+        *slot = Some(fd);
+    }
+}
+
+mod fd_msg {
+    use std::{
+        io::{self, Read, Write},
+        os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    };
+    #[repr(C)]
+    struct IoVec {
+        base: *mut u8,
+        len: usize,
+    }
+    #[repr(C)]
+    struct MsgHdr {
+        name: *mut u8,
+        namelen: u32,
+        iov: *mut IoVec,
+        iovlen: usize,
+        control: *mut u8,
+        controllen: usize,
+        flags: i32,
+    }
+    #[repr(C)]
+    struct CmsgFd {
+        len: usize,
+        level: i32,
+        kind: i32,
+        fd: i32,
+        _pad: i32,
+    }
+    const SOL_SOCKET: i32 = 1;
+    const SCM_RIGHTS: i32 = 1;
+    const MSG_NOSIGNAL: i32 = 0x4000;
+    const MSG_CMSG_CLOEXEC: i32 = 0x4000_0000;
+    extern "C" {
+        fn sendmsg(fd: RawFd, msg: *const MsgHdr, flags: i32) -> isize;
+        fn recvmsg(fd: RawFd, msg: *mut MsgHdr, flags: i32) -> isize;
+    }
+
+    /// Write `bytes`, the fd (if any) riding on the first byte.
+    pub fn send(stream: &mut std::os::unix::net::UnixStream, bytes: &[u8], fd: Option<RawFd>) -> io::Result<()> {
+        let Some(fd) = fd else { return stream.write_all(bytes) };
+        let mut first = [bytes[0]];
+        let mut iov = IoVec { base: first.as_mut_ptr(), len: 1 };
+        let mut cmsg = CmsgFd { len: 16 + 4, level: SOL_SOCKET, kind: SCM_RIGHTS, fd, _pad: 0 };
+        let msg = MsgHdr {
+            name: std::ptr::null_mut(),
+            namelen: 0,
+            iov: &mut iov,
+            iovlen: 1,
+            control: &mut cmsg as *mut CmsgFd as *mut u8,
+            controllen: std::mem::size_of::<CmsgFd>(),
+            flags: 0,
+        };
+        loop {
+            match unsafe { sendmsg(stream.as_raw_fd(), &msg, MSG_NOSIGNAL) } {
+                1 => break,
+                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+                -1 => return Err(io::Error::last_os_error()),
+                _ => return Err(io::ErrorKind::WriteZero.into()),
+            }
+        }
+        stream.write_all(&bytes[1..])
+    }
+
+    /// Read exactly `bytes`; an fd riding on the first byte is returned.
+    pub fn recv(stream: &mut std::os::unix::net::UnixStream, bytes: &mut [u8]) -> io::Result<Option<OwnedFd>> {
+        let mut first = [0u8];
+        let mut iov = IoVec { base: first.as_mut_ptr(), len: 1 };
+        let mut control = [0u64; 8];
+        let mut msg = MsgHdr {
+            name: std::ptr::null_mut(),
+            namelen: 0,
+            iov: &mut iov,
+            iovlen: 1,
+            control: control.as_mut_ptr() as *mut u8,
+            controllen: std::mem::size_of_val(&control),
+            flags: 0,
+        };
+        loop {
+            match unsafe { recvmsg(stream.as_raw_fd(), &mut msg, MSG_CMSG_CLOEXEC) } {
+                1 => break,
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+                -1 => return Err(io::Error::last_os_error()),
+                _ => return Err(io::ErrorKind::InvalidData.into()),
+            }
+        }
+        let mut fds = Vec::new();
+        let mut offset = 0usize;
+        let base = control.as_ptr() as *const u8;
+        while offset + 16 <= msg.controllen {
+            let len = unsafe { (base.add(offset) as *const usize).read() };
+            let level = unsafe { (base.add(offset + 8) as *const i32).read() };
+            let kind = unsafe { (base.add(offset + 12) as *const i32).read() };
+            if len < 16 || offset + len > msg.controllen {
+                break;
+            }
+            if level == SOL_SOCKET && kind == SCM_RIGHTS {
+                for i in 0..(len - 16) / 4 {
+                    let raw = unsafe { (base.add(offset + 16 + i * 4) as *const i32).read() };
+                    if raw >= 0 {
+                        fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
+                    }
+                }
+            }
+            offset += (len + 7) & !7;
+        }
+        bytes[0] = first[0];
+        stream.read_exact(&mut bytes[1..])?;
+        // One fd per message; extra ones (never sent) close here.
+        Ok(fds.into_iter().next())
+    }
+}
+
 /// One child's connection: it asks for a frame by id (a length-prefixed
 /// serialized `PresentableImageId`), the host answers one status byte and,
-/// when it has the frame, the buffer itself.
+/// when it has the frame, the buffer itself. The same connection carries the
+/// GPU sync of its frames (`OP_ACQUIRE`, `OP_RELEASE`).
 fn serve_frames(mut stream: std::os::unix::net::UnixStream) {
+    static CONNECTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let connection = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
     loop {
         let mut len = [0u8; 4];
-        if stream.read_exact(&mut len).is_err() {
-            return;
+        let fd = match fd_msg::recv(&mut stream, &mut len) {
+            Ok(fd) => fd,
+            Err(_) => {
+                if let Ok(mut map) = acquire_fds().lock() {
+                    map.remove(&connection);
+                }
+                return;
+            }
+        };
+        let header = u32::from_le_bytes(len);
+        if header == OP_RELEASE {
+            let release = release_fd().lock().ok().and_then(|slot| slot.as_ref().and_then(|fd| fd.try_clone().ok()));
+            let sent = match &release {
+                Some(fd) => fd_msg::send(&mut stream, &[1], Some(fd.as_raw_fd())),
+                None => stream.write_all(&[0]),
+            };
+            if sent.is_err() {
+                return;
+            }
+            continue;
         }
-        let mut key = vec![0u8; u32::from_le_bytes(len) as usize];
+        if header & OP_ACQUIRE != 0 {
+            let mut key = vec![0u8; (header & !OP_ACQUIRE) as usize];
+            if stream.read_exact(&mut key).is_err() {
+                return;
+            }
+            // 1 only when the host waits on it: otherwise the child waits
+            // for its GPU before the flip, as without fences.
+            let accepted = HOST_FENCED.load(Ordering::Relaxed)
+                && fd.is_some_and(|fd| acquire_fds().lock().map(|mut map| { map.insert(connection, fd); }).is_ok());
+            // The child sends its flip only after this: the fd is in place
+            // before the host can draw the frame.
+            if stream.write_all(&[accepted as u8]).is_err() {
+                return;
+            }
+            continue;
+        }
+        let mut key = vec![0u8; header as usize];
         if stream.read_exact(&mut key).is_err() {
             return;
         }
@@ -256,12 +469,23 @@ fn serve_frames(mut stream: std::os::unix::net::UnixStream) {
 impl Cx {
     /// Back every image of `swapchain` with a shared hardware buffer the
     /// child fetches by id (host side of `StudioToApp::Swapchain`).
+    /// The host fences its children's frames on the GPU (`HostedSync`):
+    /// a child may draw its next frame before the host painted the last.
+    pub fn hosted_frames_fenced(&self) -> bool {
+        self.os.vulkan.as_ref().is_some_and(|vulkan| vulkan.hosted_sync_role() == HostedSyncRole::Host)
+    }
+
     pub fn android_share_host_swapchain(&mut self, swapchain: &HostSwapchain) {
         start_frame_server();
         let Some(mut vulkan) = self.os.vulkan.take() else {
             crate::error!("hosted frames: the host has no Vulkan renderer");
             return;
         };
+        if vulkan.hosted_sync_role() != HostedSyncRole::Host && !sync_disabled() {
+            let fenced = vulkan.set_hosted_sync_role(HostedSyncRole::Host);
+            HOST_FENCED.store(fenced, Ordering::Relaxed);
+            crate::log!("hosted frames: GPU sync with children {}", if fenced { "by SYNC_FD" } else { "unavailable" });
+        }
         static SHARED: OnceLock<Mutex<std::collections::HashSet<Vec<u8>>>> = OnceLock::new();
         let shared = SHARED.get_or_init(|| Mutex::new(Default::default()));
         for image in &swapchain.presentable_images {
@@ -311,7 +535,7 @@ impl Cx {
 // The CHILD side: fetch a frame from the host by id.
 // ---------------------------------------------------------------------------
 
-fn fetch_shared_buffer(id: &PresentableImageId) -> Option<*mut AHardwareBuffer> {
+fn host_connection() -> Option<std::sync::MutexGuard<'static, Option<std::os::unix::net::UnixStream>>> {
     static CONNECTION: Mutex<Option<std::os::unix::net::UnixStream>> = Mutex::new(None);
     let mut connection = CONNECTION.lock().ok()?;
     if connection.is_none() {
@@ -329,6 +553,46 @@ fn fetch_shared_buffer(id: &PresentableImageId) -> Option<*mut AHardwareBuffer> 
             }
         }
     }
+    Some(connection)
+}
+
+/// Child: the host's latest release fd (none before its first submission).
+fn fetch_release_fd() -> Option<OwnedFd> {
+    let mut connection = host_connection()?;
+    let stream = connection.as_mut()?;
+    let mut status = [0u8; 1];
+    let result = stream
+        .write_all(&OP_RELEASE.to_le_bytes())
+        .and_then(|_| fd_msg::recv(stream, &mut status));
+    match result {
+        Ok(fd) if status[0] == 1 => fd,
+        Ok(_) => None,
+        Err(_) => {
+            *connection = None;
+            None
+        }
+    }
+}
+
+/// Child: hand the host this frame's fd; returns once the host holds it.
+fn send_acquire_fd(id: &PresentableImageId, fd: &OwnedFd) -> bool {
+    let Some(mut connection) = host_connection() else { return false };
+    let Some(stream) = connection.as_mut() else { return false };
+    let key = id.serialize_bin();
+    let mut request = (OP_ACQUIRE | key.len() as u32).to_le_bytes().to_vec();
+    request.extend_from_slice(&key);
+    let mut ack = [0u8; 1];
+    let ok = fd_msg::send(stream, &request, Some(fd.as_raw_fd()))
+        .and_then(|_| stream.read_exact(&mut ack))
+        .is_ok();
+    if !ok {
+        *connection = None;
+    }
+    ok && ack[0] == 1
+}
+
+fn fetch_shared_buffer(id: &PresentableImageId) -> Option<*mut AHardwareBuffer> {
+    let mut connection = host_connection()?;
     let stream = connection.as_mut()?;
     let key = id.serialize_bin();
     let mut request = (key.len() as u32).to_le_bytes().to_vec();
@@ -397,7 +661,10 @@ impl Cx {
             ..Default::default()
         });
         match CxVulkan::new_headless(1, 1) {
-            Ok(vulkan) => self.os.vulkan = Some(vulkan),
+            Ok(mut vulkan) => {
+                FENCED.store(!sync_disabled() && vulkan.set_hosted_sync_role(HostedSyncRole::Child), Ordering::Relaxed);
+                self.os.vulkan = Some(vulkan);
+            }
             Err(err) => {
                 crate::error!("hosted: no Vulkan renderer: {err}");
                 return;
@@ -405,6 +672,10 @@ impl Cx {
         }
         self.os.surface_alive = true;
         self.in_makepad_studio = true;
+        // This loop blocks on the network runtime and reads the host socket
+        // itself: a host message must not also raise the UI signals (they
+        // would ask the host for a Tick after each of its own Ticks).
+        self.net.set_quiet_socket(Some(crate::makepad_live_id::LiveId(0)));
         // As the Activity build's main loop does.
         self.gpu_info.performance = crate::gpu_info::GpuPerformance::Tier1;
 
@@ -416,6 +687,9 @@ impl Cx {
         Self::hosted_send(AppToStudio::Custom(
             crate::ime::HostedPointerCaps::current().to_json(),
         ));
+        if FENCED.load(Ordering::Relaxed) {
+            Self::hosted_send(AppToStudio::Custom(crate::ime::HostedFenced { on: true }.to_json()));
+        }
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -429,12 +703,16 @@ impl Cx {
                         let mut batch = msgs.0;
                         let closed = self.stdin_drain_host_batches(&mut batch);
                         Self::stdin_coalesce_host_batch(&mut batch);
+                        let ticked = batch.iter().any(|msg| matches!(msg, StudioToApp::Tick));
                         for msg in batch {
                             if self.hosted_handle_msg(msg, &mut windows) {
                                 return;
                             }
                         }
                         self.handle_actions();
+                        if !ticked {
+                            self.hosted_request_frame_if_dirty();
+                        }
                         if closed {
                             break;
                         }
@@ -443,8 +721,12 @@ impl Cx {
                 },
                 WebSocketMessage::String(text) => {
                     if let Ok(msg) = StudioToApp::deserialize_json(&text) {
+                        let ticked = matches!(msg, StudioToApp::Tick);
                         if self.hosted_handle_msg(msg, &mut windows) {
                             return;
+                        }
+                        if !ticked {
+                            self.hosted_request_frame_if_dirty();
                         }
                     }
                 }
@@ -610,6 +892,9 @@ impl Cx {
             crate::trace!("hosted", "tick {tick} redraw={} next_frames={}", self.need_redrawing(), self.new_next_frames.len());
         }
         self.hosted_import_frames(windows);
+        // Before the signals are taken: a signal raised from here on asks
+        // for another Tick (`hosted_wake`) instead of being swallowed.
+        WAKE_SENT.store(false, Ordering::Relaxed);
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
         if internal_signal || ui_signal {
@@ -620,7 +905,11 @@ impl Cx {
             crate::trace!("hosted", "ui signal at tick {tick}");
             self.call_event_handler(&Event::Signal);
         }
-        if SignalToUI::check_and_clear_action_signal() {
+        let action_signal = SignalToUI::check_and_clear_action_signal();
+        if internal_signal || ui_signal || action_signal {
+            crate::trace!("pace", "child signals internal={} ui={} action={}", internal_signal, ui_signal, action_signal);
+        }
+        if action_signal {
             self.handle_action_receiver();
         }
         // Storage answers from the worker thread (the app's saved state).
@@ -635,6 +924,7 @@ impl Cx {
 
         let time_now = self.os.timers.time_now();
         let phase_started = std::time::Instant::now();
+        let pace_tick = pace_ms();
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
         }
@@ -667,6 +957,9 @@ impl Cx {
                 draw_done.elapsed().as_secs_f64() * 1000.0,
             );
         }
+        if flipped {
+            crate::trace!("pace", "child tick={:.2} drawn={:.2}", pace_tick, pace_tick + draw_done.duration_since(phase_started).as_secs_f64() * 1000.0);
+        }
         if flipped && REDRAW_AFTER_FIRST.swap(false, Ordering::Relaxed) {
             self.redraw_all();
         }
@@ -678,13 +971,39 @@ impl Cx {
         if tick < 4 {
             crate::trace!("hosted", "after tick {tick}: redraw={} next_frames={} dirty={}", self.need_redrawing(), self.new_next_frames.len(), self.any_passes_dirty());
         }
-        if !self.new_next_frames.is_empty()
-            || self.need_redrawing()
-            || !self.os.timers.timers.is_empty()
-        {
+        // A host that ticks on demand (paced) needs to hear what this child
+        // still has to do: another frame now, or a timer later.
+        if !self.new_next_frames.is_empty() || self.need_redrawing() || SignalToUI::any_pending() {
+            crate::trace!("pace", "child raf next_frames={} redraw={}", self.new_next_frames.len(), self.need_redrawing());
             Self::hosted_send(AppToStudio::RequestAnimationFrame);
+        } else if let Some(due) = self.hosted_next_timer_in() {
+            crate::trace!("pace", "child wake_in={:.3} timers={}", due, self.os.timers.timers.len());
+            Self::hosted_send(AppToStudio::Custom(crate::ime::HostedWake { in_secs: due }.to_json()));
         }
         Self::hosted_send(AppToStudio::TickDone);
+    }
+
+    /// A host message outside a Tick (a permission answer, a network
+    /// response, an event) left work for the UI: ask the host for a Tick
+    /// (a host that ticks on demand would never send one otherwise).
+    fn hosted_request_frame_if_dirty(&mut self) {
+        if !self.new_next_frames.is_empty() || self.need_redrawing() || SignalToUI::any_pending() {
+            if !WAKE_SENT.swap(true, Ordering::Relaxed) {
+                Self::hosted_send(AppToStudio::RequestAnimationFrame);
+            }
+        }
+    }
+
+    /// Seconds until the next poll timer is due, if any.
+    fn hosted_next_timer_in(&self) -> Option<f64> {
+        let now = Cx::monotonic_now();
+        self.os
+            .timers
+            .timers
+            .values()
+            .map(|timer| timer.start_time + timer.interval * (timer.step + 1) as f64 - now)
+            .min_by(|a, b| a.total_cmp(b))
+            .map(|due| due.max(0.0))
     }
 
     /// Repaint every dirty pass; true when a window frame went to the host.
@@ -692,6 +1011,18 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let fenced = FENCED.load(Ordering::Relaxed);
+        // The shared image this repaint draws into may still be read by the
+        // host's GPU: this submission waits for the host's latest one.
+        if fenced && !passes_todo.is_empty() {
+            if let Some(fd) = fetch_release_fd() {
+                if let Some(vulkan) = self.os.vulkan.as_mut() {
+                    if let Err(err) = vulkan.wait_sync_fd(fd) {
+                        crate::error!("{err}");
+                    }
+                }
+            }
+        }
         let mut flips = Vec::new();
         for &draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
@@ -758,11 +1089,19 @@ impl Cx {
             if let Err(err) = vulkan.end_repaint() {
                 crate::error!("hosted: repaint submit failed: {err}");
             }
-            // The host reads the frame as soon as it hears of it.
+            let submitted = pace_ms();
+            // The host reads the frame as soon as it hears of it: it gets
+            // the frame's fence first (its GPU waits on it), or, without
+            // fences, the frame is complete before the flip goes out.
+            let fence = if fenced { vulkan.take_exported_submit_fd() } else { None };
             if !flips.is_empty() {
-                if let Err(err) = vulkan.wait_queue_idle() {
-                    crate::error!("hosted: {err}");
+                let handed = fence.as_ref().is_some_and(|fd| send_acquire_fd(&flips[0].target_id, fd));
+                if !handed {
+                    if let Err(err) = vulkan.wait_queue_idle() {
+                        crate::error!("hosted: {err}");
+                    }
                 }
+                crate::trace!("pace", "child submitted={:.2} gpu_done={:.2} fenced={}", submitted, pace_ms(), handed);
             }
             self.os.vulkan = Some(vulkan);
         }
@@ -916,6 +1255,21 @@ impl Cx {
         crate::log!("grab: next frame -> {}", path.display());
         self.capture_next_frame_to_file(path);
     }
+}
+
+/// Wall-clock milliseconds (mod 1e6) for `pace` traces: the host and its
+/// children share the device clock, so their lines line up.
+pub(crate) fn pace_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0 % 1.0e6)
+        .unwrap_or(0.0)
+}
+
+/// `adb shell setprop debug.makepad.hosted.nosync 1`: host and children
+/// fall back to CPU waits (for A/B measurements).
+fn sync_disabled() -> bool {
+    system_property("debug.makepad.hosted.nosync") == "1"
 }
 
 fn system_property(name: &str) -> String {

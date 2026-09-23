@@ -160,6 +160,9 @@ impl CxVulkan {
         slot.frame_resources
             .framebuffers
             .append(&mut self.frame_resources.framebuffers);
+        slot.frame_resources
+            .sync_semaphores
+            .append(&mut self.frame_resources.sync_semaphores);
         self.swap_repaint_slot(slot_index);
         unsafe {
             self.device
@@ -287,5 +290,200 @@ impl CxVulkan {
             }
         }
         self.repaints.next = 0;
+    }
+}
+
+/// GPU sync between a host (the WM) and its hosted children, which share
+/// frames as AHardwareBuffers: every submission signals a SYNC_FD it exports
+/// (`VK_KHR_external_semaphore_fd`). A child sends its frame's fd to the
+/// host instead of waiting for its GPU on the CPU; the host waits on those
+/// fds inside its next submission, and hands its own latest fd back so a
+/// child's next write into a shared image waits for the host's reads of it.
+#[derive(Default)]
+pub(super) struct HostedSync {
+    loader: Option<ash::khr::external_semaphore_fd::Device>,
+    role: HostedSyncRole,
+    /// Signaled by every submission while a role is set, exported right
+    /// after it (a SYNC_FD export resets the semaphore for the next one).
+    export_semaphore: vk::Semaphore,
+    exported: Option<std::os::fd::OwnedFd>,
+    /// Imported fds the next submission waits on.
+    waits: Vec<vk::Semaphore>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HostedSyncRole {
+    #[default]
+    None,
+    Host,
+    Child,
+}
+
+fn slice<'a, T>(ptr: *const T, len: u32) -> &'a [T] {
+    if len == 0 || ptr.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len as usize) } }
+}
+
+impl CxVulkan {
+    /// Whether the device imports and exports SYNC_FD semaphores; called once
+    /// the device exists (the extension is enabled only when it does).
+    pub(super) fn init_hosted_sync(&mut self, instance: &ash::Instance, enabled: bool) {
+        if !enabled {
+            return;
+        }
+        let info = vk::PhysicalDeviceExternalSemaphoreInfo::default()
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let mut props = vk::ExternalSemaphoreProperties::default();
+        unsafe {
+            instance.get_physical_device_external_semaphore_properties(
+                self.physical_device,
+                &info,
+                &mut props,
+            )
+        };
+        let needed = vk::ExternalSemaphoreFeatureFlags::EXPORTABLE
+            | vk::ExternalSemaphoreFeatureFlags::IMPORTABLE;
+        if !props.external_semaphore_features.contains(needed) {
+            crate::log!("hosted sync: SYNC_FD semaphores not supported ({:?})", props.external_semaphore_features);
+            return;
+        }
+        self.hosted_sync.loader = Some(ash::khr::external_semaphore_fd::Device::new(instance, &self.device));
+    }
+
+    /// Start exporting a SYNC_FD per submission in `role`. False when the
+    /// device cannot: the caller keeps its CPU waits.
+    pub fn set_hosted_sync_role(&mut self, role: HostedSyncRole) -> bool {
+        if self.hosted_sync.loader.is_none() {
+            return false;
+        }
+        if self.hosted_sync.export_semaphore == vk::Semaphore::null() {
+            let mut export = vk::ExportSemaphoreCreateInfo::default()
+                .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+            let info = vk::SemaphoreCreateInfo::default().push_next(&mut export);
+            match unsafe { self.device.create_semaphore(&info, None) } {
+                Ok(semaphore) => self.hosted_sync.export_semaphore = semaphore,
+                Err(err) => {
+                    crate::error!("hosted sync: exportable semaphore: {err:?}");
+                    return false;
+                }
+            }
+        }
+        self.hosted_sync.role = role;
+        true
+    }
+
+    pub fn hosted_sync_role(&self) -> HostedSyncRole {
+        self.hosted_sync.role
+    }
+
+    /// The next submission waits (GPU side) for `fd` to signal.
+    pub fn wait_sync_fd(&mut self, fd: std::os::fd::OwnedFd) -> Result<(), String> {
+        use std::os::fd::IntoRawFd;
+        let Some(loader) = self.hosted_sync.loader.as_ref() else {
+            return Err("hosted sync: no SYNC_FD support".into());
+        };
+        let semaphore = unsafe { self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+            .map_err(|e| format!("hosted sync: wait semaphore: {e:?}"))?;
+        let raw = fd.into_raw_fd();
+        let import = vk::ImportSemaphoreFdInfoKHR::default()
+            .semaphore(semaphore)
+            .flags(vk::SemaphoreImportFlags::TEMPORARY)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD)
+            .fd(raw);
+        if let Err(err) = unsafe { loader.import_semaphore_fd(&import) } {
+            // A failed import leaves the fd with us.
+            unsafe {
+                self.device.destroy_semaphore(semaphore, None);
+                drop(<std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw));
+            }
+            return Err(format!("hosted sync: import SYNC_FD: {err:?}"));
+        }
+        self.hosted_sync.waits.push(semaphore);
+        Ok(())
+    }
+
+    /// The SYNC_FD of the latest submission (it signals when that submission
+    /// completes), once.
+    pub fn take_exported_submit_fd(&mut self) -> Option<std::os::fd::OwnedFd> {
+        self.hosted_sync.exported.take()
+    }
+
+    /// `queue_submit` with the hosted waits and the export signal added.
+    pub(super) fn hosted_sync_queue_submit(
+        &mut self,
+        info: &vk::SubmitInfo<'_>,
+        fence: vk::Fence,
+    ) -> ash::prelude::VkResult<()> {
+        let role = self.hosted_sync.role;
+        if role == HostedSyncRole::None {
+            return unsafe { self.device.queue_submit(self.queue, &[*info], fence) };
+        }
+        if role == HostedSyncRole::Host {
+            for fd in crate::os::linux::android::android_hosted::take_acquire_fds() {
+                if let Err(err) = self.wait_sync_fd(fd) {
+                    crate::error!("{err}");
+                }
+            }
+        }
+        let mut waits: Vec<vk::Semaphore> = slice(info.p_wait_semaphores, info.wait_semaphore_count).to_vec();
+        let mut stages: Vec<vk::PipelineStageFlags> =
+            slice(info.p_wait_dst_stage_mask, info.wait_semaphore_count).to_vec();
+        for &semaphore in &self.hosted_sync.waits {
+            waits.push(semaphore);
+            stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
+        }
+        let mut signals: Vec<vk::Semaphore> =
+            slice(info.p_signal_semaphores, info.signal_semaphore_count).to_vec();
+        signals.push(self.hosted_sync.export_semaphore);
+        let command_buffers = slice(info.p_command_buffers, info.command_buffer_count);
+        let merged = vk::SubmitInfo::default()
+            .wait_semaphores(&waits)
+            .wait_dst_stage_mask(&stages)
+            .command_buffers(command_buffers)
+            .signal_semaphores(&signals);
+        unsafe { self.device.queue_submit(self.queue, &[merged], fence) }?;
+        // The waited semaphores live until this submission's fence.
+        self.frame_resources.sync_semaphores.append(&mut self.hosted_sync.waits);
+        let get = vk::SemaphoreGetFdInfoKHR::default()
+            .semaphore(self.hosted_sync.export_semaphore)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let loader = self.hosted_sync.loader.as_ref().unwrap();
+        match unsafe { loader.get_semaphore_fd(&get) } {
+            Ok(raw) => {
+                let fd = (raw >= 0).then(|| unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) });
+                match role {
+                    HostedSyncRole::Host => {
+                        if let Some(fd) = fd {
+                            crate::os::linux::android::android_hosted::publish_release_fd(fd);
+                        }
+                    }
+                    _ => self.hosted_sync.exported = fd,
+                }
+            }
+            Err(err) => {
+                crate::error!("hosted sync: export SYNC_FD: {err:?}");
+                // A failed export may leave the payload behind: the next
+                // submission signals a fresh semaphore.
+                self.frame_resources.sync_semaphores.push(self.hosted_sync.export_semaphore);
+                self.hosted_sync.export_semaphore = vk::Semaphore::null();
+                let role = self.hosted_sync.role;
+                if !self.set_hosted_sync_role(role) {
+                    self.hosted_sync.role = HostedSyncRole::None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn destroy_hosted_sync(&mut self) {
+        unsafe {
+            for semaphore in self.hosted_sync.waits.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            if self.hosted_sync.export_semaphore != vk::Semaphore::null() {
+                self.device.destroy_semaphore(self.hosted_sync.export_semaphore, None);
+                self.hosted_sync.export_semaphore = vk::Semaphore::null();
+            }
+        }
+        self.hosted_sync.exported = None;
     }
 }
