@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
+use crate::clock::Stopwatch;
 use crate::commit::parse_commit;
 use crate::error::GitError;
 use crate::index::Index;
@@ -102,10 +102,10 @@ pub fn local_clone_depth1(
     dst: &Path,
     branch: Option<&str>,
 ) -> Result<CloneTimings, GitError> {
-    let total_start = Instant::now();
+    let total_start = Stopwatch::start();
 
     // --- Phase 1: Resolve ref ---
-    let resolve_start = Instant::now();
+    let resolve_start = Stopwatch::start();
 
     let src_paths = crate::repo::repository_paths(src)?.ok_or_else(|| {
         GitError::InvalidRef(format!("not a git repository: {}", src.display()))
@@ -132,10 +132,10 @@ pub fn local_clone_depth1(
     let commit_obj = sources.read(&target_oid)?;
     let commit = parse_commit(&commit_obj.data)?;
 
-    let resolve_ms = resolve_start.elapsed().as_secs_f64() * 1000.0;
+    let resolve_ms = resolve_start.elapsed_ms();
 
     // --- Phase 2: Setup .git with alternates ---
-    let setup_start = Instant::now();
+    let setup_start = Stopwatch::start();
 
     let dst_git_dir = dst.join(".git");
     fs::create_dir_all(dst_git_dir.join("objects/info"))?;
@@ -164,10 +164,10 @@ pub fn local_clone_depth1(
         "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n",
     )?;
 
-    let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
+    let setup_ms = setup_start.elapsed_ms();
 
     // --- Phase 3: Walk tree to collect all entries + directories ---
-    let walk_start = Instant::now();
+    let walk_start = Stopwatch::start();
 
     let tree = parse_tree(&sources.read(&commit.tree)?.data)?;
 
@@ -181,7 +181,7 @@ pub fn local_clone_depth1(
         &mut dirs,
     )?;
 
-    let tree_walk_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
+    let tree_walk_ms = walk_start.elapsed_ms();
 
     // --- Phase 4: Create all directories ---
     let workdir = dst.to_path_buf();
@@ -202,7 +202,7 @@ pub fn local_clone_depth1(
     let loose_dirs_arc = Arc::new(sources.loose_dirs.clone());
 
     // --- Phase 6: Parallel decompress + write ---
-    let parallel_start = Instant::now();
+    let parallel_start = Stopwatch::start();
 
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -325,7 +325,7 @@ pub fn local_clone_depth1(
         bytes_written += bytes;
     }
 
-    let parallel_ms = parallel_start.elapsed().as_secs_f64() * 1000.0;
+    let parallel_ms = parallel_start.elapsed_ms();
 
     // Write index
     index_entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -336,8 +336,8 @@ pub fn local_clone_depth1(
     };
     crate::index::write_index(&dst_git_dir, &index)?;
 
-    let checkout_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
-    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+    let checkout_ms = walk_start.elapsed_ms();
+    let total_ms = total_start.elapsed_ms();
 
     Ok(CloneTimings {
         resolve_ms,
