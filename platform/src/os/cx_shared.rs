@@ -1111,6 +1111,14 @@ impl Cx {
                 }
             }
             LiveEditTrigger::Manual => {
+                // A style reload re-evaluates Splash modules under the names
+                // they had, so their bodies' script addresses now hold new
+                // code: the object and function-address shader caches would
+                // hand back the previous shaders (or another template's).
+                // Only the code-keyed cache stays valid.
+                if self.pending_style_reload {
+                    self.draw_shaders.reset_for_live_reload();
+                }
                 // Clear `pending_script_reapply` defensively — LiveEdit's
                 // script_mod re-run clobbers heap overrides anyway, and an
                 // app-level handler that re-broadcasts sets a fresh flag

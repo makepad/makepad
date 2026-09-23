@@ -8,6 +8,7 @@ pub use makepad_widgets;
 
 use makepad_widgets::*;
 
+mod plasma;
 mod profile;
 
 app_main!(App);
@@ -155,6 +156,18 @@ script_mod! {
         cursor: MouseCursor.Hand
         draw_bg +: {
             ground: #x1a1b1e
+        }
+    }
+
+    let ScreenKey = Surface{
+        width: 96
+        height: 112
+        inset: 14
+        radius: 6
+        depth: 3.0
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            ground: #x1b1c1f
         }
     }
 
@@ -331,16 +344,16 @@ script_mod! {
         ui: Root{
             main_window := Window{
                 window.title: "Skeuomorph"
-                window.inner_size: vec2(1060, 740)
+                window.inner_size: vec2(1060, 1000)
                 pass.clear_color: #x18191c
                 body +: {
                     backdrop := Surface{
                         width: Fill
                         height: Fill
                         proxy: false
-                        flow: Right
+                        flow: Down
                         padding: Inset{left: 36 right: 36 top: 36 bottom: 36}
-                        spacing: 36
+                        spacing: 30
                         draw_bg +: {
                             ground: #x181a1c
                             grain: 0.022
@@ -351,6 +364,12 @@ script_mod! {
                                 return vec4(col + self.dither(), 1.0)
                             }
                         }
+
+                        View{
+                        width: Fill
+                        height: 668
+                        flow: Right
+                        spacing: 36
 
                         View{
                             width: Fill
@@ -527,6 +546,31 @@ script_mod! {
                                 }
                             }
                         }
+                        }
+
+                        // A screen whose picture lights the keys either side of it
+                        // (a texture light). Tap the screen to pause it.
+                        Panel{
+                            height: Fill
+                            flow: Right
+                            spacing: 6
+                            ScreenKey{}
+                            ScreenKey{}
+                            Surface{
+                                width: Fit
+                                height: Fit
+                                inset: 6
+                                radius: 12
+                                depth: -3.0
+                                padding: Inset{left: 10 right: 10 top: 10 bottom: 10}
+                                draw_bg +: {
+                                    ground: #x050506
+                                }
+                                screen := mod.widgets.PlasmaScreen{width: 320 height: 132}
+                            }
+                            ScreenKey{}
+                            ScreenKey{}
+                        }
                     }
                 }
             }
@@ -657,6 +701,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        crate::plasma::script_mod(vm);
         self::script_mod(vm)
     }
 

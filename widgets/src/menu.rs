@@ -78,6 +78,9 @@ pub struct MenuRow {
     /// Flyout rows. A non-empty submenu means this row opens instead of
     /// firing.
     pub submenu: Vec<MenuRow>,
+    /// A small colour chip before the label (a theme, a colour, a tag):
+    /// its fill and a dot of a second colour on it.
+    pub swatch: Option<(Vec4f, Vec4f)>,
 }
 
 impl MenuRow {
@@ -92,6 +95,7 @@ impl MenuRow {
             section: false,
             danger: false,
             submenu: Vec::new(),
+            swatch: None,
         }
     }
 
@@ -132,6 +136,11 @@ impl MenuRow {
 
     pub fn danger(mut self, on: bool) -> Self {
         self.danger = on;
+        self
+    }
+
+    pub fn swatch(mut self, fill: Vec4f, dot: Vec4f) -> Self {
+        self.swatch = Some((fill, dot));
         self
     }
 
@@ -288,6 +297,16 @@ const MENU_PAD: f64 = 4.0;
 const MENU_MIN_W: f64 = 150.0;
 /// The leading column that carries the check or radio mark.
 const MARK_COL: f64 = 24.0;
+/// The swatch column after the mark, when a row has one.
+const SWATCH_COL: f64 = 28.0;
+
+fn lead_col(row: &MenuRow) -> f64 {
+    if row.swatch.is_some() {
+        MARK_COL + SWATCH_COL
+    } else {
+        MARK_COL
+    }
+}
 const RIGHT_PAD: f64 = 10.0;
 const ARROW_COL: f64 = 14.0;
 const CHAR_W: f64 = 5.9;
@@ -323,7 +342,7 @@ pub fn measure_rows(rows: &[MenuRow]) -> Vec2d {
             row.shortcut.chars().count() as f64 * SHORT_CHAR_W + SHORT_GAP
         };
         let arrow = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-        w = w.max(MARK_COL + label + short + arrow + RIGHT_PAD);
+        w = w.max(lead_col(row) + label + short + arrow + RIGHT_PAD);
     }
     dvec2(w.ceil(), h)
 }
@@ -526,6 +545,13 @@ pub struct DrawMenuRow {
     arrow: f32,
     #[live]
     disabled: f32,
+    /// 1 when the row has a swatch.
+    #[live]
+    swatch: f32,
+    #[live]
+    swatch_fill: Vec4f,
+    #[live]
+    swatch_dot: Vec4f,
 }
 
 script_mod! {
@@ -547,6 +573,7 @@ script_mod! {
         mark: 0.0
         arrow: 0.0
         disabled: 0.0
+        swatch: 0.0
 
         /** the row's own colours; the layer sets nothing but the state */
         color_hover: uniform(theme.color_primary_container)
@@ -571,6 +598,14 @@ script_mod! {
                     sdf.line_to(16.0, cy - 3.5)
                     sdf.stroke(self.color_mark, 1.5)
                 }
+            }
+            if self.swatch > 0.5 {
+                // The chip: its fill with an edge, and the dot on its right.
+                sdf.box(24.0, cy - 7.0, 22.0, 14.0, 3.0)
+                sdf.fill_keep(self.swatch_fill)
+                sdf.stroke(vec4(0.0, 0.0, 0.0, 0.35), 1.0)
+                sdf.circle(40.0, cy, 3.0)
+                sdf.fill(self.swatch_dot)
             }
             if self.arrow > 0.5 {
                 let ax = self.rect_size.x - 12.0
@@ -1148,7 +1183,7 @@ impl Widget for MenuLayer {
                     self.text_width(cx, true, &row.shortcut) + SHORT_GAP
                 };
                 let arrow_w = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-                need = need.max(MARK_COL + label_w + short_w + arrow_w + RIGHT_PAD);
+                need = need.max(lead_col(&row) + label_w + short_w + arrow_w + RIGHT_PAD);
             }
             let need = need.ceil();
             if (need - self.levels[li].rect.size.x).abs() > 0.5 {
@@ -1209,11 +1244,19 @@ impl Widget for MenuLayer {
                     MenuMark::None => 0.0,
                 };
                 self.draw_row.arrow = if row.submenu.is_empty() { 0.0 } else { 1.0 };
+                let (swatch, fill, dot) = match row.swatch {
+                    Some((fill, dot)) => (1.0, fill, dot),
+                    None => (0.0, Vec4f::default(), Vec4f::default()),
+                };
+                self.draw_row.swatch = swatch;
+                self.draw_row.swatch_fill = fill;
+                self.draw_row.swatch_dot = dot;
                 self.draw_row.draw_abs(cx, r);
+                let lead = lead_col(row);
 
                 let short_w = self.text_width(cx, true, &row.shortcut);
                 let arrow_w = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-                let text_w = (r.size.x - MARK_COL - RIGHT_PAD - short_w - arrow_w).max(8.0);
+                let text_w = (r.size.x - lead - RIGHT_PAD - short_w - arrow_w).max(8.0);
                 let rest = self.draw_label.color;
                 self.draw_label.color = if !row.enabled {
                     self.color_disabled
@@ -1225,7 +1268,7 @@ impl Widget for MenuLayer {
                 self.draw_label.draw_walk(
                     cx,
                     Walk::abs_rect(Rect {
-                        pos: dvec2(r.pos.x + MARK_COL, r.pos.y),
+                        pos: dvec2(r.pos.x + lead, r.pos.y),
                         size: dvec2(text_w, r.size.y),
                     }),
                     Align { x: 0.0, y: 0.5 },

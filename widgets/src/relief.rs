@@ -13,7 +13,7 @@
 //! finishes a frame, the proxies are drawn — one instanced draw call, painter
 //! order — into a small half-float offscreen pass at half density (`a` =
 //! height in points, `rgb` = emissive), which the glass stack's Gaussian
-//! filters (half-float copies) blur into four levels at a quarter of the
+//! filters (half-float copies) blur into five levels at a quarter of the
 //! window's density. Consumers read the wide levels through a B-spline, so
 //! a glow stretched over the window has no texel bands. Material shaders sample those
 //! levels in the main pass, with the same four textures and uniforms for
@@ -65,6 +65,34 @@ script_mod! {
                 discard()
             }
             return vec4(self.emissive.xyz * self.emissive.w, self.height)
+        }
+    }
+
+    // A light whose colour is another pass's texture (a video, a
+    // visualiser): the same shape and height as any proxy, its emissive
+    // sampled across its rect and eased through a soft knee, so a white
+    // flash brightens its neighbours without flooding them.
+    set_type_default() do #(DrawReliefLight::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        alpha_blend: false
+        color_format: @Rgba16F
+        source: texture_2d(float)
+
+        pixel: fn() {
+            let p = self.pos * self.rect_size
+            let c = self.rect_size * 0.5
+            let d = Material.sd_box(p, c, c, min(self.radius, min(c.x, c.y)))
+            let w = self.rect_pos + p
+            if d > 0.0 || w.x < self.clip.x || w.y < self.clip.y || w.x > self.clip.z || w.y > self.clip.w {
+                discard()
+            }
+            let src = max(self.source.sample(self.pos).xyz, vec3(0.0, 0.0, 0.0))
+            // Near-white frames light less: a white flash over a whole
+            // screen would otherwise wash every bevel round it out.
+            let white = min(min(src.x, src.y), src.z)
+            let e = src * self.intensity * (1.0 - 0.55 * smoothstep(0.55, 1.0, white))
+            let k = max(self.knee, 0.001)
+            return vec4(e / (vec3(1.0, 1.0, 1.0) + e / k), self.height)
         }
     }
 
@@ -137,6 +165,7 @@ script_mod! {
             relief_l2: texture_2d(float)
             relief_l3: texture_2d(float)
             relief_l4: texture_2d(float)
+            relief_l5: texture_2d(float)
             relief_on: uniform(0.0)
             relief_size: uniform(vec2(1.0, 1.0))
 
@@ -156,6 +185,10 @@ script_mod! {
             spill: uniform(vec2(1.6, 0.45))
             /** fine grain on faces and halos, 0 = none 0..0.05 step 0.001 */
             grain: uniform(0.0)
+            /** neighbour light graded to one colour: rgb, amount (0 = keep the light's own colour) */
+            spill_tint: uniform(vec4(1.0, 1.0, 1.0, 0.0))
+            /** soft ceiling of neighbour light, 0 = none 0..4 step 0.05 */
+            spill_knee: uniform(0.0)
             light_ink: uniform(vec4(1.0, 1.0, 1.0, 1.0))
             shadow_ink: uniform(vec4(0.0, 0.0, 0.0, 1.0))
             glow_ink: uniform(theme.color_primary)
@@ -182,7 +215,10 @@ script_mod! {
                 if level < 3.5 {
                     return self.relief_l3.sample(c)
                 }
-                return self.relief_l4.sample(c)
+                if level < 4.5 {
+                    return self.relief_l4.sample(c)
+                }
+                return self.relief_l5.sample(c)
             }
 
             // The same level through a cubic B-spline in four bilinear taps:
@@ -230,23 +266,24 @@ script_mod! {
                 let e2 = self.relief_tap(2.0, uv).xyz
                 let e3 = self.relief_tap_smooth(3.0, uv).xyz
                 let e4 = self.relief_tap_smooth(4.0, uv).xyz
-                // A near wash on every face, and the far light only where a
-                // bevel turns toward it: a flat face a long way off gets
-                // little, so the glow does not read as leaking.
-                let near = e2 * 0.25 + e3 * 0.55
-                let far = e3 * 0.5 + e4 * 0.7
-                let lum = dot(e3 + e4, vec3(0.333, 0.333, 0.333))
+                let e5 = self.relief_tap_smooth(5.0, uv).xyz
+                // A near wash on every face, the far light mostly where a
+                // bevel turns toward it, and the widest level washing the
+                // near half of a face beside a large emitter (a screen).
+                let near = e2 * 0.25 + e3 * 0.5 + e4 * 0.3
+                let far = e3 * 0.5 + e4 * 0.8
+                let lum = dot(e4 + e5, vec3(0.333, 0.333, 0.333))
                 if lum < 0.0005 {
-                    return near * 0.45 * self.spill.x
+                    return self.spill_grade(near * 0.45 * self.spill.x)
                 }
                 // Toward the emitter: central differences of the widest
-                // level, 8 points each way. (The screen derivative of a
+                // level, 16 points each way. (The screen derivative of a
                 // filtered texel flips sign from quad to quad along a bevel.)
-                let step = vec2(8.0, 8.0) / max(self.relief_size, vec2(1.0, 1.0))
+                let step = vec2(16.0, 16.0) / max(self.relief_size, vec2(1.0, 1.0))
                 let w3 = vec3(0.333, 0.333, 0.333)
                 let g = vec2(
-                    dot(self.relief_tap(4.0, uv + vec2(step.x, 0.0)).xyz - self.relief_tap(4.0, uv - vec2(step.x, 0.0)).xyz, w3),
-                    dot(self.relief_tap(4.0, uv + vec2(0.0, step.y)).xyz - self.relief_tap(4.0, uv - vec2(0.0, step.y)).xyz, w3)
+                    dot(self.relief_tap(5.0, uv + vec2(step.x, 0.0)).xyz - self.relief_tap(5.0, uv - vec2(step.x, 0.0)).xyz, w3),
+                    dot(self.relief_tap(5.0, uv + vec2(0.0, step.y)).xyz - self.relief_tap(5.0, uv - vec2(0.0, step.y)).xyz, w3)
                 )
                 let gl = length(g)
                 var dir = vec2(0.0, 0.0)
@@ -256,7 +293,26 @@ script_mod! {
                 // How strongly the field leans, so a flat glow gives no direction.
                 let lean = smoothstep(0.0, 1.0, gl / max(lum, 0.0001) * 2.0)
                 let facing = clamp(dot(n.xy, dir) * 3.0, 0.0, 1.0) * lean
-                return (near * 0.5 + far * (0.3 + 2.2 * facing)) * self.spill.x
+                // Across the face as well as on the bevel: the side nearer
+                // the light, by the same lean.
+                let across = clamp(0.5 + dot(self.pos - vec2(0.5, 0.5), dir) * 1.2, 0.0, 1.0)
+                let wash = e5 * (0.35 + 0.9 * mix(0.5, across, lean) + 1.2 * facing)
+                return self.spill_grade((near * 0.5 + far * (0.35 + 2.2 * facing) + wash) * self.spill.x)
+            }
+
+            // The neighbour light's colour and ceiling: `spill_tint` keeps
+            // its energy in one colour (a monochrome tube lights everything
+            // amber), `spill_knee` eases its brightest toward a ceiling.
+            spill_grade: fn(c: vec3) -> vec3 {
+                var o = c
+                if self.spill_tint.w > 0.001 {
+                    let l = dot(c, vec3(0.30, 0.55, 0.15))
+                    o = mix(c, self.spill_tint.xyz * l * 1.25, clamp(self.spill_tint.w, 0.0, 1.0))
+                }
+                if self.spill_knee > 0.001 {
+                    o = o / (vec3(1.0, 1.0, 1.0) + o / self.spill_knee)
+                }
+                return o
             }
 
             // Occlusion from neighbours standing above this point.
@@ -358,13 +414,14 @@ script_mod! {
 /// Relief pass density relative to layout points; the blurred levels run at
 /// half of it.
 const RELIEF_DPI: f64 = 0.5;
-const RELIEF_DOWNS: usize = 4;
+const RELIEF_DOWNS: usize = 5;
 /// The consumer's texture slots, by name.
-const RELIEF_LEVELS: [LiveId; 4] = [
+const RELIEF_LEVELS: [LiveId; 5] = [
     live_id!(relief_l1),
     live_id!(relief_l2),
     live_id!(relief_l3),
     live_id!(relief_l4),
+    live_id!(relief_l5),
 ];
 
 /// One surface as the relief buffer sees it: the shape inside its area.
@@ -389,6 +446,15 @@ struct ReliefEntry {
     depth: f64,
     area: Area,
     proxy: Option<ReliefProxy>,
+    light: Option<LightSource>,
+}
+
+/// Where a texture light's colour comes from.
+#[derive(Clone)]
+struct LightSource {
+    texture: Texture,
+    producer: DrawPassId,
+    knee: f32,
 }
 
 struct ReliefList {
@@ -396,7 +462,7 @@ struct ReliefList {
     entries: Vec<ReliefEntry>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Resolved {
     rect: Rect,
     clip: Rect,
@@ -404,6 +470,7 @@ struct Resolved {
     disc: bool,
     height: f64,
     emissive: Vec4f,
+    light: Option<LightSource>,
 }
 
 #[derive(Default)]
@@ -530,6 +597,7 @@ pub fn relief_open(cx: &mut Cx2d, depth: f64) -> Option<ReliefSlot> {
         depth,
         area: Area::Empty,
         proxy: None,
+        light: None,
     });
     let index = rl.entries.len() - 1;
     rw.open.push((list, index));
@@ -558,6 +626,52 @@ pub fn relief_close(cx: &mut Cx2d, slot: Option<ReliefSlot>, area: Area, proxy: 
     }
 }
 
+/// A light whose colour is a texture that another pass renders: a video or
+/// a visualiser lighting the controls around it. The texture is sampled
+/// over the light's rect, scaled by `intensity` and eased through a soft
+/// knee (`e / (1 + e / knee)`), so its brightest frames approach `knee`
+/// instead of flooding every bevel.
+pub struct ReliefTextureLight {
+    pub texture: Texture,
+    /// The pass that renders `texture`. The relief buffer paints after it
+    /// in the same frame, and again only on frames that pass painted.
+    pub producer: DrawPassId,
+    pub intensity: f32,
+    pub knee: f32,
+    /// Elevation over the surface below, points.
+    pub depth: f64,
+    pub inset: f64,
+    pub radius: f64,
+}
+
+/// Register a texture light over `area` (drawn already, this frame).
+pub fn relief_texture_light(cx: &mut Cx2d, area: Area, light: &ReliefTextureLight) {
+    let Some(slot) = relief_open(cx, light.depth) else {
+        return;
+    };
+    let rw = cx.global::<ReliefGlobal>().window(slot.window);
+    rw.open.pop();
+    if let Some(entry) = rw
+        .lists
+        .get_mut(&slot.list)
+        .filter(|rl| rl.redraw_id == slot.redraw_id)
+        .and_then(|rl| rl.entries.get_mut(slot.index))
+    {
+        entry.area = area;
+        entry.proxy = Some(ReliefProxy {
+            inset: light.inset,
+            radius: light.radius,
+            disc: false,
+            emissive: vec4(1.0, 1.0, 1.0, light.intensity),
+        });
+        entry.light = Some(LightSource {
+            texture: light.texture.clone(),
+            producer: light.producer,
+            knee: light.knee,
+        });
+    }
+}
+
 /// The slot a shader declares a texture in, by name.
 fn texture_slot(cx: &Cx, vars: &DrawVars, id: LiveId) -> Option<usize> {
     let shader = vars.draw_shader_id?;
@@ -569,7 +683,7 @@ fn texture_slot(cx: &Cx, vars: &DrawVars, id: LiveId) -> Option<usize> {
 }
 
 /// Bind the window's relief levels to a material shader that declares
-/// `relief_l1..relief_l4`, `relief_on` and `relief_size`. Every surface in a
+/// `relief_l1..relief_l5`, `relief_on` and `relief_size`. Every surface in a
 /// window binds the same textures and values, so batching is unchanged.
 pub fn bind_relief(cx: &mut Cx2d, vars: &mut DrawVars) {
     let mut levels = None;
@@ -719,6 +833,17 @@ pub(crate) fn end_window_relief_frame(cx: &mut Cx2d, window: WindowId) {
     // Declared a dependency of the body on every frame the body records,
     // whether or not the chain was recorded again.
     cx.attach_child_pass(stack.output_pass(), body, Some(root));
+    // A texture light's producer paints before the relief source samples
+    // it, and its paint is what repaints the chain: a paused producer
+    // leaves the whole buffer alone. Declared on every frame, since the
+    // producer re-parents itself to whatever pass shows it.
+    let source = stack.source.pass.draw_pass_id();
+    let source_list = stack.source.list.id();
+    for light in proxies.iter().filter_map(|p| p.light.as_ref()) {
+        if light.producer != source {
+            cx.attach_child_pass(light.producer, source, Some(source_list));
+        }
+    }
     cx.global::<ReliefGlobal>().window(window).stack = Some(stack);
 }
 
@@ -779,6 +904,7 @@ fn collect_proxies(cx: &Cx, rw: &ReliefWindow, root: DrawListId) -> Vec<Resolved
             disc: proxy.disc,
             height: entry_height(rw, Some((list, index))),
             emissive: proxy.emissive,
+            light: entry.light.clone(),
         });
     }
     fn walk(
@@ -840,6 +966,13 @@ fn hash_proxies(proxies: &[Resolved], size: Vec2d) -> u64 {
         for v in [p.emissive.x, p.emissive.y, p.emissive.z, p.emissive.w] {
             v.to_bits().hash(&mut h);
         }
+        // A light's frames change nothing here: its producer's paint does.
+        // Which texture and producer it names does.
+        if let Some(light) = &p.light {
+            format!("{:?}", light.texture.texture_id()).hash(&mut h);
+            light.producer.hash(&mut h);
+            light.knee.to_bits().hash(&mut h);
+        }
     }
     // Never equal to the empty stack's initial value.
     h.finish() | 1
@@ -861,6 +994,23 @@ pub struct DrawReliefProxy {
     height: f32,
     #[live]
     disc: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawReliefLight {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    clip: Vec4f,
+    #[live]
+    radius: f32,
+    #[live]
+    height: f32,
+    #[live]
+    intensity: f32,
+    #[live]
+    knee: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -925,13 +1075,14 @@ impl ReliefStage {
 }
 
 /// The relief pass and its blur chain, half-float throughout: source at
-/// half density, four downsamples, and tent upsamples that re-home every
+/// half density, five downsamples, and tent upsamples that re-home every
 /// deep level at the first level's quarter density.
 pub(crate) struct ReliefStack {
     source: ReliefStage,
     downs: Vec<ReliefStage>,
     ups: Vec<Vec<ReliefStage>>,
     proxy: DrawReliefProxy,
+    light: DrawReliefLight,
     downsample: DrawReliefDown,
     upsample: DrawReliefUp,
     hash: u64,
@@ -959,9 +1110,10 @@ impl ReliefStack {
                     .collect()
             })
             .collect();
-        let (proxy, downsample, upsample) = cx.with_vm(|vm| {
+        let (proxy, light, downsample, upsample) = cx.with_vm(|vm| {
             (
                 DrawReliefProxy::script_new_with_default(vm),
+                DrawReliefLight::script_new_with_default(vm),
                 DrawReliefDown::script_new_with_default(vm),
                 DrawReliefUp::script_new_with_default(vm),
             )
@@ -971,6 +1123,7 @@ impl ReliefStack {
             downs,
             ups,
             proxy,
+            light,
             downsample,
             upsample,
             hash: 0,
@@ -979,13 +1132,14 @@ impl ReliefStack {
         }
     }
 
-    /// The four levels a consumer binds, blur growing, all at one density.
-    fn levels(&self) -> [Texture; 4] {
+    /// The five levels a consumer binds, blur growing, all at one density.
+    fn levels(&self) -> [Texture; 5] {
         [
             self.downs[0].texture.clone(),
             self.ups[0].last().unwrap().texture.clone(),
             self.ups[1].last().unwrap().texture.clone(),
             self.ups[2].last().unwrap().texture.clone(),
+            self.ups[3].last().unwrap().texture.clone(),
         ]
     }
 
@@ -1006,19 +1160,31 @@ impl ReliefStack {
     fn record(&mut self, cx: &mut Cx2d, proxies: &[Resolved], size: Vec2d) {
         self.source.begin(cx, size);
         for p in proxies {
-            self.proxy.radius = p.radius as f32;
-            self.proxy.height = p.height as f32;
-            self.proxy.disc = if p.disc { 1.0 } else { 0.0 };
-            self.proxy.emissive = p.emissive;
-            self.proxy.clip = vec4(
+            let clip = vec4(
                 p.clip.pos.x as f32,
                 p.clip.pos.y as f32,
                 (p.clip.pos.x + p.clip.size.x) as f32,
                 (p.clip.pos.y + p.clip.size.y) as f32,
             );
+            if let Some(light) = &p.light {
+                self.light.radius = p.radius as f32;
+                self.light.height = p.height as f32;
+                self.light.intensity = p.emissive.w;
+                self.light.knee = light.knee;
+                self.light.clip = clip;
+                self.light.draw_vars.set_texture(0, &light.texture);
+                self.light.draw_abs(cx, p.rect);
+                continue;
+            }
+            self.proxy.radius = p.radius as f32;
+            self.proxy.height = p.height as f32;
+            self.proxy.disc = if p.disc { 1.0 } else { 0.0 };
+            self.proxy.emissive = p.emissive;
+            self.proxy.clip = clip;
             self.proxy.draw_abs(cx, p.rect);
         }
         self.source.end(cx);
+        self.light.draw_vars.empty_texture(0);
 
         let full = |size: Vec2d| Rect {
             pos: dvec2(0.0, 0.0),
@@ -1086,6 +1252,10 @@ pub struct ReliefView {
     /// Whether it stands in the relief buffer at all.
     #[live(true)]
     pub proxy: bool,
+    /// A key cap around a button: pressed in while a button inside it is
+    /// held, out again when it is let go.
+    #[live(false)]
+    pub follow_press: bool,
     /// Extra textures the host gives its shader, bound by name each draw.
     #[rust]
     textures: Vec<(LiveId, Texture)>,
@@ -1176,7 +1346,24 @@ impl Widget for ReliefView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
+        if !self.follow_press {
+            self.view.handle_event(cx, event, scope);
+            return;
+        }
+        let actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        for action in &actions {
+            let Some(wa) = action.as_widget_action() else {
+                continue;
+            };
+            match wa.cast::<crate::button::ButtonAction>() {
+                crate::button::ButtonAction::Pressed(_) => self.set_held(cx, 1.0),
+                crate::button::ButtonAction::Clicked(_) | crate::button::ButtonAction::Released(_) => {
+                    self.set_held(cx, 0.0)
+                }
+                _ => {}
+            }
+        }
+        cx.extend_actions(actions);
     }
 }
 
