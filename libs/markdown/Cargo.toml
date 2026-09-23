@@ -1,0 +1,21 @@
+[package]
+name = "makepad-markdown"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Markdown parsing and passive HTML rendering with host-owned resources"
+
+[features]
+default = []
+emoji = ["dep:emojis", "dep:unicode-segmentation"]
+# Use Editor.md aliases in the plain-text representation of extended Markdown.
+editormd = ["emoji"]
+
+[dependencies]
+blake3 = "1.8"
+comrak = { version = "0.55.0", default-features = false }
+html5ever = "0.39.0"
+pulldown-cmark = "0.13.0"
+url = "2.5.0"
+emojis = { version = "0.9.0", optional = true }
+unicode-segmentation = { version = "1.11.0", optional = true }

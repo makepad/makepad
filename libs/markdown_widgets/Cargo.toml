@@ -1,0 +1,33 @@
+[package]
+name = "makepad-markdown-widgets"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native Makepad Markdown rendering with optional math, code, emoji and diagrams"
+
+[features]
+default = []
+syntax-highlighting = ["dep:syntect"]
+math = ["dep:makepad-latex-math", "dep:ttf-parser", "dep:tiny-skia"]
+emoji = ["makepad-markdown/emoji", "dep:core-foundation", "dep:tiny-skia"]
+svg = ["dep:resvg"]
+diagrams = ["svg", "dep:mermaid-rs-renderer", "dep:roxmltree"]
+editormd = ["makepad-markdown/editormd", "emoji"]
+full = ["syntax-highlighting", "math", "emoji", "diagrams", "svg"]
+
+[dependencies]
+makepad-markdown = { path = "../markdown", default-features = false }
+makepad-widgets = { path = "../../widgets" }
+unicode-segmentation = { path = "../unicode/unicode-segmentation" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+blake3 = "1.8"
+makepad-latex-math = { path = "../latex_math", optional = true }
+ttf-parser = { path = "../ttf-parser", optional = true }
+tiny-skia = { version = "0.11.4", optional = true }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"], optional = true }
+resvg = { version = "0.46.0", optional = true }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false, optional = true }
+roxmltree = { version = "0.21.1", optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+core-foundation = { version = "0.10.1", optional = true }
