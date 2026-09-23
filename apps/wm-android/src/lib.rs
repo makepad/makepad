@@ -43,6 +43,11 @@ app_main!(
         if !test_app.is_empty() {
             std::env::set_var("MAKEPAD_WM_TEST_APP", test_app);
         }
+        // `adb shell setprop debug.makepad.wm.ondevice 1`: build each app on
+        // the phone before it runs (an APK packed with `--proc-toolchain`).
+        if system_property("debug.makepad.wm.ondevice") == "1" {
+            std::env::set_var("MAKEPAD_WM_ONDEVICE_BUILD", "1");
+        }
         makepad_wm::android_prepare_children(cx);
         cx.set_global(wm_build());
     }

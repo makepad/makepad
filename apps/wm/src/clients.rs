@@ -967,10 +967,18 @@ pub fn launch_argv(
         }
         None => resolve_bin(&app.bin).ok_or_else(|| format!("binary not found: {}", app.bin))?,
     };
-    // Android: the launcher's first argument is the app library it runs.
+    // Android: the launcher's first argument is the app library it runs;
+    // with on-device builds on (`adb shell setprop debug.makepad.wm.ondevice
+    // 1`, an APK packed with `--proc-toolchain`) it builds the app from the
+    // shipped source first — the phone's `cargo run` — and falls back to
+    // this library.
     #[cfg(target_os = "android")]
     if root.is_none() {
         if let Some((_, lib)) = crate::host::android_app_binary(&app.bin) {
+            if crate::host::android_ondevice_builds() {
+                args.push("--build".to_string());
+                args.push(app.bin.clone());
+            }
             args.push(lib.to_string_lossy().to_string());
         }
     }

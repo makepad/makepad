@@ -165,11 +165,48 @@ pub fn rehearse(d: &Dyn, apk: &Path, apps: &[String], tag: &str) -> Result<bool,
     bump_mtimes(&target)?;
     let mut all_pass = true;
     for app in apps {
+        if d.is_proc() {
+            // The phone's first build of a hosted app (the engine Fresh, the
+            // wrapper relinked), then the build after a person edited the
+            // app's source there: the app and the wrapper compile, nothing else.
+            println!("== {app}: cargo build -p makepad-hosted-{app} (the device command)");
+            let log = d.logs.join(format!("{tag}-{app}.log"));
+            all_pass &= super::proc_ondevice(d, &src, &target, app, &log, false, &env)?;
+            let edited = touch_app_source(d, &src, app)?;
+            println!("== {app}: after an edit of {}", edited.display());
+            let log = d.logs.join(format!("{tag}-{app}-edited.log"));
+            all_pass &= super::proc_ondevice(d, &src, &target, app, &log, true, &env)?;
+            continue;
+        }
         println!("== {app}: cargo rustc --crate-type dylib (the device command)");
         let log = d.logs.join(format!("{tag}-{app}.log"));
         all_pass &= prove::prove(d, &src, &target, app, &log, false, &env)?;
     }
     Ok(all_pass)
+}
+
+/// Proc rehearsal: change the hosted app's library source the way an edit
+/// on the phone does (content and a newer whole-second mtime); returns the
+/// file. The app package's `src/lib.rs`.
+fn touch_app_source(d: &Dyn, src: &Path, bin: &str) -> Result<PathBuf, String> {
+    let super::Kind::Proc { wrappers } = &d.kind else {
+        return Err("touch_app_source on a dyn tree".into());
+    };
+    let w = wrappers.iter().find(|w| w.bin == bin).ok_or_else(|| format!("{bin}: not a packed app"))?;
+    let manifest = src.join(w.dir()).join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    // `<app> = { path = "../../apps/x" }`: the app's directory in the tree.
+    let key = format!("{} = {{ path = \"", w.app);
+    let at = text.find(&key).ok_or_else(|| format!("{}: no dependency on {}", manifest.display(), w.app))?;
+    let rest = &text[at + key.len()..];
+    let rel = &rest[..rest.find('"').ok_or("unterminated path")?];
+    let lib = src.join(w.dir()).join(rel).join("src/lib.rs");
+    let mut body = fs::read_to_string(&lib).map_err(|e| format!("{}: {e}", lib.display()))?;
+    body.push_str("\n// rehearsal: an edit made on the phone\n");
+    fs::write(&lib, body).map_err(|e| format!("{}: {e}", lib.display()))?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) + 2;
+    set_mtime(&lib, now)?;
+    Ok(lib)
 }
 
 /// One whole-second instant for every file under `dir`

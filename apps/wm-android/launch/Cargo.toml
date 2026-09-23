@@ -11,3 +11,8 @@ name = "makepad-launch"
 path = "src/main.rs"
 
 [dependencies]
+# `--build`: provision the APK's toolchain/source/target and build the app on
+# the phone before running it (the assets are read from the APK file: a child
+# process has no JVM, so no AssetManager).
+makepad-ondevice-build = { path = "../../../libs/ondevice_build" }
+makepad-zip-file = { path = "../../../libs/zip_file" }

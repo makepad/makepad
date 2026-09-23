@@ -2797,8 +2797,11 @@ pub fn build(
     )?;
     // For APK builds, debuggable matches the cargo profile: release -> false,
     // anything else -> true (matches the historical behavior of `cargo makepad
-    // android run`).
-    let debuggable = get_profile_from_args(args) != "release";
+    // android run`). `MAKEPAD_ANDROID_DEBUGGABLE=1` makes a release APK
+    // debuggable: `proc-pack --proc-toolchain` sets it, so `adb shell run-as`
+    // reaches the source tree the phone builds its apps from.
+    let debuggable = get_profile_from_args(args) != "release"
+        || std::env::var("MAKEPAD_ANDROID_DEBUGGABLE").map(|v| v == "1").unwrap_or(false);
     let prep_opts = PrepareBuildOpts {
         build_crate,
         java_url: &resolved.java_url,

@@ -19,8 +19,15 @@
 //! The apps' resources (and whatever of their dependencies' resources the
 //! host's APK lacks) go into `assets/makepad/<crate>/…`, where a hosted child
 //! reads them straight from the APK file.
+//!
+//! `--proc-toolchain=<musl rustc tree>`: the phone builds its apps itself.
+//! The app libraries are then built from a staged, relocatable tree
+//! (dyn_pack's stage, [`super::dyn_pack::proc_build`]) and the APK also
+//! carries that tree, its target/ and the toolchain; the launcher's
+//! `--build` mode compiles an app with them before running it.
 
 use super::compile;
+use super::dyn_pack::proc_build;
 use super::sdk::AndroidSDKUrls;
 use super::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs};
 use crate::utils::{get_build_crate_from_args, get_crate_dep_dirs, get_crate_dir, VersionCodeStrategy};
@@ -56,6 +63,8 @@ pub fn proc_pack(
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let t0 = Instant::now();
+    let (proc_opts, args) = proc_build::split_proc_options(args);
+    let args = &args[..];
     // `--proc-apps=<bin,bin>`: pack only these of the listed apps.
     let only: Option<Vec<String>> = args
         .iter()
@@ -87,6 +96,11 @@ pub fn proc_pack(
     let release = args.iter().any(|a| a == "--release");
     let profile = if release { "release" } else { "debug" };
 
+    if proc_opts.toolchain.is_some() {
+        // The phone builds from a tree in the app's files dir: debuggable,
+        // so `adb shell run-as <package>` can reach and edit it.
+        std::env::set_var("MAKEPAD_ANDROID_DEBUGGABLE", "1");
+    }
     println!("== host APK ({host})");
     let result = compile::build(
         sdk_dir,
@@ -102,7 +116,21 @@ pub fn proc_pack(
         config,
         urls,
     )?;
-    let host_apk = result.apk().to_path_buf();
+    let mut host_apk = result.apk().to_path_buf();
+    if proc_opts.toolchain.is_some() {
+        // The on-device pack takes a while; plain proc-pack builds of the
+        // same crate share cargo-makepad's APK dir. Keep this run's host APK.
+        let base = proc_build::proc_base(&std::env::current_dir().map_err(|e| format!("cwd: {e}"))?, &host);
+        fs::create_dir_all(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+        let own = base.join(host_apk.file_name().ok_or("host apk has no name")?);
+        fs::copy(&host_apk, &own).map_err(|e| format!("{} -> {}: {e}", host_apk.display(), own.display()))?;
+        // That one is debuggable (MAKEPAD_ANDROID_DEBUGGABLE above): it must
+        // not stay behind as cargo-makepad's ordinary release APK.
+        let _ = fs::remove_file(&host_apk);
+        let _ = fs::remove_file(PathBuf::from(format!("{}.idsig", host_apk.display())));
+        std::env::remove_var("MAKEPAD_ANDROID_DEBUGGABLE");
+        host_apk = own;
+    }
 
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let target_dir = compile::cargo_target_dir(&cwd);
@@ -116,30 +144,47 @@ pub fn proc_pack(
     run_cargo(&cwd, &env, &launcher_args)?;
     let launcher_bin = out_dir.join(launcher_bin_name(&launcher)?);
 
+    let out = host_apk.with_file_name(format!(
+        "{}-proc{}.apk",
+        host_apk.file_stem().and_then(|s| s.to_str()).unwrap_or("app"),
+        if proc_opts.toolchain.is_some() { "-ondevice" } else { "" }
+    ));
+    // The app assets are listed before an on-device stage takes over this
+    // process's environment (cargo tree runs under the caller's).
+    let assets = app_assets(&apps, &target_dir, toolchain)?;
+
     println!("== hosted apps ({} libraries)", apps.len());
-    let wrappers = write_wrapper_workspace(&cwd, &target_dir, &apps)?;
-    let mut app_args = vec![
-        "build".to_string(),
-        format!("--manifest-path={}", wrappers.join("Cargo.toml").display()),
-        "--workspace".into(),
-    ];
-    app_args.extend(common_cargo_args(&target_dir, toolchain, release));
-    run_cargo(&wrappers, &env, &app_args)?;
+    let (lib_dir, tree) = if proc_opts.toolchain.is_some() {
+        if !release {
+            return Err("--proc-toolchain packs a release tree: pass --release".into());
+        }
+        let pairs: Vec<(String, String)> = apps.iter().map(|a| (a.package.clone(), a.bin.clone())).collect();
+        let tree = proc_build::prepare(sdk_dir, host_os, urls, *android_target, &host, min_sdk_version, &pairs, &out, &proc_opts)?;
+        (tree.out_dir(), Some(tree))
+    } else {
+        let wrappers = write_wrapper_workspace(&cwd, &target_dir, &apps)?;
+        let mut app_args = vec![
+            "build".to_string(),
+            format!("--manifest-path={}", wrappers.join("Cargo.toml").display()),
+            "--workspace".into(),
+        ];
+        app_args.extend(common_cargo_args(&target_dir, toolchain, release));
+        run_cargo(&wrappers, &env, &app_args)?;
+        (out_dir.clone(), None)
+    };
 
     println!("== pack");
     let abi = android_target.abi_identifier();
     let mut libs: Vec<(String, PathBuf)> = vec![("libmakepad_launch.so".into(), launcher_bin)];
     for app in &apps {
         let name = format!("libapp_{}.so", app.bin.replace('-', "_"));
-        libs.push((name.clone(), out_dir.join(&name)));
+        libs.push((name.clone(), lib_dir.join(&name)));
     }
-    let assets = app_assets(&apps, &target_dir, toolchain)?;
-    let out = host_apk.with_file_name(format!(
-        "{}-proc.apk",
-        host_apk.file_stem().and_then(|s| s.to_str()).unwrap_or("app")
-    ));
     pack(sdk_dir, urls, &host_apk, &out, abi, &libs, &assets)?;
     println!("{} in {:.0} s", out.display(), t0.elapsed().as_secs_f64());
+    if let Some(tree) = tree {
+        proc_build::finish(tree, &out)?;
+    }
     Ok(())
 }
 
@@ -325,7 +370,7 @@ fn write_wrapper_workspace(cwd: &Path, target_dir: &Path, apps: &[HostedApp]) ->
 
 /// The `[features]`, `[dependencies]` and `[target.*.dependencies]` sections
 /// of an app manifest: what its `src/main.rs` compiles against.
-fn copied_sections(manifest: &str) -> String {
+pub(crate) fn copied_sections(manifest: &str) -> String {
     let mut out = String::new();
     let mut keep = false;
     for line in manifest.lines() {

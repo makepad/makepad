@@ -1,0 +1,16 @@
+# The phone side of an APK that builds Rust ON THE PHONE (`cargo makepad
+# android dyn-pack`, and `proc-pack --proc-toolchain`): provision the shipped
+# toolchain, source tree and target/ out of the APK into the app's files dir,
+# rebuild the host proc-macros with the phone's rustc under the recorded SVHs,
+# and hand out the cargo command every on-device build runs. Used by the WM
+# super-app (apps/wm/src/dylib_host.rs, assets through the AssetManager) and
+# by the multi-process WM's launcher (apps/wm-android/launch, assets read from
+# the APK file itself: a child process has no JVM).
+[package]
+name = "makepad-ondevice-build"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-tar = { path = "../tar" }
+makepad-rmeta = { path = "../rmeta" }

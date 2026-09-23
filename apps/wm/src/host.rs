@@ -81,6 +81,14 @@ pub fn android_app_binary(bin: &str) -> Option<(std::path::PathBuf, std::path::P
     (launcher.is_file() && lib.is_file()).then_some((launcher, lib))
 }
 
+/// Android: whether hosted apps are built on the phone before they run
+/// (`MAKEPAD_WM_ONDEVICE_BUILD`, set by the APK's entry from the
+/// `debug.makepad.wm.ondevice` property; clients.rs `launch_argv`).
+#[cfg(target_os = "android")]
+pub fn android_ondevice_builds() -> bool {
+    std::env::var("MAKEPAD_WM_ONDEVICE_BUILD").map(|v| v == "1").unwrap_or(false)
+}
+
 /// Android: what a hosted child needs from the WM's environment — the APK
 /// its assets are in, the app's data and cache directories, the density,
 /// and the socket its shared frames come from (os/linux/android/

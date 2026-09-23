@@ -71,9 +71,12 @@
 
 mod metadata;
 mod pack;
+pub(crate) mod proc_build;
 mod prove;
 mod rehearse;
 mod stage;
+
+use proc_build::proc_ondevice;
 
 use super::compile;
 use super::sdk::AndroidSDKUrls;
@@ -198,7 +201,7 @@ pub fn split_dyn_options(args: &[String]) -> Result<(DynOptions, Vec<String>), S
     Ok((opts, rest))
 }
 
-fn absolute(p: &Path) -> PathBuf {
+pub(super) fn absolute(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -230,7 +233,7 @@ fn check_target_and_variant(android_targets: &[AndroidTarget], variant: &Android
 
 /// The phone toolchain tree: rustc + cargo, the musl loader, the musl host
 /// std and the phone target std.
-fn check_toolchain(tc: &Path, triple: &str) -> Result<(), String> {
+pub(super) fn check_toolchain(tc: &Path, triple: &str) -> Result<(), String> {
     for rel in ["bin/rustc", "bin/cargo", "bin/busybox", "ld.so"] {
         if !tc.join(rel).is_file() {
             return Err(format!("--dyn-toolchain: {} has no {rel}", tc.display()));
@@ -244,8 +247,56 @@ fn check_toolchain(tc: &Path, triple: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What the packed tree is built for.
+///
+/// - `Dyn`: the super-app (`apps/wm-dyn`): one engine dylib in the APK, every
+///   tile a dylib that binds it (`--extern force:`, `-C prefer-dynamic`).
+/// - `Proc`: the multi-process WM (`apps/wm-android`, `proc-pack
+///   --proc-toolchain`): every hosted app is a self-contained cdylib, the
+///   engine linked statically, run in a process of its own by the APK's
+///   launcher. No engine dylib and no SVH binding across the WM<->app
+///   boundary; the phone's `cargo build -p makepad-hosted-<bin>` only has to
+///   find the shipped engine rlibs Fresh. The WM host is not staged: nothing
+///   on the phone rebuilds it.
+pub enum Kind {
+    Dyn,
+    Proc { wrappers: Vec<Wrapper> },
+}
+
+/// A hosted app's generated wrapper crate in the staged tree
+/// (`proc-apps/app_<bin>`): its cdylib is the app's own `src/main.rs`, the
+/// library the launcher `dlopen`s (`libapp_<bin>.so`).
+#[derive(Clone)]
+pub struct Wrapper {
+    /// The app's cargo package.
+    pub app: String,
+    /// The WM registry's binary name.
+    pub bin: String,
+}
+
+impl Wrapper {
+    /// The wrapper's package name: what the phone builds with `-p`.
+    pub fn package(&self) -> String {
+        format!("makepad-hosted-{}", self.bin)
+    }
+
+    /// The cdylib's crate name; the library is `lib<this>.so`.
+    pub fn lib(&self) -> String {
+        format!("app_{}", self.bin.replace('-', "_"))
+    }
+
+    /// Its directory in the staged tree.
+    pub fn dir(&self) -> String {
+        format!("{PROC_APPS}/{}", self.lib())
+    }
+}
+
+/// The staged tree's directory of generated wrapper crates.
+pub const PROC_APPS: &str = "proc-apps";
+
 /// Everything the phases share.
 pub struct Dyn {
+    pub kind: Kind,
     /// The checkout (the working directory of the command).
     pub checkout: PathBuf,
     /// The host package (`makepad-wm-dyn`).
@@ -329,6 +380,7 @@ impl Dyn {
         let makepad = std::env::var("MAKEPAD").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "vulkan".to_string());
         let rustc_vv = rustc_vv(&checkout)?;
         Ok(Dyn {
+            kind: Kind::Dyn,
             checkout,
             host: host.to_string(),
             engine,
@@ -349,11 +401,29 @@ impl Dyn {
         })
     }
 
-    /// The stage roots: host, engine, apps.
+    /// The stage roots: host, engine, apps (Proc: the apps; their wrappers
+    /// are generated into the stage, not in the checkout).
     pub fn roots(&self) -> Vec<&str> {
-        let mut v = vec![self.host.as_str(), self.engine.as_str()];
+        let mut v = match self.kind {
+            Kind::Dyn => vec![self.host.as_str(), self.engine.as_str()],
+            Kind::Proc { .. } => vec![],
+        };
         v.extend(self.apps.iter().map(String::as_str));
         v
+    }
+
+    pub fn is_proc(&self) -> bool {
+        matches!(self.kind, Kind::Proc { .. })
+    }
+
+    /// The RUSTFLAGS the Mac build starts from (the Android build appends
+    /// the `--cfg android_target`): the super-app links its tiles against the
+    /// engine dylib, the multi-process WM's apps link the engine statically.
+    pub fn host_rustflags(&self) -> Option<&'static str> {
+        match self.kind {
+            Kind::Dyn => Some(HOST_RUSTFLAGS),
+            Kind::Proc { .. } => None,
+        }
     }
 
     pub fn triple(&self) -> &'static str {
@@ -387,7 +457,7 @@ impl Dyn {
         let linker = compile::android_linker_path(&self.sdk_dir, self.host_os, &self.urls, &self.android_target)?;
         Ok(vec![
             (self.android_target.linker_env_var().to_string(), linker.to_string_lossy().to_string()),
-            ("RUSTFLAGS".to_string(), compile::android_rustflags(Some(HOST_RUSTFLAGS), &self.android_target, false)),
+            ("RUSTFLAGS".to_string(), compile::android_rustflags(self.host_rustflags(), &self.android_target, false)),
             ("MAKEPAD".to_string(), self.makepad.clone()),
             ("RUSTC_BOOTSTRAP".to_string(), "1".to_string()),
         ])
@@ -430,7 +500,10 @@ impl Dyn {
         }
         let linker = compile::android_linker_path(&self.sdk_dir, self.host_os, &self.urls, &self.android_target)?;
         std::env::set_var(self.android_target.linker_env_var(), &linker);
-        std::env::set_var("RUSTFLAGS", HOST_RUSTFLAGS);
+        match self.host_rustflags() {
+            Some(flags) => std::env::set_var("RUSTFLAGS", flags),
+            None => std::env::remove_var("RUSTFLAGS"),
+        }
         std::env::set_var("MAKEPAD", &self.makepad);
         std::env::set_var("RUSTC_BOOTSTRAP", "1");
         std::env::set_var("CARGO_TARGET_DIR", &self.target);
@@ -454,7 +527,7 @@ impl Dyn {
 /// Take the stage directory: it must be ours (the marker), or missing, or
 /// empty; and it must not overlap the checkout's source tree, the toolchain
 /// or the output APK, because everything below it is regenerated or wiped.
-fn claim_stage(stage: &Path, checkout: &Path, toolchain: Option<&Path>, out_apk: &Path) -> Result<(), String> {
+pub(super) fn claim_stage(stage: &Path, checkout: &Path, toolchain: Option<&Path>, out_apk: &Path) -> Result<(), String> {
     if stage == checkout || checkout.starts_with(stage) {
         return Err(format!("--dyn-stage: {} contains the checkout", stage.display()));
     }
@@ -507,7 +580,7 @@ fn claim_stage(stage: &Path, checkout: &Path, toolchain: Option<&Path>, out_apk:
 
 /// `<stage>/bin/makepad-dyn-rustc`: a link to this binary (a copy where
 /// links are not available), refreshed every run.
-fn install_wrapper(stage: &Path) -> Result<PathBuf, String> {
+pub(super) fn install_wrapper(stage: &Path) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let bin = stage.join("bin");
     fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
@@ -524,7 +597,7 @@ fn install_wrapper(stage: &Path) -> Result<PathBuf, String> {
 
 /// `rustup run stable rustc -vV`: the text the device's rustc wrapper answers
 /// with, so cargo's fingerprints (a hash of it) match the shipped target/.
-fn rustc_vv(cwd: &Path) -> Result<String, String> {
+pub(super) fn rustc_vv(cwd: &Path) -> Result<String, String> {
     let out = controlled_command("rustup", &[])
         .args(["run", "stable", "rustc", "-vV"])
         .current_dir(cwd)
@@ -553,7 +626,7 @@ pub fn run_logged(cmd: &mut Command, log: &Path) -> Result<bool, String> {
 /// the proofs — inherits the niceness: an agent's builds must not starve the
 /// user's window. Returns only when already niced or when `nice` could not
 /// be started (then the run goes on un-niced, with a warning).
-fn renice_self() {
+pub(super) fn renice_self() {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -747,23 +820,7 @@ fn cross_build(
     variant: &AndroidVariant,
     config: &AndroidConfig,
 ) -> Result<PathBuf, String> {
-    // The env and the compiler are identity: a target built under another
-    // one never matches. The stage is ours (claim_stage), so its target may go.
-    let marker_text = d.marker_text()?;
-    let marker = d.target.join(ENV_MARKER);
-    if d.target.is_dir() {
-        let have = fs::read_to_string(&marker).ok();
-        let populated = fs::read_dir(&d.target).map(|mut r| r.next().is_some()).unwrap_or(false);
-        if populated && have.as_deref() != Some(marker_text.as_str()) {
-            println!(
-                "{} was built under another environment or compiler (the linker, RUSTFLAGS, MAKEPAD, RUSTC_BOOTSTRAP and rustc are in every SVH): wiping it",
-                d.target.display()
-            );
-            fs::remove_dir_all(&d.target).map_err(|e| format!("{}: {e}", d.target.display()))?;
-        }
-    }
-    fs::create_dir_all(&d.target).map_err(|e| format!("{}: {e}", d.target.display()))?;
-    fs::write(&marker, &marker_text).map_err(|e| format!("{}: {e}", marker.display()))?;
+    claim_target(d)?;
     let previous = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     std::env::set_current_dir(&d.src).map_err(|e| format!("{}: {e}", d.src.display()))?;
     let result = compile::build(
@@ -786,10 +843,30 @@ fn cross_build(
     Ok(apk)
 }
 
+/// The env and the compiler are identity: a target built under another one
+/// never matches. The stage is ours (claim_stage), so its target may go.
+pub fn claim_target(d: &Dyn) -> Result<(), String> {
+    let marker_text = d.marker_text()?;
+    let marker = d.target.join(ENV_MARKER);
+    if d.target.is_dir() {
+        let have = fs::read_to_string(&marker).ok();
+        let populated = fs::read_dir(&d.target).map(|mut r| r.next().is_some()).unwrap_or(false);
+        if populated && have.as_deref() != Some(marker_text.as_str()) {
+            println!(
+                "{} was built under another environment or compiler (the linker, RUSTFLAGS, MAKEPAD, RUSTC_BOOTSTRAP and rustc are in every SVH): wiping it",
+                d.target.display()
+            );
+            fs::remove_dir_all(&d.target).map_err(|e| format!("{}: {e}", d.target.display()))?;
+        }
+    }
+    fs::create_dir_all(&d.target).map_err(|e| format!("{}: {e}", d.target.display()))?;
+    fs::write(&marker, &marker_text).map_err(|e| format!("{}: {e}", marker.display()))
+}
+
 /// The finished `<out>.tmp.apk` (and apksigner's `.idsig` beside it) become
 /// the final APK by rename: the last step, so a failed run leaves the
 /// previous APK as it was.
-fn publish(tmp: &Path, out: &Path) -> Result<(), String> {
+pub(super) fn publish(tmp: &Path, out: &Path) -> Result<(), String> {
     let tmp_sig = PathBuf::from(format!("{}.idsig", tmp.display()));
     let out_sig = PathBuf::from(format!("{}.idsig", out.display()));
     fs::rename(tmp, out).map_err(|e| format!("publish {} -> {}: {e}", tmp.display(), out.display()))?;
