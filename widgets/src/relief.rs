@@ -90,7 +90,7 @@ script_mod! {
             // Near-white frames light less: a white flash over a whole
             // screen would otherwise wash every bevel round it out.
             let white = min(min(src.x, src.y), src.z)
-            let e = src * self.intensity * (1.0 - 0.55 * smoothstep(0.55, 1.0, white))
+            let e = src * self.intensity * (1.0 - 0.7 * smoothstep(0.5, 1.0, white))
             let k = max(self.knee, 0.001)
             return vec4(e / (vec3(1.0, 1.0, 1.0) + e / k), self.height)
         }
@@ -189,6 +189,8 @@ script_mod! {
             spill_tint: uniform(vec4(1.0, 1.0, 1.0, 0.0))
             /** soft ceiling of neighbour light, 0 = none 0..4 step 0.05 */
             spill_knee: uniform(0.0)
+            /** how much neighbour light a black surface takes, against a white one's 1 (light scaled by the surface's own brightness) 0..1 step 0.01 */
+            spill_dark: uniform(1.0)
             light_ink: uniform(vec4(1.0, 1.0, 1.0, 1.0))
             shadow_ink: uniform(vec4(0.0, 0.0, 0.0, 1.0))
             glow_ink: uniform(theme.color_primary)
@@ -202,6 +204,10 @@ script_mod! {
             radius: instance(8.0)
             disc: instance(0.0)
             height: instance(0.0)
+            // How far pressed in (0..1, animated over `press_secs`) and how
+            // far a press moves the part down (`travel`, points).
+            held: instance(0.0)
+            travel: instance(0.0)
 
             // One of the blurred relief levels: .xyz emissive, .w height (pt).
             relief_tap: fn(level: float, uv: vec2) -> vec4 {
@@ -311,6 +317,10 @@ script_mod! {
                 }
                 if self.spill_knee > 0.001 {
                     o = o / (vec3(1.0, 1.0, 1.0) + o / self.spill_knee)
+                }
+                if self.spill_dark < 0.999 {
+                    let albedo = clamp(dot(self.ground.xyz, vec3(0.30, 0.55, 0.15)) * 2.2, 0.0, 1.0)
+                    o = o * mix(self.spill_dark, 1.0, albedo)
                 }
                 return o
             }
@@ -1256,6 +1266,27 @@ pub struct ReliefView {
     /// held, out again when it is let go.
     #[live(false)]
     pub follow_press: bool,
+    /// Time a press takes to go down or come back, seconds; 0 = at once.
+    #[live(0.0)]
+    pub press_secs: f64,
+    /// How far a full press moves the part and its children down, points
+    /// (a mechanical key's travel); 0 = the children stay put.
+    #[live(0.0)]
+    pub travel: f64,
+    /// How far `set_latched` holds the part down (0..1); 0 = the part
+    /// ignores latching.
+    #[live(1.0)]
+    pub latch: f64,
+    /// Pressed by the hand (`set_held`) and held down by the host
+    /// (`set_latched`): the part goes to the deeper of the two.
+    #[rust]
+    pressed: f64,
+    #[rust]
+    latched: f64,
+    #[rust]
+    held_clock: Option<f64>,
+    #[rust]
+    held_frame: NextFrame,
     /// Extra textures the host gives its shader, bound by name each draw.
     #[rust]
     textures: Vec<(LiveId, Texture)>,
@@ -1278,9 +1309,46 @@ impl ReliefView {
     }
 
     pub fn set_held(&mut self, cx: &mut Cx, held: f64) {
-        if self.held != held {
-            self.held = held;
-            self.view.redraw(cx);
+        self.pressed = held;
+        self.seek_held(cx);
+    }
+
+    /// Hold the part down (a key latched while its function is on).
+    pub fn set_latched(&mut self, cx: &mut Cx, latched: f64) {
+        self.latched = latched;
+        self.seek_held(cx);
+    }
+
+    fn held_target(&self) -> f64 {
+        self.pressed.max(self.latched * self.latch)
+    }
+
+    fn seek_held(&mut self, cx: &mut Cx) {
+        let target = self.held_target();
+        if self.held == target {
+            return;
+        }
+        if self.press_secs <= 0.0 {
+            self.held = target;
+        } else if self.held_clock.is_none() {
+            self.held_clock = Some(cx.seconds_since_app_start());
+            self.held_frame = cx.new_next_frame();
+        }
+        self.view.redraw(cx);
+    }
+
+    fn step_held(&mut self, cx: &mut Cx) {
+        let now = cx.seconds_since_app_start();
+        let dt = self.held_clock.map(|t| now - t).unwrap_or(0.0).clamp(0.0, 0.1);
+        let target = self.held_target();
+        let step = dt / self.press_secs.max(0.001);
+        self.held = if self.held < target { (self.held + step).min(target) } else { (self.held - step).max(target) };
+        self.view.redraw(cx);
+        if self.held == target {
+            self.held_clock = None;
+        } else {
+            self.held_clock = Some(now);
+            self.held_frame = cx.new_next_frame();
         }
     }
 
@@ -1295,6 +1363,8 @@ impl ReliefView {
         vars.set_dyn_instance(cx, live_id!(radius), &[self.radius as f32]);
         vars.set_dyn_instance(cx, live_id!(disc), &[if self.disc { 1.0 } else { 0.0 }]);
         vars.set_dyn_instance(cx, live_id!(height), &[height as f32]);
+        vars.set_dyn_instance(cx, live_id!(held), &[self.held as f32]);
+        vars.set_dyn_instance(cx, live_id!(travel), &[self.travel as f32]);
     }
 
     fn own_proxy(&self) -> Option<ReliefProxy> {
@@ -1340,12 +1410,21 @@ impl ReliefView {
 impl Widget for ReliefView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.begin_relief(cx);
-        self.view.draw_walk(cx, scope, walk)?;
+        // A mechanical part carries its children down with it.
+        let shift = self.held * self.travel;
+        let top = self.view.layout.padding.top;
+        self.view.layout.padding.top = top + shift;
+        let step = self.view.draw_walk(cx, scope, walk);
+        self.view.layout.padding.top = top;
+        step?;
         self.end_relief(cx);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.held_frame.is_event(event).is_some() {
+            self.step_held(cx);
+        }
         if !self.follow_press {
             self.view.handle_event(cx, event, scope);
             return;
@@ -1377,6 +1456,13 @@ impl ReliefViewRef {
     pub fn set_held(&self, cx: &mut Cx, held: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_held(cx, held);
+        }
+    }
+
+    /// Hold the part down while the host says so (see `ReliefView::set_latched`).
+    pub fn set_latched(&self, cx: &mut Cx, latched: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_latched(cx, latched);
         }
     }
 
