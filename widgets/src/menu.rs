@@ -185,7 +185,9 @@ pub enum MenuAction {
     },
     /// Replace the rows of the menu `owner` has open, leaving it open and
     /// leaving the highlight where it is. This is how a set of switches
-    /// shows a mark changing under the pointer.
+    /// shows a mark changing under the pointer. A flyout that is open shows
+    /// its row's new submenu, so a switch inside one changes under the
+    /// pointer as well.
     Update { owner: LiveId, rows: Vec<MenuRow> },
     /// A row was chosen. The `Closed` for that menu is in the same pass.
     Picked { owner: LiveId, id: LiveId },
@@ -339,6 +341,21 @@ struct Level {
     press: Option<usize>,
     /// Row of the PARENT level that opened this flyout.
     from_row: Option<usize>,
+}
+
+/// Each open flyout shows its parent row's submenu again, after the root's
+/// rows were replaced: a switch picked inside one then shows its new mark.
+/// A flyout whose rows no longer line up is left as it was, and so is
+/// everything past it.
+fn refresh_flyouts(levels: &mut [Level]) {
+    for index in 1..levels.len() {
+        let Some(from) = levels[index].from_row else { break };
+        let Some(submenu) = levels[index - 1].rows.get(from).map(|row| row.submenu.clone()) else { break };
+        if submenu.len() != levels[index].rows.len() {
+            break;
+        }
+        levels[index].rows = submenu;
+    }
 }
 
 impl Level {
@@ -807,7 +824,8 @@ impl MenuLayer {
     }
 
     /// Replace the rows of the menu that is open for `owner`, keeping it
-    /// open and keeping the highlight where it is.
+    /// open and keeping the highlight where it is. Open flyouts take
+    /// their rows from the new ones too.
     pub fn update_rows(&mut self, cx: &mut Cx, owner: LiveId, rows: Vec<MenuRow>) {
         let Some(level) = self.levels.first_mut() else {
             return;
@@ -816,6 +834,7 @@ impl MenuLayer {
             return;
         }
         level.rows = rows;
+        refresh_flyouts(&mut self.levels);
         self.redraw_menus(cx);
     }
 
@@ -1496,6 +1515,32 @@ mod tests {
         // A heading and a disabled row never answer, whatever their letter.
         assert_eq!(l.typeahead('f'), None, "the File heading is not selectable");
         assert_eq!(l.typeahead('c'), None, "the disabled Close is not selectable");
+        });
+    }
+
+    /// A switch picked inside an open flyout shows its new mark: replacing
+    /// the root's rows hands the open flyout its row's new submenu, and a
+    /// flyout whose rows no longer line up keeps what it had.
+    #[test]
+    fn replacing_the_rows_refreshes_the_open_flyout() {
+        crate::on_test_cx(|| {
+        let switches = |on: bool| vec![MenuRow::new(live_id!(a), "A").checked(on), MenuRow::new(live_id!(b), "B")];
+        let root = |on: bool| vec![MenuRow::new(live_id!(group), "Group").submenu(switches(on)), MenuRow::new(live_id!(other), "Other")];
+        let mut root_level = level();
+        root_level.rows = root(false);
+        let mut flyout = level();
+        flyout.rows = switches(false);
+        flyout.from_row = Some(0);
+        let mut levels = vec![root_level, flyout];
+        levels[0].rows = root(true);
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check, "the flyout shows the new mark");
+        // A submenu that changed length is not forced onto the open flyout.
+        levels[0].rows[0].submenu.push(MenuRow::new(live_id!(c), "C"));
+        levels[0].rows[0].submenu[0].mark = MenuMark::None;
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows.len(), 2);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check);
         });
     }
 

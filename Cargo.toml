@@ -138,6 +138,8 @@ workspace.members = [
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
+    # === per-application audio tap, mixer input for a host equalizer ===
+    "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
     "libs/video_flow",

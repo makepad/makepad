@@ -121,6 +121,7 @@ pub mod bare_step;
 pub mod turtle_step;
 
 pub mod data_grid;
+pub mod data_grid_columns;
 pub mod calendar;
 pub mod date_picker;
 pub mod time_picker;
@@ -301,6 +302,7 @@ pub use crate::{
     popup_menu::*,
     popup_notification::*,
     data_grid::*,
+    data_grid_columns::*,
     calendar::*,
     date_picker::*,
     time_picker::*,
