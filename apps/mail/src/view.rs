@@ -13,6 +13,7 @@ use makepad_widgets::makepad_platform::storage::{
     StorageHandle, StorageRequestId, StorageResponse, StorageResult,
 };
 use makepad_widgets::*;
+use std::collections::HashMap;
 
 pub(crate) fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
     let theme = vm.module(id!(theme));
@@ -612,6 +613,12 @@ pub struct MailView {
     quit_ready: bool,
     #[rust]
     last_metrics: Option<LayoutMetrics>,
+    // What each list item widget was last bound to. Binding a row runs script
+    // evals and restyles every label, which cost most of a phone frame when it
+    // ran for every visible row on every scroll frame; now it runs only when the
+    // item shows a different row or the row, selection or layout changed.
+    #[rust]
+    bound_rows: HashMap<WidgetUid, RowBinding>,
     #[rust]
     last_size: Option<DVec2>,
     #[rust]
@@ -1634,7 +1641,25 @@ impl MailView {
         while let Some(index) = list.next_visible_item(cx) {
             let Some(row) = self.rows.get(index).cloned() else { continue };
             let item = list.item(cx, index, live_id!(Message));
-            self.bind_message_row(cx, item.clone(), row);
+            let binding = RowBinding {
+                selected: self.ui.selected == Some(row.id),
+                search_all: !self.ui.list.query.trim().is_empty() && self.ui.list.scope == SearchScope::AllMail,
+                today: self.doc.as_ref().map(|d| d.seed_anchor.midnight_utc).unwrap_or(0),
+                metrics: self.last_metrics,
+                row,
+            };
+            // A restyle (theme switch) re-applies the template to live items and
+            // drops the sizes the bind set; the sender's font size tells.
+            let metrics = self.last_metrics.unwrap_or_else(|| layout_for(1240.0, 800.0));
+            let sender_size = if metrics.kind == LayoutKind::Compact && !metrics.short { 12.75 } else { 9.75 };
+            let restyled = item
+                .label(cx, ids!(sender))
+                .borrow()
+                .is_some_and(|l| l.draw_text.text_style.font_size != sender_size);
+            if restyled || self.bound_rows.get(&item.widget_uid()) != Some(&binding) {
+                self.bind_message_row(cx, item.clone(), binding.row.clone());
+                self.bound_rows.insert(item.widget_uid(), binding);
+            }
             item.draw_all(cx, &mut Scope::empty());
         }
     }
@@ -1719,6 +1744,17 @@ impl MailView {
         item.label(cx, ids!(date)).set_text(cx, &format_list_date(row.date_secs, today));
     }
 
+}
+
+/// Everything `bind_message_row` reads, so a list item is rebound only when
+/// one of them changed (see `MailView::bound_rows`).
+#[derive(Clone, PartialEq)]
+struct RowBinding {
+    row: MessageRow,
+    selected: bool,
+    search_all: bool,
+    today: i64,
+    metrics: Option<LayoutMetrics>,
 }
 
 fn apply_or_status(view: &mut MailView, cx: &mut Cx, command: Command) -> Option<Mutation> {

@@ -7,7 +7,8 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         scroll_motion::{
-            estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            drag_origin, estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            touch_drag_slop, touch_fling_limits,
             rubber_band_bounce, soften_bounce_velocity, stretch_displayed, stretch_raw, Fling,
             FrameClock, MomentumStream, ScrollSample, CATCH_PRESS_WINDOW, FLING_BOOST_MAX_DWELL,
             FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, PER_FRAME_TO_PER_SECOND,
@@ -3670,7 +3671,9 @@ impl Widget for PortalList {
                             ScrollState::Drag { committed, .. } if !e.device.is_touch() => {
                                 *committed || along >= self.drag_scroll_threshold
                             }
-                            ScrollState::Drag { .. } => along >= self.drag_scroll_threshold && along >= across,
+                            ScrollState::Drag { .. } => {
+                                along >= touch_drag_slop(self.drag_scroll_threshold, true) && along >= across
+                            }
                             _ => false,
                         };
                         let takes = intent && !self.drag_claimed;
@@ -3730,9 +3733,15 @@ impl Widget for PortalList {
                             }
                             *committed = true;
                             self.suppress_child_events = true;
-                            // The claiming move scrolls by all the travel since
-                            // the press: none is lost to the threshold.
-                            let from = if just_claimed { *initial_abs } else { samples.last().unwrap().abs };
+                            // The claiming move scrolls by the travel since the
+                            // press (on Android less the touch slop, so the
+                            // content doesn't jump and stays under the finger).
+                            let from = if just_claimed {
+                                let slop = touch_drag_slop(self.drag_scroll_threshold, e.device.is_touch());
+                                drag_origin(*initial_abs, new_abs, slop, e.device.is_touch())
+                            } else {
+                                samples.last().unwrap().abs
+                            };
                             push_sample(samples, new_abs, e.time);
                             self.delta_top_scroll(cx, new_abs - from, false, false, 0.0, true, true);
                             self.area.redraw(cx);
@@ -3798,12 +3807,16 @@ impl Widget for PortalList {
                             };
                             // Cap to a sane maximum flick speed (px/s). `flick_scroll_maximum`
                             // is a per-frame value; ×60 converts it to per-second.
-                            let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
-                            let release_velocity =
-                                release_velocity.clamp(-max_velocity, max_velocity);
                             // Minimum release speed (px/s) below which a lift is treated as a stop,
                             // not a fling. `flick_scroll_minimum` is per-frame; ×60 → per-second.
-                            let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
+                            // On Android a touch uses the platform's own limits.
+                            let (min_velocity, max_velocity) = touch_fling_limits(
+                                self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND,
+                                self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND,
+                                fe.device.is_touch(),
+                            );
+                            let release_velocity =
+                                release_velocity.clamp(-max_velocity, max_velocity);
                             if self.bounce_at_start
                                 && self.first_id == self.range_start
                                 && self.first_scroll > 0.0

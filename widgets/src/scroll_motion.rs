@@ -15,11 +15,54 @@
 
 use std::sync::OnceLock;
 
+/// Whether scrolling follows Android's native touch feel: the `OverScroller` fling
+/// spline, a `VelocityTracker` least-squares release velocity, the platform's touch
+/// slop and fling limits, and a short, firm edge stretch. On Android a Makepad list
+/// must feel like a `RecyclerView` next to it; elsewhere the iOS-style model stays.
+pub const NATIVE_ANDROID_TOUCH: bool = cfg!(target_os = "android");
+
 /// Whether touch flicks animate along Android's native fling spline instead of the
-/// exponential decay. Currently off: the spline's high-speed tail runs very long
-/// (a maximum fling coasts ~2.6s, boosted ones several times longer), which felt
-/// too strong in testing. Set to `cfg!(target_os = "android")` to A/B the native curve.
-const USE_ANDROID_FLING_SPLINE: bool = false;
+/// exponential decay (see [`NATIVE_ANDROID_TOUCH`]).
+const USE_ANDROID_FLING_SPLINE: bool = NATIVE_ANDROID_TOUCH;
+
+/// Android's `ViewConfiguration` touch slop, min and max fling velocity, in dp and
+/// dp/s. Makepad's logical pixels are dp on Android, so these apply as they are.
+pub const ANDROID_TOUCH_SLOP: f64 = 8.0;
+pub const ANDROID_MIN_FLING_VELOCITY: f64 = 50.0;
+pub const ANDROID_MAX_FLING_VELOCITY: f64 = 8_000.0;
+
+/// The travel a touch drag needs before a scroller takes it: Android's touch slop
+/// there, the widget's own threshold elsewhere (and always for a mouse).
+pub fn touch_drag_slop(widget_threshold: f64, touch: bool) -> f64 {
+    if touch && NATIVE_ANDROID_TOUCH {
+        widget_threshold.max(ANDROID_TOUCH_SLOP)
+    } else {
+        widget_threshold
+    }
+}
+
+/// Where the content starts following the finger once a touch drag is taken. On
+/// Android the slop is consumed (as `RecyclerView` does), so the content does not
+/// jump by the slop on the taking move and stays exactly under the finger from
+/// there on; elsewhere every pixel of travel since the press is applied.
+pub fn drag_origin(press_abs: f64, now_abs: f64, slop: f64, touch: bool) -> f64 {
+    if touch && NATIVE_ANDROID_TOUCH {
+        let travel = now_abs - press_abs;
+        press_abs + travel.signum() * slop.min(travel.abs())
+    } else {
+        press_abs
+    }
+}
+
+/// The `(min, max)` fling speed (px/s) of a touch release: Android's
+/// `ViewConfiguration` values there, the widget's own `flick_scroll_*` elsewhere.
+pub fn touch_fling_limits(widget_min: f64, widget_max: f64, touch: bool) -> (f64, f64) {
+    if touch && NATIVE_ANDROID_TOUCH {
+        (ANDROID_MIN_FLING_VELOCITY, ANDROID_MAX_FLING_VELOCITY)
+    } else {
+        (widget_min, widget_max)
+    }
+}
 
 /// Default per-ms decay for a touch-drag flick (the widgets' `fling_decel` field). For
 /// reference, iOS `UIScrollViewDecelerationRateNormal` is 0.998; we run a little firmer.
@@ -236,9 +279,13 @@ pub const RUBBER_BAND_STRETCH_STIFFNESS: f64 = 12.0;
 /// [`RUBBER_BAND_TOUCH_RANGE`] × the viewport extent is the hard limit on all
 /// displayed overscroll: the drag stretch flattens toward it, and the widgets
 /// clamp the spring-back overshoot to it, so no bounce ever travels farther.
-pub const RUBBER_BAND_TOUCH_COEFF: f64 = 0.55;
-pub const RUBBER_BAND_TOUCH_DECAY: f64 = 20.0;
-pub const RUBBER_BAND_TOUCH_RANGE: f64 = 0.35;
+///
+/// On Android the edge gives the short, firm stretch of the platform's `EdgeEffect`
+/// instead of the loose iOS band: less of the finger's travel shows, it saturates at
+/// a small fraction of the viewport, and it recedes faster with no visible overshoot.
+pub const RUBBER_BAND_TOUCH_COEFF: f64 = if NATIVE_ANDROID_TOUCH { 0.4 } else { 0.55 };
+pub const RUBBER_BAND_TOUCH_DECAY: f64 = if NATIVE_ANDROID_TOUCH { 28.0 } else { 20.0 };
+pub const RUBBER_BAND_TOUCH_RANGE: f64 = if NATIVE_ANDROID_TOUCH { 0.15 } else { 0.35 };
 
 /// The displayed overscroll for `raw` px of finger travel past the edge (signed), in
 /// a viewport `extent` px long. `touch` picks the iOS curve; trackpad input keeps the
@@ -464,6 +511,11 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
     for w in samples.windows(2) {
         total_delta += w[1].abs - w[0].abs;
     }
+    if NATIVE_ANDROID_TOUCH {
+        if let Some(velocity) = lsq2_release_velocity(samples) {
+            return (velocity, total_delta);
+        }
+    }
     // Velocity comes from the last FLING_VELOCITY_SPAN of the gesture (falling
     // back to the oldest sample when the gesture is shorter), so it reflects the
     // speed at lift-off rather than the whole-gesture average.
@@ -488,6 +540,66 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
         0.0
     };
     (release_velocity, total_delta)
+}
+
+/// Android `VelocityTracker`'s look-back horizon, sample cap and "pointer stopped"
+/// gap (`HORIZON`, `HISTORY_SIZE`, `ASSUME_POINTER_STOPPED_TIME`).
+const LSQ2_HORIZON: f64 = 0.1;
+const LSQ2_HISTORY: usize = 20;
+const LSQ2_STOPPED_GAP: f64 = 0.04;
+
+/// The release velocity (px/s) the way Android's default `VelocityTracker`
+/// strategy (LSQ2) computes it: a least-squares quadratic `x(t) = a + b·t + c·t²`
+/// through the samples of the last 100 ms, with `t` measured back from the newest
+/// sample; the velocity is `b`, the slope at the newest sample. A gap of more than
+/// 40 ms before the newest sample means the finger stopped: zero. `None` when there
+/// are too few samples for the fit (the caller keeps its two-point estimate).
+pub fn lsq2_release_velocity(samples: &[ScrollSample]) -> Option<f64> {
+    let newest = samples.last()?;
+    if samples.len() >= 2 && newest.time - samples[samples.len() - 2].time > LSQ2_STOPPED_GAP {
+        return Some(0.0);
+    }
+    // The lift reported at the last move's position (the up event carries no new
+    // motion) is not a deceleration: fit the moves only, as Android does.
+    let samples = match samples {
+        [.., prev, last] if last.abs == prev.abs => &samples[..samples.len() - 1],
+        _ => samples,
+    };
+    let newest = samples.last()?;
+    let recent: Vec<&ScrollSample> = samples
+        .iter()
+        .rev()
+        .take_while(|s| newest.time - s.time <= LSQ2_HORIZON)
+        .take(LSQ2_HISTORY)
+        .collect();
+    if recent.len() < 3 {
+        return None;
+    }
+    // Normal equations of the quadratic fit, in (t, x) relative to the newest sample.
+    let (mut s0, mut s1, mut s2, mut s3, mut s4) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut sx, mut stx, mut st2x) = (0.0, 0.0, 0.0);
+    for s in &recent {
+        let t = s.time - newest.time;
+        let x = s.abs - newest.abs;
+        let t2 = t * t;
+        s0 += 1.0;
+        s1 += t;
+        s2 += t2;
+        s3 += t2 * t;
+        s4 += t2 * t2;
+        sx += x;
+        stx += t * x;
+        st2x += t2 * x;
+    }
+    // Solve [s0 s1 s2; s1 s2 s3; s2 s3 s4]·[a b c] = [sx stx st2x] for b (Cramer).
+    let det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
+    if det.abs() < 1e-18 {
+        // Degenerate timing (all samples at nearly one instant): a straight line.
+        let denom = s0 * s2 - s1 * s1;
+        return (denom.abs() > 1e-12).then(|| (s0 * stx - s1 * sx) / denom);
+    }
+    let det_b = s0 * (stx * s4 - s3 * st2x) - sx * (s1 * s4 - s3 * s2) + s2 * (s1 * st2x - stx * s2);
+    Some(det_b / det)
 }
 
 /// One kinetic-scroll animation along a single scroll axis, stepped per frame so the
@@ -558,6 +670,11 @@ impl Fling {
 
     /// Whether this fling should keep animating (still above the minimum speed).
     pub fn is_active(&self, min_velocity: f64) -> bool {
+        // The spline runs its fixed duration to the end, as `OverScroller` does:
+        // cutting it at a speed floor would leave its last pixels unscrolled.
+        if USE_ANDROID_FLING_SPLINE && self.spline_duration > 0.0 {
+            return self.age < self.spline_duration;
+        }
         self.velocity.abs() > min_velocity
     }
 
@@ -672,4 +789,39 @@ mod tests {
         // clocks. Treating that as "settling" would swallow presses indefinitely.
         assert!(!press_settles_finger_scroll(Some(1_784_000_000.0), 5.0));
     }
+    fn samples(points: &[(f64, f64)]) -> Vec<ScrollSample> {
+        points.iter().map(|&(time, abs)| ScrollSample { abs, time }).collect()
+    }
+
+    /// A steady 1000 px/s drag sampled at 120 Hz reads 1000 px/s.
+    #[test]
+    fn lsq2_reads_a_steady_drag_exactly() {
+        let pts: Vec<(f64, f64)> = (0..12).map(|i| (i as f64 * 0.00833, 1000.0 * i as f64 * 0.00833)).collect();
+        let v = lsq2_release_velocity(&samples(&pts)).unwrap();
+        assert!((v - 1000.0).abs() < 1.0, "{v}");
+    }
+
+    /// A finger that slows down releases at its speed at lift-off, not its average:
+    /// x = 2000·t − 5000·t² over 0..0.1 s ends at 1000 px/s (the average is 1500).
+    #[test]
+    fn lsq2_reads_the_speed_at_lift_off() {
+        let pts: Vec<(f64, f64)> =
+            (0..=12).map(|i| { let t = i as f64 * 0.00833; (t, 2000.0 * t - 5000.0 * t * t) }).collect();
+        let v = lsq2_release_velocity(&samples(&pts)).unwrap();
+        assert!((v - (2000.0 - 10000.0 * 12.0 * 0.00833)).abs() < 1.0, "{v}");
+    }
+
+    /// A finger that rested more than 40 ms before its last sample released at rest.
+    #[test]
+    fn lsq2_treats_a_pause_as_stopped() {
+        let pts = [(0.0, 0.0), (0.008, 8.0), (0.016, 16.0), (0.070, 16.0)];
+        assert_eq!(lsq2_release_velocity(&samples(&pts)), Some(0.0));
+    }
+
+    /// Too few samples for the quadratic: the caller keeps its two-point estimate.
+    #[test]
+    fn lsq2_needs_three_samples() {
+        assert_eq!(lsq2_release_velocity(&samples(&[(0.0, 0.0), (0.008, 8.0)])), None);
+    }
+
 }

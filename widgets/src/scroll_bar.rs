@@ -3,7 +3,8 @@ use crate::event::{ScrollPhase, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
-    estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
+    drag_origin, estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
+    touch_drag_slop, touch_fling_limits,
     soften_bounce_velocity, stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample,
     CATCH_PRESS_WINDOW, COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
     FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW, PER_FRAME_TO_PER_SECOND,
@@ -1000,7 +1001,8 @@ impl ScrollBar {
                         };
                         // Touch only: a mouse drag scrolls from its first move,
                         // as it always has.
-                        if e.device.is_touch() && (along < TAP_COUNT_DISTANCE || along < across) {
+                        let slop = touch_drag_slop(TAP_COUNT_DISTANCE, e.device.is_touch());
+                        if e.device.is_touch() && (along < slop || along < across) {
                             push_sample(samples, new_abs, e.time);
                             return;
                         }
@@ -1009,7 +1011,7 @@ impl ScrollBar {
                             return;
                         }
                         self.drag_claimed = true;
-                        from = self.drag_origin;
+                        from = drag_origin(self.drag_origin, new_abs, slop, e.device.is_touch());
                     }
                     push_sample(samples, new_abs, e.time);
 
@@ -1082,9 +1084,12 @@ impl ScrollBar {
                         estimate_release_velocity(samples)
                     };
                     let caught_fling = caught_fling.filter(|_| !at_rest);
-                    let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
+                    let (min_velocity, max_velocity) = touch_fling_limits(
+                        self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND,
+                        self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND,
+                        fe.device.is_touch(),
+                    );
                     let release_velocity = release_velocity.clamp(-max_velocity, max_velocity);
-                    let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
                     if self.overscroll != 0.0 {
                         // Lifted while stretched past an edge: spring back, with the
                         // lift velocity carried into the bounce (positive further
