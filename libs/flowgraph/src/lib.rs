@@ -5,11 +5,13 @@ pub mod model;
 pub mod wire_route;
 
 pub use canvas::{
-    Camera, CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus, Selection, LOCAL_ORIGIN,
+    Camera, CanvasEdit, CanvasEventPolicy, CanvasNodeRegion, CanvasPick, CanvasViewport,
+    BoundaryLink, CanvasViewportError, EmbeddedCanvasRoot, FlowCanvas, FlowCanvasAction, NodeGeometry,
+    NodeStatus, Selection, CANVAS_SCALE_MAX, CANVAS_SCALE_MIN, LOCAL_ORIGIN,
 };
 pub use model::{
-    CompatiblePorts, EdgeView, GraphIndex, GraphView, NodeFaces, NodeFacesScope, NodeStyle,
-    NodeView, PortStyle, PortView, FIRST_AT, NODE_WIDTH,
+    CompatiblePorts, EdgeView, FacePort, FaceViewport, GraphIndex, GraphView, NodeFaces, NodeFacesScope, NodeStyle,
+    NodeView, PortIconOverrides, PortStyle, PortView, WirePainter, FIRST_AT, NODE_WIDTH,
 };
 
 use makepad_widgets::ScriptVm;
