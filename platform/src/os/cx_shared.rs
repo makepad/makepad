@@ -788,6 +788,72 @@ impl Cx {
         self.fingers.cycle_hover_area(live_id!(mouse).into());
     }
 
+    /// A hosted child on a touch device (an Android child process): the
+    /// host's pointer is a finger, so its press, moves and release arrive as
+    /// one touch, dispatched the way the Activity build dispatches
+    /// `FromJavaMessage::Touch` — lists and scroll views drag-scroll, and a
+    /// press a scroller takes away is cancelled. As mouse events, a press on
+    /// a row captured the mouse and the list refused to scroll under it.
+    /// `state: None` is the host's cancellation (`MouseCancel`).
+    #[cfg(target_os = "android")]
+    pub(crate) fn dispatch_hosted_touch(
+        &mut self,
+        state: Option<crate::event::finger::TouchState>,
+        at: crate::makepad_math::DVec2,
+        time: f64,
+        window_id: crate::window::WindowId,
+        pos: crate::makepad_math::DVec2,
+    ) {
+        use crate::event::finger::{TouchPoint, TouchState};
+        let abs = self.stdin_pointer_abs(at, pos, window_id);
+        let touch = |state| TouchPoint {
+            state,
+            abs,
+            time,
+            uid: 0,
+            rotation_angle: 0.0,
+            force: 0.0,
+            radius: crate::makepad_math::dvec2(1.0, 1.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+        };
+        let Some(state) = state else {
+            let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, 0).into();
+            self.fingers.cancel_digit(digit_id);
+            self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+                window_id,
+                digit_id,
+                device: crate::event::DigitDevice::Touch { uid: 0 },
+                abs,
+                time,
+                modifiers: Default::default(),
+            }));
+            self.fingers.process_touch_update_end(&[touch(TouchState::Stop)]);
+            self.update_pointer_capture_pacing();
+            self.send_studio_key_focus_rect_response();
+            return;
+        };
+        if state == TouchState::Start {
+            self.activate_window_on_pointer_down(window_id);
+        }
+        let touches = vec![touch(state)];
+        self.fingers.process_touch_update_start(time, &touches);
+        let e = Event::TouchUpdate(crate::event::TouchUpdateEvent {
+            time,
+            window_id,
+            touches,
+            modifiers: Default::default(),
+        });
+        self.call_event_handler(&e);
+        if let Event::TouchUpdate(e) = e {
+            self.fingers.process_touch_update_end(&e.touches);
+        }
+        self.update_pointer_capture_pacing();
+        if state == TouchState::Stop {
+            self.send_studio_key_focus_rect_response();
+        }
+    }
+
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,

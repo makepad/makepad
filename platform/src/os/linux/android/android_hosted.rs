@@ -19,7 +19,7 @@ use {
         cx::{AndroidParams, Cx, OsType},
         cx_api::CxOsOp,
         draw_pass::{CxDrawPassParent, DrawPassClearColor},
-        event::{Event, WindowGeom},
+        event::{finger::TouchState, Event, WindowGeom},
         makepad_math::*,
         makepad_micro_serde::*,
         os::linux::vulkan::CxVulkan,
@@ -48,6 +48,10 @@ static HOSTED: AtomicBool = AtomicBool::new(false);
 /// more after the first draw at a new size (`first_after_resize`), and so
 /// does a hosted child, or its first frame shows no text until an input.
 static REDRAW_AFTER_FIRST: AtomicBool = AtomicBool::new(true);
+
+/// The host's finger is down on this app (a MouseMove without it is the
+/// host's hover, which a touch screen does not have).
+static TOUCH_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// True in a hosted child process (no JVM: every JNI path must stay shut).
 pub fn is_hosted() -> bool {
@@ -459,9 +463,32 @@ impl Cx {
             crate::trace!("hosted", "rx {:?}", msg);
         }
         match msg {
+            // The WM's pointer is the phone's finger: it reaches the app as a
+            // touch (`Cx::dispatch_hosted_touch`), so lists drag-scroll.
             StudioToApp::MouseDown(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                return self.dispatch_studio_msg(msg, window_id, pos);
+                TOUCH_DOWN.store(true, Ordering::Relaxed);
+                self.dispatch_hosted_touch(Some(TouchState::Start), dvec2(e.x, e.y), e.time, window_id, pos);
+                return false;
+            }
+            StudioToApp::MouseMove(ref e) => {
+                if !TOUCH_DOWN.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let at = dvec2(e.x, e.y);
+                let (window_id, pos) = self.hosted_pointer_window(at);
+                self.dispatch_hosted_touch(Some(TouchState::Move), at, e.time, window_id, pos);
+                return false;
+            }
+            StudioToApp::MouseUp(ref e) | StudioToApp::MouseCancel(ref e) => {
+                if !TOUCH_DOWN.swap(false, Ordering::Relaxed) {
+                    return false;
+                }
+                let at = dvec2(e.x, e.y);
+                let (window_id, pos) = self.hosted_pointer_window(at);
+                let state = matches!(msg, StudioToApp::MouseUp(_)).then_some(TouchState::Stop);
+                self.dispatch_hosted_touch(state, at, e.time, window_id, pos);
+                return false;
             }
             StudioToApp::Scroll(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
@@ -469,16 +496,6 @@ impl Cx {
             }
             StudioToApp::Pinch(ref e) => {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                return self.dispatch_studio_msg(msg, window_id, pos);
-            }
-            StudioToApp::MouseMove(ref e) => {
-                let at = dvec2(e.x, e.y);
-                let (window_id, pos) = self.hosted_pointer_window(at);
-                return self.dispatch_studio_msg(msg, window_id, pos);
-            }
-            StudioToApp::MouseUp(ref e) | StudioToApp::MouseCancel(ref e) => {
-                let at = dvec2(e.x, e.y);
-                let (window_id, pos) = self.hosted_pointer_window(at);
                 return self.dispatch_studio_msg(msg, window_id, pos);
             }
             StudioToApp::WindowGeomChange { dpi_factor, width, height, window_id, .. } => {
@@ -617,9 +634,11 @@ impl Cx {
         self.hosted_platform_ops(windows);
 
         let time_now = self.os.timers.time_now();
+        let phase_started = std::time::Instant::now();
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
         }
+        let next_frame_done = std::time::Instant::now();
         if self.need_redrawing() {
             crate::trace!("hosted", "draw at tick {tick}");
             self.call_draw_event(time_now);
@@ -633,7 +652,21 @@ impl Cx {
                 self.call_draw_event(time_now);
             }
         }
+        let draw_done = std::time::Instant::now();
         let flipped = self.hosted_repaint(windows, time_now as f32);
+        // Where a hosted frame's time goes, as the Activity build's
+        // `frame.cpu`: NextFrame, the widget draw, and the repaint (record,
+        // submit and the wait for the GPU before the host is told).
+        // `adb shell setprop debug.makepad.trace frame.cpu`.
+        if flipped {
+            crate::trace!(
+                "frame.cpu",
+                "hosted next_frame_ms={:.3} draw_ms={:.3} repaint_ms={:.3}",
+                next_frame_done.duration_since(phase_started).as_secs_f64() * 1000.0,
+                draw_done.duration_since(next_frame_done).as_secs_f64() * 1000.0,
+                draw_done.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         if flipped && REDRAW_AFTER_FIRST.swap(false, Ordering::Relaxed) {
             self.redraw_all();
         }

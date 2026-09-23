@@ -15,8 +15,83 @@ script_mod! {
         // onto it (a crossfade tile app opening: its full frame clipped
         // to the tile's growing rect, never scaled).
         uv_pos: vec2(0.0, 0.0) uv_size: vec2(1.0, 1.0)
+        // A band drawn as the MEAN of the edge row it would stretch (eight
+        // samples across it): stretched, the text of a list that runs to
+        // the edge became vertical streaks under the app.
+        row_mean: 0.0
         pixel: fn() {
             let uv=self.uv_pos+self.pos*self.uv_size
+            if self.row_mean>0.5 {
+                // Sixteen samples across the edge row. A smooth row (a sky's
+                // gradient) is drawn as itself, stretched; a row with
+                // content in it (a list's text) as its dominant colour, so
+                // it never streaks and scrolling text barely moves it.
+                let y=self.uv_pos.y+0.5*self.uv_size.y
+                let x0=self.uv_pos.x
+                let dx=self.uv_size.x/16.0
+                let s0=self.image.sample(vec2(x0+0.5*dx,y))
+                let s1=self.image.sample(vec2(x0+1.5*dx,y))
+                let s2=self.image.sample(vec2(x0+2.5*dx,y))
+                let s3=self.image.sample(vec2(x0+3.5*dx,y))
+                let s4=self.image.sample(vec2(x0+4.5*dx,y))
+                let s5=self.image.sample(vec2(x0+5.5*dx,y))
+                let s6=self.image.sample(vec2(x0+6.5*dx,y))
+                let s7=self.image.sample(vec2(x0+7.5*dx,y))
+                let s8=self.image.sample(vec2(x0+8.5*dx,y))
+                let s9=self.image.sample(vec2(x0+9.5*dx,y))
+                let s10=self.image.sample(vec2(x0+10.5*dx,y))
+                let s11=self.image.sample(vec2(x0+11.5*dx,y))
+                let s12=self.image.sample(vec2(x0+12.5*dx,y))
+                let s13=self.image.sample(vec2(x0+13.5*dx,y))
+                let s14=self.image.sample(vec2(x0+14.5*dx,y))
+                let s15=self.image.sample(vec2(x0+15.5*dx,y))
+                // The biggest step between neighbours: a gradient moves in
+                // small steps, text in big ones.
+                let jumps=max(max(max(max(max(max(max(max(max(max(max(max(max(max(abs(s0.xyz-s1.xyz),abs(s1.xyz-s2.xyz)),abs(s2.xyz-s3.xyz)),abs(s3.xyz-s4.xyz)),abs(s4.xyz-s5.xyz)),abs(s5.xyz-s6.xyz)),abs(s6.xyz-s7.xyz)),abs(s7.xyz-s8.xyz)),abs(s8.xyz-s9.xyz)),abs(s9.xyz-s10.xyz)),abs(s10.xyz-s11.xyz)),abs(s11.xyz-s12.xyz)),abs(s12.xyz-s13.xyz)),abs(s13.xyz-s14.xyz)),abs(s14.xyz-s15.xyz))
+                // Opaque: the edge row can be partly transparent (the app's
+                // clear showing through its root's edge).
+                if max(jumps.x,max(jumps.y,jumps.z))<0.1 {
+                    let own=self.image.sample(uv)
+                    return vec4(own.xyz/max(own.w,0.001),1.0)*self.opacity
+                }
+                // Content in the row: its most common colour — the sample
+                // nearest to the others (a list's ground, not the grey mean
+                // of its ground and its text).
+                let d0=length(s0.xyz-s1.xyz)+length(s0.xyz-s2.xyz)+length(s0.xyz-s3.xyz)+length(s0.xyz-s4.xyz)+length(s0.xyz-s5.xyz)+length(s0.xyz-s6.xyz)+length(s0.xyz-s7.xyz)+length(s0.xyz-s8.xyz)+length(s0.xyz-s9.xyz)+length(s0.xyz-s10.xyz)+length(s0.xyz-s11.xyz)+length(s0.xyz-s12.xyz)+length(s0.xyz-s13.xyz)+length(s0.xyz-s14.xyz)+length(s0.xyz-s15.xyz)
+                let d1=length(s1.xyz-s0.xyz)+length(s1.xyz-s2.xyz)+length(s1.xyz-s3.xyz)+length(s1.xyz-s4.xyz)+length(s1.xyz-s5.xyz)+length(s1.xyz-s6.xyz)+length(s1.xyz-s7.xyz)+length(s1.xyz-s8.xyz)+length(s1.xyz-s9.xyz)+length(s1.xyz-s10.xyz)+length(s1.xyz-s11.xyz)+length(s1.xyz-s12.xyz)+length(s1.xyz-s13.xyz)+length(s1.xyz-s14.xyz)+length(s1.xyz-s15.xyz)
+                let d2=length(s2.xyz-s0.xyz)+length(s2.xyz-s1.xyz)+length(s2.xyz-s3.xyz)+length(s2.xyz-s4.xyz)+length(s2.xyz-s5.xyz)+length(s2.xyz-s6.xyz)+length(s2.xyz-s7.xyz)+length(s2.xyz-s8.xyz)+length(s2.xyz-s9.xyz)+length(s2.xyz-s10.xyz)+length(s2.xyz-s11.xyz)+length(s2.xyz-s12.xyz)+length(s2.xyz-s13.xyz)+length(s2.xyz-s14.xyz)+length(s2.xyz-s15.xyz)
+                let d3=length(s3.xyz-s0.xyz)+length(s3.xyz-s1.xyz)+length(s3.xyz-s2.xyz)+length(s3.xyz-s4.xyz)+length(s3.xyz-s5.xyz)+length(s3.xyz-s6.xyz)+length(s3.xyz-s7.xyz)+length(s3.xyz-s8.xyz)+length(s3.xyz-s9.xyz)+length(s3.xyz-s10.xyz)+length(s3.xyz-s11.xyz)+length(s3.xyz-s12.xyz)+length(s3.xyz-s13.xyz)+length(s3.xyz-s14.xyz)+length(s3.xyz-s15.xyz)
+                let d4=length(s4.xyz-s0.xyz)+length(s4.xyz-s1.xyz)+length(s4.xyz-s2.xyz)+length(s4.xyz-s3.xyz)+length(s4.xyz-s5.xyz)+length(s4.xyz-s6.xyz)+length(s4.xyz-s7.xyz)+length(s4.xyz-s8.xyz)+length(s4.xyz-s9.xyz)+length(s4.xyz-s10.xyz)+length(s4.xyz-s11.xyz)+length(s4.xyz-s12.xyz)+length(s4.xyz-s13.xyz)+length(s4.xyz-s14.xyz)+length(s4.xyz-s15.xyz)
+                let d5=length(s5.xyz-s0.xyz)+length(s5.xyz-s1.xyz)+length(s5.xyz-s2.xyz)+length(s5.xyz-s3.xyz)+length(s5.xyz-s4.xyz)+length(s5.xyz-s6.xyz)+length(s5.xyz-s7.xyz)+length(s5.xyz-s8.xyz)+length(s5.xyz-s9.xyz)+length(s5.xyz-s10.xyz)+length(s5.xyz-s11.xyz)+length(s5.xyz-s12.xyz)+length(s5.xyz-s13.xyz)+length(s5.xyz-s14.xyz)+length(s5.xyz-s15.xyz)
+                let d6=length(s6.xyz-s0.xyz)+length(s6.xyz-s1.xyz)+length(s6.xyz-s2.xyz)+length(s6.xyz-s3.xyz)+length(s6.xyz-s4.xyz)+length(s6.xyz-s5.xyz)+length(s6.xyz-s7.xyz)+length(s6.xyz-s8.xyz)+length(s6.xyz-s9.xyz)+length(s6.xyz-s10.xyz)+length(s6.xyz-s11.xyz)+length(s6.xyz-s12.xyz)+length(s6.xyz-s13.xyz)+length(s6.xyz-s14.xyz)+length(s6.xyz-s15.xyz)
+                let d7=length(s7.xyz-s0.xyz)+length(s7.xyz-s1.xyz)+length(s7.xyz-s2.xyz)+length(s7.xyz-s3.xyz)+length(s7.xyz-s4.xyz)+length(s7.xyz-s5.xyz)+length(s7.xyz-s6.xyz)+length(s7.xyz-s8.xyz)+length(s7.xyz-s9.xyz)+length(s7.xyz-s10.xyz)+length(s7.xyz-s11.xyz)+length(s7.xyz-s12.xyz)+length(s7.xyz-s13.xyz)+length(s7.xyz-s14.xyz)+length(s7.xyz-s15.xyz)
+                let d8=length(s8.xyz-s0.xyz)+length(s8.xyz-s1.xyz)+length(s8.xyz-s2.xyz)+length(s8.xyz-s3.xyz)+length(s8.xyz-s4.xyz)+length(s8.xyz-s5.xyz)+length(s8.xyz-s6.xyz)+length(s8.xyz-s7.xyz)+length(s8.xyz-s9.xyz)+length(s8.xyz-s10.xyz)+length(s8.xyz-s11.xyz)+length(s8.xyz-s12.xyz)+length(s8.xyz-s13.xyz)+length(s8.xyz-s14.xyz)+length(s8.xyz-s15.xyz)
+                let d9=length(s9.xyz-s0.xyz)+length(s9.xyz-s1.xyz)+length(s9.xyz-s2.xyz)+length(s9.xyz-s3.xyz)+length(s9.xyz-s4.xyz)+length(s9.xyz-s5.xyz)+length(s9.xyz-s6.xyz)+length(s9.xyz-s7.xyz)+length(s9.xyz-s8.xyz)+length(s9.xyz-s10.xyz)+length(s9.xyz-s11.xyz)+length(s9.xyz-s12.xyz)+length(s9.xyz-s13.xyz)+length(s9.xyz-s14.xyz)+length(s9.xyz-s15.xyz)
+                let d10=length(s10.xyz-s0.xyz)+length(s10.xyz-s1.xyz)+length(s10.xyz-s2.xyz)+length(s10.xyz-s3.xyz)+length(s10.xyz-s4.xyz)+length(s10.xyz-s5.xyz)+length(s10.xyz-s6.xyz)+length(s10.xyz-s7.xyz)+length(s10.xyz-s8.xyz)+length(s10.xyz-s9.xyz)+length(s10.xyz-s11.xyz)+length(s10.xyz-s12.xyz)+length(s10.xyz-s13.xyz)+length(s10.xyz-s14.xyz)+length(s10.xyz-s15.xyz)
+                let d11=length(s11.xyz-s0.xyz)+length(s11.xyz-s1.xyz)+length(s11.xyz-s2.xyz)+length(s11.xyz-s3.xyz)+length(s11.xyz-s4.xyz)+length(s11.xyz-s5.xyz)+length(s11.xyz-s6.xyz)+length(s11.xyz-s7.xyz)+length(s11.xyz-s8.xyz)+length(s11.xyz-s9.xyz)+length(s11.xyz-s10.xyz)+length(s11.xyz-s12.xyz)+length(s11.xyz-s13.xyz)+length(s11.xyz-s14.xyz)+length(s11.xyz-s15.xyz)
+                let d12=length(s12.xyz-s0.xyz)+length(s12.xyz-s1.xyz)+length(s12.xyz-s2.xyz)+length(s12.xyz-s3.xyz)+length(s12.xyz-s4.xyz)+length(s12.xyz-s5.xyz)+length(s12.xyz-s6.xyz)+length(s12.xyz-s7.xyz)+length(s12.xyz-s8.xyz)+length(s12.xyz-s9.xyz)+length(s12.xyz-s10.xyz)+length(s12.xyz-s11.xyz)+length(s12.xyz-s13.xyz)+length(s12.xyz-s14.xyz)+length(s12.xyz-s15.xyz)
+                let d13=length(s13.xyz-s0.xyz)+length(s13.xyz-s1.xyz)+length(s13.xyz-s2.xyz)+length(s13.xyz-s3.xyz)+length(s13.xyz-s4.xyz)+length(s13.xyz-s5.xyz)+length(s13.xyz-s6.xyz)+length(s13.xyz-s7.xyz)+length(s13.xyz-s8.xyz)+length(s13.xyz-s9.xyz)+length(s13.xyz-s10.xyz)+length(s13.xyz-s11.xyz)+length(s13.xyz-s12.xyz)+length(s13.xyz-s14.xyz)+length(s13.xyz-s15.xyz)
+                let d14=length(s14.xyz-s0.xyz)+length(s14.xyz-s1.xyz)+length(s14.xyz-s2.xyz)+length(s14.xyz-s3.xyz)+length(s14.xyz-s4.xyz)+length(s14.xyz-s5.xyz)+length(s14.xyz-s6.xyz)+length(s14.xyz-s7.xyz)+length(s14.xyz-s8.xyz)+length(s14.xyz-s9.xyz)+length(s14.xyz-s10.xyz)+length(s14.xyz-s11.xyz)+length(s14.xyz-s12.xyz)+length(s14.xyz-s13.xyz)+length(s14.xyz-s15.xyz)
+                let d15=length(s15.xyz-s0.xyz)+length(s15.xyz-s1.xyz)+length(s15.xyz-s2.xyz)+length(s15.xyz-s3.xyz)+length(s15.xyz-s4.xyz)+length(s15.xyz-s5.xyz)+length(s15.xyz-s6.xyz)+length(s15.xyz-s7.xyz)+length(s15.xyz-s8.xyz)+length(s15.xyz-s9.xyz)+length(s15.xyz-s10.xyz)+length(s15.xyz-s11.xyz)+length(s15.xyz-s12.xyz)+length(s15.xyz-s13.xyz)+length(s15.xyz-s14.xyz)
+                let mut best=s0
+                let mut bd=d0
+                if d1<bd {best=s1 bd=d1}
+                if d2<bd {best=s2 bd=d2}
+                if d3<bd {best=s3 bd=d3}
+                if d4<bd {best=s4 bd=d4}
+                if d5<bd {best=s5 bd=d5}
+                if d6<bd {best=s6 bd=d6}
+                if d7<bd {best=s7 bd=d7}
+                if d8<bd {best=s8 bd=d8}
+                if d9<bd {best=s9 bd=d9}
+                if d10<bd {best=s10 bd=d10}
+                if d11<bd {best=s11 bd=d11}
+                if d12<bd {best=s12 bd=d12}
+                if d13<bd {best=s13 bd=d13}
+                if d14<bd {best=s14 bd=d14}
+                if d15<bd {best=s15 bd=d15}
+                return vec4(best.xyz/max(best.w,0.001),1.0)*self.opacity
+            }
             // Square: a hard edge, so a full-screen app meets the bars
             // without a device pixel of the wallpaper between them.
             if self.radius<0.001 {
@@ -40,6 +115,7 @@ pub struct DrawPhoneApp {
     #[live] pub radius: f32,
     #[live] pub uv_pos: Vec2f,
     #[live] pub uv_size: Vec2f,
+    #[live] pub row_mean: f32,
 }
 
 /// One off-screen capture of a client's tile widget at one viewport.
@@ -409,7 +485,14 @@ impl WmDesk {
             self.draw_panel.draw_abs(cx,band);
             self.draw_panel.color=saved;
         } else {
+            // Until a sample says otherwise, the edge rows' live mean: the
+            // rows stretched streaked whenever content reached the edge
+            // after the last sample (a scrolled list's text under the app —
+            // a hosted child's frames do not bump the sample revision) or
+            // where the rows cannot be read back at all.
+            self.draw_phone.row_mean=1.0;
             self.draw_band_rows(cx,capture,full,band,below,opacity);
+            self.draw_phone.row_mean=0.0;
         }
         self.compositor.as_mut().unwrap().content(band);
     }

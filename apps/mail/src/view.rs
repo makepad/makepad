@@ -63,17 +63,25 @@ script_mod! {
         margin: 0 padding: 0
         draw_bg +: {pixel: fn() {return vec4(0.0, 0.0, 0.0, 0.0)}}
     }
-    let MailAction = mod.widgets.glass.GlassButton{
-        width: 48 height: 48 padding: 0 margin: 0
+    // Flat discs, not glass: every action sits on an opaque bar, and a glass
+    // button makes the app render its whole window twice a frame (a backdrop
+    // pass plus the blur pyramid) — on the phone that doubled every scroll
+    // frame of the list.
+    let MailAction = ButtonFlat{
+        width: 48 height: 48 text: "" padding: 0 margin: 0 spacing: 0
+        align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 24 height: 24}
         draw_text +: {color: theme.color_text}
-        draw_glass +: {tint: theme.color_inset}
+        draw_bg +: {
+            // Hover and press in the selection tint: several themes give
+            // color_inset_hover/down the inset colour itself, and a flat disc
+            // with no state change reads as dead.
+            color: theme.color_inset color_hover: theme.color_bg_highlight color_down: theme.color_bg_highlight
+            border_size: 0.0 border_radius: 24.0
+        }
     }
-    // Actions that sit on a bar: the bar is the surface, so the buttons cast
-    // no shadow of their own onto it or onto each other.
-    let MailBarAction = MailAction{
-        draw_glass +: {shadow_color: #0000}
-    }
+    // Actions that sit on a bar: the bar is the surface.
+    let MailBarAction = MailAction{}
     // An opaque bar: toolbars and bottom action bars. Nothing scrolls
     // through it, so the list above it never reads as covered.
     let MailBar = RoundedView{
@@ -1618,7 +1626,7 @@ impl MailView {
     }
 
     fn glass(&self, cx: &Cx, id: &[LiveId], actions: &Actions) -> bool {
-        self.view.glass_button(cx, id).clicked(actions)
+        self.view.button(cx, id).clicked(actions)
     }
 
     fn draw_messages(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
@@ -2369,7 +2377,7 @@ mod tests {
                 panel.draw_bg.color == mod.theme.color_bg_app
                     && segmented.draw_text.color == mod.theme.color_text
                     && segmented.draw_sel.fill_color == mod.theme.color_bg_highlight
-                    && action.draw_glass.tint == mod.theme.color_inset
+                    && action.draw_bg.color == mod.theme.color_inset
             });
             assert_eq!(matches.as_bool(), Some(true));
         });

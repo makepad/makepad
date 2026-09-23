@@ -552,6 +552,10 @@ pub struct CxVulkan {
     swapchain_format: vk::Format,
     depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    /// The surface's `current_transform` when the swapchain was made (it is
+    /// made with an IDENTITY pre-transform): see
+    /// `suboptimal_needs_new_swapchain`.
+    swapchain_surface_transform: vk::SurfaceTransformFlagsKHR,
     render_pass: vk::RenderPass,
     xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
@@ -1006,6 +1010,7 @@ impl CxVulkan {
                 width: 0,
                 height: 0,
             },
+            swapchain_surface_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             render_pass: vk::RenderPass::null(),
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
@@ -1419,6 +1424,7 @@ impl CxVulkan {
                 width: 0,
                 height: 0,
             },
+            swapchain_surface_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             render_pass: vk::RenderPass::null(),
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
@@ -3502,7 +3508,7 @@ impl CxVulkan {
             }
         }
 
-        if acquire_suboptimal || present_suboptimal {
+        if (acquire_suboptimal || present_suboptimal) && self.suboptimal_needs_new_swapchain() {
             self.recreate_swapchain()?;
         }
 
@@ -8529,6 +8535,32 @@ impl CxVulkan {
         Err("No graphics queue family found for OpenXR Vulkan device".to_string())
     }
 
+    /// Whether a SUBOPTIMAL acquire/present asks for a new swapchain. Always
+    /// yes, except for the one known Android case: the swapchain was made
+    /// with an IDENTITY pre-transform on a rotated display (the compositor
+    /// rotates), which reports SUBOPTIMAL on every frame; rebuilding for it
+    /// each frame (device idle, pipelines rebuilt) made landscape crawl at
+    /// ~35 ms a present. That case is skipped only while the surface's
+    /// extent and transform are what the swapchain was made with.
+    fn suboptimal_needs_new_swapchain(&self) -> bool {
+        if !cfg!(target_os = "android") || self.surface == vk::SurfaceKHR::null() {
+            return true;
+        }
+        if self.swapchain_surface_transform == vk::SurfaceTransformFlagsKHR::IDENTITY {
+            return true;
+        }
+        let Ok(capabilities) = (unsafe {
+            self.surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, self.surface)
+        }) else {
+            return true;
+        };
+        let extent = capabilities.current_extent;
+        !(extent.width == self.swapchain_extent.width
+            && extent.height == self.swapchain_extent.height
+            && capabilities.current_transform == self.swapchain_surface_transform)
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), String> {
         let result = self.recreate_swapchain_inner();
         if result.is_err() {
@@ -8687,6 +8719,13 @@ impl CxVulkan {
         self.swapchain_format = format.format;
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
+        // Recorded only when the swapchain's pre-transform differs from it:
+        // IDENTITY here means "no accepted mismatch".
+        self.swapchain_surface_transform = if pre_transform == vk::SurfaceTransformFlagsKHR::IDENTITY {
+            capabilities.current_transform
+        } else {
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        };
 
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
