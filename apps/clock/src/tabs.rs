@@ -154,7 +154,7 @@ impl Widget for PhoneTabs {
             }
             Hit::FingerUp(e) if e.is_primary_hit() => {
                 if let (Some(pressed), Some(up)) = (self.pressed.take(), self.cell_at(cx, e.abs)) {
-                    if pressed == up {
+                    if pressed == up && !e.cancelled {
                         self.set_active(cx, up, true);
                         cx.widget_action(self.uid, PhoneTabsAction::Selected(up));
                     }

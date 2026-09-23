@@ -252,7 +252,7 @@ impl Widget for AlarmList {
                         if self.reveal == 0.0 {
                             self.revealed = None;
                         }
-                    } else if drag.axis == DragAxis::Pending {
+                    } else if drag.axis == DragAxis::Pending && !e.cancelled {
                         let r = self.area.rect(cx);
                         if self.rows.is_empty() {
                             if self.add_rect.is_some_and(|a| a.contains(e.abs)) {
