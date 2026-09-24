@@ -1062,6 +1062,9 @@ enum UndoStep {
         prop: String,
         removed: Vec<TweakDiffEntry>,
     },
+    /// One hunk of the Build tab's design session: undone and redone by the
+    /// session's own history, previewed through hot reload.
+    Source { label: String },
 }
 
 /// One freehand annotation stroke, in window-local points, tagged with the
@@ -15792,6 +15795,21 @@ impl Tweaker {
                 drop(s);
                 log!("TWEAK undo reset {} {} -> {}", path, prop, last);
             }
+            UndoStep::Source { label } => {
+                let result = self.design.as_mut().map(|s| s.undo(cx));
+                match result {
+                    Some(Ok(())) => log!("TWEAK undo source {label}"),
+                    Some(Err(error)) => {
+                        log!("TWEAK undo source failed: {error}");
+                        session().lock().unwrap().undo.push(step);
+                        return;
+                    }
+                    None => {
+                        // The session is gone; its history went with it.
+                        return;
+                    }
+                }
+            }
         }
         session().lock().unwrap().redo.push(step);
         self.rows_uid = 0;
@@ -15869,6 +15887,21 @@ impl Tweaker {
                 s.undo_open = false;
                 drop(s);
                 log!("TWEAK redo reset {} {}", path_c, prop_c);
+            }
+            UndoStep::Source { label } => {
+                let result = self.design.as_mut().map(|s| s.redo(cx));
+                match result {
+                    Some(Ok(())) => {
+                        log!("TWEAK redo source {label}");
+                        session().lock().unwrap().undo.push(step.clone());
+                    }
+                    Some(Err(error)) => {
+                        log!("TWEAK redo source failed: {error}");
+                        session().lock().unwrap().redo.push(step);
+                        return;
+                    }
+                    None => return,
+                }
             }
         }
         self.rows_uid = 0;
@@ -19006,11 +19039,7 @@ impl Widget for Tweaker {
                     && tweak_is_on()
                     && cx.key_focus() == Area::Empty =>
             {
-                if self.panel_tab == PanelTab::Build && self.design.is_some() {
-                    // On the Build tab a design session owns the history:
-                    // its steps are source hunks, previewed by reload.
-                    self.design_history(cx, ke.modifiers.shift);
-                } else if ke.modifiers.shift {
+                if ke.modifiers.shift {
                     self.redo(cx);
                 } else {
                     self.undo(cx);
@@ -23652,14 +23681,45 @@ impl Tweaker {
     }
 
     /// The common tail of a session action: no session, an error, or done.
+    /// A done edit joins the panel's undo history as a `Source` step, so
+    /// Cmd+Z walks value tweaks and structural edits in one timeline.
     fn design_after(&mut self, cx: &mut Cx, result: Option<Result<(), String>>) {
         match result {
             None => self.design_say(cx, "press Design first"),
             Some(Err(err)) => self.design_say(cx, err),
             Some(Ok(())) => {
+                let label = self
+                    .design
+                    .as_ref()
+                    .and_then(|s| s.doc().hunks().last().map(|h| h.label.clone()))
+                    .unwrap_or_default();
+                let mut s = session().lock().unwrap();
+                s.undo.push(UndoStep::Source { label });
+                s.redo.clear();
+                s.undo_open = false;
+                drop(s);
                 self.design_msg.clear();
                 self.redraw_sidebar(cx);
                 self.redraw_overlay(cx);
+            }
+        }
+    }
+
+    /// Replay the value ledger after a reload: a reload re-applies the tree
+    /// from source, which drops every eval-applied tweak; the ledger says
+    /// what the person had set, so it is set again. Baked tweaks are in the
+    /// source already and come back unchanged.
+    fn design_replay_ledger(&mut self, cx: &mut Cx) {
+        let entries = coalesce_diff(&session().lock().unwrap().diff);
+        for entry in entries {
+            if entry.path == "theme" || entry.prop.starts_with("const:") {
+                continue;
+            }
+            let Ok(widget) = resolve_widget_for_history(cx, &entry.path) else {
+                continue;
+            };
+            if let Err(error) = eval_chunk(cx, &widget, &format!("{}: {}", entry.prop, entry.new)) {
+                log!("DESIGN replay {} {} failed: {error}", entry.path, entry.prop);
             }
         }
     }
@@ -23695,8 +23755,8 @@ impl Tweaker {
                     }
                 }
             }
-            BUILD_UNDO => self.design_history(cx, false),
-            BUILD_REDO => self.design_history(cx, true),
+            BUILD_UNDO => self.undo(cx),
+            BUILD_REDO => self.redo(cx),
             BUILD_RESET => {
                 let result = self.design.as_mut().map(|s| s.reset(cx));
                 self.design_after(cx, result);
@@ -23751,14 +23811,6 @@ impl Tweaker {
         self.design_after(cx, result);
     }
 
-    fn design_history(&mut self, cx: &mut Cx, redo: bool) {
-        let result = self
-            .design
-            .as_mut()
-            .map(|s| if redo { s.redo(cx) } else { s.undo(cx) });
-        self.design_after(cx, result);
-    }
-
     /// `Event::LiveEdit` with a preview in flight: it has landed. The
     /// session reads the re-run's errors (a refused change is rolled back)
     /// and names the widget to select once it is drawn.
@@ -23773,6 +23825,7 @@ impl Tweaker {
         if let Some(path) = landed.select {
             self.design_reselect = Some((path, 8));
         }
+        self.design_replay_ledger(cx);
         self.rows_uid = 0;
         self.design_baked = None;
         self.redraw_sidebar(cx);
@@ -23853,6 +23906,12 @@ impl Tweaker {
             .map(|s| s.set_prop(cx, &widget, &step.1, &step.2));
         if matches!(result, Some(Ok(()))) {
             self.design_baked = Some(step);
+            // The gesture's Value step is superseded: the value now lives in
+            // the source, and the Source step design_after pushes undoes it.
+            let mut s = session().lock().unwrap();
+            if matches!(s.undo.last(), Some(UndoStep::Value { .. })) {
+                s.undo.pop();
+            }
         }
         self.design_after(cx, result);
     }

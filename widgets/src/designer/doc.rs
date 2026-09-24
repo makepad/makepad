@@ -104,6 +104,13 @@ impl DesignDoc {
         if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
             return Err(format!("edit {}..{} splits a character", start, end));
         }
+        // Hot reload binds `#(...)` placeholders by their order in the block,
+        // so an edit that moves, removes or adds one would rebind values
+        // silently. Such an edit is cold: it needs a Rust rebuild, and is
+        // refused here rather than previewed wrong.
+        if self.text[start..end].contains("#(") || replacement.contains("#(") {
+            return Err("the edit touches a #() placeholder; that needs a rebuild, not a preview".to_string());
+        }
         self.undo.push((self.text.clone(), self.hunks.clone()));
         self.redo.clear();
         let hunk = Hunk {
