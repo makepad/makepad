@@ -234,6 +234,7 @@ pub struct Cx {
     /// Draws skipped because their pipeline was still compiling: in all,
     /// and the repaint that last skipped one (`window_snapshot.rs`).
     pub(crate) pipeline_skips: u64,
+    #[cfg(target_vendor = "apple")]
     pub(crate) pipeline_skip_repaint: Option<u64>,
     /// Until then (seconds since start), a window frame with a draw skipped
     /// for a compiling pipeline is not presented: the last whole frame stays.
@@ -988,6 +989,7 @@ impl Cx {
             screenshot_requests: Default::default(),
             window_snapshots: Vec::new(),
             pipeline_skips: 0,
+            #[cfg(target_vendor = "apple")]
             pipeline_skip_repaint: None,
             whole_frames_until: 0.0,
             whole_hold_began: None,
