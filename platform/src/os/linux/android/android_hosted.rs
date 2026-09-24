@@ -22,7 +22,6 @@ use {
         event::{finger::TouchState, Event, WindowGeom},
         makepad_math::*,
         makepad_micro_serde::*,
-        os::linux::vulkan::{CxVulkan, HostedSyncRole},
         os::shared_framebuf::{HostSwapchain, PollTimer, PresentableDraw, PresentableImageId},
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
@@ -40,6 +39,13 @@ use {
         },
     },
 };
+
+// The hosted child and the host's shared frames exist only with the Vulkan
+// renderer (`MAKEPAD=vulkan`, as proc-pack builds). The default OpenGL
+// Android build keeps this module compiling: a child started from it
+// reports that it has no renderer and exits.
+#[cfg(use_vulkan)]
+use crate::os::linux::vulkan::{CxVulkan, HostedSyncRole};
 
 static HOSTED: AtomicBool = AtomicBool::new(false);
 
@@ -266,12 +272,14 @@ fn release_fd() -> &'static Mutex<Option<OwnedFd>> {
 }
 
 /// Host: the children's frame fds its next submission waits on.
+#[cfg(use_vulkan)]
 pub(crate) fn take_acquire_fds() -> Vec<OwnedFd> {
     acquire_fds().lock().map(|mut map| map.drain().map(|(_, fd)| fd).collect()).unwrap_or_default()
 }
 
 /// Host: the fd of its latest submission (it signals once every read of a
 /// shared image submitted so far is done).
+#[cfg(use_vulkan)]
 pub(crate) fn publish_release_fd(fd: OwnedFd) {
     if let Ok(mut slot) = release_fd().lock() {
         *slot = Some(fd);
@@ -471,10 +479,22 @@ impl Cx {
     /// child fetches by id (host side of `StudioToApp::Swapchain`).
     /// The host fences its children's frames on the GPU (`HostedSync`):
     /// a child may draw its next frame before the host painted the last.
+    #[cfg(not(use_vulkan))]
+    pub fn hosted_frames_fenced(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(use_vulkan))]
+    pub fn android_share_host_swapchain(&mut self, _swapchain: &HostSwapchain) {
+        crate::error!("hosted frames: the host has no Vulkan renderer (build with MAKEPAD=vulkan)");
+    }
+
+    #[cfg(use_vulkan)]
     pub fn hosted_frames_fenced(&self) -> bool {
         self.os.vulkan.as_ref().is_some_and(|vulkan| vulkan.hosted_sync_role() == HostedSyncRole::Host)
     }
 
+    #[cfg(use_vulkan)]
     pub fn android_share_host_swapchain(&mut self, swapchain: &HostSwapchain) {
         start_frame_server();
         let Some(mut vulkan) = self.os.vulkan.take() else {
@@ -660,15 +680,9 @@ impl Cx {
             density,
             ..Default::default()
         });
-        match CxVulkan::new_headless(1, 1) {
-            Ok(mut vulkan) => {
-                FENCED.store(!sync_disabled() && vulkan.set_hosted_sync_role(HostedSyncRole::Child), Ordering::Relaxed);
-                self.os.vulkan = Some(vulkan);
-            }
-            Err(err) => {
-                crate::error!("hosted: no Vulkan renderer: {err}");
-                return;
-            }
+        if let Err(err) = self.hosted_start_renderer() {
+            crate::error!("hosted: no Vulkan renderer: {err}");
+            return;
         }
         self.os.surface_alive = true;
         self.in_makepad_studio = true;
@@ -866,15 +880,10 @@ impl Cx {
                         initial: true,
                     },
                 );
-                let Some(mut vulkan) = self.os.vulkan.take() else { return };
-                let bound = vulkan.bind_shared_hardware_buffer(
-                    texture.texture_id(),
-                    buffer,
-                    swapchain.alloc_width,
-                    swapchain.alloc_height,
-                    true,
-                );
-                self.os.vulkan = Some(vulkan);
+                let Some(bound) = self.hosted_bind_frame(&texture, buffer, swapchain.alloc_width, swapchain.alloc_height)
+                else {
+                    return;
+                };
                 // The resource took its own reference.
                 unsafe { ndk_sys::AHardwareBuffer_release(buffer) };
                 match bound {
@@ -1020,10 +1029,8 @@ impl Cx {
         // host's GPU: this submission waits for the host's latest one.
         if fenced && !passes_todo.is_empty() {
             if let Some(fd) = fetch_release_fd() {
-                if let Some(vulkan) = self.os.vulkan.as_mut() {
-                    if let Err(err) = vulkan.wait_sync_fd(fd) {
-                        crate::error!("{err}");
-                    }
+                if let Err(err) = self.hosted_wait_host_fd(fd) {
+                    crate::error!("{err}");
                 }
             }
         }
@@ -1089,25 +1096,20 @@ impl Cx {
                 }
             }
         }
-        if let Some(mut vulkan) = self.os.vulkan.take() {
-            if let Err(err) = vulkan.end_repaint() {
-                crate::error!("hosted: repaint submit failed: {err}");
-            }
+        if let Some(fence) = self.hosted_submit(fenced) {
             let submitted = pace_ms();
             // The host reads the frame as soon as it hears of it: it gets
             // the frame's fence first (its GPU waits on it), or, without
             // fences, the frame is complete before the flip goes out.
-            let fence = if fenced { vulkan.take_exported_submit_fd() } else { None };
             if !flips.is_empty() {
                 let handed = fence.as_ref().is_some_and(|fd| send_acquire_fd(&flips[0].target_id, fd));
                 if !handed {
-                    if let Err(err) = vulkan.wait_queue_idle() {
+                    if let Err(err) = self.hosted_wait_gpu_idle() {
                         crate::error!("hosted: {err}");
                     }
                 }
                 crate::trace!("pace", "child submitted={:.2} gpu_done={:.2} fenced={}", submitted, pace_ms(), handed);
             }
-            self.os.vulkan = Some(vulkan);
         }
         let flipped = !flips.is_empty();
         for flip in flips {
@@ -1118,6 +1120,7 @@ impl Cx {
     }
 
     fn hosted_draw_pass(&mut self, draw_pass_id: crate::draw_pass::DrawPassId) {
+        #[cfg(use_vulkan)]
         if let Some(mut vulkan) = self.os.vulkan.take() {
             let result = vulkan.draw_pass_to_texture(self, draw_pass_id);
             self.os.vulkan = Some(vulkan);
@@ -1125,6 +1128,8 @@ impl Cx {
                 crate::error!("hosted: draw failed: {err}");
             }
         }
+        #[cfg(not(use_vulkan))]
+        let _ = draw_pass_id;
     }
 
     fn hosted_platform_ops(&mut self, windows: &mut Vec<HostedWindow>) {
@@ -1203,6 +1208,82 @@ impl Cx {
 }
 
 // ---------------------------------------------------------------------------
+// The child's renderer: a windowless Vulkan device. Without the Vulkan
+// renderer in the build there is none, and the child exits at startup.
+// ---------------------------------------------------------------------------
+
+#[cfg(use_vulkan)]
+impl Cx {
+    fn hosted_start_renderer(&mut self) -> Result<(), String> {
+        let mut vulkan = CxVulkan::new_headless(1, 1)?;
+        FENCED.store(!sync_disabled() && vulkan.set_hosted_sync_role(HostedSyncRole::Child), Ordering::Relaxed);
+        self.os.vulkan = Some(vulkan);
+        Ok(())
+    }
+
+    /// Imports a host frame into `texture`; None without a renderer.
+    fn hosted_bind_frame(
+        &mut self,
+        texture: &Texture,
+        buffer: *mut AHardwareBuffer,
+        width: u32,
+        height: u32,
+    ) -> Option<Result<(), String>> {
+        let mut vulkan = self.os.vulkan.take()?;
+        let bound = vulkan.bind_shared_hardware_buffer(texture.texture_id(), buffer, width, height, true);
+        self.os.vulkan = Some(vulkan);
+        Some(bound)
+    }
+
+    fn hosted_wait_host_fd(&mut self, fd: OwnedFd) -> Result<(), String> {
+        match self.os.vulkan.as_mut() {
+            Some(vulkan) => vulkan.wait_sync_fd(fd),
+            None => Ok(()),
+        }
+    }
+
+    /// Submits the repaint; Some(the frame's fence when `fenced`) once
+    /// submitted, None without a renderer.
+    fn hosted_submit(&mut self, fenced: bool) -> Option<Option<OwnedFd>> {
+        let vulkan = self.os.vulkan.as_mut()?;
+        if let Err(err) = vulkan.end_repaint() {
+            crate::error!("hosted: repaint submit failed: {err}");
+        }
+        Some(if fenced { vulkan.take_exported_submit_fd() } else { None })
+    }
+
+    fn hosted_wait_gpu_idle(&mut self) -> Result<(), String> {
+        match self.os.vulkan.as_mut() {
+            Some(vulkan) => vulkan.wait_queue_idle(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(use_vulkan))]
+impl Cx {
+    fn hosted_start_renderer(&mut self) -> Result<(), String> {
+        Err("this build has no Vulkan renderer (build with MAKEPAD=vulkan)".into())
+    }
+
+    fn hosted_bind_frame(&mut self, _texture: &Texture, _buffer: *mut AHardwareBuffer, _width: u32, _height: u32) -> Option<Result<(), String>> {
+        None
+    }
+
+    fn hosted_wait_host_fd(&mut self, _fd: OwnedFd) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn hosted_submit(&mut self, _fenced: bool) -> Option<Option<OwnedFd>> {
+        None
+    }
+
+    fn hosted_wait_gpu_idle(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The app's own grab on a phone: `adb shell setprop debug.makepad.grab <n>`
 // writes the next presented frame to the app's external files directory
 // (`/sdcard/Android/data/<package>/files/grab-<n>.png`, readable by adb) —
@@ -1272,6 +1353,7 @@ pub(crate) fn pace_ms() -> f64 {
 
 /// `adb shell setprop debug.makepad.hosted.nosync 1`: host and children
 /// fall back to CPU waits (for A/B measurements).
+#[cfg(use_vulkan)]
 fn sync_disabled() -> bool {
     system_property("debug.makepad.hosted.nosync") == "1"
 }

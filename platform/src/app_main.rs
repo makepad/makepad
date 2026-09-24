@@ -655,7 +655,7 @@ mod font_set_macro_compile_test {
 
         let source = include_str!("app_main.rs");
         let constructor_call = ["$crate::new_cx", "_with_font_set("].concat();
-        assert_eq!(source.matches(constructor_call.as_str()).count(), 4);
+        assert_eq!(source.matches(constructor_call.as_str()).count(), 5);
     }
 }
 
