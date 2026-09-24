@@ -82,7 +82,7 @@ mod geometry;
 mod gpu_info;
 mod id_pool;
 pub mod ime;
-mod live_reload;
+pub mod live_reload;
 mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;

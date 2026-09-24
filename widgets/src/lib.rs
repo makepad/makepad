@@ -79,6 +79,7 @@ pub mod keyboard_view;
 pub mod nav_control;
 pub mod nav_list;
 pub mod tweaker;
+pub mod designer;
 pub mod reflect;
 pub mod ai_slot;
 #[cfg(feature = "voice")]

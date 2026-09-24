@@ -72,6 +72,30 @@ pub struct ScriptModBlock {
     pub rust_value_count: usize,
     /// File byte ranges of the `#(...)` placeholders, in order.
     pub placeholders: Vec<std::ops::Range<usize>>,
+    /// File byte offset where `code`'s row 0 begins (the start of the first
+    /// token's line), so a row and column inside `code` map to the file.
+    pub code_start: usize,
+    /// Byte ranges of the same placeholders inside `code` (`#(0)`, `#(1)`
+    /// ...), the one place `code` and the file differ in length.
+    pub placeholder_code_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl ScriptModBlock {
+    /// The file byte offset of a byte offset inside `code`.
+    pub fn code_to_file_offset(&self, code_offset: usize) -> usize {
+        let mut delta: isize = 0;
+        for (file_range, code_range) in self.placeholders.iter().zip(&self.placeholder_code_ranges) {
+            if code_range.end <= code_offset {
+                delta += file_range.len() as isize - code_range.len() as isize;
+            } else if code_range.start < code_offset {
+                // Inside a placeholder: the placeholder's start.
+                return (self.code_start as isize + code_range.start as isize + delta) as usize;
+            } else {
+                break;
+            }
+        }
+        (self.code_start as isize + code_offset as isize + delta) as usize
+    }
 }
 
 /// Scan a Rust source file for its `script_mod!` blocks.
@@ -249,6 +273,70 @@ fn handle_cx_live_edit(cx: &mut Cx) -> LiveEditTrigger {
         LiveEditTrigger::Manual
     } else {
         LiveEditTrigger::None
+    }
+}
+
+impl Cx {
+    /// Check a file's text the way a hot reload would before installing it:
+    /// every `script_mod!` block the runtime compiled from the file is found,
+    /// the placeholder counts match, and each body parses. The design overlay
+    /// runs this on an edit before it queues the text as a preview, so a
+    /// broken edit is refused with the parser's message instead of being
+    /// rejected silently in the log. Nothing is installed.
+    pub fn validate_live_edit_text(&mut self, file_name: &str, content: &str) -> Result<(), String> {
+        let Some(script_vm) = self.script_vm.as_mut() else {
+            return Err("no script VM".to_string());
+        };
+        let file_name = normalize_path_string(Path::new(file_name));
+        let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
+        if compiled_sites.is_empty() {
+            return Err(format!("no compiled script_mod! blocks for {}", file_name));
+        }
+        let extracted = extract_script_mods_from_rust_file(&file_name, content)?;
+        if extracted.len() != compiled_sites.len() {
+            return Err(format!(
+                "script_mod! block count changed: runtime has {}, file has {}",
+                compiled_sites.len(),
+                extracted.len()
+            ));
+        }
+        for (site, extracted) in compiled_sites.iter().zip(extracted.iter()) {
+            if extracted.rust_value_count != site.values.len() {
+                return Err(format!(
+                    "placeholder count changed at {}: expected {} #(…) values, found {}",
+                    format_script_mod_site(site),
+                    site.values.len(),
+                    extracted.rust_value_count
+                ));
+            }
+            let mut tokenizer = ScriptTokenizer::default();
+            let mut parser = ScriptParser::default();
+            tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
+            parser.parse(
+                &tokenizer,
+                &site.file_name,
+                (extracted.first_token_line, extracted.first_token_column),
+                &site.values,
+            );
+            if parser.had_error {
+                let detail = parser
+                    .parse_errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "parse error".to_string());
+                return Err(format!("{}: {}", format_script_mod_site(site), detail));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the path of the file a compiled block came from, as the
+    /// runtime knows it: the first candidate that exists on disk.
+    pub fn resolve_script_mod_path(script_mod: &ScriptMod) -> Option<String> {
+        resolve_script_mod_file_candidates(script_mod)
+            .into_iter()
+            .map(|candidate| normalize_path_string(Path::new(&candidate)))
+            .find(|candidate| Path::new(candidate).is_file())
     }
 }
 
@@ -690,6 +778,7 @@ fn scan_script_mod_blocks(
                         let mut block = normalize_script_mod_body(file_name, body, body_pos)?;
                         block.body_start = body_start;
                         block.body_end = end;
+                        block.code_start += body_start;
                         for range in &mut block.placeholders {
                             range.start += body_start;
                             range.end += body_start;
@@ -721,6 +810,7 @@ fn normalize_script_mod_body(
     let mut rust_value_count = 0;
     let mut first_token = None;
     let mut placeholders = Vec::new();
+    let mut placeholder_code_ranges = Vec::new();
 
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
@@ -813,7 +903,9 @@ fn normalize_script_mod_body(
                 if first_token.is_none() {
                     first_token = Some(pos);
                 }
+                let code_from = out.len();
                 out.push_str(&format!("#({rust_value_count})"));
+                placeholder_code_ranges.push(code_from..out.len());
                 rust_value_count += 1;
                 placeholders.push(i..segment_end);
                 bump_pos_bytes(&mut pos, &bytes[i..segment_end]);
@@ -843,9 +935,15 @@ fn normalize_script_mod_body(
     // The body begins right after the `{`, usually one line earlier: drop the
     // lines before the first token (their comments are blank by now) and keep
     // that line's indentation so columns still match the file.
+    let mut code_start = 0;
     if let Some(first_ink) = out.find(|c: char| !c.is_whitespace()) {
         if let Some(last_newline) = out[..first_ink].rfind('\n') {
-            out.drain(..=last_newline);
+            code_start = last_newline + 1;
+            out.drain(..code_start);
+            for range in &mut placeholder_code_ranges {
+                range.start -= code_start;
+                range.end -= code_start;
+            }
         }
     }
 
@@ -857,6 +955,8 @@ fn normalize_script_mod_body(
         code: out,
         rust_value_count,
         placeholders,
+        code_start,
+        placeholder_code_ranges,
     })
 }
 
