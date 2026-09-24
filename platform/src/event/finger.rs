@@ -1090,13 +1090,14 @@ impl Event {
                     return Hit::TextRangeReplace(tr.clone());
                 }
             }
+            // A restricted isolate's widgets can't export text to the clipboard.
             Event::TextCopy(tc) => {
-                if cx.keyboard.has_key_focus(area) {
+                if cx.keyboard.has_key_focus(area) && !cx.script_data.std.host_io_only() {
                     return Hit::TextCopy(tc.clone());
                 }
             }
             Event::TextCut(tc) => {
-                if cx.keyboard.has_key_focus(area) {
+                if cx.keyboard.has_key_focus(area) && !cx.script_data.std.host_io_only() {
                     return Hit::TextCut(tc.clone());
                 }
             }
