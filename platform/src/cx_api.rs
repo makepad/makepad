@@ -688,8 +688,9 @@ impl Cx {
 
     /// Arm the VM's captured-error sink for the live-edit re-run that
     /// follows, so a hot-reloaded block that fails to run is reported to
-    /// the caller as well as the log.
-    pub(crate) fn live_edit_capture_begin(&mut self) {
+    /// the caller as well as the log. Called by the `app_main!` expansion,
+    /// which is why it is public.
+    pub fn live_edit_capture_begin(&mut self) {
         if self.script_vm.is_none() {
             return;
         }
@@ -697,8 +698,8 @@ impl Cx {
     }
 
     /// Take the errors the re-run raised: log them, and keep them for
-    /// `take_live_edit_errors`.
-    pub(crate) fn live_edit_capture_end(&mut self) {
+    /// `take_live_edit_errors`. Public for the `app_main!` expansion.
+    pub fn live_edit_capture_end(&mut self) {
         if self.script_vm.is_none() {
             return;
         }
