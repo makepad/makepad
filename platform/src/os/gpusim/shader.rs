@@ -196,6 +196,14 @@ impl DrawVars {
 }
 
 impl Cx {
+    /// gpusim compiles shaders synchronously in `gpusim_compile_shaders`, so a
+    /// shader is window-ready as soon as it has an `os_shader_id`. Mirrors the
+    /// GL and D3D11 backends, which `DrawText::slug_draw_is_ready` calls on
+    /// Linux and Windows.
+    pub fn is_draw_shader_window_ready(&self, shader_id: DrawShaderId) -> bool {
+        self.draw_shaders.shaders[shader_id.index].os_shader_id.is_some()
+    }
+
     pub(crate) fn gpusim_compile_shaders(&mut self) {
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
         if self.os.no_draw {
