@@ -206,7 +206,10 @@ impl DesignDoc {
 /// `file` relative to the current directory (the checkout an app runs
 /// from), with forward slashes; unchanged when it lies elsewhere.
 fn repo_relative(file: &str) -> String {
+    // A canonical Windows path carries the verbatim prefix; it means
+    // nothing to git.
     let file = file.replace('\\', "/");
+    let file = file.strip_prefix("//?/").map(str::to_string).unwrap_or(file);
     let Ok(cwd) = std::env::current_dir() else {
         return file;
     };

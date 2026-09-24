@@ -23977,6 +23977,16 @@ impl Tweaker {
         let Some((_, widget)) = self.design_target(cx) else {
             return;
         };
+        // A tweak on a widget from another file is not this session's to
+        // write; it stays a value tweak, quietly, rather than an error on
+        // every pointer move of the gesture.
+        let mine = crate::designer::widget_source_file(cx, &widget)
+            .map(|file| self.design.as_ref().is_some_and(|s| s.file() == file))
+            .unwrap_or(false);
+        if !mine {
+            self.design_baked = Some(step);
+            return;
+        }
         let result = self
             .design
             .as_mut()
