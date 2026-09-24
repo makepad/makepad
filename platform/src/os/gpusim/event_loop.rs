@@ -793,6 +793,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
+        if self.script_data.std.host_io_only() { return; }
         crate::warning!("open_url is ignored in gpusim mode");
     }
 }

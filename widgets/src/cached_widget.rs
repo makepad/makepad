@@ -120,11 +120,14 @@ impl ScriptHook for CachedWidget {
             cx.set_global(WidgetWrapperCache::default())
         }
 
-        // Try to retrieve the widget from the global cache
+        // Try to retrieve the widget from the global cache.
+        // Each heap has its own singletons, so isolates never share widgets with the app or each other.
+        let key = (vm.bx.heap.heap_key(), self.template_id);
+        let cx = vm.cx_mut();
         if let Some(widget) = cx
             .get_global::<WidgetWrapperCache>()
             .map
-            .get_mut(&self.template_id)
+            .get_mut(&key)
         {
             self.widget = Some(widget.clone());
         } else if let Some(template_value) = self.template_value {
@@ -133,7 +136,7 @@ impl ScriptHook for CachedWidget {
             let cx = vm.cx_mut();
             cx.get_global::<WidgetWrapperCache>()
                 .map
-                .insert(self.template_id, widget.clone());
+                .insert(key, widget.clone());
             self.widget = Some(widget);
         }
         if let Some(widget) = &self.widget {
@@ -196,5 +199,41 @@ impl CachedWidget {}
 
 #[derive(Default)]
 pub struct WidgetWrapperCache {
-    map: HashMap<LiveId, WidgetRef>,
+    /// Keyed by the heap that created each widget, and then its template ID.
+    map: HashMap<(usize, LiveId), WidgetRef>,
+}
+
+/// Forgets the cached widgets of isolates whose heaps died,
+/// as a later isolate may reuse a dead heap's key.
+pub(crate) fn gc_heaps(cx: &mut Cx, dead_heaps: &[usize]) {
+    if cx.has_global::<WidgetWrapperCache>() {
+        cx.get_global::<WidgetWrapperCache>()
+            .map
+            .retain(|(heap, _), _| !dead_heaps.contains(heap));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widget_async::CxSplashVmExt;
+
+    /// Creates a `CachedWidget` in the current VM and returns the UID of the widget it caches.
+    fn cached_widget_uid(vm: &mut ScriptVm) -> WidgetUid {
+        let value = crate::script_eval!(vm, {use mod.widgets.* CachedWidget{ shared := View{} }});
+        let cached = CachedWidget::script_from_value(vm, value);
+        cached.widget.as_ref().expect("the cached widget").widget_uid()
+    }
+
+    #[test]
+    fn cached_widgets_are_not_shared_between_heaps() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let app_uid = cx.with_vm(cached_widget_uid);
+        assert_eq!(cx.with_vm(cached_widget_uid), app_uid, "the same heap reuses its widget");
+        let id = cx.alloc_splash_vm();
+        assert_ne!(cx.with_script_vm_id(id, cached_widget_uid), app_uid);
+        cx.free_splash_vm(id);
+        assert_eq!(cx.get_global::<WidgetWrapperCache>().map.len(), 1, "a dead isolate's widgets are forgotten");
+    }
 }
