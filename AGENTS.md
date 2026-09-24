@@ -21,6 +21,10 @@ use current source for API signatures and working examples.
 - Codex manages the work and reviews Fable's designs and results.
 - Fable designs and executes the difficult implementation work.
 - Grok handles bounded mechanical work and validation under precise briefs.
+- Subagents an agent spawns for itself (the Agent tool, Workflow `agent()`
+  calls) run on Opus 5.5 at maximum effort: `model: "opus"` on the Agent tool,
+  `model: "claude-opus-5-5", effort: "max"` on a workflow agent (user,
+  2026-09-24, for every session in this repository).
 - Keep one persistent Fable session for related tasks; send follow-ups to that
   session or resume it with its existing context. Do not repeatedly start fresh
   Fable sessions and repay the same input context. Idle without polling/model
