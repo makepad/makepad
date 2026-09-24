@@ -90,6 +90,135 @@ script_mod! {
             /** the check, dash or knob ink under the error intent */
             mark_color_error: uniform(theme.color_error)
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** how far the mark lifts toward the glow ink while active, and how far past full brightness 0..1 step 0.01 */
+            material_ink: uniform(vec2(theme.material_ink_glow, theme.material_ink_lift))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+            /** the emissive ink an active well, its knob and its mark take */
+            material_glow_ink: uniform(theme.color_material_glow)
+
+            /** the outward gradient of a rounded box centred on c with half size h and corner k, by central differences */
+            material_grad: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec2 {
+                let e = 0.5
+                let g = vec2(
+                    Material.sd_box(p + vec2(e, 0.0), c, h, k) - Material.sd_box(p - vec2(e, 0.0), c, h, k),
+                    Material.sd_box(p + vec2(0.0, e), c, h, k) - Material.sd_box(p - vec2(0.0, e), c, h, k)
+                )
+                if length(g) > 0.00001 {
+                    return normalize(g)
+                }
+                return vec2(0.0, 1.0)
+            }
+
+            /** a well cut into the housing: the box centred on c (half size
+             * h, corner k, distance d at p) lit as a sunken face, with the
+             * surround's inner shadow over it -- the outline shifted
+             * down-light and blurred -- and lit toward the glow ink by
+             * `lit` under an illuminating material. Tier 1 is the relief
+             * alone. */
+            material_well: fn(fill: vec4, p: vec2, d: float, c: vec2, h: vec2, k: float, lit: float) -> vec4 {
+                let g = self.material_grad(p, c, h, k)
+                let elev = -self.material_tune.w * (1.0 - self.disabled)
+                var insh = 0.0
+                if self.material_inner.x > 0.001 && elev < 0.0 {
+                    let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                    insh = 1.0 - Material.box_cov(c - h + ioff, c + h + ioff, p, max(self.material_inner.y * 0.5, 0.35), k)
+                }
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(self.material_relief.x, self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                var o = Material.face(
+                    fill.rgb, d, g, uv, elev, elev, 0.0, insh, 0.0,
+                    self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * lit * (1.0 - self.disabled))
+                }
+                return vec4(o, fill.a)
+            }
+
+            /** a raised domed knob of radius r centred on kc, lit as one
+             * object: the shoulder rolls into a shallow dome so the whole
+             * cap catches the light. */
+            material_knob: fn(fill: vec4, p: vec2, kc: vec2, r: float) -> vec4 {
+                let q = p - kc
+                let rr = length(q)
+                let d = rr - r
+                var g = vec2(0.0, 1.0)
+                if rr > 0.00001 {
+                    g = q / rr
+                }
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(min(self.material_relief.x, r * 0.5), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                // No face gradient: a dome's normal carries its own.
+                let tune = vec4(0.0, self.material_tune.y, self.material_tune.z, self.material_tune.w)
+                // The dome: a paraboloid, its slope growing with the radius,
+                // over a raise that m_normal multiplies back in.
+                let dome = 0.55 * clamp(rr / max(r, 0.001), 0.0, 1.0) / max(raise, 0.001)
+                let uv = q / (2.0 * r) + vec2(0.5, 0.5)
+                let o = Material.face(
+                    fill.rgb, d, g, uv, raise, raise, dome, 0.0, 0.0,
+                    self.material_light, rel, fin, tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                return vec4(o, fill.a)
+            }
+
+            /** what a knob of radius r centred on kc throws on the ground at
+             * p, premultiplied: its cast shadow, contact and lip, and its
+             * glow by `lit`. Laid into the well's fill, since the knob
+             * travels inside it. */
+            material_knob_under: fn(p: vec2, kc: vec2, r: float, lit: float) -> vec4 {
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let q = p - kc
+                let rr = length(q)
+                let d = rr - r
+                var g = vec2(0.0, 1.0)
+                if rr > 0.00001 {
+                    g = q / rr
+                }
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let off = Material.cast_offset(raise, self.material_light)
+                // The shadow falls inside the well: its blur stays in scale
+                // with the knob.
+                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, r), self.material_shadow.z, self.material_shadow.w)
+                var under = Material.cast(
+                    d, length(q - off) - r, length(q + off) - r, g, px, raise, self.material_relief.z,
+                    self.material_light, sh, self.material_inner.z,
+                    self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                ) * (1.0 - self.disabled)
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * lit * (1.0 - self.disabled)
+                    under = vec4(self.material_glow_ink.rgb * a3, a3) + under * (1.0 - a3)
+                }
+                return under
+            }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -110,7 +239,7 @@ script_mod! {
                             self.border_radius * /** mark box corner scale 0..1 step 0.05 */ 0.5
                         )
 
-                        let color_fill = self.color
+                        var color_fill = self.color
                             .mix(self.color_focus, self.focus)
                             .mix(self.color_active, self.active)
                             .mix(self.color_hover, self.hover)
@@ -125,6 +254,18 @@ script_mod! {
                             .mix(self.border_color_error, self.error)
                             .mix(self.border_color_disabled, self.disabled)
 
+                        // THE MATERIAL: the mark box is a well cut into the
+                        // housing, lit up by an active mark under an
+                        // illuminating material. Nothing changes at 0.
+                        if self.material > 0.5 {
+                            let p = self.pos * self.rect_size
+                            let c = offset_px + vec2(sz_px * 0.5, sz_px * 0.5)
+                            let h = max(vec2(sz_px * 0.5 - self.border_size, sz_px * 0.5 - self.border_size), vec2(0.5, 0.5))
+                            // `sdf.box` draws a corner of TWICE its argument, clamped.
+                            let k = min(self.border_radius, min(h.x, h.y))
+                            color_fill = self.material_well(color_fill, p, sdf.shape, c, h, k, self.active)
+                        }
+
                         sdf.fill_keep(color_fill)
                         sdf.stroke(color_stroke, self.border_size)
 
@@ -134,11 +275,19 @@ script_mod! {
                         sdf.line_to(offset_px.x + center_px.x, center_px.y + sz_px * 0.5 - mark_padding)
                         sdf.line_to(offset_px.x + sz_px - mark_padding, offset_px.y + mark_padding)
 
-                        let mark_color = self.mark_color
+                        var mark_color = self.mark_color
                             .mix(self.mark_color_hover, self.hover)
                             .mix(self.mark_color_active, self.active)
                             .mix(self.mark_color_error, self.error * self.active)
                             .mix(self.mark_color_disabled, self.disabled)
+
+                        // Lit ink: an active mark toward the glow ink and
+                        // past full brightness, one mix on a value already
+                        // computed.
+                        if self.material > 0.5 {
+                            let lit = self.material_ink.x * self.active * (1.0 - self.disabled)
+                            mark_color = vec4(mix(mark_color.rgb, self.material_glow_ink.rgb * self.material_ink.y, lit), mark_color.a)
+                        }
 
                         sdf.stroke(mark_color, self.size * /** check stroke frac 0.02..0.2 step 0.005 */ 0.09)
 
@@ -405,7 +554,7 @@ script_mod! {
                     self.border_radius * self.size * /** pill corner scale 0..0.3 step 0.01 */ 0.1
                 )
 
-                let color_fill = self.color
+                var color_fill = self.color
                     .mix(self.color_focus, self.focus)
                     .mix(self.color_active, self.active)
                     .mix(self.color_hover, self.hover)
@@ -419,6 +568,30 @@ script_mod! {
                     .mix(self.border_color_down, self.down)
                     .mix(self.border_color_error, self.error)
                     .mix(self.border_color_disabled, self.disabled)
+
+                // The knob's geometry, before the pill is filled, because
+                // under a material its shadow is laid INTO the pill's fill.
+                // While dragging the knob follows drag_pos instead of the
+                // active mix, and it grows while pressed.
+                let knob_t = mix(self.active, self.drag_pos, self.drag)
+                let mark_size = (sz_px.y * 0.5 - self.border_size - self.knob_inset) * (1.0 + self.pressed * self.knob_grow)
+                let mark_target_y = sz_px.y - sz_px.x + self.border_size + self.knob_inset
+                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * knob_t
+                let kc = vec2(offset_px.x + mark_pos_y, center_px.y)
+
+                // THE MATERIAL: the pill is a sunken track, the knob a raised
+                // dome travelling in it, throwing its shadow on the track.
+                // Nothing changes at 0.
+                let p = self.pos * self.rect_size
+                if self.material > 0.5 {
+                    let c = offset_px + sz_px * 0.5
+                    let h = max(sz_px * 0.5 - vec2(self.border_size, self.border_size), vec2(0.5, 0.5))
+                    // `sdf.box` draws a corner of TWICE its argument, clamped.
+                    let k = min(2.0 * self.border_radius * self.size * 0.1, min(h.x, h.y))
+                    color_fill = self.material_well(color_fill, p, sdf.shape, c, h, k, 0.0)
+                    let under = self.material_knob_under(p, kc, mark_size, self.active)
+                    color_fill = vec4(mix(color_fill.rgb, under.rgb / max(under.a, 0.0001), under.a), color_fill.a)
+                }
 
                 sdf.fill_keep(color_fill)
                 sdf.stroke(color_stroke, self.border_size)
@@ -436,28 +609,37 @@ script_mod! {
                     sdf.stroke(self.outline_color.mix(vec4(0., 0., 0., 0.), self.active), self.outline_size)
                 }
 
-                // Draw toggle mark. While dragging the knob follows drag_pos
-                // instead of the active mix, and it grows while pressed.
-                let knob_t = mix(self.active, self.drag_pos, self.drag)
-                let mark_size = (sz_px.y * 0.5 - self.border_size - self.knob_inset) * (1.0 + self.pressed * self.knob_grow)
-                let mark_target_y = sz_px.y - sz_px.x + self.border_size + self.knob_inset
-                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * knob_t
-
-                // Draw ring when off, filled circle when on
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
-                sdf.subtract()
-
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
-                sdf.blend(self.active)
-
                 let mark_color = self.mark_color
                     .mix(self.mark_color_hover, self.hover)
                     .mix(self.mark_color_active, self.active)
                     .mix(self.mark_color_error, self.error)
                     .mix(self.mark_color_disabled, self.disabled)
 
-                sdf.fill(mark_color)
+                if self.material > 0.5 {
+                    // One solid knob, the same substance as the housing,
+                    // carried toward the active ink as it turns on and lit
+                    // toward the glow ink under an illuminating material.
+                    var knob = self.color
+                        .mix(self.mark_color_active, self.active)
+                        .mix(self.mark_color_error, self.error)
+                        .mix(self.mark_color_disabled, self.disabled)
+                    let glow = self.material_inner.w
+                    if glow > 0.001 {
+                        knob = vec4(mix(knob.rgb, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.active * (1.0 - self.disabled)), knob.a)
+                    }
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.fill(self.material_knob(knob, p, kc, mark_size))
+                } else {
+                    // Draw ring when off, filled circle when on
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.circle(kc.x, kc.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
+                    sdf.subtract()
+
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.blend(self.active)
+
+                    sdf.fill(mark_color)
+                }
                 return sdf.result
             }
         }
