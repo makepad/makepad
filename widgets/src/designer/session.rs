@@ -52,11 +52,46 @@ struct Landing {
     select: Option<String>,
 }
 
-/// One palette entry: the type to insert and the body it comes with.
+/// One palette entry: the type to insert, the body it comes with, and the
+/// folder it is filed under.
 #[derive(Clone, Debug)]
 pub struct PaletteEntry {
     pub name: String,
     pub body: String,
+    pub group: &'static str,
+}
+
+/// The palette's folders, in the order they are shown.
+pub const PALETTE_GROUPS: &[&str] = &[
+    "Common",
+    "Layout",
+    "Text",
+    "Controls",
+    "Lists & tables",
+    "Navigation",
+    "Media & charts",
+    "Other",
+];
+
+/// The folder a widget type is filed under, from its name.
+fn palette_group(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&["view", "splitter", "dock", "grid", "masonry", "panel", "layout", "spacer", "filler", "hr", "vr", "modal", "dialog", "popover", "drawer", "card", "accordion", "fold"]) {
+        "Layout"
+    } else if has(&["label", "text", "markdown", "html", "code", "rich", "math", "badge", "tooltip", "tip"]) {
+        "Text"
+    } else if has(&["button", "check", "radio", "slider", "input", "dropdown", "drop_down", "toggle", "knob", "picker", "field", "combo", "switch", "stepper", "range", "fader", "color"]) {
+        "Controls"
+    } else if has(&["list", "table", "tree", "portal", "kanban", "data", "tile", "carousel", "wheel"]) {
+        "Lists & tables"
+    } else if has(&["nav", "menu", "tab", "bar", "breadcrumb", "pill", "stack", "page", "toolbar"]) {
+        "Navigation"
+    } else if has(&["image", "video", "icon", "svg", "chart", "spark", "gauge", "meter", "wave", "progress", "spinner", "canvas", "vector"]) {
+        "Media & charts"
+    } else {
+        "Other"
+    }
 }
 
 pub struct DesignSession {
@@ -487,7 +522,7 @@ pub fn palette(cx: &mut Cx) -> Vec<PaletteEntry> {
     ];
     let mut out: Vec<PaletteEntry> = CURATED
         .iter()
-        .map(|(name, body)| PaletteEntry { name: name.to_string(), body: body.to_string() })
+        .map(|(name, body)| PaletteEntry { name: name.to_string(), body: body.to_string(), group: "Common" })
         .collect();
     let mut rest: Vec<String> = cx.with_vm(|vm| {
         let widgets = vm.module(id!(widgets));
@@ -522,6 +557,9 @@ pub fn palette(cx: &mut Cx) -> Vec<PaletteEntry> {
         names
     });
     rest.sort();
-    out.extend(rest.into_iter().map(|name| PaletteEntry { name, body: "{}".to_string() }));
+    out.extend(rest.into_iter().map(|name| {
+        let group = palette_group(&name);
+        PaletteEntry { name, body: "{}".to_string(), group }
+    }));
     out
 }

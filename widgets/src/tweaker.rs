@@ -8874,6 +8874,12 @@ pub struct Tweaker {
     /// Palette rows drawn this frame: (button uid, entry index).
     #[rust]
     palette_visible: Vec<(u64, usize)>,
+    /// Palette folder heads drawn this frame: (button uid, group).
+    #[rust]
+    palette_heads: Vec<(u64, String)>,
+    /// The palette folders that are open; the rest show their head only.
+    #[rust]
+    palette_open: Vec<String>,
     #[rust]
     palette_filter: String,
     /// A tree row being dragged over: (target widget uid, where relative
@@ -11105,7 +11111,8 @@ impl Tweaker {
                             height: Fill
                             margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
                             drag_scrolling: false
-                            PaletteRow := PanelButton { width: Fill height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            PaletteHead := PanelButton { width: Fill height: 20 padding: Inset{left: 6 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 3 bottom: 1} text: "" draw_bg +: { color: fab.color_panel_sub } draw_text +: { text_style +: { font_size: 8.0 } } }
+                            PaletteRow := PanelButton { width: Fill height: 20 padding: Inset{left: 16 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
                         }
                         patch_text := PanelInput {
                             width: Fill
@@ -16046,6 +16053,21 @@ impl Tweaker {
                     if let Some(slot) = self.build_uids.iter().position(|u| *u == uid) {
                         if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                             self.build_button(cx, slot);
+                        }
+                    } else if let Some(group) = self
+                        .palette_heads
+                        .iter()
+                        .find(|(u, _)| *u == uid)
+                        .map(|(_, g)| g.clone())
+                    {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            match self.palette_open.iter().position(|g| *g == group) {
+                                Some(i) => {
+                                    self.palette_open.remove(i);
+                                }
+                                None => self.palette_open.push(group),
+                            }
+                            self.redraw_sidebar(cx);
                         }
                     } else if let Some(&(_, index)) =
                         self.palette_visible.iter().find(|(u, _)| *u == uid)
@@ -24151,35 +24173,69 @@ impl Tweaker {
         }
     }
 
-    /// The palette list: the entries that match the filter, one button each.
+    /// The palette list: folders in a fixed order, each a head row that
+    /// opens or closes it, with the entries that match the filter under it.
+    /// A filter opens every folder that has a match.
     fn draw_palette(&mut self, cx: &mut Cx2d, list_widget: &WidgetRef) {
         if self.palette_entries.is_empty() {
             self.palette_entries = crate::designer::palette(cx);
+            self.palette_open = vec!["Common".to_string()];
         }
         let filter = self.palette_filter.trim().to_lowercase();
-        let shown: Vec<usize> = self
-            .palette_entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
-            .map(|(i, _)| i)
-            .collect();
+        enum Row {
+            Head(&'static str, usize, bool),
+            Entry(usize),
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for group in crate::designer::PALETTE_GROUPS {
+            let members: Vec<usize> = self
+                .palette_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.group == *group)
+                .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
+                .map(|(i, _)| i)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let open = !filter.is_empty() || self.palette_open.iter().any(|g| g == group);
+            rows.push(Row::Head(group, members.len(), open));
+            if open {
+                rows.extend(members.into_iter().map(Row::Entry));
+            }
+        }
         let Some(mut list) = list_widget.borrow_mut::<PortalList>() else {
             return;
         };
-        list.set_item_range(cx, 0, shown.len());
+        list.set_item_range(cx, 0, rows.len());
         self.palette_visible.clear();
+        self.palette_heads.clear();
         while let Some(entry_id) = list.next_visible_item(cx) {
-            let Some(&index) = shown.get(entry_id) else {
+            let Some(row) = rows.get(entry_id) else {
                 continue;
             };
-            let item = list.item(cx, entry_id, live_id!(PaletteRow));
-            if item.is_empty() {
-                continue;
+            match row {
+                Row::Head(group, count, open) => {
+                    let item = list.item(cx, entry_id, live_id!(PaletteHead));
+                    if item.is_empty() {
+                        continue;
+                    }
+                    let mark = if *open { "\u{25be}" } else { "\u{25b8}" };
+                    item.set_text(cx, &format!("{mark} {group}  ({count})"));
+                    self.palette_heads.push((item.widget_uid().0, group.to_string()));
+                    item.draw_all(cx, &mut Scope::empty());
+                }
+                Row::Entry(index) => {
+                    let item = list.item(cx, entry_id, live_id!(PaletteRow));
+                    if item.is_empty() {
+                        continue;
+                    }
+                    item.set_text(cx, &self.palette_entries[*index].name);
+                    self.palette_visible.push((item.widget_uid().0, *index));
+                    item.draw_all(cx, &mut Scope::empty());
+                }
             }
-            item.set_text(cx, &self.palette_entries[index].name);
-            self.palette_visible.push((item.widget_uid().0, index));
-            item.draw_all(cx, &mut Scope::empty());
         }
     }
 
