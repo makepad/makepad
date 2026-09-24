@@ -914,6 +914,18 @@ impl Repository {
         &mut self,
         options: worktree::StatusOptions,
     ) -> Result<worktree::Status, GitError> {
+        self.status_cancellable(options, &|| false)
+    }
+
+    /// [`Repository::status_with_options`] that stops with
+    /// [`GitError::Cancelled`] as soon as `cancel` returns true (polled per
+    /// file and per folder). Read-only: the index is never refreshed or
+    /// written, like `git status` under `GIT_OPTIONAL_LOCKS=0`.
+    pub fn status_cancellable(
+        &mut self,
+        options: worktree::StatusOptions,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<worktree::Status, GitError> {
         self.ensure_object_sources()?;
         let index = self.read_index()?;
 
@@ -937,22 +949,26 @@ impl Repository {
         })() {
             Ok(head_files) => head_files,
             Err(GitError::ObjectNotFound(_)) => {
-                return worktree::compute_status_worktree_only_with_options(
+                return worktree::compute_status_worktree_only_cancellable(
                     &index,
                     &self.workdir,
                     options,
+                    cancel,
                 );
             }
             Err(e) => return Err(e),
         };
 
-        match worktree::compute_status_with_options(&head_files, &index, &self.workdir, options) {
+        if cancel() {
+            return Err(GitError::Cancelled);
+        }
+        match worktree::compute_status_cancellable(&head_files, &index, &self.workdir, options, cancel) {
             Ok(status) => Ok(status),
             // Some repos (e.g. partial clones) may miss HEAD objects locally.
             // Fall back to index/worktree comparison so modified/untracked files
             // still show up.
             Err(GitError::ObjectNotFound(_)) => {
-                worktree::compute_status_worktree_only_with_options(&index, &self.workdir, options)
+                worktree::compute_status_worktree_only_cancellable(&index, &self.workdir, options, cancel)
             }
             Err(e) => Err(e),
         }

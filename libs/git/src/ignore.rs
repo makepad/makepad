@@ -366,6 +366,16 @@ fn read_rules(path: &Path) -> Result<Vec<Rule>, IgnoreError> {
 
 impl GitIgnore {
     pub fn new(root: &Path) -> Result<Self, IgnoreError> {
+        Self::open(root, false)
+    }
+    /// [`GitIgnore::new`] plus the user's excludes file, as `git status`
+    /// applies it: `core.excludesFile` from the global or repository
+    /// config, else `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore`).
+    /// Its rules rank below `info/exclude` and every `.gitignore`.
+    pub fn with_user_excludes(root: &Path) -> Result<Self, IgnoreError> {
+        Self::open(root, true)
+    }
+    fn open(root: &Path, user_excludes: bool) -> Result<Self, IgnoreError> {
         let root = root.canonicalize()?;
         let mut at = root.clone();
         let repo = loop {
@@ -401,7 +411,12 @@ impl GitIgnore {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            excludes = read_rules(&repo.common_dir.join("info/exclude"))?;
+            if user_excludes {
+                if let Some(path) = user_excludes_file(&repo.common_dir) {
+                    excludes = read_rules(&path)?;
+                }
+            }
+            excludes.extend(read_rules(&repo.common_dir.join("info/exclude"))?);
             (repo.workdir, prefix)
         } else {
             (root, String::new())
@@ -486,6 +501,72 @@ impl GitIgnore {
         }
         Ok(ignored)
     }
+}
+
+/// Where the user's excludes file lives for the repository whose shared
+/// git directory is `common_dir`. Later config files win, as in git: the
+/// XDG config, `~/.gitconfig` (or `GIT_CONFIG_GLOBAL`), then the
+/// repository's own config. The system config is not read.
+fn user_excludes_file(common_dir: &Path) -> Option<PathBuf> {
+    let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
+    let xdg = env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    let mut configs = Vec::new();
+    match env("GIT_CONFIG_GLOBAL") {
+        Some(global) => configs.push(PathBuf::from(global)),
+        None => {
+            configs.extend(xdg.as_ref().map(|xdg| xdg.join("git/config")));
+            configs.extend(home.as_ref().map(|home| home.join(".gitconfig")));
+        }
+    }
+    configs.push(common_dir.join("config"));
+    let configured = configs
+        .iter()
+        .filter_map(|config| config_excludes_file(config))
+        .last();
+    match configured {
+        Some(value) => match (value.strip_prefix("~/"), &home) {
+            (Some(rest), Some(home)) => Some(home.join(rest)),
+            _ => Some(PathBuf::from(value)),
+        },
+        None => xdg.map(|xdg| xdg.join("git/ignore")),
+    }
+}
+
+/// The last `core.excludesFile` value in one config file, if any.
+fn config_excludes_file(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_core = false;
+    let mut found = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(section) = line.strip_prefix('[') {
+            let name = section
+                .split(|c: char| c == ']' || c.is_whitespace())
+                .next()
+                .unwrap_or("");
+            in_core = name.eq_ignore_ascii_case("core");
+            continue;
+        }
+        if !in_core {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("excludesfile") {
+            continue;
+        }
+        let value = value.trim();
+        let value = match value.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or(""),
+            None => value.split(['#', ';']).next().unwrap_or("").trim_end(),
+        };
+        found = (!value.is_empty()).then(|| value.to_string());
+    }
+    found
 }
 
 /// Read membership only, including unmerged stages, extended v3 flags and v4
@@ -574,3 +655,25 @@ pub fn index_paths(bytes: &[u8]) -> Result<BTreeSet<String>, IgnoreError> {
     Ok(paths)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_excludes_file_is_read_from_the_core_section() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "[user]\n\texcludesFile = /wrong\n[core]\n\tbare = false\n\
+             \texcludesFile = ~/first # comment\n[Core]\n\tEXCLUDESFILE = \"/quoted path\"\n",
+        )
+        .unwrap();
+        assert_eq!(config_excludes_file(&config).as_deref(), Some("/quoted path"));
+        std::fs::write(&config, "[core]\n\texcludesfile = ~/ignore ; note\n").unwrap();
+        assert_eq!(config_excludes_file(&config).as_deref(), Some("~/ignore"));
+        std::fs::write(&config, "[core]\n\tbare = false\n").unwrap();
+        assert_eq!(config_excludes_file(&config), None);
+    }
+}
