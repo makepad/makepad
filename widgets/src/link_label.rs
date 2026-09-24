@@ -263,7 +263,7 @@ impl Widget for LinkLabel {
         let actions = cx.capture_actions(|cx| {
             self.button.handle_event(cx, event, scope);
         });
-        if self.url.len() > 0 && self.clicked(&actions) {
+        if self.url.len() > 0 && self.clicked(&actions) && !cx.script_data.std.host_io_only() {
             cx.open_url(
                 &self.url,
                 if self.open_in_place {

@@ -778,6 +778,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_server),
         script_args_def!(options = NIL, events = NIL),
         move |vm, args| {
+            if vm.std_ref::<ScriptStd>().host_io_only() {
+                return script_err_io!(vm.trap(), "network access requires a host request");
+            }
             let options = script_value!(vm, args.options);
             let events = script_value!(vm, args.events);
             if !script_has_proto!(vm, options, net.HttpServerOptions)
@@ -831,6 +834,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_request),
         script_args_def!(request = NIL, events = NIL),
         move |vm, args| {
+            if vm.std_ref::<ScriptStd>().host_io_only() {
+                return script_err_io!(vm.trap(), "network access requires a host request");
+            }
             let request = script_value!(vm, args.request);
             let events = script_value!(vm, args.events);
             if !script_has_proto!(vm, request, net.HttpRequest)
@@ -1089,6 +1095,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(web_socket),
         script_args_def!(request = NIL, events = NIL),
         move |vm, args| {
+            if vm.std_ref::<ScriptStd>().host_io_only() {
+                return script_err_io!(vm.trap(), "network access requires a host request");
+            }
             let request = script_value!(vm, args.request);
             let events = script_value!(vm, args.events);
 
@@ -1132,6 +1141,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(socket_stream),
         script_args_def!(options = NIL),
         move |vm, args| {
+            if vm.std_ref::<ScriptStd>().host_io_only() {
+                return script_err_io!(vm.trap(), "network access requires a host request");
+            }
             let options = script_value!(vm, args.options);
             if !script_has_proto!(vm, options, net.SocketStreamOptions) {
                 return script_err_type_mismatch!(vm.trap(), "invalid socket_stream arg type");
