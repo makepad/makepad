@@ -25,6 +25,30 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn install(cx: &mut Cx) {
     cx.tweak_callback = Some(callback);
+    cx.design_preview_callback = Some(design_preview);
+}
+
+/// The designer's preview of a story file, without the app-wide live edit:
+/// the file's override is installed, the evaluated record dropped, and the
+/// canvas rebuilt, which re-runs that one file. Files outside the stories
+/// (a widget's own source) are left to the platform's live edit.
+fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), String>> {
+    let normalized = file.replace('\\', "/");
+    if !normalized.contains("/apps/storybook/src/stories/") {
+        return None;
+    }
+    if let Err(err) = cx.install_live_edit_text(file, text) {
+        return Some(Err(err));
+    }
+    crate::stories::forget_evaluated(cx);
+    let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
+    let canvas = root.widget(cx, ids!(canvas));
+    cx.live_edit_capture_begin();
+    if let Some(mut canvas) = canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
+        canvas.rebuild(cx);
+    }
+    cx.live_edit_capture_end();
+    Some(Ok(()))
 }
 
 /// The app records the story it shows so `story_state` can report it.

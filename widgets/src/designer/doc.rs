@@ -31,6 +31,9 @@ pub enum PreviewOutcome {
     /// The text equals the base and the file had no overrides: nothing was
     /// queued and no live edit will follow.
     Unchanged,
+    /// The app's own preview hook installed the text and rebuilt the tree
+    /// on the spot; no live edit follows, the caller lands now.
+    Landed,
     /// The gate refused the text; nothing was queued.
     Refused(String),
 }
@@ -169,6 +172,13 @@ impl DesignDoc {
     /// gate first; when it equals the base, the file's overrides are dropped
     /// instead, so the compiled-in code runs again.
     pub fn preview(&self, cx: &mut Cx) -> PreviewOutcome {
+        if let Some(hook) = cx.design_preview_callback {
+            match hook(cx, &self.file, &self.text) {
+                Some(Ok(())) => return PreviewOutcome::Landed,
+                Some(Err(err)) => return PreviewOutcome::Refused(err),
+                None => {}
+            }
+        }
         if self.text == self.base {
             return if cx.revert_live_edit_file(&self.file) > 0 {
                 PreviewOutcome::Reverted

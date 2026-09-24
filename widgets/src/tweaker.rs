@@ -11408,6 +11408,17 @@ impl Tweaker {
     /// AI can do it in the source where it belongs.
     fn request_rename(&mut self, cx: &mut Cx, to: &str) {
         let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        // With a design session open the rename is a source edit, made now.
+        if self.design.is_some() {
+            let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+            if !widget.is_empty() {
+                let name = to.trim();
+                let name = (!name.is_empty()).then_some(name);
+                let result = self.design.as_mut().map(|s| s.rename(cx, &widget, name));
+                self.design_after(cx, result);
+                return;
+            }
+        }
         let reference = self.sel_ref(cx, sel.uid);
         let from = tree_name_of(cx, sel.uid);
         let renames = {
@@ -23726,6 +23737,12 @@ impl Tweaker {
                 s.undo_open = false;
                 drop(s);
                 self.design_msg.clear();
+                // The app's own hook may have rebuilt the tree already (the
+                // storybook re-runs one story file): land now, no live edit
+                // is coming.
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
                 self.redraw_sidebar(cx);
                 self.redraw_overlay(cx);
             }

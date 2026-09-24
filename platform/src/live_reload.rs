@@ -330,6 +330,61 @@ impl Cx {
         Ok(())
     }
 
+    /// Install one file's text as its blocks' overrides, the way a live edit
+    /// would, without queueing a live edit: for a host that re-runs the
+    /// file's templates itself. The same gate applies (block count,
+    /// placeholder count, a parse of every changed block). Returns whether
+    /// the overrides changed; text equal to the compiled code removes them.
+    pub fn install_live_edit_text(&mut self, file_name: &str, content: &str) -> Result<bool, String> {
+        let file_name = normalize_path_string(Path::new(file_name));
+        let Some(script_vm) = self.script_vm.as_mut() else {
+            return Err("no script VM".to_string());
+        };
+        let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
+        if compiled_sites.is_empty() {
+            return Err(format!("{} has no compiled script_mod! block", file_name));
+        }
+        let extracted = extract_script_mods_from_rust_file(&file_name, content)?;
+        if extracted.len() != compiled_sites.len() {
+            return Err(format!(
+                "block count changed: runtime has {}, file has {}",
+                compiled_sites.len(),
+                extracted.len()
+            ));
+        }
+        let current = self.script_data.live_reload.script_mod_overrides.borrow().clone();
+        let mut next = current.clone();
+        for (site, extracted) in compiled_sites.iter().zip(extracted.iter()) {
+            if extracted.rust_value_count != site.values.len() {
+                return Err(format!(
+                    "placeholder count changed at {}: expected {} #(…) values, found {}",
+                    format_script_mod_site(site),
+                    site.values.len(),
+                    extracted.rust_value_count
+                ));
+            }
+            let effective = current.get(&site.key).map(String::as_str).unwrap_or(site.original_code.as_str());
+            if extracted.code != effective
+                && extracted.code != site.original_code
+                && !validate_extracted_script_mod(script_vm, site, extracted)
+            {
+                return Err(format!("{}: the block does not parse", format_script_mod_site(site)));
+            }
+        }
+        for (site, extracted) in compiled_sites.into_iter().zip(extracted.into_iter()) {
+            if extracted.code == site.original_code {
+                next.remove(&site.key);
+            } else {
+                next.insert(site.key, extracted.code);
+            }
+        }
+        if next == current {
+            return Ok(false);
+        }
+        *self.script_data.live_reload.script_mod_overrides.borrow_mut() = next;
+        Ok(true)
+    }
+
     /// Resolve the path of the file a compiled block came from, as the
     /// runtime knows it: the first candidate that exists on disk.
     pub fn resolve_script_mod_path(script_mod: &ScriptMod) -> Option<String> {

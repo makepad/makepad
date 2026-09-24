@@ -62,6 +62,9 @@ pub struct PaletteEntry {
 pub struct DesignSession {
     doc: DesignDoc,
     landing: Option<Landing>,
+    /// The last preview landed on the spot (the app's hook rebuilt the tree
+    /// itself); the host lands it without waiting for a live edit.
+    sync_landed: bool,
     /// One line for the panel: what is under design and what last happened.
     pub status: String,
 }
@@ -71,7 +74,7 @@ impl DesignSession {
     pub fn open(cx: &mut Cx, widget: &WidgetRef) -> Result<Self, String> {
         let span = locate_widget(cx, widget, None)?;
         let doc = DesignDoc::from_text(&span.file, span.text);
-        let mut session = Self { doc, landing: None, status: String::new() };
+        let mut session = Self { doc, landing: None, sync_landed: false, status: String::new() };
         session.status = session.status_line();
         Ok(session)
     }
@@ -87,6 +90,27 @@ impl DesignSession {
     /// Whether a preview has been queued and its reload has not landed yet.
     pub fn is_landing(&self) -> bool {
         self.landing.is_some()
+    }
+
+    /// Whether the last preview already rebuilt the tree, so `land` is due
+    /// now rather than on the next live edit. Reading it clears it.
+    pub fn take_sync_landing(&mut self) -> bool {
+        std::mem::take(&mut self.sync_landed)
+    }
+
+    /// Give the selection a name, change it, or drop it (`None`). Returns
+    /// once the preview is queued; the renamed widget is selected by its
+    /// new path when it lands.
+    pub fn rename(&mut self, cx: &mut Cx, widget: &WidgetRef, name: Option<&str>) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let parent = parent_path(&path_of(cx, widget));
+        DesignOp::Rename { node: span, name: name.map(|n| n.to_string()) }.apply(&mut self.doc)?;
+        let select = match name {
+            Some(name) if !parent.is_empty() => format!("{}.{}", parent, name),
+            Some(name) => name.to_string(),
+            None => parent,
+        };
+        self.preview(cx, Some(select))
     }
 
     /// The panel's status line: the file, the edit count, the dirty mark.
@@ -335,6 +359,13 @@ impl DesignSession {
                 cx.redraw_all();
                 Ok(())
             }
+            PreviewOutcome::Landed => {
+                self.landing = Some(Landing { select });
+                self.sync_landed = true;
+                self.status = self.status_line();
+                cx.redraw_all();
+                Ok(())
+            }
         }
     }
 
@@ -350,9 +381,17 @@ impl DesignSession {
             let rolled_back = self.doc.undo();
             self.status = format!("rolled back: {}", mine[0]);
             if rolled_back {
-                if let PreviewOutcome::Queued | PreviewOutcome::Reverted = self.doc.preview(cx) {
-                    self.landing = Some(Landing { select: None });
-                    cx.redraw_all();
+                match self.doc.preview(cx) {
+                    PreviewOutcome::Queued | PreviewOutcome::Reverted => {
+                        self.landing = Some(Landing { select: None });
+                        cx.redraw_all();
+                    }
+                    PreviewOutcome::Landed => {
+                        // Rebuilt on the spot; nothing further to wait for.
+                        cx.take_live_edit_errors();
+                        cx.redraw_all();
+                    }
+                    _ => {}
                 }
             }
             return Landed { errors: mine, select: None };

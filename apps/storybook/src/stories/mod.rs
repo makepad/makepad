@@ -375,6 +375,14 @@ fn evaluate(vm: &mut ScriptVm, index: usize) {
     (modules()[index].script_mod)(vm);
 }
 
+/// Forget which files were evaluated, without touching the module: the next
+/// page a canvas asks for evaluates its file again, on top of what is there.
+/// For a designer preview of one story file: its override is installed,
+/// the record dropped, and the canvas rebuilt, and no other file runs.
+pub fn forget_evaluated(cx: &mut Cx) {
+    cx.global::<Evaluated>().flags.clear();
+}
+
 /// How many story files this context has evaluated.
 pub fn evaluated_count(cx: &mut Cx) -> usize {
     cx.global::<Evaluated>().flags.iter().filter(|on| **on).count()

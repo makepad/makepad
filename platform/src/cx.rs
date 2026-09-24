@@ -263,6 +263,13 @@ pub struct Cx {
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
     pub tweak_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
+    /// A design preview hook: an app that can re-run one file's templates on
+    /// its own (the storybook re-evaluates one story file) registers it, so a
+    /// designer preview of that file skips the app-wide live edit. Called
+    /// with the file and its edited text; `None` leaves the preview to the
+    /// platform's live edit, `Some(Ok)` says the text is installed and the
+    /// tree rebuilt, `Some(Err)` that the text was refused.
+    pub design_preview_callback: Option<fn(&mut Cx, &str, &str) -> Option<Result<(), String>>>,
     /// The AI chat overlay's remote dispatcher (`/ai`, `/ai/transcript`):
     /// registered by the aichat crate when an app links it, the same way
     /// the widgets crate registers the tweaker's. `(op, params) -> JSON`.
@@ -1027,6 +1034,7 @@ impl Cx {
             widget_snapshot_callback: None,
             cancel_scope_resolver: None,
             tweak_callback: None,
+            design_preview_callback: None,
             ai_callback: None,
             net,
 
