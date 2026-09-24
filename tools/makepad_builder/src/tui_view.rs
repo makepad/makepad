@@ -84,9 +84,9 @@ thread_local! {
 
 /// Setup detail (stages, compiler output summaries, errors) goes to this file.
 pub(super) fn set_log(path: PathBuf) {
-    // One session's worth: start over when an older log grew large.
+    // Start the log over (truncate, never delete) once it grew large.
     if fs::metadata(&path).is_ok_and(|m| m.len() > 4 * 1024 * 1024) {
-        let _ = fs::remove_file(&path);
+        let _ = fs::File::create(&path);
     }
     LOG_PATH.with(|log| *log.borrow_mut() = Some(path));
 }

@@ -73,12 +73,23 @@ pub fn repair(root: &Path) -> Result<(), String> {
         if !id.is_empty() && fs::read_to_string(owner).is_ok_and(|s| s == id) && fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             let target = root.join("scope");
             if fs::read_link(&path).ok().as_ref() != Some(&target) {
-                fs::remove_file(&path).map_err(|e| e.to_string())?;
-                std::os::unix::fs::symlink(target, path).map_err(|e| e.to_string())?;
+                replace_link(&target, &path)?;
             }
         }
     }
     Ok(())
+}
+
+/// Point `link` at `target`: a new link beside it renamed over the old one,
+/// so nothing is deleted and the command never disappears in between.
+#[cfg(unix)]
+fn replace_link(target: &Path, link: &Path) -> Result<(), String> {
+    let next = link.with_extension("makepad-next");
+    if fs::symlink_metadata(&next).is_ok() {
+        return Err(format!("{} is in the way; remove it to set up the scope command", next.display()));
+    }
+    std::os::unix::fs::symlink(target, &next).map_err(|e| e.to_string())?;
+    fs::rename(&next, link).map_err(|e| e.to_string())
 }
 
 #[cfg(unix)]
@@ -96,13 +107,12 @@ pub fn install(root: &Path) -> Result<(), String> {
         if !owner.is_file() || !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err("An existing ~/.local/bin/scope was not created by Builder; it was left unchanged".into());
         }
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
-    fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::create_dir_all(path.parent().ok_or("Missing command folder")?).map_err(|e| e.to_string())?;
     let id = format!("{:x}-{:x}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
     fs::write(root.join(".scope-command-id"), &id).map_err(|e| e.to_string())?;
     fs::write(owner, &id).map_err(|e| e.to_string())?;
-    std::os::unix::fs::symlink(root.join("scope"), &path).map_err(|e| e.to_string())?;
+    replace_link(&root.join("scope"), &path)?;
     if !env::var_os("PATH").is_some_and(|v| env::split_paths(&v).any(|p| Some(p.as_path()) == path.parent())) {
         let home = std::path::PathBuf::from(env::var_os("HOME").ok_or("Missing home directory")?);
         let shell = env::var("SHELL").unwrap_or_default();

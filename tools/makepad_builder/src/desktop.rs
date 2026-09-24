@@ -42,10 +42,12 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     }
 
     let stage = root.join(format!(".{name}.app.next"));
-    if stage.exists() { fs::remove_dir_all(&stage)?; }
-    struct Stage(PathBuf);
-    impl Drop for Stage { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
-    let _stage = Stage(stage.clone());
+    // A bundle staged by an interrupted run is rebuilt from scratch.
+    crate::remove_inside(&root, &stage).map_err(std::io::Error::other)?;
+    // Whatever happens below, the staging copy does not outlive this call.
+    struct Stage(PathBuf, PathBuf);
+    impl Drop for Stage { fn drop(&mut self) { let _ = crate::remove_inside(&self.1, &self.0); } }
+    let _stage = Stage(stage.clone(), root.clone());
     let macos = stage.join("Contents/MacOS");
     let resources = stage.join("Contents/Resources");
     fs::create_dir_all(&macos)?;
@@ -95,13 +97,14 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     fs::write(stage.join("Contents/PkgInfo"), b"APPL????")?;
     fs::write(resources.join("build-receipt"), stamp)?;
     let previous = root.join(format!(".{name}.app.previous"));
-    if previous.exists() { fs::remove_dir_all(&previous)?; }
+    crate::remove_inside(&root, &previous).map_err(std::io::Error::other)?;
     let existed = bundle.exists();
     if existed { fs::rename(&bundle, &previous)?; }
     if let Err(error) = fs::rename(&stage, &bundle) {
         if existed { let _ = fs::rename(&previous, &bundle); }
         return Err(error);
     }
-    if existed { fs::remove_dir_all(previous)?; }
+    // The old bundle was only kept to roll back a failed swap.
+    if existed { crate::remove_inside(&root, &previous).map_err(std::io::Error::other)?; }
     Ok(executable)
 }

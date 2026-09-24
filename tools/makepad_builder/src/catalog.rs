@@ -416,7 +416,9 @@ pub fn checkout(
             fs::rename(&stage, &checkout).map_err(|e| e.to_string())?;
             fs::write(receipt_path(&dest, repo), receipt(repo)).map_err(|e| e.to_string())
         })();
-        if result.is_err() { let _ = fs::remove_dir_all(&stage); }
+        // The staging folder was created above by this process; a failed
+        // checkout leaves nothing behind and the previous sources untouched.
+        if result.is_err() { let _ = crate::remove_inside(root, &stage); }
         result?;
     }
     if !release.source(root).join("Cargo.toml").is_file() { return Err("Release is missing its Cargo workspace".into()); }
@@ -447,7 +449,7 @@ pub fn prune_snapshots(root: &Path, keep: &[Release]) -> Result<Vec<String>, Str
         if !snapshot.is_dir() || kept.contains(&snapshot) || !snapshot_unchanged(&snapshot)? {
             continue;
         }
-        fs::remove_dir_all(&snapshot).map_err(|e| format!("Remove {}: {e}", snapshot.display()))?;
+        crate::remove_inside(root, &snapshot)?;
         removed.push(label);
     }
     Ok(removed)

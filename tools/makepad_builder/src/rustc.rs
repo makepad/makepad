@@ -67,8 +67,11 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     crate::progress::package("Rust downloads", "cargo", 3, 3);
     let cargo_path = http::cached_file(cache, &cargo.1, &file_name(&cargo.1), Some(&cargo.2))?;
 
+    // Unpacked and verified beside the destination, then moved into place.
+    // An unpack left by an interrupted run starts over from the cached archives.
     let tmp = dest.with_extension("unpack");
-    let _ = fs::remove_dir_all(&tmp);
+    let toolchains = dest.parent().ok_or("Rust destination has no parent")?;
+    crate::remove_inside(toolchains, &tmp)?;
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
 
     crate::progress::package("Install Rust", "rustc", 1, 3);
@@ -87,7 +90,7 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     check_rustc(&staged, version)?;
     fs::write(staged.join(".toolchain-version"), stamp).map_err(|e| e.to_string())?;
     move_staged(&staged, dest)?;
-    let _ = fs::remove_dir_all(&tmp);
+    let _ = crate::remove_inside(toolchains, &tmp);
     if !dest
         .join("bin")
         .join(crate::runtime::exe("rustc"))
@@ -122,7 +125,9 @@ pub fn retry_staged(dest: &Path, version: &str) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     move_staged(&staged, dest)?;
-    let _ = fs::remove_dir_all(dest.with_extension("unpack"));
+    if let Some(toolchains) = dest.parent() {
+        let _ = crate::remove_inside(toolchains, &dest.with_extension("unpack"));
+    }
     crate::progress::stage("Ready", "Rust installed and verified", 1.0);
     Ok(())
 }

@@ -62,12 +62,14 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
         let file = rel.rsplit('/').next().unwrap_or(name);
         crate::setup_note!("cuda: {name}");
         let zip = http::cached_file(cache, &url, file, sha)?;
+        // Unpacked beside the toolkit, then merged in; a leftover from an
+        // interrupted run is unpacked again from scratch.
         let tmp = dest.join(format!(".unpack-{name}"));
-        let _ = fs::remove_dir_all(&tmp);
+        crate::remove_inside(dest, &tmp)?;
         extract::unzip_file(&zip, &tmp, None)?;
         let inner = extract::single_child_dir(&tmp).unwrap_or(tmp.clone());
         extract::merge_dir(&inner, dest)?;
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = crate::remove_inside(dest, &tmp);
     }
     if !dest.join("bin").join("nvcc.exe").is_file() {
         return Err("nvcc.exe missing after cuda extract".into());

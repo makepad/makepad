@@ -136,7 +136,6 @@ pub fn cached_file(
     let dest = cache.join(safe_name(file_name));
     let part = sidecar(&dest, ".part");
     let ok = sidecar(&dest, ".ok");
-    let _ = fs::remove_file(&part);
 
     progress::stage("Verify cache", file_name, 0.0);
     if dest.is_file() && file_is_complete(&dest, &ok, sha256_hex)? {
@@ -147,9 +146,8 @@ pub fn cached_file(
         return Ok(dest);
     }
     if dest.is_file() {
+        // Replaced by the download below (write_atomic renames over it).
         crate::setup_note!("  incomplete or corrupt {file_name}, redownloading");
-        let _ = fs::remove_file(&dest);
-        let _ = fs::remove_file(&ok);
     }
 
     crate::setup_note!("  download {file_name}");
@@ -296,7 +294,7 @@ fn write_atomic(
     body: &[u8],
     sha256_hex: Option<&str>,
 ) -> Result<(), String> {
-    let _ = fs::remove_file(part);
+    // A partial file from an earlier attempt is truncated, not deleted.
     {
         let mut f = OpenOptions::new()
             .create(true)
@@ -311,11 +309,10 @@ fn write_atomic(
         .map(|s| s.to_string())
         .unwrap_or_else(|| sha256::sha256_hex(body));
     let stamp = format!("size={}\nsha256={sha}\n", body.len());
+    // On failure the .part file stays and the next attempt truncates it.
+    fs::rename(part, dest).map_err(|e| e.to_string())?;
+    // The stamp follows the file it describes; a hash check backs it anyway.
     fs::write(ok, stamp).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(part, dest) {
-        let _ = fs::remove_file(part);
-        return Err(e.to_string());
-    }
     Ok(())
 }
 

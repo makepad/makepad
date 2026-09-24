@@ -76,13 +76,41 @@ pub fn validate_install_root(root: &Path) -> Result<PathBuf, String> {
     let home_var = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .ok_or("Missing home directory")?;
     let home = canonical_install_path(Path::new(&home_var))?;
-    if root.parent().is_none() || root == home {
+    // The home folder, any folder above it and the filesystem root hold
+    // other people's files; Builder deletes inside its root (see `remove_inside`).
+    if root.parent().is_none() || home.starts_with(&root) {
         return Err(format!(
-            "Builder needs a dedicated installation subfolder; {} is the home folder or filesystem root",
+            "Builder needs a dedicated installation subfolder; {} is the home folder, a folder above it or the filesystem root",
             root.display()
         ));
     }
     Ok(root)
+}
+
+/// The one way the Builder deletes files and folders it made. `path` must lie
+/// strictly inside `root`, and `root` must be an acceptable installation
+/// folder (never the filesystem root, the home folder or a folder above it).
+/// Both are compared after resolving links; the last component of `path` is
+/// not followed, so a link is removed, never what it points to. A path
+/// that does not exist is already gone.
+pub fn remove_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let root = validate_install_root(root)?;
+    // Nothing can be inside a root that does not exist yet.
+    let Ok(root) = fs::canonicalize(&root) else { return Ok(()) };
+    let refuse = || format!("Refusing to delete {}: it is not inside {}", path.display(), root.display());
+    let name = path.file_name().ok_or_else(refuse)?;
+    let Ok(parent) = fs::canonicalize(path.parent().ok_or_else(refuse)?) else { return Ok(()) };
+    let target = parent.join(name);
+    if target == root || !target.starts_with(&root) {
+        return Err(refuse());
+    }
+    let result = match fs::symlink_metadata(&target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => Err(error),
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(&target),
+        Ok(_) => fs::remove_file(&target),
+    };
+    result.map_err(|e| format!("Delete {}: {e}", target.display()))
 }
 
 fn canonical_install_path(path: &Path) -> Result<PathBuf, String> {
@@ -140,6 +168,8 @@ pub fn run_install(
 }
 
 fn run_install_inner(opts: &InstallOpts) -> Result<Vec<AppInfo>, String> {
+    // The legacy CLI takes any --root; refuse the home folder and above.
+    validate_install_root(&opts.root)?;
     fs::create_dir_all(&opts.root).map_err(|e| e.to_string())?;
     let tmp = tmp_dir(&opts.root)?;
     let _ = tmp;

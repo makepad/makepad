@@ -65,13 +65,8 @@ pub fn record_rust_choice(root: &Path, choice: &RustChoice) -> Result<(), String
     if cfg!(windows) { return Err("Windows always uses the private Rust toolchain".into()); }
     let file = root.join("selected-rust");
     let text = match choice {
-        RustChoice::Undecided => {
-            return match fs::remove_file(&file) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(format!("Clear selected Rust: {error}")),
-            };
-        }
+        // "Not asked yet" is the absence of a choice; nothing records it.
+        RustChoice::Undecided => return Err("An undecided Rust choice is not recorded".into()),
         RustChoice::Private => "private".to_owned(),
         RustChoice::External(sysroot) => sysroot.clone(),
     };
@@ -614,17 +609,22 @@ fn pin_bootstrap(script: &Path, pins: &[(&str, &str)]) -> Result<bool, String> {
 
 fn replace_file(next: &Path, destination: &Path) -> Result<(), String> {
     // Windows cannot replace an existing file with std::fs::rename.
+    // A running executable can be renamed but not overwritten, so the old
+    // file moves aside first (replacing any older .previous) and the new one
+    // takes its name.
     let backup = destination.with_extension("previous");
     let existed = destination.is_file();
     if existed {
-        if backup.exists() { fs::remove_file(&backup).map_err(|e| e.to_string())?; }
         fs::rename(destination, &backup).map_err(|e| e.to_string())?;
     }
     if let Err(error) = fs::rename(next, destination) {
         if existed { let _ = fs::rename(&backup, destination); }
         return Err(error.to_string());
     }
-    if existed { let _ = fs::remove_file(backup); }
+    // Still running programs keep their .previous file until the next update.
+    if let (true, Some(folder)) = (existed, destination.parent()) {
+        let _ = crate::remove_inside(folder, &backup);
+    }
     Ok(())
 }
 /// Console applications launched for setup/build must not show a second
