@@ -24,8 +24,10 @@
 pub mod doc;
 pub mod locate;
 pub mod ops;
+pub mod session;
 pub mod text;
 
 pub use doc::{DesignDoc, Hunk, PreviewOutcome};
-pub use locate::{locate_widget, NodeSpan};
-pub use ops::{DesignOp, Placement};
+pub use locate::{locate_widget, widget_source_file, NodeSpan};
+pub use session::{palette, path_of, DesignSession, Landed, PaletteEntry, Place, Structural};
+pub use ops::{fresh_name, rust_safe_value, DesignOp, Placement};

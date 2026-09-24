@@ -28,6 +28,9 @@ pub enum PreviewOutcome {
     Queued,
     /// The text equals the base: overrides for the file were dropped instead.
     Reverted,
+    /// The text equals the base and the file had no overrides: nothing was
+    /// queued and no live edit will follow.
+    Unchanged,
     /// The gate refused the text; nothing was queued.
     Refused(String),
 }
@@ -160,8 +163,11 @@ impl DesignDoc {
     /// instead, so the compiled-in code runs again.
     pub fn preview(&self, cx: &mut Cx) -> PreviewOutcome {
         if self.text == self.base {
-            cx.revert_live_edit_file(&self.file);
-            return PreviewOutcome::Reverted;
+            return if cx.revert_live_edit_file(&self.file) > 0 {
+                PreviewOutcome::Reverted
+            } else {
+                PreviewOutcome::Unchanged
+            };
         }
         if let Err(err) = self.check(cx) {
             return PreviewOutcome::Refused(err);

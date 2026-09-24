@@ -196,3 +196,27 @@ fn brace_from(text: &str, from: usize, limit: usize) -> Option<usize> {
     }
     None
 }
+
+/// The resolved path of the file `widget` was declared in, without locating
+/// the literal.
+pub fn widget_source_file(cx: &mut Cx, widget: &WidgetRef) -> Result<String, String> {
+    let source = widget.script_source();
+    if source == ScriptObject::ZERO {
+        return Err("the widget has no script source".to_string());
+    }
+    cx.with_vm(|vm| {
+        let made_at = vm.bx.heap.object_data(source).made_at;
+        if made_at.is_unknown() {
+            return Err("the widget's source was built by Rust, not by a literal".to_string());
+        }
+        let bodies = vm.bx.code.bodies.borrow();
+        let Some(body) = bodies.get(made_at.body as usize) else {
+            return Err("the widget's source body is gone".to_string());
+        };
+        let ScriptSource::Mod(script_mod) = &body.source else {
+            return Err("the widget's source is not a script_mod! block".to_string());
+        };
+        Cx::resolve_script_mod_path(script_mod)
+            .ok_or_else(|| format!("the source file {} is not on disk here", script_mod.file))
+    })
+}

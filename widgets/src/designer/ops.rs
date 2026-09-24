@@ -203,31 +203,100 @@ impl DesignOp {
                 if !is_path(key) {
                     return Err(format!("{:?} is not a property name", key));
                 }
+                let value = rust_safe_value(value.trim());
+                // A dotted key descends through property objects, creating
+                // the missing ones with `+:` so their inherited fields stay.
+                let mut target = node.node.clone();
+                let mut segments: Vec<&str> = key.split('.').collect();
+                let leaf = segments.pop().unwrap_or(key);
                 let text = doc.text();
-                let value = value.trim();
-                if let Some(prop) = text::find_property(text, &node.node, key) {
-                    return doc.edit(prop.value.start, prop.value.end, value, &label);
-                }
-                let close = node.node.close;
-                let line = format!("{}{}{}", key, if *merge { " +: " } else { ": " }, value);
-                if !text[node.node.open..close].contains('\n') {
-                    // A one-line node stays one line: `{a: 1}` → `{a: 1 b: 2}`.
-                    if text[node.node.open + 1..close].trim().is_empty() {
-                        let at = node.node.open + 1;
-                        doc.edit(at, at, &line, &label)
-                    } else {
-                        let at = trim_end_offset(text, close);
-                        doc.edit(at, at, &format!(" {}", line), &label)
+                let mut segments = segments.into_iter().peekable();
+                while let Some(segment) = segments.next() {
+                    let brace = text::find_property(text, &target, segment)
+                        .and_then(|prop| text::value_brace(text, &prop.value));
+                    match brace {
+                        Some(brace) => {
+                            target = text::node_at_brace(text, brace)
+                                .ok_or_else(|| format!("{}: unmatched braces", segment))?;
+                        }
+                        None => {
+                            // The rest of the path becomes one nested literal.
+                            let mut inner = format!("{}: {}", leaf, value);
+                            for outer in segments.rev() {
+                                inner = format!("{} +: {{{}}}", outer, inner);
+                            }
+                            let line = format!("{} +: {{{}}}", segment, inner);
+                            return add_property(doc, &target, &line, &label);
+                        }
                     }
-                } else {
-                    // A line of its own before the closing brace.
-                    let inner = format!("{}{}", text::indent_at(text, node.node.start), INDENT_STEP);
-                    let at = text::line_start(text, close);
-                    doc.edit(at, at, &format!("{}{}\n", inner, line), &label)
                 }
+                if let Some(prop) = text::find_property(text, &target, leaf) {
+                    return doc.edit(prop.value.start, prop.value.end, &value, &label);
+                }
+                let line = format!("{}{}{}", leaf, if *merge { " +: " } else { ": " }, value);
+                add_property(doc, &target, &line, &label)
             }
         }
     }
+}
+
+/// Add a `key: value` line to a node: a one-line node stays one line
+/// (`{a: 1}` → `{a: 1 b: 2}`), a multi-line node gets a line of its own
+/// before the closing brace.
+fn add_property(doc: &mut DesignDoc, node: &Node, line: &str, label: &str) -> Result<Hunk, String> {
+    let text = doc.text();
+    let close = node.close;
+    if !text[node.open..close].contains('\n') {
+        if text[node.open + 1..close].trim().is_empty() {
+            let at = node.open + 1;
+            doc.edit(at, at, line, label)
+        } else {
+            let at = trim_end_offset(text, close);
+            doc.edit(at, at, &format!(" {}", line), label)
+        }
+    } else {
+        let inner = format!("{}{}", text::indent_at(text, node.start), INDENT_STEP);
+        let at = text::line_start(text, close);
+        doc.edit(at, at, &format!("{}{}\n", inner, line), label)
+    }
+}
+
+/// A value spelled so the Rust macro tokenizes it: a hex colour whose digits
+/// put a digit before an `e` (`#1e1e2e`) reads as a float exponent in Rust
+/// and takes the `#x` escape (`#x1e1e2e`).
+pub fn rust_safe_value(value: &str) -> String {
+    let Some(hex) = value.strip_prefix('#') else {
+        return value.to_string();
+    };
+    let is_hex = !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    let exponent = hex
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0].is_ascii_digit() && (w[1] == b'e' || w[1] == b'E'));
+    if is_hex && exponent {
+        format!("#x{}", hex)
+    } else {
+        value.to_string()
+    }
+}
+
+/// `base_1`, `base_2`, ...: the first not used as a `:=` name in `text`. The
+/// name an inserted widget gets, so it can be addressed by path.
+pub fn fresh_name(text: &str, base: &str) -> String {
+    let base: String = base
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    let base = base.trim_matches('_');
+    let base = if base.is_empty() { "widget" } else { base };
+    for n in 1..10000 {
+        let candidate = format!("{}_{}", base, n);
+        if !text.contains(&format!("{} :=", candidate)) && !text.contains(&format!("{}:=", candidate))
+        {
+            return candidate;
+        }
+    }
+    format!("{}_x", base)
 }
 
 /// The node's span must come from the document's current text.

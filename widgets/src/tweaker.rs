@@ -7924,6 +7924,9 @@ enum PanelTab {
     /// the rules that stand over the whole app. The app-wide field is why
     /// this tab has to work with nothing selected.
     Spec,
+    /// The builder: insert, move, delete and wrap widgets by editing the
+    /// source file, previewed through hot reload. See [`crate::designer`].
+    Build,
 }
 
 /// One built-in thing the Theme tab's picker offers: a theme the library is
@@ -8351,6 +8354,8 @@ struct VisRow {
     item: WidgetRef,
 }
 
+use crate::designer::{DesignSession, PaletteEntry, Place as DesignPlace};
+
 #[derive(Script, Widget)]
 pub struct Tweaker {
     #[uid]
@@ -8640,7 +8645,7 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 5],
+    tab_uids: [u64; 6],
     /// The Theme tab's picker and its three commands, captured at draw. A
     /// click arrives as a uid and nothing else; 0 is no widget, so a control
     /// that is not on screen routes nothing.
@@ -8833,6 +8838,41 @@ pub struct Tweaker {
     /// Open the readable default levels once per tree refresh.
     #[rust]
     tree_open_defaults_pending: bool,
+    /// The Build tab's design session, when one is open.
+    #[rust]
+    design: Option<DesignSession>,
+    /// Where the next palette insert goes, relative to the selection.
+    #[rust]
+    design_place: DesignPlace,
+    /// What the Build tab last answered, shown beside the session's line.
+    #[rust]
+    design_msg: String,
+    /// The path to select once a landed preview has been drawn, and the
+    /// frames left to find it in.
+    #[rust]
+    design_reselect: Option<(String, u32)>,
+    /// The last ledger step written into the source: (path, prop, value),
+    /// so a step is written once.
+    #[rust]
+    design_baked: Option<(String, String, String)>,
+    /// The hunk count the patch pane shows.
+    #[rust]
+    design_patch_shown: usize,
+    /// The Build tab's buttons, captured at build; indexed by `BUILD_*`.
+    #[rust]
+    build_uids: [u64; 14],
+    #[rust]
+    palette_list_uid: u64,
+    #[rust]
+    palette_filter_uid: u64,
+    /// The palette, built on first draw from the widget module.
+    #[rust]
+    palette_entries: Vec<PaletteEntry>,
+    /// Palette rows drawn this frame: (button uid, entry index).
+    #[rust]
+    palette_visible: Vec<(u64, usize)>,
+    #[rust]
+    palette_filter: String,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -10469,6 +10509,7 @@ impl Tweaker {
                         tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_build := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Build" draw_text +: { text_style +: { font_size: 8.0 } } }
                     }
                     // The Theme tab's head: which theme the whole library
                     // is running under, and what may be done with it. It
@@ -10983,6 +11024,84 @@ impl Tweaker {
                             }
                         }
                     }
+                    // The Build tab: the structural designer. A session opens
+                    // on the selection's source file; the palette inserts a
+                    // widget before, inside or after the selection; the ops
+                    // row moves, copies, wraps or deletes it; every change is
+                    // previewed through hot reload and written as a patch,
+                    // never into the file itself.
+                    build_wrap := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        build_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
+                            design := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Design" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            undo := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Undo" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            redo := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Redo" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            reset := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Reset" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            patch := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Patch" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        build_status := PanelLabelSmall {
+                            width: Fill
+                            margin: Inset{left: 8 right: 8 top: 0 bottom: 2}
+                            text: ""
+                            max_lines: 2
+                        }
+                        place_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            place_label := PanelLabelSmall { width: Fit text: "insert" }
+                            place_before := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Before" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            place_inside := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Inside" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            place_after := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "After" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        ops_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            op_delete := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Delete" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_dup := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Dup" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_wrap := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Wrap" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_up := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Up" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_down := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Down" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_out := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Out" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        palette_filter := PanelInput {
+                            width: Fill
+                            height: 22
+                            margin: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            empty_text: "filter widgets"
+                        }
+                        palette := PortalList {
+                            width: Fill
+                            height: Fill
+                            margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
+                            drag_scrolling: false
+                            PaletteRow := PanelButton { width: Fill height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        patch_text := PanelInput {
+                            width: Fill
+                            height: 110
+                            margin: Inset{left: 8 right: 8 top: 2 bottom: 4}
+                            is_multiline: true
+                            is_read_only: true
+                            empty_text: "the patch appears here"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                    }
                     props_wrap := View {
                         width: Fill
                         height: Fill
@@ -11206,6 +11325,29 @@ impl Tweaker {
         self.tree_isolate_uid = tree_head.child(live_id!(isolate)).widget_uid().0;
         self.view_center_uid = tree_head.child(live_id!(center)).widget_uid().0;
         self.view_zoom_uid = tree_head.child(live_id!(zoom)).widget_uid().0;
+        let build_wrap = sidebar.child(live_id!(build_wrap));
+        let build_head = build_wrap.child(live_id!(build_head));
+        let place_row = build_wrap.child(live_id!(place_row));
+        let ops_row = build_wrap.child(live_id!(ops_row));
+        self.build_uids = [
+            build_head.child(live_id!(design)).widget_uid().0,
+            build_head.child(live_id!(undo)).widget_uid().0,
+            build_head.child(live_id!(redo)).widget_uid().0,
+            build_head.child(live_id!(reset)).widget_uid().0,
+            build_head.child(live_id!(patch)).widget_uid().0,
+            place_row.child(live_id!(place_before)).widget_uid().0,
+            place_row.child(live_id!(place_inside)).widget_uid().0,
+            place_row.child(live_id!(place_after)).widget_uid().0,
+            ops_row.child(live_id!(op_delete)).widget_uid().0,
+            ops_row.child(live_id!(op_dup)).widget_uid().0,
+            ops_row.child(live_id!(op_wrap)).widget_uid().0,
+            ops_row.child(live_id!(op_up)).widget_uid().0,
+            ops_row.child(live_id!(op_down)).widget_uid().0,
+            ops_row.child(live_id!(op_out)).widget_uid().0,
+        ];
+        self.palette_list_uid = build_wrap.child(live_id!(palette)).widget_uid().0;
+        self.palette_filter_uid = build_wrap.child(live_id!(palette_filter)).widget_uid().0;
+        self.palette_entries.clear();
         self.shader_list_uid = sidebar
             .child(live_id!(shader_col))
             .child(live_id!(shader_rows))
@@ -13373,6 +13515,12 @@ impl Tweaker {
             sidebar
                 .child(live_id!(theme_head))
                 .set_visible(cx, tab == PanelTab::Theme);
+            sidebar
+                .child(live_id!(build_wrap))
+                .set_visible(cx, tab == PanelTab::Build);
+            if tab == PanelTab::Build {
+                self.draw_build_head(cx, &sidebar);
+            }
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -13517,6 +13665,7 @@ impl Tweaker {
                 (live_id!(tab_tree), PanelTab::Tree, "Tree"),
                 (live_id!(tab_theme), PanelTab::Theme, "Theme"),
                 (live_id!(tab_spec), PanelTab::Spec, "Spec"),
+                (live_id!(tab_build), PanelTab::Build, "Build"),
             ];
             for (i, (id, t, label)) in tabs.into_iter().enumerate() {
                 let btn = tab_row.child(id);
@@ -13788,6 +13937,10 @@ impl Tweaker {
         });
         self.tree_visible.clear();
         while let Some(step_widget) = sidebar.draw_walk(cx, scope, walk).step() {
+            if self.palette_list_uid != 0 && step_widget.widget_uid().0 == self.palette_list_uid {
+                self.draw_palette(cx, &step_widget);
+                continue;
+            }
             // The tree tab's list fills from the flattened hierarchy.
             if step_widget.widget_uid().0 == self.tree_list_uid {
                 let sel_uid = self.rows_uid;
@@ -15493,6 +15646,12 @@ impl Tweaker {
             log!("TWEAK sidebar apply failed: {error}");
         }
         self.rows_uid = 0;
+        // A tweak made while designing is part of the design: it is written
+        // into the source once the gesture is over (HoldOff), or now when
+        // there is no gesture (a toggle, a pick from a list).
+        if !session().lock().unwrap().edit_hold {
+            self.design_bake_gesture(cx);
+        }
     }
 
     /// Reset one property to its session-original value: apply it back
@@ -15820,6 +15979,29 @@ impl Tweaker {
                 if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
                 {
                     self.request_rename(cx, text.trim());
+                }
+            }
+            {
+                let uid = widget_action.widget_uid.0;
+                if uid != 0 {
+                    if let Some(slot) = self.build_uids.iter().position(|u| *u == uid) {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            self.build_button(cx, slot);
+                        }
+                    } else if let Some(&(_, index)) =
+                        self.palette_visible.iter().find(|(u, _)| *u == uid)
+                    {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            self.build_insert(cx, index);
+                        }
+                    } else if uid == self.palette_filter_uid {
+                        if let TextInputAction::Changed(text) =
+                            widget_action.cast::<TextInputAction>()
+                        {
+                            self.palette_filter = text;
+                            self.redraw_sidebar(cx);
+                        }
+                    }
                 }
             }
             if self.tab_uids.contains(&widget_action.widget_uid.0)
@@ -16630,6 +16812,7 @@ impl Tweaker {
                     // step (two scrubs on one prop never merge).
                     s.undo_open = false;
                     drop(s);
+                    self.design_bake_gesture(cx);
                     self.text_edit_origin = None;
                     self.redraw_overlay(cx);
                 }
@@ -16721,6 +16904,7 @@ impl Tweaker {
             2 => PanelTab::Tree,
             3 => PanelTab::Theme,
             4 => PanelTab::Spec,
+            5 => PanelTab::Build,
             _ => PanelTab::Props,
         };
         // Entering the Theme tab is the moment to look at the theme folder
@@ -18370,6 +18554,7 @@ impl Widget for Tweaker {
         // on. A frame count would be a guess; this is the event itself.
         if matches!(event, Event::LiveEdit) {
             self.land_the_pending_pins(cx);
+            self.design_landed(cx);
             // ...and the mix, which the rebuild this event follows has just
             // thrown away. Every `request_style_reload` the panel asks for
             // lands here, and so does a live edit arriving from the file
@@ -18821,7 +19006,11 @@ impl Widget for Tweaker {
                     && tweak_is_on()
                     && cx.key_focus() == Area::Empty =>
             {
-                if ke.modifiers.shift {
+                if self.panel_tab == PanelTab::Build && self.design.is_some() {
+                    // On the Build tab a design session owns the history:
+                    // its steps are source hunks, previewed by reload.
+                    self.design_history(cx, ke.modifiers.shift);
+                } else if ke.modifiers.shift {
                     self.redo(cx);
                 } else {
                     self.undo(cx);
@@ -19039,6 +19228,7 @@ impl Widget for Tweaker {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        self.design_reselect_step(cx);
         let on = tweak_is_on();
         if on {
             discard_unavailable_picks(cx);
@@ -19317,6 +19507,9 @@ impl Widget for Tweaker {
                     PickStyle::Pinned
                 };
                 self.draw_pick(cx, pick, style);
+                if self.panel_tab == PanelTab::Build && self.design.is_some() {
+                    self.draw_insert_caret(cx, pick);
+                }
                 // Direct-manipulation handles, HOVER-REVEALED: the radius
                 // dots exist for the hand, not the eye — parked on the
                 // selection's corners they read as chrome and hide the very
@@ -23415,5 +23608,368 @@ line two");
             panel.next_frame, frame,
             "and asked for a frame to pay a debt nobody owes"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Build tab: the structural designer, over `crate::designer`.
+// ---------------------------------------------------------------------------
+
+/// Slots of `Tweaker::build_uids`, in the order the buttons are captured.
+const BUILD_DESIGN: usize = 0;
+const BUILD_UNDO: usize = 1;
+const BUILD_REDO: usize = 2;
+const BUILD_RESET: usize = 3;
+const BUILD_PATCH: usize = 4;
+const BUILD_BEFORE: usize = 5;
+const BUILD_INSIDE: usize = 6;
+const BUILD_AFTER: usize = 7;
+const BUILD_DELETE: usize = 8;
+const BUILD_DUP: usize = 9;
+const BUILD_WRAP: usize = 10;
+const BUILD_UP: usize = 11;
+const BUILD_DOWN: usize = 12;
+const BUILD_OUT: usize = 13;
+// The array in `Tweaker::build_uids` holds BUILD_OUT + 1 slots.
+
+impl Tweaker {
+    /// The pinned selection and its live widget, when both exist.
+    fn design_target(&self, cx: &Cx) -> Option<(TweakPick, WidgetRef)> {
+        let pinned = session().lock().unwrap().pinned.clone()?;
+        let widget = cx.widget_tree().widget(WidgetUid(pinned.uid));
+        if widget.is_empty() {
+            return None;
+        }
+        Some((pinned, widget))
+    }
+
+    /// What the Build tab answers, beside the session's own line.
+    fn design_say(&mut self, cx: &mut Cx, msg: impl Into<String>) {
+        let msg = msg.into();
+        log!("DESIGN {msg}");
+        self.design_msg = msg;
+        self.redraw_sidebar(cx);
+    }
+
+    /// The common tail of a session action: no session, an error, or done.
+    fn design_after(&mut self, cx: &mut Cx, result: Option<Result<(), String>>) {
+        match result {
+            None => self.design_say(cx, "press Design first"),
+            Some(Err(err)) => self.design_say(cx, err),
+            Some(Ok(())) => {
+                self.design_msg.clear();
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+            }
+        }
+    }
+
+    fn build_button(&mut self, cx: &mut Cx, slot: usize) {
+        use crate::designer::{DesignSession, Place, Structural};
+        match slot {
+            BUILD_DESIGN => {
+                if let Some(mut session) = self.design.take() {
+                    // Stop: the preview stays in the running app; the patch
+                    // is written so the work does not go with the session.
+                    let msg = match session.write_patch() {
+                        Ok(path) => format!("stopped; patch written to {path}"),
+                        Err(err) => format!("stopped; {err}"),
+                    };
+                    self.design_patch_shown = usize::MAX;
+                    self.design_say(cx, msg);
+                } else {
+                    let Some((_, widget)) = self.design_target(cx) else {
+                        self.design_say(cx, "pick a widget first, then press Design");
+                        return;
+                    };
+                    match DesignSession::open(cx, &widget) {
+                        Ok(session) => {
+                            self.design_msg.clear();
+                            self.design_baked = None;
+                            self.design_patch_shown = usize::MAX;
+                            self.design = Some(session);
+                            self.redraw_sidebar(cx);
+                            self.redraw_overlay(cx);
+                        }
+                        Err(err) => self.design_say(cx, err),
+                    }
+                }
+            }
+            BUILD_UNDO => self.design_history(cx, false),
+            BUILD_REDO => self.design_history(cx, true),
+            BUILD_RESET => {
+                let result = self.design.as_mut().map(|s| s.reset(cx));
+                self.design_after(cx, result);
+            }
+            BUILD_PATCH => {
+                let result = self.design.as_mut().map(|s| s.write_patch().map(|_| ()));
+                self.design_after(cx, result);
+            }
+            BUILD_BEFORE | BUILD_INSIDE | BUILD_AFTER => {
+                self.design_place = match slot {
+                    BUILD_BEFORE => Place::Before,
+                    BUILD_AFTER => Place::After,
+                    _ => Place::Inside,
+                };
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+            }
+            BUILD_DELETE | BUILD_DUP | BUILD_WRAP | BUILD_UP | BUILD_DOWN | BUILD_OUT => {
+                let op = match slot {
+                    BUILD_DELETE => Structural::Delete,
+                    BUILD_DUP => Structural::Duplicate,
+                    BUILD_WRAP => Structural::Wrap,
+                    BUILD_UP => Structural::Up,
+                    BUILD_DOWN => Structural::Down,
+                    _ => Structural::Out,
+                };
+                let Some((_, widget)) = self.design_target(cx) else {
+                    self.design_say(cx, "nothing is selected");
+                    return;
+                };
+                let result = self.design.as_mut().map(|s| s.structural(cx, &widget, op));
+                self.design_after(cx, result);
+            }
+            _ => {}
+        }
+    }
+
+    /// A palette row was clicked: insert that entry at the caret.
+    fn build_insert(&mut self, cx: &mut Cx, index: usize) {
+        let Some(entry) = self.palette_entries.get(index).cloned() else {
+            return;
+        };
+        let Some((_, widget)) = self.design_target(cx) else {
+            self.design_say(cx, "pick a widget to insert next to");
+            return;
+        };
+        let place = self.design_place;
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| s.insert(cx, &widget, place, &entry.name, &entry.body));
+        self.design_after(cx, result);
+    }
+
+    fn design_history(&mut self, cx: &mut Cx, redo: bool) {
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| if redo { s.redo(cx) } else { s.undo(cx) });
+        self.design_after(cx, result);
+    }
+
+    /// `Event::LiveEdit` with a preview in flight: it has landed. The
+    /// session reads the re-run's errors (a refused change is rolled back)
+    /// and names the widget to select once it is drawn.
+    fn design_landed(&mut self, cx: &mut Cx) {
+        let Some(session) = self.design.as_mut() else {
+            return;
+        };
+        if !session.is_landing() {
+            return;
+        }
+        let landed = session.land(cx);
+        if let Some(path) = landed.select {
+            self.design_reselect = Some((path, 8));
+        }
+        self.rows_uid = 0;
+        self.design_baked = None;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// Select the widget a landed preview named, once the app has drawn it:
+    /// its rect is known only after the app's own draw, which precedes the
+    /// overlay's in the same frame.
+    fn design_reselect_step(&mut self, cx: &mut Cx2d) {
+        let Some((path, tries)) = self.design_reselect.take() else {
+            return;
+        };
+        let widget = match resolve_widget_by_path(cx, &path) {
+            Ok(widget) => widget,
+            Err(_) => {
+                if tries > 0 {
+                    self.design_reselect = Some((path, tries - 1));
+                }
+                return;
+            }
+        };
+        let Some(uid) = widget.try_widget_uid() else {
+            return;
+        };
+        let rect = live_rect(cx, &widget);
+        if rect.size.x <= 0.0 {
+            if tries > 0 {
+                self.design_reselect = Some((path, tries - 1));
+            }
+            return;
+        }
+        let ty = type_name_of(cx, uid.0).unwrap_or_else(|| "-".to_string());
+        let path = crate::designer::path_of(cx, &widget);
+        session().lock().unwrap().pinned = Some(TweakPick {
+            uid: uid.0,
+            path,
+            ty,
+            rect,
+            window_id: self.my_window.unwrap_or(0),
+            band: None,
+            level: 0,
+        });
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// The value ledger's latest step, written into the source while a
+    /// session is open: a tweak made while designing is part of the design.
+    fn design_bake_gesture(&mut self, cx: &mut Cx) {
+        if self.design.is_none() {
+            return;
+        }
+        let step = {
+            let s = session().lock().unwrap();
+            match (s.undo.last(), s.pinned.as_ref()) {
+                (Some(UndoStep::Value { path, prop, new, .. }), Some(pinned))
+                    if *path == pinned.path =>
+                {
+                    Some((path.clone(), prop.clone(), new.clone()))
+                }
+                _ => None,
+            }
+        };
+        let Some(step) = step else {
+            return;
+        };
+        if self.design_baked.as_ref() == Some(&step) {
+            return;
+        }
+        let Some((_, widget)) = self.design_target(cx) else {
+            return;
+        };
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| s.set_prop(cx, &widget, &step.1, &step.2));
+        if matches!(result, Some(Ok(()))) {
+            self.design_baked = Some(step);
+        }
+        self.design_after(cx, result);
+    }
+
+    /// The Build tab's head: the session's state on its buttons and line,
+    /// and the patch pane when the edits changed.
+    fn draw_build_head(&mut self, cx: &mut Cx2d, sidebar: &WidgetRef) {
+        use crate::designer::Place;
+        let wrap = sidebar.child(live_id!(build_wrap));
+        let head = wrap.child(live_id!(build_head));
+        let on = self.design.is_some();
+        let design = head.child(live_id!(design));
+        design.set_text(cx, if on { "Stop" } else { "Design" });
+        set_button_fill(cx, design, on);
+        let place_row = wrap.child(live_id!(place_row));
+        for (id, place) in [
+            (live_id!(place_before), Place::Before),
+            (live_id!(place_inside), Place::Inside),
+            (live_id!(place_after), Place::After),
+        ] {
+            set_button_fill(cx, place_row.child(id), self.design_place == place);
+        }
+        let status = match &self.design {
+            Some(session) if self.design_msg.is_empty() => session.status.clone(),
+            Some(session) => format!("{} \u{2014} {}", session.status, self.design_msg),
+            None if self.design_msg.is_empty() => {
+                "Pick a widget, then press Design to edit its file".to_string()
+            }
+            None => self.design_msg.clone(),
+        };
+        wrap.child(live_id!(build_status)).set_text(cx, &status);
+        let shown = self.design.as_ref().map_or(0, |s| s.doc().hunks().len());
+        if self.design_patch_shown != shown {
+            let diff = self
+                .design
+                .as_ref()
+                .filter(|s| s.doc().is_dirty())
+                .map(|s| s.doc().unified_diff())
+                .unwrap_or_default();
+            wrap.child(live_id!(patch_text)).set_text(cx, &diff);
+            self.design_patch_shown = shown;
+        }
+    }
+
+    /// The palette list: the entries that match the filter, one button each.
+    fn draw_palette(&mut self, cx: &mut Cx2d, list_widget: &WidgetRef) {
+        if self.palette_entries.is_empty() {
+            self.palette_entries = crate::designer::palette(cx);
+        }
+        let filter = self.palette_filter.trim().to_lowercase();
+        let shown: Vec<usize> = self
+            .palette_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
+            .map(|(i, _)| i)
+            .collect();
+        let Some(mut list) = list_widget.borrow_mut::<PortalList>() else {
+            return;
+        };
+        list.set_item_range(cx, 0, shown.len());
+        self.palette_visible.clear();
+        while let Some(entry_id) = list.next_visible_item(cx) {
+            let Some(&index) = shown.get(entry_id) else {
+                continue;
+            };
+            let item = list.item(cx, entry_id, live_id!(PaletteRow));
+            if item.is_empty() {
+                continue;
+            }
+            item.set_text(cx, &self.palette_entries[index].name);
+            self.palette_visible.push((item.widget_uid().0, index));
+            item.draw_all(cx, &mut Scope::empty());
+        }
+    }
+
+    /// The insertion caret: where the next palette insert goes, on the
+    /// selection's near or far edge (before, after) or inside its far edge,
+    /// along the selection's flow.
+    fn draw_insert_caret(&mut self, cx: &mut Cx2d, pick: &TweakPick) {
+        use crate::designer::Place;
+        if pick.rect.size.x <= 0.0 || pick.rect.size.y <= 0.0 {
+            return;
+        }
+        let horizontal = self
+            .rows
+            .iter()
+            .find(|r| r.prop == "flow")
+            .map(|r| r.value.starts_with("Right"))
+            .unwrap_or(false);
+        let r = pick.rect;
+        let t = 2.0;
+        let bar = match (self.design_place, horizontal) {
+            (Place::Before, true) => Rect { pos: dvec2(r.pos.x - 4.0, r.pos.y), size: dvec2(t, r.size.y) },
+            (Place::Before, false) => Rect { pos: dvec2(r.pos.x, r.pos.y - 4.0), size: dvec2(r.size.x, t) },
+            (Place::After, true) => {
+                Rect { pos: dvec2(r.pos.x + r.size.x + 2.0, r.pos.y), size: dvec2(t, r.size.y) }
+            }
+            (Place::After, false) => {
+                Rect { pos: dvec2(r.pos.x, r.pos.y + r.size.y + 2.0), size: dvec2(r.size.x, t) }
+            }
+            (Place::Inside, true) => Rect {
+                pos: dvec2(r.pos.x + r.size.x - 6.0, r.pos.y + 4.0),
+                size: dvec2(t, (r.size.y - 8.0).max(t)),
+            },
+            (Place::Inside, false) => Rect {
+                pos: dvec2(r.pos.x + 4.0, r.pos.y + r.size.y - 6.0),
+                size: dvec2((r.size.x - 8.0).max(t), t),
+            },
+        };
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.border_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.border_size = 0.0;
+        self.draw_outline.dash = 0.0;
+        if let Some(bar) = self.clip_to_viewport(cx, bar) {
+            self.draw_outline.draw_abs(cx, bar);
+        }
     }
 }

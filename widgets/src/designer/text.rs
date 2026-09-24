@@ -479,3 +479,40 @@ pub fn reindent(snippet: &str, indent: &str) -> String {
     }
     out
 }
+
+/// The literal that holds `node` as a child, and the node's index among that
+/// parent's children, searched from the top of `body` (a block's body range).
+/// `None` for a top-level node, or when `node` is not found under `body`.
+pub fn parent_of(text: &str, body: Range<usize>, node: &Node) -> Option<(Node, usize)> {
+    let mut level = braces_at_depth_zero(text, body.start, body.end);
+    let mut parent: Option<Node> = None;
+    loop {
+        let Some(holder) = level
+            .iter()
+            .find(|n| n.start <= node.start && node.end() <= n.end())
+            .cloned()
+        else {
+            return None;
+        };
+        if holder.open == node.open {
+            let parent = parent?;
+            let index = children(text, &parent)
+                .iter()
+                .position(|c| c.open == node.open)?;
+            return Some((parent, index));
+        }
+        level = braces_at_depth_zero(text, holder.open + 1, holder.close);
+        parent = Some(holder);
+    }
+}
+
+/// The `{` of a property value that is an object (`{..}`, `Type{..}`), or
+/// `None` for a scalar value.
+pub fn value_brace(text: &str, value: &Range<usize>) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = value.start;
+    while i < value.end && (is_ident_byte(b[i]) || b[i] == b'.' || b[i] == b' ') {
+        i += 1;
+    }
+    (i < value.end && b[i] == b'{').then_some(i)
+}
