@@ -35,6 +35,7 @@ pub mod moving_panels;
 pub mod glasspanel;
 pub mod glass_surfaces;
 pub mod glass_controls;
+pub mod surface_material;
 pub mod splash;
 pub mod label;
 pub mod typography;
@@ -187,6 +188,7 @@ static FILES: &[StoryModule] = &[
     file(glasspanel::script_mod, glasspanel::STORIES),
     file(glass_surfaces::script_mod, glass_surfaces::STORIES),
     file(glass_controls::script_mod, glass_controls::STORIES),
+    file(surface_material::script_mod, surface_material::STORIES),
     file(splash::script_mod, splash::STORIES),
     // 4 Text
     file(label::script_mod, label::STORIES),

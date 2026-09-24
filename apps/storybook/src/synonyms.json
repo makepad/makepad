@@ -1098,6 +1098,42 @@
    ]
   },
   {
+   "component": "Material",
+   "aka": [
+    "skeuomorphic",
+    "skeuomorph",
+    "neumorphic",
+    "neumorphism",
+    "soft ui",
+    "moulded",
+    "molded plastic",
+    "relief",
+    "bevel and emboss",
+    "3d button"
+   ],
+   "does": [
+    "lit from a distance field",
+    "raised surface",
+    "sunken well",
+    "cast shadow",
+    "inner shadow",
+    "drop shadow",
+    "ambient occlusion",
+    "rim light",
+    "gloss",
+    "specular highlight",
+    "glow",
+    "emissive",
+    "led",
+    "press that inverts",
+    "press that deepens",
+    "press that lights up",
+    "domed knob",
+    "material tokens",
+    "material stylesheets"
+   ]
+  },
+  {
    "component": "GlassFloatingSurface",
    "aka": [
     "draggable window",

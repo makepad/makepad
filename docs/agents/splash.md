@@ -221,3 +221,25 @@ pub struct MyDrawShader {
 Putting non-instance state in that region corrupts the GPU instance buffer,
 including when another draw shader extends yours. Follow the base shader's
 current layout and registration.
+
+### Materials
+
+`mod.sdf.Material` (`draw/src/shader/surface.rs`) lights a shape from the
+signed distance a pixel function already holds: `face(...)` shades a face
+from its distance, outward gradient, elevation and the packed `light`,
+`relief`, `finish` and `tune` vec4s; `cast(...)` returns what a raised face
+throws on its ground, to lay under it with `sdf.clear`; `box_cov` is the
+blurred box coverage an inner shadow is cut from. Its helpers are `fn`
+declarations in the object's own scope, so a member calls another member by
+its bare `m_*` name, never through `Material.`.
+
+The base shaders of `RoundedView`, `PanelView`, `Button`, `CheckBox`,
+`Toggle`, `Slider` and `RotaryKnob` read it behind a `material` uniform
+defaulting to `theme.material_level`, packed exactly as `ReliefView` packs
+its own (`material_light`, `material_relief`, `material_finish`,
+`material_tune`, `material_shadow`, `material_inner`, the three inks). Keep
+that packing when a widget joins: a stylesheet's tokens must mean the same
+thing on every surface. Gate the whole branch on the uniform, so a stock
+theme pays one compare per draw call and draws exactly what it always did,
+and put the room a shadow needs inside the control's own rect
+(`material_margin`), since makepad clips by default.
