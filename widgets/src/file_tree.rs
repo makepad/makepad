@@ -892,9 +892,20 @@ impl FileTree {
             tree_node.draw_all(cx, &mut Scope::empty());
             if self.scroll_to_pending == Some(node_id) {
                 self.scroll_to_pending = None;
+                // The row's rect is on screen, already shifted by the
+                // scroll; the scroll-into-view wants content coordinates,
+                // so put the row back where it sits in the content. A screen
+                // rect handed over as content made a scrolled tree jump
+                // back to wherever the row happened to be drawn.
                 let rect = tree_node.area().rect(cx);
                 if rect.size.y > 0.0 {
-                    self.scroll_bars.scroll_into_view(cx, rect);
+                    let view = self.scroll_bars.area().rect(cx);
+                    let scroll = self.scroll_bars.get_scroll_pos();
+                    let content = Rect {
+                        pos: rect.pos - view.pos + scroll,
+                        size: rect.size,
+                    };
+                    self.scroll_bars.scroll_into_view(cx, content);
                 }
             }
         }

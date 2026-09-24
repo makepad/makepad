@@ -7408,6 +7408,9 @@ script_mod! {
     set_type_default() do #(DrawTweakOutline::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn() {
+            if self.solid > 0.5 {
+                return self.fill_color
+            }
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
             sdf.fill_keep(self.fill_color)
@@ -7644,6 +7647,10 @@ pub struct DrawTweakOutline {
     /// Device pixels per point, for dpi-true hairlines and dashes.
     #[live(1.0)]
     pub dpi: f32,
+    /// 1.0 = a solid fill to the quad's edge, no antialiased rim: a bar a
+    /// few points wide keeps its full width instead of fading at both edges.
+    #[live]
+    pub solid: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -19640,7 +19647,10 @@ impl Widget for Tweaker {
         if let Some((pick, place)) = self.design_drop.clone() {
             if Some(pick.window_id) == window_id && flat_outlines {
                 let horizontal = match place {
-                    DesignPlace::Inside => false,
+                    DesignPlace::Inside => {
+                        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+                        !widget.is_empty() && flows_right(cx, &widget)
+                    }
                     _ => siblings_run_horizontal(cx, pick.uid),
                 };
                 self.draw_place_bar(cx, pick.rect, place, horizontal);
@@ -23763,9 +23773,37 @@ line two");
 // The Build tab: the structural designer, over `crate::designer`.
 // ---------------------------------------------------------------------------
 
-/// Whether a widget's siblings are laid out side by side: the parent flows
-/// Right when two drawn children share a row and differ in x. A widget with
-/// no drawn sibling reads as a column.
+/// Whether a container lays its children out side by side. A `View` says so
+/// through its layout; anything else (and an Overlay) is read from where two
+/// drawn children sit: rows that share a band of y and stand apart in x, so a
+/// centre-aligned row whose children differ by a few points still reads as a
+/// row. A lone or unknown child reads as a column.
+fn flows_right(cx: &Cx2d, container: &WidgetRef) -> bool {
+    use crate::makepad_draw::Flow;
+    if let Some(view) = container.borrow::<View>() {
+        match view.layout.flow {
+            Flow::Right { .. } => return true,
+            Flow::Down => return false,
+            Flow::Overlay => {}
+        }
+    }
+    let mut rects: Vec<Rect> = Vec::new();
+    container.children(&mut |_, child| {
+        let rect = live_rect(cx, &child);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            rects.push(rect);
+        }
+    });
+    rects.windows(2).any(|pair| {
+        let (a, b) = (pair[0], pair[1]);
+        let share_y = a.pos.y < b.pos.y + b.size.y && b.pos.y < a.pos.y + a.size.y;
+        let apart_x =
+            a.pos.x + a.size.x <= b.pos.x + 0.5 || b.pos.x + b.size.x <= a.pos.x + 0.5;
+        share_y && apart_x
+    })
+}
+
+/// Whether a widget's siblings run side by side: its parent's flow.
 fn siblings_run_horizontal(cx: &Cx2d, uid: u64) -> bool {
     let tree = cx.widget_tree();
     let Some(parent_uid) = tree.parent_of(WidgetUid(uid)) else {
@@ -23775,17 +23813,7 @@ fn siblings_run_horizontal(cx: &Cx2d, uid: u64) -> bool {
     if parent.is_empty() {
         return false;
     }
-    let mut rects: Vec<Rect> = Vec::new();
-    parent.children(&mut |_, child| {
-        let rect = live_rect(cx, &child);
-        if rect.size.x > 0.0 && rect.size.y > 0.0 {
-            rects.push(rect);
-        }
-    });
-    rects.windows(2).any(|pair| {
-        let (a, b) = (pair[0], pair[1]);
-        (a.pos.y - b.pos.y).abs() < 1.0 && (a.pos.x - b.pos.x).abs() >= 1.0
-    })
+    flows_right(cx, &parent)
 }
 
 /// Slots of `Tweaker::build_uids`, in the order the buttons are captured.
@@ -24410,14 +24438,11 @@ impl Tweaker {
     fn draw_insert_caret(&mut self, cx: &mut Cx2d, pick: &TweakPick) {
         let horizontal = match self.design_place {
             // Inside: along the selection's own flow.
-            DesignPlace::Inside => self
-                .rows
-                .iter()
-                .find(|r| r.prop == "flow")
-                .map(|r| r.value.starts_with("Right"))
-                .unwrap_or(false),
-            // Before or after: along the parent's flow, read from where the
-            // siblings sit.
+            DesignPlace::Inside => {
+                let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+                !widget.is_empty() && flows_right(cx, &widget)
+            }
+            // Before or after: along the parent's flow.
             _ => siblings_run_horizontal(cx, pick.uid),
         };
         self.draw_place_bar(cx, pick.rect, self.design_place, horizontal);
@@ -24455,8 +24480,10 @@ impl Tweaker {
         self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.95);
         self.draw_outline.border_size = 0.0;
         self.draw_outline.dash = 0.0;
+        self.draw_outline.solid = 1.0;
         if let Some(bar) = self.clip_to_viewport(cx, bar) {
             self.draw_outline.draw_abs(cx, bar);
         }
+        self.draw_outline.solid = 0.0;
     }
 }
