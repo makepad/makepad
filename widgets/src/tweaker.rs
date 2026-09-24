@@ -15820,7 +15820,8 @@ impl Tweaker {
                 log!("TWEAK undo reset {} {} -> {}", path, prop, last);
             }
             UndoStep::Source { label } => {
-                let result = self.design.as_mut().map(|s| s.undo(cx));
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.undo(cx, keep));
                 match result {
                     Some(Ok(())) => log!("TWEAK undo source {label}"),
                     Some(Err(error)) => {
@@ -15913,7 +15914,8 @@ impl Tweaker {
                 log!("TWEAK redo reset {} {}", path_c, prop_c);
             }
             UndoStep::Source { label } => {
-                let result = self.design.as_mut().map(|s| s.redo(cx));
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.redo(cx, keep));
                 match result {
                     Some(Ok(())) => {
                         log!("TWEAK redo source {label}");
@@ -23832,7 +23834,8 @@ impl Tweaker {
             BUILD_UNDO => self.undo(cx),
             BUILD_REDO => self.redo(cx),
             BUILD_RESET => {
-                let result = self.design.as_mut().map(|s| s.reset(cx));
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.reset(cx, keep));
                 self.design_after(cx, result);
             }
             BUILD_PATCH => {

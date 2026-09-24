@@ -196,8 +196,25 @@ impl DesignDoc {
     }
 
     /// A unified diff of the base against the working text, for a commit.
+    /// The paths are relative to the repository root when the file lies
+    /// under the current directory, so `git apply` takes it as written.
     pub fn unified_diff(&self) -> String {
-        unified_diff(&self.file, &self.base, &self.text)
+        unified_diff(&repo_relative(&self.file), &self.base, &self.text)
+    }
+}
+
+/// `file` relative to the current directory (the checkout an app runs
+/// from), with forward slashes; unchanged when it lies elsewhere.
+fn repo_relative(file: &str) -> String {
+    let file = file.replace('\\', "/");
+    let Ok(cwd) = std::env::current_dir() else {
+        return file;
+    };
+    let cwd = cwd.to_string_lossy().replace('\\', "/");
+    let cwd = cwd.trim_end_matches('/');
+    match file.strip_prefix(cwd).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => file,
     }
 }
 

@@ -319,25 +319,27 @@ impl DesignSession {
         self.doc.can_redo()
     }
 
-    pub fn undo(&mut self, cx: &mut Cx) -> Result<(), String> {
+    /// Undo the last edit; `reselect` is the path to select again once the
+    /// reload lands (the selection, whose widget the reload may rebuild).
+    pub fn undo(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
         if !self.doc.undo() {
             return Err("nothing to undo".to_string());
         }
-        self.preview(cx, None)
+        self.preview(cx, reselect)
     }
 
-    pub fn redo(&mut self, cx: &mut Cx) -> Result<(), String> {
+    pub fn redo(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
         if !self.doc.redo() {
             return Err("nothing to redo".to_string());
         }
-        self.preview(cx, None)
+        self.preview(cx, reselect)
     }
 
     /// Back to the file as it was opened; the app runs its compiled code
     /// again.
-    pub fn reset(&mut self, cx: &mut Cx) -> Result<(), String> {
+    pub fn reset(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
         self.doc.reset();
-        self.preview(cx, None)
+        self.preview(cx, reselect)
     }
 
     /// Queue the working text for the running app and remember what to do
