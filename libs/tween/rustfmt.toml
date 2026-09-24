@@ -1,0 +1,2 @@
+# The repository root disables rustfmt; this crate opts back in (default style).
+edition = "2021"
