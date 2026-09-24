@@ -23914,17 +23914,21 @@ impl Tweaker {
     /// session reads the re-run's errors (a refused change is rolled back)
     /// and names the widget to select once it is drawn.
     fn design_landed(&mut self, cx: &mut Cx) {
-        let Some(session) = self.design.as_mut() else {
+        let Some(design) = self.design.as_mut() else {
             return;
         };
-        if !session.is_landing() {
+        if !design.is_landing() {
             return;
         }
-        let landed = session.land(cx);
+        let landed = design.land(cx);
         if let Some(path) = landed.select {
             self.design_reselect = Some((path, 8));
         }
         self.design_replay_ledger(cx);
+        // The rebuilt tree has new widgets: the rows and the Tree tab's
+        // list, both keyed on the apply generation, are stale until it
+        // moves.
+        session().lock().unwrap().apply_gen += 1;
         self.rows_uid = 0;
         self.design_baked = None;
         self.redraw_sidebar(cx);
@@ -24240,6 +24244,32 @@ impl Tweaker {
         }
     }
 
+    /// Where a palette entry dragged to `abs` would land: the widget under
+    /// the point and the zone of its rect the point is in (the middle of a
+    /// container: inside; else the near or far half: before or after).
+    /// `None` over the panel or over nothing.
+    fn palette_drop_target(&self, cx: &mut Cx, abs: DVec2) -> Option<(TweakPick, DesignPlace)> {
+        let on_panel = self.band.size.x > 0.0 && abs.x >= self.band.pos.x;
+        if on_panel {
+            return None;
+        }
+        let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
+        let pick = resolve_pick(cx, &root, abs, self.my_window.unwrap_or(0))?;
+        let r = pick.rect;
+        let fx = ((abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
+        let fy = ((abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
+        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+        let container = crate::designer::is_container(cx, &widget);
+        let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
+            DesignPlace::Inside
+        } else if fy < 0.5 {
+            DesignPlace::Before
+        } else {
+            DesignPlace::After
+        };
+        Some((pick, place))
+    }
+
     /// A dragged palette entry over the canvas: the widget under the pointer
     /// and the zone of it the pointer is in decide where the entry lands;
     /// the drop inserts it there. Over the panel the drop means the
@@ -24255,27 +24285,7 @@ impl Tweaker {
                 if !is_palette(&e.items) {
                     return;
                 }
-                let on_panel = self.band.size.x > 0.0 && e.abs.x >= self.band.pos.x;
-                let next = if on_panel {
-                    None
-                } else {
-                    let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
-                    resolve_pick(cx, &root, e.abs, self.my_window.unwrap_or(0)).map(|pick| {
-                        let r = pick.rect;
-                        let fx = ((e.abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
-                        let fy = ((e.abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
-                        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
-                        let container = crate::designer::is_container(cx, &widget);
-                        let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
-                            DesignPlace::Inside
-                        } else if fy < 0.5 {
-                            DesignPlace::Before
-                        } else {
-                            DesignPlace::After
-                        };
-                        (pick, place)
-                    })
-                };
+                let next = self.palette_drop_target(cx, e.abs);
                 if let Ok(mut response) = e.response.lock() {
                     *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
                 }
@@ -24297,7 +24307,12 @@ impl Tweaker {
                 let Some(index) = self.palette_drag.take() else {
                     return;
                 };
-                let drop = self.design_drop.take();
+                // The target is read from the drop itself: the pointer-up
+                // that precedes the drop goes through the body's pick
+                // handling, which may have moved the hover and the state
+                // under it since the last drag event.
+                self.design_drop = None;
+                let drop = self.palette_drop_target(cx, e.abs);
                 session().lock().unwrap().hover = None;
                 self.redraw_overlay(cx);
                 let Some(entry) = self.palette_entries.get(index).cloned() else {
@@ -24357,7 +24372,7 @@ impl Tweaker {
         if r.size.x <= 0.0 || r.size.y <= 0.0 {
             return;
         }
-        let t = 2.0;
+        let t = 3.0;
         let bar = match (place, horizontal) {
             (Place::Before, true) => Rect { pos: dvec2(r.pos.x - 4.0, r.pos.y), size: dvec2(t, r.size.y) },
             (Place::Before, false) => Rect { pos: dvec2(r.pos.x, r.pos.y - 4.0), size: dvec2(r.size.x, t) },
