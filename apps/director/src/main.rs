@@ -21,6 +21,8 @@ use makepad_director::iteration_view::{IterationViewAction, StudioIterationView}
 use makepad_director::iteration_worker::{
     IterationWorker, Request as IterationRequest, TreePresentation,
 };
+use makepad_director::agent_arguments::{self, AgentLaunchSettings};
+use makepad_director::agent_session::AgentProvider;
 use makepad_director::state::{self, Args, Settings};
 use makepad_director::usage_history_view::StudioUsageHistoryView;
 use makepad_director::usage_stall::UsageStalls;
@@ -854,6 +856,10 @@ pub struct App {
     agent_sessions: AgentSessionAppState,
     #[rust]
     settings: Settings,
+    /// Settings → Coding agents: bypass flag and custom arguments per
+    /// provider, saved as `agent_arguments.ron` beside `settings.ron`.
+    #[rust]
+    agent_launch: AgentLaunchSettings,
     /// Numbering for terminal tab ids allocated at runtime.
     #[rust]
     terminal_seq: u64,
@@ -1272,6 +1278,66 @@ impl App {
         self.ui
             .label(cx, ids!(state_dir_label))
             .set_text(cx, &self.state_dir().display().to_string());
+        self.refresh_agent_launch_panel(cx);
+    }
+
+    /// The Settings widgets of each coding agent provider, in panel order.
+    fn agent_launch_widgets() -> [(AgentProvider, LiveId, LiveId, LiveId); 3] {
+        [
+            (AgentProvider::Fable, id!(agent_claude_bypass), id!(agent_claude_args), id!(agent_claude_note)),
+            (AgentProvider::Codex, id!(agent_codex_bypass), id!(agent_codex_args), id!(agent_codex_note)),
+            (AgentProvider::Grok, id!(agent_grok_bypass), id!(agent_grok_args), id!(agent_grok_note)),
+        ]
+    }
+
+    /// Push the saved coding agent choices into the Settings tab. A text
+    /// field is only rewritten when it differs, so typing keeps its cursor.
+    fn refresh_agent_launch_panel(&self, cx: &mut Cx) {
+        for (provider, bypass, args, note) in Self::agent_launch_widgets() {
+            let launch = self.agent_launch.get(provider);
+            self.ui
+                .check_box(cx, &[bypass])
+                .set_active(cx, launch.bypass_permissions, Animate::No);
+            let input = self.ui.text_input(cx, &[args]);
+            if input.text() != launch.arguments {
+                input.set_text(cx, &launch.arguments);
+            }
+            let text = match agent_arguments::split_arguments(&launch.arguments) {
+                Err(error) => format!(
+                    "These arguments cannot be used: {error}. Launches of {} fail until this is fixed.",
+                    agent_arguments::provider_label(provider)
+                ),
+                Ok(_) => format!(
+                    "e.g. {} (lets the agent act without asking — use with care)",
+                    agent_arguments::bypass_flag(provider).unwrap_or("--help")
+                ),
+            };
+            self.ui.label(cx, &[note]).set_text(cx, &text);
+        }
+    }
+
+    /// Save a changed tick or custom argument text immediately.
+    fn handle_agent_launch_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let mut changed = false;
+        for (provider, bypass, args, _) in Self::agent_launch_widgets() {
+            let mut launch = self.agent_launch.get(provider);
+            if let Some(active) = self.ui.check_box(cx, &[bypass]).changed(actions) {
+                launch.bypass_permissions = active;
+            }
+            if let Some(text) = self.ui.text_input(cx, &[args]).changed(actions) {
+                launch.arguments = text;
+            }
+            if launch != self.agent_launch.get(provider) {
+                self.agent_launch.set(provider, launch);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(err) = self.agent_launch.save(&self.state_dir()) {
+                log!("director: could not save coding agent settings: {err}");
+            }
+            self.refresh_agent_launch_panel(cx);
+        }
     }
 }
 
@@ -2234,6 +2300,7 @@ impl MatchEvent for App {
                 .resize(cx, dvec2(w as f64, h as f64));
         }
         self.settings = Settings::load(&self.state_dir());
+        self.agent_launch = AgentLaunchSettings::load(&self.state_dir());
         makepad_wm_api::set_title(cx, "Director");
         self.restore_dock(cx);
         self.restore_items(cx);
@@ -2333,6 +2400,7 @@ impl MatchEvent for App {
                 );
             }
         }
+        self.handle_agent_launch_actions(cx, actions);
         if let Some(dark) = self.ui.check_box(cx, ids!(dark_toggle)).changed(actions) {
             if !Self::hosted(cx) {
                 self.ui_action(

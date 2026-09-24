@@ -9,6 +9,7 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 pub mod activity;
+pub mod agent_arguments;
 pub mod agent_session;
 pub mod agent_tree;
 pub mod ai;
@@ -86,7 +87,7 @@ script_mod! {
         draw_text +: {color: theme.color_text}
     }
 
-    /** Appearance and the saved state location. */
+    /** Appearance, coding agent launch options and the saved state location. */
     mod.widgets.StudioSettings = ScrollYView{
         width: Fill height: Fill
         flow: Down spacing: theme.space_3 padding: theme.space_3
@@ -117,6 +118,38 @@ script_mod! {
                 dark_toggle := CheckBox{text: "Use the dark variant"}
             }
             style_note := Hint{text: ""}
+        }
+
+        SectionTitle{text: "Coding agents"}
+        coding_agents := Card{
+            Row{
+                RowLabel{text: "Claude"}
+                agent_claude_bypass := CheckBox{text: "Let this agent act without asking (bypass permissions)"}
+            }
+            Row{
+                RowLabel{text: ""}
+                agent_claude_args := TextInput{width: Fill height: 28 margin: 0 empty_text: "Custom arguments for Claude"}
+            }
+            agent_claude_note := Hint{text: "e.g. --dangerously-skip-permissions (lets the agent act without asking — use with care)" draw_text +: {wrap: Words}}
+            Row{
+                RowLabel{text: "Codex"}
+                agent_codex_bypass := CheckBox{text: "Let this agent act without asking (bypass permissions)"}
+            }
+            Row{
+                RowLabel{text: ""}
+                agent_codex_args := TextInput{width: Fill height: 28 margin: 0 empty_text: "Custom arguments for Codex"}
+            }
+            agent_codex_note := Hint{text: "e.g. --dangerously-bypass-approvals-and-sandbox (lets the agent act without asking — use with care)" draw_text +: {wrap: Words}}
+            Row{
+                RowLabel{text: "Grok"}
+                agent_grok_bypass := CheckBox{text: "Let this agent act without asking (bypass permissions)"}
+            }
+            Row{
+                RowLabel{text: ""}
+                agent_grok_args := TextInput{width: Fill height: 28 margin: 0 empty_text: "Custom arguments for Grok"}
+            }
+            agent_grok_note := Hint{text: "e.g. --always-approve (lets the agent act without asking — use with care)" draw_text +: {wrap: Words}}
+            Hint{text: "Off by default: agents ask before they act, in their own terminal tab. The tick adds the agent's own bypass flag; custom arguments follow it, split like a shell splits words (quotes work, nothing is expanded). Changes apply the next time a lane starts or resumes." draw_text +: {wrap: Words}}
         }
 
         SectionTitle{text: "Storage"}

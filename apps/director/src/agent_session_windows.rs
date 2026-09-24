@@ -1454,6 +1454,7 @@ impl Backend {
             // After the executable and a node entry script, if there is one.
             command.args(provider_arguments(
                 launch.provider,
+                provider_launch_words(&self.records, launch.provider)?,
                 identity.map(|identity| identity.conversation_id.as_str()),
                 self.provider_bootstrap(record)?,
             )?);

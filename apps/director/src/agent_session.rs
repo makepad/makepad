@@ -742,29 +742,20 @@ fn provider_context_name(id: &str, created_at_ms: u64) -> Result<String, String>
     Ok(format!("{id}-{created_at_ms}.context.md"))
 }
 
-/// What lets a root AI that Director launches work without asking for every
-/// command and edit: the person's chosen default for every Codex and Fable
-/// lane. Grok and shell lanes take none. The documented long form is used for
-/// Codex; its `--yolo` spelling is an alias the installed help does not list.
-#[cfg(any(target_os = "macos", target_os = "linux", windows))]
-fn provider_bypass_flag(provider: AgentProvider) -> Option<&'static str> {
-    match provider {
-        AgentProvider::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
-        AgentProvider::Fable => Some("--dangerously-skip-permissions"),
-        _ => None,
-    }
-}
-
 /// Everything after the provider executable (and, on Windows, a node entry
 /// script), for a fresh start and for a resume alike:
-/// `codex [resume] <flag> [<conversation>] <prompt>`,
-/// `claude <flag> [--resume <conversation>] <prompt>`,
-/// `grok [--resume <conversation>] <prompt>`.
-/// Options come before the positional conversation and prompt, which both
-/// parsers accept after the `resume` subcommand as well as at the top level.
+/// `codex [resume] <launch words> [<conversation>] <prompt>`,
+/// `claude <launch words> [--resume <conversation>] <prompt>`,
+/// `grok <launch words> [--resume <conversation>] <prompt>`.
+/// The launch words are what the person chose in Settings → Coding agents
+/// (`crate::agent_arguments`): by default none, so the agent asks before it
+/// acts. Options come before the positional conversation and prompt, which
+/// both parsers accept after the `resume` subcommand as well as at the top
+/// level.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn provider_arguments(
     provider: AgentProvider,
+    launch_words: Vec<String>,
     conversation: Option<&str>,
     prompt: String,
 ) -> Result<Vec<String>, String> {
@@ -772,7 +763,7 @@ fn provider_arguments(
     if provider == AgentProvider::Codex && conversation.is_some() {
         arguments.push("resume".into());
     }
-    arguments.extend(provider_bypass_flag(provider).map(str::to_owned));
+    arguments.extend(launch_words);
     if let Some(conversation) = conversation {
         match provider {
             AgentProvider::Codex => {}
@@ -783,6 +774,16 @@ fn provider_arguments(
     }
     arguments.push(prompt);
     Ok(arguments)
+}
+
+/// The saved launch words for `provider`; `records` is the lane record
+/// directory inside Director's state directory, where the settings live.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn provider_launch_words(records: &Path, provider: AgentProvider) -> Result<Vec<String>, String> {
+    let state_dir = records
+        .parent()
+        .ok_or("Agent session records have no state directory")?;
+    crate::agent_arguments::launch_words(state_dir, provider)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -2550,6 +2551,7 @@ mod native {
                 }
                 command.args(provider_arguments(
                     launch.provider,
+                    provider_launch_words(&self.records, launch.provider)?,
                     resume.map(|identity| identity.conversation_id.as_str()),
                     self.provider_bootstrap(record)?,
                 )?);
@@ -2916,6 +2918,7 @@ exit "$result"
                 // on as the script's remaining positional parameters.
                 .args(provider_arguments(
                     AgentProvider::Codex,
+                    provider_launch_words(&self.records, AgentProvider::Codex)?,
                     Some(identity.conversation_id.as_str()),
                     bootstrap,
                 )?)
