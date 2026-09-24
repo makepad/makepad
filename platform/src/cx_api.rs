@@ -1568,10 +1568,20 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::HideSelectionHandles);
     }
 
+    /// Start a drag of `items` inside the app. Items that are not files
+    /// (strings, and anything with an `internal_id`) are the app's own
+    /// data, so they are dragged by the platform-independent path on every
+    /// backend: the pointer's moves become `Event::Drag`, its release
+    /// `Event::Drop` then `Event::DragEnd`. Files alone go to the OS drag
+    /// where a backend has one, since a file may leave the app.
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
-        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-        {
+        let files_only = items
+            .iter()
+            .all(|item| matches!(item, DragItem::FilePath { internal_id: None, .. }));
+        let os_drag = cfg!(not(any(target_arch = "wasm32", target_os = "linux", test))) && files_only;
+        if !os_drag {
             self.drag_drop.start_internal_drag(items);
+            return;
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
         {
