@@ -246,7 +246,9 @@ pub fn home_dir() -> PathBuf {
 /// The makepad home directory (`MAKEPAD_HOME`, else the user home; a temp dir as a
 /// last resort).
 pub fn makepad_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         return PathBuf::from(home);
     }
     #[cfg(target_arch = "wasm32")]

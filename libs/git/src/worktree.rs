@@ -787,6 +787,43 @@ fn collect_untracked(
     Ok(())
 }
 
+/// The on-disk path for a repository-relative `path` that is about to be
+/// written or removed, refusing anything that could land outside `workdir`
+/// or inside `.git`: every '/'-separated component must pass
+/// [`crate::tree::validate_entry_name`], and no parent folder below
+/// `workdir` may be a symlink (writing through one would touch whatever it
+/// points at). A symlink as the final component is the caller's business:
+/// removing it removes the link, and writers unlink it before writing.
+pub fn checked_worktree_path(workdir: &Path, path: &str) -> Result<PathBuf, GitError> {
+    let mut file_path = workdir.to_path_buf();
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        crate::tree::validate_entry_name(part)
+            .map_err(|_| GitError::InvalidObject(format!("unsafe worktree path {:?}", path)))?;
+        file_path.push(part);
+        if parts.peek().is_some() {
+            if let Ok(meta) = fs::symlink_metadata(&file_path) {
+                if meta.file_type().is_symlink() {
+                    return Err(GitError::InvalidObject(format!(
+                        "{path}: folder {part} is a symlink; refusing to write or remove through it"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(file_path)
+}
+
+/// Replace a symlink at `file_path` (the link itself, never its target) so
+/// a following `fs::write` creates a plain file instead of writing
+/// through the link.
+pub(crate) fn unlink_if_symlink(file_path: &Path) -> Result<(), GitError> {
+    if fs::symlink_metadata(file_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        fs::remove_file(file_path)?;
+    }
+    Ok(())
+}
+
 /// Flatten a tree into a map of path -> OID for all blobs (recursively).
 pub fn flatten_tree(
     tree: &Tree,
@@ -836,7 +873,7 @@ pub fn checkout_tree(
 
         if entry.is_tree() {
             let sub_tree = read_tree(&entry.oid)?;
-            let dir_path = workdir.join(&path);
+            let dir_path = checked_worktree_path(workdir, &path)?;
             fs::create_dir_all(&dir_path)?;
             let sub_prefix = format!("{}/", path);
             checkout_tree(
@@ -851,10 +888,11 @@ pub fn checkout_tree(
         } else {
             // Write file
             let data = read_blob(&entry.oid)?;
-            let file_path = workdir.join(&path);
+            let file_path = checked_worktree_path(workdir, &path)?;
             if let Some(parent) = file_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            unlink_if_symlink(&file_path)?;
             fs::write(&file_path, &data)?;
 
             // Set executable permission if needed
@@ -906,10 +944,11 @@ pub fn write_worktree_file(
     mode: u32,
     data: &[u8],
 ) -> Result<IndexEntry, GitError> {
-    let file_path = workdir.join(path);
+    let file_path = checked_worktree_path(workdir, path)?;
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    unlink_if_symlink(&file_path)?;
     fs::write(&file_path, data)?;
     #[cfg(unix)]
     {
@@ -1009,16 +1048,21 @@ pub fn remove_worktree_files(
     old_files: &HashMap<String, ObjectId>,
     new_files: &HashMap<String, ObjectId>,
 ) -> Result<(), GitError> {
+    // Check every path before removing any, so an unsafe one stops the
+    // whole clean-up instead of leaving it half done.
+    let mut doomed = Vec::new();
     for path in old_files.keys() {
         if !new_files.contains_key(path) {
-            let file_path = workdir.join(path);
-            if file_path.exists() {
-                fs::remove_file(&file_path)?;
-            }
-            // Try to remove empty parent directories
-            if let Some(parent) = file_path.parent() {
-                remove_empty_dirs(parent, workdir);
-            }
+            doomed.push(checked_worktree_path(workdir, path)?);
+        }
+    }
+    for file_path in doomed {
+        if file_path.exists() {
+            fs::remove_file(&file_path)?;
+        }
+        // Try to remove empty parent directories
+        if let Some(parent) = file_path.parent() {
+            remove_empty_dirs(parent, workdir);
         }
     }
     Ok(())
@@ -1390,5 +1434,48 @@ mod tests {
             .entries
             .iter()
             .any(|e| e.path == "ignored.tmp" && e.status == FileStatus::Untracked));
+    }
+
+    #[test]
+    fn unsafe_worktree_paths_are_refused_before_writing() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        let oid = ObjectId::from_hex("2015f8e40c38d86ca88808c6f031bb22544e92cf").unwrap();
+        for path in [
+            "", "..", "../escape.txt", "a/../../escape.txt", ".git/config", "sub/.GIT/HEAD",
+            "a//b", "a/./b", "a\\..\\b", "trailing/",
+        ] {
+            assert!(checked_worktree_path(workdir, path).is_err(), "{path:?}");
+            assert!(write_worktree_file(workdir, path, oid, 0o100644, b"x").is_err(), "{path:?}");
+        }
+        assert!(checked_worktree_path(workdir, "dir/file.txt").is_ok());
+        assert!(!workdir.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_parent_folder_is_refused() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let outside = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        std::os::unix::fs::symlink(outside.path(), workdir.join("link")).unwrap();
+        let oid = ObjectId::from_hex("2015f8e40c38d86ca88808c6f031bb22544e92cf").unwrap();
+        assert!(write_worktree_file(workdir, "link/file.txt", oid, 0o100644, b"x").is_err());
+        assert!(!outside.path().join("file.txt").exists());
+
+        // Removing through the link is refused too, and nothing is removed.
+        fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        let mut old_files = HashMap::new();
+        old_files.insert("link/keep.txt".to_string(), oid);
+        assert!(remove_worktree_files(workdir, &old_files, &HashMap::new()).is_err());
+        assert!(outside.path().join("keep.txt").exists());
+
+        // A symlink as the file itself is replaced, not written through.
+        fs::write(outside.path().join("target.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("target.txt"), workdir.join("f.txt"))
+            .unwrap();
+        write_worktree_file(workdir, "f.txt", oid, 0o100644, b"inside").unwrap();
+        assert_eq!(fs::read_to_string(outside.path().join("target.txt")).unwrap(), "outside");
+        assert_eq!(fs::read_to_string(workdir.join("f.txt")).unwrap(), "inside");
     }
 }

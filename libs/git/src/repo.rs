@@ -1165,10 +1165,12 @@ impl Repository {
             }
         }
         // Refuse before touching anything: every path we would replace or
-        // delete must still hold its old content.
+        // delete must be a safe worktree path (no "..", ".git", separators
+        // in a name, or symlinked parent folder) and must still hold its
+        // old content.
         for path in removed.iter().copied().chain(written.iter().map(|(p, _, _)| *p)) {
+            let file = worktree::checked_worktree_path(&self.workdir, path)?;
             if let Some((old_oid, _)) = old_files.get(path) {
-                let file = self.workdir.join(path);
                 if file.is_file() && worktree::hash_file_blob(&file)? != *old_oid {
                     return Err(GitError::InvalidObject(format!(
                         "{path} was modified locally; the update would overwrite it"
@@ -1180,7 +1182,7 @@ impl Repository {
         written.sort_by(|a, b| a.0.cmp(b.0));
         let mut index = self.read_index()?;
         for path in &removed {
-            let file = self.workdir.join(path);
+            let file = worktree::checked_worktree_path(&self.workdir, path)?;
             if file.is_file() {
                 fs::remove_file(&file)?;
             }
@@ -1357,10 +1359,11 @@ impl Repository {
                 TreeMergeEntry::Resolved { path, oid, mode } => {
                     // Write blob to worktree
                     let data = self.read_blob(oid)?;
-                    let file_path = self.workdir.join(path);
+                    let file_path = worktree::checked_worktree_path(&self.workdir, path)?;
                     if let Some(parent) = file_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
+                    worktree::unlink_if_symlink(&file_path)?;
                     std::fs::write(&file_path, &data)?;
 
                     index.entries.push(make_index_entry(path, *oid, *mode));
@@ -1382,10 +1385,11 @@ impl Repository {
 
                     let merge_result = merge::merge3_text(&base_text, &ours_text, &theirs_text);
 
-                    let file_path = self.workdir.join(path);
+                    let file_path = worktree::checked_worktree_path(&self.workdir, path)?;
                     if let Some(parent) = file_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
+                    worktree::unlink_if_symlink(&file_path)?;
                     std::fs::write(&file_path, merge_result.content())?;
 
                     if merge_result.has_conflict() {

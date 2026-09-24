@@ -97,7 +97,7 @@ script_mod! {
                 save_btn := TBtn{text: "Save"}
                 path_input := FieldInput{
                     width: 190
-                    empty_text: "sheet.csv"
+                    empty_text: "name.csv"
                 }
             }
             demo_pick := View{
@@ -419,9 +419,17 @@ pub struct MpSheets {
     /// An Open in flight: the request and the key it was for.
     #[rust]
     storage_load: Option<(StorageRequestId, String)>,
-    /// A Save in flight.
+    /// A Save in flight: the request, the key, and the tab it saved.
     #[rust]
-    storage_save: Option<(StorageRequestId, String)>,
+    storage_save: Option<(StorageRequestId, String, usize)>,
+    /// A Save's existence check in the jail, before anything is written.
+    #[rust]
+    storage_stat: Option<(StorageRequestId, String)>,
+    /// A Save that needs a second press (it would replace a file that is
+    /// not this sheet's own, or write an empty sheet): the path it was for.
+    /// Any model change disarms it.
+    #[rust]
+    save_armed: Option<String>,
     /// The chrome layout last applied (desktop or a phone orientation) and
     /// the width it was sized for.
     #[rust]
@@ -1029,6 +1037,7 @@ impl MpSheets {
     }
 
     fn after_model_change(&mut self, cx: &mut Cx) {
+        self.save_armed = None;
         self.editing = None;
         self.edit_seed = None;
         self.sync_chrome(cx);
@@ -1076,14 +1085,48 @@ impl MpSheets {
         self.sync_chrome(cx);
     }
 
+    /// The path field, trimmed. Empty means "no file named": Open and Save
+    /// refuse it instead of guessing a file in the current folder.
     fn csv_path(&self, cx: &mut Cx) -> String {
-        let p = self.view.text_input(cx, ids!(path_input)).text();
-        let p = p.trim().to_string();
-        if p.is_empty() {
-            "sheet.csv".to_string()
-        } else {
-            p
+        self.view.text_input(cx, ids!(path_input)).text().trim().to_string()
+    }
+
+    /// Why this Save needs a second press, if it does: it would replace an
+    /// existing file that this sheet was not opened from or saved to, or
+    /// it would write an empty file for a blank sheet.
+    fn save_warning(&self, path: &str, exists: bool) -> Option<String> {
+        let sheet = self.wb.sheet();
+        let mut reasons = Vec::new();
+        if exists && sheet.file.as_deref() != Some(path) {
+            reasons.push(format!("{path} already exists"));
         }
+        if sheet.used_range().is_none() {
+            reasons.push("the sheet is empty".to_string());
+        }
+        if reasons.is_empty() {
+            None
+        } else {
+            Some(format!("{}: press Save again to write it", reasons.join(" and ")))
+        }
+    }
+
+    /// The status after a successful save. CSV holds what cells show, so a
+    /// sheet's formulas are written as their current values; say so.
+    fn saved_status(path: &str, formulas: usize) -> String {
+        match formulas {
+            0 => format!("Saved {path}"),
+            1 => format!("Saved {path} (CSV: 1 formula saved as its value)"),
+            n => format!("Saved {path} (CSV: {n} formulas saved as their values)"),
+        }
+    }
+
+    /// Write the active sheet to the jail (the existence check is done).
+    fn storage_write(&mut self, cx: &mut Cx, path: String) {
+        let Some(storage) = &self.storage else { return };
+        let id = storage.set(cx, &path, sheet::to_csv(self.wb.sheet()).into_bytes());
+        self.storage_save = Some((id, path.clone(), self.wb.active));
+        self.status = format!("Saving {path}…");
+        self.sync_chrome(cx);
     }
 
     /// A host handed this instance its storage jail: Open and Save go there
@@ -1115,7 +1158,9 @@ impl MpSheets {
                 match &response.result {
                     Ok(StorageResult::Value(Some(bytes))) => {
                         let text = String::from_utf8_lossy(bytes);
-                        self.wb.open_loaded_sheet(sheet::sheet_from_csv(&Self::name_for_key(&key), &text));
+                        let mut loaded = sheet::sheet_from_csv(&Self::name_for_key(&key), &text);
+                        loaded.file = Some(key.clone());
+                        self.wb.open_loaded_sheet(loaded);
                         self.reset_loaded_sheet_view(cx);
                         self.status = format!("Opened {key}");
                     }
@@ -1123,10 +1168,41 @@ impl MpSheets {
                     Err(e) => self.status = format!("Open failed: {e}"),
                 }
                 self.after_model_change(cx);
-            } else if self.storage_save.as_ref().map(|(id, _)| *id == response.request_id).unwrap_or(false) {
-                let (_, key) = self.storage_save.take().unwrap();
+            } else if self.storage_stat.as_ref().map(|(id, _)| *id == response.request_id).unwrap_or(false) {
+                let (_, key) = self.storage_stat.take().unwrap();
+                match &response.result {
+                    Ok(StorageResult::Stat(stat)) => {
+                        if let Some(warning) = self.save_warning(&key, stat.is_some()) {
+                            self.save_armed = Some(key);
+                            self.status = warning;
+                            self.sync_chrome(cx);
+                        } else {
+                            self.storage_write(cx, key);
+                        }
+                    }
+                    Ok(_) => {
+                        self.status = "Save failed: unexpected storage answer".to_string();
+                        self.sync_chrome(cx);
+                    }
+                    Err(e) => {
+                        self.status = format!("Save failed: {e}");
+                        self.sync_chrome(cx);
+                    }
+                }
+            } else if self.storage_save.as_ref().map(|(id, _, _)| *id == response.request_id).unwrap_or(false) {
+                let (_, key, index) = self.storage_save.take().unwrap();
                 self.status = match &response.result {
-                    Ok(_) => format!("Saved {key}"),
+                    Ok(_) => {
+                        // The tab that was saved (if it is still open) now
+                        // belongs to this key.
+                        match self.wb.sheets.get_mut(index) {
+                            Some(sheet) => {
+                                sheet.file = Some(key.clone());
+                                Self::saved_status(&key, sheet.formula_count())
+                            }
+                            None => format!("Saved {key}"),
+                        }
+                    }
                     Err(e) => format!("Save failed: {e}"),
                 };
                 self.sync_chrome(cx);
@@ -1136,6 +1212,11 @@ impl MpSheets {
 
     fn open_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
+        if path.is_empty() {
+            self.status = "Type a file name to open".to_string();
+            self.sync_chrome(cx);
+            return;
+        }
         if let Some(storage) = &self.storage {
             // Asynchronous: the sheet lands in `on_storage`.
             let id = storage.get(cx, &path);
@@ -1145,7 +1226,8 @@ impl MpSheets {
             return;
         }
         match docs::docs().load(&path) {
-            Ok(sheet) => {
+            Ok(mut sheet) => {
+                sheet.file = Some(path.clone());
                 self.wb.open_loaded_sheet(sheet);
                 self.reset_loaded_sheet_view(cx);
                 self.status = format!("Opened {path}");
@@ -1155,17 +1237,46 @@ impl MpSheets {
         self.after_model_change(cx);
     }
 
+    /// Save the active sheet as CSV. Never guesses a path, and asks (a
+    /// second press on the same path) before replacing a file that is not
+    /// this sheet's own or writing an empty sheet.
     fn save_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
-        if let Some(storage) = &self.storage {
-            let id = storage.set(cx, &path, sheet::to_csv(self.wb.sheet()).into_bytes());
-            self.storage_save = Some((id, path.clone()));
-            self.status = format!("Saving {path}…");
+        if path.is_empty() {
+            self.save_armed = None;
+            self.status = "Type a file name to save to".to_string();
             self.sync_chrome(cx);
             return;
         }
-        self.status = match docs::docs().save(&path, self.wb.sheet()) {
-            Ok(()) => format!("Saved {path}"),
+        // The second press on the path the warning was for.
+        let confirmed = self.save_armed.take().as_deref() == Some(path.as_str());
+        if let Some(storage) = &self.storage {
+            if confirmed {
+                self.storage_write(cx, path);
+            } else {
+                // Asynchronous: the check lands in `on_storage`.
+                let id = storage.stat(cx, &path);
+                self.storage_stat = Some((id, path.clone()));
+                self.status = format!("Checking {path}…");
+                self.sync_chrome(cx);
+            }
+            return;
+        }
+        let docs = docs::docs();
+        if !confirmed {
+            if let Some(warning) = self.save_warning(&path, docs.exists(&path)) {
+                self.save_armed = Some(path);
+                self.status = warning;
+                self.sync_chrome(cx);
+                return;
+            }
+        }
+        self.status = match docs.save(&path, self.wb.sheet()) {
+            Ok(()) => {
+                let sheet = self.wb.sheet_mut();
+                sheet.file = Some(path.clone());
+                Self::saved_status(&path, sheet.formula_count())
+            }
             Err(e) => format!("Save failed: {e}"),
         };
         self.sync_chrome(cx);
