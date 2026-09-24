@@ -84,6 +84,9 @@ impl App {
             // is the same flat dark the style itself draws.
             DesktopStyle::BlackOrange => (shell::rgb(20, 23, 28), shell::rgb(16, 19, 23)),
             DesktopStyle::Neumorphic => (shell::rgb(238, 240, 246), shell::rgb(222, 226, 238)),
+            DesktopStyle::Molded => (shell::rgb(216, 218, 214), shell::rgb(196, 199, 194)),
+            DesktopStyle::Glossy => (shell::rgb(43, 47, 52), shell::rgb(30, 33, 37)),
+            DesktopStyle::Milled => (shell::rgb(21, 23, 27), shell::rgb(12, 13, 16)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),

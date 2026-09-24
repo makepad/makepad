@@ -873,6 +873,10 @@ mod crate_tint_role_tests {
             for (style, dark) in [
                 (DesktopStyle::Omarchy, false),
                 (DesktopStyle::BlackOrange, false),
+                (DesktopStyle::Neumorphic, false),
+                (DesktopStyle::Molded, false),
+                (DesktopStyle::Glossy, false),
+                (DesktopStyle::Milled, false),
                 (DesktopStyle::Macos, false),
                 (DesktopStyle::Macos, true),
                 (DesktopStyle::Windows, false),
@@ -913,6 +917,10 @@ mod crate_tint_role_tests {
         let sheets = [
             (DesktopStyle::Omarchy, false, &DARK_TINTS),
             (DesktopStyle::BlackOrange, false, &DARK_TINTS),
+            (DesktopStyle::Neumorphic, false, &LIGHT_TINTS),
+            (DesktopStyle::Molded, false, &LIGHT_TINTS),
+            (DesktopStyle::Glossy, false, &DARK_TINTS),
+            (DesktopStyle::Milled, false, &DARK_TINTS),
             (DesktopStyle::Macos, false, &LIGHT_TINTS),
             (DesktopStyle::Macos, true, &DARK_TINTS),
             (DesktopStyle::Windows, false, &LIGHT_TINTS),
