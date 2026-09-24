@@ -221,6 +221,55 @@ impl DesignSession {
         self.preview(cx, select)
     }
 
+    /// Move `widget` next to, or into, `target`: what a drag in the tree
+    /// does. `Before`/`After` place it among the target's siblings; `Inside`
+    /// appends it to the target's children.
+    pub fn move_relative(
+        &mut self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        target: &WidgetRef,
+        place: Place,
+    ) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let target_span = self.locate(cx, target)?;
+        if span.node.open == target_span.node.open {
+            return Err("a node cannot be moved next to itself".to_string());
+        }
+        let name = span.node.name().map(|n| n.to_string());
+        let (parent, placement, parent_path) = match place {
+            Place::Inside => {
+                if target.borrow::<View>().is_none() {
+                    return Err(format!("{} is not a container", target_span.node.ty));
+                }
+                (target_span, Placement::Last, path_of(cx, target))
+            }
+            Place::Before | Place::After => {
+                let (parent, mut index) = Self::parent_of(&target_span)?;
+                // Once the node is out, a sibling before it in the same
+                // parent moves up one.
+                if let Some((own_parent, own_index)) = Self::parent_of(&span).ok() {
+                    if own_parent.node.open == parent.node.open && own_index < index {
+                        index -= 1;
+                    }
+                }
+                let placement = if place == Place::Before {
+                    Placement::Before(index)
+                } else {
+                    Placement::After(index)
+                };
+                (parent, placement, parent_path(&path_of(cx, target)))
+            }
+        };
+        DesignOp::Move { node: span, parent, placement }.apply(&mut self.doc)?;
+        let select = match name {
+            Some(name) if !parent_path.is_empty() => format!("{}.{}", parent_path, name),
+            Some(name) => name,
+            None => parent_path,
+        };
+        self.preview(cx, Some(select))
+    }
+
     /// Write a property into the selection's literal (a dotted key descends
     /// into typed properties through `+:`).
     pub fn set_prop(

@@ -8876,6 +8876,10 @@ pub struct Tweaker {
     palette_visible: Vec<(u64, usize)>,
     #[rust]
     palette_filter: String,
+    /// A tree row being dragged over: (target widget uid, where relative
+    /// to it), for the drop indicator and the drop.
+    #[rust]
+    tree_drop: Option<(u64, DesignPlace)>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -15145,6 +15149,7 @@ impl Tweaker {
                 });
             }
         }
+        self.draw_tree_drop_indicator(cx, &sidebar);
         self.visible = visible_rects;
     }
 
@@ -16219,6 +16224,25 @@ impl Tweaker {
                             self.tree_hover_active = false;
                             session().lock().unwrap().hover = None;
                             self.redraw_overlay(cx);
+                        }
+                    }
+                    FileTreeAction::ShouldFileStartDrag(id) => {
+                        // With a design session open a row can be dragged to
+                        // another place in the tree: the drop moves the
+                        // widget's literal in the source.
+                        if self.design.is_some() {
+                            if let Some(tree) = self.tree_widget() {
+                                if let Some(mut tree) = tree.borrow_mut::<FileTree>() {
+                                    tree.start_dragging_file_node(
+                                        cx,
+                                        id,
+                                        vec![DragItem::String {
+                                            value: "design-node".to_string(),
+                                            internal_id: Some(id),
+                                        }],
+                                    );
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -18538,6 +18562,9 @@ impl Widget for Tweaker {
         if !tweak_is_on() {
             self.splitter_drag = false;
             return;
+        }
+        if self.panel_tab == PanelTab::Tree && self.design.is_some() {
+            self.handle_tree_drag(cx, event);
         }
         discard_unavailable_picks(cx);
         let in_frame = self.settle_frame.is_event(event).is_some();
@@ -23914,6 +23941,114 @@ impl Tweaker {
             }
         }
         self.design_after(cx, result);
+    }
+
+    /// The Tree tab's FileTree widget, once the sidebar is built.
+    fn tree_widget(&self) -> Option<WidgetRef> {
+        let sidebar = self.sidebar.as_ref()?;
+        let tree = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree));
+        (!tree.is_empty()).then_some(tree)
+    }
+
+    /// A design-node drag over the tree: the row under the pointer and the
+    /// third of it the pointer is in decide the drop (before, inside,
+    /// after); the drop moves the literal.
+    fn handle_tree_drag(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(tree) = self.tree_widget() else {
+            return;
+        };
+        let dragged = |items: &[DragItem]| {
+            items.iter().find_map(|item| match item {
+                DragItem::String { value, internal_id: Some(id) } if value == "design-node" => Some(*id),
+                _ => None,
+            })
+        };
+        match event.drag_hits(cx, tree.area()) {
+            DragHit::Drag(f) => {
+                if dragged(&f.items).is_none() {
+                    return;
+                }
+                let row = tree.borrow::<FileTree>().and_then(|t| t.node_at(cx, f.abs));
+                let next = row.map(|(id, rect)| {
+                    let third = (f.abs.y - rect.pos.y) / rect.size.y.max(1.0);
+                    let place = if third < 1.0 / 3.0 {
+                        DesignPlace::Before
+                    } else if third > 2.0 / 3.0 {
+                        DesignPlace::After
+                    } else {
+                        DesignPlace::Inside
+                    };
+                    (id.0, place)
+                });
+                if let Ok(mut response) = f.response.lock() {
+                    *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
+                }
+                if next != self.tree_drop {
+                    self.tree_drop = next;
+                    self.redraw_sidebar(cx);
+                }
+            }
+            DragHit::Drop(f) => {
+                let target = self.tree_drop.take();
+                self.redraw_sidebar(cx);
+                let (Some(node_id), Some((target_uid, place))) = (dragged(&f.items), target) else {
+                    return;
+                };
+                if node_id.0 == target_uid {
+                    return;
+                }
+                let node = cx.widget_tree().widget(WidgetUid(node_id.0));
+                let target = cx.widget_tree().widget(WidgetUid(target_uid));
+                if node.is_empty() || target.is_empty() {
+                    self.design_say(cx, "the dragged row is gone");
+                    return;
+                }
+                let result = self
+                    .design
+                    .as_mut()
+                    .map(|s| s.move_relative(cx, &node, &target, place));
+                self.design_after(cx, result);
+            }
+            DragHit::DragEnd => {
+                if self.tree_drop.take().is_some() {
+                    self.redraw_sidebar(cx);
+                }
+            }
+            DragHit::NoHit => {}
+        }
+    }
+
+    /// The drop indicator over the tree: a bar above or below the target
+    /// row, or a frame around it for a drop inside.
+    fn draw_tree_drop_indicator(&mut self, cx: &mut Cx2d, sidebar: &WidgetRef) {
+        let Some((uid, place)) = self.tree_drop else {
+            return;
+        };
+        if self.panel_tab != PanelTab::Tree {
+            return;
+        }
+        let tree = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree));
+        let Some(rect) = tree.borrow::<FileTree>().and_then(|t| t.node_rect(cx, LiveId(uid))) else {
+            return;
+        };
+        let accent = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.dash = 0.0;
+        match place {
+            DesignPlace::Inside => {
+                self.draw_outline.border_color = accent;
+                self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.12);
+                self.draw_outline.border_size = 1.0;
+                self.draw_outline.draw_abs(cx, rect);
+            }
+            DesignPlace::Before | DesignPlace::After => {
+                self.draw_outline.border_color = accent;
+                self.draw_outline.fill_color = accent;
+                self.draw_outline.border_size = 0.0;
+                let y = if place == DesignPlace::Before { rect.pos.y } else { rect.pos.y + rect.size.y - 2.0 };
+                self.draw_outline.draw_abs(cx, Rect { pos: dvec2(rect.pos.x, y), size: dvec2(rect.size.x, 2.0) });
+            }
+        }
     }
 
     /// The Build tab's head: the session's state on its buttons and line,

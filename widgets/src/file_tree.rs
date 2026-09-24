@@ -1064,6 +1064,21 @@ impl FileTree {
         }
     }
 
+    /// The row drawn for `node_id`, in window points, when it is on screen.
+    pub fn node_rect(&self, cx: &Cx, node_id: LiveId) -> Option<Rect> {
+        let node = self.tree_nodes.get(&node_id)?;
+        let rect = node.area().clipped_rect_union(cx);
+        (rect.size.y > 0.0).then_some(rect)
+    }
+
+    /// The row under `abs`, with its rect, when a drawn row is there.
+    pub fn node_at(&self, cx: &Cx, abs: Vec2d) -> Option<(LiveId, Rect)> {
+        self.tree_nodes.iter().find_map(|(id, node)| {
+            let rect = node.area().clipped_rect_union(cx);
+            (rect.size.y > 0.0 && rect.contains(abs)).then_some((*id, rect))
+        })
+    }
+
     pub fn start_dragging_file_node(&mut self, cx: &mut Cx, node_id: LiveId, items: Vec<DragItem>) {
         self.dragging_node_id = Some(node_id);
         log!("makepad: start_dragging_file_node");
