@@ -8880,6 +8880,14 @@ pub struct Tweaker {
     /// to it), for the drop indicator and the drop.
     #[rust]
     tree_drop: Option<(u64, DesignPlace)>,
+    /// A palette entry being dragged (its index), from the press on its row
+    /// until the drop or the click that ends it.
+    #[rust]
+    palette_drag: Option<usize>,
+    /// Where a dragged palette entry would land on the canvas: the widget
+    /// under the pointer and the zone (before, inside, after).
+    #[rust]
+    design_drop: Option<(TweakPick, DesignPlace)>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -16040,8 +16048,22 @@ impl Tweaker {
                     } else if let Some(&(_, index)) =
                         self.palette_visible.iter().find(|(u, _)| *u == uid)
                     {
-                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                            self.build_insert(cx, index);
+                        match widget_action.cast::<ButtonAction>() {
+                            ButtonAction::Pressed(_) if self.design.is_some() => {
+                                // A press arms a drag onto the canvas; a
+                                // release on the row is a plain click.
+                                self.palette_drag = Some(index);
+                                cx.start_dragging(vec![DragItem::String {
+                                    value: "design-palette".to_string(),
+                                    internal_id: Some(LiveId(index as u64)),
+                                }]);
+                            }
+                            ButtonAction::Clicked(_) => {
+                                // The press's drag ended on the row: a click.
+                                self.palette_drag = None;
+                                self.build_insert(cx, index);
+                            }
+                            _ => {}
                         }
                     } else if uid == self.palette_filter_uid {
                         if let TextInputAction::Changed(text) =
@@ -18577,6 +18599,9 @@ impl Widget for Tweaker {
         if self.panel_tab == PanelTab::Tree && self.design.is_some() {
             self.handle_tree_drag(cx, event);
         }
+        if self.design.is_some() && self.palette_drag.is_some() {
+            self.handle_palette_drag(cx, event);
+        }
         discard_unavailable_picks(cx);
         let in_frame = self.settle_frame.is_event(event).is_some();
         if self.settle_isolation(cx, in_frame) {
@@ -19565,6 +19590,11 @@ impl Widget for Tweaker {
             pick
         });
         let flat_outlines = !cx.sploded_active();
+        if let Some((pick, place)) = self.design_drop.clone() {
+            if Some(pick.window_id) == window_id && flat_outlines {
+                self.draw_place_bar(cx, pick.rect, place, false);
+            }
+        }
         if flat_outlines {
         if let Some(pick) = &pinned {
             if Some(pick.window_id) == window_id {
@@ -24140,23 +24170,125 @@ impl Tweaker {
         }
     }
 
+    /// A dragged palette entry over the canvas: the widget under the pointer
+    /// and the zone of it the pointer is in decide where the entry lands;
+    /// the drop inserts it there. Over the panel the drop means the
+    /// selection, like a click on the row.
+    fn handle_palette_drag(&mut self, cx: &mut Cx, event: &Event) {
+        let is_palette = |items: &[DragItem]| {
+            items
+                .iter()
+                .any(|item| matches!(item, DragItem::String { value, .. } if value == "design-palette"))
+        };
+        match event {
+            Event::Drag(e) => {
+                if !is_palette(&e.items) {
+                    return;
+                }
+                let on_panel = self.band.size.x > 0.0 && e.abs.x >= self.band.pos.x;
+                let next = if on_panel {
+                    None
+                } else {
+                    let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
+                    resolve_pick(cx, &root, e.abs, self.my_window.unwrap_or(0)).map(|pick| {
+                        let r = pick.rect;
+                        let fx = ((e.abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
+                        let fy = ((e.abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
+                        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+                        let container = widget.borrow::<View>().is_some();
+                        let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
+                            DesignPlace::Inside
+                        } else if fy < 0.5 {
+                            DesignPlace::Before
+                        } else {
+                            DesignPlace::After
+                        };
+                        (pick, place)
+                    })
+                };
+                if let Ok(mut response) = e.response.lock() {
+                    *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
+                }
+                let changed = match (&next, &self.design_drop) {
+                    (Some((a, pa)), Some((b, pb))) => a.uid != b.uid || pa != pb,
+                    (None, None) => false,
+                    _ => true,
+                };
+                if changed {
+                    session().lock().unwrap().hover = next.as_ref().map(|(p, _)| p.clone());
+                    self.design_drop = next;
+                    self.redraw_overlay(cx);
+                }
+            }
+            Event::Drop(e) => {
+                if !is_palette(&e.items) {
+                    return;
+                }
+                let Some(index) = self.palette_drag.take() else {
+                    return;
+                };
+                let drop = self.design_drop.take();
+                session().lock().unwrap().hover = None;
+                self.redraw_overlay(cx);
+                let Some(entry) = self.palette_entries.get(index).cloned() else {
+                    return;
+                };
+                match drop {
+                    Some((pick, place)) => {
+                        let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+                        if target.is_empty() {
+                            self.design_say(cx, "the target is gone");
+                            return;
+                        }
+                        let result = self
+                            .design
+                            .as_mut()
+                            .map(|s| s.insert(cx, &target, place, &entry.name, &entry.body));
+                        self.design_after(cx, result);
+                    }
+                    None => {
+                        let on_panel = self.band.size.x > 0.0 && e.abs.x >= self.band.pos.x;
+                        if on_panel {
+                            self.build_insert(cx, index);
+                        }
+                    }
+                }
+            }
+            Event::DragEnd => {
+                if self.design_drop.take().is_some() {
+                    session().lock().unwrap().hover = None;
+                    self.redraw_overlay(cx);
+                }
+                // A click on the row follows on its own; a drag that ended
+                // elsewhere is over.
+            }
+            _ => {}
+        }
+    }
+
     /// The insertion caret: where the next palette insert goes, on the
     /// selection's near or far edge (before, after) or inside its far edge,
     /// along the selection's flow.
     fn draw_insert_caret(&mut self, cx: &mut Cx2d, pick: &TweakPick) {
-        use crate::designer::Place;
-        if pick.rect.size.x <= 0.0 || pick.rect.size.y <= 0.0 {
-            return;
-        }
         let horizontal = self
             .rows
             .iter()
             .find(|r| r.prop == "flow")
             .map(|r| r.value.starts_with("Right"))
             .unwrap_or(false);
-        let r = pick.rect;
+        self.draw_place_bar(cx, pick.rect, self.design_place, horizontal);
+    }
+
+    /// An amber bar on `r`: on its near edge for `Before`, its far edge for
+    /// `After`, inside its far edge for `Inside`; the edges run across the
+    /// flow, so `horizontal` picks left/right over top/bottom.
+    fn draw_place_bar(&mut self, cx: &mut Cx2d, r: Rect, place: DesignPlace, horizontal: bool) {
+        use crate::designer::Place;
+        if r.size.x <= 0.0 || r.size.y <= 0.0 {
+            return;
+        }
         let t = 2.0;
-        let bar = match (self.design_place, horizontal) {
+        let bar = match (place, horizontal) {
             (Place::Before, true) => Rect { pos: dvec2(r.pos.x - 4.0, r.pos.y), size: dvec2(t, r.size.y) },
             (Place::Before, false) => Rect { pos: dvec2(r.pos.x, r.pos.y - 4.0), size: dvec2(r.size.x, t) },
             (Place::After, true) => {
