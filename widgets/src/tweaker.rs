@@ -2211,10 +2211,20 @@ pub fn window_intercept(
     // there, or a drop target in the app under the pointer takes the drop
     // and the tweaker, dispatched after the body, never sees it.
     if matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd) {
-        if let Some((_, tweaker)) = window_view.children.iter().find(|(id, _)| *id == live_id!(tweaker)) {
+        let body = window_view
+            .children
+            .iter()
+            .find(|(id, _)| *id == live_id!(body))
+            .map(|(_, widget)| widget.clone());
+        let tweaker = window_view
+            .children
+            .iter()
+            .find(|(id, _)| *id == live_id!(tweaker))
+            .map(|(_, widget)| widget.clone());
+        if let (Some(body), Some(tweaker)) = (body, tweaker) {
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 if tw.design.is_some() && tw.palette_drag.is_some() {
-                    tw.handle_palette_drag(cx, event);
+                    tw.handle_palette_drag(cx, event, &body);
                     return true;
                 }
             }
@@ -18639,9 +18649,6 @@ impl Widget for Tweaker {
         if self.panel_tab == PanelTab::Tree && self.design.is_some() {
             self.handle_tree_drag(cx, event);
         }
-        if self.design.is_some() && self.palette_drag.is_some() {
-            self.handle_palette_drag(cx, event);
-        }
         discard_unavailable_picks(cx);
         let in_frame = self.settle_frame.is_event(event).is_some();
         if self.settle_isolation(cx, in_frame) {
@@ -19632,7 +19639,11 @@ impl Widget for Tweaker {
         let flat_outlines = !cx.sploded_active();
         if let Some((pick, place)) = self.design_drop.clone() {
             if Some(pick.window_id) == window_id && flat_outlines {
-                self.draw_place_bar(cx, pick.rect, place, false);
+                let horizontal = match place {
+                    DesignPlace::Inside => false,
+                    _ => siblings_run_horizontal(cx, pick.uid),
+                };
+                self.draw_place_bar(cx, pick.rect, place, horizontal);
             }
         }
         if flat_outlines {
@@ -23752,6 +23763,31 @@ line two");
 // The Build tab: the structural designer, over `crate::designer`.
 // ---------------------------------------------------------------------------
 
+/// Whether a widget's siblings are laid out side by side: the parent flows
+/// Right when two drawn children share a row and differ in x. A widget with
+/// no drawn sibling reads as a column.
+fn siblings_run_horizontal(cx: &Cx2d, uid: u64) -> bool {
+    let tree = cx.widget_tree();
+    let Some(parent_uid) = tree.parent_of(WidgetUid(uid)) else {
+        return false;
+    };
+    let parent = tree.widget(parent_uid);
+    if parent.is_empty() {
+        return false;
+    }
+    let mut rects: Vec<Rect> = Vec::new();
+    parent.children(&mut |_, child| {
+        let rect = live_rect(cx, &child);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            rects.push(rect);
+        }
+    });
+    rects.windows(2).any(|pair| {
+        let (a, b) = (pair[0], pair[1]);
+        (a.pos.y - b.pos.y).abs() < 1.0 && (a.pos.x - b.pos.x).abs() >= 1.0
+    })
+}
+
 /// Slots of `Tweaker::build_uids`, in the order the buttons are captured.
 const BUILD_DESIGN: usize = 0;
 const BUILD_UNDO: usize = 1;
@@ -24264,13 +24300,14 @@ impl Tweaker {
     /// the point and the zone of its rect the point is in (the middle of a
     /// container: inside; else the near or far half: before or after).
     /// `None` over the panel or over nothing.
-    fn palette_drop_target(&self, cx: &mut Cx, abs: DVec2) -> Option<(TweakPick, DesignPlace)> {
+    fn palette_drop_target(&self, cx: &mut Cx, abs: DVec2, body: &WidgetRef) -> Option<(TweakPick, DesignPlace)> {
         let on_panel = self.band.size.x > 0.0 && abs.x >= self.band.pos.x;
         if on_panel {
             return None;
         }
-        let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
-        let pick = resolve_pick(cx, &root, abs, self.my_window.unwrap_or(0))?;
+        // Picked from the window's body view, as every other pick is: the
+        // widget tree's root handle is not a widget to walk from.
+        let pick = resolve_pick(cx, body, abs, self.my_window.unwrap_or(0))?;
         let r = pick.rect;
         let fx = ((abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
         let fy = ((abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
@@ -24290,7 +24327,7 @@ impl Tweaker {
     /// and the zone of it the pointer is in decide where the entry lands;
     /// the drop inserts it there. Over the panel the drop means the
     /// selection, like a click on the row.
-    fn handle_palette_drag(&mut self, cx: &mut Cx, event: &Event) {
+    fn handle_palette_drag(&mut self, cx: &mut Cx, event: &Event, body: &WidgetRef) {
         let is_palette = |items: &[DragItem]| {
             items
                 .iter()
@@ -24301,7 +24338,7 @@ impl Tweaker {
                 if !is_palette(&e.items) {
                     return;
                 }
-                let next = self.palette_drop_target(cx, e.abs);
+                let next = self.palette_drop_target(cx, e.abs, body);
                 if let Ok(mut response) = e.response.lock() {
                     *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
                 }
@@ -24328,7 +24365,7 @@ impl Tweaker {
                 // handling, which may have moved the hover and the state
                 // under it since the last drag event.
                 self.design_drop = None;
-                let drop = self.palette_drop_target(cx, e.abs);
+                let drop = self.palette_drop_target(cx, e.abs, body);
                 session().lock().unwrap().hover = None;
                 self.redraw_overlay(cx);
                 let Some(entry) = self.palette_entries.get(index).cloned() else {
@@ -24371,12 +24408,18 @@ impl Tweaker {
     /// selection's near or far edge (before, after) or inside its far edge,
     /// along the selection's flow.
     fn draw_insert_caret(&mut self, cx: &mut Cx2d, pick: &TweakPick) {
-        let horizontal = self
-            .rows
-            .iter()
-            .find(|r| r.prop == "flow")
-            .map(|r| r.value.starts_with("Right"))
-            .unwrap_or(false);
+        let horizontal = match self.design_place {
+            // Inside: along the selection's own flow.
+            DesignPlace::Inside => self
+                .rows
+                .iter()
+                .find(|r| r.prop == "flow")
+                .map(|r| r.value.starts_with("Right"))
+                .unwrap_or(false),
+            // Before or after: along the parent's flow, read from where the
+            // siblings sit.
+            _ => siblings_run_horizontal(cx, pick.uid),
+        };
         self.draw_place_bar(cx, pick.rect, self.design_place, horizontal);
     }
 
