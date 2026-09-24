@@ -1,0 +1,9 @@
+// The material itself needs no assignment here: `material` is a uniform whose
+// default is `theme.material_level`, and theme.splash has already raised that
+// before any widget registered. This file is only the geometry the look needs.
+mod.widgets.Button.padding = mod.turtle.Inset{left: 18.0 right: 18.0 top: 11.0 bottom: 11.0}
+mod.widgets.Button.draw_bg.border_radius = 8.0
+mod.widgets.Button.draw_bg.border_size = 0.0
+mod.widgets.TextInput.draw_bg.border_radius = 8.0
+mod.widgets.Window.pass.clear_color = #eef0f6
+true

@@ -20,14 +20,19 @@ pub enum DesktopStyle {
     /// 4 NeXTSTEP), so a new style takes the next number and `ALL` below
     /// keeps the order they are shown in.
     BlackOrange,
+    /// Soft moulded surfaces on one near-white ground: no borders, every
+    /// visible edge is light on a shoulder. The first sheet built on the
+    /// surface material.
+    Neumorphic,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 8] = [Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    pub const ALL: [Self; 9] = [Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
             Self::BlackOrange => "black-orange",
+            Self::Neumorphic => "neumorphic",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -40,6 +45,7 @@ impl DesktopStyle {
         match self {
             Self::Omarchy => "Omarchy",
             Self::BlackOrange => "Black orange",
+            Self::Neumorphic => "Neumorphic",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -61,7 +67,7 @@ impl DesktopStyle {
     /// it.
     pub fn icon_set(self) -> usize {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic => 0,
             Self::Macos => 1,
             Self::Windows => 2,
             Self::Windows2000 => 3,
@@ -76,11 +82,11 @@ impl DesktopStyle {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
+        !matches!(self, Self::Omarchy | Self::BlackOrange | Self::Neumorphic) && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -89,7 +95,7 @@ impl DesktopStyle {
     }
     pub fn title_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -137,6 +143,10 @@ impl StyleSheet {
             DesktopStyle::BlackOrange => (
                 include_str!("../themes/black-orange/theme.splash"),
                 include_str!("../themes/black-orange/widgets.splash"),
+            ),
+            DesktopStyle::Neumorphic => (
+                include_str!("../themes/neumorphic/theme.splash"),
+                include_str!("../themes/neumorphic/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -372,6 +382,7 @@ mod tests {
                         DesktopStyle::Ios => 14.0,
                         DesktopStyle::Android => 20.0,
                         DesktopStyle::BlackOrange => 2.5,
+                        DesktopStyle::Neumorphic => 8.0,
                         _ => 0.0,
                     }
                 );
