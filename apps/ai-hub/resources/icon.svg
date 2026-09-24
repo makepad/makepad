@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7ef0da"/><stop offset="1" stop-color="#3fc9b0"/></linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <g stroke="#4aa3e0" stroke-width="36" stroke-linecap="round">
+    <path d="M512 512 L512 262 M512 512 L728.5 387 M512 512 L728.5 637 M512 512 L512 762 M512 512 L295.5 637 M512 512 L295.5 387"/>
+  </g>
+  <g fill="#4aa3e0"><circle cx="512" cy="262" r="62"/><circle cx="728.5" cy="387" r="62"/><circle cx="728.5" cy="637" r="62"/><circle cx="512" cy="762" r="62"/><circle cx="295.5" cy="637" r="62"/><circle cx="295.5" cy="387" r="62"/></g>
+  <circle cx="512" cy="512" r="124" fill="url(#g)"/>
+  <circle cx="512" cy="512" r="46" fill="#0e1d33"/>
+</svg>

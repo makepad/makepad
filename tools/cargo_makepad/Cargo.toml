@@ -26,6 +26,8 @@ makepad-tar = { path = "../../libs/tar", version = "0.1.0" }
 makepad-lz4 = { path = "../../libs/lz4", version = "0.1.0" }
 makepad-rmeta = { path = "../../libs/rmeta", version = "0.1.0" }
 makepad-civil-time = { path = "../../libs/civil_time", version = "0.1.0" }
+# Windows executable icons without rc.exe/windres.
+makepad-win-resource = { path = "../../libs/win_resource", version = "0.1.0" }
 brotli = "8.0"
 
 [features]

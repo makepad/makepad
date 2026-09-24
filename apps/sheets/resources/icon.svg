@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- sheets: a spreadsheet grid with a header row and a selected cell -->
+  <rect x="212" y="232" width="600" height="560" rx="44" fill="#e8eef6"/>
+  <path d="M212 276 A44 44 0 0 1 256 232 L768 232 A44 44 0 0 1 812 276 L812 360 L212 360 Z" fill="#4fd18b"/>
+  <g fill="#0e1d33" fill-opacity="0.9">
+    <rect x="372" y="232" width="16" height="560"/>
+    <rect x="592" y="232" width="16" height="560"/>
+    <rect x="212" y="360" width="600" height="16"/>
+    <rect x="212" y="498" width="600" height="16"/>
+    <rect x="212" y="636" width="600" height="16"/>
+  </g>
+  <rect x="388" y="514" width="204" height="122" fill="#4fd18b" fill-opacity="0.35"/>
+  <rect x="380" y="506" width="220" height="138" fill="none" stroke="#2fae6c" stroke-width="16"/>
+</svg>

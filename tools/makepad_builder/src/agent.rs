@@ -27,13 +27,22 @@ pub fn write_context(release: &Release, environment: &Environment) -> Result<Pat
     Ok(context)
 }
 
-pub fn command(name: &str, release: &Release, environment: &Environment) -> Result<Command, String> {
+/// `task`, when given, is the first prompt (Claude and Codex take it as a
+/// positional argument). Grok has no instruction flag here; it reads the
+/// context file named by MAKEPAD_AGENT_CONTEXT like a shell user would.
+pub fn command(name: &str, release: &Release, environment: &Environment, task: Option<&str>) -> Result<Command, String> {
     let context = write_context(release, environment)?;
-    let arguments = match name {
+    let mut arguments = match name {
         "codex" => vec!["-c".to_owned(), format!("developer_instructions='{}'", DIRECTIVE)],
         "claude" => vec!["--append-system-prompt".to_owned(), DIRECTIVE.to_owned()],
+        "grok" => Vec::new(),
         _ => return Err("Unknown app agent".into()),
     };
+    if let Some(task) = task.filter(|_| name != "grok") {
+        // The task is built from fixed text and identifiers; keep it free of
+        // characters CMD would interpret.
+        arguments.push(task.chars().filter(|c| !"\"%!^&|<>\r\n".contains(*c)).collect());
+    }
     let mut command = if cfg!(windows) {
         // Only fixed agent names and our constant instruction enter CMD; paths
         // and credentials never do. This also supports installed npm .cmd shims.

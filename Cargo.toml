@@ -160,6 +160,7 @@ workspace.members = [
     "platform/video",
     "tools/cargo_makepad",
     "tools/makepad_builder",
+    "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",

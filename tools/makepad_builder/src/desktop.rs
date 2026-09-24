@@ -61,17 +61,15 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
         .map(|(name, path)| format!("{name}\tinstallation/{path}\n")).collect();
     fs::write(macos.join(format!("{binary}-bin.makepad-package-paths")), paths)?;
 
-    let app_resources = release.source(&root).join("resources");
-    let icon = if release.id == "scope" {
-        fs::write(resources.join("AppIcon.icns"), include_bytes!("../resources/scope.icns"))?;
-        "AppIcon.icns"
-    } else if app_resources.join("icon.icns").is_file() {
-        fs::copy(app_resources.join("icon.icns"), resources.join("AppIcon.icns"))?;
-        "AppIcon.icns"
-    } else if app_resources.join("icon_1024.png").is_file() {
-        fs::copy(app_resources.join("icon_1024.png"), resources.join("AppIcon.png"))?;
-        "AppIcon.png"
-    } else { "" };
+    // The same source as the Windows executable's icon (app_icon.rs).
+    let icon = match crate::app_icon::source(&root, release) {
+        Some(source) => {
+            let name = if source.is_png() { "AppIcon.png" } else { "AppIcon.icns" };
+            fs::write(resources.join(name), source.read()?)?;
+            name
+        }
+        None => "",
+    };
     let icon = if icon.is_empty() { String::new() } else {
         format!("<key>CFBundleIconFile</key><string>{icon}</string>")
     };

@@ -6,7 +6,7 @@ use makepad_strict_json::{self as json, Value};
 use crate::extract;
 use crate::http;
 
-const CUDA_VERSION: &str = "13.2.2";
+pub const CUDA_VERSION: &str = "13.2.2";
 const REDIST: &str = "https://developer.download.nvidia.com/compute/cuda/redist";
 
 const COMPONENTS: &[&str] = &[
@@ -21,6 +21,17 @@ const COMPONENTS: &[&str] = &[
 /// Availability of the private toolkit, independent of the app release defaults.
 pub fn supported() -> bool {
     cfg!(all(windows, target_arch = "x86_64"))
+}
+
+/// An NVIDIA display driver is installed: it places nvcuda.dll in System32.
+/// Only then is the optional toolkit offered.
+pub fn gpu_present() -> bool {
+    supported()
+        && std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32/nvcuda.dll")
+            .is_file()
 }
 
 pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {

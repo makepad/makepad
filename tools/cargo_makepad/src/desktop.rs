@@ -2,7 +2,7 @@ use crate::makepad_shell::{shell_env_cap, write_text};
 use crate::utils::{
     get_build_crate_from_args, get_crate_dir, get_package_binary_name, get_profile_from_args,
     get_target_from_args, resolve_app_icon_env, AppIconEnv, APP_ICON_ENV_VARS, APP_ICON_IDX_1024,
-    APP_ICON_IDX_512, APP_ICON_IDX_ICO,
+    APP_ICON_IDX_512,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,72 +65,39 @@ fn cargo_target_dir() -> PathBuf {
     }
 }
 
+/// The executable's icon resource, made in-process (no rc.exe/windres) from the
+/// same source as the macOS bundle in `write_macos_app_bundle`:
+/// `resources/icon.icns`, else the largest `icon_*.png`.
 fn write_windows_icon_resource(
+    args: &[String],
     icon_env: &AppIconEnv,
     build_crate: &str,
 ) -> Result<Option<PathBuf>, String> {
+    use makepad_win_resource::{app_link_input, LinkFormat};
+    let target = get_target_from_args(args).unwrap_or_else(|| {
+        format!("{}-pc-windows-msvc", std::env::consts::ARCH)
+    });
+    let env = if target.ends_with("-gnu") || target.ends_with("-gnullvm") { "gnu" } else { "msvc" };
+    let arch = target.split('-').next().unwrap_or_default();
+    let Some(format) = LinkFormat::for_target("windows", env, arch)? else {
+        return Ok(None);
+    };
+
+    let icns = get_crate_dir(build_crate)?.join("resources/icon.icns");
+    let source = if icns.is_file() {
+        icns
+    } else {
+        PathBuf::from(&icon_env[APP_ICON_IDX_1024])
+    };
+    let bytes = fs::read(&source).map_err(|e| format!("failed to read {:?}: {e}", source))?;
+    let input = app_link_input(format, Some(&bytes), None)
+        .map_err(|e| format!("Windows icon from {:?}: {e}", source))?;
+
     let out_dir = PathBuf::from("target/makepad-desktop/windows-res").join(build_crate);
     fs::create_dir_all(&out_dir).map_err(|e| format!("failed to create {:?}: {e}", out_dir))?;
-
-    let rc_path = out_dir.join("app_icon.rc");
-    let res_path = out_dir.join("app_icon.res");
-    let ico = &icon_env[APP_ICON_IDX_ICO];
-    fs::write(
-        &rc_path,
-        format!("1 ICON \"{}\"\n", ico.replace('\\', "\\\\")),
-    )
-    .map_err(|e| format!("failed to write {:?}: {e}", rc_path))?;
-
-    let mut tries: Vec<(&str, Vec<String>)> = Vec::new();
-    tries.push((
-        "llvm-rc",
-        vec![
-            "/nologo".to_string(),
-            format!("/fo{}", res_path.to_string_lossy()),
-            rc_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "rc",
-        vec![
-            "/nologo".to_string(),
-            format!("/fo{}", res_path.to_string_lossy()),
-            rc_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "llvm-windres",
-        vec![
-            rc_path.to_string_lossy().to_string(),
-            "-O".to_string(),
-            "coff".to_string(),
-            "-o".to_string(),
-            res_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "windres",
-        vec![
-            rc_path.to_string_lossy().to_string(),
-            "-O".to_string(),
-            "coff".to_string(),
-            "-o".to_string(),
-            res_path.to_string_lossy().to_string(),
-        ],
-    ));
-
-    for (tool, args) in tries {
-        if let Ok(status) = Command::new(tool).args(&args).status() {
-            if status.success() && res_path.is_file() {
-                return Ok(Some(res_path));
-            }
-        }
-    }
-
-    eprintln!(
-        "warning: could not compile Windows .rc icon resource (tried llvm-rc/rc/llvm-windres/windres). executable icon embedding skipped."
-    );
-    Ok(None)
+    let path = out_dir.join(format!("app_icon.{}", format.extension()));
+    fs::write(&path, input).map_err(|e| format!("failed to write {:?}: {e}", path))?;
+    Ok(Some(path))
 }
 
 fn add_windows_icon_link_arg(
@@ -142,7 +109,7 @@ fn add_windows_icon_link_arg(
     if !is_windows_target(args) {
         return Ok(());
     }
-    let Some(res) = write_windows_icon_resource(icon_env, build_crate)? else {
+    let Some(res) = write_windows_icon_resource(args, icon_env, build_crate)? else {
         return Ok(());
     };
 

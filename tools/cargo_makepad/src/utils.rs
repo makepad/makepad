@@ -668,7 +668,6 @@ pub fn get_profile_from_args(args: &[String]) -> String {
 pub const APP_ICON_COUNT: usize = 7;
 pub const APP_ICON_IDX_512: usize = 4;
 pub const APP_ICON_IDX_1024: usize = 5;
-pub const APP_ICON_IDX_ICO: usize = 6;
 
 pub type AppIconEnv = [String; APP_ICON_COUNT];
 

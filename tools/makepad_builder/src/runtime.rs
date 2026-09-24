@@ -388,12 +388,19 @@ impl Environment {
     }
     pub fn build(&self, release: &Release) -> Result<(), String> {
         let cargo = self.vars.get("CARGO").ok_or("Missing Cargo path")?;
+        // Windows executables carry the app's icon and name as resources.
+        // `cargo rustc` passes the linker input to the final link only, so
+        // dependencies in the shared target keep their fingerprints.
+        #[cfg(windows)]
+        let resources = Some(crate::app_icon::windows_resources(&self.root, &self.build, release)?);
+        #[cfg(not(windows))]
+        let resources: Option<PathBuf> = None;
         let mut cmd = Command::new(cargo);
         cmd.current_dir(&self.cwd).envs(&self.vars);
         isolate(&mut cmd);
         cmd.env("MAKEPAD_PACKAGE_DIR", ".")
             .args([
-                "build",
+                if resources.is_some() { "rustc" } else { "build" },
                 "--release",
                 "--message-format=json-render-diagnostics",
                 "-p",
@@ -403,6 +410,9 @@ impl Environment {
             ]);
         if self.cwd.join("Cargo.lock").is_file() { cmd.arg("--locked"); }
         if !release.features.is_empty() { cmd.args(["--features", &release.features.join(",")]); }
+        if let Some(resources) = &resources {
+            cmd.args(["--", "-C"]).arg(format!("link-arg={}", resources.display()));
+        }
         let status = run_build_logged(&mut cmd, &self.build.join("builder-build.log"))?;
         if !status.success() {
             return Err(format!("Build failed: {status}"));
