@@ -80,9 +80,13 @@ script_mod! {
 
         // How a shadow or a glow dies away from the edge that throws it:
         // `fall` 0 = linear, gone at three blur lengths; 1 = exponential.
-        tail: fn(d: float, bl: float, fall: float) -> float {
+        fn m_tail(d: float, bl: float, fall: float) -> float {
             let dd = max(d, 0.0) / max(bl, 0.001)
             return mix(clamp(1.0 - dd / 3.0, 0.0, 1.0), exp(-dd), clamp(fall, 0.0, 1.0))
+        }
+
+        tail: fn(d: float, bl: float, fall: float) -> float {
+            return m_tail(d, bl, fall)
         }
 
         // The direction a shadow falls: away from the light, in the plane.
@@ -192,6 +196,50 @@ script_mod! {
         // Film grain from a screen position; never from time.
         grain: fn(p: vec2) -> float {
             return fract(sin(dot(floor(p), vec2(12.9898, 78.233))) * 43758.5453) - 0.5
+        }
+
+        // Where a raised shape's shadow is read: the pixel moved by the
+        // depth over the light's slope, away from the light for the shadow
+        // and toward it for the lip. Only the caller knows its shape, so it
+        // evaluates the shape at `p - offset` and `p + offset` itself.
+        cast_offset: fn(depth: float, light: vec4) -> vec2 {
+            let ll = length(light.xy)
+            var sdir = vec2(0.0, 1.0)
+            if ll > 0.0001 {
+                sdir = -light.xy / ll
+            }
+            let tanel = max(light.z, 0.05) / max(ll, 0.05)
+            return sdir * (max(depth, 0.0) / tanel)
+        }
+
+        // What a raised face throws on its ground, as one premultiplied
+        // colour to lay UNDER the face: the cast shadow (`d_dark`, the shape
+        // read at the pixel moved toward the light), the contact occlusion
+        // hugging the base, and the light-side lip (`d_lite`, read the other
+        // way), gated to the side facing the light. `d` and `g` are the
+        // shape's distance and outward gradient at the pixel, `px` a pixel
+        // in points, `raise` the depth the shadow is full at.
+        // `shadow` = strength, blur, falloff, contact; `lip` the lip strength.
+        cast: fn(d: float, d_dark: float, d_lite: float, g: vec2, px: float, depth: float, raise: float, light: vec4, shadow: vec4, lip: float, shadow_ink: vec3, light_ink: vec3) -> vec4 {
+            let ll = length(light.xy)
+            var sdir = vec2(0.0, 1.0)
+            if ll > 0.0001 {
+                sdir = -light.xy / ll
+            }
+            // Reaching under the antialiased edge, or the AA band blends the
+            // face with bare ground and draws a light line round every shadow.
+            let outside = smoothstep(-3.0 * px, 0.0, d)
+            let rel = clamp(depth / max(raise, 0.001), 0.0, 1.0)
+            let facing = clamp(-dot(g, sdir), 0.0, 1.0)
+            let blur = max(shadow.y, 0.001)
+            let dark = m_tail(d_dark, blur, shadow.z) * outside * rel
+            let lite = m_tail(d_lite, blur, shadow.z) * outside * rel * smoothstep(0.0, 0.7, facing)
+            let contact = exp(-max(d, 0.0) / (blur * 0.30)) * outside * step(0.0, depth)
+            let a1 = clamp(dark * shadow.x + contact * shadow.w, 0.0, 1.0)
+            var under = vec4(shadow_ink * a1, a1)
+            let a2 = clamp(lite * lip, 0.0, 1.0)
+            under = vec4(light_ink * a2, a2) + under * (1.0 - a2)
+            return under
         }
     }
 }
