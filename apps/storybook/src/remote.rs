@@ -37,17 +37,46 @@ fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), Stri
     if !normalized.contains("/apps/storybook/src/stories/") {
         return None;
     }
-    if let Err(err) = cx.install_live_edit_text(file, text) {
-        return Some(Err(err));
-    }
+    // The canvas by type, not by name: a name search takes the shallowest
+    // `canvas` in the tree, which need not be the story canvas.
+    let canvas = cx
+        .widget_tree()
+        .flat_tree(cx)
+        .into_iter()
+        .find(|row| row.ty == "StoryCanvas")
+        .map(|row| cx.widget_tree().widget(WidgetUid(row.uid)))
+        .filter(|w| !w.is_empty());
+    let Some(canvas) = canvas else {
+        log!("storybook: design preview found no StoryCanvas; the live edit takes it");
+        return None;
+    };
+    let changed = match cx.install_live_edit_text(file, text) {
+        Ok(changed) => changed,
+        Err(err) => return Some(Err(err)),
+    };
     crate::stories::forget_evaluated(cx);
-    let root = cx.widget_tree().widget(cx.widget_tree().root_uid());
-    let canvas = root.widget(cx, ids!(canvas));
+    // The rebuild runs the story file again under reload, as the live edit
+    // would, so widgets that guard their state on `is_reload` behave alike.
     cx.live_edit_capture_begin();
-    if let Some(mut canvas) = canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
-        canvas.rebuild(cx);
-    }
+    cx.with_vm(|vm| vm.bx.is_reload = true);
+    let rebuilt = match canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
+        Some(mut canvas) => {
+            canvas.rebuild(cx);
+            true
+        }
+        None => false,
+    };
+    cx.with_vm(|vm| vm.bx.is_reload = false);
     cx.live_edit_capture_end();
+    log!(
+        "storybook: design preview of {} (override {}, canvas {})",
+        normalized.rsplit('/').next().unwrap_or(&normalized),
+        if changed { "installed" } else { "unchanged" },
+        if rebuilt { "rebuilt" } else { "NOT rebuilt" }
+    );
+    if !rebuilt {
+        return None;
+    }
     Some(Ok(()))
 }
 

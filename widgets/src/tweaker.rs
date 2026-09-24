@@ -24221,7 +24221,8 @@ impl Tweaker {
                     if item.is_empty() {
                         continue;
                     }
-                    let mark = if *open { "\u{25be}" } else { "\u{25b8}" };
+                    // Plain marks: the panel font has no triangle glyphs.
+                    let mark = if *open { "-" } else { "+" };
                     item.set_text(cx, &format!("{mark} {group}  ({count})"));
                     self.palette_heads.push((item.widget_uid().0, group.to_string()));
                     item.draw_all(cx, &mut Scope::empty());
