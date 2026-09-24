@@ -200,6 +200,9 @@ impl Widget for PlasmaScreen {
                 depth: 0.0,
                 inset: 0.0,
                 radius: 6.0,
+                map: [Vec4f::default(); 4],
+                map_amount: 0.0,
+                tint: Vec4f::default(),
             },
         );
         if self.running {

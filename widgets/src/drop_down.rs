@@ -753,8 +753,14 @@ impl DropDown {
         // rather than leaving the operator a blank face.
         if !(self.icon_only && has_icon) {
             if let Some(val) = self.labels.get(self.selected_item) {
-                self.draw_text
-                    .draw_walk(cx, Walk::fit(), Align::default(), val);
+                // A label set to ellipsize takes the room the face leaves it
+                // (its padding keeps the chevron clear) and ends in "…".
+                let walk = if self.draw_text.text_overflow == crate::makepad_draw::shader::draw_text::TextOverflow::Ellipsis {
+                    Walk { width: Size::fill(), height: Size::fit(), ..Walk::fit() }
+                } else {
+                    Walk::fit()
+                };
+                self.draw_text.draw_walk(cx, walk, Align::default(), val);
             } else {
                 self.draw_text
                     .draw_walk(cx, Walk::fit(), Align::default(), " ");

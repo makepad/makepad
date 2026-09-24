@@ -120,6 +120,7 @@ pub mod remote;
 pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
+pub mod window_snapshot;
 pub mod audio_output_tap;
 pub mod log_ring;
 pub mod midi_inject;
@@ -318,6 +319,7 @@ pub use {
             ScriptWindowHandle, WaylandDecorationPreference, WindowBackdrop, WindowHandle,
             WindowIcon, WindowIconBuffer, WindowId, WindowVisuals,
         },
+        window_snapshot::WindowSnapshotState,
         xr_tsdf::{
             ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
             XrTsdfState, XrTsdfStats, XrTsdfStore,

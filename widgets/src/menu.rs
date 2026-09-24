@@ -327,6 +327,9 @@ fn row_height(row: &MenuRow) -> f64 {
 }
 
 /// The bubble size a list of rows needs, estimated from character counts.
+/// The least a menu keeps clear of the window's edges when it must scroll.
+const MENU_MARGIN: f64 = 8.0;
+
 pub fn measure_rows(rows: &[MenuRow]) -> Vec2d {
     let mut w: f64 = MENU_MIN_W;
     let mut h = MENU_PAD * 2.0;
@@ -360,6 +363,9 @@ struct Level {
     press: Option<usize>,
     /// Row of the PARENT level that opened this flyout.
     from_row: Option<usize>,
+    /// Points scrolled down, when the rows are taller than the room the
+    /// window gives the bubble.
+    scroll: f64,
 }
 
 /// Each open flyout shows its parent row's submenu again, after the root's
@@ -378,8 +384,30 @@ fn refresh_flyouts(levels: &mut [Level]) {
 }
 
 impl Level {
+    /// The rows' whole height: taller than `rect` when the list scrolls.
+    fn content_h(&self) -> f64 {
+        MENU_PAD * 2.0 + self.rows.iter().map(row_height).sum::<f64>()
+    }
+
+    fn max_scroll(&self) -> f64 {
+        (self.content_h() - self.rect.size.y).max(0.0)
+    }
+
+    /// Scroll so that row `i` is inside the bubble.
+    fn scroll_to(&mut self, i: usize) {
+        let r = self.row_rect(i);
+        let top = self.rect.pos.y + MENU_PAD;
+        let bottom = self.rect.pos.y + self.rect.size.y - MENU_PAD;
+        if r.pos.y < top {
+            self.scroll -= top - r.pos.y;
+        } else if r.pos.y + r.size.y > bottom {
+            self.scroll += r.pos.y + r.size.y - bottom;
+        }
+        self.scroll = self.scroll.clamp(0.0, self.max_scroll());
+    }
+
     fn row_rect(&self, i: usize) -> Rect {
-        let mut y = self.rect.pos.y + MENU_PAD;
+        let mut y = self.rect.pos.y + MENU_PAD - self.scroll;
         for row in self.rows.iter().take(i) {
             y += row_height(row);
         }
@@ -394,6 +422,12 @@ impl Level {
 
     fn row_at(&self, p: Vec2d) -> Option<usize> {
         if !self.rect.contains(p) {
+            return None;
+        }
+        // Only the part of a row inside the bubble answers (a scrolled
+        // row half under the edge is not hit through it).
+        let inner = Rect { pos: dvec2(self.rect.pos.x, self.rect.pos.y + MENU_PAD), size: dvec2(self.rect.size.x, (self.rect.size.y - MENU_PAD * 2.0).max(0.0)) };
+        if !inner.contains(p) {
             return None;
         }
         (0..self.rows.len()).find(|i| self.row_rect(*i).contains(p))
@@ -891,7 +925,9 @@ impl MenuLayer {
         } else {
             Rect { pos: dvec2(0.0, 0.0), size: cx.default_window_size() }
         };
-        let size = measure_rows(&rows);
+        // Never taller than the window: a long list scrolls in its bubble.
+        let mut size = measure_rows(&rows);
+        size.y = size.y.min((bounds.size.y - MENU_MARGIN * 2.0).max(MENU_PAD * 2.0 + 24.0));
         // A context menu hangs off the point itself, which is an anchor of
         // no size; everything else hangs off the control that raised it.
         let anchor = match menu_place {
@@ -917,6 +953,7 @@ impl MenuLayer {
             hover_t: vec![0.0; n],
             press: None,
             from_row: None,
+            scroll: 0.0,
         });
         self.opened_at = cx.seconds_since_app_start();
         self.last_t = self.opened_at;
@@ -943,7 +980,8 @@ impl MenuLayer {
             }
             (it.submenu.clone(), l.row_rect(row), l.owner)
         };
-        let size = measure_rows(&rows);
+        let mut size = measure_rows(&rows);
+        size.y = size.y.min((self.window.size.y - MENU_MARGIN * 2.0).max(MENU_PAD * 2.0 + 24.0));
         let parent = self.levels[level].rect;
         // A flyout hangs off the parent bubble's edge, not off the row: the
         // row is inside the bubble, and a flyout that overlapped its parent
@@ -970,6 +1008,7 @@ impl MenuLayer {
             hover_t: vec![0.0; n],
             press: None,
             from_row: Some(row),
+            scroll: 0.0,
         });
         self.redraw_menus(cx);
     }
@@ -1092,6 +1131,9 @@ impl MenuLayer {
                 let dir = if ke.key_code == KeyCode::ArrowDown { 1 } else { -1 };
                 let from = self.levels[last].hi;
                 self.levels[last].hi = self.levels[last].step(from, dir);
+                if let Some(hi) = self.levels[last].hi {
+                    self.levels[last].scroll_to(hi);
+                }
                 self.levels.truncate(last + 1);
                 self.redraw_menus(cx);
                 true
@@ -1121,11 +1163,13 @@ impl MenuLayer {
             }
             KeyCode::Home => {
                 self.levels[last].hi = self.levels[last].step(None, 1);
+                self.levels[last].scroll = 0.0;
                 self.redraw_menus(cx);
                 true
             }
             KeyCode::End => {
                 self.levels[last].hi = self.levels[last].step(None, -1);
+                self.levels[last].scroll = self.levels[last].max_scroll();
                 self.redraw_menus(cx);
                 true
             }
@@ -1209,8 +1253,17 @@ impl Widget for MenuLayer {
             let rect = self.levels[li].rect;
             let rows = self.levels[li].rows.clone();
             self.draw_bg.draw_abs(cx, rect);
+            // Rows are clipped to the bubble (a long list scrolls in it).
+            let scrolls = self.levels[li].max_scroll() > 0.0;
+            let inner = Rect { pos: dvec2(rect.pos.x, rect.pos.y + MENU_PAD), size: dvec2(rect.size.x, (rect.size.y - MENU_PAD * 2.0).max(0.0)) };
+            if scrolls {
+                cx.push_clip_rect(inner);
+            }
             for (i, row) in rows.iter().enumerate() {
                 let r = self.levels[li].row_rect(i);
+                if r.pos.y + r.size.y < inner.pos.y || r.pos.y > inner.pos.y + inner.size.y {
+                    continue;
+                }
                 if row.separator {
                     self.draw_sep.draw_abs(
                         cx,
@@ -1286,6 +1339,19 @@ impl Widget for MenuLayer {
                         &row.shortcut,
                     );
                 }
+            }
+            if scrolls {
+                cx.pop_clip_rect();
+                // Where in the list the bubble is: a thin thumb at its edge.
+                let l = &self.levels[li];
+                let content = l.content_h();
+                let track = inner.size.y;
+                let thumb_h = (track * track / content).max(16.0);
+                let thumb_y = inner.pos.y + (track - thumb_h) * (l.scroll / l.max_scroll().max(1.0));
+                let keep = self.draw_sep.color;
+                self.draw_sep.color = Vec4f { w: keep.w.max(0.5), ..keep };
+                self.draw_sep.draw_abs(cx, Rect { pos: dvec2(rect.pos.x + rect.size.x - 5.0, thumb_y), size: dvec2(3.0, thumb_h) });
+                self.draw_sep.color = keep;
             }
         }
 
@@ -1372,6 +1438,21 @@ impl Widget for MenuLayer {
             return;
         }
         match event {
+            // A list taller than the window scrolls in its bubble.
+            Event::Scroll(e) => {
+                if let Some(li) = self.inside_any(e.abs) {
+                    let l = &mut self.levels[li];
+                    let next = (l.scroll + e.scroll.y).clamp(0.0, l.max_scroll());
+                    if next != l.scroll {
+                        l.scroll = next;
+                        self.levels.truncate(li + 1);
+                        if let Some((li, row)) = self.hit(e.abs) {
+                            self.point_at(cx, li, Some(row));
+                        }
+                        self.redraw_menus(cx);
+                    }
+                }
+            }
             Event::MouseMove(e) => {
                 // The highlight is a hover, and a hover taken from a pointer
                 // another control is holding is the thing the rule forbids.
@@ -1526,7 +1607,38 @@ mod tests {
             hover_t: vec![0.0; n],
             press: None,
             from_row: None,
+            scroll: 0.0,
         }
+    }
+
+    /// A list taller than its bubble scrolls: rows move up by the scroll,
+    /// only rows inside the bubble are hit, and a row the keyboard reaches
+    /// is scrolled into view.
+    #[test]
+    fn a_long_list_scrolls_inside_its_bubble() {
+        let list: Vec<MenuRow> = (0..40).map(|i| MenuRow::new(LiveId(i as u64 + 1), &format!("row {i}"))).collect();
+        let full = measure_rows(&list);
+        let mut l = Level {
+            owner: live_id!(owner),
+            rect: Rect { pos: dvec2(0.0, 0.0), size: dvec2(full.x, 200.0) },
+            rows: list,
+            hi: None,
+            hover_t: vec![0.0; 40],
+            press: None,
+            from_row: None,
+            scroll: 0.0,
+        };
+        assert!(l.max_scroll() > 0.0);
+        assert_eq!(l.row_at(dvec2(20.0, 199.0)), None, "the bottom padding hits nothing");
+        let below = l.row_rect(30);
+        assert!(below.pos.y > 200.0, "row 30 starts outside the bubble");
+        assert_eq!(l.row_at(below.pos + dvec2(20.0, 2.0)), None, "and is not hit through it");
+        l.scroll_to(30);
+        let r = l.row_rect(30);
+        assert!(r.pos.y + r.size.y <= 200.0 - MENU_PAD + 0.01 && r.pos.y >= MENU_PAD);
+        assert_eq!(l.row_at(r.pos + dvec2(20.0, 2.0)), Some(30));
+        l.scroll_to(0);
+        assert_eq!(l.scroll, 0.0);
     }
 
     /// Only rows that can be chosen take the highlight: a heading, a rule

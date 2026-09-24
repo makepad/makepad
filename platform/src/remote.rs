@@ -472,6 +472,13 @@ mod imp {
         /// The window's own maximise (macOS: toggleFullScreen) — the test
         /// hook for the maximise/occlusion proof.
         Maximize,
+        /// Resize the window's inner size (points): responsive-layout checks
+        /// without relaunching.
+        Resize(f64, f64),
+        /// Ask the window what the OS asks before a native press: is this
+        /// point a window drag (Caption) or the app's (Client)? Remote
+        /// clicks skip that question, so this is how a check sees it.
+        DragQuery(f64, f64),
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -1481,6 +1488,22 @@ mod imp {
                             cx.redraw_all();
                             continue;
                         }
+                        Input::DragQuery(x, y) => {
+                            let response = std::rc::Rc::new(std::cell::Cell::new(crate::event::WindowDragQueryResponse::NoAnswer));
+                            cx.call_event_handler(&crate::event::Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
+                                window_id,
+                                abs: crate::makepad_math::dvec2(x, y),
+                                response: response.clone(),
+                            }));
+                            input_result = Some(format!("{{\"ok\":1,\"drag\":\"{:?}\"}}", response.get()));
+                            continue;
+                        }
+                        Input::Resize(w, h) => {
+                            cx.push_unique_platform_op(crate::cx_api::CxOsOp::ResizeWindow(window_id, crate::makepad_math::dvec2(w, h)));
+                            input_result = Some(format!("{{\"ok\":1,\"resize\":[{w},{h}]}}"));
+                            cx.redraw_all();
+                            continue;
+                        }
                         Input::DropFile { path, x, y } => {
                             let size = cx.windows[window_id].window_geom.inner_size;
                             if x >= size.x || y >= size.y {
@@ -1975,7 +1998,15 @@ mod imp {
             // next drawn frame with `wait` (the maximise/occlusion proof).
             "/w" | "/window" => match p.get(&["k", "kind"]) {
                 Some("maximize") | Some("max") => send_input(p.window(), vec![Input::Maximize], p.flag(&["wait"])),
-                other => err(&format!("unknown window op {other:?}; k=maximize")),
+                Some("dragquery") => match (p.get(&["x"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["y"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(x), Some(y)) => send_input(p.window(), vec![Input::DragQuery(x, y)], p.flag(&["wait"])),
+                    _ => err("dragquery needs x= and y= (window points)"),
+                },
+                Some("resize") => match (p.get(&["width"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["height"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => send_input(p.window(), vec![Input::Resize(w, h)], p.flag(&["wait"])),
+                    _ => err("resize needs width= and height= (points)"),
+                },
+                other => err(&format!("unknown window op {other:?}; k=maximize|resize|dragquery")),
             },
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next

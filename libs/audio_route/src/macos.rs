@@ -14,7 +14,10 @@ use std::sync::Mutex;
 const SYSTEM: u32 = 1;
 const GLOBAL: u32 = fourcc(*b"glob");
 const OUTPUT: u32 = fourcc(*b"outp");
-const MAX_CHANNELS: usize = 8;
+const INPUT: u32 = fourcc(*b"inpt");
+/// The widest device stream tapped whole; a wider one falls back to a
+/// stereo mixdown.
+const MAX_TAP_CHANNELS: usize = 64;
 const MAX_FRAMES: usize = 16_384;
 
 const fn fourcc(bytes: [u8; 4]) -> u32 {
@@ -108,6 +111,12 @@ extern "C" {
 extern "C" {
     fn CFStringGetCString(string: *const c_void, buffer: *mut c_char, size: isize, encoding: u32) -> bool;
     fn CFRelease(cf: *const c_void);
+    fn CFStringCreateWithCString(alloc: *const c_void, text: *const c_char, encoding: u32) -> *const c_void;
+}
+
+extern "C" {
+    fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -120,17 +129,53 @@ struct ProcSlot {
     processor: Box<dyn Processor>,
 }
 
+/// Where the route's audio thread reads and writes, worked out when the
+/// route opens.
+///
+/// The tap is the player's own output on the output device's stream that
+/// carries the device's stereo pair, in that stream's width, rate and
+/// channel order: no mixdown, so the level and the channels are exactly
+/// what the player sends the device. The processor sees the pair as
+/// stereo, and the processed pair goes back onto the same two output
+/// channels; the stream's other channels pass through as tapped. Where a
+/// stream tap is not available, a stereo mixdown is tapped and played on
+/// the pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// Input buffers ahead of the tap's: the output device's own inputs.
+    skip: usize,
+    /// The tap's width.
+    width: usize,
+    /// The processor's width: 2, or 1 for a mono tap.
+    channels: usize,
+    /// Left and right: channels of the tap.
+    tap_pair: [usize; 2],
+    /// Left and right: channels of the output, counted across its buffers.
+    out_pair: [usize; 2],
+    /// A stream tap: the output channel its first channel lands on.
+    raw_first: Option<usize>,
+}
+
 struct Shared {
     processor: AtomicPtr<ProcSlot>,
     epoch: AtomicU64,
     sample_rate: f64,
     channels: u16,
+    layout: Layout,
     scratch_frames: usize,
+    /// The tap's stream format as Core Audio reports it, for [`Route::describe`].
+    tap_format: String,
+    /// The last block's buffer layouts ([`pack_layout`]), input and output.
+    in_layout: AtomicU64,
+    out_layout: AtomicU64,
 }
 
 struct Callback {
     shared: *const Shared,
+    /// The tap's block, `layout.width` wide.
     scratch: Vec<f32>,
+    /// The processor's block, `layout.channels` wide.
+    block: Vec<f32>,
 }
 
 pub struct Route {
@@ -221,6 +266,66 @@ impl Route {
     pub fn channels(&self) -> u16 {
         self.shared.channels
     }
+
+    /// What the route's audio thread sees, for a diagnostic log: the tap's
+    /// stream format, and the channel count of each buffer in the last
+    /// block's input list (the output device's own inputs, then the tap)
+    /// and output list.
+    pub fn describe(&self) -> String {
+        let layout = |packed: u64| {
+            let count = (packed & 0xff) as usize;
+            let widths: Vec<String> = (0..count.min(7)).map(|i| ((packed >> (8 + 8 * i)) & 0xff).to_string()).collect();
+            format!("[{}]", widths.join(" "))
+        };
+        let l = &self.shared.layout;
+        format!(
+            "tap {} ({}), L/R = tap ch {}/{} -> output ch {}/{} (1-based){}; input buffers {}; output buffers {}",
+            self.shared.tap_format,
+            if l.raw_first.is_some() { "the device stream, no mixdown" } else { "stereo mixdown" },
+            l.tap_pair[0] + 1,
+            l.tap_pair[1] + 1,
+            l.out_pair[0] + 1,
+            l.out_pair[1] + 1,
+            match l.raw_first {
+                Some(first) => format!(", other stream channels pass through from output ch {}", first + 1),
+                None => String::new(),
+            },
+            layout(self.shared.in_layout.load(Ordering::Relaxed)),
+            layout(self.shared.out_layout.load(Ordering::Relaxed))
+        )
+    }
+}
+
+/// Whether macOS lets this app hear other apps ("Screen & System Audio
+/// Recording", the TCC service `kTCCServiceAudioCapture`), asked without
+/// prompting. `None` where the system does not say (the check is the
+/// private `TCCAccessPreflight`, looked up at run time). Opening a route is
+/// what asks the person, the first time.
+pub fn permission() -> Option<crate::Permission> {
+    type Preflight = unsafe extern "C" fn(*const c_void, *const c_void) -> i32;
+    static PREFLIGHT: std::sync::OnceLock<Option<Preflight>> = std::sync::OnceLock::new();
+    let preflight = (*PREFLIGHT.get_or_init(|| {
+        let path = CString::new("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC").ok()?;
+        let symbol = CString::new("TCCAccessPreflight").ok()?;
+        let handle = unsafe { dlopen(path.as_ptr(), 1) };
+        if handle.is_null() {
+            return None;
+        }
+        let function = unsafe { dlsym(handle, symbol.as_ptr()) };
+        (!function.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, Preflight>(function) })
+    }))?;
+    let service = CString::new("kTCCServiceAudioCapture").ok()?;
+    let service = unsafe { CFStringCreateWithCString(ptr::null(), service.as_ptr(), 0x0800_0100) };
+    if service.is_null() {
+        return None;
+    }
+    let answer = unsafe { preflight(service, ptr::null()) };
+    unsafe { CFRelease(service) };
+    Some(match answer {
+        0 => crate::Permission::Granted,
+        1 => crate::Permission::Denied,
+        _ => crate::Permission::Unknown,
+    })
 }
 
 pub fn processes() -> Result<Vec<AudioProcess>> {
@@ -244,34 +349,31 @@ fn open_route(config: RouteConfig, processor: Box<dyn Processor>) -> Result<Rout
         return Err(Error::NotFound);
     }
     let (object_ids, bundles) = resolve_sources(&config.sources)?;
-    let description = tap_description(&object_ids, &bundles, config.mute)?;
-    let mut tap = 0u32;
-    let status = unsafe { AudioHardwareCreateProcessTap(description, &mut tap) };
-    if let Err(error) = check(status, "create tap") {
-        release(description);
-        return Err(error);
-    }
-    let tap_uid = match cfstring_property(tap, fourcc(*b"tuid"), GLOBAL, "tap uid") {
-        Ok(uid) => uid,
-        Err(error) => {
-            unsafe { AudioHardwareDestroyProcessTap(tap) };
-            release(description);
-            return Err(error);
-        }
-    };
     let output_id = match &config.output {
-        Some(uid) => device_for_uid(uid),
-        None => default_output_device(),
+        Some(uid) => device_for_uid(uid)?,
+        None => default_output_device()?,
     };
-    let output_id = match output_id {
-        Ok(id) => id,
-        Err(error) => {
-            unsafe { AudioHardwareDestroyProcessTap(tap) };
-            release(description);
-            return Err(error);
+    let output_uid = cfstring_property(output_id, fourcc(*b"uid "), GLOBAL, "output uid")?;
+    let out_widths = stream_widths(output_id, OUTPUT);
+    let out_total: usize = out_widths.iter().sum();
+    let pair = preferred_pair(output_id, out_total);
+    let (stream, first) = stream_of(&out_widths, pair[0]);
+    // The player's output on the stream that carries the pair; a stereo
+    // mixdown where that cannot be tapped.
+    let mut streamed = stream.filter(|_| instances_respond(sel!(initWithProcesses:andDeviceUID:withStream:)));
+    let mut tap = 0u32;
+    let description = loop {
+        let description = tap_description(&object_ids, &bundles, config.mute, streamed.map(|stream| (output_uid.as_str(), stream)))?;
+        let status = unsafe { AudioHardwareCreateProcessTap(description, &mut tap) };
+        if status == 0 {
+            break description;
+        }
+        release(description);
+        if streamed.take().is_none() {
+            return Err(Error::System { status, step: "create tap" });
         }
     };
-    let output_uid = match cfstring_property(output_id, fourcc(*b"uid "), GLOBAL, "output uid") {
+    let tap_uid = match cfstring_property(tap, fourcc(*b"tuid"), GLOBAL, "tap uid") {
         Ok(uid) => uid,
         Err(error) => {
             unsafe { AudioHardwareDestroyProcessTap(tap) };
@@ -288,7 +390,9 @@ fn open_route(config: RouteConfig, processor: Box<dyn Processor>) -> Result<Rout
         }
     };
 
-    let channels = tap_channels(tap).clamp(1, MAX_CHANNELS as u32) as u16;
+    let width = (tap_channels(tap) as usize).clamp(1, MAX_TAP_CHANNELS);
+    let layout = route_layout(width, streamed.map(|stream| out_widths[stream]), first, pair, out_total, stream_widths(output_id, INPUT).len());
+    let channels = layout.channels as u16;
     let scratch_frames = buffer_cap(aggregate);
     let sample_rate = f64_property(aggregate, fourcc(*b"nsrt"), GLOBAL).unwrap_or(48_000.0);
     let shared = Box::new(Shared {
@@ -296,11 +400,16 @@ fn open_route(config: RouteConfig, processor: Box<dyn Processor>) -> Result<Rout
         epoch: AtomicU64::new(0),
         sample_rate,
         channels,
+        layout,
         scratch_frames,
+        tap_format: tap_format(tap),
+        in_layout: AtomicU64::new(0),
+        out_layout: AtomicU64::new(0),
     });
     let callback = Box::new(Callback {
         shared: &*shared as *const Shared,
-        scratch: vec![0.0; scratch_frames * channels as usize],
+        scratch: vec![0.0; scratch_frames * layout.width],
+        block: vec![0.0; scratch_frames * layout.channels],
     });
     let client = &*callback as *const Callback as *mut c_void;
     let mut proc_id = ptr::null_mut();
@@ -346,15 +455,18 @@ unsafe extern "C" fn io_proc(
     }
     let callback = &mut *(client as *mut Callback);
     let shared = &*callback.shared;
-    let channels = shared.channels as usize;
+    let layout = shared.layout;
     let frames = output_frames(output);
-    if frames == 0 || channels == 0 || frames > shared.scratch_frames {
+    if frames == 0 || frames > shared.scratch_frames {
         shared.epoch.fetch_add(1, Ordering::Release);
         return 0;
     }
-    let samples = frames * channels;
-    let scratch = &mut callback.scratch[..samples];
-    read_interleaved(input, channels, frames, scratch);
+    shared.in_layout.store(pack_layout(input), Ordering::Relaxed);
+    shared.out_layout.store(pack_layout(output), Ordering::Relaxed);
+    let wide = &mut callback.scratch[..frames * layout.width];
+    read_tap(buffers_of(input), layout.skip, layout.width, frames, wide);
+    let block = &mut callback.block[..frames * layout.channels];
+    take_pair(wide, &layout, frames, block);
     let info = FrameInfo {
         sample_rate: shared.sample_rate,
         channels: shared.channels,
@@ -363,9 +475,9 @@ unsafe extern "C" fn io_proc(
     };
     let slot = shared.processor.load(Ordering::Acquire);
     if !slot.is_null() {
-        (*slot).processor.process(scratch, &info);
+        (*slot).processor.process(block, &info);
     }
-    write_interleaved(output, channels, frames, scratch);
+    write_out(buffers_of_mut(output), &layout, frames, block, wide);
     shared.epoch.fetch_add(1, Ordering::Release);
     0
 }
@@ -406,11 +518,23 @@ fn resolve_sources(sources: &[Source]) -> Result<(Vec<u32>, Vec<String>)> {
     Ok((ids, bundles))
 }
 
-fn tap_description(object_ids: &[u32], bundles: &[String], mute: Mute) -> Result<ObjcId> {
+/// A tap of `object_ids` (and `bundles`): their output on one output
+/// device's stream as it is (`stream`: the device's uid and the stream's
+/// index), or mixed down to stereo.
+fn tap_description(object_ids: &[u32], bundles: &[String], mute: Mute, stream: Option<(&str, usize)>) -> Result<ObjcId> {
     let numbers: Vec<ObjcId> = object_ids.iter().copied().map(ns_u32).collect();
     let processes = ns_array(&numbers);
     let allocated: ObjcId = unsafe { msg_send![class!(CATapDescription), alloc] };
-    let description: ObjcId = unsafe { msg_send![allocated, initStereoMixdownOfProcesses: processes] };
+    let description: ObjcId = match stream {
+        Some((device, index)) => {
+            let device = ns_string(device);
+            let index = index as isize;
+            let description: ObjcId = unsafe { msg_send![allocated, initWithProcesses: processes andDeviceUID: device withStream: index] };
+            release(device);
+            description
+        }
+        None => unsafe { msg_send![allocated, initStereoMixdownOfProcesses: processes] },
+    };
     if description.is_null() {
         release(processes);
         return Err(Error::System { status: -1, step: "tap description" });
@@ -548,6 +672,51 @@ fn translate_pid(pid: u32) -> Option<u32> {
         .filter(|id| *id != 0)
 }
 
+/// A buffer list's shape in one word: the count, then up to seven widths.
+fn pack_layout(list: *const AudioBufferList) -> u64 {
+    let buffers = buffers_of(list);
+    let mut packed = buffers.len().min(255) as u64;
+    for (i, buffer) in buffers.iter().take(7).enumerate() {
+        packed |= (buffer.number_channels.min(255) as u64) << (8 + 8 * i);
+    }
+    packed
+}
+
+/// The tap's stream format, as text.
+fn tap_format(tap: u32) -> String {
+    let mut format = StreamFormat {
+        _sample_rate: 0.0,
+        _format_id: 0,
+        _format_flags: 0,
+        _bytes_per_packet: 0,
+        _frames_per_packet: 0,
+        _bytes_per_frame: 0,
+        channels_per_frame: 0,
+        _bits_per_channel: 0,
+        _reserved: 0,
+    };
+    let mut size = std::mem::size_of::<StreamFormat>() as u32;
+    let address = address(fourcc(*b"tfmt"), GLOBAL);
+    let status = unsafe {
+        AudioObjectGetPropertyData(tap, &address, 0, ptr::null(), &mut size, &mut format as *mut StreamFormat as *mut c_void)
+    };
+    if status != 0 {
+        return format!("format unknown ({status})");
+    }
+    let id = format._format_id.to_be_bytes();
+    format!(
+        "{:.0} Hz, {} ch, '{}', flags {:#x} ({}float, {}interleaved), {} bit, {} bytes/frame",
+        format._sample_rate,
+        format.channels_per_frame,
+        String::from_utf8_lossy(&id),
+        format._format_flags,
+        if format._format_flags & 1 != 0 { "" } else { "not " },
+        if format._format_flags & (1 << 5) != 0 { "non-" } else { "" },
+        format._bits_per_channel,
+        format._bytes_per_frame
+    )
+}
+
 fn tap_channels(tap: u32) -> u32 {
     let mut format = StreamFormat {
         _sample_rate: 0.0,
@@ -611,84 +780,153 @@ fn buffer_frames(buffer: &AudioBuffer) -> usize {
     if buffer.number_channels <= 1 { samples } else { samples / channels }
 }
 
-fn read_interleaved(list: *const AudioBufferList, channels: usize, frames: usize, dst: &mut [f32]) {
+/// Where the audio thread reads and writes; see [`Layout`]. `stream_width`
+/// is the tapped stream's width when the tap is a device stream, `first`
+/// the output channel that stream starts on, `pair` the device's stereo
+/// pair, `skip` the output device's input streams.
+fn route_layout(width: usize, stream_width: Option<usize>, first: usize, pair: [usize; 2], out_total: usize, skip: usize) -> Layout {
+    let channels = if width >= 2 { 2 } else { 1 };
+    let out_pair = if out_total <= 1 { [0, 0] } else { pair };
+    match stream_width.filter(|stream_width| *stream_width == width) {
+        Some(_) => {
+            let in_stream = |channel: usize| channel.checked_sub(first).filter(|at| *at < width);
+            let left = in_stream(pair[0]).unwrap_or(0);
+            let right = in_stream(pair[1]).unwrap_or(left);
+            Layout { skip, width, channels, tap_pair: [left, right], out_pair, raw_first: Some(first) }
+        }
+        None => Layout { skip, width, channels, tap_pair: [0, 1.min(width - 1)], out_pair, raw_first: None },
+    }
+}
+
+/// Read the tap into interleaved `dst`, `channels` wide. The aggregate's
+/// input list is the output device's own inputs (`skip` buffers), then the
+/// tap: one buffer of the tap's width, or one buffer per channel. Every
+/// channel is read, none is left silent, and a device input never stands
+/// in for the tap.
+fn read_tap(buffers: &[AudioBuffer], skip: usize, channels: usize, frames: usize, dst: &mut [f32]) {
     dst.fill(0.0);
-    if list.is_null() || channels == 0 || frames == 0 {
+    if channels == 0 || frames == 0 {
         return;
     }
-    // The aggregate's input list is the output device's own inputs, then the
-    // tap. The tap is the last buffer whose width matches the tap.
-    let buffers = buffers_of(list);
-    let Some(buffer) = buffers
-        .iter()
-        .rev()
-        .find(|buffer| !buffer.data.is_null() && buffer.number_channels as usize == channels)
-        .or_else(|| buffers.iter().rev().find(|buffer| !buffer.data.is_null()))
-    else {
+    let buffers = if skip < buffers.len() { &buffers[skip..] } else { buffers };
+    if let Some(buffer) = buffers.iter().rev().find(|buffer| !buffer.data.is_null() && buffer.number_channels as usize == channels) {
+        copy_channels(buffer, 0, channels, frames, dst);
         return;
-    };
-    let ch = buffer.number_channels as usize;
+    }
+    let mut start = buffers.len();
+    let mut width = 0;
+    while start > 0 && width < channels {
+        start -= 1;
+        if !buffers[start].data.is_null() {
+            width += (buffers[start].number_channels as usize).max(1);
+        }
+    }
+    let mut first = 0;
+    for buffer in buffers[start..].iter().filter(|buffer| !buffer.data.is_null()) {
+        copy_channels(buffer, first, channels, frames, dst);
+        first += (buffer.number_channels as usize).max(1);
+    }
+}
+
+/// Copy `buffer`'s channels into interleaved `dst` from channel `first` on,
+/// as many as fit, sample for sample.
+fn copy_channels(buffer: &AudioBuffer, first: usize, channels: usize, frames: usize, dst: &mut [f32]) {
+    let ch = (buffer.number_channels as usize).max(1);
     let count = frames.min(buffer_frames(buffer));
-    if count == 0 || ch == 0 {
+    if count == 0 || first >= channels {
         return;
     }
     let src = buffer.data as *const f32;
-    let take = ch.min(channels);
+    let take = ch.min(channels - first);
     for frame in 0..count {
         for channel in 0..take {
-            dst[frame * channels + channel] = unsafe { *src.add(frame * ch + channel) };
+            dst[frame * channels + first + channel] = unsafe { *src.add(frame * ch + channel) };
         }
     }
 }
 
-fn write_interleaved(list: *mut AudioBufferList, src_channels: usize, frames: usize, src: &[f32]) {
-    if list.is_null() || src_channels == 0 {
-        return;
-    }
-    let buffers = buffers_of_mut(list);
-    let total: usize = buffers.iter().filter(|buffer| !buffer.data.is_null()).map(|buffer| (buffer.number_channels as usize).max(1)).sum();
-    if total == 0 {
-        return;
-    }
-    let mut index = 0usize;
-    for buffer in buffers {
-        if buffer.data.is_null() {
-            continue;
+/// The processor's block from the tap's: the pair, sample for sample.
+fn take_pair(wide: &[f32], layout: &Layout, frames: usize, block: &mut [f32]) {
+    for frame in 0..frames {
+        let row = &wide[frame * layout.width..(frame + 1) * layout.width];
+        if layout.channels == 1 {
+            block[frame] = row[layout.tap_pair[0]];
+        } else {
+            block[frame * 2] = row[layout.tap_pair[0]];
+            block[frame * 2 + 1] = row[layout.tap_pair[1]];
         }
+    }
+}
+
+/// Play the processed pair on the output's pair (a mono output hears both
+/// sides mixed); with a stream tap the stream's other channels pass through
+/// as tapped, and every other output channel is silent.
+fn write_out(buffers: &mut [AudioBuffer], layout: &Layout, frames: usize, block: &[f32], wide: &[f32]) {
+    let total: usize = buffers.iter().filter(|buffer| !buffer.data.is_null()).map(|buffer| (buffer.number_channels as usize).max(1)).sum();
+    let sample = |frame: usize, out: usize| -> f32 {
+        let (left, right) = if layout.channels == 1 { (block[frame], block[frame]) } else { (block[frame * 2], block[frame * 2 + 1]) };
+        if total == 1 {
+            return 0.5 * (left + right);
+        }
+        if out == layout.out_pair[0] {
+            return left;
+        }
+        if out == layout.out_pair[1] {
+            return right;
+        }
+        match layout.raw_first.and_then(|first| out.checked_sub(first)).filter(|at| *at < layout.width && !layout.tap_pair.contains(at)) {
+            Some(at) => wide[frame * layout.width + at],
+            None => 0.0,
+        }
+    };
+    let mut index = 0usize;
+    for buffer in buffers.iter_mut().filter(|buffer| !buffer.data.is_null()) {
         let ch = (buffer.number_channels as usize).max(1);
         let count = frames.min(buffer_frames(buffer));
         let dst = buffer.data as *mut f32;
-        if total == 1 && src_channels > 1 {
+        for channel in 0..ch {
             for frame in 0..count {
-                let left = sample_at(src, src_channels, frame, 0);
-                let right = sample_at(src, src_channels, frame, 1);
-                unsafe { *dst.add(frame) = 0.5 * (left + right) };
+                unsafe { *dst.add(frame * ch + channel) = sample(frame, index + channel) };
             }
-            return;
         }
-        if ch == 1 {
-            for frame in 0..count {
-                unsafe { *dst.add(frame) = mapped_sample(src, src_channels, frame, index) };
-            }
-            index += 1;
-        } else {
-            for channel in 0..ch {
-                for frame in 0..count {
-                    unsafe { *dst.add(frame * ch + channel) = mapped_sample(src, src_channels, frame, index + channel) };
-                }
-            }
-            index += ch;
-        }
+        index += ch;
     }
 }
 
-fn mapped_sample(src: &[f32], src_channels: usize, frame: usize, out_index: usize) -> f32 {
-    sample_at(src, src_channels, frame, out_index % src_channels)
+/// Each stream's width on `scope` of `device`, in order.
+fn stream_widths(device: u32, scope: u32) -> Vec<usize> {
+    let Ok(words) = property_words(device, fourcc(*b"slay"), scope, &[]) else { return Vec::new() };
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let list = words.as_ptr() as *const AudioBufferList;
+    buffers_of(list).iter().map(|buffer| buffer.number_channels as usize).collect()
 }
 
-fn sample_at(src: &[f32], channels: usize, frame: usize, channel: usize) -> f32 {
-    let index = frame * channels + channel;
-    if index < src.len() { src[index] } else { 0.0 }
+/// The device's stereo pair (its "preferred channels for stereo"), 0-based;
+/// the first two channels when it names none.
+fn preferred_pair(device: u32, total: usize) -> [usize; 2] {
+    let fallback = [0, 1.min(total.saturating_sub(1))];
+    let Ok(words) = property_words(device, fourcc(*b"dch2"), OUTPUT, &[]) else { return fallback };
+    let Some(word) = words.first() else { return fallback };
+    let (left, right) = ((*word & 0xffff_ffff) as usize, (*word >> 32) as usize);
+    if left == 0 || right == 0 || left > total || right > total {
+        return fallback;
+    }
+    [left - 1, right - 1]
+}
+
+/// The stream holding output channel `channel`, and the channel its first
+/// channel is.
+fn stream_of(widths: &[usize], channel: usize) -> (Option<usize>, usize) {
+    let mut first = 0;
+    for (stream, width) in widths.iter().enumerate() {
+        if channel < first + width {
+            return (Some(stream), first);
+        }
+        first += width;
+    }
+    (None, 0)
 }
 
 fn buffers_of(list: *const AudioBufferList) -> &'static [AudioBuffer] {
@@ -869,4 +1107,122 @@ fn drop_slot(slot: *mut ProcSlot) {
 
 fn check(status: i32, step: &'static str) -> Result<()> {
     if status == 0 { Ok(()) } else { Err(Error::System { status, step }) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(channels: u32, data: &mut [f32]) -> AudioBuffer {
+        AudioBuffer { number_channels: channels, data_byte_size: (data.len() * 4) as u32, data: data.as_mut_ptr() as *mut c_void }
+    }
+
+    fn rms_db(samples: &[f32]) -> f32 {
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        20.0 * rms.log10()
+    }
+
+    const FRAMES: usize = 480;
+
+    /// A -12 dBFS sine, left, and its inverse, right.
+    fn stereo() -> (Vec<f32>, Vec<f32>) {
+        let amp = 10f32.powf(-12.0 / 20.0);
+        let left: Vec<f32> = (0..FRAMES).map(|i| amp * (std::f32::consts::TAU * 1_000.0 * i as f32 / 44_100.0).sin()).collect();
+        let right = left.iter().map(|s| -s).collect();
+        (left, right)
+    }
+
+    /// Run one block through the route's datapath at unity (read, pair,
+    /// no processing, write) and return the output buffers' samples.
+    fn through(layout: &Layout, input: &mut [AudioBuffer], outputs: &[u32]) -> Vec<Vec<f32>> {
+        let mut wide = vec![0.0; FRAMES * layout.width];
+        read_tap(input, layout.skip, layout.width, FRAMES, &mut wide);
+        let mut block = vec![0.0; FRAMES * layout.channels];
+        take_pair(&wide, layout, FRAMES, &mut block);
+        let mut data: Vec<Vec<f32>> = outputs.iter().map(|ch| vec![9.0; FRAMES * *ch as usize]).collect();
+        let mut out: Vec<AudioBuffer> = data.iter_mut().zip(outputs).map(|(d, ch)| buffer(*ch, d)).collect();
+        write_out(&mut out, layout, FRAMES, &block, &wide);
+        data
+    }
+
+    fn channel(data: &[f32], width: usize, at: usize) -> Vec<f32> {
+        data.iter().skip(at).step_by(width).copied().collect()
+    }
+
+    /// The user's rig: an 8-channel interface whose own 8 inputs come first
+    /// in the aggregate's input list, a tap of its 8-channel output stream
+    /// with the player on channels 1/2, one 8-channel output buffer. The
+    /// pair plays on output 1/2 sample for sample (-12 dBFS sine in, -12
+    /// out), the device's inputs never leak in, and the stream's other
+    /// channels pass through as tapped.
+    #[test]
+    fn a_stream_tap_plays_on_the_same_channels_at_unity() {
+        let (left, right) = stereo();
+        let mut tap = vec![0.0f32; FRAMES * 8];
+        for frame in 0..FRAMES {
+            tap[frame * 8] = left[frame];
+            tap[frame * 8 + 1] = right[frame];
+            tap[frame * 8 + 5] = 0.25;
+        }
+        let mut mic = vec![0.5f32; FRAMES * 8];
+        let layout = route_layout(8, Some(8), 0, [0, 1], 8, 1);
+        assert_eq!(layout, Layout { skip: 1, width: 8, channels: 2, tap_pair: [0, 1], out_pair: [0, 1], raw_first: Some(0) });
+        let out = through(&layout, &mut [buffer(8, &mut mic), buffer(8, &mut tap)], &[8]);
+        assert_eq!(channel(&out[0], 8, 0), left);
+        assert_eq!(channel(&out[0], 8, 1), right);
+        assert!(channel(&out[0], 8, 5).iter().all(|s| *s == 0.25), "the stream's other channels pass through");
+        for silent in [2, 3, 4, 6, 7] {
+            assert!(channel(&out[0], 8, silent).iter().all(|s| *s == 0.0), "output {silent} stays silent");
+        }
+        let db = rms_db(&channel(&out[0], 8, 0));
+        assert!((db - (-12.0 - 3.01)).abs() < 0.05, "a -12 dBFS sine plays at {db:.2} dBFS RMS");
+    }
+
+    /// A device whose stereo pair is 3/4, on its second stream: the tap of
+    /// that stream feeds the processor from its channels 1/2 and the pair
+    /// plays on outputs 3/4 only.
+    #[test]
+    fn the_pair_follows_the_device() {
+        let (left, right) = stereo();
+        let (stream, first) = stream_of(&[2, 2], 2);
+        assert_eq!((stream, first), (Some(1), 2));
+        let layout = route_layout(2, Some(2), first, [2, 3], 4, 0);
+        assert_eq!(layout.tap_pair, [0, 1]);
+        let mut tap: Vec<f32> = left.iter().zip(&right).flat_map(|(l, r)| [*l, *r]).collect();
+        let out = through(&layout, &mut [buffer(2, &mut tap)], &[2, 2]);
+        assert!(out[0].iter().all(|s| *s == 0.0), "outputs 1/2 are not the pair");
+        assert_eq!(channel(&out[1], 2, 0), left);
+        assert_eq!(channel(&out[1], 2, 1), right);
+    }
+
+    /// The stereo mixdown fallback, from an interleaved tap and from a tap
+    /// that comes one buffer per channel, plays on the pair at unity; no
+    /// side dropped, nothing averaged, the device input ignored.
+    #[test]
+    fn a_mixdown_tap_reaches_the_pair_at_unity() {
+        let (left, right) = stereo();
+        let mut interleaved: Vec<f32> = left.iter().zip(&right).flat_map(|(l, r)| [*l, *r]).collect();
+        let (mut l, mut r) = (left.clone(), right.clone());
+        let mut mic = vec![0.5f32; FRAMES];
+        let mut mic2 = mic.clone();
+        let layout = route_layout(2, None, 0, [0, 1], 8, 1);
+        assert_eq!(layout.raw_first, None);
+        for input in [vec![buffer(1, &mut mic), buffer(2, &mut interleaved)], vec![buffer(1, &mut mic2), buffer(1, &mut l), buffer(1, &mut r)]] {
+            let mut input = input;
+            let out = through(&layout, &mut input, &[8]);
+            assert_eq!(channel(&out[0], 8, 0), left);
+            assert_eq!(channel(&out[0], 8, 1), right);
+            assert!(channel(&out[0], 8, 2).iter().all(|s| *s == 0.0));
+        }
+    }
+
+    /// A mono output hears both sides mixed.
+    #[test]
+    fn a_mono_output_hears_both_sides() {
+        let (left, _) = stereo();
+        let mut tap: Vec<f32> = left.iter().flat_map(|l| [*l, *l]).collect();
+        let layout = route_layout(2, None, 0, [0, 0], 1, 0);
+        let out = through(&layout, &mut [buffer(2, &mut tap)], &[1]);
+        assert_eq!(out[0], left);
+    }
 }

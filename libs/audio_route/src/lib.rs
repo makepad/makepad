@@ -111,7 +111,21 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(target_os = "macos")]
-pub use macos::{default_output, outputs, processes, Route};
+pub use macos::{default_output, outputs, permission, processes, Route};
+
+/// Whether the system lets this app hear other apps ([`permission`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    Granted,
+    Denied,
+    /// Not asked yet.
+    Unknown,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn permission() -> Option<Permission> {
+    None
+}
 
 /// A route that is not open. Other platforms keep the type so a host compiles.
 #[cfg(not(target_os = "macos"))]
@@ -135,6 +149,10 @@ impl Route {
 
     pub fn channels(&self) -> u16 {
         0
+    }
+
+    pub fn describe(&self) -> String {
+        String::new()
     }
 }
 

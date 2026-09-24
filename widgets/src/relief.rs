@@ -86,7 +86,19 @@ script_mod! {
             if d > 0.0 || w.x < self.clip.x || w.y < self.clip.y || w.x > self.clip.z || w.y > self.clip.w {
                 discard()
             }
-            let src = max(self.source.sample(self.pos).xyz, vec3(0.0, 0.0, 0.0))
+            var src = max(self.source.sample(self.pos).xyz, vec3(0.0, 0.0, 0.0))
+            if self.map_amount > 0.001 {
+                // The picture's luminance through the host's colour map.
+                let l = clamp(dot(src, vec3(0.30, 0.55, 0.15)), 0.0, 1.0) * 3.0
+                var m = mix(self.map0.xyz, self.map1.xyz, clamp(l, 0.0, 1.0))
+                m = mix(m, self.map2.xyz, clamp(l - 1.0, 0.0, 1.0))
+                m = mix(m, self.map3.xyz, clamp(l - 2.0, 0.0, 1.0))
+                src = mix(src, m, self.map_amount)
+            }
+            if self.tint.w > 0.001 {
+                let lt = dot(src, vec3(0.30, 0.55, 0.15))
+                src = mix(src, self.tint.xyz * lt * 1.25, self.tint.w)
+            }
             // Near-white frames light less: a white flash over a whole
             // screen would otherwise wash every bevel round it out.
             let white = min(min(src.x, src.y), src.z)
@@ -191,6 +203,10 @@ script_mod! {
             spill_knee: uniform(0.0)
             /** how much neighbour light a black surface takes, against a white one's 1 (light scaled by the surface's own brightness) 0..1 step 0.01 */
             spill_dark: uniform(1.0)
+            /** how far a lit face turns toward the light's hue 0..3 step 0.05 */
+            spill_hue: uniform(1.2)
+            /** how much light a dark face adds on top 0..2 step 0.05 */
+            spill_add: uniform(1.0)
             light_ink: uniform(vec4(1.0, 1.0, 1.0, 1.0))
             shadow_ink: uniform(vec4(0.0, 0.0, 0.0, 1.0))
             glow_ink: uniform(theme.color_primary)
@@ -306,6 +322,21 @@ script_mod! {
                 return self.spill_grade((near * 0.5 + far * (0.35 + 2.2 * facing) + wash) * self.spill.x)
             }
 
+            // Neighbour light falling on a face of colour `face`: a light
+            // face takes the light's hue (it does not whiten), a dark one
+            // also gains its brightness. `spill_hue` = how far a face goes
+            // toward the hue, `spill_add` = how much light a dark face adds.
+            spill_apply: fn(face: vec3, sp: vec3) -> vec3 {
+                let s = max(max(sp.x, sp.y), sp.z)
+                if s < 0.0005 {
+                    return face
+                }
+                let hue = sp / s
+                let albedo = clamp(dot(face, vec3(0.30, 0.55, 0.15)), 0.0, 1.0)
+                let tinted = mix(face, face * hue * 1.15 + hue * 0.06, clamp(s * self.spill_hue, 0.0, 0.75))
+                return tinted + sp * (1.0 - albedo) * self.spill_add
+            }
+
             // The neighbour light's colour and ceiling: `spill_tint` keeps
             // its energy in one colour (a monochrome tube lights everything
             // amber), `spill_knee` eases its brightest toward a ceiling.
@@ -364,7 +395,9 @@ script_mod! {
                 let l = self.light
                 let sdir = Material.shadow_dir(l)
                 let tanel = max(l.z, 0.05) / max(length(l.xy), 0.05)
-                let blur = max(self.shadow.y, 0.001)
+                // A shadow wider than the margin it falls into would only be
+                // cut off: its blur stays within reach of the quad's edge.
+                let blur = max(min(self.shadow.y, max(self.inset, 1.0) * 1.2), 0.001)
                 let fall = self.shadow.z
                 let outside = smoothstep(-3.0 * px, 0.0, d)
                 var under = vec4(0.0, 0.0, 0.0, 0.0)
@@ -396,13 +429,16 @@ script_mod! {
                 let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
                 var face = Material.face(base, d, g, uv, self.depth, self.convex, 0.0, insh, 0.0, l, self.relief, self.finish, self.tune, self.inner.x, self.light_ink.xyz, self.shadow_ink.xyz, 1.0)
                 let n = Material.normal(d, g, self.relief.x, self.relief.y, self.convex, 0.0)
-                face = face * (1.0 - self.env_ao(self.height)) + self.env_spill(n)
+                face = self.spill_apply(face * (1.0 - self.env_ao(self.height)), self.env_spill(n))
                 if self.lit > 0.001 {
                     face = mix(face, self.glow_ink.xyz, min(self.inner.w * 1.6, 1.0) * 0.72 * self.lit)
                 }
                 // Whatever falls outside the shape fades out before the quad
-                // edge, so a shadow or a halo never ends on a straight line.
-                var edge = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+                // edge, along a box rounded like the shape (its corner plus
+                // the margin), so a shadow or a halo ends rounded, never on a
+                // straight line or a square corner.
+                let qr = min(self.radius + self.inset, min(c.x, c.y))
+                var edge = -Material.sd_box(p, c, c, qr)
                 if self.disc > 0.5 {
                     edge = min(c.x, c.y) - length(p - c)
                 }
@@ -465,6 +501,9 @@ struct LightSource {
     texture: Texture,
     producer: DrawPassId,
     knee: f32,
+    map: [Vec4f; 4],
+    map_amount: f32,
+    tint: Vec4f,
 }
 
 struct ReliefList {
@@ -652,6 +691,14 @@ pub struct ReliefTextureLight {
     pub depth: f64,
     pub inset: f64,
     pub radius: f64,
+    /// A colour map for the light: its luminance through these four stops
+    /// (low to high), blended in by `map_amount` (0 = the texture's own
+    /// colours). A host that shows the picture colour-mapped lights with
+    /// the same map.
+    pub map: [Vec4f; 4],
+    pub map_amount: f32,
+    /// The light graded to one colour (a monochrome display): rgb, amount.
+    pub tint: Vec4f,
 }
 
 /// Register a texture light over `area` (drawn already, this frame).
@@ -678,6 +725,9 @@ pub fn relief_texture_light(cx: &mut Cx2d, area: Area, light: &ReliefTextureLigh
             texture: light.texture.clone(),
             producer: light.producer,
             knee: light.knee,
+            map: light.map,
+            map_amount: light.map_amount,
+            tint: light.tint,
         });
     }
 }
@@ -873,6 +923,10 @@ fn collect_proxies(cx: &Cx, rw: &ReliefWindow, root: DrawListId) -> Vec<Resolved
         if cx.draw_lists.is_id_freed(area_list) {
             return;
         }
+        // An area that drew nothing this frame (an empty label) has no rect.
+        if !entry.area.is_valid(cx) {
+            return;
+        }
         let mut rect = entry.area.rect(cx);
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
@@ -913,7 +967,15 @@ fn collect_proxies(cx: &Cx, rw: &ReliefWindow, root: DrawListId) -> Vec<Resolved
             radius: proxy.radius,
             disc: proxy.disc,
             height: entry_height(rw, Some((list, index))),
-            emissive: proxy.emissive,
+            // A small emitter (an LED, a dash) lights a small area: its
+            // intensity follows its size, so it glows locally.
+            emissive: if entry.light.is_none() {
+                let side = (rect.size.x * rect.size.y).max(0.0).sqrt();
+                let scale = (side / 48.0).clamp(0.3, 1.0) as f32;
+                vec4(proxy.emissive.x, proxy.emissive.y, proxy.emissive.z, proxy.emissive.w * scale)
+            } else {
+                proxy.emissive
+            },
             light: entry.light.clone(),
         });
     }
@@ -982,6 +1044,15 @@ fn hash_proxies(proxies: &[Resolved], size: Vec2d) -> u64 {
             format!("{:?}", light.texture.texture_id()).hash(&mut h);
             light.producer.hash(&mut h);
             light.knee.to_bits().hash(&mut h);
+            light.map_amount.to_bits().hash(&mut h);
+            for v in [light.tint.x, light.tint.y, light.tint.z, light.tint.w] {
+                v.to_bits().hash(&mut h);
+            }
+            for c in light.map {
+                for v in [c.x, c.y, c.z] {
+                    v.to_bits().hash(&mut h);
+                }
+            }
         }
     }
     // Never equal to the empty stack's initial value.
@@ -1021,6 +1092,18 @@ pub struct DrawReliefLight {
     intensity: f32,
     #[live]
     knee: f32,
+    #[live]
+    map0: Vec4f,
+    #[live]
+    map1: Vec4f,
+    #[live]
+    map2: Vec4f,
+    #[live]
+    map3: Vec4f,
+    #[live]
+    map_amount: f32,
+    #[live]
+    tint: Vec4f,
 }
 
 #[derive(Script, ScriptHook)]
@@ -1181,6 +1264,12 @@ impl ReliefStack {
                 self.light.height = p.height as f32;
                 self.light.intensity = p.emissive.w;
                 self.light.knee = light.knee;
+                self.light.map0 = light.map[0];
+                self.light.map1 = light.map[1];
+                self.light.map2 = light.map[2];
+                self.light.map3 = light.map[3];
+                self.light.map_amount = light.map_amount;
+                self.light.tint = light.tint;
                 self.light.clip = clip;
                 self.light.draw_vars.set_texture(0, &light.texture);
                 self.light.draw_abs(cx, p.rect);
@@ -1262,6 +1351,10 @@ pub struct ReliefView {
     /// Whether it stands in the relief buffer at all.
     #[live(true)]
     pub proxy: bool,
+    /// The light it gives off is the colour it draws its glow in
+    /// (`draw_bg.glow_ink`) rather than `emissive`'s rgb.
+    #[live(false)]
+    pub emissive_from_glow: bool,
     /// A key cap around a button: pressed in while a button inside it is
     /// held, out again when it is let go.
     #[live(false)]
@@ -1367,17 +1460,21 @@ impl ReliefView {
         vars.set_dyn_instance(cx, live_id!(travel), &[self.travel as f32]);
     }
 
-    fn own_proxy(&self) -> Option<ReliefProxy> {
+    fn own_proxy(&self, cx: &mut Cx) -> Option<ReliefProxy> {
+        // A surface that draws its light in `glow_ink` gives off that colour.
+        let mut rgb = [self.emissive.x, self.emissive.y, self.emissive.z];
+        if self.emissive_from_glow {
+            let mut glow = [0.0f32; 4];
+            self.view.draw_bg.draw_vars.get_uniform(cx, live_id!(glow_ink), &mut glow);
+            if glow[0] + glow[1] + glow[2] > 0.0 {
+                rgb = [glow[0], glow[1], glow[2]];
+            }
+        }
         self.proxy.then(|| ReliefProxy {
             inset: self.inset,
             radius: self.radius,
             disc: self.disc,
-            emissive: vec4(
-                self.emissive.x,
-                self.emissive.y,
-                self.emissive.z,
-                self.emissive.w * self.lit as f32,
-            ),
+            emissive: vec4(rgb[0], rgb[1], rgb[2], self.emissive.w * self.lit as f32),
         })
     }
 
@@ -1402,7 +1499,7 @@ impl ReliefView {
             return;
         }
         self.drawing = false;
-        let proxy = self.own_proxy();
+        let proxy = self.own_proxy(cx);
         relief_close(cx, self.slot.take(), self.view.area(), proxy);
     }
 }
