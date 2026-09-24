@@ -2206,6 +2206,22 @@ pub fn window_intercept(
         return false;
     }
 
+    // A palette entry being dragged belongs to the design surface from the
+    // press to the drop: the drag events go to the tweaker first and stop
+    // there, or a drop target in the app under the pointer takes the drop
+    // and the tweaker, dispatched after the body, never sees it.
+    if matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd) {
+        if let Some((_, tweaker)) = window_view.children.iter().find(|(id, _)| *id == live_id!(tweaker)) {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                if tw.design.is_some() && tw.palette_drag.is_some() {
+                    tw.handle_palette_drag(cx, event);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     let (abs, kind) = match event {
         Event::MouseMove(e) if e.window_id == window_id => (e.abs, PointerKind::Move),
         Event::MouseDown(e) if e.window_id == window_id => (e.abs, PointerKind::Down),
