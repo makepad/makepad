@@ -90,6 +90,9 @@ mod.theme.material_press_depth = -9.0
 // is the page rather than an object resting on it -- which is exactly the
 // condition this sheet sets up.
 mod.theme.material_press_invert = 1.0
+// The room a control's shadow falls into, inside its own rect: the sheet
+// pays for it again in the controls' padding.
+mod.theme.material_margin = 10.0
 
 // The broad gradient across a face, and the hard line on its boundary. Both
 // stay low here: neumorphism is a soft material under a soft light, and a

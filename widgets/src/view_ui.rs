@@ -443,15 +443,18 @@ script_mod! {
                     }
                     let raise = self.material_relief.z
                     let off = Material.cast_offset(raise, self.material_light)
+                    let margin = min(min(self.border_inset.x, self.border_inset.y), min(self.border_inset.z, self.border_inset.w)) + self.border_size
+                    // A shadow wider than the margin it falls into would only
+                    // be cut off: its blur stays within reach of the quad's edge.
+                    let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(margin, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
                     var under = Material.cast(
                         d,
                         Material.sd_box(p - off, c, h, r),
                         Material.sd_box(p + off, c, h, r),
                         g, px, raise, raise,
-                        self.material_light, self.material_shadow, self.material_inner.z,
+                        self.material_light, sh, self.material_inner.z,
                         self.material_shadow_ink.rgb, self.material_light_ink.rgb
                     )
-                    let margin = min(min(self.border_inset.x, self.border_inset.y), min(self.border_inset.z, self.border_inset.w)) + self.border_size
                     let qc = self.rect_size * 0.5
                     let edge = -Material.sd_box(p, qc, qc, min(r + margin, min(qc.x, qc.y)))
                     under = under * smoothstep(0.0, max(margin, 1.0), edge)

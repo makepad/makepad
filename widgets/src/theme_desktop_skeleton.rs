@@ -454,6 +454,7 @@ script_mod! {
         material_raise: 3.
         material_sink: 3.
         material_press_depth: -6.
+        material_margin: 0.
         color_material_light: #xFFFFFFFF
         color_material_shadow: #x404040FF
         color_material_glow: #x00A0A0FF

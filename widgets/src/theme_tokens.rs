@@ -276,6 +276,7 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     length("material_raise", TokenGroup::Material, "How far a raised surface stands off its ground, in points.", 0.0, 24.0, 0.5),
     length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
     length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
+    length("material_margin", TokenGroup::Material, "The margin a material control keeps between its quad and its face, where its cast shadow and glow fall, in points.", 0.0, 32.0, 0.5),
     color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
     color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
     color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
@@ -2907,7 +2908,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 591, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 592, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
