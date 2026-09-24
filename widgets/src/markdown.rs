@@ -680,7 +680,8 @@ struct MarkdownLink {
 
 impl WidgetMatchEvent for MarkdownLink {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.link.clicked(actions) {
+        // A restricted Splash must not hand its URLs to the host, which may open them.
+        if self.link.clicked(actions) && !cx.script_data.std.host_io_only() {
             cx.widget_action(
                 self.widget_uid(),
                 MarkdownAction::LinkNavigated(self.href.clone()),
@@ -722,4 +723,29 @@ pub enum MarkdownAction {
     #[default]
     None,
     LinkNavigated(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::button::ButtonAction;
+
+    #[test]
+    fn restricted_links_emit_no_url() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut link = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {use mod.widgets.* MarkdownLink{href: "https://example.invalid/"}});
+            MarkdownLink::script_from_value(vm, value)
+        });
+        let uid = link.widget_uid();
+        let clicked = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(Default::default())));
+        let mut navigations = |cx: &mut Cx| cx.capture_actions(|cx| link.handle_actions(cx, &clicked, &mut Scope::empty()))
+            .iter()
+            .filter(|action| matches!(action.as_widget_action().cast(), MarkdownAction::LinkNavigated(_)))
+            .count();
+        assert_eq!(navigations(&mut cx), 1);
+        cx.script_data.std.restrict_to_host_io();
+        assert_eq!(navigations(&mut cx), 0);
+    }
 }

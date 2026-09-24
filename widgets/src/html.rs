@@ -1291,13 +1291,10 @@ impl Widget for HtmlLink {
                         }
                         self.animator_play(cx, ids!(hover.pressed));
                     } else if fe.mouse_button().is_some_and(|mb| mb.is_secondary()) {
-                        cx.widget_action(
-                            self.widget_uid(),
-                            HtmlLinkAction::SecondaryClicked {
-                                url: self.url.clone(),
-                                key_modifiers: fe.modifiers,
-                            },
-                        );
+                        self.emit_url_action(cx, HtmlLinkAction::SecondaryClicked {
+                            url: self.url.clone(),
+                            key_modifiers: fe.modifiers,
+                        });
                     }
                 }
                 Hit::FingerHoverIn(_) => {
@@ -1311,13 +1308,10 @@ impl Widget for HtmlLink {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 Hit::FingerLongPress(_) => {
-                    cx.widget_action(
-                        self.widget_uid(),
-                        HtmlLinkAction::SecondaryClicked {
-                            url: self.url.clone(),
-                            key_modifiers: Default::default(),
-                        },
-                    );
+                    self.emit_url_action(cx, HtmlLinkAction::SecondaryClicked {
+                        url: self.url.clone(),
+                        key_modifiers: Default::default(),
+                    });
                 }
                 Hit::FingerUp(fu) => {
                     // Touch never gets a hover-out, so only a hovering pointer stays hovered here.
@@ -1329,13 +1323,10 @@ impl Widget for HtmlLink {
                     }
 
                     if fu.is_over && fu.is_primary_hit() && fu.was_tap() {
-                        cx.widget_action(
-                            self.widget_uid(),
-                            HtmlLinkAction::Clicked {
-                                url: self.url.clone(),
-                                key_modifiers: fu.modifiers,
-                            },
-                        );
+                        self.emit_url_action(cx, HtmlLinkAction::Clicked {
+                            url: self.url.clone(),
+                            key_modifiers: fu.modifiers,
+                        });
                     }
                 }
                 _ => (),
@@ -1407,6 +1398,14 @@ impl HtmlRef {
 }
 
 impl HtmlLink {
+    /// Emits the given action with this link's URL, unless a restricted Splash is running:
+    /// it must not hand its URLs to the host, which may open them.
+    fn emit_url_action(&self, cx: &mut Cx, action: HtmlLinkAction) {
+        if !cx.script_data.std.host_io_only() {
+            cx.widget_action(self.widget_uid(), action);
+        }
+    }
+
     /// Sets the link's default (non-hovered) font color.
     /// `None` makes the link inherit the surrounding text's font color.
     ///
@@ -1683,6 +1682,20 @@ mod tests {
         }
         assert!(!node.done(), "fixture must contain a closing summary tag");
         node
+    }
+
+    #[test]
+    fn restricted_links_emit_no_url() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let link = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {use mod.widgets.* HtmlLink{url: "https://example.invalid/"}});
+            HtmlLink::script_from_value(vm, value)
+        });
+        let click = || HtmlLinkAction::Clicked { url: "https://example.invalid/".into(), key_modifiers: Default::default() };
+        assert_eq!(cx.capture_actions(|cx| link.emit_url_action(cx, click())).len(), 1);
+        cx.script_data.std.restrict_to_host_io();
+        assert!(cx.capture_actions(|cx| link.emit_url_action(cx, click())).is_empty());
     }
 
     #[test]
