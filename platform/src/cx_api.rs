@@ -686,6 +686,35 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Arm the VM's captured-error sink for the live-edit re-run that
+    /// follows, so a hot-reloaded block that fails to run is reported to
+    /// the caller as well as the log.
+    pub(crate) fn live_edit_capture_begin(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        self.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+    }
+
+    /// Take the errors the re-run raised: log them, and keep them for
+    /// `take_live_edit_errors`.
+    pub(crate) fn live_edit_capture_end(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        let errors = self.with_vm(|vm| vm.take_errors());
+        for error in &errors {
+            crate::error!("live edit: {}", error);
+        }
+        self.live_edit_errors = errors;
+    }
+
+    /// The script errors raised by the most recent live-edit re-run, if any.
+    /// Taking them clears the record.
+    pub fn take_live_edit_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.live_edit_errors)
+    }
+
     /// The `Apply` variant the currently dispatching `Event::LiveEdit` should
     /// be re-applied with — `Reload` for a file-change hot reload, `Rebake`
     /// for a `request_live_edit()` re-bake. `app_main!` reads this; app code

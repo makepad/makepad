@@ -259,11 +259,13 @@ impl ScriptHook for View {
         }
 
         if apply.is_reload() {
-            // update/delete children list
-            // Only reorder and truncate if we actually processed items from the vec.
-            // If vec was empty but children exist, this is likely an incomplete parse
-            // during streaming - preserve existing children.
-            if !self.live_update_order.is_empty() || self.children.is_empty() {
+            // update/delete children list. A view whose children come from
+            // `on_render` is applied its declaration, whose vec is empty by
+            // design (`make_render_me`), so its children are kept; any other
+            // view takes the vec as the whole child list, and an empty vec
+            // means the last child was deleted.
+            let renders_children = self.on_render.as_object() != ScriptObject::ZERO;
+            if !self.live_update_order.is_empty() || self.children.is_empty() || !renders_children {
                 for (idx, id) in self.live_update_order.iter().enumerate() {
                     if let Some(pos) = self.children.iter().position(|(i, _v)| *i == *id) {
                         self.children.swap(idx, pos);

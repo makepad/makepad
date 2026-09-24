@@ -309,6 +309,7 @@ macro_rules! _app_main_event_closure {
                     } else {
                         cx.live_edit_apply()
                     };
+                    cx.live_edit_capture_begin();
                     cx.with_vm(|vm| {
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
@@ -330,6 +331,7 @@ macro_rules! _app_main_event_closure {
                         // value is held and the tree has been applied.
                         vm.gc();
                     });
+                    cx.live_edit_capture_end();
                 }
             }
             if let Event::ScriptReapply = event {

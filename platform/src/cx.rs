@@ -188,6 +188,10 @@ pub struct Cx {
     pub pending_live_edit_request: bool,
     /// Re-evaluate Splash definitions while preserving imperative widget state.
     pub pending_style_reload: bool,
+    /// The script errors the last `Event::LiveEdit` re-run raised, kept for
+    /// whoever queued the change (the design overlay rolls its edit back on
+    /// them); they are logged as well.
+    pub(crate) live_edit_errors: Vec<String>,
 
     /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
     /// the freshly re-run `script_mod` value with. A file-change hot reload
@@ -1009,6 +1013,7 @@ impl Cx {
             pending_script_reapply: false,
             pending_style_reload: false,
             pending_live_edit_request: false,
+            live_edit_errors: Vec::new(),
             live_edit_apply: Apply::Reload,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,

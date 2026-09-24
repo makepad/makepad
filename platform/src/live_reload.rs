@@ -31,6 +31,9 @@ pub(crate) struct PendingLiveChange {
 pub struct CxLiveReloadState {
     pub(crate) pending_files: Vec<PendingLiveChange>,
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
+    /// Set when overrides were dropped outside the file path (a revert), so
+    /// the next live edit re-runs the modules as a DSL change.
+    pub(crate) overrides_changed: bool,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) file_observer: Option<DesktopHotReloadWatcher>,
 }
@@ -47,6 +50,33 @@ struct ExtractedScriptMod {
     rust_value_count: usize,
     first_token_line: usize,
     first_token_column: usize,
+}
+
+/// One `script_mod!` block found in a Rust source file, as the hot-reload
+/// scanner sees it: where its body sits in the file, the normalized code the
+/// runtime compiles for it, and where each `#(...)` placeholder is. Hot
+/// reload and the design overlay read the same scan, so an edit the overlay
+/// makes to a body is an edit hot reload will accept.
+#[derive(Clone, Debug)]
+pub struct ScriptModBlock {
+    /// Byte offset of the first byte inside the `{`.
+    pub body_start: usize,
+    /// Byte offset of the closing `}` (exclusive end of the body).
+    pub body_end: usize,
+    /// One-based file line and column of the block's first token.
+    pub first_token_line: usize,
+    pub first_token_column: usize,
+    /// The normalized code, as the runtime would compile it.
+    pub code: String,
+    /// How many `#(...)` placeholders the body holds.
+    pub rust_value_count: usize,
+    /// File byte ranges of the `#(...)` placeholders, in order.
+    pub placeholders: Vec<std::ops::Range<usize>>,
+}
+
+/// Scan a Rust source file for its `script_mod!` blocks.
+pub fn scan_script_mods(file_name: &str, source: &str) -> Result<Vec<ScriptModBlock>, String> {
+    scan_script_mod_blocks(file_name, source)
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +100,7 @@ impl Default for CxLiveReloadState {
         Self {
             pending_files: Vec::new(),
             script_mod_overrides: Default::default(),
+            overrides_changed: false,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             file_observer: None,
         }
@@ -107,6 +138,43 @@ pub(crate) enum LiveEditTrigger {
 }
 
 impl Cx {
+    /// Drop every override that a hot reload installed for this file, so the
+    /// compiled-in `script_mod!` code is what runs again, and queue the live
+    /// edit that re-runs the modules. Returns how many overrides went.
+    ///
+    /// Queueing the disk text does not do this: the scanner's normalized code
+    /// never equals the macro's reconstruction of the same block, so it would
+    /// only replace one override with an equivalent one.
+    pub fn revert_live_edit_file(&mut self, file_name: &str) -> usize {
+        let Some(script_vm) = self.script_vm.as_ref() else {
+            return 0;
+        };
+        let file_name = normalize_path_string(Path::new(file_name));
+        let keys: Vec<ScriptModKey> = collect_compiled_sites_for_file(script_vm, &file_name)
+            .into_iter()
+            .map(|site| site.key)
+            .collect();
+        let mut removed = 0;
+        {
+            let mut overrides = self.script_data.live_reload.script_mod_overrides.borrow_mut();
+            for key in keys {
+                if overrides.remove(&key).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.script_data.live_reload.overrides_changed = true;
+        }
+        removed
+    }
+
+    /// How many `script_mod!` blocks currently run on hot-reloaded text
+    /// instead of their compiled-in code.
+    pub fn live_edit_override_count(&self) -> usize {
+        self.script_data.live_reload.script_mod_overrides.borrow().len()
+    }
+
     pub fn start_hot_reload_file_observer_if_requested(&mut self) {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.start_desktop_hot_reload_file_observer_if_requested();
@@ -172,9 +240,10 @@ fn handle_cx_live_edit(cx: &mut Cx) -> LiveEditTrigger {
     // `script_mod_overrides` map that subsequent `script_mod` re-runs
     // consult, and we want that done before the LiveEdit fires.
     let file_changed = handle_cx_live_edit_files(cx);
+    let reverted = std::mem::take(&mut cx.script_data.live_reload.overrides_changed);
     let manual = std::mem::take(&mut cx.pending_live_edit_request);
 
-    if file_changed {
+    if file_changed || reverted {
         LiveEditTrigger::FileChange
     } else if manual {
         LiveEditTrigger::Manual
@@ -576,6 +645,21 @@ fn extract_script_mods_from_rust_file(
     file_name: &str,
     source: &str,
 ) -> Result<Vec<ExtractedScriptMod>, String> {
+    Ok(scan_script_mod_blocks(file_name, source)?
+        .into_iter()
+        .map(|block| ExtractedScriptMod {
+            code: block.code,
+            rust_value_count: block.rust_value_count,
+            first_token_line: block.first_token_line,
+            first_token_column: block.first_token_column,
+        })
+        .collect())
+}
+
+fn scan_script_mod_blocks(
+    file_name: &str,
+    source: &str,
+) -> Result<Vec<ScriptModBlock>, String> {
     let bytes = source.as_bytes();
     let mut i = 0;
     let mut extracted = Vec::new();
@@ -603,7 +687,14 @@ fn extract_script_mods_from_rust_file(
                         let body_start = j + 1;
                         let body = &source[body_start..end];
                         let body_pos = position_after_index(source, j);
-                        extracted.push(normalize_script_mod_body(file_name, body, body_pos)?);
+                        let mut block = normalize_script_mod_body(file_name, body, body_pos)?;
+                        block.body_start = body_start;
+                        block.body_end = end;
+                        for range in &mut block.placeholders {
+                            range.start += body_start;
+                            range.end += body_start;
+                        }
+                        extracted.push(block);
                         i = end + 1;
                         continue;
                     }
@@ -622,13 +713,14 @@ fn normalize_script_mod_body(
     file_name: &str,
     body: &str,
     start_pos: FilePos,
-) -> Result<ExtractedScriptMod, String> {
+) -> Result<ScriptModBlock, String> {
     let bytes = body.as_bytes();
     let mut i = 0;
     let mut pos = start_pos;
     let mut out = String::with_capacity(body.len() + 1);
     let mut rust_value_count = 0;
     let mut first_token = None;
+    let mut placeholders = Vec::new();
 
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
@@ -641,7 +733,20 @@ fn normalize_script_mod_body(
 
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
             let end = skip_block_comment(bytes, i)?;
-            push_comment_whitespace(&mut out, &bytes[i..end]);
+            // A `/** ... */` block is a Splash doc annotation, not a comment:
+            // the macro hands the runtime the same text, and the tokenizer
+            // keys field and object docs off it. Blanking it here (as every
+            // plain comment is) made a hot-reloaded file lose its reflected
+            // docs until the next rebuild.
+            let is_doc = bytes.get(i + 2) == Some(&b'*') && end - i > 4;
+            if is_doc {
+                if first_token.is_none() {
+                    first_token = Some(pos);
+                }
+                out.push_str(&body[i..end]);
+            } else {
+                push_comment_whitespace(&mut out, &bytes[i..end]);
+            }
             bump_pos_bytes(&mut pos, &bytes[i..end]);
             i = end;
             continue;
@@ -710,6 +815,7 @@ fn normalize_script_mod_body(
                 }
                 out.push_str(&format!("#({rust_value_count})"));
                 rust_value_count += 1;
+                placeholders.push(i..segment_end);
                 bump_pos_bytes(&mut pos, &bytes[i..segment_end]);
                 i = segment_end;
                 continue;
@@ -732,11 +838,25 @@ fn normalize_script_mod_body(
     out.push(';');
     let first_token = first_token.unwrap_or(start_pos);
 
-    Ok(ExtractedScriptMod {
-        code: out,
-        rust_value_count,
+    // The runtime records a block's line as its FIRST TOKEN's line and adds
+    // that to a row inside the code, so row 0 must be the first token's line.
+    // The body begins right after the `{`, usually one line earlier: drop the
+    // lines before the first token (their comments are blank by now) and keep
+    // that line's indentation so columns still match the file.
+    if let Some(first_ink) = out.find(|c: char| !c.is_whitespace()) {
+        if let Some(last_newline) = out[..first_ink].rfind('\n') {
+            out.drain(..=last_newline);
+        }
+    }
+
+    Ok(ScriptModBlock {
+        body_start: 0,
+        body_end: 0,
         first_token_line: first_token.line,
         first_token_column: first_token.column,
+        code: out,
+        rust_value_count,
+        placeholders,
     })
 }
 
