@@ -170,7 +170,7 @@ impl DesignSession {
         let splash = format!("{} := {}{}", name, ty, body.trim());
         let (parent, placement, parent_path) = match place {
             Place::Inside => {
-                if widget.borrow::<View>().is_none() {
+                if !is_container(cx, widget) {
                     return Err(format!(
                         "{} is not a container; insert before or after it",
                         span.node.ty
@@ -263,7 +263,7 @@ impl DesignSession {
         let name = span.node.name().map(|n| n.to_string());
         let (parent, placement, parent_path) = match place {
             Place::Inside => {
-                if target.borrow::<View>().is_none() {
+                if !is_container(cx, target) {
                     return Err(format!("{} is not a container", target_span.node.ty));
                 }
                 (target_span, Placement::Last, path_of(cx, target))
@@ -422,6 +422,24 @@ impl DesignSession {
         self.status = format!("patch written: {}", path);
         Ok(path)
     }
+}
+
+/// Whether `widget` takes children in its literal's body the way a View
+/// does: a View (and every Splash template over one), a Grid, a Masonry.
+/// Slot and template hosts (Splitter, Dock, PortalList, Tabs) do not, and
+/// an insert inside them is refused with the reason.
+pub fn is_container(cx: &Cx, widget: &WidgetRef) -> bool {
+    if widget.borrow::<View>().is_some() {
+        return true;
+    }
+    let Some(type_id) = widget.widget_type_id() else {
+        return false;
+    };
+    let registry = cx.components.get::<WidgetRegistry>();
+    let Some((info, _)) = registry.map.get(&type_id) else {
+        return false;
+    };
+    matches!(live_id_token(info.name).as_str(), "Grid" | "Masonry" | "KeyboardView")
 }
 
 /// The widget's dotted path in the widget tree.

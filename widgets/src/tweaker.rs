@@ -24195,7 +24195,7 @@ impl Tweaker {
                         let fx = ((e.abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
                         let fy = ((e.abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
                         let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
-                        let container = widget.borrow::<View>().is_some();
+                        let container = crate::designer::is_container(cx, &widget);
                         let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
                             DesignPlace::Inside
                         } else if fy < 0.5 {
