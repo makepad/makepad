@@ -621,11 +621,19 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Where deleted files go. The operations engine has to know this too and
-/// cannot depend on this module, so it owns the definition and this is the
-/// one name the rest of the app uses.
+/// Where the platform's Trash keeps what other apps threw away (macOS:
+/// `<home>/.Trash`, elsewhere `<home>/.local/share/Trash/files`, the
+/// freedesktop.org convention). Only a place to look: this app never puts
+/// anything there.
 pub fn trash_dir(home: &Path) -> PathBuf {
-    crate::ops::trash_dir(home)
+    #[cfg(target_os = "macos")]
+    {
+        home.join(".Trash")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.join(".local/share/Trash/files")
+    }
 }
 
 #[cfg(test)]

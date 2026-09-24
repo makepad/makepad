@@ -30,8 +30,8 @@ use makepad_diskmap::treemap::{Node, ScanProgress};
 /// and so on.
 const VIRTUAL_HOME: &str = "/Demo";
 
-/// Where a trashed demo file goes; a plain hidden folder under the virtual
-/// home, exactly the way `~/.Trash` sits under a real one.
+/// The demo home's Trash: a plain hidden folder of already-thrown-away files,
+/// exactly the way `~/.Trash` sits under a real home. Only ever looked at.
 const TRASH_NAME: &str = ".Trash";
 
 /// The anchor "now" every seeded date is measured back from. A fixed
@@ -637,8 +637,6 @@ fn reject_reserved_trash_source(request: &OpRequest) -> Result<(), String> {
         let action = match request.kind {
             OpKind::Rename => "rename",
             OpKind::Move => "move",
-            OpKind::Trash => "trash",
-            OpKind::Delete => "delete",
             _ => "modify",
         };
         return Err(format!("Can't {action} the reserved demo Trash folder"));
@@ -691,7 +689,7 @@ fn perform_new_folder(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome
 
     Ok(OpOutcome {
         message: outcome_message(OpKind::NewFolder, 1, &path),
-        undo: Some(Undo::Created { paths: vec![path.clone()] }),
+        undo: None,
         touched: vec![path],
     })
 }
@@ -723,7 +721,7 @@ fn perform_copy(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, Stri
 
     Ok(OpOutcome {
         message: outcome_message(OpKind::Copy, touched.len(), &request.dest_dir),
-        undo: Some(Undo::Created { paths: touched.clone() }),
+        undo: None,
         touched,
     })
 }
@@ -780,66 +778,26 @@ fn perform_move(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, Stri
     Ok(OpOutcome { message, undo: Some(Undo::Moved { pairs: moved_pairs }), touched })
 }
 
-fn perform_trash(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, String> {
-    let trash_path = reserved_trash_path();
-    let trash = resolve(tree, &trash_path).ok_or_else(|| "The demo Trash folder is missing".to_string())?;
-    if !trash.is_dir {
-        return Err("The demo Trash path is not a folder".to_string());
-    }
-    let mut pairs = Vec::new();
-    let mut touched = Vec::new();
-    for source in &request.sources {
-        let (parent_path, name) = split_path(source).ok_or_else(|| format!("Can't trash {}", source.display()))?;
-        let node = {
-            let parent = resolve_mut(tree, &parent_path)
-                .ok_or_else(|| format!("No such folder: {}", parent_path.display()))?;
-            take_child(parent, &name).ok_or_else(|| format!("No such file: {}", source.display()))?
-        };
-        let dest = resolve_mut(tree, &trash_path).ok_or_else(|| "The demo Trash folder is missing".to_string())?;
-        let unique = unique_name(&dest.children, &name);
-        let mut item = node;
-        item.name = unique.clone();
-        dest.children.push(item);
-        let target = trash_path.join(&unique);
-        pairs.push((source.clone(), target.clone()));
-        touched.push(target);
-    }
-
-    Ok(OpOutcome {
-        message: outcome_message(OpKind::Trash, pairs.len(), &trash_path),
-        undo: Some(Undo::Moved { pairs }),
-        touched,
-    })
-}
-
-/// Erases every source outright — no undo, no trash behind it, per
-/// `OpKind::Delete`'s contract.
-fn perform_delete(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, String> {
-    let mut removed = 0usize;
-    for source in &request.sources {
-        let (parent_path, name) = split_path(source).ok_or_else(|| format!("Can't delete {}", source.display()))?;
-        let parent =
-            resolve_mut(tree, &parent_path).ok_or_else(|| format!("No such folder: {}", parent_path.display()))?;
-        take_child(parent, &name).ok_or_else(|| format!("No such file: {}", source.display()))?;
-        removed += 1;
-    }
-    Ok(OpOutcome {
-        message: format!("Deleted {removed} item{} permanently", if removed == 1 { "" } else { "s" }),
-        undo: None,
-        touched: Vec::new(),
-    })
-}
-
 fn undo_moved(tree: &mut VNode, pairs: &[(PathBuf, PathBuf)]) -> Result<OpOutcome, String> {
     let mut restored = Vec::new();
     for (from, to) in pairs {
+        // Never onto something that took the old name since: same rule as
+        // `ops::move_path`.
+        let (from_parent, from_name) = split_path(from).ok_or_else(|| format!("Can't undo move to {}", from.display()))?;
+        let occupied = resolve(tree, &from_parent)
+            .ok_or_else(|| format!("No such folder: {}", from_parent.display()))?
+            .children
+            .iter()
+            .any(|c| c.name == from_name);
+        if occupied {
+            return Err(format!("\"{from_name}\" already exists"));
+        }
         let (to_parent, to_name) = split_path(to).ok_or_else(|| format!("Can't undo move of {}", to.display()))?;
         let node = {
             let parent =
                 resolve_mut(tree, &to_parent).ok_or_else(|| format!("No such folder: {}", to_parent.display()))?;
             take_child(parent, &to_name).ok_or_else(|| format!("Nothing to undo at {}", to.display()))?
         };
-        let (from_parent, from_name) = split_path(from).ok_or_else(|| format!("Can't undo move to {}", from.display()))?;
         let dest = resolve_mut(tree, &from_parent)
             .ok_or_else(|| format!("No such folder: {}", from_parent.display()))?;
         let mut item = node;
@@ -848,18 +806,6 @@ fn undo_moved(tree: &mut VNode, pairs: &[(PathBuf, PathBuf)]) -> Result<OpOutcom
         restored.push(from.clone());
     }
     Ok(OpOutcome { message: format!("Undid move of {} item(s)", restored.len()), undo: None, touched: restored })
-}
-
-fn undo_created(tree: &mut VNode, paths: &[PathBuf]) -> Result<OpOutcome, String> {
-    let mut removed = Vec::new();
-    for path in paths {
-        let (parent_path, name) = split_path(path).ok_or_else(|| format!("Can't undo creation of {}", path.display()))?;
-        let parent =
-            resolve_mut(tree, &parent_path).ok_or_else(|| format!("No such folder: {}", parent_path.display()))?;
-        take_child(parent, &name).ok_or_else(|| format!("Nothing to undo at {}", path.display()))?;
-        removed.push(path.clone());
-    }
-    Ok(OpOutcome { message: format!("Undid creation of {} item(s)", removed.len()), undo: None, touched: removed })
 }
 
 // ---------------------------------------------------------------------
@@ -1122,7 +1068,7 @@ impl Vfs for DemoVfs {
 
     fn perform(&self, request: &OpRequest) -> Result<OpOutcome, String> {
         let mut tree = self.root.lock().unwrap();
-        if matches!(request.kind, OpKind::Rename | OpKind::Move | OpKind::Trash | OpKind::Delete) {
+        if matches!(request.kind, OpKind::Rename | OpKind::Move) {
             reject_reserved_trash_source(request)?;
         }
         match request.kind {
@@ -1130,8 +1076,6 @@ impl Vfs for DemoVfs {
             OpKind::NewFolder => perform_new_folder(&mut tree, request),
             OpKind::Copy => perform_copy(&mut tree, request),
             OpKind::Move => perform_move(&mut tree, request),
-            OpKind::Trash => perform_trash(&mut tree, request),
-            OpKind::Delete => perform_delete(&mut tree, request),
         }
     }
 
@@ -1139,7 +1083,6 @@ impl Vfs for DemoVfs {
         let mut tree = self.root.lock().unwrap();
         match undo {
             Undo::Moved { pairs } => undo_moved(&mut tree, pairs),
-            Undo::Created { paths } => undo_created(&mut tree, paths),
         }
     }
 
@@ -1253,7 +1196,6 @@ mod tests {
                 sources: vec![old_path.clone()],
                 dest_dir: dest_dir.clone(),
                 new_name: Some("journal.md".to_string()),
-                home: vfs.home(),
             })
             .unwrap();
         let new_path = dest_dir.join("journal.md");
@@ -1268,7 +1210,6 @@ mod tests {
             sources: vec![new_path.clone()],
             dest_dir: dest_dir.clone(),
             new_name: Some("budget.csv".to_string()),
-            home: vfs.home(),
         });
         assert!(collide.is_err());
 
@@ -1279,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_into_the_same_folder_gets_a_suffix_and_undoes() {
+    fn copy_into_the_same_folder_gets_a_suffix_and_no_undo() {
         let vfs = DemoVfs::new();
         let dir = PathBuf::from(VIRTUAL_HOME).join("Documents");
         let source = dir.join("notes.md");
@@ -1291,7 +1232,6 @@ mod tests {
                 sources: vec![source.clone()],
                 dest_dir: dir.clone(),
                 new_name: None,
-                home: vfs.home(),
             })
             .unwrap();
         let copy_path = dir.join("notes (2).md");
@@ -1299,32 +1239,29 @@ mod tests {
         assert!(vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "notes.md"), "the original must survive its own copy");
         assert!(vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "notes (2).md"));
 
-        let Some(Undo::Created { paths }) = outcome.undo else { panic!("expected a Created undo") };
-        vfs.perform_undo(&Undo::Created { paths }).unwrap();
-        assert!(!vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "notes (2).md"));
-        assert!(vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "notes.md"));
+        // Undoing a copy would mean deleting it, and nothing here deletes.
+        assert!(outcome.undo.is_none());
     }
 
     #[test]
-    fn trash_moves_out_and_undo_restores_it() {
+    fn move_out_and_undo_restores_it() {
         let vfs = DemoVfs::new();
         let dir = PathBuf::from(VIRTUAL_HOME).join("Documents");
+        let desktop = PathBuf::from(VIRTUAL_HOME).join("Desktop");
         let source = dir.join("budget.csv");
 
         let outcome = vfs
             .perform(&OpRequest {
                 id: 1,
-                kind: OpKind::Trash,
+                kind: OpKind::Move,
                 sources: vec![source.clone()],
-                dest_dir: dir.clone(),
+                dest_dir: desktop.clone(),
                 new_name: None,
-                home: vfs.home(),
             })
             .unwrap();
         assert!(!vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "budget.csv"));
-        let trash_path = PathBuf::from(VIRTUAL_HOME).join(".Trash").join("budget.csv");
-        assert_eq!(outcome.touched, vec![trash_path.clone()]);
-        assert!(vfs.read_dir(&PathBuf::from(VIRTUAL_HOME).join(".Trash"), true).unwrap().iter().any(|e| e.name == "budget.csv"));
+        assert_eq!(outcome.touched, vec![desktop.join("budget.csv")]);
+        assert!(vfs.read_dir(&desktop, true).unwrap().iter().any(|e| e.name == "budget.csv"));
 
         let Some(Undo::Moved { pairs }) = outcome.undo else { panic!("expected a Moved undo") };
         vfs.perform_undo(&Undo::Moved { pairs }).unwrap();
@@ -1332,38 +1269,16 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_permanently_with_no_undo() {
-        let vfs = DemoVfs::new();
-        let dir = PathBuf::from(VIRTUAL_HOME).join("Documents");
-        let source = dir.join("contacts.csv");
-
-        let outcome = vfs
-            .perform(&OpRequest {
-                id: 1,
-                kind: OpKind::Delete,
-                sources: vec![source.clone()],
-                dest_dir: dir.clone(),
-                new_name: None,
-                home: vfs.home(),
-            })
-            .unwrap();
-        assert!(outcome.undo.is_none());
-        assert!(outcome.touched.is_empty());
-        assert!(!vfs.read_dir(&dir, true).unwrap().iter().any(|e| e.name == "contacts.csv"));
-    }
-
-    #[test]
-    fn reserved_trash_root_rejects_every_destructive_operation() {
+    fn reserved_trash_root_rejects_rename_and_move() {
         let vfs = DemoVfs::new();
         let trash = reserved_trash_path();
-        for kind in [OpKind::Rename, OpKind::Move, OpKind::Trash, OpKind::Delete] {
+        for kind in [OpKind::Rename, OpKind::Move] {
             let result = vfs.perform(&OpRequest {
                 id: 1,
                 kind,
                 sources: vec![trash.clone()],
                 dest_dir: PathBuf::from(VIRTUAL_HOME).join("Documents"),
                 new_name: (kind == OpKind::Rename).then(|| "Old Trash".to_string()),
-                home: vfs.home(),
             });
             let error = match result {
                 Ok(_) => panic!("reserved Trash operation must fail"),
@@ -1661,7 +1576,6 @@ mod tests {
             sources: Vec::new(),
             dest_dir: home.clone(),
             new_name: Some("Inline Operation".to_string()),
-            home: home.clone(),
         };
         let outcome = if spy.is_instant() {
             spy.perform(&request)

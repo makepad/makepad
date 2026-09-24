@@ -1,11 +1,10 @@
 //! What the chat panel's model is allowed to read and change.
 //!
-//! Four bounded read tools inspect paths; three mutation tools make a folder,
-//! rename one item, or move one item to the platform Trash. On the desktop bus
-//! those three wait for confirmation because their manifest risk is
-//! `Destructive`. There is
-//! no permanent delete or shell, and [`run`] is a closed match over the seven
-//! names.
+//! Four bounded read tools inspect paths; two mutation tools make a folder or
+//! rename one item (never onto a name that exists). On the desktop bus those
+//! two wait for confirmation because their manifest risk is `Destructive`.
+//! There is no delete, no Trash and no shell, and [`run`] is a closed match
+//! over the six names.
 //!
 //! Every path the model names goes through [`resolve`] first. It expands `~`,
 //! folds `.` and `..` away *lexically* (so `~/../../etc` is refused before the
@@ -56,7 +55,7 @@ const MEASURE_ENTRIES: usize = 400_000;
 /// panel's `ToolSpec`s and the desktop bus's manifest read the SAME name,
 /// sentence and schema, so the two can never drift apart. Every schema is
 /// an argument object (`"type":"object"`), which the wire insists on.
-const TOOL_TABLE: [(&str, &str, &str, Risk); 7] = [
+const TOOL_TABLE: [(&str, &str, &str, Risk); 6] = [
     (
         "list_dir",
         "List what is directly inside a folder: each entry's name, whether it is a folder, its kind and its size. Bounded to the first 200 entries. Use this before saying anything about what a folder contains.",
@@ -93,12 +92,6 @@ const TOOL_TABLE: [(&str, &str, &str, Risk); 7] = [
         r#"{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string","description":"bare new name, with no path separators"}},"required":["path","new_name"]}"#,
         Risk::Destructive,
     ),
-    (
-        "trash",
-        "Move one file or folder inside the home-folder jail to the platform Trash. It is never permanently deleted.",
-        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
-        Risk::Destructive,
-    ),
 ];
 
 /// The tools, exactly as the panel's own model is told about them.
@@ -110,14 +103,14 @@ pub fn tools() -> Vec<ToolSpec> {
         .collect()
 }
 
-/// The same seven tools as the desktop assistant learns them over the bus
+/// The same six tools as the desktop assistant learns them over the bus
 /// (`ai_service.rs`). Mutations are `Destructive`, so the router confirms
 /// them before a call reaches this app.
 pub fn service_manifest() -> ServiceManifest {
     let mut manifest = ServiceManifest::new(
         "files",
         "Files",
-        "The file browser. Its tools list folders, read text, inspect metadata, measure folder sizes, create folders, rename items, and move items to Trash. Paths may be absolute, `~` for the home folder, or relative to the folder the person is looking at; anything outside the home is refused. Mutations require confirmation.",
+        "The file browser. Its tools list folders, read text, inspect metadata, measure folder sizes, create folders and rename items. Nothing can be deleted or moved to the Trash. Paths may be absolute, `~` for the home folder, or relative to the folder the person is looking at; anything outside the home is refused. Mutations require confirmation.",
     );
     for (name, description, schema, risk) in TOOL_TABLE {
         manifest = manifest.with_tool(ToolDef::new(name, description, schema, risk));
@@ -235,7 +228,6 @@ fn run_with_vfs(
         }
         "mkdir" => mkdir(fs, &path, &shown),
         "rename" => rename(fs, &path, arg(&job.args, "new_name"), &job.home, &shown),
-        "trash" => trash(fs, &path, &job.home, &shown),
         other => ToolOutcome {
             note: format!("unknown tool {other}"),
             text: format!("there is no tool called {other}"),
@@ -480,74 +472,6 @@ fn rename(
         format!("renamed {shown} to {new_name}"),
         format!("could not rename {shown}"),
     )
-}
-
-fn trash(fs: &dyn crate::vfs::Vfs, path: &Path, home: &Path, shown: &str) -> ToolOutcome {
-    if path == home {
-        return refused(shown, "refused: the home folder itself cannot be trashed");
-    }
-    if !fs.exists(path) {
-        return refused(shown, format!("refused: there is nothing at {shown}"));
-    }
-    let trash_dir = crate::ops::trash_dir(home);
-    let trash_dir = match resolve_with(&trash_dir.display().to_string(), home, home, fs) {
-        Ok(path) => path,
-        Err(error) => return refused(shown, error),
-    };
-    if path == trash_dir {
-        return refused(shown, "refused: the Trash folder itself cannot be trashed");
-    }
-    if !fs.exists(&trash_dir) {
-        if let Err(error) = fs.mkdir(&trash_dir) {
-            return mutation(
-                Err(error),
-                String::new(),
-                format!("could not reach Trash for {shown}"),
-            );
-        }
-    } else if !fs.is_dir(&trash_dir) {
-        return refused(shown, "refused: the Trash path is not a folder");
-    }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return refused(shown, format!("refused: {shown} has no movable name"));
-    };
-    let target = unique_destination(fs, &trash_dir, name);
-    mutation(
-        fs.rename(path, &target)
-            .map(|()| format!("moved {shown} to Trash as {}", target.file_name().unwrap().to_string_lossy())),
-        format!("trashed {shown}"),
-        format!("could not trash {shown}"),
-    )
-}
-
-/// Collision handling identical to the operations engine: suffix before an
-/// extension, or at the end for an extensionless name and a dotfile.
-fn unique_destination(fs: &dyn crate::vfs::Vfs, dir: &Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
-    if !fs.exists(&candidate) {
-        return candidate;
-    }
-    let path = Path::new(name);
-    let (stem, ext) = match (path.file_stem(), path.extension()) {
-        (Some(stem), Some(ext)) => (
-            stem.to_string_lossy().into_owned(),
-            ext.to_string_lossy().into_owned(),
-        ),
-        _ => (name.to_string(), String::new()),
-    };
-    let mut n = 2u64;
-    loop {
-        let candidate_name = if ext.is_empty() {
-            format!("{name} ({n})")
-        } else {
-            format!("{stem} ({n}).{ext}")
-        };
-        let candidate = dir.join(candidate_name);
-        if !fs.exists(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
 }
 
 fn list_dir(fs: &dyn crate::vfs::Vfs, path: &Path) -> Result<(String, String), String> {
@@ -857,7 +781,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_and_a_safe_name() {
         let tools = tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 6);
         for tool in &tools {
             assert!(tool
                 .name
@@ -869,7 +793,7 @@ mod tests {
         }
         assert!(tools.iter().any(|tool| tool.name == "mkdir"));
         assert!(tools.iter().any(|tool| tool.name == "rename"));
-        assert!(tools.iter().any(|tool| tool.name == "trash"));
+        assert!(!tools.iter().any(|tool| tool.name == "trash"));
     }
 
     #[test]
@@ -888,7 +812,7 @@ mod tests {
         for name in ["list_dir", "read_file", "stat", "treemap_summary"] {
             assert_eq!(manifest.tool(name).unwrap().risk, Risk::Read);
         }
-        for name in ["mkdir", "rename", "trash"] {
+        for name in ["mkdir", "rename"] {
             assert_eq!(manifest.tool(name).unwrap().risk, Risk::Destructive);
         }
     }
@@ -906,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn mkdir_rename_and_trash_mutate_the_demo_vfs() {
+    fn mkdir_and_rename_mutate_the_demo_vfs() {
         let fs = crate::demo::DemoVfs::new();
         let home = fs.home();
         let created = home.join("Documents/assistant-created");
@@ -935,16 +859,6 @@ mod tests {
         assert!(!outcome.is_error, "{}", outcome.text);
         assert!(!fs.exists(&created));
         assert!(fs.is_dir(&renamed));
-
-        let outcome = run_with_vfs(
-            &demo_job(&home, "trash", &[("path", "assistant-renamed")]),
-            &fs,
-            &AtomicBool::new(false),
-            &|_| {},
-        );
-        assert!(!outcome.is_error, "{}", outcome.text);
-        assert!(!fs.exists(&renamed));
-        assert!(fs.is_dir(&crate::ops::trash_dir(&home).join("assistant-renamed")));
     }
 
     #[test]
@@ -954,7 +868,6 @@ mod tests {
         for (tool, args) in [
             ("mkdir", vec![("path", "/Outside/new")]),
             ("rename", vec![("path", "/Outside/item"), ("new_name", "new")]),
-            ("trash", vec![("path", "/Outside/item")]),
         ] {
             let outcome = run_with_vfs(
                 &demo_job(&home, tool, &args),

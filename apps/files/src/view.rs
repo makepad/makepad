@@ -1586,8 +1586,7 @@ pub struct FilesView {
     /// What each running job will mean for the size map once it lands. The
     /// map is expensive to build and cheap to correct, so every operation the
     /// app performs itself is folded straight into it — a scan of a full home
-    /// directory is minutes, and moving one file to the Trash should not cost
-    /// them.
+    /// directory is minutes, and moving one file should not cost them.
     #[rust]
     map_jobs: Vec<MapJob>,
     /// A file to select, and maybe rename, once the folder is re-listed.
@@ -1619,11 +1618,6 @@ pub struct FilesView {
     submenu_apps: Vec<AppChoice>,
     #[rust]
     submenu_hover: Option<usize>,
-    /// A permanent delete that has been asked for once and is waiting for the
-    /// second press that means it. There is no undo behind this one, so it is
-    /// the only thing in the app that asks twice.
-    #[rust]
-    pending_delete: Vec<PathBuf>,
     /// Warm-pool dormancy — see `Dormancy`.
     #[rust]
     dormancy: Dormancy,
@@ -2865,9 +2859,7 @@ impl FilesView {
             } else {
                 Palette::vec4(&palette.bg)
             };
-            let text = if row.danger {
-                Palette::vec4(&palette.danger)
-            } else if hovered {
+            let text = if hovered {
                 Palette::vec4(&palette.accent)
             } else {
                 Palette::vec4(&palette.fg)
@@ -2973,8 +2965,7 @@ impl FilesView {
                 self.with_contents(cx, |contents, cx| contents.select_all(cx));
                 self.report(cx);
             }
-            MenuAction::Trash => self.trash_selection(cx),
-            MenuAction::DeleteForever => self.delete_forever(cx),
+            MenuAction::ShowInFileManager => self.show_in_file_manager(cx, target),
             MenuAction::RevealInTreemap => self.reveal_in_treemap(cx, target),
             MenuAction::Properties => self.set_props(cx, true),
             MenuAction::OpenInTerminal => self.open_terminal(cx),
@@ -3044,29 +3035,29 @@ impl FilesView {
         self.status(cx, &format!("{name} is highlighted on the map"));
     }
 
-    /// Erase, with nothing behind it. Asked once in the status bar and done on
-    /// the second press: there is no undo for this, so a single slip must not
-    /// be enough.
-    fn delete_forever(&mut self, cx: &mut Cx) {
-        let paths = self.target_paths(cx);
-        if paths.is_empty() {
-            self.status(cx, "Nothing selected to delete");
-            return;
-        }
-        if self.pending_delete != paths {
-            let count = paths.len();
-            self.pending_delete = paths;
-            self.status(
-                cx,
-                &format!(
-                    "Delete {count} item{} permanently? This cannot be undone — press Shift+Delete again to confirm, Esc to cancel",
-                    if count == 1 { "" } else { "s" }
-                ),
-            );
-            return;
-        }
-        self.pending_delete.clear();
-        self.submit(cx, OpKind::Delete, paths, None);
+    /// Hand the item to the platform's own file manager — the item under the
+    /// pointer, else the first of the selection, else the folder being shown.
+    /// Deleting is done there: this app has no delete of its own.
+    fn show_in_file_manager(&mut self, cx: &mut Cx, entry: Option<FileEntry>) {
+        let path = match entry {
+            Some(entry) => entry.path,
+            None => self
+                .target_paths(cx)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.current_dir()),
+        };
+        let message = preview::show_in_file_manager(&path);
+        self.status(cx, &message);
+    }
+
+    /// What a delete key says here: where deleting is done instead.
+    fn no_delete_here(&mut self, cx: &mut Cx) {
+        let label = crate::menu::file_manager_label();
+        self.status(
+            cx,
+            &format!("Files does not delete — use {label} and delete it there"),
+        );
     }
 
     fn toggle_hidden(&mut self, cx: &mut Cx) {
@@ -3290,7 +3281,6 @@ impl FilesView {
             sources,
             dest_dir: self.current_dir(),
             new_name,
-            home: self.home.clone(),
         };
         // An in-memory tree changes at once: sending it to a worker would only
         // buy a progress bar for work that is already finished.
@@ -3380,7 +3370,7 @@ impl FilesView {
                 }
                 OpUpdate::Done {
                     id,
-                    kind,
+                    kind: _,
                     message,
                     undo,
                     touched,
@@ -3393,12 +3383,7 @@ impl FilesView {
                     }
                     self.finish_op(cx);
                     self.map_absorb(cx, id, &touched);
-                    // What a job left behind is worth selecting only when it
-                    // landed *here*: a trashed file's `touched` path is inside
-                    // the Trash, and selecting it would select nothing.
-                    if kind != OpKind::Trash {
-                        self.pending_select = touched;
-                    }
+                    self.pending_select = touched;
                     self.status(cx, &message);
                     self.pending_status = Some(message);
                     self.request_directory(cx);
@@ -3482,15 +3467,6 @@ impl FilesView {
             .unwrap_or_default()
     }
 
-    fn trash_selection(&mut self, cx: &mut Cx) {
-        let paths = self.target_paths(cx);
-        if paths.is_empty() {
-            self.status(cx, "Nothing selected to move to the Trash");
-            return;
-        }
-        self.submit(cx, OpKind::Trash, paths, None);
-    }
-
     fn new_folder(&mut self, cx: &mut Cx) {
         if self.tabs[self.tab].mode.is_treemap() {self.set_mode(cx, ViewMode::Icons);}
         let name = ops::unique_path(&self.current_dir(), "untitled folder");
@@ -3507,18 +3483,11 @@ impl FilesView {
             return;
         };
         let id = self.next_op_id();
-        // An undo is a move backwards or a removal, and both sides of it are
-        // already known — so the map follows it without a rescan too.
-        match &undo {
-            Undo::Moved { pairs } => {
-                let sources: Vec<PathBuf> = pairs.iter().map(|(_, to)| to.clone()).collect();
-                self.remember_for_map(id, MapEffect::Move, sources);
-            }
-            Undo::Created { paths } => {
-                self.remember_for_map(id, MapEffect::Remove, paths.clone());
-            }
-        }
-        let home = self.home.clone();
+        // An undo is a move backwards, and both sides of it are already known
+        // — so the map follows it without a rescan too.
+        let Undo::Moved { pairs } = &undo;
+        let sources: Vec<PathBuf> = pairs.iter().map(|(_, to)| to.clone()).collect();
+        self.remember_for_map(id, MapEffect::Move, sources);
         let description = undo.describe();
         if vfs().is_instant() {
             let update = match vfs().perform_undo(&undo) {
@@ -3542,7 +3511,7 @@ impl FilesView {
         let Some(engine) = self.ops.as_ref() else {
             return;
         };
-        engine.submit_undo(id, undo, home);
+        engine.submit_undo(id, undo);
         self.active_op = Some(id);
         self.show_progress(cx, true, 0.0, &description);
         let left = self.journal.len();
@@ -3801,11 +3770,6 @@ impl FilesView {
             {
                 return self.report(cx);
             }
-            if !self.pending_delete.is_empty() {
-                self.pending_delete.clear();
-                self.status(cx, "Nothing was deleted");
-                return;
-            }
             if self.batch_open {
                 return self.close_batch(cx);
             }
@@ -3875,7 +3839,7 @@ impl FilesView {
                     self.report(cx);
                     return;
                 }
-                KeyCode::Backspace if !editing => return self.trash_selection(cx),
+                KeyCode::Backspace if !editing => return self.no_delete_here(cx),
                 KeyCode::Equals | KeyCode::NumpadAdd if !editing => return self.zoom(cx, 1),
                 KeyCode::Minus | KeyCode::NumpadSubtract if !editing => return self.zoom(cx, -1),
                 KeyCode::KeyH => return self.toggle_hidden(cx),
@@ -3915,16 +3879,10 @@ impl FilesView {
         if event.key_code == KeyCode::F5 && !editing {
             return self.rescan_map(cx);
         }
+        // The keys other file managers delete with (Delete here, Cmd+Backspace
+        // above) say where deleting is done instead of doing anything.
         if event.key_code == KeyCode::Delete && !editing {
-            if shift {
-                return self.delete_forever(cx);
-            }
-            return self.trash_selection(cx);
-        }
-        // The macOS keyboard's Delete key is Backspace, so the same pair holds
-        // there: with Cmd it trashes, with Cmd+Shift it erases.
-        if event.key_code == KeyCode::Backspace && command && shift && !editing {
-            return self.delete_forever(cx);
+            return self.no_delete_here(cx);
         }
         if editing {
             return;
@@ -4049,11 +4007,6 @@ impl FilesView {
         let Some(map) = map else { return };
         match job.effect {
             MapEffect::Nothing => {}
-            MapEffect::Remove => {
-                let moves: Vec<(PathBuf, Option<PathBuf>)> =
-                    job.sources.into_iter().map(|from| (from, None)).collect();
-                map.absorb_moves(cx, &moves);
-            }
             MapEffect::Move => {
                 // A job that reported fewer destinations than sources did not
                 // move all of them; the ones it cannot account for are treated
@@ -4105,8 +4058,6 @@ impl FilesView {
 /// What a finished operation does to the size map.
 #[derive(Clone, Copy, PartialEq)]
 enum MapEffect {
-    /// The sources stop existing anywhere the map can see.
-    Remove,
     /// The sources end up somewhere else, which may or may not be on the map.
     Move,
     /// The sources stay and are duplicated.
@@ -4118,8 +4069,7 @@ enum MapEffect {
 impl MapEffect {
     fn of(kind: OpKind) -> MapEffect {
         match kind {
-            OpKind::Delete => MapEffect::Remove,
-            OpKind::Trash | OpKind::Move | OpKind::Rename => MapEffect::Move,
+            OpKind::Move | OpKind::Rename => MapEffect::Move,
             OpKind::Copy => MapEffect::Copy,
             OpKind::NewFolder => MapEffect::Nothing,
         }

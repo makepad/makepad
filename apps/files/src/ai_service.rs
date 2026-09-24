@@ -2,7 +2,7 @@
 //!
 //! Hosted by the window manager, the app opens one [`AiServicePort`] with
 //! the manifest from `chat_tools::service_manifest` and answers the calls
-//! that come back through it. The tools are the same seven the app's own
+//! that come back through it. The tools are the same six the app's own
 //! panel has; what is new is how they run: every call carries the
 //! engine's `call_id`, the answer carries it back, and the person (or the
 //! router) can give up on a call mid-walk. The old panel's runner is

@@ -831,7 +831,7 @@ impl FileContents {
             .or_else(||self.map_entry.as_ref().filter(|e| &e.path==anchor).cloned())
     }
 
-    /// Everything selected, in display order — what copy, trash and batch
+    /// Everything selected, in display order — what copy, cut and batch
     /// rename operate on.
     pub fn selected_entries(&self) -> Vec<FileEntry> {
         let mut entries: Vec<_> = self.rows.iter()

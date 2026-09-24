@@ -26,8 +26,10 @@ pub enum MenuAction {
     Cut,
     Paste,
     SelectAll,
-    Trash,
-    DeleteForever,
+    /// Reveal the item in the platform's own file manager (Finder, Explorer,
+    /// the desktop's folder window). Deleting is done there: this app has no
+    /// delete of its own.
+    ShowInFileManager,
     RevealInTreemap,
     Properties,
     OpenInTerminal,
@@ -53,8 +55,6 @@ pub struct MenuRow {
     /// The keyboard shortcut that does the same thing, shown greyed on the
     /// right. Empty when there is none.
     pub hint: &'static str,
-    /// Drawn in the theme's warning color, because it cannot be undone.
-    pub danger: bool,
     /// This row opens a submenu instead of acting.
     pub submenu: bool,
     /// A hairline above this row.
@@ -67,7 +67,6 @@ impl MenuRow {
             action,
             label: label.to_string(),
             hint,
-            danger: false,
             submenu: false,
             separator: false,
         }
@@ -75,11 +74,6 @@ impl MenuRow {
 
     fn sep(mut self) -> Self {
         self.separator = true;
-        self
-    }
-
-    fn danger(mut self) -> Self {
-        self.danger = true;
         self
     }
 
@@ -120,12 +114,8 @@ pub fn entry_menu(count: usize, folder: bool) -> Vec<MenuRow> {
     rows.push(MenuRow::new(MenuAction::Duplicate, "Duplicate", ""));
     rows.push(MenuRow::new(MenuAction::Copy, "Copy", "⌘C"));
     rows.push(MenuRow::new(MenuAction::Cut, "Cut", "⌘X"));
-    rows.push(MenuRow::new(MenuAction::Trash, "Move to Trash", "⌘Del").sep());
-    rows.push(
-        MenuRow::new(MenuAction::DeleteForever, "Delete Permanently", "⇧Del")
-            .danger(),
-    );
-    rows.push(MenuRow::new(MenuAction::RevealInTreemap, "Reveal in Treemap", "").sep());
+    rows.push(MenuRow::new(MenuAction::ShowInFileManager, file_manager_label(), "").sep());
+    rows.push(MenuRow::new(MenuAction::RevealInTreemap, "Reveal in Treemap", ""));
     rows.push(MenuRow::new(MenuAction::Properties, "Properties", "⌘I"));
     rows.push(MenuRow::new(
         MenuAction::OpenInTerminal,
@@ -133,6 +123,18 @@ pub fn entry_menu(count: usize, folder: bool) -> Vec<MenuRow> {
         "",
     ));
     rows
+}
+
+/// What the platform calls its own file manager, for the row that hands an
+/// item over to it.
+pub fn file_manager_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else if cfg!(windows) {
+        "Show in Explorer"
+    } else {
+        "Show in File Manager"
+    }
 }
 
 /// The menu for the empty space of a folder.
@@ -195,6 +197,7 @@ pub fn toolbar_menu(mode: ViewMode, show_hidden: bool, chat: bool, terminal: boo
         MenuRow::new(MenuAction::EditPath, "Go to Folder…", "⌃L"),
         MenuRow::new(MenuAction::Properties, "Get Info", "⌘I").sep(),
         MenuRow::new(MenuAction::Preview, "Preview Selection", "Space"),
+        MenuRow::new(MenuAction::ShowInFileManager, file_manager_label(), ""),
     ];
     if terminal { rows.push(MenuRow::new(MenuAction::OpenInTerminal, "Open in Terminal", "")); }
     if chat { rows.push(MenuRow::new(MenuAction::Chat, "Ask about Files", "")); }
@@ -278,8 +281,7 @@ mod tests {
         for action in [
             MenuAction::Copy,
             MenuAction::Cut,
-            MenuAction::Trash,
-            MenuAction::DeleteForever,
+            MenuAction::ShowInFileManager,
             MenuAction::Duplicate,
         ] {
             assert!(rows.iter().any(|r| r.action == action), "{action:?}");
@@ -291,13 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn only_the_permanent_delete_is_dangerous() {
-        let dangerous: Vec<MenuAction> = entry_menu(1, false)
-            .into_iter()
-            .filter(|r| r.danger)
-            .map(|r| r.action)
-            .collect();
-        assert_eq!(dangerous, [MenuAction::DeleteForever]);
+    fn no_menu_offers_a_delete() {
+        for rows in [
+            entry_menu(1, false),
+            entry_menu(3, true),
+            empty_menu(ViewMode::List, 2, true),
+            toolbar_menu(ViewMode::List, false, true, true),
+        ] {
+            for row in &rows {
+                let label = row.label.to_lowercase();
+                assert!(!label.contains("delete") && !label.contains("trash"), "{}", row.label);
+            }
+        }
+        let entry = entry_menu(1, false);
+        let reveal = entry.iter().find(|r| r.action == MenuAction::ShowInFileManager).unwrap();
+        assert_eq!(reveal.label, file_manager_label());
     }
 
     #[test]
