@@ -80,6 +80,7 @@ pub fn fetch_method_progress(
                     frac,
                     unit: progress::Unit::Bytes,
                     package: progress::Package::default(),
+                    overall: None,
                 });
             });
         }
@@ -240,6 +241,15 @@ pub fn download_probe() -> Result<(), String> {
     }
     // A timed-out sample is still useful; other failures remain failures.
     match result { Ok(_) | Err(blocking_http::Error::Timeout) => Ok(()), Err(e) => Err(e.to_string()) }
+}
+
+/// The size of a download before fetching it: a cached copy's size, else
+/// the server's Content-Length for a HEAD request; 0 when neither is known.
+pub fn download_size(cache: &Path, url: &str, file_name: &str) -> u64 {
+    if let Ok(meta) = fs::metadata(cache.join(safe_name(file_name))) {
+        return meta.len();
+    }
+    fetch_method("HEAD", url, &[], &[]).ok().and_then(|resp| content_length(&resp)).unwrap_or(0)
 }
 
 fn content_length(resp: &blocking_http::Response) -> Option<u64> {

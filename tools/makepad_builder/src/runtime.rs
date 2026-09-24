@@ -403,7 +403,10 @@ impl Environment {
                 "--bin",
                 &release.binary,
             ]);
-        if self.cwd.join("Cargo.lock").is_file() { cmd.arg("--locked"); }
+        // The pinned repository commits are the lock: once a Cargo.lock exists,
+        // build offline and let Cargo bring that lockfile in line with the
+        // pinned path crates (--locked failed when an app's own lock went stale).
+        if self.cwd.join("Cargo.lock").is_file() { cmd.arg("--offline"); }
         if !release.features.is_empty() { cmd.args(["--features", &release.features.join(",")]); }
         if let Some(resources) = &resources {
             cmd.args(["--", "-C"]).arg(format!("link-arg={}", resources.display()));

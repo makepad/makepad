@@ -45,23 +45,29 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
     let bytes = http::fetch_bytes(&manifest_url)?;
     let doc = json::parse(&bytes).map_err(|e| format!("cuda json: {e}"))?;
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    for (index, name) in COMPONENTS.iter().enumerate() {
-        crate::progress::package("NVIDIA CUDA", name, index + 1, COMPONENTS.len());
-        let comp = doc
+    // One bar for CUDA: every component's archive size is in the manifest.
+    let mut parts = Vec::new();
+    for name in COMPONENTS {
+        let win = doc
             .get(name)
-            .ok_or_else(|| format!("cuda manifest missing {name}"))?;
-        let win = comp
+            .ok_or_else(|| format!("cuda manifest missing {name}"))?
             .get("windows-x86_64")
             .ok_or_else(|| format!("{name} has no windows-x86_64"))?;
-        let rel = win
-            .get("relative_path")
-            .and_then(Value::as_str)
-            .ok_or("relative_path")?;
-        let sha = win.get("sha256").and_then(Value::as_str);
+        let rel = win.get("relative_path").and_then(Value::as_str).ok_or("relative_path")?;
+        // NVIDIA writes sizes as strings.
+        let size = win.get("size").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
+        parts.push((*name, rel, win.get("sha256").and_then(Value::as_str), size));
+    }
+    crate::progress::total_begin("CUDA", parts.iter().map(|p| p.3).sum());
+    let result = parts.iter().try_for_each(|(name, rel, sha, size)| {
         let url = format!("{REDIST}/{rel}");
         let file = rel.rsplit('/').next().unwrap_or(name);
         crate::setup_note!("cuda: {name}");
-        let zip = http::cached_file(cache, &url, file, sha)?;
+        crate::progress::package("CUDA", name, 0, 0);
+        crate::progress::step(*size);
+        let zip = http::cached_file(cache, &url, file, *sha)?;
+        crate::progress::step_done();
+        crate::progress::step(*size);
         // Unpacked beside the toolkit, then merged in; a leftover from an
         // interrupted run is unpacked again from scratch.
         let tmp = dest.join(format!(".unpack-{name}"));
@@ -70,7 +76,11 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
         let inner = extract::single_child_dir(&tmp).unwrap_or(tmp.clone());
         extract::merge_dir(&inner, dest)?;
         let _ = crate::remove_inside(dest, &tmp);
-    }
+        crate::progress::step_done();
+        Ok::<(), String>(())
+    });
+    crate::progress::total_end();
+    result?;
     if !dest.join("bin").join("nvcc.exe").is_file() {
         return Err("nvcc.exe missing after cuda extract".into());
     }

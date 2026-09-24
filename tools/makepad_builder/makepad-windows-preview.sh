@@ -52,7 +52,7 @@ rust_pin=1.92.0
 system_rust=1.93.1
 [ "$demo_rust" = found ] || system_rust=
 licensed=unknown
-checked='not checked yet'
+checked=
 message=
 
 get() { eval "printf '%s' \"\${st_$1:-new}\""; }
@@ -354,7 +354,7 @@ main_rows() {
         "item|rust|Build tools||$rs|$ra" \
         "item|cuda|CUDA||$cs|$ca" \
         "$(disk_row)" \
-        "item|updates|Update||${dim}$checked$r0|check licenses & pull" \
+        "$(if [ -z "$checked" ]; then printf '%s' "item|updates|Update||${dim}check for updates$r0|="; else printf '%s' "item|updates|Update||$checked|check again"; fi)" \
         "head|YOUR LICENSES"
     case "$licensed" in
         unknown) printf '%s\n' "note|${dim}checking licenses for ${email}…$r0" ;;
@@ -798,9 +798,9 @@ check_updates() {
         for f in $(printf '%s\n' "$free_apps" | cut -d'|' -f1); do [ "$(get "$f")" != ready ] || put "$f" compile; done
         got="$got${got:+ and }Makepad apps"
     fi
-    checked="checked $(date +%H:%M)"
+    checked="${ok}✓$r0 up to date · $(date +%H:%M)"
     if [ -n "$got" ]; then
-        checked="$checked · updated $got"
+        checked="updates downloaded · $(date +%H:%M)"
         message="${ok}✓$r0 Updated $got.$kept"
     else
         message="${ok}✓$r0 Licenses checked; everything is up to date."

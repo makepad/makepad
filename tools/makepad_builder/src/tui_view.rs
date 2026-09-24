@@ -620,17 +620,43 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
                 p.stage.to_lowercase()
             };
             let what = [amount, clean(&what)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+            // A component with a known total shows one forward-only bar for all of
+            // it, the MB done of its payload and what it is doing now.
+            let (label, fraction, what) = match &p.overall {
+                Some(overall) => {
+                    let mb = |bytes: f64| bytes / 1048576.;
+                    let doing = match p.stage.as_str() {
+                        "Download" => "downloading",
+                        "Verify cache" => "checking downloads",
+                        _ => "unpacking",
+                    };
+                    let amount = format!("{:.0} / {:.0} MB", mb(overall.fraction * overall.bytes as f64), mb(overall.bytes as f64));
+                    (overall.label.clone(), Some(overall.fraction), format!("{amount} · {doing}"))
+                }
+                None => (label, fraction, what),
+            };
             if !color {
                 if changed { println!("{label}: {what}"); }
                 return;
             }
             let label: String = label.chars().take(22).collect();
-            let mut spans = vec![Span(format!("{} ", padded(&label, 13)), PLAIN)];
+            // With a plan, the status line lists the steps that run (✓ done,
+            // ● now, ○ next) and the line under it holds the current bar.
+            let plan = p.overall.as_ref().filter(|o| !o.plan.is_empty());
+            let mut spans = Vec::new();
+            spans.push(Span(format!("{} ", padded(&label, 13)), PLAIN));
+            let width = if plan.is_some() { 24 } else { 30 };
+            let steps: Vec<Span> = plan.map_or_else(Vec::new, |o| {
+                    o.plan.iter().enumerate().flat_map(|(i, name)| {
+                        let (mark, style) = if i < o.step { ("✓", OK) } else if i == o.step { ("●", ACC) } else { ("○", DIM) };
+                        [Span(mark.into(), style), Span(format!(" {name}   "), if i == o.step { PLAIN } else { DIM })]
+                    }).collect()
+                });
             match fraction {
                 Some(f) => {
-                    let filled = (f * 30.).round() as usize;
+                    let filled = (f * width as f64).round() as usize;
                     spans.push(Span("━".repeat(filled), ACC));
-                    spans.push(Span("─".repeat(30 - filled), DIM));
+                    spans.push(Span("─".repeat(width - filled), DIM));
                     spans.push(Span(format!(" {:3.0}%", f * 100.), PLAIN));
                 }
                 None => {
@@ -641,7 +667,13 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
             if !what.is_empty() {
                 spans.push(Span(format!("  {what}"), DIM));
             }
-            MESSAGE.with(|m| *m.borrow_mut() = spans);
+            if steps.is_empty() {
+                MESSAGE.with(|m| *m.borrow_mut() = spans);
+                CHOICE.with(|c| c.borrow_mut().clear());
+            } else {
+                MESSAGE.with(|m| *m.borrow_mut() = steps);
+                CHOICE.with(|c| *c.borrow_mut() = spans);
+            }
             FOOTER.with(|f| f.set(Some("working · ctrl+c stops")));
             draw();
         },
@@ -649,5 +681,7 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
     );
     FOOTER.with(|f| f.set(None));
     MESSAGE.with(|m| m.borrow_mut().clear());
+    CHOICE.with(|c| c.borrow_mut().clear());
+    progress::plan(&[]);
     result
 }

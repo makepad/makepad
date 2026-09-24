@@ -60,12 +60,26 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     let rustc = pkg_target(&toml, "rustc", triple)?;
     let std = pkg_target(&toml, "rust-std", triple)?;
     let cargo = pkg_target(&toml, "cargo", triple)?;
-    crate::progress::package("Rust downloads", "rustc", 1, 3);
-    let rustc_path = http::cached_file(cache, &rustc.1, &file_name(&rustc.1), Some(&rustc.2))?;
-    crate::progress::package("Rust downloads", "rust-std", 2, 3);
-    let std_path = http::cached_file(cache, &std.1, &file_name(&std.1), Some(&std.2))?;
-    crate::progress::package("Rust downloads", "cargo", 3, 3);
-    let cargo_path = http::cached_file(cache, &cargo.1, &file_name(&cargo.1), Some(&cargo.2))?;
+    // One bar for Rust: the three archives' sizes (cached, or the server's
+    // Content-Length), each downloaded then unpacked.
+    let sizes = [&rustc, &std, &cargo].map(|p| http::download_size(cache, &p.1, &file_name(&p.1)));
+    crate::progress::total_begin("Rust", sizes.iter().sum());
+    let result = unpack_rust(cache, dest, version, &stamp, [&rustc, &std, &cargo], sizes);
+    crate::progress::total_end();
+    result
+}
+
+fn unpack_rust(cache: &Path, dest: &Path, version: &str, stamp: &str, [rustc, std, cargo]: [&(String, String, String); 3], sizes: [u64; 3]) -> Result<(), String> {
+    let download = |package: &(String, String, String), size: u64| {
+        crate::progress::package("Rust", &package.0, 0, 0);
+        crate::progress::step(size);
+        let path = http::cached_file(cache, &package.1, &file_name(&package.1), Some(&package.2));
+        crate::progress::step_done();
+        path
+    };
+    let rustc_path = download(rustc, sizes[0])?;
+    let std_path = download(std, sizes[1])?;
+    let cargo_path = download(cargo, sizes[2])?;
 
     // Unpacked and verified beside the destination, then moved into place.
     // An unpack left by an interrupted run starts over from the cached archives.
@@ -74,12 +88,11 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     crate::remove_inside(toolchains, &tmp)?;
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
 
-    crate::progress::package("Install Rust", "rustc", 1, 3);
-    extract::extract_tar_gz(&rustc_path, &tmp.join("rustc"))?;
-    crate::progress::package("Install Rust", "rust-std", 2, 3);
-    extract::extract_tar_gz(&std_path, &tmp.join("std"))?;
-    crate::progress::package("Install Rust", "cargo", 3, 3);
-    extract::extract_tar_gz(&cargo_path, &tmp.join("cargo"))?;
+    for (path, part, size) in [(&rustc_path, "rustc", sizes[0]), (&std_path, "std", sizes[1]), (&cargo_path, "cargo", sizes[2])] {
+        crate::progress::step(size);
+        extract::extract_tar_gz(path, &tmp.join(part))?;
+        crate::progress::step_done();
+    }
 
     let staged = tmp.join("ready");
     fs::create_dir_all(&staged).map_err(|e| e.to_string())?;

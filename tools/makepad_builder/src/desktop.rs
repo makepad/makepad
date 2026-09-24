@@ -7,6 +7,24 @@ fn xml(value: &str) -> String {
         .replace('"', "&quot;").replace('\'', "&apos;")
 }
 
+/// The bundle's file name without `.app`: the catalog title ("Makepad Scope"),
+/// kept to characters that are safe in a file name.
+pub fn bundle_name(release: &Release) -> String {
+    let name: String = release.title.chars().filter(|c| c.is_alphanumeric() || " -_.".contains(*c)).collect();
+    let name = name.trim().trim_start_matches('.').to_owned();
+    if name.is_empty() { capitalized(&release.binary) } else { name }
+}
+fn capitalized(binary: &str) -> String {
+    let mut chars = binary.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+}
+/// A bundle an earlier Builder named after the binary ("Scope.app"). It is
+/// left alone; the caller mentions it once.
+pub fn older_bundle(root: &Path, release: &Release) -> Option<PathBuf> {
+    let old = capitalized(&release.binary);
+    (old != bundle_name(release)).then(|| root.join(format!("{old}.app"))).filter(|path| path.is_dir())
+}
+
 /// Return the bundle's launch wrapper. The original root binary and command
 /// remain available; resources stay in the downloaded source repositories.
 pub fn prepare(root: &Path, release: &Release, project: &Path) -> Result<PathBuf, String> {
@@ -19,8 +37,7 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     let root = root.canonicalize()?;
     let project = project.canonicalize()?;
     let binary = &release.binary;
-    let mut chars = binary.chars();
-    let name = chars.next().unwrap().to_uppercase().collect::<String>() + chars.as_str();
+    let name = bundle_name(release);
     let bundle = root.join(format!("{name}.app"));
     let executable = bundle.join("Contents/MacOS").join(binary);
     fs::create_dir_all(root.join("installed"))?;

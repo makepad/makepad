@@ -68,6 +68,9 @@ pub fn run() -> Result<(), String> {
     let email = env::var("MAKEPAD_LOADER_EMAIL").ok().or_else(|| bootstrap.map(|b| b.email));
     let mut setup = Setup::open(root, email)?;
     view::set_log(setup.root.join("builder.log"));
+    // The host window's palette is for this TUI only, not for the shells,
+    // agents and apps started from it.
+    env::remove_var("MAKEPAD_TERMINAL_COLORS");
     let screen = Screen::enter();
     // The email comes first (downloads are not personalized): asked once per
     // folder, kept in its makepad-builder.json and never asked again.
@@ -262,7 +265,8 @@ struct Setup {
     license_error: Option<String>,
     /// The newest public Makepad release known (for the free apps).
     public: Option<Release>,
-    checked: Option<String>,
+    /// The last update check or build: (downloaded updates, "HH:MM").
+    checked: Option<(bool, String)>,
     disk: Arc<Mutex<(u64, Option<(u64, u64)>)>>,
     disk_seen: std::cell::Cell<u64>,
     /// Installed coding agents: (command, title).
@@ -375,13 +379,17 @@ impl Setup {
         if !cfg!(target_os = "macos") {
             rows.push(self.graphics_row());
         }
-        rows.push(self.agreements_row(ready));
+        rows.push(self.agreements_row());
         rows.extend(self.compiler_rows(ready));
         if crate::cuda::supported() {
             rows.push(self.cuda_row());
         }
         rows.push(self.disk_row());
-        rows.push(item("updates", "Update", "", text(self.checked.clone().unwrap_or_else(|| "not checked yet".into()), DIM), "check licenses & pull"));
+        rows.push(match &self.checked {
+            None => item("updates", "Update", "", text("check for updates", DIM), "⏎"),
+            Some((false, time)) => item("updates", "Update", "", done(format!("up to date · {time}")), "check again"),
+            Some((true, time)) => item("updates", "Update", "", text(format!("updates downloaded · {time}"), PLAIN), "check again"),
+        });
         if self.root.join(if cfg!(windows) { "scope.exe" } else { "scope.bin" }).is_file() {
             rows.push(item("command", "Scope command", "", text("open projects from any terminal", DIM), "add to PATH"));
         }
@@ -407,7 +415,16 @@ impl Setup {
         if self.email.is_empty() {
             item("account", "Account", "", text("not logged in", WARN), "log in")
         } else {
-            item("account", "Account", "", text(self.email.clone(), PLAIN), "switch email")
+            // The email proves itself by loading its license catalog.
+            let status = match (&self.licenses, &self.license_error) {
+                (Some(_), _) => done(self.email.clone()),
+                (None, Some(error)) => vec![
+                    view::Span(format!("{} ", self.email), PLAIN),
+                    view::Span(format!("· {}", short_reason(error)), WARN),
+                ],
+                (None, None) => vec![view::Span(format!("{} ", self.email), PLAIN), view::Span("checking…".into(), DIM)],
+            };
+            item("account", "Account", "", status, "switch email")
         }
     }
     fn graphics_row(&self) -> Row {
@@ -417,24 +434,23 @@ impl Setup {
             item("gpu", "Graphics", "", text("read the driver notice", WARN), "read")
         }
     }
-    /// Installing the build tools accepts Makepad, Microsoft (Windows) and
-    /// Rust; installing CUDA accepts NVIDIA.
-    fn agreements_row(&self, ready: Ready) -> Row {
-        let mut names = vec!["Makepad"];
-        if cfg!(windows) {
-            names.push("Microsoft");
-        }
-        names.push("Rust");
-        let status = if ready.compiler() {
-            if self.cuda_installed() {
+    /// ✓ once every agreement the build tools need is accepted (on the
+    /// Agreements screen or a consent screen); NVIDIA joins when CUDA's is.
+    fn agreements_row(&self) -> Row {
+        let accepted = self.accepted_agreements();
+        let required = required_agreements();
+        let status = if required.iter().all(|id| accepted.iter().any(|a| a == id)) {
+            let mut names = vec!["Makepad"];
+            if cfg!(windows) {
+                names.push("Microsoft");
+            }
+            names.push("Rust");
+            if accepted.iter().any(|a| a == "cuda") {
                 names.push("NVIDIA");
             }
             vec![view::Span("✓".into(), OK), view::Span(" accepted ".into(), PLAIN), view::Span(format!("· {}", names.join(", ")), DIM)]
         } else {
-            if crate::cuda::supported() {
-                names.push("NVIDIA");
-            }
-            text(names.join(", "), DIM)
+            text("not accepted", WARN)
         };
         item("terms", "Agreements", "", status, "read")
     }
@@ -484,10 +500,14 @@ impl Setup {
     fn cuda_row(&self) -> Row {
         let (status, action) = if !crate::cuda::gpu_present() {
             (text("needs an NVIDIA GPU", DIM), "")
-        } else if self.cuda_installed() && self.cuda {
-            (vec![view::Span("✓".into(), OK), view::Span(" CUDA ".into(), PLAIN), view::Span("· AI features in Makepad Amp".into(), DIM)], "turn off")
         } else if self.cuda_installed() {
-            (text("off · AI features in Makepad Amp", DIM), "turn on")
+            let (note, action) = if self.cuda { ("· AI features in Makepad Amp", "turn off") } else { ("· off", "turn on") };
+            let status = vec![
+                view::Span("✓".into(), OK),
+                view::Span(format!(" CUDA {} ", crate::cuda::CUDA_VERSION), PLAIN),
+                view::Span(note.into(), DIM),
+            ];
+            (status, action)
         } else {
             (text("optional · AI features in Makepad Amp", DIM), "install")
         };
@@ -726,19 +746,45 @@ impl Setup {
         }
         Ok(())
     }
-    /// The License agreements page: Return opens a row's link in the browser.
+    /// The Agreements page: each agreement with its state (Return opens it),
+    /// then Agree to all and Disagree. Disagreeing only withdraws the record:
+    /// nothing installed is removed, and the next install or update asks again.
     fn agreements_screen(&self) -> Result<(), String> {
         let mut selected = 0;
         loop {
+            let accepted = self.accepted_agreements();
+            let mut rows: Vec<Row> = agreements()
+                .into_iter()
+                .map(|(id, name, url)| {
+                    let state = if accepted.iter().any(|a| a == id) {
+                        vec![view::Span("✓".into(), OK), view::Span(" accepted  ".into(), PLAIN), view::Span(host(url).into(), DIM)]
+                    } else {
+                        vec![view::Span("not accepted  ".into(), WARN), view::Span(host(url).into(), DIM)]
+                    };
+                    item(format!("url:{id}"), format!("{name:<36}"), "", state, "open in browser")
+                })
+                .collect();
+            rows.push(Row::Note(Vec::new()));
+            rows.push(item("agree", "Agree to all", "", Vec::new(), "accept every agreement above"));
+            rows.push(item("disagree", "Disagree", "", Vec::new(), "withdraw acceptance"));
             let view = View {
                 crumb: " › License agreements".into(),
                 subtitle: "Return opens an agreement in your browser.".into(),
                 email: self.shown_email(),
-                rows: agreement_rows(None),
+                rows,
                 back: true,
                 ..View::default()
             };
             match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "agree" => {
+                    let ids: Vec<&str> = agreements().iter().map(|a| a.0).collect();
+                    self.record_agreements(&ids)?;
+                    view::message(done("Agreements accepted."));
+                }
+                Nav::Select(id) if id == "disagree" => {
+                    self.record_agreements(&[])?;
+                    view::message(text("Agreements withdrawn: installing or updating build tools will ask again.", WARN));
+                }
                 Nav::Select(id) => open_agreement(&id),
                 Nav::Back => return Ok(()),
                 Nav::Quit => return Err(QUIT.into()),
@@ -749,7 +795,12 @@ impl Setup {
     /// A consent screen of its own for the licenses a step needs: what it
     /// installs and where, each agreement by name (Return opens it), then
     /// "Agree to all" (selected at the start) and Cancel. Escape cancels.
+    /// Agreements already accepted are not asked again; agreeing records them.
     fn consent(&self, title: &str, intro: &str, detail: &str, ids: &[&str], action: &str) -> Result<bool, String> {
+        let accepted = self.accepted_agreements();
+        if ids.iter().all(|id| accepted.iter().any(|a| a == id)) {
+            return Ok(true);
+        }
         let mut selected = agreement_rows(Some(ids)).len();
         loop {
             let mut rows = vec![Row::Note(Vec::new())];
@@ -772,13 +823,42 @@ impl Setup {
                 ..View::default()
             };
             match view::menu(view, &mut selected, &|| false)? {
-                Nav::Select(id) if id == "agree" => return Ok(true),
+                Nav::Select(id) if id == "agree" => {
+                    let mut all: Vec<&str> = accepted.iter().map(String::as_str).collect();
+                    all.extend(ids.iter().filter(|id| !accepted.iter().any(|a| a == *id)));
+                    self.record_agreements(&all)?;
+                    return Ok(true);
+                }
                 Nav::Select(id) if id == "cancel" => return Ok(false),
                 Nav::Select(id) => open_agreement(&id),
                 Nav::Back | Nav::Quit => return Ok(false),
                 Nav::Refresh => {}
             }
         }
+    }
+    /// Accepted agreement ids, from `agreements-accepted` in the folder.
+    /// Folders set up before that record existed accepted the build tools'
+    /// agreements when installing them (and NVIDIA's with CUDA).
+    fn accepted_agreements(&self) -> Vec<String> {
+        match fs::read_to_string(self.root.join("agreements-accepted")) {
+            Ok(record) => record.split_whitespace().map(str::to_owned).collect(),
+            Err(_) => {
+                let mut ids = Vec::new();
+                if self.ready().compiler() {
+                    ids.extend(required_agreements().iter().map(|id| id.to_string()));
+                }
+                if self.cuda_installed() {
+                    ids.push("cuda".into());
+                }
+                ids
+            }
+        }
+    }
+    /// Replace the record; an empty list means withdrawn.
+    fn record_agreements(&self, ids: &[&str]) -> Result<(), String> {
+        let next = self.root.join("agreements-accepted.next");
+        fs::write(&next, ids.join("\n") + "\n").map_err(|e| e.to_string())?;
+        fs::rename(&next, self.root.join("agreements-accepted")).map_err(|e| e.to_string())
     }
 }
 
@@ -864,6 +944,15 @@ impl Setup {
             }
         }
         let result: Result<bool, String> = with_progress(|| {
+            // The components that actually run, for the ✓ ● ○ line.
+            let mut steps = Vec::new();
+            if cfg!(windows) && !ready.tools {
+                steps.extend(["Build tools", "Windows SDK"]);
+            }
+            if !ready.rust {
+                steps.push("Rust");
+            }
+            progress::plan(&steps);
             if cfg!(windows) && !ready.tools {
                 runtime::dependency(&self.root, release, Dependency::Msvc)?;
             }
@@ -919,7 +1008,7 @@ impl Setup {
             (false, false) => "Makepad compiles from source, so it needs a compiler. Development packages come from your distribution's package manager.",
         };
         let detail = if parts.is_empty() { String::new() } else { format!("Installed in this folder only: {}", parts.join(", ")) };
-        let ids: &[&str] = if cfg!(windows) { &["makepad", "vs", "sdk", "rust"] } else { &["makepad", "rust"] };
+        let ids = required_agreements();
         let action = if !ready.tools { "install the build tools and Rust" } else { "install Rust" };
         self.consent("Install build tools", intro, &detail, ids, action)
     }
@@ -1131,7 +1220,10 @@ impl Setup {
         view::set_view(self.main_view());
         view::working("cuda", "installing…");
         let release = self.compiler_release()?;
-        with_progress(|| runtime::dependency(&self.root, &release, Dependency::Cuda))?;
+        with_progress(|| {
+            progress::plan(&["CUDA"]);
+            runtime::dependency(&self.root, &release, Dependency::Cuda)
+        })?;
         self.cuda = self.cuda_installed();
         self.measure_disk();
         view::message(done("CUDA installed. Makepad Amp gets its AI features on its next compile."));
@@ -1273,6 +1365,9 @@ impl Setup {
     /// An app runs on a copy of this session pointed at it; carry back what
     /// that copy learned (compiler state, releases, a new login).
     fn adopt(&mut self, app: &str, selected: Setup) {
+        if selected.checked.is_some() {
+            self.checked = selected.checked;
+        }
         self.compiler_retry = selected.compiler_retry;
         self.cuda = selected.cuda;
         if selected.public.is_some() {
@@ -1339,6 +1434,8 @@ impl Setup {
             }
             Err(error) => activity(&format!("Unused sources kept: {error}")),
         }
+        // Just downloaded and built: that is up to date.
+        self.checked = Some((false, clock()));
         activity(&format!("Build complete. Opening {}.", release.title));
         let title = self.launch()?;
         activity(&format!("{title} is running; Builder remains open."));
@@ -1418,8 +1515,10 @@ impl Setup {
             .map_err(|e| e.to_string())?;
         let title = release.title.clone();
         RUNNING_APPS.with(|apps| apps.borrow_mut().push(RunningApp {
-            title: release.title, child, log: log_path,
+            title: release.title.clone(), child, log: log_path,
         }));
+        #[cfg(target_os = "macos")]
+        note_older_bundle(&self.root, &release);
         Ok(title)
     }
     /// After an update saved an app's edits in changes/, a coding agent
@@ -1521,6 +1620,12 @@ impl Setup {
     /// a newer release gets clean new sources; edits made to its old source
     /// are saved in changes/ first and it waits for an agent to merge them.
     fn check_updates(&mut self) -> Result<(), String> {
+        // Updates download Makepad sources; withdrawn agreements ask again.
+        if !self.consent("Update", "Updates download the newest sources of your apps.", "", &["makepad"], "check for updates")? {
+            view::set_view(self.main_view());
+            view::message(text("Nothing was downloaded.", DIM));
+            return Ok(());
+        }
         self.refresh_licenses()?;
         view::set_view(self.main_view());
         view::working("updates", "checking…");
@@ -1555,12 +1660,7 @@ impl Setup {
         if let Some(release) = self.release.as_ref().map(|r| r.id.clone()).and_then(|id| load_release(&available.join(format!("{id}.json")))) {
             self.release = Some(release);
         }
-        let (_, _, _, hour, minute) = local_time();
-        self.checked = Some(if updated.is_empty() {
-            format!("checked {hour:02}:{minute:02}")
-        } else {
-            format!("checked {hour:02}:{minute:02} · updated {}", updated.len())
-        });
+        self.checked = Some((!updated.is_empty(), clock()));
         self.measure_disk();
         view::message(if updated.is_empty() {
             done("Licenses checked; everything is up to date.")
@@ -1655,6 +1755,10 @@ fn agreements() -> Vec<(&'static str, &'static str, &'static str)> {
     list
 }
 
+/// The agreements installing the build tools needs on this platform.
+fn required_agreements() -> &'static [&'static str] {
+    if cfg!(windows) { &["makepad", "vs", "sdk", "rust"] } else { &["makepad", "rust"] }
+}
 /// Agreement rows: full name and host; Return opens the link.
 fn agreement_rows(ids: Option<&[&str]>) -> Vec<Row> {
     agreements()
@@ -1698,8 +1802,37 @@ fn is_public(app: &str) -> bool {
     catalog::apps().is_ok_and(|apps| apps.iter().any(|a| a.get("id").and_then(makepad_strict_json::Value::as_str) == Some(app)))
 }
 
+/// The first line of an error, short enough for a row.
+fn short_reason(error: &str) -> String {
+    let line = clean(error.lines().next().unwrap_or_default());
+    if line.chars().count() > 40 { line.chars().take(39).collect::<String>() + "…" } else { line }
+}
+
+thread_local! {
+    /// Said once after a launch: an older bundle named after the binary.
+    static OLDER_BUNDLE: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+/// Bundles are now named after the title ("Makepad Scope.app"). An older
+/// "Scope.app" is never deleted; it is mentioned once per folder.
+#[cfg(target_os = "macos")]
+fn note_older_bundle(root: &Path, release: &Release) {
+    let Some(old) = crate::desktop::older_bundle(root, release) else { return };
+    let noted = root.join("installed").join(format!("{}.older-bundle-noted", release.binary));
+    if noted.exists() {
+        return;
+    }
+    let _ = fs::write(&noted, "");
+    let name = old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    activity(&format!("{name} from an earlier build is left in place; the app is now {}.app.", crate::desktop::bundle_name(release)));
+    OLDER_BUNDLE.with(|n| n.set(Some(format!("The older {name} is still here; you can remove it."))));
+}
+
 /// The success line after launching an app.
 fn launched(title: &str) {
+    if let Some(note) = OLDER_BUNDLE.with(|n| n.take()) {
+        view::message(vec![view::Span("✓".into(), OK), view::Span(format!(" {title} is running. "), PLAIN), view::Span(note, WARN)]);
+        return;
+    }
     let hint = if cfg!(target_os = "macos") {
         "Right-click its Dock icon › Options › Keep in Dock."
     } else if cfg!(windows) {
@@ -1864,6 +1997,12 @@ fn on_path(name: &str) -> bool {
         vec![String::new()]
     };
     env::split_paths(&path).any(|directory| extensions.iter().any(|extension| directory.join(format!("{name}{extension}")).is_file()))
+}
+
+/// The local time as "HH:MM".
+fn clock() -> String {
+    let (_, _, _, hour, minute) = local_time();
+    format!("{hour:02}:{minute:02}")
 }
 
 /// Local (year, month, day, hour, minute).
