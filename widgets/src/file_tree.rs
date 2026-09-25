@@ -472,6 +472,10 @@ pub struct FileTree {
 
     #[live]
     node_height: f64,
+    /// The host lets rows be picked up and carried: the pointer over a
+    /// row is a hand, as it is over anything that can be dragged.
+    #[live]
+    pub drag_cursor: bool,
 
     #[live]
     draw_scroll_shadow: DrawScrollShadow,
@@ -1151,9 +1155,15 @@ impl Widget for FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasHovered => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Hand);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHovered(node_id));
                 }
                 FileTreeNodeAction::HoverEnded => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Default);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHoverEnded(node_id));
                 }
                 FileTreeNodeAction::WasClicked => {

@@ -5496,6 +5496,46 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     });
 }
 
+/// A panel tab up or down. Up wears the body's face with a hairline
+/// edge and bright ink; down is a bare word (transparent face and edge)
+/// in dimmer ink, lit a little under the pointer. Literals, for the same
+/// reason `set_button_fill` uses them.
+fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
+    let mut btn = btn;
+    let none: Vec4f = vec4(0.0, 0.0, 0.0, 0.0);
+    let (base, hover, down, border, ink): (Vec4f, Vec4f, Vec4f, Vec4f, Vec4f) = if selected {
+        (
+            vec4(0.20, 0.20, 0.21, 1.0),
+            vec4(0.22, 0.22, 0.23, 1.0),
+            vec4(0.18, 0.18, 0.19, 1.0),
+            vec4(0.36, 0.36, 0.38, 1.0),
+            vec4(0.93, 0.93, 0.93, 1.0),
+        )
+    } else {
+        (
+            none,
+            vec4(0.15, 0.15, 0.16, 1.0),
+            vec4(0.12, 0.12, 0.13, 1.0),
+            none,
+            vec4(0.64, 0.64, 0.66, 1.0),
+        )
+    };
+    script_apply_eval!(cx, btn, {
+        draw_bg +: {
+            color: #(base)
+            color_hover: #(hover)
+            color_down: #(down)
+            color_focus: #(base)
+            border_color: #(border)
+            border_color_hover: #(border)
+            border_color_down: #(border)
+            border_color_focus: #(border)
+        }
+        draw_text +: { color: #(ink) }
+        draw_icon +: { color: #(ink) }
+    });
+}
+
 /// A Button live or off, as one thing. Its `enabled` is what makes it
 /// inert and its disabled track is what makes it look so, and neither
 /// drives the other; this sets both. Guarded on the track, so a sidebar
@@ -9544,6 +9584,39 @@ impl Tweaker {
                         color_disabled: panel.text_muted
                     }
                 }
+                // A tab of the panel, in the dock's shape: a rounded top and
+                // an open bottom where it meets the body it stands for. An
+                // off tab is its bare word (its face and edge are set
+                // transparent); the tab that is up wears the body's face.
+                let PanelTabButton = PanelButton {
+                    width: Fit
+                    height: 20
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                    spacing: 0
+                    draw_text +: { text_style +: { font_size: 8.0 } }
+                    draw_bg +: {
+                        border_radius: 4.0
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box_y(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y + 6.0
+                                self.border_radius
+                                0.5
+                            )
+                            let fill = self.color
+                                .mix(self.color_hover, self.hover)
+                                .mix(self.color_down, self.down)
+                            let stroke = self.border_color.mix(self.border_color_hover, self.hover)
+                            sdf.fill_keep(fill)
+                            sdf.stroke(stroke, self.border_size)
+                            return sdf.result
+                        }
+                    }
+                }
                 // The panel's text field, hardened the same way and for the
                 // same reasons: `windows-2000` and `nextstep` replace
                 // `mod.widgets.TextInput.draw_bg.pixel` with a sunken white
@@ -10640,18 +10713,28 @@ impl Tweaker {
                             }
                         }
                     }
+                    // Words while they fit the band, icons when they do
+                    // not: each tab is one of two buttons, and the draw
+                    // shows the pair's word or its icon.
                     tab_row := View {
                         width: Fill
                         height: 22
                         flow: Right
-                        spacing: 2
+                        spacing: 1
+                        align: Align{x: 0.0 y: 1.0}
                         padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
-                        tab_props := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_shader := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_build := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Build" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_props := PanelTabButton { text: "Props" }
+                        tab_props_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_list.svg") } }
+                        tab_shader := PanelTabButton { text: "Shader" }
+                        tab_shader_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_brush.svg") } }
+                        tab_tree := PanelTabButton { text: "Tree" }
+                        tab_tree_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_tree.svg") } }
+                        tab_theme := PanelTabButton { text: "Theme" }
+                        tab_theme_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_palette.svg") } }
+                        tab_spec := PanelTabButton { text: "Spec" }
+                        tab_spec_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_braces.svg") } }
+                        tab_build := PanelTabButton { text: "Build" }
+                        tab_build_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_hammer.svg") } }
                     }
                     // The Theme tab's head: which theme the whole library
                     // is running under, and what may be done with it. It
@@ -12243,7 +12326,7 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 32] = [
+        let chrome: [(&[LiveId], &str); 38] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12261,6 +12344,12 @@ impl Tweaker {
             (&[live_id!(tab_row), live_id!(tab_tree)], "the widget tree: isolate a branch, centre, zoom"),
             (&[live_id!(tab_row), live_id!(tab_theme)], "the theme's colours and values, edited live everywhere"),
             (&[live_id!(tab_row), live_id!(tab_spec)], "notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tab_row), live_id!(tab_props_i)], "Props: the selection's properties, edited live"),
+            (&[live_id!(tab_row), live_id!(tab_shader_i)], "Shader: the selection's draw layers: preview, source, states"),
+            (&[live_id!(tab_row), live_id!(tab_tree_i)], "Tree: the widget tree: isolate a branch, centre, zoom"),
+            (&[live_id!(tab_row), live_id!(tab_theme_i)], "Theme: the theme's colours and values, edited live everywhere"),
+            (&[live_id!(tab_row), live_id!(tab_spec_i)], "Spec: notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tab_row), live_id!(tab_build_i)], "Build: the designer: palette, structure, patch"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(isolate)], "show only the selection and what is inside it"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(center)], "keep the view centred on the selection"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(zoom)], "magnify the app view \u{00b7} 1 is life size"),
@@ -13814,17 +13903,32 @@ impl Tweaker {
             }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
-                (live_id!(tab_props), PanelTab::Props, "Props"),
-                (live_id!(tab_shader), PanelTab::Shader, "Shader"),
-                (live_id!(tab_tree), PanelTab::Tree, "Tree"),
-                (live_id!(tab_theme), PanelTab::Theme, "Theme"),
-                (live_id!(tab_spec), PanelTab::Spec, "Spec"),
-                (live_id!(tab_build), PanelTab::Build, "Build"),
+                (live_id!(tab_props), live_id!(tab_props_i), PanelTab::Props, "Props"),
+                (live_id!(tab_shader), live_id!(tab_shader_i), PanelTab::Shader, "Shader"),
+                (live_id!(tab_tree), live_id!(tab_tree_i), PanelTab::Tree, "Tree"),
+                (live_id!(tab_theme), live_id!(tab_theme_i), PanelTab::Theme, "Theme"),
+                (live_id!(tab_spec), live_id!(tab_spec_i), PanelTab::Spec, "Spec"),
+                (live_id!(tab_build), live_id!(tab_build_i), PanelTab::Build, "Build"),
             ];
-            for (i, (id, t, label)) in tabs.into_iter().enumerate() {
-                let btn = tab_row.child(id);
-                btn.set_text(cx, label);
-                set_button_fill(cx, btn.clone(), t == tab);
+            // The words while the row can hold every one of them, the
+            // icons when the band is too narrow: measured, not guessed.
+            let mut need = 8.0 + 5.0;
+            for (_, _, _, label) in &tabs {
+                let word = self
+                    .draw_label
+                    .prepare_single_line_run(cx, label)
+                    .map(|run| run.width_in_lpxs as f64)
+                    .unwrap_or_else(|| label.chars().count() as f64 * 5.4);
+                need += word * 1.1 + 16.0;
+            }
+            let narrow = need > self.band.size.x - SPLITTER_WIDTH;
+            for (i, (id, icon_id, t, _)) in tabs.into_iter().enumerate() {
+                let word = tab_row.child(id);
+                let icon = tab_row.child(icon_id);
+                word.set_visible(cx, !narrow);
+                icon.set_visible(cx, narrow);
+                let btn = if narrow { icon } else { word };
+                set_tab_fill(cx, btn.clone(), t == tab);
                 self.tab_uids[i] = btn.widget_uid().0;
             }
             if tab == PanelTab::Spec {
@@ -14124,6 +14228,9 @@ impl Tweaker {
                 let Some(mut tree) = step_widget.borrow_mut::<FileTree>() else {
                     continue;
                 };
+                // With a session open the rows can be carried to another
+                // place in the tree, and the pointer over them says so.
+                tree.drag_cursor = self.design.is_some();
                 // First fill (or selection change): open the levels that
                 // make the tree readable / reveal the selection.
                 if self.tree_open_defaults_pending {
