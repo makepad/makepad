@@ -9971,7 +9971,7 @@ impl Tweaker {
                     head := View {
                         width: Fill
                         height: Fit
-                        flow: Right
+                        flow: Right{wrap: true}
                         spacing: 6
                         align: Align{x: 0.0 y: 0.5}
                         ic_app := View { width: Fit height: Fit visible: false
@@ -10138,7 +10138,7 @@ impl Tweaker {
                         w_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_axis := PanelLabelSmall { width: 12 text: "W" }
@@ -10153,7 +10153,7 @@ impl Tweaker {
                         w_clamp := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_min_label := PanelLabelSmall { width: Fit text: "min" }
@@ -10165,7 +10165,7 @@ impl Tweaker {
                         w_grow := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_grow_label := PanelLabelSmall { width: Fit text: "grow" }
@@ -10176,7 +10176,7 @@ impl Tweaker {
                         w_basis := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_basis_label := PanelLabelSmall { width: Fit text: "basis" }
@@ -10185,7 +10185,7 @@ impl Tweaker {
                         h_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_axis := PanelLabelSmall { width: 12 text: "H" }
@@ -10200,7 +10200,7 @@ impl Tweaker {
                         h_clamp := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_min_label := PanelLabelSmall { width: Fit text: "min" }
@@ -10212,7 +10212,7 @@ impl Tweaker {
                         h_grow := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_grow_label := PanelLabelSmall { width: Fit text: "grow" }
@@ -10223,7 +10223,7 @@ impl Tweaker {
                         h_basis := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_basis_label := PanelLabelSmall { width: Fit text: "basis" }
@@ -10232,7 +10232,7 @@ impl Tweaker {
                         aspect_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             aspect_label := PanelLabelSmall { width: Fit text: "aspect" }
@@ -10252,7 +10252,7 @@ impl Tweaker {
                 let IdentityRowT = View {
                     width: Fill
                     height: Fit
-                    flow: Right
+                    flow: Right{wrap: true}
                     spacing: 6
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 8 top: 3 bottom: 5}
@@ -10280,7 +10280,7 @@ impl Tweaker {
                 let MeasuredRowT = View {
                     width: Fill
                     height: Fit
-                    flow: Right
+                    flow: Right{wrap: true}
                     padding: Inset{left: 8 right: 8 top: 1 bottom: 3}
                     measured := PanelLabelSmall {
                         width: Fill
@@ -10306,7 +10306,7 @@ impl Tweaker {
                         mid_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.5 y: 0.5}
                             leg_left := FabValueInput { width: 64 height: 16 }
@@ -10351,7 +10351,7 @@ impl Tweaker {
                         dir_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             flow_seg := View { width: Fit height: Fit flow: Right spacing: 1
@@ -10369,7 +10369,7 @@ impl Tweaker {
                         gap_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             gap_label := PanelLabelSmall { width: Fit text: "gap" }
@@ -10390,7 +10390,7 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        just_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        just_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             just_label := PanelLabelSmall { width: 34 text: "justify" }
                             just_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 j_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10400,7 +10400,7 @@ impl Tweaker {
                             }
                             just_axis := PanelLabelSmall { width: Fit text: "" }
                         }
-                        space_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        space_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             space_label := PanelLabelSmall { width: 34 text: "space" }
                             space_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 s_between := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10408,7 +10408,7 @@ impl Tweaker {
                                 s_evenly := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
-                        cross_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        cross_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             cross_label := PanelLabelSmall { width: 34 text: "align" }
                             cross_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 c_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10439,7 +10439,7 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        mode_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                        mode_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 6 align: Align{x: 0.0 y: 0.5}
                             mode_label := PanelLabelSmall { width: Fit text: "" }
                             convert := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                         }
@@ -10447,7 +10447,7 @@ impl Tweaker {
                         // the grid/flex ask, not instead of it: that one
                         // changes the container's type, this one wraps it in
                         // its parent, and both can stand.
-                        dock_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                        dock_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 6 align: Align{x: 0.0 y: 0.5}
                             dock_check := PanelCheckBox { width: Fit height: Fit text: "" }
                             dock_label := PanelLabelSmall { width: Fit text: "dockable" }
                         }
@@ -10455,7 +10455,7 @@ impl Tweaker {
                         // column is too narrow for it beside the box, and a
                         // Fill label wraps where a Fit one runs off the panel.
                         dock_hint := PanelLabelSmall { width: Fill text: "" }
-                        name_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        name_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             ctr_label := PanelLabelSmall { width: Fit text: "named" }
                             ctr_name := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10468,7 +10468,7 @@ impl Tweaker {
                     abs_col := View {
                         width: Fill
                         height: Fit
-                        flow: Right
+                        flow: Right{wrap: true}
                         spacing: 6
                         align: Align{x: 0.0 y: 0.5}
                         abs_check := PanelCheckBox { width: Fit height: Fit text: "" }
@@ -10490,29 +10490,29 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        cols_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        cols_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             cols_label := PanelLabelSmall { width: 40 text: "columns" }
                             cols_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
-                        rows_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        rows_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             rows_label := PanelLabelSmall { width: 40 text: "rows" }
                             rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
-                        gaps_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        gaps_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             gap_label := PanelLabelSmall { width: 34 text: "gap" }
                             gap_x := PanelLabelSmall { width: Fit text: "\u{2194}" }
                             gap_col := FabValueInput { width: 40 height: 18 }
                             gap_y := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
                             gap_row_in := FabValueInput { width: 40 height: 18 }
                         }
-                        fill_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        fill_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             fill_label := PanelLabelSmall { width: 40 text: "fill" }
                             fill_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 f_rows := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                                 f_cols := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
-                        areas_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        areas_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             areas_label := PanelLabelSmall { width: 40 text: "areas" }
                             areas_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10528,19 +10528,19 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        place_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        place_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             col_label := PanelLabelSmall { width: Fit text: "col" }
                             cell_c := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                             row_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
                             cell_r := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
-                        span_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        span_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             span_label := PanelLabelSmall { width: Fit text: "span" }
                             cell_cs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                             by_label := PanelLabelSmall { width: Fit text: "\u{00d7}" }
                             cell_rs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
-                        area_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        area_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             area_label := PanelLabelSmall { width: Fit text: "area" }
                             cell_area := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10659,7 +10659,7 @@ impl Tweaker {
                     filter_row := View {
                         width: Fill
                         height: Fit
-                        flow: Right
+                        flow: Right{wrap: true}
                         spacing: 4
                         align: Align{x: 0.0 y: 0.5}
                         search := FabSearch {}
@@ -10766,7 +10766,7 @@ impl Tweaker {
                         theme_pick_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 3
                             align: Align{x: 0.0 y: 0.5}
                             theme_pick := PanelDropDown {
@@ -10821,7 +10821,7 @@ impl Tweaker {
                             eq_appearance_row := View {
                                 width: Fill
                                 height: Fit
-                                flow: Right
+                                flow: Right{wrap: true}
                                 spacing: 3
                                 align: Align{x: 0.0 y: 0.5}
                                 eq_dark := PanelButton {
@@ -10894,7 +10894,7 @@ impl Tweaker {
                         theme_save_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 3
                             align: Align{x: 0.0 y: 0.5}
                             theme_name := PanelInput {
@@ -11082,7 +11082,7 @@ impl Tweaker {
                         notes_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             align: Align{x: 0.0 y: 0.5}
                             notes_label := FabHeaderLabel {
                                 width: Fill
@@ -11122,7 +11122,7 @@ impl Tweaker {
                         rules_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             align: Align{x: 0.0 y: 0.5}
                             rules_label := FabHeaderLabel {
                                 width: Fill
@@ -11155,7 +11155,7 @@ impl Tweaker {
                         app_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             align: Align{x: 0.0 y: 0.5}
                             app_label := FabHeaderLabel {
                                 width: Fill
@@ -11193,7 +11193,7 @@ impl Tweaker {
                         tree_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
@@ -11262,7 +11262,7 @@ impl Tweaker {
                         build_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
@@ -11281,7 +11281,7 @@ impl Tweaker {
                         place_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
@@ -11293,7 +11293,7 @@ impl Tweaker {
                         ops_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
@@ -11406,7 +11406,7 @@ impl Tweaker {
                         prompt_bar := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             align: Align{x: 0.0 y: 0.5}
                             target_wrap := View {
                                 width: Fill
@@ -11483,7 +11483,7 @@ impl Tweaker {
                             scope_line := View {
                                 width: Fill
                                 height: Fit
-                                flow: Right
+                                flow: Right{wrap: true}
                                 spacing: 4
                                 align: Align{x: 0.0 y: 0.5}
                                 scope_label := PanelLabelSmall { width: Fit text: "scope" }
