@@ -9,7 +9,8 @@
 use crate::easing::{Easing, YoyoEase};
 use crate::engine::*;
 use crate::event::EventKind;
-use crate::spec::EventMask;
+use crate::path::PathPoint;
+use crate::spec::{EventMask, PathAlign};
 use crate::value::{decode, encode_pair, lerp_lanes, ColorSpace, Rgba, TweenValue, ValueKind};
 use crate::{animation_cycle, round7, TINY};
 
@@ -818,6 +819,10 @@ impl TweenEngine {
         let ki = k as usize;
         let spec = self.tr_spec[ki];
         let m = self.tr_meta[ki];
+        if m.flags & T_PATH != 0 {
+            self.resolve_path_track(ki);
+            return;
+        }
         let s = self.tr_slot[ki] as usize;
         let cur = if self.sl_seeded[s] && self.sl_kind[s] == m.kind {
             Some(self.sl_val[s])
@@ -864,10 +869,72 @@ impl TweenEngine {
         self.tr_meta[ki].flags |= T_RESOLVED;
     }
 
+    /// Captures a path track: its ends are the path's points at the bind's
+    /// `start` and `end` plus the lane's offset. With `PathAlign::Start` an
+    /// x / y / z lane moves the path so its start sits on the slot's
+    /// current value (an unseeded slot counts in `unseeded_starts` and does
+    /// not align).
+    fn resolve_path_track(&mut self, k: usize) {
+        let spec = self.tr_spec[k];
+        let b = spec.bind as usize;
+        let pb = self.pbinds[b];
+        let g = &self.paths[pb.path as usize].geom;
+        let a = g.sample_span(pb.span[0], pb.span[1], 0.0);
+        let z = g.sample_span(pb.span[0], pb.span[1], 1.0);
+        let (from, to, off) = if spec.lane == LANE_ROT {
+            let off = pb.rot;
+            (
+                a.angle_deg * pb.rot_scale + off,
+                z.angle_deg * pb.rot_scale + off,
+                off,
+            )
+        } else {
+            let i = spec.lane as usize;
+            let (base0, base1) = (a.pos[i], z.pos[i]);
+            let (off, from) = if pb.align == PathAlign::Start {
+                let s = self.tr_slot[k] as usize;
+                if self.sl_seeded[s] && self.sl_kind[s] == ValueKind::F64 {
+                    let c = self.sl_val[s][0];
+                    (c - base0 + pb.offset[i], c + pb.offset[i])
+                } else {
+                    self.stats.unseeded_starts += 1;
+                    (pb.offset[i], base0 + pb.offset[i])
+                }
+            } else {
+                (pb.offset[i], base0 + pb.offset[i])
+            };
+            (from, base1 + off, off)
+        };
+        self.pbinds[b].off[spec.lane as usize] = off;
+        self.tr_from[k] = [from, 0.0, 0.0, 0.0];
+        self.tr_to[k] = [to, 0.0, 0.0, 0.0];
+        self.tr_meta[k].flags |= T_RESOLVED;
+    }
+
+    /// The value of path track `k` at eased ratio `e` (clamped to 0..=1 on
+    /// the path), sampling through `memo` when it holds the track's bind.
+    #[inline]
+    fn path_value(&self, k: usize, e: f64, memo: &mut (u32, PathPoint)) -> f64 {
+        let spec = &self.tr_spec[k];
+        let pb = &self.pbinds[spec.bind as usize];
+        if memo.0 != spec.bind {
+            let g = &self.paths[pb.path as usize].geom;
+            *memo = (spec.bind, g.sample_span(pb.span[0], pb.span[1], e));
+        }
+        let v = if spec.lane == LANE_ROT {
+            memo.1.angle_deg * pb.rot_scale
+        } else {
+            memo.1.pos[spec.lane as usize]
+        };
+        v + pb.off[spec.lane as usize]
+    }
+
     /// Writes node `n`'s tracks at progress `p` with eased ratio `e` (6.2):
-    /// `p >= 1` lands `to`, `p <= 0` lands `from`, exactly.
+    /// `p >= 1` lands `to`, `p <= 0` lands `from`, exactly. A path samples
+    /// once per bind, whatever the number of lanes it writes.
     pub(crate) fn write_tracks(&mut self, n: u32, p: f64, e: f64) {
         let (s, end) = self.track_range(n);
+        let mut memo = (NIL, PathPoint::default());
         for k in s as usize..end as usize {
             let m = self.tr_meta[k];
             if m.flags & (T_ALIVE | T_RESOLVED) != (T_ALIVE | T_RESOLVED) {
@@ -877,6 +944,8 @@ impl TweenEngine {
                 self.tr_to[k]
             } else if p <= 0.0 {
                 self.tr_from[k]
+            } else if m.flags & T_PATH != 0 {
+                [self.path_value(k, e, &mut memo), 0.0, 0.0, 0.0]
             } else {
                 lerp_lanes(self.tr_from[k], self.tr_to[k], e)
             };
@@ -984,6 +1053,9 @@ impl TweenEngine {
             self.tr_to[k]
         } else if p <= 0.0 {
             self.tr_from[k]
+        } else if m.flags & T_PATH != 0 {
+            let mut memo = (NIL, PathPoint::default());
+            [self.path_value(k, e, &mut memo), 0.0, 0.0, 0.0]
         } else {
             lerp_lanes(self.tr_from[k], self.tr_to[k], e)
         };

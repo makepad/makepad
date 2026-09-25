@@ -65,4 +65,10 @@ pub struct Stats {
     pub event_overflows: u64,
     /// Track compactions run.
     pub compactions: u64,
+    /// Live motion paths ([`crate::TweenEngine::add_path`]).
+    pub paths: u32,
+    /// Live path binds: one per (tween, target) that follows a path.
+    pub path_binds: u32,
+    /// `PropTo::path` props skipped because their path handle was stale.
+    pub bad_paths: u64,
 }

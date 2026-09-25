@@ -20,6 +20,9 @@
 //! - [`event`]: callback events (GSAP onStart, onComplete, ...).
 //! - [`quick`]: `QuickTo`, the engine-free retargetable tween (GSAP `quickTo`).
 //! - [`ticker`]: the app-wide clock policy (GSAP `ticker`, lag smoothing).
+//! - [`path`]: motion paths (GSAP `MotionPathPlugin`): SVG path data, curves
+//!   through points, an arc-length table, allocation-free sampling. A tween
+//!   follows one with [`PropTo::path`] after [`TweenEngine::add_path`].
 //!
 //! The engine, [`TweenEngine`], is GSAP's global timeline: build tweens and
 //! timelines on it, control them through [`AnimMut`] / [`TimelineMut`],
@@ -103,7 +106,10 @@
 //! `add_label`, ...). `advance`, every control, every getter, kills,
 //! overwrites, reclamation and track compaction are allocation-free, provided
 //! the event queue is drained with [`TweenEngine::swap_events`] (or
-//! [`TweenEngine::clear_events`]) between frames.
+//! [`TweenEngine::clear_events`]) between frames. Motion paths follow the
+//! same rule: [`TweenEngine::add_path`] and [`TweenEngine::release_path`]
+//! are building calls, and a path freed inside a frame keeps its geometry
+//! until the next building call drops it (no deallocation per frame either).
 //!
 //! # Deviations from GSAP 3.15
 //!
@@ -124,6 +130,7 @@ mod engine;
 pub mod event;
 pub mod ids;
 mod overwrite;
+pub mod path;
 pub mod quick;
 mod render;
 pub mod spec;
@@ -136,6 +143,7 @@ pub use easing::*;
 pub use engine::TweenEngine;
 pub use event::*;
 pub use ids::*;
+pub use path::*;
 pub use quick::*;
 pub use spec::*;
 pub use stagger::*;

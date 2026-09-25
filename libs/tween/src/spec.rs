@@ -5,7 +5,7 @@
 //! `const` item and a later script layer only has to fill these structs.
 
 use crate::easing::{Easing, YoyoEase};
-use crate::ids::{PropKey, Tag, TargetId};
+use crate::ids::{PathId, PropKey, Tag, TargetId};
 use crate::stagger::Stagger;
 use crate::value::{ColorSpace, TweenValue};
 
@@ -79,6 +79,143 @@ pub enum End<'a> {
     Keys(&'a [Key]),
     /// Value keyframes (`x: [0, 100, 50]`), evenly spaced.
     Values(&'a [TweenValue]),
+    /// A motion path (GSAP `motionPath`): the prop's key is x, the path
+    /// drives y (and z, and a rotation) as well. See [`PropTo::path`].
+    Path(PathTo),
+}
+
+/// Where a motion path sits relative to its target (GSAP `align`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PathAlign {
+    /// The path's own coordinates (GSAP's default: no `align`).
+    #[default]
+    None,
+    /// The path is moved so its point at `start` sits on the target's
+    /// current x / y (/ z), captured when the tween starts (GSAP
+    /// `align: self`); each key aligns on its own slot.
+    Start,
+}
+
+/// GSAP `autoRotate`: a property that follows the path's xy heading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoRotate {
+    /// The property written (a rotation).
+    pub key: PropKey,
+    /// Added to the heading, in degrees (GSAP `autoRotate: 90`).
+    pub offset_deg: f64,
+    /// Write radians instead of degrees.
+    pub radians: bool,
+}
+
+/// How a tween follows a motion path: GSAP's `motionPath` options.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathOpts {
+    /// GSAP `start`: the fraction of the path's arc length where the tween
+    /// starts (may leave 0..1 on a closed path, which wraps).
+    pub start: f64,
+    /// GSAP `end`: where it ends (may be below `start`: the path is
+    /// travelled backwards).
+    pub end: f64,
+    /// GSAP `offsetX` / `offsetY` (and z): added to every written position.
+    pub offset: [f64; 3],
+    /// GSAP `align`.
+    pub align: PathAlign,
+    /// GSAP `autoRotate`.
+    pub auto_rotate: Option<AutoRotate>,
+    /// A z property, written from the path's third coordinate (3D paths);
+    /// `None` for 2D use.
+    pub z: Option<PropKey>,
+}
+
+impl Default for PathOpts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PathOpts {
+    /// The whole path (`start` 0, `end` 1), no offset, no align, no
+    /// rotation, no z.
+    pub const fn new() -> Self {
+        Self {
+            start: 0.0,
+            end: 1.0,
+            offset: [0.0; 3],
+            align: PathAlign::None,
+            auto_rotate: None,
+            z: None,
+        }
+    }
+
+    /// GSAP `start` / `end`.
+    pub const fn span(self, start: f64, end: f64) -> Self {
+        Self { start, end, ..self }
+    }
+
+    /// GSAP `offsetX` / `offsetY` (the z offset is kept).
+    pub const fn offset(self, dx: f64, dy: f64) -> Self {
+        Self {
+            offset: [dx, dy, self.offset[2]],
+            ..self
+        }
+    }
+
+    /// An x / y / z offset.
+    pub const fn offset3(self, dx: f64, dy: f64, dz: f64) -> Self {
+        Self {
+            offset: [dx, dy, dz],
+            ..self
+        }
+    }
+
+    /// GSAP `align`.
+    pub const fn align(self, a: PathAlign) -> Self {
+        Self { align: a, ..self }
+    }
+
+    /// GSAP `autoRotate: offset_deg`: `key` gets the heading plus
+    /// `offset_deg`, in degrees.
+    pub const fn auto_rotate(self, key: PropKey, offset_deg: f64) -> Self {
+        Self {
+            auto_rotate: Some(AutoRotate {
+                key,
+                offset_deg,
+                radians: false,
+            }),
+            ..self
+        }
+    }
+
+    /// [`PathOpts::auto_rotate`], written in radians (GSAP `useRadians`).
+    pub const fn auto_rotate_radians(self, key: PropKey, offset_deg: f64) -> Self {
+        Self {
+            auto_rotate: Some(AutoRotate {
+                key,
+                offset_deg,
+                radians: true,
+            }),
+            ..self
+        }
+    }
+
+    /// Writes the path's z coordinate to `key` (a 3D path).
+    pub const fn z(self, key: PropKey) -> Self {
+        Self {
+            z: Some(key),
+            ..self
+        }
+    }
+}
+
+/// The motion path of an [`End::Path`] prop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathTo {
+    /// The y property (the prop's own key is x).
+    pub y: PropKey,
+    /// The path, from [`crate::TweenEngine::add_path`].
+    pub path: PathId,
+    /// Span, offset, align, rotation and z.
+    pub opts: PathOpts,
 }
 
 /// One animated property of a tween: key, optional explicit start, end, and
@@ -168,6 +305,21 @@ impl<'a> PropTo<'a> {
             key,
             from: None,
             to: End::Values(vs),
+            snap: 0.0,
+        }
+    }
+
+    /// GSAP `motionPath`: `x` and `y` (and `opts.z`, and the auto-rotate
+    /// key) follow path `path` from its point at `opts.start` to its point
+    /// at `opts.end`; the tween's eased ratio is clamped to 0..1 on the path
+    /// (an overshooting ease rests at the ends). The start is the path's,
+    /// not the target's current value (unless `opts.align` is
+    /// [`PathAlign::Start`]). `snap` rounds every lane the path writes.
+    pub const fn path(x: PropKey, y: PropKey, path: PathId, opts: PathOpts) -> Self {
+        Self {
+            key: x,
+            from: None,
+            to: End::Path(PathTo { y, path, opts }),
             snap: 0.0,
         }
     }

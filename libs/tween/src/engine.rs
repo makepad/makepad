@@ -10,10 +10,11 @@
 
 use crate::easing::{Easing, YoyoEase};
 use crate::event::{EventKind, Stats, TweenEvent};
-use crate::ids::{PropKey, SlotId, Tag, TargetId, TweenId};
+use crate::ids::{PathId, PropKey, SlotId, Tag, TargetId, TweenId};
+use crate::path::MotionPath;
 use crate::spec::{
-    Anchor, End, EventMask, KeyStep, Offset, Overwrite, Position, PropTo, Reduce, Targets,
-    TimelineOpts, TweenOpts,
+    Anchor, End, EventMask, KeyStep, Offset, Overwrite, PathAlign, Position, PropTo, Reduce,
+    Targets, TimelineOpts, TweenOpts,
 };
 use crate::value::{ColorSpace, TweenValue, ValueKind};
 use crate::{finite_or, round7, splitmix64, BIG, INFINITE, TINY};
@@ -65,11 +66,23 @@ pub(crate) const F_IN_REAP: u32 = 1 << 25;
 /// A keyframes group: its first init renders the inner timeline to the end
 /// (GSAP `_initTween`), so every step captures from the previous step's end.
 pub(crate) const F_KEYFRAMES: u32 = 1 << 26;
+/// The node owns path binds (`PropTo::path` tracks): freeing it releases
+/// them. Bits 28..31 are free.
+pub(crate) const F_PATH: u32 = 1 << 27;
 
 // ---- track flags (TrackMeta::flags) ----
 pub(crate) const T_ALIVE: u8 = 1;
 pub(crate) const T_RESOLVED: u8 = 2;
 pub(crate) const T_SNAP: u8 = 4;
+/// A motion path lane: the value between the ends is sampled from the
+/// path of `TrackSpec::bind`, lane `TrackSpec::lane`.
+pub(crate) const T_PATH: u8 = 8;
+
+// ---- path lanes (TrackSpec::lane) ----
+pub(crate) const LANE_X: u8 = 0;
+pub(crate) const LANE_Y: u8 = 1;
+pub(crate) const LANE_Z: u8 = 2;
+pub(crate) const LANE_ROT: u8 = 3;
 
 /// The record the child walk reads for every visited child: exactly one
 /// 64-byte cache line (aligned to one).
@@ -212,6 +225,42 @@ pub(crate) struct TrackSpec {
     /// A colour track's captured ends in sRGB, so both ends land exactly
     /// (the interpolation-space round trip is not bit-exact).
     pub land: [[f64; 4]; 2],
+    /// A path track's bind (index into `pbinds`); NIL for ordinary tracks.
+    pub bind: u32,
+    /// A path track's lane (`LANE_X` .. `LANE_ROT`).
+    pub lane: u8,
+}
+
+/// One motion path stored in the engine (`add_path`).
+#[derive(Clone, Debug)]
+pub(crate) struct PathEntry {
+    pub geom: MotionPath,
+    /// Live binds that sample it.
+    pub users: u32,
+    /// The caller still holds it (`release_path` not called yet).
+    pub held: bool,
+    pub gen: u32,
+    pub live: bool,
+}
+
+/// What one (tween, target) needs to sample its path: the span, the
+/// offsets and the per-lane offset resolved at capture time.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PathBind {
+    pub path: u32,
+    pub node: u32,
+    /// GSAP `start` / `end`.
+    pub span: [f64; 2],
+    pub offset: [f64; 3],
+    pub align: PathAlign,
+    /// The rotation offset in lane units.
+    pub rot: f64,
+    /// 1 (degrees) or PI / 180 (radians).
+    pub rot_scale: f64,
+    /// Per lane (x, y, z, rotation): what is added to the sampled value,
+    /// resolved when the tracks capture.
+    pub off: [f64; 4],
+    pub live: bool,
 }
 
 /// A timeline label. The engine keeps every label in one Vec sorted by
@@ -342,6 +391,15 @@ pub struct TweenEngine {
     pub(crate) root_clock: f64,
     pub(crate) defaults: TweenOpts,
     pub(crate) stats: Stats,
+    /// Motion paths (`add_path`), their free slots and the entries that
+    /// died inside a frame (their geometry is dropped by the next building
+    /// call, never inside `advance`).
+    pub(crate) paths: Vec<PathEntry>,
+    pub(crate) path_free: Vec<u32>,
+    pub(crate) path_dead: Vec<u32>,
+    /// Path binds, one per (tween, target) with a path, and their free slots.
+    pub(crate) pbinds: Vec<PathBind>,
+    pub(crate) pb_free: Vec<u32>,
 }
 
 impl Default for TweenEngine {
@@ -407,6 +465,11 @@ impl TweenEngine {
             root_clock: 0.0,
             defaults: TweenOpts::new(),
             stats: Stats::default(),
+            paths: Vec::new(),
+            path_free: Vec::new(),
+            path_dead: Vec::new(),
+            pbinds: Vec::new(),
+            pb_free: Vec::new(),
         }
     }
 
@@ -664,9 +727,11 @@ impl TweenEngine {
     }
 
     /// Housekeeping after every building call: reclaim what an immediate
-    /// render completed, then top up the event reserve.
+    /// render completed, drop the geometry of paths that died, then top up
+    /// the event reserve.
     pub(crate) fn finish_build(&mut self) {
         self.flush_reap();
+        self.drain_dead_paths();
         self.reserve_events();
     }
 
@@ -938,6 +1003,10 @@ impl TweenEngine {
         for j in 0..t.len() {
             let target = t.get(j);
             for p in props {
+                if let End::Path(pt) = p.to {
+                    count += self.push_path_tracks(n, target, p, pt, space);
+                    continue;
+                }
                 let (end, val) = match p.to {
                     End::To(v) => (EndKind::To, v),
                     End::By(v) => (EndKind::By, v),
@@ -949,7 +1018,7 @@ impl TweenEngine {
                         let i = ((index_base + j) as usize).min(vs.len() - 1);
                         (EndKind::To, vs[i])
                     }
-                    End::Keys(_) | End::Values(_) => continue,
+                    End::Keys(_) | End::Values(_) | End::Path(_) => continue,
                 };
                 let kind = val.kind();
                 let slot = self.slot_for(target, p.key, kind);
@@ -979,6 +1048,8 @@ impl TweenEngine {
                     val: val.to_lanes(),
                     snap: p.snap,
                     land: [[0.0; 4]; 2],
+                    bind: NIL,
+                    lane: 0,
                 });
                 self.tr_node.push(n);
                 self.tr_next_in_slot
@@ -991,6 +1062,107 @@ impl TweenEngine {
         c.tracks = first;
         c.n_tracks = count;
         c.live_tracks = count;
+    }
+
+    /// The tracks of one `PropTo::path` prop on one target: a bind, then one
+    /// F64 track per written lane (x, y, then z and the rotation when set).
+    /// A stale path handle counts in `stats.bad_paths` and adds nothing.
+    /// Returns how many tracks were pushed.
+    fn push_path_tracks(
+        &mut self,
+        n: u32,
+        target: TargetId,
+        p: &PropTo,
+        pt: crate::spec::PathTo,
+        space: ColorSpace,
+    ) -> u32 {
+        let Some(pix) = self.live_path(pt.path) else {
+            self.stats.bad_paths += 1;
+            return 0;
+        };
+        let o = pt.opts;
+        let (rot, rot_scale) = match o.auto_rotate {
+            Some(a) => {
+                let scale = if a.radians {
+                    std::f64::consts::PI / 180.0
+                } else {
+                    1.0
+                };
+                (finite_or(a.offset_deg, 0.0) * scale, scale)
+            }
+            None => (0.0, 1.0),
+        };
+        let bind = PathBind {
+            path: pix,
+            node: n,
+            span: [finite_or(o.start, 0.0), finite_or(o.end, 1.0)],
+            offset: o.offset.map(|v| finite_or(v, 0.0)),
+            align: o.align,
+            rot,
+            rot_scale,
+            off: [0.0; 4],
+            live: true,
+        };
+        let b = match self.pb_free.pop() {
+            Some(b) => {
+                self.pbinds[b as usize] = bind;
+                b
+            }
+            None => {
+                self.pbinds.push(bind);
+                // Releasing inside a frame pushes here: keep room for all.
+                let cap = self.pbinds.len();
+                if self.pb_free.capacity() < cap {
+                    self.pb_free.reserve(cap - self.pb_free.len());
+                }
+                (self.pbinds.len() - 1) as u32
+            }
+        };
+        self.paths[pix as usize].users += 1;
+        self.stats.path_binds += 1;
+        self.hot[n as usize].flags |= F_PATH;
+        let lanes = [
+            (LANE_X, Some(p.key)),
+            (LANE_Y, Some(pt.y)),
+            (LANE_Z, o.z),
+            (LANE_ROT, o.auto_rotate.map(|a| a.key)),
+        ];
+        let mut flags = T_ALIVE | T_PATH;
+        if p.snap > 0.0 {
+            flags |= T_SNAP;
+        }
+        let mut count = 0;
+        for (lane, key) in lanes {
+            let Some(key) = key else {
+                continue;
+            };
+            let slot = self.slot_for(target, key, ValueKind::F64);
+            let k = self.tr_slot.len() as u32;
+            self.tr_from.push([0.0; 4]);
+            self.tr_to.push([0.0; 4]);
+            self.tr_slot.push(slot);
+            self.tr_meta.push(TrackMeta {
+                kind: ValueKind::F64,
+                flags,
+                space,
+                lanes: 1,
+            });
+            self.tr_spec.push(TrackSpec {
+                from: None,
+                end: EndKind::To,
+                val: [0.0; 4],
+                snap: p.snap,
+                land: [[0.0; 4]; 2],
+                bind: b,
+                lane,
+            });
+            self.tr_node.push(n);
+            self.tr_next_in_slot
+                .push(self.sl_first_track[slot as usize]);
+            self.sl_first_track[slot as usize] = k;
+            count += 1;
+        }
+        count
     }
 
     /// A staggered group (GSAP `stagger`): one child tween per target at its
@@ -1899,6 +2071,9 @@ impl TweenEngine {
             self.unlink_raw(n);
         }
         self.kill_tracks_of(n);
+        if self.has(n, F_PATH) {
+            self.release_binds_of(n);
+        }
         if self.kind(n) == K_TIMELINE {
             self.labels.retain(|l| l.tl != n);
             self.tl_defaults.retain(|d| d.0 != n);
@@ -1915,6 +2090,140 @@ impl TweenEngine {
         };
         self.free_nodes.push(n);
         self.stats.live_nodes = self.stats.live_nodes.saturating_sub(1);
+    }
+
+    /// Releases every path bind of node `n` (only path nodes pay this scan):
+    /// a path left with no bind and no caller hold dies (its geometry is
+    /// dropped by the next building call). Allocation-free.
+    fn release_binds_of(&mut self, n: u32) {
+        for b in 0..self.pbinds.len() {
+            let pb = &mut self.pbinds[b];
+            if !pb.live || pb.node != n {
+                continue;
+            }
+            pb.live = false;
+            let pix = pb.path;
+            self.pb_free.push(b as u32);
+            self.stats.path_binds = self.stats.path_binds.saturating_sub(1);
+            let e = &mut self.paths[pix as usize];
+            e.users = e.users.saturating_sub(1);
+            if e.users == 0 && !e.held {
+                self.kill_path(pix);
+                self.path_dead.push(pix);
+            }
+        }
+    }
+
+    /// Marks path entry `pix` dead: its handles go stale at once.
+    fn kill_path(&mut self, pix: u32) {
+        let e = &mut self.paths[pix as usize];
+        e.live = false;
+        e.gen = e.gen.wrapping_add(1).max(1);
+        self.stats.paths = self.stats.paths.saturating_sub(1);
+    }
+
+    /// Drops the geometry of the paths that died since the last building
+    /// call and makes their slots reusable.
+    pub(crate) fn drain_dead_paths(&mut self) {
+        while let Some(pix) = self.path_dead.pop() {
+            self.paths[pix as usize].geom = MotionPath::default();
+            self.path_free.push(pix);
+        }
+    }
+
+    /// The entry of a live path handle.
+    #[inline]
+    pub(crate) fn live_path(&self, id: PathId) -> Option<u32> {
+        let e = self.paths.get(id.ix as usize)?;
+        (e.live && e.gen == id.gen).then_some(id.ix)
+    }
+
+    /// Stores a motion path for `PropTo::path` and returns its handle. The
+    /// caller holds it until [`TweenEngine::release_path`]; every tween
+    /// target that follows it holds it too, and the path is freed when the
+    /// last of them lets go. The usual pattern hands it to the tweens at
+    /// once:
+    ///
+    /// ```
+    /// use makepad_tween::*;
+    /// const X: PropKey = PropKey(1);
+    /// const Y: PropKey = PropKey(2);
+    /// let mut e = TweenEngine::new();
+    /// let path = MotionPath::from_svg("M0,0 C50,-80 150,80 200,0").unwrap();
+    /// let p = e.add_path(path);
+    /// e.to(TargetId(0).into(), &[PropTo::path(X, Y, p, PathOpts::new())], TweenOpts::new().duration(1.0));
+    /// e.release_path(p); // the geometry now lives exactly as long as the tween
+    /// e.advance(2.0);
+    /// assert_eq!(e.get_f64(TargetId(0), X), Some(200.0));
+    /// assert!(e.path(p).is_none());
+    /// ```
+    ///
+    /// A building call (it allocates).
+    pub fn add_path(&mut self, p: MotionPath) -> PathId {
+        self.drain_dead_paths();
+        let ix = match self.path_free.pop() {
+            Some(ix) => {
+                let e = &mut self.paths[ix as usize];
+                e.geom = p;
+                e.users = 0;
+                e.held = true;
+                e.live = true;
+                ix
+            }
+            None => {
+                self.paths.push(PathEntry {
+                    geom: p,
+                    users: 0,
+                    held: true,
+                    gen: 1,
+                    live: true,
+                });
+                (self.paths.len() - 1) as u32
+            }
+        };
+        // Deaths inside a frame push here: keep room for every entry.
+        let cap = self.paths.len();
+        if self.path_free.capacity() < cap {
+            self.path_free.reserve(cap - self.path_free.len());
+        }
+        if self.path_dead.capacity() < cap {
+            self.path_dead.reserve(cap - self.path_dead.len());
+        }
+        self.stats.paths += 1;
+        PathId {
+            ix,
+            gen: self.paths[ix as usize].gen,
+        }
+    }
+
+    /// Drops the caller's hold on path `id` (once; a stale handle or a
+    /// second call does nothing). With no tween following it the path is
+    /// freed at once, else when the last of them is freed.
+    pub fn release_path(&mut self, id: PathId) {
+        self.drain_dead_paths();
+        let Some(pix) = self.live_path(id) else {
+            return;
+        };
+        let e = &mut self.paths[pix as usize];
+        if !e.held {
+            return;
+        }
+        e.held = false;
+        if e.users == 0 {
+            self.kill_path(pix);
+            self.paths[pix as usize].geom = MotionPath::default();
+            self.path_free.push(pix);
+        }
+    }
+
+    /// The geometry of path `id`; `None` when it is stale or freed.
+    pub fn path(&self, id: PathId) -> Option<&MotionPath> {
+        self.live_path(id).map(|pix| &self.paths[pix as usize].geom)
+    }
+
+    /// How many paths are alive (`stats().paths`).
+    pub fn path_count(&self) -> u32 {
+        self.stats.paths
     }
 
     /// In-place, stable track compaction: drops dead tracks, fixes every

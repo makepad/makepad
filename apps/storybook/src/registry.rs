@@ -330,7 +330,7 @@ mod tests {
                 ("Shape", &["Radius"]),
                 ("Elevation", &["Levels"]),
                 ("State", &["Layers"]),
-                ("Motion", &["Overview", "Tween & timeline", "Ease editor", "Script tweens"]),
+                ("Motion", &["Overview", "Tween & timeline", "Ease editor", "Script tweens", "Motion paths"]),
             ],
         ),
         (

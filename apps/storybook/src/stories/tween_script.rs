@@ -8,7 +8,8 @@
 //! surface reads what the callbacks wrote where no screenshot is available:
 //! `st_state` is written by the timeline's `on_update` (only when the text
 //! changes), `st_call` by its `call()`, `st_done` by `on_complete`,
-//! `st_note` and `st_wave_note` by the tweens' `on_complete`.
+//! `st_note`, `st_wave_note` and `st_path_note` by the tweens'
+//! `on_complete`.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -35,6 +36,10 @@ script_mod! {
         margin: Inset{left: 0.}
         draw_bg +: {color: #x5b6cff border_radius: 6.0}
     }
+
+    // A lane a box follows a motion path in: in a `flow: Overlay` parent
+    // margin.left / margin.top are the box's x / y.
+    let PathLane = View{width: Fill height: 120 flow: Overlay}
 
     let Bar = RoundedView{
         width: 18
@@ -258,6 +263,42 @@ script_mod! {
         }
         st_wave_note := Readout{text: "stagger: -"}
         st_ticker := Readout{text: "ticker time_scale 1"}
+
+        StoryHeading{text: "Motion path"}
+        StoryRow{
+            st_path_go := Button{text: "motion_path" on_click: || {
+                // Back to the lane's start, so the button replays: align @start
+                // moves the path onto wherever the box is.
+                tween.set(ui.st_path_box, {margin: {left: 20.0 top: 48.0}})
+                tween.to(ui.st_path_box, {
+                    duration: 2.0
+                    ease: "power1.inOut"
+                    motion_path: {path: [[0, 0], [120, -40], [240, 40], [360, 0]], curviness: 1.25, align: @start, auto_rotate: true}
+                    on_complete: || ui.st_path_note.set_text("motion_path: on_complete")
+                })
+            }}
+        }
+        PathLane{
+            st_path_box := View{
+                width: 40
+                height: 24
+                margin: Inset{left: 20 top: 48}
+                show_bg: true
+                draw_bg +: {
+                    rotation: instance(0.0)
+                    color: #x5b6cff
+                    pixel: fn() {
+                        let c = self.rect_size * 0.5
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.rotate(self.rotation * 0.017453292, c.x, c.y)
+                        sdf.box(4.0, 6.0, self.rect_size.x - 8.0, self.rect_size.y - 12.0, 3.0)
+                        sdf.fill(self.color)
+                        return sdf.result
+                    }
+                }
+            }
+        }
+        st_path_note := Readout{text: "motion_path: -"}
     }
 }
 
@@ -270,7 +311,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "FoundationsMotionScriptTweens",
     added: "2026-09-25",
     tags: &["new", "tween", "timeline", "gsap", "script", "splash", "stagger", "ticker", "callbacks"],
-    doc: "# Script tweens\n\n`tween` (`mod.tween`) is the tween engine from Splash script, shaped like GSAP. Every widget script has it:\n\n```\ntween.to(ui.card, {duration: 0.4, ease: Ease.OutCubic, draw_bg: {color: #x3fb8af}})\nlet tl = tween.timeline({defaults: {duration: 0.3}, repeat: 1, yoyo: true, paused: true})\ntl.to(ui.a, {margin: {left: 100.0}}).to(ui.b, {width: 80.0}, \"+=0.2\").add_label(@shown)\n  .call(|| ui.status.set_text(\"shown\"), \"shown+=0.1\")\ntl.on_complete(|| ui.status.set_text(\"done\"))\ntl.play()\n```\n\n- **Targets** are `ui` handles (`ui`, `ui.name`) or an array of them, in stagger order.\n- **vars**: `duration, delay, ease, repeat, repeat_delay, yoyo, yoyo_ease, stagger, overwrite, paused, reversed, time_scale, color_space, id` and `on_start, on_update, on_repeat, on_complete, on_reverse_complete, on_interrupt` are options; every other key is a property, and a nested object is a path (`draw_bg: {color: ..}`). Values are numbers, colours, vec2/vec3/vec4 and `\"+=n\"` / `\"-=n\"`.\n- **Eases**: `Ease.OutCubic`, `theme.motion_ease_*`, a GSAP string (`\"power2.out\"`, `\"back.out(1.7)\"`, `\"steps(5)\"`, `\"cubic-bezier(.2,0,0,1)\"`) or a CSS preset name.\n- **Positions**: numbers, `@labels`, or GSAP strings (`\"<\"`, `\">\"`, `\"+=0.2\"`, `\"shown+=0.1\"`).\n- **Handles** from `tween.to` and `tween.timeline` answer `play, pause, resume, reverse, restart, seek, kill`, the getters/setters `time, total_time, progress, total_progress, time_scale, paused, reversed, duration` and `total_duration, iteration, is_active, current_label, is_alive`, and `on_*(fn)`. A root tween stays addressable after it completes while script holds its handle (`h.restart()` works); an animation whose widgets are all gone is killed with them.\n- **Globals**: `tween.kill_tweens_of(targets, props?)`, `tween.clear_props(targets, props?)` (forgets what the tween layer holds for those keys and puts the DSL values back), `tween.is_tweening(target)`, `tween.ticker({time_scale, paused, reduced_motion, lag_smoothing})` (the app-wide ticker, main VM only; `tween.ticker()` reads it; lag smoothing in seconds).\n\nCallbacks run after the frame that fired them (GSAP runs them inside the render). A `to()` starts from the value the tween layer last wrote, else from the widget's DSL value at that path: a value the Animator changed is not seen, and a key the DSL never set needs `from_to`.\n\n## This page\n\nThe first row tweens one box (`clear_props` puts its DSL values back); the timeline row plays a timeline built on first use and kept in a script variable, built again when the page was instantiated anew; the last row staggers eight bars from the centre and toggles the ticker's time scale. The readouts (`st_state`, `st_call`, `st_done`, `st_note`, `st_wave_note`, `st_ticker`) are written by the script's callbacks, so `/snap?q=st_` reads them.",
+    doc: "# Script tweens\n\n`tween` (`mod.tween`) is the tween engine from Splash script, shaped like GSAP. Every widget script has it:\n\n```\ntween.to(ui.card, {duration: 0.4, ease: Ease.OutCubic, draw_bg: {color: #x3fb8af}})\nlet tl = tween.timeline({defaults: {duration: 0.3}, repeat: 1, yoyo: true, paused: true})\ntl.to(ui.a, {margin: {left: 100.0}}).to(ui.b, {width: 80.0}, \"+=0.2\").add_label(@shown)\n  .call(|| ui.status.set_text(\"shown\"), \"shown+=0.1\")\ntl.on_complete(|| ui.status.set_text(\"done\"))\ntl.play()\n```\n\n- **Targets** are `ui` handles (`ui`, `ui.name`) or an array of them, in stagger order.\n- **vars**: `duration, delay, ease, repeat, repeat_delay, yoyo, yoyo_ease, stagger, overwrite, paused, reversed, time_scale, color_space, id` and `on_start, on_update, on_repeat, on_complete, on_reverse_complete, on_interrupt` are options; every other key is a property, and a nested object is a path (`draw_bg: {color: ..}`). Values are numbers, colours, vec2/vec3/vec4 and `\"+=n\"` / `\"-=n\"`.\n- **Eases**: `Ease.OutCubic`, `theme.motion_ease_*`, a GSAP string (`\"power2.out\"`, `\"back.out(1.7)\"`, `\"steps(5)\"`, `\"cubic-bezier(.2,0,0,1)\"`) or a CSS preset name.\n- **Positions**: numbers, `@labels`, or GSAP strings (`\"<\"`, `\">\"`, `\"+=0.2\"`, `\"shown+=0.1\"`).\n- **Handles** from `tween.to` and `tween.timeline` answer `play, pause, resume, reverse, restart, seek, kill`, the getters/setters `time, total_time, progress, total_progress, time_scale, paused, reversed, duration` and `total_duration, iteration, is_active, current_label, is_alive`, and `on_*(fn)`. A root tween stays addressable after it completes while script holds its handle (`h.restart()` works); an animation whose widgets are all gone is killed with them.\n- **Motion paths**: `motion_path` in `to()` vars makes the tween follow a path: an SVG path string, `[[x, y], ..]` (a smooth curve through the points) or `{path, type: @thru | @cubic, curviness, align: @start, auto_rotate: true | degrees, radians, start, end, offset, x, y, z, rotation}`. It drives `margin.left` / `margin.top` (an x / y in a `flow: Overlay` parent) and, with `auto_rotate`, `draw_bg.rotation` in degrees, unless `x`, `y`, `rotation` name other keys.\n- **Globals**: `tween.kill_tweens_of(targets, props?)`, `tween.clear_props(targets, props?)` (forgets what the tween layer holds for those keys and puts the DSL values back), `tween.is_tweening(target)`, `tween.ticker({time_scale, paused, reduced_motion, lag_smoothing})` (the app-wide ticker, main VM only; `tween.ticker()` reads it; lag smoothing in seconds).\n\nCallbacks run after the frame that fired them (GSAP runs them inside the render). A `to()` starts from the value the tween layer last wrote, else from the widget's DSL value at that path: a value the Animator changed is not seen, and a key the DSL never set needs `from_to`.\n\n## This page\n\nThe first row tweens one box (`clear_props` puts its DSL values back); the timeline row plays a timeline built on first use and kept in a script variable, built again when the page was instantiated anew; the stagger row staggers eight bars from the centre and toggles the ticker's time scale; the last button sends a box along a curve through four points with `motion_path` (`align: @start`, `auto_rotate: true`), from the lane's start. The readouts (`st_state`, `st_call`, `st_done`, `st_note`, `st_wave_note`, `st_ticker`, `st_path_note`) are written by the script's callbacks, so `/snap?q=st_` reads them.",
     subject: "",
     feature: None,
     controls: &[],

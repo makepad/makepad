@@ -18,6 +18,7 @@
 //! | [`TweenClock`], [`tween_ticker`], [`set_tween_ticker`] | `gsap.ticker` (`lagSmoothing`), `globalTimeline.timeScale()` / `pause()` |
 //! | [`TweenHost::push_instances`], [`TweenHost::apply_to`], [`TweenHost::apply_to_ref`] | GSAP's property setters: where the values go |
 //! | [`QuickTo`] | `gsap.quickTo` (engine-free, for per-frame retargeting) |
+//! | [`MotionPath`], [`PropTo::path`], [`PathOpts`] (engine) | `MotionPathPlugin`: `motionPath: {path, align, autoRotate, start, end}` (see "Motion paths" below) |
 //! | [`prop`], [`prop_path`], [`tag`], [`pos`] | property names, `id`s / labels, position strings (`"<"`, `"+=0.2"`, `"intro-=0.1"`) |
 //!
 //! # The frame loop
@@ -58,6 +59,52 @@
 //! - Budget: the engine handles thousands of tweens per frame; the push is
 //!   the limit (one `Apply::Animate` per target per frame does not scale
 //!   past a few hundred targets).
+//!
+//! # Motion paths
+//!
+//! A tween can follow a [`MotionPath`] (GSAP `motionPath`). Build the path
+//! once ([`MotionPath::from_svg`] for SVG path data, [`MotionPath::through`]
+//! for a curve through points, [`MotionPath::cubic_points`], a
+//! [`PathBuilder`]; the `*3` forms take z), store it in the host's engine
+//! with `host.engine.add_path(path)`, build with
+//! `PropTo::path(x_key, y_key, id, PathOpts::new()..)` and drop the caller's
+//! hold with `host.engine.release_path(id)`: the geometry then lives exactly
+//! as long as the tweens that follow it (a host that rebuilds often keeps
+//! its hold and releases the old path when it replaces it). [`PathOpts`]
+//! carries GSAP's `start` / `end`, `offsetX` / `offsetY`, `align`
+//! ([`PathAlign::Start`] is `align: self`: the path moves so its start sits
+//! on the target's current x / y), `autoRotate` (degrees, or radians with
+//! [`PathOpts::auto_rotate_radians`]) and an optional z key for 3D paths.
+//! The eased ratio is clamped to the path (an overshooting ease rests at
+//! the ends) and both ends land exactly.
+//!
+//! Which keys a path can drive (x and y are two scalar keys):
+//! - `margin.left` / `margin.top` of a child in a `flow: Overlay` parent:
+//!   the child sits at the parent's origin plus its margin. The script
+//!   layer's default (`motion_path` in [`crate::tween_script`]); a layout
+//!   field, so each changed frame relayouts and redraws the target (a few
+//!   hundred targets is the budget).
+//! - draw-shader `instance()` pairs (`draw_bg.shift_x` / `draw_bg.shift_y`,
+//!   a `draw_bg.rotation`) with [`TweenHost::push_instances`]: the cheapest
+//!   sink, no relayout, for custom-drawn content.
+//! - pulled with [`TweenHost::f64`] in `draw_walk` for a canvas that draws
+//!   many items (the storybook's Motion paths page pulls x, y and the
+//!   rotation this way: one redraw per changed frame, no layout).
+//! - Not `abs_pos`: `Walk.abs_pos` is an absolute pass position (an
+//!   `Option<Vec2d>`, neither parent-relative nor two scalar keys).
+//!
+//! ```text
+//! const PX: PropKey = prop(live_id!(px));
+//! const PY: PropKey = prop(live_id!(py));
+//! const ROT: PropKey = prop(live_id!(rot));
+//! // Parse once (a building call), never per frame.
+//! let path = MotionPath::from_svg("M0,100 C100,0 200,200 300,100").unwrap();
+//! let id = self.motion.engine.add_path(path);
+//! let o = PathOpts::new().auto_rotate(ROT, 0.0); // degrees
+//! self.motion.to(cx, ME.into(), &[PropTo::path(PX, PY, id, o)], TweenOpts::new().duration(2.0));
+//! self.motion.engine.release_path(id); // freed with the tween
+//! // draw_walk: let (x, y) = (self.motion.f64(ME, PX, 0.0), self.motion.f64(ME, PY, 0.0));
+//! ```
 //!
 //! # Example: a hover tween on `draw_bg.hover`
 //!

@@ -33,6 +33,7 @@
 //! | `time(t?)`, `total_time(t?)`, `progress(p?)`, `total_progress(p?)`, `time_scale(s?)`, `paused(b?)`, `reversed(b?)`, `duration(d?)` | getters without an argument, setters (returning the handle) with one |
 //! | `total_duration()`, `iteration()`, `is_active()`, `current_label()`, `is_alive()` | getters; `is_alive()` (not GSAP) is false once the animation is gone: killed, completed and released, or all its widgets gone |
 //! | `on_start(fn)`, `on_update(fn)`, `on_repeat(fn)`, `on_complete(fn)`, `on_reverse_complete(fn)`, `on_interrupt(fn)` | `eventCallback`; also as `vars` keys; `nil` removes |
+//! | `motion_path: "M0,0 C.."` / `[[x, y], ..]` / `{path, type, curviness, align, auto_rotate, radians, start, end, offset, x, y, z, rotation}` in `to()` vars | `motionPath` (MotionPathPlugin); see "Motion paths" below |
 //!
 //! `tween.to(..)` returns a handle with the same methods as a timeline
 //! handle (the builders answer an error on a tween). As in GSAP, a root
@@ -48,9 +49,10 @@
 //! refused. In `vars`, the keys `duration, delay, ease, ease_each, repeat,
 //! repeat_delay, repeat_refresh, yoyo, yoyo_ease, stagger, overwrite,
 //! immediate_render, paused, reversed, time_scale, color_space, reduce,
-//! keep, inherit, id, tag` and `on_*` are options; every other key is a
-//! property, and a nested object is a path (`draw_bg: {color: #f00}`
-//! animates `draw_bg.color`, up to four ids deep). Values: numbers, colours,
+//! keep, inherit, id, tag` and `on_*` are options, `motion_path` makes the
+//! tween follow a path (below), and every other key is a property: a nested
+//! object is a path (`draw_bg: {color: #f00}` animates `draw_bg.color`, up
+//! to four ids deep). Values: numbers, colours,
 //! `vec2`/`vec3`/`vec4` (finite lanes), and `"+=n"` / `"-=n"` for relative
 //! numeric ends. An ease is an `Ease` value (`Ease.OutCubic`,
 //! `theme.motion_ease_*`), a GSAP string (`"power2.out"`, `"back.out(1.7)"`,
@@ -60,6 +62,43 @@
 //! @edges | @end | @random | index | [x, y], grid: [rows, cols], axis: @x |
 //! @y, ease, repeat, yoyo, repeat_delay}`. Positions are numbers, `@labels`
 //! or GSAP strings (`"<"`, `">-0.1"`, `"+=0.2"`, `"shown+=0.1"`).
+//!
+//! # Motion paths
+//!
+//! ```text
+//! tween.to(ui.box, {duration: 2.0, ease: "power1.inOut",
+//!     motion_path: {path: [[0, 0], [120, -40], [240, 40], [360, 0]], curviness: 1.25,
+//!                   align: @start, auto_rotate: true}})
+//! ```
+//!
+//! `motion_path` (GSAP `motionPath`, `to()` and `tl.to()` only) takes an SVG
+//! path string (`"M0,0 C50,-80 150,80 200,0"`: `M L H V C S Q T A Z`, arcs
+//! become cubics), an array of points (`[[x, y], ..]` or `[[x, y, z], ..]`:
+//! a smooth curve through them), or an object:
+//! - `path`: the string or the array (required);
+//! - `type: @thru | @cubic` (arrays only; default `@thru`; `@cubic` reads
+//!   anchor, control, control, anchor, .. with 3k + 1 points) and
+//!   `curviness` (`@thru` only; default 1, 0 draws straight lines);
+//! - `align: @start | @none | true | false` (default `@none`): `@start`
+//!   moves the path so its start sits on the widget's current x / y;
+//! - `auto_rotate: false | true | degrees` (default false; a number is true
+//!   with that offset) and `radians: true` to write radians;
+//! - `start`, `end` (default 0, 1): fractions of the path's length, may
+//!   leave 0..1 on a closed path and may be reversed; `offset: [dx, dy]`
+//!   (or `[dx, dy, dz]`);
+//! - the keys it drives, `@id` or `"a.b.c"`: `x` (default `margin.left`),
+//!   `y` (default `margin.top`), `rotation` (default `draw_bg.rotation`,
+//!   degrees, written with `auto_rotate`) and `z` (none unless given).
+//!
+//! A `flow: Overlay` parent makes `margin.left` / `margin.top` an x / y
+//! (the child sits at the parent's origin plus its margin; each moving frame
+//! relayouts it). The path is parsed once, when the tween is built, and
+//! lives as long as the tween: `kill`, `clear_props`, a widget going away
+//! free it with the tween. A vars property on a key the path drives is an
+//! error, as are `from`, `from_to` and `set` with a `motion_path`. The
+//! eased ratio is clamped to the path (an overshooting ease rests at its
+//! ends); GSAP's element `align`, `alignOrigin` and `fromCurrent` are not
+//! supported (use `offset`).
 //!
 //! # How it runs
 //!
@@ -123,10 +162,10 @@ use crate::{
     },
     tween::{
         parse_gsap_ease, prop_path, set_tween_ticker, tween_ticker, Anchor, AnimMut, AnimRef,
-        ColorSpace, Easing, Emit, End, EventKind, EventMask, LagSmoothing, Offset, Overwrite,
-        Position, PropKey, PropTo, Reduce, Rgba, Seek, Stagger, StaggerAxis, StaggerFrom, Tag,
-        TargetId, Targets, TimelineOpts, TweenEvent, TweenHost, TweenId, TweenOpts, TweenValue,
-        ValueKind, YoyoEase,
+        ColorSpace, Easing, Emit, End, EventKind, EventMask, LagSmoothing, MotionPath, Offset,
+        Overwrite, PathAlign, PathOpts, Position, PropKey, PropTo, Reduce, Rgba, Seek, Stagger,
+        StaggerAxis, StaggerFrom, Tag, TargetId, Targets, TimelineOpts, TweenEvent, TweenHost,
+        TweenId, TweenOpts, TweenValue, ValueKind, YoyoEase,
     },
     widget::{WidgetRef, WidgetUid, WidgetWeakRef},
     widget_async::{
@@ -771,12 +810,23 @@ enum PVal {
     Rel(f64),
 }
 
+/// What a vars property is: a value, or a key a `motion_path` drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PRole {
+    Value,
+    PathX,
+    PathY,
+    PathZ,
+    PathRot,
+}
+
 /// One property of a vars object: its path and value.
 #[derive(Clone, Copy, Debug)]
 struct PProp {
     path: [LiveId; 4],
     len: u8,
     val: PVal,
+    role: PRole,
 }
 
 impl PProp {
@@ -789,12 +839,51 @@ impl PProp {
     }
 }
 
+/// A key path of up to four ids (`margin.left`).
+#[derive(Clone, Copy, Debug)]
+struct IdPath {
+    path: [LiveId; 4],
+    len: u8,
+}
+
+impl IdPath {
+    fn new(ids: &[LiveId]) -> Self {
+        let mut path = [LiveId(0); 4];
+        path[..ids.len()].copy_from_slice(ids);
+        Self {
+            path,
+            len: ids.len() as u8,
+        }
+    }
+
+    fn ids(&self) -> &[LiveId] {
+        &self.path[..self.len as usize]
+    }
+}
+
+/// A parsed `motion_path`: the geometry (built once, while parsing), its
+/// GSAP options and the keys it drives.
+struct PathSpec {
+    geom: MotionPath,
+    start: f64,
+    end: f64,
+    offset: [f64; 3],
+    align: PathAlign,
+    /// `auto_rotate`: the offset in degrees, and whether to write radians.
+    rotate: Option<(f64, bool)>,
+    x: IdPath,
+    y: IdPath,
+    z: Option<IdPath>,
+    rot: IdPath,
+}
+
 /// A parsed tween vars object.
 #[derive(Default)]
 struct TweenSpec {
     opts: TweenOpts,
     props: Vec<PProp>,
     cbs: Vec<(CbKind, ScriptFnRef)>,
+    path: Option<PathSpec>,
 }
 
 fn path_text(path: &[LiveId]) -> String {
@@ -951,6 +1040,7 @@ fn add_prop(vm: &ScriptVm, v: ScriptValue, path: &[LiveId], out: &mut Vec<PProp>
             path: p,
             len: path.len() as u8,
             val,
+            role: PRole::Value,
         });
     }
     Ok(())
@@ -1184,12 +1274,224 @@ fn parse_tween_vars(vm: &mut ScriptVm, v: ScriptValue) -> Parse<TweenSpec> {
         return Err("vars must be an object ({duration: 0.3, x: 10.0})".into());
     };
     for (key, v) in own_entries(vm, obj) {
+        if key == live_id!(motion_path) {
+            spec.path = Some(parse_motion_path(vm, v)?);
+            continue;
+        }
         if tween_option(vm, key, v, &mut spec.opts, &mut spec.cbs)? {
             continue;
         }
         add_prop(vm, v, &[key], &mut spec.props)?;
     }
+    // The keys a motion path drives join the props (after every vars key,
+    // so a vars property on one of them is found).
+    if let Some(ps) = &spec.path {
+        let mut keys = vec![(PRole::PathX, ps.x), (PRole::PathY, ps.y)];
+        if let Some(z) = ps.z {
+            keys.push((PRole::PathZ, z));
+        }
+        if ps.rotate.is_some() {
+            keys.push((PRole::PathRot, ps.rot));
+        }
+        for (role, ip) in keys {
+            if let Some(q) = spec.props.iter().find(|q| q.path() == ip.ids()) {
+                return Err(if q.role == PRole::Value {
+                    format!(
+                        "motion_path drives {}; remove it from vars",
+                        path_text(ip.ids())
+                    )
+                } else {
+                    format!(
+                        "motion_path: x, y, z and rotation need different keys ({} twice)",
+                        path_text(ip.ids())
+                    )
+                });
+            }
+            spec.props.push(PProp {
+                path: ip.path,
+                len: ip.len,
+                val: PVal::Abs(TweenValue::F64(0.0)),
+                role,
+            });
+        }
+    }
     Ok(spec)
+}
+
+/// A key path for a `motion_path` key: `@id` or `"a.b.c"` (at most four ids).
+fn motion_key(vm: &ScriptVm, v: ScriptValue, what: &str) -> Parse<IdPath> {
+    if let Some(s) = string_of(vm, v) {
+        let ids: Vec<LiveId> = s
+            .split('.')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(LiveId::from_str)
+            .collect();
+        if ids.is_empty() {
+            return Err(format!("motion_path {what} takes @id or \"a.b.c\""));
+        }
+        if ids.len() > 4 {
+            return Err(format!(
+                "motion_path {what}: \"{s}\" is deeper than four ids"
+            ));
+        }
+        return Ok(IdPath::new(&ids));
+    }
+    match v.as_id() {
+        Some(id) if id.0 != 0 => Ok(IdPath::new(&[id])),
+        _ => Err(format!("motion_path {what} takes @id or \"a.b.c\"")),
+    }
+}
+
+/// The points of a `motion_path` array: `[[x, y], ..]` or `[[x, y, z], ..]`.
+fn motion_points(vm: &ScriptVm, arr: ScriptArray) -> Parse<Vec<[f64; 3]>> {
+    let heap = &vm.bx.heap;
+    let n = heap.array_len(arr);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let item = heap.array_index(arr, i, NoTrap);
+        let bad = || format!("motion_path: point {i} is not [x, y] or [x, y, z]");
+        let Some(p) = item.as_array() else {
+            return Err(bad());
+        };
+        let len = heap.array_len(p);
+        if len != 2 && len != 3 {
+            return Err(bad());
+        }
+        let mut q = [0.0; 3];
+        for (k, c) in q.iter_mut().enumerate().take(len) {
+            match heap.array_index(p, k, NoTrap).as_number() {
+                Some(x) if x.is_finite() => *c = x,
+                _ => return Err(bad()),
+            }
+        }
+        out.push(q);
+    }
+    Ok(out)
+}
+
+/// `motion_path` (GSAP `motionPath`): an SVG path string, an array of
+/// points (a `thru` curve) or `{path, type, curviness, align, auto_rotate,
+/// radians, start, end, offset, x, y, z, rotation}`. The geometry is built
+/// here, once.
+fn parse_motion_path(vm: &mut ScriptVm, v: ScriptValue) -> Parse<PathSpec> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Thru,
+        Cubic,
+    }
+    let mut ps = PathSpec {
+        geom: MotionPath::default(),
+        start: 0.0,
+        end: 1.0,
+        offset: [0.0; 3],
+        align: PathAlign::None,
+        rotate: None,
+        x: IdPath::new(&[live_id!(margin), live_id!(left)]),
+        y: IdPath::new(&[live_id!(margin), live_id!(top)]),
+        z: None,
+        rot: IdPath::new(&[live_id!(draw_bg), live_id!(rotation)]),
+    };
+    let shorthand = string_of(vm, v).is_some() || v.as_array().is_some();
+    let mut path = shorthand.then_some(v);
+    let (mut kind, mut curviness) = (None, None);
+    let (mut auto, mut radians) = (None, false);
+    if !shorthand {
+        let Some(obj) = v.as_object() else {
+            return Err("motion_path takes an SVG path string, [[x, y], ..] or {path, ..}".into());
+        };
+        for (key, v) in own_entries(vm, obj) {
+            match key {
+                live_id!(path) => path = Some(v),
+                live_id!(type) => {
+                    kind = Some(match name_of(vm, v) {
+                        Some(live_id!(thru)) => Kind::Thru,
+                        Some(live_id!(cubic)) => Kind::Cubic,
+                        _ => return Err("motion_path type takes @thru or @cubic".into()),
+                    })
+                }
+                live_id!(curviness) => curviness = Some(number(v, key)?),
+                live_id!(align) => {
+                    ps.align = match v.as_bool() {
+                        Some(true) => PathAlign::Start,
+                        Some(false) => PathAlign::None,
+                        None => match name_of(vm, v) {
+                            Some(live_id!(start)) => PathAlign::Start,
+                            Some(live_id!(none)) => PathAlign::None,
+                            _ => {
+                                return Err(
+                                    "motion_path align takes @start, @none, true or false".into()
+                                )
+                            }
+                        },
+                    }
+                }
+                live_id!(auto_rotate) => {
+                    auto = match v.as_bool() {
+                        Some(b) => b.then_some(0.0),
+                        None => match v.as_number() {
+                            Some(n) if n.is_finite() => Some(n),
+                            _ => {
+                                return Err(
+                                    "motion_path auto_rotate takes true, false or degrees".into()
+                                )
+                            }
+                        },
+                    }
+                }
+                live_id!(radians) => radians = boolean(v, key)?,
+                live_id!(start) => ps.start = number(v, key)?,
+                live_id!(end) => ps.end = number(v, key)?,
+                live_id!(offset) => {
+                    let bad = "motion_path offset takes [dx, dy] or [dx, dy, dz]";
+                    let Some(arr) = v.as_array() else {
+                        return Err(bad.into());
+                    };
+                    let heap = &vm.bx.heap;
+                    let len = heap.array_len(arr);
+                    if len != 2 && len != 3 {
+                        return Err(bad.into());
+                    }
+                    for k in 0..len {
+                        match heap.array_index(arr, k, NoTrap).as_number() {
+                            Some(x) if x.is_finite() => ps.offset[k] = x,
+                            _ => return Err(bad.into()),
+                        }
+                    }
+                }
+                live_id!(x) => ps.x = motion_key(vm, v, "x")?,
+                live_id!(y) => ps.y = motion_key(vm, v, "y")?,
+                live_id!(z) => ps.z = Some(motion_key(vm, v, "z")?),
+                live_id!(rotation) => ps.rot = motion_key(vm, v, "rotation")?,
+                _ => return Err(format!("motion_path has no option {key}")),
+            }
+        }
+    }
+    let Some(path) = path else {
+        return Err("motion_path needs a path (an SVG path string or [[x, y], ..])".into());
+    };
+    let geom = if let Some(d) = string_of(vm, path) {
+        if kind.is_some() || curviness.is_some() {
+            return Err("motion_path type and curviness are for point arrays".into());
+        }
+        MotionPath::from_svg(&d)
+    } else if let Some(arr) = path.as_array() {
+        let pts = motion_points(vm, arr)?;
+        match kind.unwrap_or(Kind::Thru) {
+            Kind::Thru => MotionPath::through3(&pts, curviness.unwrap_or(1.0)),
+            Kind::Cubic => {
+                if curviness.is_some() {
+                    return Err("motion_path curviness is for type @thru".into());
+                }
+                MotionPath::cubic_points3(&pts)
+            }
+        }
+    } else {
+        return Err("motion_path path takes an SVG path string or [[x, y], ..]".into());
+    };
+    ps.geom = geom.map_err(|e| format!("motion_path: {e}"))?;
+    ps.rotate = auto.map(|deg| (deg, radians));
+    Ok(ps)
 }
 
 /// A timeline vars object: options only (`defaults` holds tween options).
@@ -1456,6 +1758,9 @@ fn build_tween(
     }
     let uids = parse_targets(vm, targets)?;
     let mut spec = parse_tween_vars(vm, vars)?;
+    if spec.path.is_some() && verb != Verb::To {
+        return Err("motion_path works with to()".into());
+    }
     let mut from = Vec::new();
     if verb == Verb::FromTo {
         let Some(obj) = from_vars.as_object() else {
@@ -1502,10 +1807,20 @@ fn build_tween(
     // current value) and a relative set. An absolute set carries its value
     // as an explicit start too (it renders when its time comes, and never
     // counts as unseeded), a from_to its own start.
-    let needs_current = |p: &PProp| match verb {
-        Verb::To | Verb::From => true,
-        Verb::Set => matches!(p.val, PVal::Rel(_)),
-        Verb::FromTo => false,
+    // A motion path reads the widget's x / y (/ z) only to align its start
+    // on them (align @start); its rotation never.
+    let path_align = spec
+        .path
+        .as_ref()
+        .is_some_and(|p| p.align == PathAlign::Start);
+    let needs_current = |p: &PProp| match p.role {
+        PRole::Value => match verb {
+            Verb::To | Verb::From => true,
+            Verb::Set => matches!(p.val, PVal::Rel(_)),
+            Verb::FromTo => false,
+        },
+        PRole::PathX | PRole::PathY | PRole::PathZ => path_align,
+        PRole::PathRot => false,
     };
     // The widgets, each built by this VM: a source in another heap (a
     // Splash isolate's widget seen from its host, the host-built Splash seen
@@ -1555,8 +1870,31 @@ fn build_tween(
         // is collected.
         spec.opts.keep = spec.opts.keep.or(Some(true));
     }
+    // The motion path: its geometry goes to the engine inside the build, its
+    // y key and options ride on the PathX prop.
+    let path = spec.path.as_mut().map(|ps| {
+        let mut o = PathOpts::new()
+            .span(ps.start, ps.end)
+            .offset3(ps.offset[0], ps.offset[1], ps.offset[2])
+            .align(ps.align);
+        if let Some((deg, radians)) = ps.rotate {
+            let rot = prop_path(ps.rot.ids());
+            o = if radians {
+                o.auto_rotate_radians(rot, deg)
+            } else {
+                o.auto_rotate(rot, deg)
+            };
+        }
+        if let Some(z) = ps.z {
+            o = o.z(prop_path(z.ids()));
+        }
+        (std::mem::take(&mut ps.geom), prop_path(ps.y.ids()), o)
+    });
     let cx = vm.cx_mut();
     let built = with_vm_tweens(cx, vm_id, |cx, vt| {
+        // Held by this call until the build is done: the tweens that follow
+        // it keep it alive after that, and free it with them.
+        let path = path.map(|(geom, y, o)| (vt.host.engine.add_path(geom), y, o));
         let mut tix = Vec::with_capacity(uids.len());
         let mut tids = Vec::with_capacity(uids.len());
         for (ti, uid) in uids.iter().enumerate() {
@@ -1576,6 +1914,9 @@ fn build_tween(
                 (PVal::Rel(_), None) => ValueKind::F64,
             };
             let kind = match (0..uids.len()).find_map(|ti| known[ti * n + pi]) {
+                // A path writes plain numbers: a slot of another kind is
+                // converted below.
+                _ if p.role != PRole::Value => ValueKind::F64,
                 Some(k) if lanes(k) >= lanes(own) => k,
                 _ => own,
             };
@@ -1607,15 +1948,30 @@ fn build_tween(
                             let uid = uids[ti];
                             if cfg!(debug_assertions) && !vt.warned.contains(&(uid, key)) {
                                 vt.warned.push((uid, key));
+                                let hint = if p.role == PRole::Value {
+                                    "use from_to"
+                                } else {
+                                    "motion_path align @start cannot align on it"
+                                };
                                 log!(
-                                    "tween: {} of widget {:?} has nothing to start from (its DSL source does not set it); use from_to",
+                                    "tween: {} of widget {:?} has nothing to start from (its DSL source does not set it); {}",
                                     path_text(p.path()),
-                                    uid
+                                    uid,
+                                    hint
                                 );
                             }
                         }
                     }
                 }
+            }
+            match (p.role, path) {
+                (PRole::Value, _) => {}
+                // One PropTo::path carries every key of the path.
+                (PRole::PathX, Some((pid, y, o))) => {
+                    props.push(PropTo::path(key, y, pid, o));
+                    continue;
+                }
+                _ => continue,
             }
             props.push(match (verb, p.val) {
                 (Verb::FromTo, PVal::Abs(v)) => {
@@ -1667,6 +2023,9 @@ fn build_tween(
                 child
             }
         };
+        if let Some((pid, _, _)) = path {
+            vt.host.engine.release_path(pid);
+        }
         // The root animation these targets belong to (a timeline's for a
         // child), so it can go with its widgets.
         vt.add_root_targets(into.map_or(id, |(tl, _)| tl), &tids);

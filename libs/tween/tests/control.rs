@@ -880,3 +880,28 @@ fn forget_props_clears_some_properties_only() {
     // The changes list holds no forgotten slot.
     assert!(e.changes().iter().all(|s| e.slot_key(*s) == (tg(0), Y)));
 }
+
+#[test]
+fn tween_id_bits_round_trip() {
+    assert_eq!(TweenId::from_bits(TweenId::NONE.to_bits()), TweenId::NONE);
+    assert!(TweenId::from_bits(TweenId::NONE.to_bits()).is_none());
+    let mut e = TweenEngine::new();
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    let t = e.to(one(0), &[to(X, 1.0)], lin(1.0));
+    let b = t.to_bits();
+    assert_eq!(TweenId::from_bits(b), t);
+    assert!(e.anim_ref(TweenId::from_bits(b)).is_alive());
+    e.anim(t).kill();
+    assert!(!e.anim_ref(TweenId::from_bits(b)).is_alive());
+    // The freed slot is reused with a new generation: the old bits stay stale.
+    let u = e.to(one(0), &[to(X, 2.0)], lin(1.0));
+    assert_ne!(u.to_bits(), b);
+    assert!(!e.anim_ref(TweenId::from_bits(b)).is_alive());
+    assert!(e.anim_ref(TweenId::from_bits(u.to_bits())).is_alive());
+    // Arbitrary bits refer to nothing, and controls with them do nothing.
+    assert!(!e
+        .anim_ref(TweenId::from_bits(0xdead_beef_0000_0001))
+        .is_alive());
+    e.anim(TweenId::from_bits(12_345)).pause();
+    assert!(!e.anim_ref(u).paused());
+}

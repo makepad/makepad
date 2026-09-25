@@ -78,4 +78,51 @@ impl TweenId {
     pub fn is_none(self) -> bool {
         self.ix == u32::MAX
     }
+
+    /// The handle as one number (`generation << 32 | index`), for hosts that
+    /// keep ids as plain data (a widget model, a script value).
+    #[inline]
+    pub const fn to_bits(self) -> u64 {
+        ((self.gen as u64) << 32) | self.ix as u64
+    }
+
+    /// The handle [`TweenId::to_bits`] made. Any other number is a handle
+    /// that refers to nothing (every call with it is a no-op).
+    #[inline]
+    pub const fn from_bits(b: u64) -> TweenId {
+        TweenId {
+            ix: b as u32,
+            gen: (b >> 32) as u32,
+        }
+    }
+}
+
+/// A handle to a motion path stored in an engine
+/// ([`crate::TweenEngine::add_path`]). Generational like [`TweenId`]: once
+/// the path is freed the handle is stale and building with it adds nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PathId {
+    pub(crate) ix: u32,
+    pub(crate) gen: u32,
+}
+
+impl Default for PathId {
+    /// [`PathId::NONE`].
+    fn default() -> Self {
+        PathId::NONE
+    }
+}
+
+impl PathId {
+    /// The handle that refers to no path.
+    pub const NONE: PathId = PathId {
+        ix: u32::MAX,
+        gen: 0,
+    };
+
+    /// Whether this is [`PathId::NONE`].
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self.ix == u32::MAX
+    }
 }

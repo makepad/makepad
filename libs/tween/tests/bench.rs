@@ -10,6 +10,8 @@ use std::time::Instant;
 use makepad_tween::*;
 
 const X: PropKey = PropKey(1);
+const Y: PropKey = PropKey(2);
+const R: PropKey = PropKey(3);
 const FRAMES: usize = 600;
 const RUNS: usize = 5;
 
@@ -138,7 +140,37 @@ fn bench_engine() {
         }
         e
     });
+    let path_ns = measure("1k path tweens (x, y, rot)", 1_000, || {
+        let mut e = TweenEngine::new();
+        let path = e.add_path(
+            MotionPath::from_svg(
+                "M20,160 C120,-20 220,220 320,100 S520,0 580,160 A60,60 0 0,1 460,160 L400,120 Q340,60 300,140 T160,160 Z",
+            )
+            .unwrap(),
+        );
+        for i in 0..1_000u32 {
+            e.to(
+                TargetId(i).into(),
+                &[PropTo::path(
+                    X,
+                    Y,
+                    path,
+                    PathOpts::new().auto_rotate(R, 90.0),
+                )],
+                TweenOpts::new()
+                    .duration(0.5 + (i % 10) as f64 * 0.1)
+                    .ease(Easing::InOutSine)
+                    .repeat(-1)
+                    .yoyo(true),
+            );
+        }
+        e.release_path(path);
+        e
+    });
     #[cfg(not(debug_assertions))]
     assert!(f64_ns < 60.0, "F64 tween {f64_ns} ns/frame");
-    black_box(f64_ns);
+    // Soft bound (design R1): one path sample per tween per frame.
+    #[cfg(not(debug_assertions))]
+    assert!(path_ns < 600.0, "path tween {path_ns} ns/frame");
+    black_box((f64_ns, path_ns));
 }

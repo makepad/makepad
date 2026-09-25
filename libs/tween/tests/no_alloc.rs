@@ -50,6 +50,7 @@ fn allocs() -> usize {
 const X: PropKey = PropKey(1);
 const Y: PropKey = PropKey(2);
 const C: PropKey = PropKey(3);
+const R: PropKey = PropKey(4);
 
 fn lin(d: f64) -> TweenOpts {
     TweenOpts::new().duration(d).ease(Easing::Linear)
@@ -61,6 +62,15 @@ struct World {
     nested: Vec<TweenId>,
     roots: Vec<TweenId>,
     colours: TweenId,
+    path_tweens: Vec<TweenId>,
+}
+
+fn wave() -> MotionPath {
+    MotionPath::through(
+        &[[0.0, 0.0], [100.0, -40.0], [200.0, 40.0], [300.0, 0.0]],
+        1.0,
+    )
+    .unwrap()
 }
 
 fn build() -> World {
@@ -169,12 +179,71 @@ fn build() -> World {
             Position::prev_start(0.05),
         );
     }
+    // Motion paths: 40 repeating root path tweens (thru path, auto-rotate,
+    // align start), two stagger groups of 5, and 5 that complete during the
+    // measured loop (their binds and their path are released inside advance).
+    let path = e.add_path(wave());
+    let popts = PathOpts::new().align(PathAlign::Start).auto_rotate(R, 90.0);
+    let mut path_tweens = Vec::new();
+    for i in 0..40u32 {
+        let t = TargetId(6000 + i);
+        e.seed(t, X, TweenValue::F64(i as f64));
+        e.seed(t, Y, TweenValue::F64(0.0));
+        path_tweens.push(
+            e.to(
+                t.into(),
+                &[PropTo::path(X, Y, path, popts)],
+                TweenOpts::new()
+                    .duration(0.5 + (i % 5) as f64 * 0.1)
+                    .ease(Easing::InOutSine)
+                    .repeat(-1)
+                    .yoyo(true),
+            ),
+        );
+    }
+    for g in 0..2u32 {
+        for i in 0..5u32 {
+            let t = TargetId(6100 + g * 10 + i);
+            e.seed(t, X, TweenValue::F64(0.0));
+            e.seed(t, Y, TweenValue::F64(0.0));
+        }
+        e.to(
+            Targets::Range {
+                first: 6100 + g * 10,
+                count: 5,
+            },
+            &[PropTo::path(X, Y, path, popts)],
+            TweenOpts::new()
+                .duration(0.4)
+                .repeat(-1)
+                .yoyo(true)
+                .stagger(Stagger::each(0.05)),
+        );
+    }
+    e.release_path(path);
+    let done =
+        e.add_path(MotionPath::from_svg("M0,0 C50,-80 150,80 200,0 A50,50 0 0,1 300,0").unwrap());
+    for i in 0..5u32 {
+        let t = TargetId(6200 + i);
+        e.to(
+            t.into(),
+            &[PropTo::path(
+                X,
+                Y,
+                done,
+                PathOpts::new().auto_rotate(R, 0.0),
+            )],
+            lin(1.0 + i as f64 * 5.0),
+        );
+    }
+    e.release_path(done);
     World {
         e,
         grid_tl,
         nested,
         roots,
         colours,
+        path_tweens,
     }
 }
 
@@ -218,12 +287,21 @@ fn per_frame_path_does_not_allocate() {
             }
             w.e.anim(w.colours)
                 .set_progress((k % 10) as f64 / 10.0, Emit::Fire);
+            if k < 20 {
+                w.e.anim(w.path_tweens[k]).kill();
+            }
+            w.e.anim(w.path_tweens[20 + k % 20])
+                .seek(Seek::Progress(0.3), Emit::Suppress);
             w.e.anim(w.grid_tl).play();
             w.e.swap_events(&mut buf);
         }
     }
     let during = allocs() - before;
     assert_eq!(during, 0, "allocations on the per-frame path");
+    // The finishing path tweens and the killed ones released their binds;
+    // the finishing path died inside advance.
+    let s = w.e.stats();
+    assert_eq!((s.paths, s.path_binds), (1, 30), "{s:?}");
     // The loop exercised what it claims to.
     assert!(events > 10_000, "{events} events");
     assert!(
@@ -248,13 +326,29 @@ fn track_compaction_does_not_allocate() {
             lin(10.0).repeat(-1),
         ));
     }
+    // 50 path tweens (x, y, rotation: 150 tracks), all killed below.
+    let path = e.add_path(wave());
+    let mut path_ids = Vec::new();
+    for i in 0..50u32 {
+        path_ids.push(e.to(
+            TargetId(1000 + i).into(),
+            &[PropTo::path(
+                X,
+                Y,
+                path,
+                PathOpts::new().auto_rotate(R, 0.0),
+            )],
+            lin(10.0).repeat(-1),
+        ));
+    }
+    e.release_path(path);
     let mut buf: Vec<TweenEvent> = Vec::new();
     e.advance(0.01);
     e.swap_events(&mut buf);
     e.advance(0.01);
     e.swap_events(&mut buf);
     let before = allocs();
-    for id in ids.iter().take(300) {
+    for id in ids.iter().take(300).chain(path_ids.iter()) {
         e.anim(*id).kill();
     }
     for _ in 0..10 {
@@ -266,6 +360,7 @@ fn track_compaction_does_not_allocate() {
     let s = e.stats();
     assert_eq!(s.compactions, 1);
     assert_eq!((s.tracks, s.dead_tracks), (100, 0));
+    assert_eq!((s.paths, s.path_binds), (0, 0));
     // The survivors still animate.
     e.advance(1.0);
     assert!(e.get_f64(TargetId(399), X).unwrap() > 0.0);
