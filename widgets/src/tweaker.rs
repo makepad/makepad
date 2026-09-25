@@ -2289,6 +2289,11 @@ pub fn window_intercept(
                     tw.handle_palette_drag(cx, event, &body);
                     return true;
                 }
+                if tw.tree_drag {
+                    // The row rides the pointer wherever it goes; the tree
+                    // itself still gets the event for its drop zones.
+                    tw.follow_tree_drag(cx, event);
+                }
             }
         }
         return false;
@@ -8989,6 +8994,27 @@ pub struct Tweaker {
     /// under the pointer and the zone (before, inside, after).
     #[rust]
     design_drop: Option<(TweakPick, DesignPlace)>,
+    /// The provisional insert a palette drag has previewed: the target it
+    /// was made for (uid, place) and, once landed, the path of the ghost
+    /// widget that occupies the space. The canvas is laid out as if the
+    /// drop had happened; the drop keeps it, leaving retracts it.
+    #[rust]
+    design_ghost: Option<(u64, DesignPlace, Option<String>)>,
+    /// The next landing names the ghost, not a selection to make.
+    #[rust]
+    design_ghost_pending: bool,
+    /// A ghost target asked for while a preview was still landing; taken
+    /// when it lands.
+    #[rust]
+    design_ghost_want: Option<Option<(TweakPick, DesignPlace)>>,
+    /// The chip that rides the pointer through a palette or tree drag: its
+    /// text and where the pointer is.
+    #[rust]
+    drag_chip: Option<(String, DVec2)>,
+    /// A tree row is being dragged (from the tree's own drag start until
+    /// the drop or the end), so the chip follows the pointer anywhere.
+    #[rust]
+    tree_drag: bool,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -16388,6 +16414,7 @@ impl Tweaker {
                         // another place in the tree: the drop moves the
                         // widget's literal in the source.
                         if self.design.is_some() {
+                            self.tree_drag = true;
                             if let Some(tree) = self.tree_widget() {
                                 if let Some(mut tree) = tree.borrow_mut::<FileTree>() {
                                     tree.start_dragging_file_node(
@@ -19715,7 +19742,8 @@ impl Widget for Tweaker {
             pick
         });
         let flat_outlines = !cx.sploded_active();
-        if let Some((pick, place)) = self.design_drop.clone() {
+        let ghost_drawn = flat_outlines && self.draw_ghost(cx);
+        if let Some((pick, place)) = self.design_drop.clone().filter(|_| !ghost_drawn) {
             if Some(pick.window_id) == window_id && flat_outlines {
                 let horizontal = match place {
                     DesignPlace::Inside => {
@@ -19891,6 +19919,7 @@ impl Widget for Tweaker {
             self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(approx, label_height) });
             self.draw_label.draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
         }
+        self.draw_drag_chip(cx);
         // Last into the topmost list, so it lies over the panel too.
         if draw_hands_off_frame(cx, &mut self.draw_outline) {
             self.next_frame = cx.new_next_frame();
@@ -24078,8 +24107,15 @@ impl Tweaker {
         }
         let landed = design.land(cx);
         if let Some(path) = landed.select {
-            self.design_reselect = Some((path, 8));
+            if self.design_ghost_pending {
+                if let Some(ghost) = self.design_ghost.as_mut() {
+                    ghost.2 = Some(path);
+                }
+            } else {
+                self.design_reselect = Some((path, 8));
+            }
         }
+        self.design_ghost_pending = false;
         self.design_replay_ledger(cx);
         // The rebuilt tree has new widgets: the rows and the Tree tab's
         // list, both keyed on the apply generation, are stale until it
@@ -24089,6 +24125,10 @@ impl Tweaker {
         self.design_baked = None;
         self.redraw_sidebar(cx);
         self.redraw_overlay(cx);
+        // A target the drag asked for while this was landing.
+        if let Some(want) = self.design_ghost_want.take() {
+            self.ghost_retarget(cx, want);
+        }
     }
 
     /// Select the widget a landed preview named, once the app has drawn it:
@@ -24412,6 +24452,11 @@ impl Tweaker {
         // Picked from the window's body view, as every other pick is: the
         // widget tree's root handle is not a widget to walk from.
         let pick = resolve_pick(cx, body, abs, self.my_window.unwrap_or(0))?;
+        // The ghost occupies the space the drop would take: a pointer over
+        // it (or anything inside it) is still on the target it stands for.
+        if self.pick_is_ghost(cx, pick.uid) {
+            return self.design_drop.clone();
+        }
         let r = pick.rect;
         let fx = ((abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
         let fy = ((abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
@@ -24442,6 +24487,14 @@ impl Tweaker {
                 if !is_palette(&e.items) {
                     return;
                 }
+                // The entry rides the pointer.
+                let label = self
+                    .palette_drag
+                    .and_then(|index| self.palette_entries.get(index))
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_default();
+                self.drag_chip = Some((label, e.abs));
+                self.redraw_sidebar(cx);
                 let next = self.palette_drop_target(cx, e.abs, body);
                 if let Ok(mut response) = e.response.lock() {
                     *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
@@ -24453,8 +24506,12 @@ impl Tweaker {
                 };
                 if changed {
                     session().lock().unwrap().hover = next.as_ref().map(|(p, _)| p.clone());
-                    self.design_drop = next;
+                    self.design_drop = next.clone();
                     self.redraw_overlay(cx);
+                    // The canvas shows the drop before it happens: the entry
+                    // is inserted at the target for real and the siblings
+                    // make room; a ghost marks it until the drop or the leave.
+                    self.ghost_retarget(cx, next);
                 }
             }
             Event::Drop(e) => {
@@ -24464,17 +24521,30 @@ impl Tweaker {
                 let Some(index) = self.palette_drag.take() else {
                     return;
                 };
+                self.drag_chip = None;
                 // The target is read from the drop itself: the pointer-up
                 // that precedes the drop goes through the body's pick
                 // handling, which may have moved the hover and the state
                 // under it since the last drag event.
-                self.design_drop = None;
                 let drop = self.palette_drop_target(cx, e.abs, body);
+                self.design_drop = None;
                 session().lock().unwrap().hover = None;
                 self.redraw_overlay(cx);
+                self.redraw_sidebar(cx);
                 let Some(entry) = self.palette_entries.get(index).cloned() else {
+                    self.ghost_retract(cx);
                     return;
                 };
+                // The ghost already IS the insert when the drop lands on
+                // the target it was made for: keep it, and the drop is done.
+                if let Some((ghost_uid, ghost_place, _)) = self.design_ghost.clone() {
+                    let same = matches!(&drop, Some((pick, place)) if pick.uid == ghost_uid && *place == ghost_place);
+                    if same {
+                        self.ghost_commit(cx);
+                        return;
+                    }
+                    self.ghost_retract(cx);
+                }
                 match drop {
                     Some((pick, place)) => {
                         let target = cx.widget_tree().widget(WidgetUid(pick.uid));
@@ -24497,15 +24567,221 @@ impl Tweaker {
                 }
             }
             Event::DragEnd => {
+                self.drag_chip = None;
+                self.redraw_sidebar(cx);
                 if self.design_drop.take().is_some() {
                     session().lock().unwrap().hover = None;
                     self.redraw_overlay(cx);
                 }
+                self.ghost_retract(cx);
                 // A click on the row follows on its own; a drag that ended
                 // elsewhere is over.
             }
             _ => {}
         }
+    }
+
+    /// Whether `uid` is the ghost widget or lies inside it.
+    fn pick_is_ghost(&self, cx: &Cx, uid: u64) -> bool {
+        let Some((_, _, Some(path))) = &self.design_ghost else {
+            return false;
+        };
+        let Ok(ghost) = resolve_widget_by_path(cx, path) else {
+            return false;
+        };
+        let Some(ghost_uid) = ghost.try_widget_uid() else {
+            return false;
+        };
+        let mut cur = Some(WidgetUid(uid));
+        for _ in 0..64 {
+            let Some(u) = cur else { break };
+            if u == ghost_uid {
+                return true;
+            }
+            cur = cx.widget_tree().parent_of(u);
+        }
+        false
+    }
+
+    /// Point the provisional insert at `next`: retract the one in place,
+    /// insert at the new target. While a preview is still landing the wish
+    /// is kept for the landing to apply.
+    fn ghost_retarget(&mut self, cx: &mut Cx, next: Option<(TweakPick, DesignPlace)>) {
+        if self.design.as_ref().is_none_or(|s| s.is_landing()) {
+            if self.design.is_some() {
+                self.design_ghost_want = Some(next);
+            }
+            return;
+        }
+        if let Some((uid, place, _)) = &self.design_ghost {
+            if matches!(&next, Some((pick, p)) if pick.uid == *uid && p == place) {
+                return;
+            }
+            self.ghost_retract(cx);
+            if self.design.as_ref().is_some_and(|s| s.is_landing()) {
+                self.design_ghost_want = Some(next);
+                return;
+            }
+        }
+        let Some((pick, place)) = next else {
+            return;
+        };
+        let Some(entry) = self.palette_drag.and_then(|i| self.palette_entries.get(i)).cloned() else {
+            return;
+        };
+        let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+        if target.is_empty() {
+            return;
+        }
+        self.design_ghost_pending = true;
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| s.insert(cx, &target, place, &entry.name, &entry.body));
+        match result {
+            Some(Ok(())) => {
+                self.design_ghost = Some((pick.uid, place, None));
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
+            }
+            Some(Err(err)) => {
+                // Nothing to show for this target (a non-container asked
+                // for Inside, a widget from another file): the bar stands.
+                self.design_ghost_pending = false;
+                log!("DESIGN ghost: {err}");
+            }
+            None => self.design_ghost_pending = false,
+        }
+    }
+
+    /// Take the provisional insert back out of the source and the canvas.
+    fn ghost_retract(&mut self, cx: &mut Cx) {
+        if self.design_ghost.take().is_none() {
+            self.design_ghost_want = None;
+            return;
+        }
+        self.design_ghost_pending = false;
+        let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+        let result = self.design.as_mut().map(|s| s.undo(cx, keep));
+        match result {
+            Some(Ok(())) => {
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
+            }
+            Some(Err(err)) => log!("DESIGN ghost retract: {err}"),
+            None => {}
+        }
+        self.redraw_overlay(cx);
+    }
+
+    /// The drop landed on the ghost's own target: the insert stays, joins
+    /// the undo history, and the new widget becomes the selection.
+    fn ghost_commit(&mut self, cx: &mut Cx) {
+        let Some((_, _, path)) = self.design_ghost.take() else {
+            return;
+        };
+        let label = self
+            .design
+            .as_ref()
+            .and_then(|s| s.doc().hunks().last().map(|h| h.label.clone()))
+            .unwrap_or_default();
+        let mut s = session().lock().unwrap();
+        s.undo.push(UndoStep::Source { label });
+        s.redo.clear();
+        s.undo_open = false;
+        drop(s);
+        self.design_msg.clear();
+        match path {
+            Some(path) => self.design_reselect = Some((path, 8)),
+            // Not landed yet: the landing selects it, as a plain insert's does.
+            None => self.design_ghost_pending = false,
+        }
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// The chip for a tree row drag: the row's name at the pointer, and
+    /// gone with the drop or the end.
+    fn follow_tree_drag(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::Drag(e) => {
+                let dragged = e.items.iter().find_map(|item| match item {
+                    DragItem::String { value, internal_id: Some(id) } if value == "design-node" => {
+                        Some(id.0)
+                    }
+                    _ => None,
+                });
+                let Some(uid) = dragged else {
+                    return;
+                };
+                let label = self
+                    .tree_rows
+                    .iter()
+                    .find(|row| row.uid == uid)
+                    .map(|row| if row.name.is_empty() { row.ty.clone() } else { row.name.clone() })
+                    .unwrap_or_default();
+                self.drag_chip = Some((label, e.abs));
+                self.redraw_sidebar(cx);
+            }
+            Event::Drop(_) | Event::DragEnd => {
+                self.tree_drag = false;
+                self.drag_chip = None;
+                self.redraw_sidebar(cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// The ghost's scrim: an amber wash and dashed edge over the widget the
+    /// provisional insert put on the canvas.
+    fn draw_ghost(&mut self, cx: &mut Cx2d) -> bool {
+        let Some((_, _, Some(path))) = self.design_ghost.clone() else {
+            return false;
+        };
+        let Ok(ghost) = resolve_widget_by_path(cx, &path) else {
+            return false;
+        };
+        let rect = live_rect(cx, &ghost);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return false;
+        }
+        let rect = self.screen_rect(cx, rect);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.border_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.18);
+        self.draw_outline.border_size = 1.0;
+        self.draw_outline.dash = 1.0;
+        if let Some(rect) = self.clip_to_viewport(cx, rect) {
+            self.draw_outline.draw_abs(cx, rect);
+        }
+        true
+    }
+
+    /// The chip riding the pointer through a drag, over the panel as well
+    /// as the canvas.
+    fn draw_drag_chip(&mut self, cx: &mut Cx2d) {
+        let Some((text, at)) = self.drag_chip.clone() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let height = 18.0;
+        let width = self
+            .draw_label
+            .prepare_single_line_run(cx, &text)
+            .map(|run| run.width_in_lpxs as f64)
+            .unwrap_or_else(|| text.chars().count() as f64 * 5.4)
+            + 12.0;
+        let pass = cx.current_pass_size();
+        let pos = dvec2(
+            (at.x + 14.0).min((pass.x - width).max(0.0)),
+            (at.y + 14.0).min((pass.y - height).max(0.0)),
+        );
+        self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(width, height) });
+        self.draw_label.draw_abs(cx, pos + dvec2(6.0, 3.0), &text);
     }
 
     /// The insertion caret: where the next palette insert goes, on the
