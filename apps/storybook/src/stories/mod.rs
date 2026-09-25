@@ -68,6 +68,7 @@ pub mod date_picker;
 pub mod calendar;
 pub mod time_picker;
 pub mod color;
+pub mod gradient_editor;
 pub mod dropzone;
 pub mod form;
 pub mod property_inspector;
@@ -226,6 +227,7 @@ static FILES: &[StoryModule] = &[
     file(calendar::script_mod, calendar::STORIES),
     file(time_picker::script_mod, time_picker::STORIES),
     file(color::script_mod, color::STORIES),
+    file(gradient_editor::script_mod, gradient_editor::STORIES),
     file(dropzone::script_mod, dropzone::STORIES),
     file(dropzone_states::script_mod, dropzone_states::STORIES),
     file(form::script_mod, form::STORIES),

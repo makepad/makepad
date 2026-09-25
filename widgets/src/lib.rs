@@ -150,6 +150,7 @@ pub mod carousel;
 pub mod dropzone;
 pub mod form;
 pub mod color;
+pub mod gradient_editor;
 pub mod column_picker;
 pub mod picker_parts;
 pub mod tree_select;
@@ -330,6 +331,7 @@ pub use crate::{
     dropzone::*,
     form::*,
     color::*,
+    gradient_editor::*,
     column_picker::*,
     picker_parts::*,
     tree_select::*,
@@ -862,6 +864,7 @@ true
     crate::dropzone::script_mod(vm);
     crate::form::script_mod(vm);
     crate::color::script_mod(vm);
+    crate::gradient_editor::script_mod(vm);
     // Before the three that draw with its panel and row surfaces.
     crate::picker_parts::script_mod(vm);
     crate::column_picker::script_mod(vm);

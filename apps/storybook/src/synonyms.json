@@ -1146,6 +1146,32 @@
    ]
   },
   {
+   "component": "GradientEditor",
+   "aka": [
+    "colour ramp",
+    "color ramp",
+    "colour map",
+    "color map",
+    "lut",
+    "gradient stops",
+    "hdr gradient"
+   ],
+   "does": [
+    "colour marks under the bar",
+    "alpha marks over the bar",
+    "press the bar to add a stop",
+    "drag a mark to move it",
+    "drag a mark away to remove it",
+    "delete removes the selected mark",
+    "double press opens the colour picker",
+    "intensity above one",
+    "blend in linear light",
+    "blend in oklab",
+    "sample the ramp",
+    "presets"
+   ]
+  },
+  {
    "component": "Grid",
    "aka": [
     "columns and rows",
