@@ -1593,6 +1593,22 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
 }
 
 
+/// Where a row was taken hold of: the pointer's offset inside the row and
+/// the row's size, for the chip that carries it. A row with no rect is
+/// held near its left end.
+fn grab_of(row: Option<Rect>, at: DVec2) -> (DVec2, DVec2) {
+    match row {
+        Some(rect) => {
+            let offset = dvec2(
+                (at.x - rect.pos.x).clamp(0.0, rect.size.x),
+                (at.y - rect.pos.y).clamp(0.0, rect.size.y),
+            );
+            (offset, rect.size)
+        }
+        None => (dvec2(12.0, 10.0), dvec2(120.0, 20.0)),
+    }
+}
+
 /// Why a pick the session holds with a rect draws nothing: the widget's
 /// area, its draw list, and what the attached set and the list say about
 /// it, logged once per widget so a frame loop does not flood the log.
@@ -9093,6 +9109,10 @@ pub struct Tweaker {
     /// text and where the pointer is.
     #[rust]
     drag_chip: Option<(String, DVec2)>,
+    /// How the row was picked up: where inside the row the pointer took
+    /// hold, and the row's size. The chip is the row, held at that spot.
+    #[rust]
+    drag_grab: Option<(DVec2, DVec2)>,
     /// A tree row is being dragged (from the tree's own drag start until
     /// the drop or the end), so the chip follows the pointer anywhere.
     #[rust]
@@ -24657,12 +24677,23 @@ impl Tweaker {
                 if !is_palette(&e.items) {
                     return;
                 }
-                // The entry rides the pointer.
+                // The entry rides the pointer: the row itself, held where
+                // it was taken hold of.
                 let label = self
                     .palette_drag
                     .and_then(|index| self.palette_entries.get(index))
                     .map(|entry| entry.name.clone())
                     .unwrap_or_default();
+                if self.drag_grab.is_none() {
+                    let row = self
+                        .palette_drag
+                        .and_then(|index| self.palette_visible.iter().find(|(_, i)| *i == index))
+                        .map(|(uid, _)| cx.widget_tree().widget(WidgetUid(*uid)))
+                        .filter(|w| !w.is_empty())
+                        .map(|w| w.area().clipped_rect_union(cx))
+                        .filter(|r| r.size.x > 0.0 && r.size.y > 0.0);
+                    self.drag_grab = Some(grab_of(row, e.abs));
+                }
                 self.drag_chip = Some((label, e.abs));
                 self.redraw_sidebar(cx);
                 let next = self.palette_drop_target(cx, e.abs, body);
@@ -24695,6 +24726,7 @@ impl Tweaker {
                     return;
                 };
                 self.drag_chip = None;
+                self.drag_grab = None;
                 // The target is read from the drop itself: the pointer-up
                 // that precedes the drop goes through the body's pick
                 // handling, which may have moved the hover and the state
@@ -24741,6 +24773,7 @@ impl Tweaker {
             }
             Event::DragEnd => {
                 self.drag_chip = None;
+                self.drag_grab = None;
                 self.redraw_sidebar(cx);
                 if self.design_drop.take().is_some() {
                     session().lock().unwrap().hover = None;
@@ -24904,12 +24937,19 @@ impl Tweaker {
                     .find(|row| row.uid == uid)
                     .map(|row| if row.name.is_empty() { row.ty.clone() } else { row.name.clone() })
                     .unwrap_or_default();
+                if self.drag_grab.is_none() {
+                    let row = self
+                        .tree_widget()
+                        .and_then(|tree| tree.borrow::<FileTree>().and_then(|t| t.node_rect(cx, LiveId(uid))));
+                    self.drag_grab = Some(grab_of(row, e.abs));
+                }
                 self.drag_chip = Some((label, e.abs));
                 self.redraw_sidebar(cx);
             }
             Event::Drop(_) | Event::DragEnd => {
                 self.tree_drag = false;
                 self.drag_chip = None;
+                self.drag_grab = None;
                 self.redraw_sidebar(cx);
             }
             _ => {}
@@ -24950,20 +24990,26 @@ impl Tweaker {
         if text.is_empty() {
             return;
         }
-        let height = 18.0;
-        let width = self
+        // The row as it was picked up: its own size, the pointer at the
+        // spot where it took hold, so it reads as carried, not towed.
+        let (offset, size) = self.drag_grab.unwrap_or((dvec2(12.0, 10.0), dvec2(120.0, 20.0)));
+        let text_w = self
             .draw_label
             .prepare_single_line_run(cx, &text)
             .map(|run| run.width_in_lpxs as f64)
-            .unwrap_or_else(|| text.chars().count() as f64 * 5.4)
-            + 12.0;
-        let pass = cx.current_pass_size();
-        let pos = dvec2(
-            (at.x + 14.0).min((pass.x - width).max(0.0)),
-            (at.y + 14.0).min((pass.y - height).max(0.0)),
-        );
-        self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(width, height) });
-        self.draw_label.draw_abs(cx, pos + dvec2(6.0, 3.0), &text);
+            .unwrap_or_else(|| text.chars().count() as f64 * 5.4);
+        let size = dvec2(size.x.max(text_w + 16.0), size.y.max(16.0));
+        let pos = at - offset;
+        let rect = Rect { pos, size };
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.fill_color = vec4(0.30, 0.30, 0.32, 0.96);
+        self.draw_outline.border_color = vec4(0.50, 0.50, 0.53, 1.0);
+        self.draw_outline.border_size = 1.0;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.solid = 0.0;
+        self.draw_outline.draw_abs(cx, rect);
+        let text_pos = dvec2(pos.x + (size.x - text_w) * 0.5, pos.y + (size.y - 11.0) * 0.5);
+        self.draw_label.draw_abs(cx, text_pos, &text);
     }
 
     /// The insertion caret: where the next palette insert goes, on the
