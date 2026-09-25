@@ -9314,6 +9314,12 @@ pub struct Tweaker {
     /// under a still pointer changes) is not a new position.
     #[rust]
     drag_last: Option<DVec2>,
+    /// The window body the design drag picks from, kept for the end of a
+    /// dwell: the target is picked again there from the layout on screen,
+    /// not taken from a drag event that may have read the frame before a
+    /// rebuild settled.
+    #[rust]
+    drag_body: Option<WidgetRef>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -12297,7 +12303,30 @@ impl Tweaker {
             fields.push(row.item.child(live_id!(value)).area());
             fields.push(row.item.child(live_id!(name_field)).area());
         }
-        fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area))
+        if fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area)) {
+            return true;
+        }
+        // Every other text field in the panel (the size column's width,
+        // height, bounds and aspect inputs among them): whichever holds
+        // the key owns the keys typed into it, Cmd+Z included.
+        fn holds_text(cx: &Cx, widget: &WidgetRef, depth: usize) -> bool {
+            if depth > 24 {
+                return false;
+            }
+            if widget.borrow::<crate::text_input::TextInput>().is_some() {
+                let area = widget.area();
+                return !area.is_empty() && cx.has_key_focus(area);
+            }
+            let mut found = false;
+            widget.children(&mut |_, child| {
+                if !found && holds_text(cx, &child, depth + 1) {
+                    found = true;
+                }
+            });
+            found
+        }
+        self.sidebar.as_ref().is_some_and(|sidebar| holds_text(cx, sidebar, 0))
+            || self.visible.iter().any(|row| holds_text(cx, &row.item, 0))
     }
 
     /// The selection's exact reference: its indexed path. This is what a note
@@ -19304,6 +19333,20 @@ impl Widget for Tweaker {
                 if now >= due {
                     self.design_ghost_due = None;
                     if let Some(want) = self.design_ghost_want.take() {
+                        // The pointer has rested: what is under it now, on
+                        // the frame on screen, is the target.
+                        let want = match (self.drag_body.clone(), self.drag_last) {
+                            (Some(body), Some(at)) if want.is_some() => {
+                                let now_under = self.palette_drop_target(cx, at, &body);
+                                if now_under.is_some() {
+                                    self.design_drop = now_under.clone();
+                                    now_under
+                                } else {
+                                    want
+                                }
+                            }
+                            _ => want,
+                        };
                         self.ghost_retarget(cx, want);
                     }
                 } else {
@@ -24623,13 +24666,19 @@ impl Tweaker {
             .as_mut()
             .map(|s| s.set_prop(cx, &widget, &step.1, &step.2));
         if matches!(result, Some(Ok(()))) {
-            self.design_baked = Some(step);
             // The gesture's Value step is superseded: the value now lives in
             // the source, and the Source step design_after pushes undoes it.
+            // Its ledger entries go too: a reload replays the ledger, so an
+            // entry left behind would put the value back over the undone
+            // source.
             let mut s = session().lock().unwrap();
-            if matches!(s.undo.last(), Some(UndoStep::Value { .. })) {
+            if let Some(UndoStep::Value { seq_start, .. }) = s.undo.last().cloned() {
                 s.undo.pop();
+                let (path, prop) = (step.0.clone(), step.1.clone());
+                s.diff.retain(|e| !(e.path == path && e.prop == prop && e.seq >= seq_start));
             }
+            drop(s);
+            self.design_baked = Some(step);
         }
         self.design_after(cx, result);
     }
@@ -24880,6 +24929,15 @@ impl Tweaker {
             return None;
         }
         let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+        // Only the file under design takes a drop: the rest of the window
+        // (the docs pane, the panels around the canvas) is not a target,
+        // and the pointer says so on its way across.
+        let in_file = crate::designer::widget_source_file(cx, &widget)
+            .map(|file| self.design.as_ref().is_some_and(|s| s.file() == file))
+            .unwrap_or(false);
+        if !in_file {
+            return None;
+        }
         let container = crate::designer::is_container(cx, &widget);
         // The pointer on a container's own space, between or beside its
         // children: the drop goes into the nearest gap between them, which
@@ -24950,6 +25008,7 @@ impl Tweaker {
                 }
                 self.drag_chip = Some((label, e.abs));
                 self.redraw_sidebar(cx);
+                self.drag_body = Some(body.clone());
                 if self.drag_last == Some(e.abs) {
                     if let Ok(mut response) = e.response.lock() {
                         *response =
@@ -24962,8 +25021,10 @@ impl Tweaker {
                 if let Ok(mut response) = e.response.lock() {
                     *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
                 }
+                // By path: a rebuild gives every widget a new uid, and the
+                // same widget under a still pointer is not a new target.
                 let changed = match (&next, &self.design_drop) {
-                    (Some((a, pa)), Some((b, pb))) => a.uid != b.uid || pa != pb,
+                    (Some((a, pa)), Some((b, pb))) => a.path != b.path || pa != pb,
                     (None, None) => false,
                     _ => true,
                 };
@@ -25005,7 +25066,13 @@ impl Tweaker {
                 // drop lands on the target it was made for: keep it, and
                 // the drop is done.
                 if let Some((ghost_uid, ghost_place, _)) = self.design_ghost.clone() {
-                    let same = matches!(&drop, Some((pick, place)) if pick.uid == ghost_uid && *place == ghost_place);
+                    let same = match &drop {
+                        Some((pick, place)) => {
+                            (pick.uid == ghost_uid && *place == ghost_place)
+                                || self.ghost_holds_place(cx, pick.uid, *place)
+                        }
+                        None => false,
+                    };
                     if same {
                         self.ghost_commit(cx);
                         return;
@@ -25034,6 +25101,7 @@ impl Tweaker {
                 self.drag_chip = None;
                 self.drag_grab = None;
                 self.drag_last = None;
+                self.drag_body = None;
                 self.redraw_sidebar(cx);
                 if self.design_drop.take().is_some() {
                     session().lock().unwrap().hover = None;
@@ -25183,6 +25251,36 @@ impl Tweaker {
         }
     }
 
+    /// Whether the ghost already stands where `uid`/`place` would put it:
+    /// before its next sibling, after its previous one, or inside its
+    /// parent as the last child.
+    fn ghost_holds_place(&self, cx: &Cx, uid: u64, place: DesignPlace) -> bool {
+        let Some((_, _, Some(path))) = &self.design_ghost else {
+            return false;
+        };
+        let Some(ghost) = resolve_widget_by_path(cx, path).ok().and_then(|w| w.try_widget_uid()) else {
+            return false;
+        };
+        let Some(parent_uid) = cx.widget_tree().parent_of(ghost) else {
+            return false;
+        };
+        let parent = cx.widget_tree().widget(parent_uid);
+        let mut children: Vec<u64> = Vec::new();
+        parent.children(&mut |_, child| {
+            if let Some(u) = child.try_widget_uid() {
+                children.push(u.0);
+            }
+        });
+        let Some(i) = children.iter().position(|u| *u == ghost.0) else {
+            return false;
+        };
+        match place {
+            DesignPlace::Before => children.get(i + 1) == Some(&uid),
+            DesignPlace::After => i > 0 && children.get(i - 1) == Some(&uid),
+            DesignPlace::Inside => uid == parent_uid.0 && i + 1 == children.len(),
+        }
+    }
+
     /// Whether a ghost is up but not yet on screen: still landing, or
     /// landed and not drawn, so its path finds nothing.
     fn ghost_settling(&self, cx: &Cx) -> bool {
@@ -25238,6 +25336,16 @@ impl Tweaker {
         if let Some((ghost_uid, ghost_place, path)) = self.design_ghost.clone() {
             if matches!(&next, Some((pick, p)) if pick.uid == ghost_uid && *p == ghost_place) {
                 return;
+            }
+            // Already there: the target names the place the ghost stands
+            // in (before its next sibling, after its previous one, inside
+            // its parent as the last child). A rebuild renews every uid,
+            // so the record's key alone cannot say so.
+            if let Some((pick, p)) = &next {
+                if self.ghost_holds_place(cx, pick.uid, *p) {
+                    self.design_ghost = Some((pick.uid, *p, path));
+                    return;
+                }
             }
             let Some((pick, place)) = next else {
                 self.ghost_retract(cx);
