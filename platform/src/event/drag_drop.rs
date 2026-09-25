@@ -6,7 +6,7 @@ use {
         event::{
             event::{DragHit, Event},
             finger::{HitOptions, Inset},
-            KeyModifiers,
+            KeyCode, KeyModifiers,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -104,6 +104,8 @@ pub struct CxDragDrop {
 pub(crate) enum InternalDragEvent {
     Drag(DragEvent),
     Drop(DropEvent),
+    /// The drag was called off (Escape): no drop, only the end.
+    End,
 }
 
 impl CxDragDrop {
@@ -132,6 +134,12 @@ impl CxDragDrop {
                     abs: event.abs,
                     items,
                 }))
+            }
+            // Escape calls the drag off: the items are dropped on the floor
+            // and everyone who watched the drag hears that it ended.
+            Event::KeyDown(event) if event.key_code == KeyCode::Escape => {
+                self.internal_drag_items.take()?;
+                Some(InternalDragEvent::End)
             }
             _ => None,
         }

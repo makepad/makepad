@@ -1255,6 +1255,10 @@ impl Cx {
                     self.call_event_handler(&Event::DragEnd);
                     self.drag_drop.cycle_drag();
                 }
+                crate::event::InternalDragEvent::End => {
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
             }
             return;
         }
