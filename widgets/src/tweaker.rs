@@ -20068,7 +20068,11 @@ impl Widget for Tweaker {
                 } else if rect.size.x <= 0.0 {
                     // Not drawn this frame (another tab is up): the pin
                     // stands, but there is nothing on screen to outline.
-                    log_absent_pick(cx, &pick, &live);
+                    // A widget lifted off the canvas is expected to be
+                    // gone from its place: not worth a line.
+                    if self.move_drag.is_none() {
+                        log_absent_pick(cx, &pick, &live);
+                    }
                     pick.rect = Rect::default();
                 }
             }

@@ -46,6 +46,10 @@ pub struct DesignDoc {
     hunks: Vec<Hunk>,
     undo: Vec<(String, Vec<Hunk>)>,
     redo: Vec<(String, Vec<Hunk>)>,
+    /// The file ends its lines with CR LF (a Windows checkout of an LF
+    /// repository): every edit writes its new lines the same way, or a
+    /// moved line comes back with a different ending than it left with.
+    crlf: bool,
 }
 
 impl DesignDoc {
@@ -60,6 +64,7 @@ impl DesignDoc {
         Self {
             file: file.to_string(),
             base: text.clone(),
+            crlf: text.contains("\r\n"),
             text,
             hunks: Vec::new(),
             undo: Vec::new(),
@@ -114,6 +119,8 @@ impl DesignDoc {
         if self.text[start..end].contains("#(") || replacement.contains("#(") {
             return Err("the edit touches a #() placeholder; that needs a rebuild, not a preview".to_string());
         }
+        let replacement = if self.crlf { with_crlf(replacement) } else { replacement.to_string() };
+        let replacement = replacement.as_str();
         self.undo.push((self.text.clone(), self.hunks.clone()));
         self.redo.clear();
         let hunk = Hunk {
@@ -347,6 +354,20 @@ pub fn unified_diff(file: &str, old: &str, new: &str) -> String {
             }
         }
         k = end;
+    }
+    out
+}
+
+/// `text` with every bare LF made CR LF; line breaks already CR LF stay.
+fn with_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    let mut prev = '\0';
+    for c in text.chars() {
+        if c == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(c);
+        prev = c;
     }
     out
 }
