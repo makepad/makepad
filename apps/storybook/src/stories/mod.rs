@@ -73,6 +73,7 @@ pub mod dropzone;
 pub mod form;
 pub mod property_inspector;
 pub mod hotkeys;
+pub mod gizmo;
 pub mod checkbox;
 pub mod radio_group;
 pub mod select;
@@ -234,6 +235,7 @@ static FILES: &[StoryModule] = &[
     file(form::script_mod, form::STORIES),
     file(property_inspector::script_mod, property_inspector::STORIES),
     file(hotkeys::script_mod, hotkeys::STORIES),
+    file(gizmo::script_mod, gizmo::STORIES),
     // 8 Selection
     file(checkbox::script_mod, checkbox::STORIES),
     file(radio_group::script_mod, radio_group::STORIES),

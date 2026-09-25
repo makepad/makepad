@@ -403,6 +403,7 @@ mod tests {
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
                 ("Hotkeys", &["Hotkey editor", "Keyboard map"]),
+                ("Gizmo3d", &["3D Gizmo"]),
             ],
         ),
         (

@@ -164,6 +164,7 @@ pub mod floating_action;
 pub mod hamburger_menu;
 pub mod property_inspector;
 pub mod chart_shapes;
+pub mod gizmo;
 pub mod toolbar;
 mod column_fit;
 pub mod masonry;
@@ -884,6 +885,7 @@ true
     crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
     crate::chart_shapes::script_mod(vm);
+    crate::gizmo::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::floating_action::script_mod(vm);
     crate::masonry::script_mod(vm);

@@ -1070,6 +1070,27 @@
    ]
   },
   {
+   "component": "Gizmo3d",
+   "aka": [
+    "3d gizmo",
+    "transform gizmo",
+    "manipulator",
+    "view cube",
+    "orientation gizmo",
+    "navigation cube"
+   ],
+   "does": [
+    "translate along an axis or plane",
+    "rotate on a ring",
+    "scale along an axis",
+    "snap to steps",
+    "local or world space",
+    "escape cancels the drag",
+    "snap the camera to a face",
+    "orbit by dragging the cube"
+   ]
+  },
+  {
    "component": "Glass",
    "aka": [
     "frosted backings",

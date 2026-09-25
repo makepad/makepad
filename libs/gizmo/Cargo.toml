@@ -1,0 +1,20 @@
+# makepad-gizmo: 3D manipulation and orientation gizmos as pure math.
+#
+# No Cx and no drawing. Given a view, a projection and a viewport it picks
+# handles under the pointer, turns a drag into a new model (or view) matrix,
+# snaps, and describes its own picture as screen-space primitives for any 2D
+# renderer to paint.
+
+[package]
+name = "makepad-gizmo"
+version = "0.1.0"
+edition = "2021"
+description = "3D transform and orientation gizmos: picking, dragging, snapping and screen-space geometry"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_gizmo"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-math = { path = "../math", version = "1.0.0" }
