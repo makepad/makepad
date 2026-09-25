@@ -58,6 +58,15 @@ pub fn line_names(line: &str, name: &str) -> bool {
         }
         let mut rest = line;
         while let Some(at) = rest.find(lookup) {
+            // A whole macro name: `id!(` inside `live_id!(` is live_id!.
+            let whole = rest[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+            if !whole {
+                rest = &rest[at + lookup.len()..];
+                continue;
+            }
             let inner = &rest[at + lookup.len()..];
             let end = inner.find(')').unwrap_or(inner.len());
             let names = inner[..end]

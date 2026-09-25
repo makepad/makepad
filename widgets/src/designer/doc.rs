@@ -178,6 +178,14 @@ impl DesignDoc {
         self.hunks.push(hunk);
     }
 
+    /// Give the last edit's hunk a new label (a folded edit names all of
+    /// what it did, not its first step).
+    pub fn relabel_last(&mut self, label: &str) {
+        if let Some(hunk) = self.hunks.last_mut() {
+            hunk.label = label.to_string();
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

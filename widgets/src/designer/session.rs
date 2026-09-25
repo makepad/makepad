@@ -169,9 +169,12 @@ impl DesignSession {
 
     /// Fold the last `n` edits into one: one hunk, one undo step. For an
     /// operation made of several edits (a bake of several tweaks).
-    pub fn squash_edits(&mut self, n: usize) {
+    pub fn squash_edits(&mut self, n: usize, label: &str) {
         for _ in 1..n {
             self.doc.squash_last_two();
+        }
+        if n > 1 {
+            self.doc.relabel_last(label);
         }
         self.status = self.status_line();
     }

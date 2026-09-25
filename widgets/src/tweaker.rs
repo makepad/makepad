@@ -24773,8 +24773,9 @@ impl Tweaker {
         // One bake is one edit: a single hunk and a single undo step, however
         // many tweaks (a padding's sides are one each) it wrote.
         if !baked.is_empty() {
+            let label = format!("bake {} tweak{}", baked.len(), if baked.len() == 1 { "" } else { "s" });
             if let Some(s) = self.design.as_mut() {
-                s.squash_edits(baked.len());
+                s.squash_edits(baked.len(), &label);
             }
             self.design_after(cx, Some(Ok(())));
         }
