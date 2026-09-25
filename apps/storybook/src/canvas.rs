@@ -123,6 +123,12 @@ pub struct StoryCanvas {
     /// What the story raised, newest last.
     #[rust]
     log: VecDeque<String>,
+    /// Scroll positions to put back once the rebuilt story has laid out:
+    /// the path from the story root and the offset, for every scrolled
+    /// view the last story had. A rebuild mid-drag that threw the page
+    /// back to the top took the pointer's target away with it.
+    #[rust]
+    restore_scroll: Vec<(Vec<LiveId>, DVec2)>,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
 }
@@ -147,6 +153,28 @@ impl WidgetNode for StoryCanvas {
     }
 }
 
+/// Every view under `root` (itself included) that is scrolled away from its
+/// origin: its id path from `root` and its offset.
+fn scrolled_views(cx: &Cx, root: &WidgetRef) -> Vec<(Vec<LiveId>, DVec2)> {
+    fn walk(cx: &Cx, widget: &WidgetRef, path: &mut Vec<LiveId>, out: &mut Vec<(Vec<LiveId>, DVec2)>) {
+        if let Some(view) = widget.borrow::<View>() {
+            if let Some(extent) = view.scroll_extent() {
+                if extent.pos.x != 0.0 || extent.pos.y != 0.0 {
+                    out.push((path.clone(), extent.pos));
+                }
+            }
+        }
+        widget.children(&mut |id, child| {
+            path.push(id);
+            walk(cx, &child, path, out);
+            path.pop();
+        });
+    }
+    let mut out = Vec::new();
+    walk(cx, root, &mut Vec::new(), &mut out);
+    out
+}
+
 impl StoryCanvas {
     /// Show the template with this name. Switching stories forgets the
     /// previous story's edits and log.
@@ -169,6 +197,7 @@ impl StoryCanvas {
     /// Drop the shown story and build it afresh, keeping the edits to
     /// re-apply.
     pub fn rebuild(&mut self, cx: &mut Cx) {
+        self.restore_scroll = self.shown.as_ref().map(|(_, page)| scrolled_views(cx, page)).unwrap_or_default();
         self.shown = None;
         self.build(cx);
     }
@@ -361,6 +390,18 @@ impl Widget for StoryCanvas {
             page.draw_walk(cx, scope, w)?;
         }
         cx.end_turtle_with_area(&mut self.area);
+        // The rebuilt story has laid out, so its views know how far they
+        // can scroll: put the last story's offsets back and draw once more.
+        if !self.restore_scroll.is_empty() {
+            let restore = std::mem::take(&mut self.restore_scroll);
+            for (path, pos) in restore {
+                let target = if path.is_empty() { page.clone() } else { page.widget(cx, &path) };
+                if let Some(mut view) = target.borrow_mut::<View>() {
+                    view.set_scroll_pos(cx, pos);
+                };
+            }
+            page.redraw(cx);
+        }
         DrawStep::done()
     }
 }
