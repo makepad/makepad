@@ -24846,16 +24846,24 @@ impl Tweaker {
         }
     }
 
-    /// Whether `uid` is the ghost widget or lies inside it.
+    /// Whether `uid` is the ghost widget or lies inside it. A ghost that
+    /// has landed but not yet drawn is not in the widget tree to be found;
+    /// until it is, every pick counts as the ghost's own, because the
+    /// pointer has not moved and the layout under it is mid-change.
     fn pick_is_ghost(&self, cx: &Cx, uid: u64) -> bool {
-        let Some((_, _, Some(path))) = &self.design_ghost else {
+        let Some((_, _, path)) = &self.design_ghost else {
             return false;
+        };
+        // Still landing: nothing to resolve yet. A landing that named no
+        // widget leaves nothing to hold on to.
+        let Some(path) = path else {
+            return self.design_ghost_pending;
         };
         let Ok(ghost) = resolve_widget_by_path(cx, path) else {
-            return false;
+            return true;
         };
         let Some(ghost_uid) = ghost.try_widget_uid() else {
-            return false;
+            return true;
         };
         let mut cur = Some(WidgetUid(uid));
         for _ in 0..64 {
