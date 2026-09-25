@@ -1216,6 +1216,39 @@
    ]
   },
   {
+   "component": "Hotkeys",
+   "aka": [
+    "keyboard shortcuts editor",
+    "key bindings",
+    "keybindings",
+    "keymap",
+    "rebind keys",
+    "remap shortcuts",
+    "shortcut settings",
+    "keyboard layout",
+    "on screen keyboard",
+    "keyboard overlay"
+   ],
+   "does": [
+    "capture the next key combination",
+    "escape cancels a capture",
+    "backspace clears a binding",
+    "reset to the default chord",
+    "reset all bindings",
+    "undo a rebinding",
+    "conflicting chords are marked",
+    "filter the commands",
+    "a focused scope beats a global binding",
+    "typing keys stay with the text field",
+    "tint keys by their modifiers",
+    "light the keys held down",
+    "bindings of a hovered key in a tip",
+    "ansi and iso layouts",
+    "number pad and navigation cluster",
+    "save the changed bindings"
+   ]
+  },
+  {
    "component": "Html",
    "aka": [
     "markup",

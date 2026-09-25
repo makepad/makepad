@@ -402,6 +402,7 @@ mod tests {
                 ("Dropzone", &["Overview", "Well states"]),
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
+                ("Hotkeys", &["Hotkey editor", "Keyboard map"]),
             ],
         ),
         (

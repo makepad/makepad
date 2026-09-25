@@ -133,6 +133,9 @@ pub mod rating;
 pub mod tag_field;
 pub mod radio_group;
 pub mod kbd;
+pub mod hotkeys;
+pub mod hotkey_editor;
+pub mod keyboard_map;
 pub mod typography;
 pub mod tree;
 pub mod list_item;
@@ -315,6 +318,9 @@ pub use crate::{
     tag_field::*,
     radio_group::*,
     kbd::*,
+    hotkeys::*,
+    hotkey_editor::*,
+    keyboard_map::*,
     typography::*,
     tree::*,
     list_item::*,
@@ -871,6 +877,9 @@ true
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
     crate::command_palette::script_mod(vm);
+    // After TextInput, Button, KbdGroup and the tip they build on.
+    crate::hotkey_editor::script_mod(vm);
+    crate::keyboard_map::script_mod(vm);
     crate::radial_menu::script_mod(vm);
     crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
