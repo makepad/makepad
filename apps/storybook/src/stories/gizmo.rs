@@ -455,7 +455,7 @@ The picking, dragging, snapping and pictures are pure math in `makepad-gizmo`, r
                     "Gizmo3dMode.Scale",
                     "Gizmo3dMode.Universal",
                 ],
-                default: 0,
+                default: 3,
             },
         },
         Control {

@@ -39,11 +39,11 @@ use std::f32::consts::{PI, TAU};
 /// What the gizmo manipulates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum GizmoMode {
-    #[default]
     Translate,
     Rotate,
     Scale,
-    /// Translate, rotate and scale handles at once.
+    /// Translate, rotate and scale handles at once: the default.
+    #[default]
     Universal,
 }
 

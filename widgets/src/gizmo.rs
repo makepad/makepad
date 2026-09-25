@@ -147,7 +147,7 @@ script_mod! {
         width: Fill
         height: Fill
         /** Translate, Rotate, Scale or Universal */
-        mode: mod.widgets.Gizmo3dMode.Translate
+        mode: mod.widgets.Gizmo3dMode.Universal
         /** World or Local axes for translate and rotate; scale is always local */
         space: mod.widgets.Gizmo3dSpace.World
         /** snap while dragging; the primary modifier inverts it 0..1 step 1 */
@@ -216,11 +216,11 @@ script_mod! {
 /// What the transform gizmo manipulates.
 #[derive(Copy, Clone, Debug, PartialEq, Script, ScriptHook, Default)]
 pub enum Gizmo3dMode {
-    #[pick]
-    #[default]
     Translate,
     Rotate,
     Scale,
+    #[pick]
+    #[default]
     Universal,
 }
 
