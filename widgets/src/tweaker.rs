@@ -1597,6 +1597,12 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
 /// area, its draw list, and what the attached set and the list say about
 /// it, logged once per widget so a frame loop does not flood the log.
 fn log_absent_pick(cx: &Cx, pick: &TweakPick, live: &WidgetRef) {
+    // The window's own chrome (the caption bar and its buttons) has no
+    // path and no mark to draw; a pick that wandered onto it is not worth
+    // a line.
+    if pick.path.is_empty() {
+        return;
+    }
     thread_local! {
         static LOGGED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
     }
