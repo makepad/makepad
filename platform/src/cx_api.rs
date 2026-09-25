@@ -107,6 +107,7 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn spawn(&mut self, url: &str) {
+        if self.cx.script_data.std.host_io_only() { return; }
         self.cx.platform_ops.push_back(CxOsOp::SpawnSystemBrowser {
             browser_id: self.id.0,
             url: url.to_string(),
@@ -128,6 +129,7 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn set_url(&mut self, url: &str, replace: bool) {
+        if self.cx.script_data.std.host_io_only() { return; }
         self.cx.platform_ops.push_back(CxOsOp::SetSystemBrowserUrl {
             browser_id: self.id.0,
             url: url.to_string(),
@@ -136,6 +138,7 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn history_go(&mut self, delta: i32) {
+        if self.cx.script_data.std.host_io_only() { return; }
         self.cx
             .platform_ops
             .push_back(CxOsOp::SystemBrowserHistoryGo {
@@ -1175,6 +1178,7 @@ impl Cx {
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 
@@ -1231,10 +1235,12 @@ impl Cx {
     }
 
     pub fn browser_update_url(&mut self, url: &str, replace: bool) {
+        if self.script_data.std.host_io_only() { return; }
         <Self as CxOsApi>::browser_update_url(self, url, replace);
     }
 
     pub fn browser_history_go(&mut self, delta: i32) {
+        if self.script_data.std.host_io_only() { return; }
         <Self as CxOsApi>::browser_history_go(self, delta);
     }
 
@@ -1499,6 +1505,7 @@ impl Cx {
     ///
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
     pub fn copy_to_clipboard(&mut self, content: &str) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::CopyToClipboard(content.to_owned()));
     }
@@ -1506,6 +1513,7 @@ impl Cx {
     /// Sets the primary selection (Linux middle-click paste).
     /// No-op on non-Linux platforms.
     pub fn set_primary_selection(&mut self, content: &str) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SetPrimarySelection(content.to_owned()));
     }
@@ -1539,6 +1547,7 @@ impl Cx {
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
+        if self.script_data.std.host_io_only() { return; }
         #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
         {
             self.drag_drop.start_internal_drag(items);
@@ -1564,6 +1573,7 @@ impl Cx {
     /// rejected request completes with `Event::DragEnd`, allowing callers to
     /// release gesture state without platform-specific timeouts.
     pub fn start_external_dragging(&mut self, window_id: WindowId, items: Vec<DragItem>) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops.iter().for_each(|op| {
             if matches!(op, CxOsOp::StartExternalDragging { .. }) {
                 panic!("start external drag twice");
@@ -2097,6 +2107,7 @@ impl Cx {
     }
 
     pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
+        if self.script_data.std.host_io_only() { return; }
         if let Err(err) = self.net.http_start(request_id, request) {
             crate::error!("http_request failed for {}: {}", request_id.0, err);
         }
@@ -2177,6 +2188,7 @@ impl Cx {
         should_loop: bool,
         permission: crate::permission::Permission,
     ) {
+        if self.script_data.std.host_io_only() { return; }
         if let VideoSource::Camera(..) = &source {
             self.pending_camera_playbacks
                 .push(crate::cx::PendingCameraPlayback {
@@ -2358,6 +2370,7 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::PrepareAudioPlayback(
             video_id,
             source,
@@ -2371,6 +2384,7 @@ impl Cx {
     }
 
     pub fn open_system_savefile_dialog(&mut self) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SaveFileDialog(FileDialog::new()));
     }
@@ -2387,6 +2401,7 @@ impl Cx {
     /// On web this should be called directly from a user input handler:
     /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
+        if self.script_data.std.host_io_only() { return; }
         self.file_dialogs.begin(&dialog);
         self.platform_ops
             .push_back(CxOsOp::SelectFileDialog(dialog));
@@ -2415,15 +2430,18 @@ impl Cx {
     /// Open the platform's native save panel. The OS asks about
     /// overwriting before answering `SaveFileSelected`.
     pub fn open_save_file_dialog(&mut self, dialog: FileDialog) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::SaveFileDialog(dialog));
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SaveFolderDialog(FileDialog::new()));
     }
 
     pub fn open_system_openfolder_dialog(&mut self) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SelectFolderDialog(FileDialog::new()));
     }
@@ -2433,6 +2451,7 @@ impl Cx {
     /// [`crate::file_dialogs::FileDialogAction`] in the actions pass —
     /// `FolderSelected` with the chosen path, or `FolderCancelled`.
     pub fn open_select_folder_dialog(&mut self, dialog: FileDialog) {
+        if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SelectFolderDialog(dialog));
     }
@@ -2864,4 +2883,27 @@ impl Cx {
         )
     }
 
+}
+
+#[cfg(test)]
+mod host_io_tests {
+    use super::*;
+
+    #[test]
+    fn host_io_native_widget_paths_do_not_enqueue_external_operations() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.script_data.std.restrict_to_host_io();
+        let before = cx.platform_ops.len();
+        cx.copy_to_clipboard("private");
+        cx.set_primary_selection("private");
+        cx.open_system_savefile_dialog();
+        cx.open_system_openfile_dialog();
+        cx.open_system_openfolder_dialog();
+        cx.open_system_savefolder_dialog();
+        cx.system_browser(LiveId::unique()).spawn("https://example.invalid/private");
+        cx.system_browser(LiveId::unique()).set_url("https://example.invalid/private", false);
+        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Network("https://example.invalid/private".into()), false, false);
+        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Filesystem("/etc/passwd".into()), false, false);
+        assert_eq!(cx.platform_ops.len(), before);
+    }
 }

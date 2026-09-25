@@ -85,6 +85,18 @@ const XR_MAX_FRAMES_IN_FLIGHT: u32 = 3;
 #[cfg(target_os = "android")]
 const XR_MAX_FRAMES_IN_FLIGHT_LIMIT: u32 = 8;
 
+/// Everything the messenger reports below warning level. The Vulkan loader
+/// narrates itself here — every directory it searches for layer and ICD
+/// manifests, every manifest it finds, the layer callstack it assembles —
+/// which is around ninety lines before an app has drawn anything, on every
+/// machine, whether or not the validation layer is loaded.
+const VULKAN_DEBUG_TRACE_TOPIC: &str = "vulkan.debug";
+
+/// The size and format an imported camera buffer came in with. Useful when a
+/// frame arrives wrong, uninteresting on every frame that does not.
+#[cfg(target_os = "android")]
+const VULKAN_CAMERA_TRACE_TOPIC: &str = "vulkan.camera";
+
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -103,18 +115,26 @@ unsafe extern "system" fn vulkan_debug_callback(
     } else if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
         crate::warning!("Vulkan validation [{message_types:?}] {msg}");
     } else {
-        crate::log!("Vulkan validation [{message_types:?}] {msg}");
+        crate::trace!(
+            VULKAN_DEBUG_TRACE_TOPIC,
+            "Vulkan validation [{message_types:?}] {msg}"
+        );
     }
     vk::FALSE
 }
 
 fn vulkan_debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+    // Ask for what we will actually print: the driver skips the callback
+    // entirely for a severity we did not subscribe to, so the loader never
+    // formats its narration in the first place.
+    let mut severity = vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING;
+    if crate::makepad_error_log::trace_enabled(VULKAN_DEBUG_TRACE_TOPIC) {
+        severity |= vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+            | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE;
+    }
     vk::DebugUtilsMessengerCreateInfoEXT::default()
-        .message_severity(
-            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
-        )
+        .message_severity(severity)
         .message_type(
             vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
                 | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
@@ -5636,7 +5656,8 @@ impl CxVulkan {
         unsafe {
             ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
         }
-        crate::warning!(
+        crate::trace!(
+            VULKAN_CAMERA_TRACE_TOPIC,
             "Android Vulkan camera import: size={}x{} vk_format={:?} external_format={} alloc_size={}",
             width.max(1),
             height.max(1),
@@ -6136,7 +6157,8 @@ impl CxVulkan {
         unsafe {
             ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
         }
-        crate::warning!(
+        crate::trace!(
+            VULKAN_CAMERA_TRACE_TOPIC,
             "Android Vulkan camera import: YUV size={}x{} vk_format={:?} external_format={} biplanar={}",
             width.max(1),
             height.max(1),

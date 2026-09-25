@@ -361,8 +361,6 @@ pub struct Window {
     #[new]
     depth_texture: Texture,
     #[live]
-    hide_caption_on_fullscreen: bool,
-    #[live]
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
@@ -851,17 +849,18 @@ impl Window {
                         .window
                         .handle
                         .uses_wayland_client_side_decorations(cx);
-                let wayland_fullscreen = self.window.handle.is_wayland_fullscreen(cx);
                 // With server-side decorations, app caption controls become
                 // a content toolbar; only the native window buttons disappear.
+                //
+                // Our own chrome stays up in fullscreen too. The compositor draws none
+                // there, so dropping ours leaves no way back out -- the max button is the
+                // only path to RestoreWindow, and it lives in this bar.
                 self.view(cx, ids!(caption_bar)).set_visible(
                     cx,
-                    self.show_caption_bar
-                        && (custom_chrome || has_content)
-                        && (!wayland_fullscreen || has_content),
+                    self.show_caption_bar && (custom_chrome || has_content),
                 );
                 self.view(cx, ids!(windows_buttons))
-                    .set_visible(cx, custom_chrome && !wayland_fullscreen);
+                    .set_visible(cx, custom_chrome);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -1462,7 +1461,7 @@ impl WindowRef {
             false
         }
     }
-    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: zoom).
+    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: `toggleFullScreen:`).
     /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
     /// `FullscreenWindow`/`NormalizeWindow` — not handled by every
     /// backend), `maximize`/`restore` push the ops the Windows backend
@@ -1522,17 +1521,20 @@ impl WindowRef {
             inner.window.handle.normal(cx);
         }
     }
-    /// Configure the window's size and position, and whether it's fullscreen or not.
+    /// Configure the window's size, position, title, and whether it starts out big.
     ///
-    /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
-    /// `inner_size` and `position` arguments will be ignored.
+    /// `fullscreen` is the legacy maximize-or-fullscreen flag that `is_fullscreen()`
+    /// reports back, so saving that value on exit and feeding it in here round-trips.
+    /// x11, Wayland and Win32 all create the window MAXIMIZED for it, keeping the title
+    /// bar and chrome buttons; only macOS takes it literally and enters fullscreen,
+    /// where AppKit still supplies an auto-hiding menu bar and traffic lights. Nothing
+    /// here ever produces a chromeless window the user can't get out of.
     ///
-    /// If `fullscreen` is `false`, the window will be set to the specified `inner_size`
-    /// and positioned at `position` on the screen.
+    /// `inner_size` and `position` still apply -- they become the geometry the window
+    /// un-maximizes back to. Wayland ignores `position`; the protocol has no way for a
+    /// client to place its own toplevel.
     ///
-    /// The `title` argument sets the window's title bar text.
-    ///
-    /// This only works in app startup.
+    /// This only works in app startup, before the window is created.
     pub fn configure_window(
         &self,
         cx: &mut Cx,
@@ -1699,20 +1701,6 @@ impl Widget for Window {
                     // areas non-authoritative until the redraw that answers this configure.
                     self.drag_query_cache = None;
                     self.drag_query_layout_valid = false;
-                    match cx.os_type() {
-                        OsType::Windows | OsType::Macos => {
-                            if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
-                                if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    let content = self.caption_contains_app_content(cx);
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && content);
-                                } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar))
-                                        .set_visible(cx, self.show_caption_bar);
-                                };
-                            }
-                        }
-                        _ => (),
-                    }
 
                     // Update the display context if the screen size has changed.
                     // Some platforms send spurious zero-size geometry at startup (notably macOS);

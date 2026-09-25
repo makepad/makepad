@@ -2191,7 +2191,8 @@ impl PortalList {
     /// Otherwise, the list animates until the target item's top edge is positioned at
     /// `top_offset` pixels below the viewport's top edge. A value of `0.0` places the
     /// item flush with the viewport top; `20.0` leaves a 20 px margin. Negative values
-    /// are clamped to `0.0`.
+    /// are clamped to `0.0`. Animating to any item but the last one also stops the list
+    /// from following its end (see `set_tail_range()`).
     pub fn smooth_scroll_to(
         &mut self,
         cx: &mut Cx,
@@ -2271,6 +2272,12 @@ impl PortalList {
         // leftover fling, bounce, or OS momentum stream can't fight or resume
         // after it finishes.
         self.stop_all_scroll_motion();
+        // Scrolling to any item but the last one also stops following the end,
+        // otherwise each draw would pull the list right back down to it.
+        if target_id + 1 < self.range_end {
+            self.tail_range = false;
+            self.tail_adjustment_needed = 0.0;
+        }
         self.scroll_state = ScrollState::ScrollingTo {
             target_id,
             delta: speed.abs() * scroll_direction,
