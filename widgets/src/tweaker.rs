@@ -25359,6 +25359,21 @@ impl Tweaker {
     /// The drop landed on the ghost's own target: the insert stays, joins
     /// the undo history, and the new widget becomes the selection.
     fn ghost_commit(&mut self, cx: &mut Cx) {
+        // A lifted widget carried back to its own place: the drag's edit
+        // came out as no change at all. Nothing to keep, nothing to undo
+        // later; take the empty step back out.
+        let no_op = self
+            .design
+            .as_ref()
+            .and_then(|s| s.doc().hunks().last().map(|h| h.removed == h.replacement))
+            .unwrap_or(false);
+        if no_op && self.design_ghost.is_some() {
+            log!("DESIGN drop: back in its own place, no edit");
+            self.ghost_retract(cx);
+            self.design_msg.clear();
+            self.redraw_sidebar(cx);
+            return;
+        }
         let Some((_, _, path)) = self.design_ghost.take() else {
             return;
         };
