@@ -187,6 +187,23 @@ Add `wait=1` to input requests to wait for the resulting frame.
 Read [App remote control](docs/agents/app-remote.md) for routes and examples,
 or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 
+## Drag and drop, and pointer feedback
+
+The user's rules for every drag in every app (stated repeatedly; the dock's
+tab drag is the reference):
+
+- The cursor holds what it drags: a chip, image or label of the item rides
+  the pointer from the press to the drop.
+- Near a drop target the app shows how the drop would look BEFORE it
+  happens. In a design case (placing a widget, docking a panel) the layout
+  reflows as if the item had been dropped: other elements move or scale to
+  make room, and a ghost occupies that space until the drop or the leave.
+- The one exception is a list reorder, where an insertion line between the
+  rows is the right feedback.
+- The pointer is a hand while it hovers anything that can be dragged.
+- The panel's controls are responsive: rows of buttons and inputs wrap or
+  resize when the panel narrows; tab rows fall back to icons.
+
 ## Threading and realtime ownership
 
 - The UI thread never takes a `Mutex`, `RwLock`, or `Condvar` another thread
