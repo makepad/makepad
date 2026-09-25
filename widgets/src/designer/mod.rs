@@ -24,6 +24,7 @@
 pub mod doc;
 pub mod locate;
 pub mod ops;
+pub mod refs;
 pub mod session;
 pub mod text;
 
@@ -34,3 +35,4 @@ pub use session::{
     PALETTE_GROUPS,
 };
 pub use ops::{fresh_name, rust_safe_value, DesignOp, Placement};
+pub use refs::{references_note, rust_references, Reference};

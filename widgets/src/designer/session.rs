@@ -10,6 +10,7 @@
 use super::doc::{DesignDoc, PreviewOutcome};
 use super::locate::{locate_widget, widget_source_file, NodeSpan};
 use super::ops::{fresh_name, DesignOp, Placement};
+use super::refs;
 use super::text;
 use crate::makepad_draw::*;
 use crate::view::View;
@@ -102,6 +103,9 @@ pub struct DesignSession {
     sync_landed: bool,
     /// One line for the panel: what is under design and what last happened.
     pub status: String,
+    /// A warning the last edit raised beside its success: Rust code that
+    /// looks a renamed or deleted widget up by name. Taken by the host.
+    pub note: Option<String>,
 }
 
 impl DesignSession {
@@ -109,7 +113,8 @@ impl DesignSession {
     pub fn open(cx: &mut Cx, widget: &WidgetRef) -> Result<Self, String> {
         let span = locate_widget(cx, widget, None)?;
         let doc = DesignDoc::from_text(&span.file, span.text);
-        let mut session = Self { doc, landing: None, sync_landed: false, status: String::new() };
+        let mut session =
+            Self { doc, landing: None, sync_landed: false, status: String::new(), note: None };
         session.status = session.status_line();
         Ok(session)
     }
@@ -139,7 +144,9 @@ impl DesignSession {
     pub fn rename(&mut self, cx: &mut Cx, widget: &WidgetRef, name: Option<&str>) -> Result<(), String> {
         let span = self.locate(cx, widget)?;
         let parent = parent_path(&path_of(cx, widget));
+        let old_name = span.node.name().map(|n| n.to_string());
         DesignOp::Rename { node: span, name: name.map(|n| n.to_string()) }.apply(&mut self.doc)?;
+        self.note = old_name.and_then(|old| refs::references_note(self.file(), &old));
         let select = match name {
             Some(name) if !parent.is_empty() => format!("{}.{}", parent, name),
             Some(name) => name.to_string(),
@@ -239,7 +246,9 @@ impl DesignSession {
         let path = path_of(cx, widget);
         let select = match op {
             Structural::Delete => {
+                let name = span.node.name().map(|n| n.to_string());
                 DesignOp::Delete { node: span }.apply(&mut self.doc)?;
+                self.note = name.and_then(|name| refs::references_note(self.file(), &name));
                 Some(parent_path(&path))
             }
             Structural::Duplicate => {
