@@ -1588,6 +1588,58 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
 }
 
 
+/// Why a pick the session holds with a rect draws nothing: the widget's
+/// area, its draw list, and what the attached set and the list say about
+/// it, logged once per widget so a frame loop does not flood the log.
+fn log_absent_pick(cx: &Cx, pick: &TweakPick, live: &WidgetRef) {
+    thread_local! {
+        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    if LAST.with(|last| last.get()) == pick.uid {
+        return;
+    }
+    LAST.with(|last| last.set(pick.uid));
+    let area = live.area();
+    let attached = attached_cache().lock().unwrap().clone();
+    let on = area.is_attached(cx, &attached);
+    let detail = match area {
+        Area::Instance(inst) => {
+            let list = cx.draw_lists.checked_index(inst.draw_list_id);
+            format!(
+                "instance list={:?} count={} redraw inst={} list={:?}",
+                inst.draw_list_id,
+                inst.instance_count,
+                inst.redraw_id,
+                list.map(|l| l.redraw_id)
+            )
+        }
+        Area::Rect(ra) => {
+            let list = cx.draw_lists.checked_index(ra.draw_list_id);
+            let entry = list.and_then(|l| l.rect_areas.get(ra.rect_id));
+            format!(
+                "rect list={:?} rect_id={} of {:?} redraw ra={} list={:?} rect={:?} clip={:?}",
+                ra.draw_list_id,
+                ra.rect_id,
+                list.map(|l| l.rect_areas.len()),
+                ra.redraw_id,
+                list.map(|l| l.redraw_id),
+                entry.map(|e| e.rect),
+                entry.map(|e| e.draw_clip)
+            )
+        }
+        Area::Empty => "empty".to_string(),
+    };
+    log!(
+        "TWEAK absent {} ({}) session rect {:?}: attached={} of {} lists; {}",
+        pick.path,
+        pick.ty,
+        pick.rect,
+        on,
+        attached.len(),
+        detail
+    );
+}
+
 /// Navigation-class widgets keep working under the pick: "since tabs show
 /// whole new chunks of clickable UI", a plain click on a tab, fold button,
 /// dropdown opener or stack-navigation control both PINS it and performs
@@ -19548,6 +19600,7 @@ impl Widget for Tweaker {
                 } else if rect.size.x <= 0.0 {
                     // Not drawn this frame (another tab is up): the pin
                     // stands, but there is nothing on screen to outline.
+                    log_absent_pick(cx, &pick, &live);
                     pick.rect = Rect::default();
                 }
             }
@@ -19557,6 +19610,9 @@ impl Widget for Tweaker {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
                 let rect = live_rect(cx, &live);
+                if rect.size.x <= 0.0 {
+                    log_absent_pick(cx, &pick, &live);
+                }
                 pick.rect = if rect.size.x > 0.0 { rect } else { Rect::default() };
             }
             pick
