@@ -2722,6 +2722,9 @@ pub fn window_intercept(
                             let mut s = session().lock().unwrap();
                             s.down_consumed = true;
                             s.edit_hold = true;
+                            // A new drag is a new gesture: its steps coalesce into one undo
+                            // step of their own, not into the last drag's.
+                            s.undo_open = false;
                         }
                         redraw_tweaker(cx, &tweaker);
                         return true;
@@ -2792,6 +2795,9 @@ pub fn window_intercept(
                             let mut s = session().lock().unwrap();
                             s.down_consumed = true;
                             s.edit_hold = true;
+                            // A new drag is a new gesture: its steps coalesce into one undo
+                            // step of their own, not into the last drag's.
+                            s.undo_open = false;
                         }
                         redraw_tweaker(cx, &tweaker);
                         return true;
@@ -9303,6 +9309,11 @@ pub struct Tweaker {
     /// the selection's rect at the press; the press position).
     #[rust]
     size_drag: Option<(usize, Rect, DVec2)>,
+    /// Where the last drag event of a design drag was: one delivered
+    /// again at the same point (the OS repeats a move when the window
+    /// under a still pointer changes) is not a new position.
+    #[rust]
+    drag_last: Option<DVec2>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -24852,7 +24863,12 @@ impl Tweaker {
         }
         // Picked from the window's body view, as every other pick is: the
         // widget tree's root handle is not a widget to walk from.
-        let pick = resolve_pick(cx, body, abs, self.my_window.unwrap_or(0))?;
+        let Some(pick) = resolve_pick(cx, body, abs, self.my_window.unwrap_or(0)) else {
+            // Right after a landing nothing has a rect yet: the pick finds
+            // nothing until the rebuilt tree has drawn. The target holds
+            // until the ghost is on screen; a miss after that is a miss.
+            return if self.ghost_settling(cx) { self.design_drop.clone() } else { None };
+        };
         // The ghost occupies the space the drop would take: a pointer over
         // it (or anything inside it) is still on the target it stands for.
         if self.pick_is_ghost(cx, pick.uid) {
@@ -24934,6 +24950,14 @@ impl Tweaker {
                 }
                 self.drag_chip = Some((label, e.abs));
                 self.redraw_sidebar(cx);
+                if self.drag_last == Some(e.abs) {
+                    if let Ok(mut response) = e.response.lock() {
+                        *response =
+                            if self.design_drop.is_some() { DragResponse::Move } else { DragResponse::None };
+                    }
+                    return;
+                }
+                self.drag_last = Some(e.abs);
                 let next = self.palette_drop_target(cx, e.abs, body);
                 if let Ok(mut response) = e.response.lock() {
                     *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
@@ -24967,6 +24991,7 @@ impl Tweaker {
                 }
                 self.drag_chip = None;
                 self.drag_grab = None;
+                self.drag_last = None;
                 // The target is read from the drop itself: the pointer-up
                 // that precedes the drop goes through the body's pick
                 // handling, which may have moved the hover and the state
@@ -25008,6 +25033,7 @@ impl Tweaker {
             Event::DragEnd => {
                 self.drag_chip = None;
                 self.drag_grab = None;
+                self.drag_last = None;
                 self.redraw_sidebar(cx);
                 if self.design_drop.take().is_some() {
                     session().lock().unwrap().hover = None;
@@ -25151,6 +25177,18 @@ impl Tweaker {
         }
     }
 
+    /// Whether a ghost is up but not yet on screen: still landing, or
+    /// landed and not drawn, so its path finds nothing.
+    fn ghost_settling(&self, cx: &Cx) -> bool {
+        match &self.design_ghost {
+            None => false,
+            Some((_, _, None)) => self.design_ghost_pending,
+            Some((_, _, Some(path))) => {
+                resolve_widget_by_path(cx, path).ok().and_then(|w| w.try_widget_uid()).is_none()
+            }
+        }
+    }
+
     /// Whether `uid` is the ghost widget or lies inside it. A ghost that
     /// has landed but not yet drawn is not in the widget tree to be found;
     /// until it is, every pick counts as the ghost's own, because the
@@ -25207,6 +25245,7 @@ impl Tweaker {
         if self.design_ghost_failed.contains(&(pick.uid, place)) {
             return;
         }
+        log!("DESIGN ghost: {place:?} {}", pick.path);
         let index = self.palette_drag;
         let lifted = self.move_drag.clone();
         if index.is_none() && lifted.is_none() {
@@ -25214,6 +25253,7 @@ impl Tweaker {
         }
         let target = cx.widget_tree().widget(WidgetUid(pick.uid));
         if target.is_empty() {
+            log!("DESIGN ghost: the target {} is gone from the tree", pick.path);
             return;
         }
         self.design_ghost_pending = true;
@@ -25239,10 +25279,11 @@ impl Tweaker {
 
     /// Take the provisional insert back out of the source and the canvas.
     fn ghost_retract(&mut self, cx: &mut Cx) {
-        if self.design_ghost.take().is_none() {
+        let Some((uid, place, _)) = self.design_ghost.take() else {
             self.design_ghost_want = None;
             return;
-        }
+        };
+        log!("DESIGN ghost retracted (was {place:?} {uid})");
         self.design_ghost_pending = false;
         let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
         let result = self.design.as_mut().map(|s| s.undo(cx, keep));
