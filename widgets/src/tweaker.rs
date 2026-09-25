@@ -15925,7 +15925,11 @@ impl Tweaker {
                 let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
                 let result = self.design.as_mut().map(|s| s.undo(cx, keep));
                 match result {
-                    Some(Ok(())) => log!("TWEAK undo source {label}"),
+                    Some(Ok(())) => {
+                        log!("TWEAK undo source {label}");
+                        // The note the undone edit raised is about that edit.
+                        self.design_msg.clear();
+                    }
                     Some(Err(error)) => {
                         log!("TWEAK undo source failed: {error}");
                         session().lock().unwrap().undo.push(step);
@@ -16022,6 +16026,7 @@ impl Tweaker {
                     Some(Ok(())) => {
                         log!("TWEAK redo source {label}");
                         session().lock().unwrap().undo.push(step.clone());
+                        self.design_msg.clear();
                     }
                     Some(Err(error)) => {
                         log!("TWEAK redo source failed: {error}");
