@@ -16311,6 +16311,7 @@ impl Tweaker {
                         log!("TWEAK undo source {label}");
                         // The note the undone edit raised is about that edit.
                         self.design_msg.clear();
+                        self.design_settle(cx);
                     }
                     Some(Err(error)) => {
                         log!("TWEAK undo source failed: {error}");
@@ -16407,6 +16408,7 @@ impl Tweaker {
                 match result {
                     Some(Ok(())) => {
                         log!("TWEAK redo source {label}");
+                        self.design_settle(cx);
                         session().lock().unwrap().undo.push(step.clone());
                         self.design_msg.clear();
                     }
@@ -24477,6 +24479,15 @@ impl Tweaker {
             .as_mut()
             .map(|s| s.insert(cx, &widget, place, &entry.name, &entry.body));
         self.design_after(cx, result);
+    }
+
+    /// A preview the app's own hook has already rebuilt the tree for (the
+    /// storybook re-runs one story file) lands now: no live edit is coming
+    /// to land it, and a landing left standing holds every later ghost.
+    fn design_settle(&mut self, cx: &mut Cx) {
+        if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+            self.design_landed(cx);
+        }
     }
 
     /// `Event::LiveEdit` with a preview in flight: it has landed. The
