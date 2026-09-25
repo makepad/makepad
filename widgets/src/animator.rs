@@ -548,6 +548,20 @@ impl AnimatorAction {
     }
 }
 
+/// How the Animator would move a state group into a state: the duration and
+/// ease of the `Play` it picks, and whether the state asks for a redraw.
+/// Read with [`Animator::state_motion`] so a tween can move the same way
+/// (GSAP: the `duration` and `ease` of a tween built from a CSS transition).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StateMotion {
+    /// Seconds: the `Forward` duration, 0 for `Snap`.
+    pub secs: f64,
+    /// The state's `ease` (`Ease::Linear` when unset, as the Animator uses).
+    pub ease: Ease,
+    /// The state's `redraw` flag.
+    pub redraw: bool,
+}
+
 impl Animator {
     /// The VM that owns this animator's script objects: the isolate VM of the
     /// `Splash` the widget was built in, or `MAIN_SPLASH_VM_ID` for the app VM.
@@ -597,6 +611,63 @@ impl Animator {
             .unwrap_or(group.default);
         let state = group.states.get(&state_id)?;
         state.apply.as_ref().map(|apply| apply.as_object())
+    }
+
+    /// The motion the Animator would play for `group.state` coming from
+    /// `from_state` (read only; nothing starts). The `Play` is picked the way
+    /// [`Animator::play`] picks it: the state's `from[from_state]`, else
+    /// `from[all]`, else `Forward { duration: 0.3 }`. `from_state` `None`
+    /// means where the group is now (its running track's state, else its
+    /// current state, else its default).
+    ///
+    /// `Forward` gives its duration and `Snap` gives 0. `None` wherever
+    /// `play` would not run a plain forward motion to `state`: an unknown
+    /// group or state, a state with no `apply`, the group already resting in
+    /// `state` (with `from_state` `None`: `play` then does nothing), a
+    /// `Reverse` (it runs the mix from `end` back toward the start values,
+    /// the opposite of a tween to `state`) and the loops (which never end).
+    ///
+    /// ```text
+    /// if let Some(m) = self.animator.state_motion(id!(hover), id!(on), None) {
+    ///     let o = TweenOpts::new().duration(m.secs).ease(m.ease.into());
+    /// }
+    /// ```
+    pub fn state_motion(
+        &self,
+        group: LiveId,
+        state: LiveId,
+        from_state: Option<LiveId>,
+    ) -> Option<StateMotion> {
+        let g = self.groups.get(&group)?;
+        let target = g.states.get(&state)?;
+        target.apply.as_ref()?;
+        let current = self.current_states.get(&group).copied().unwrap_or(g.default);
+        let track = self.tracks.iter().find(|t| t.group_id == group);
+        let from = match from_state {
+            Some(f) => f,
+            // Mirrors `play`: resting in `state` already means no motion.
+            None if current == state && track.is_none() => return None,
+            None => track.map(|t| t.state_id).unwrap_or(current),
+        };
+        let play = target
+            .from
+            .get(&from)
+            .or_else(|| target.from.get(&id!(all)))
+            .copied()
+            .unwrap_or(Play::Forward { duration: 0.3 });
+        let secs = match play {
+            Play::Forward { duration } => duration,
+            Play::Snap => 0.0,
+            Play::Reverse { .. }
+            | Play::Loop { .. }
+            | Play::ReverseLoop { .. }
+            | Play::BounceLoop { .. } => return None,
+        };
+        Some(StateMotion {
+            secs,
+            ease: target.ease.unwrap_or(Ease::Linear),
+            redraw: target.redraw,
+        })
     }
 
     /// Start animating to a new state
@@ -1873,5 +1944,69 @@ impl Ease {
                 return ((ay * u + by) * u + cy) * u;
             }
         }
+    }
+}
+
+/// The tween engine's ease for an Animator ease, bit for bit: `Easing::from(&e).map(t)`
+/// equals `e.map(t)` for every `t` (the parity family of `makepad_tween::Easing`).
+/// This is how theme motion tokens (`theme.motion_ease_*`, read into an
+/// `#[live] ease: Ease` field) reach a tween (GSAP `ease`):
+///
+/// ```text
+/// TweenOpts::new().duration(self.open_secs).ease((&self.open_ease).into())
+/// ```
+impl From<&Ease> for crate::tween::Easing {
+    fn from(e: &Ease) -> Self {
+        use crate::tween::Easing as E;
+        match *e {
+            Ease::Linear => E::Linear,
+            Ease::None => E::Instant,
+            Ease::Constant(c) => E::Constant(c),
+            Ease::InQuad => E::InQuad,
+            Ease::OutQuad => E::OutQuad,
+            Ease::InOutQuad => E::InOutQuad,
+            Ease::InCubic => E::InCubic,
+            Ease::OutCubic => E::OutCubic,
+            Ease::InOutCubic => E::InOutCubic,
+            Ease::InQuart => E::InQuart,
+            Ease::OutQuart => E::OutQuart,
+            Ease::InOutQuart => E::InOutQuart,
+            Ease::InQuint => E::InQuint,
+            Ease::OutQuint => E::OutQuint,
+            Ease::InOutQuint => E::InOutQuint,
+            Ease::InSine => E::InSine,
+            Ease::OutSine => E::OutSine,
+            Ease::InOutSine => E::InOutSine,
+            Ease::InExp => E::InExp,
+            Ease::OutExp => E::OutExp,
+            Ease::InOutExp => E::InOutExp,
+            Ease::InCirc => E::InCirc,
+            Ease::OutCirc => E::OutCirc,
+            Ease::InOutCirc => E::InOutCirc,
+            Ease::InElastic => E::InElastic,
+            Ease::OutElastic => E::OutElastic,
+            Ease::InOutElastic => E::InOutElastic,
+            Ease::InBack => E::InBack,
+            Ease::OutBack => E::OutBack,
+            Ease::InOutBack => E::InOutBack,
+            Ease::InBounce => E::InBounce,
+            Ease::OutBounce => E::OutBounce,
+            Ease::InOutBounce => E::InOutBounce,
+            Ease::ExpDecay { d1, d2, max } => E::exp_decay(d1, d2, max),
+            Ease::Pow { begin, end } => E::pow(begin, end),
+            Ease::Bezier { cp0, cp1, cp2, cp3 } => E::Bezier {
+                x1: cp0,
+                y1: cp1,
+                x2: cp2,
+                y2: cp3,
+            },
+        }
+    }
+}
+
+/// The same conversion as `From<&Ease>`, by value.
+impl From<Ease> for crate::tween::Easing {
+    fn from(e: Ease) -> Self {
+        Self::from(&e)
     }
 }

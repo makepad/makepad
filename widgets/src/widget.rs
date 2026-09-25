@@ -1610,6 +1610,25 @@ impl WidgetRef {
             vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
     }
+
+    /// `Apply::Animate` of `value` onto the widget this ref holds, without the
+    /// unconditional `redraw` of [`WidgetRef::script_apply`]: shader instance
+    /// values land in the GPU buffer directly, and a caller that moved layout
+    /// fields redraws itself. Nothing is created: an empty ref (or one that is
+    /// already borrowed, such as the calling widget's own ref from inside its
+    /// `handle_event`) answers `false` and is left untouched.
+    pub(crate) fn script_apply_animate(&self, vm: &mut ScriptVm, value: ScriptValue) -> bool {
+        let Ok(mut inner) = self.0.try_borrow_mut() else {
+            return false;
+        };
+        let Some(component) = inner.as_mut() else {
+            return false;
+        };
+        component
+            .widget
+            .script_apply(vm, &Apply::Animate, &mut Scope::empty(), value);
+        true
+    }
 }
 
 impl WidgetWeakRef {

@@ -9,6 +9,7 @@ pub use makepad_script::script_eval;
 pub use makepad_script::{ScriptValue, ScriptVm};
 
 pub use makepad_html;
+pub use makepad_tween;
 #[cfg(feature = "pdf")]
 pub use makepad_pdf_parse;
 
@@ -17,6 +18,7 @@ pub use makepad_draw::makepad_zune_png;
 
 // Core modules (used internally first)
 pub mod animator;
+pub mod tween;
 pub mod font_policy;
 pub mod desktop_style;
 pub mod app_icon;

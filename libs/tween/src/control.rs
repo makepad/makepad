@@ -152,6 +152,27 @@ impl TweenEngine {
         self.after_control();
     }
 
+    /// [`TweenEngine::finish`] for the root-level animations that are
+    /// playing: the ones [`TweenEngine::is_active`] counts (linked, not
+    /// killed, not paused, time scale not 0). A host applying reduced motion
+    /// on every frame calls this, so a paused (or scrubbed) timeline keeps
+    /// its playhead instead of jumping to its end.
+    pub fn finish_all_playing(&mut self) {
+        if self.root == NIL {
+            return;
+        }
+        let mut c = self.cold[self.root as usize].first;
+        while c != NIL {
+            let h = &self.hot[c as usize];
+            let next = h.next;
+            if h.ts != 0.0 && h.flags & F_KILLED == 0 {
+                self.finish_node(c);
+            }
+            c = next;
+        }
+        self.after_control();
+    }
+
     pub(crate) fn finish_node(&mut self, n: u32) {
         match self.cold[n as usize].reduce {
             Reduce::JumpToEnd => {
