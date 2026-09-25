@@ -696,3 +696,49 @@ fn slot_key_of_an_unknown_slot_is_the_default() {
     let e = TweenEngine::new();
     assert_eq!(e.slot_key(SlotId(7)), (TargetId(0), PropKey(0)));
 }
+
+#[test]
+fn finish_all_playing_skips_paused_and_stopped_clocks() {
+    // The reduced-motion path: every root child that is playing (the ones
+    // `is_active` counts) jumps to its end; a paused one and one with time
+    // scale 0 keep their playheads.
+    let mut e = TweenEngine::new();
+    seed_all(&mut e, 5, X, 0.0);
+    let playing = e.to(one(0), &[to(X, 100.0)], lin(1.0));
+    let paused = e.to(one(1), &[to(X, 100.0)], lin(1.0));
+    let stopped = e.to(one(2), &[to(X, 100.0)], lin(1.0));
+    let tl = e.timeline(TimelineOpts::new());
+    e.tl(tl)
+        .to(one(3), &[to(X, 100.0)], lin(1.0), Position::END);
+    let future = e.to(one(4), &[to(X, 100.0)], lin(1.0).delay(5.0));
+    e.advance(0.25);
+    e.anim(paused).pause();
+    e.anim(stopped).set_time_scale(0.0);
+    assert!(e.is_active());
+
+    e.finish_all_playing();
+
+    assert_eq!([val(&e, 0, X), val(&e, 3, X), val(&e, 4, X)], [100.0; 3]);
+    for (id, name) in [(playing, "playing"), (future, "future")] {
+        assert!(!e.anim_ref(id).is_alive(), "{name} finished and removed");
+    }
+    // A timeline is kept by default: finished, unlinked, its handle valid.
+    let t = e.anim_ref(tl);
+    assert!(t.is_alive() && !t.is_active());
+    assert_eq!(t.total_time(), 1.0);
+    close(val(&e, 1, X), 25.0, 1e-9, "paused keeps its value");
+    close(val(&e, 2, X), 25.0, 1e-9, "time scale 0 keeps its value");
+    let p = e.anim_ref(paused);
+    assert!(p.is_alive() && p.paused());
+    close(p.total_time(), 0.25, 1e-12, "paused keeps its playhead");
+    let s = e.anim_ref(stopped);
+    assert!(s.is_alive() && s.time_scale() == 0.0);
+    close(s.total_time(), 0.25, 1e-12, "stopped keeps its playhead");
+    assert!(!e.is_active(), "only idle animations are left");
+
+    // Resumed, they play on from where they were.
+    e.anim(paused).resume();
+    e.advance(0.25);
+    close(val(&e, 1, X), 50.0, 1e-9, "resumed from its playhead");
+    close(val(&e, 2, X), 25.0, 1e-9, "time scale 0 still holds");
+}

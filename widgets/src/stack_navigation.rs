@@ -1,8 +1,37 @@
+use crate::tween::{
+    prop, tag, ClockPolicy, EventKind, LagSmoothing, PropKey, PropTo, Tag, TargetId, TweenEvent,
+    TweenHost, TweenOpts,
+};
 use crate::{
     animator::*, button::*, label::*, makepad_derive_widget::*, makepad_draw::*, view::*,
     widget::*, widget_match_event::WidgetMatchEvent, widget_tree::CxWidgetExt,
 };
 use std::collections::HashMap;
+
+/// The slide's clock: raw frame deltas with no lag clamp (the Animator it
+/// replaces measured `nf.time - start_time`), and a first frame of 0.
+const SLIDE_CLOCK: ClockPolicy = ClockPolicy {
+    lag: Some(LagSmoothing::OFF),
+    first_dt: 0.0,
+    follow_ticker: true,
+};
+/// The one target of the slide host: this view.
+const SLIDE_SELF: TargetId = TargetId(0);
+/// The slid property, `offset`.
+const SLIDE_OFFSET: PropKey = prop(live_id!(offset));
+/// Tags of the two slides, read back from their events.
+const SLIDE_SHOW: Tag = tag(live_id!(slide_show));
+const SLIDE_HIDE: Tag = tag(live_id!(slide_hide));
+/// Show completes once the incoming view is this close to rest.
+const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
+
+/// A slide whose start waits for the script VM (see
+/// `StackNavigationView::start_slide`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlideStart {
+    Show,
+    Hide,
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -158,8 +187,23 @@ pub struct StackNavigationView {
     #[rust(10000.0)]
     offset_to_hide: f64,
 
+    /// Configures the slide (its `slide` group: durations, eases, offsets,
+    /// including apps' overrides); the `slide` host below plays it.
     #[apply_default]
     animator: Animator,
+
+    /// Plays the slide into `offset` and reports its ends as events.
+    #[rust(TweenHost::with_clock(SLIDE_CLOCK))]
+    slide: TweenHost,
+
+    /// The slide host's drained events (reused every frame).
+    #[rust]
+    slide_events: Vec<TweenEvent>,
+
+    /// A slide requested while the script VM was held (inside an apply walk):
+    /// started on the next event, as the Animator replays deferred plays.
+    #[rust]
+    slide_deferred: Option<SlideStart>,
 
     /// The state of the stack view.
     #[rust]
@@ -258,17 +302,23 @@ impl StackNavigationView {
 
 impl Widget for StackNavigationView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The animator first: it flushes deferred cuts, which the slide host
+        // then overrides while it plays.
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
         }
+        if let Some(start) = self.slide_deferred.take() {
+            self.start_slide(cx, start);
+        }
+        self.step_slide(cx, event);
         self.view.handle_event(cx, event, scope);
 
         self.handle_stack_view_closure_request(cx, event, scope);
-        self.trigger_action_post_opening_if_done(cx);
-        self.finish_closure_animation_if_done(cx);
+        self.finish_slide_if_done(cx);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.slide.draw_check(cx);
         let parent_rect = cx.peek_walk_turtle(walk);
         let abs_pos = Vec2d {
             x: parent_rect.pos.x + self.offset,
@@ -282,7 +332,7 @@ impl Widget for StackNavigationView {
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
         self.dismiss_transient_children(cx);
-        self.animator_play(cx, ids!(slide.hide));
+        self.start_slide(cx, SlideStart::Hide);
 
         cx.widget_action(
             self.widget_uid(),
@@ -329,45 +379,172 @@ impl StackNavigationView {
         }
     }
 
-    fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Active
-            && self.animator.in_state(cx, ids!(slide.hide))
-        {
-            if self.offset >= self.offset_to_hide || !self.is_animating() {
-                self.view.visible = false;
-                self.redraw(cx);
-                // The animator's fixed target may be smaller than a wide window.
-                // Completion still hides the view and must release its scope,
-                // including standalone views with no parent to notify.
+    /// Starts the slide into the `slide` group's `show` or `hide` state on
+    /// the host, with the duration, ease and offsets the Animator holds for
+    /// it. The Animator is cut to the destination at once (so `in_state`
+    /// and a re-apply see where the slide goes) and the host carries
+    /// `offset` there. Cuts need the script VM: while an apply walk holds it
+    /// the start waits for the next event, as `Animator::defer_play` does.
+    fn start_slide(&mut self, cx: &mut Cx, start: SlideStart) {
+        if cx.is_script_vm_held() {
+            self.slide_deferred = Some(start);
+            cx.new_next_frame();
+            return;
+        }
+        let (from, to, motion, tag) = match start {
+            SlideStart::Show => {
+                // Each cut applies its state now: read the offsets back.
+                self.animator_cut(cx, ids!(slide.show));
+                let show_to = self.offset;
                 self.animator_cut(cx, ids!(slide.hide));
-                self.set_nav_state(cx, StackNavigationViewState::Inactive);
+                // The show starts from the hide offset (4000, or the app's
+                // override), as the Animator's play from the hide state did.
+                let hide_to = self.offset;
+                let motion = self
+                    .animator
+                    .state_motion(live_id!(slide), live_id!(show), Some(live_id!(hide)))
+                    .unwrap_or(StateMotion {
+                        secs: 0.5,
+                        ease: Ease::ExpDecay {
+                            d1: 0.82,
+                            d2: 0.95,
+                            max: 100,
+                        },
+                        redraw: true,
+                    });
+                self.animator_cut(cx, ids!(slide.show));
+                (hide_to, show_to, motion, SLIDE_SHOW)
+            }
+            SlideStart::Hide => {
+                // From where the view is (the cut applies the hide offset).
+                let from = self.offset;
+                self.animator_cut(cx, ids!(slide.hide));
+                let hide_to = self.offset;
+                let motion = self
+                    .animator
+                    .state_motion(live_id!(slide), live_id!(hide), Some(live_id!(show)))
+                    .unwrap_or(StateMotion {
+                        secs: 5.0,
+                        ease: Ease::ExpDecay {
+                            d1: 0.80,
+                            d2: 0.97,
+                            max: 100,
+                        },
+                        redraw: true,
+                    });
+                (from, hide_to, motion, SLIDE_HIDE)
+            }
+        };
+        self.stop_slide();
+        // The first frame of the slide moves 0, as the Animator's first
+        // frame (its start time) did, even when a slide was cut short.
+        self.slide.clock.stop();
+        self.offset = from;
+        self.slide.seed(SLIDE_SELF, SLIDE_OFFSET, from);
+        let opts = TweenOpts::new()
+            .duration(motion.secs)
+            .ease((&motion.ease).into())
+            .tag(tag)
+            .on_update()
+            .on_complete();
+        self.slide.to(
+            cx,
+            SLIDE_SELF.into(),
+            &[PropTo::to_f64(SLIDE_OFFSET, to)],
+            opts,
+        );
+        if !self.slide.is_active() {
+            // Over as it was built (a duration of 0, or reduced motion):
+            // land now. The next event may be any event, not the host's
+            // frame, and it drains the Complete that reports the end
+            // against this offset.
+            self.offset = self.slide.f64(SLIDE_SELF, SLIDE_OFFSET, to);
+        }
+        self.view.redraw(cx);
+    }
 
-                // Dispatch HideEnd with the parent navigation's UID
-                let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
-                    StackNavigationTransitionAction::HideEnd(parent_uid)
-                } else {
-                    error!(
-                        "No parent navigation UID found for stack view {:?}",
-                        self.widget_uid()
-                    );
-                    return;
-                };
+    /// Ends any slide at once, dropping what it queued (external completion:
+    /// `show_at_rest` / `hide_immediately`, and apps that synthesize
+    /// `ShowDone` / `HideEnd`). `offset` stays where the caller puts it.
+    fn stop_slide(&mut self) {
+        self.slide_deferred = None;
+        // Straight on the engine: the host's kill arms a frame to report the
+        // kill, and there is nothing to report (the events go just below).
+        self.slide.engine.kill_all();
+        self.slide.clear_changes();
+        self.slide.engine.clear_events();
+        self.slide_events.clear();
+    }
 
-                cx.widget_action(self.widget_uid(), hide_end_action);
+    /// Steps the slide host and writes its value into `offset` whenever it
+    /// plays (or landed this frame), so a re-apply or a deferred cut cannot
+    /// snap the view mid-slide. Drains the slide's events.
+    fn step_slide(&mut self, cx: &mut Cx, event: &Event) {
+        let act = self.slide.handle_event(cx, event);
+        if self.slide.is_active() || act.settled() {
+            let v = self.slide.f64(SLIDE_SELF, SLIDE_OFFSET, self.offset);
+            if v != self.offset {
+                self.offset = v;
+                self.view.redraw(cx);
+            }
+        }
+        self.slide.clear_changes();
+        self.slide.swap_events(&mut self.slide_events);
+    }
+
+    /// Reports the ends of the slide from its frames, at the thresholds the
+    /// stack has always used: ShowDone once the incoming view is within
+    /// `OPENING_OFFSET_THRESHOLD` of rest, HideEnd once the outgoing view is
+    /// past `offset_to_hide` (well before the stock 5 s hide ends) or when
+    /// the hide ends.
+    fn finish_slide_if_done(&mut self, cx: &mut Cx) {
+        for i in 0..self.slide_events.len() {
+            let e = self.slide_events[i];
+            let ended = match e.kind {
+                EventKind::Update => false,
+                EventKind::Complete => true,
+                _ => continue,
+            };
+            if e.tag == SLIDE_SHOW
+                && self.state == StackNavigationViewState::Inactive
+                && self.offset < OPENING_OFFSET_THRESHOLD
+            {
+                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
+                self.set_nav_state(cx, StackNavigationViewState::Active);
+                return;
+            }
+            if e.tag == SLIDE_HIDE
+                && self.state == StackNavigationViewState::Active
+                && (self.offset >= self.offset_to_hide || ended)
+            {
+                self.finish_hide(cx);
+                return;
             }
         }
     }
 
-    fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
-        if self.state == StackNavigationViewState::Inactive
-            && self.animator.in_state(cx, ids!(slide.show))
-        {
-            const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
-            if self.offset < OPENING_OFFSET_THRESHOLD {
-                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
-                self.set_nav_state(cx, StackNavigationViewState::Active);
-            }
-        }
+    fn finish_hide(&mut self, cx: &mut Cx) {
+        self.view.visible = false;
+        self.redraw(cx);
+        // The animator's fixed target may be smaller than a wide window.
+        // Completion still hides the view and must release its scope,
+        // including standalone views with no parent to notify.
+        self.stop_slide();
+        self.animator_cut(cx, ids!(slide.hide));
+        self.set_nav_state(cx, StackNavigationViewState::Inactive);
+
+        // Dispatch HideEnd with the parent navigation's UID
+        let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
+            StackNavigationTransitionAction::HideEnd(parent_uid)
+        } else {
+            error!(
+                "No parent navigation UID found for stack view {:?}",
+                self.widget_uid()
+            );
+            return;
+        };
+
+        cx.widget_action(self.widget_uid(), hide_end_action);
     }
 
     /// Finish a state transition without replacing a scope already acquired by
@@ -389,7 +566,7 @@ impl StackNavigationView {
     }
 
     fn is_animating(&self) -> bool {
-        self.animator.is_track_animating(live_id!(slide))
+        self.slide.is_active()
     }
 }
 
@@ -401,13 +578,9 @@ impl StackNavigationViewRef {
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.cancel_scope = Some(inner.begin_cancel_scope_for(cx, CancelScopeKind::Back));
 
-            // Force-reset the animator by cutting to show (offset=0) first,
-            // then cutting to hide, then playing show. This ensures the animator
-            // always sees a state change regardless of its current state.
-            inner.animator_cut(cx, ids!(slide.show)); // force to show state
-            inner.animator_cut(cx, ids!(slide.hide)); // then to hide state
-            inner.offset = view_width; // set actual start offset
-            inner.animator_play(cx, ids!(slide.show)); // now animate hide -> show
+            // Slide from the hide state to the show state (whatever the
+            // animator's current state), timed and eased by the `slide` group.
+            inner.start_slide(cx, SlideStart::Show);
             inner.redraw(cx);
         }
     }
@@ -442,6 +615,7 @@ impl StackNavigationViewRef {
 
     pub fn show_at_rest(&self, cx: &mut Cx, view_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_slide();
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
             inner.offset = 0.0;
@@ -453,6 +627,7 @@ impl StackNavigationViewRef {
 
     pub fn hide_immediately(&self, cx: &mut Cx, view_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
+            inner.stop_slide();
             if inner.view.visible {
                 inner.dismiss_transient_children(cx);
             }
