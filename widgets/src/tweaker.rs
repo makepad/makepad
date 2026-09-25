@@ -1262,6 +1262,11 @@ pub(crate) struct TweakSession {
     /// Bumped by every applied change (any origin) and by resets/clears:
     /// the sidebar rebuilds its rows when it sees a new generation.
     apply_gen: u64,
+    /// The pointer's last move was over the panel band: the cursor was
+    /// put back to the arrow on the way in, and the panel's own widgets
+    /// (a hand on a row that can be dragged or pressed, an I-beam) keep
+    /// theirs while it stays.
+    band_hovered: bool,
 }
 
 fn session() -> &'static Mutex<TweakSession> {
@@ -2558,11 +2563,22 @@ pub fn window_intercept(
                 log!("TWEAK press {:.0},{:.0} in the panel band: not a pick", abs.x, abs.y);
             }
             if kind == PointerKind::Move {
-                // The body's pick-hand must not linger over the panel; the
-                // panel's own widgets set theirs (I-beam etc.) after this.
-                cx.set_cursor(MouseCursor::Default);
+                // The body's pick-hand must not linger over the panel, so
+                // the move that ENTERS the band puts the arrow back. Only
+                // that one: a widget in the panel sets its own cursor once,
+                // on hover-in (a hand on a row that can be dragged, an
+                // I-beam on a field), and a reset on every move took it
+                // straight back off.
+                let entering = !session().lock().unwrap().band_hovered;
+                if entering {
+                    cx.set_cursor(MouseCursor::Default);
+                    session().lock().unwrap().band_hovered = true;
+                }
             }
             return false;
+        }
+        if kind == PointerKind::Move {
+            session().lock().unwrap().band_hovered = false;
         }
     }
 
