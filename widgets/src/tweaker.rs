@@ -1593,12 +1593,22 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
 /// it, logged once per widget so a frame loop does not flood the log.
 fn log_absent_pick(cx: &Cx, pick: &TweakPick, live: &WidgetRef) {
     thread_local! {
-        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static LOGGED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    if LAST.with(|last| last.get()) == pick.uid {
+    let fresh = LOGGED.with(|logged| {
+        let mut logged = logged.borrow_mut();
+        if logged.contains(&pick.uid) {
+            return false;
+        }
+        if logged.len() >= 64 {
+            logged.remove(0);
+        }
+        logged.push(pick.uid);
+        true
+    });
+    if !fresh {
         return;
     }
-    LAST.with(|last| last.set(pick.uid));
     let area = live.area();
     let attached = attached_cache().lock().unwrap().clone();
     let on = area.is_attached(cx, &attached);
@@ -23926,7 +23936,12 @@ impl Tweaker {
                 s.redo.clear();
                 s.undo_open = false;
                 drop(s);
-                self.design_msg.clear();
+                // A rename or delete may leave Rust looking the widget up by
+                // its old name: the edit stands, the note stays on the line.
+                match self.design.as_mut().and_then(|s| s.note.take()) {
+                    Some(note) => self.design_say(cx, note),
+                    None => self.design_msg.clear(),
+                }
                 // The app's own hook may have rebuilt the tree already (the
                 // storybook re-runs one story file): land now, no live edit
                 // is coming.
