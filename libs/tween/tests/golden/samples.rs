@@ -3,14 +3,28 @@
 // Numbers are the golden doubles (shortest round-trip repr, bit-exact). Tolerances are the test's business
 // (see design/gsap_reconciliation.md D: GSAP rounds written property values to 1e-6, so value columns need 5e-7).
 // Columnar samples: `t` is the driver time in visiting order, each Series is aligned with it; everything else is in `meta`.
-#![allow(dead_code, unused_imports, clippy::approx_constant, clippy::excessive_precision, clippy::unreadable_literal)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::approx_constant,
+    clippy::excessive_precision,
+    clippy::unreadable_literal
+)]
 use super::common::*;
 
 pub const GSAP_VERSION: &str = "3.15.0";
 pub const NOTES: &[&str] = &["Each case: series are columnar arrays aligned with samples.t. Samples are taken on ONE instance in the listed order (increasing t unless stated). driver says how the playhead was moved.", "tl.seek(t) for numeric t is totalTime(t) with events suppressed; values are identical to totalTime(t).", "Grid: 0..totalDuration step 0.05 (decimal-exact) plus listed boundary times; times beyond the end show clamping."];
 
 #[derive(Clone, Copy, Debug)]
-pub struct SampleCase { pub id: &'static str, pub description: &'static str, pub gsap_calls: &'static [&'static str], pub driver: &'static str, pub meta: Pairs, pub t: &'static [f64], pub series: &'static [Series] }
+pub struct SampleCase {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub gsap_calls: &'static [&'static str],
+    pub driver: &'static str,
+    pub meta: Pairs,
+    pub t: &'static [f64],
+    pub series: &'static [Series],
+}
 /// XOR of the bits of every CASES[*].t and CASES[*].series[*].v value.
 pub const F64_BITS_XOR: u64 = 0x8084180ac4393c6c;
 pub const CASES: &[SampleCase] = &[

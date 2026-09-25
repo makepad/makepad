@@ -1,0 +1,951 @@
+//! Rendering: iteration maths, the tween / zero-duration / group / timeline
+//! renders, the child walk and the track writes. This is the only code that
+//! runs every frame, and it never allocates.
+//!
+//! The rules are GSAP 3.15's `Tween.render`, `_renderZeroDurationTween` and
+//! `Timeline.render` (design sections 5.3 to 5.11), with the reconciled
+//! deviations noted where they apply.
+
+use crate::easing::{Easing, YoyoEase};
+use crate::engine::*;
+use crate::event::EventKind;
+use crate::spec::EventMask;
+use crate::value::{decode, encode_pair, lerp_lanes, ColorSpace, Rgba, TweenValue, ValueKind};
+use crate::{animation_cycle, round7, TINY};
+
+impl TweenEngine {
+    /// Renders node `n` at its own total time `total` (GSAP `render()`).
+    /// `yo` is the stagger group whose odd yoyo iteration lends its yoyo ease
+    /// to this node (NIL when none).
+    pub(crate) fn render(&mut self, n: u32, total: f64, suppress: bool, force: bool, yo: u32) {
+        if self.kind(n) == K_TIMELINE {
+            self.render_timeline(n, total, suppress, force);
+        } else if self.hot[n as usize].dur == 0.0 {
+            self.render_zero(n, total, suppress, force);
+        } else {
+            self.render_tween(n, total, suppress, force, yo);
+        }
+    }
+
+    /// GSAP `_parentToChildTotalTime`: the child's total time when its parent
+    /// is at local time `t` (a reversed child runs from its total duration down).
+    #[inline]
+    pub(crate) fn child_time(&mut self, t: f64, c: u32) -> f64 {
+        let h = self.hot[c as usize];
+        if h.ts > 0.0 {
+            (t - h.start) * h.ts
+        } else {
+            let tdur = if h.flags & F_DIRTY != 0 {
+                self.total_duration(c)
+            } else {
+                h.tdur
+            };
+            tdur + (t - h.start) * h.ts
+        }
+    }
+
+    /// [`Self::child_time`] without the duration recompute.
+    pub(crate) fn parent_to_child(&mut self, t: f64, c: u32) -> f64 {
+        let h = self.hot[c as usize];
+        let tdur = if h.ts >= 0.0 {
+            0.0
+        } else {
+            self.total_duration(c)
+        };
+        (t - h.start) * h.ts + tdur
+    }
+
+    /// The same without mutating (getters): a dirty timeline's total
+    /// duration is derived on the fly.
+    pub(crate) fn parent_to_child_pure(&self, t: f64, c: u32) -> f64 {
+        let h = &self.hot[c as usize];
+        let tdur = if h.ts >= 0.0 {
+            0.0
+        } else {
+            self.pure_total_duration(c)
+        };
+        (t - h.start) * h.ts + tdur
+    }
+
+    /// GSAP `rawTime()`: the node's total time as its parent's playhead
+    /// implies it (its own total time when paused or parentless).
+    pub(crate) fn raw_time(&mut self, n: u32) -> f64 {
+        let c = self.cold[n as usize];
+        let p = if c.parent != NIL { c.parent } else { c.dp };
+        let h = self.hot[n as usize];
+        if p == NIL || h.ts == 0.0 {
+            return h.ttime;
+        }
+        let pr = self.raw_time(p);
+        self.parent_to_child(pr, n)
+    }
+
+    /// [`Self::raw_time`] without mutating.
+    pub(crate) fn raw_time_pure(&self, n: u32) -> f64 {
+        let c = &self.cold[n as usize];
+        let p = if c.parent != NIL { c.parent } else { c.dp };
+        let h = &self.hot[n as usize];
+        if p == NIL || h.ts == 0.0 {
+            return h.ttime;
+        }
+        self.parent_to_child_pure(self.raw_time_pure(p), n)
+    }
+
+    /// GSAP `globalTime(local)`: folds a local time up through every parent.
+    pub(crate) fn global_time(&self, n: u32, local: f64) -> f64 {
+        let mut t = local;
+        let mut x = n;
+        while x != NIL {
+            let h = &self.hot[x as usize];
+            let s = if h.ts == 0.0 { 1.0 } else { h.ts.abs() };
+            t = h.start + t / s;
+            x = self.cold[x as usize].dp;
+        }
+        t
+    }
+
+    /// Iteration maths (5.4): the 0-based iteration, the (yoyo-mirrored)
+    /// iteration time and whether this is an odd yoyo pass, for a total time
+    /// already clamped to `[0, tdur]`.
+    #[inline]
+    pub(crate) fn iterate(&self, n: u32, tt: f64) -> (u32, f64, bool) {
+        let c = &self.cold[n as usize];
+        let h = &self.hot[n as usize];
+        if c.repeat == 0 {
+            return (0, tt, false);
+        }
+        let dur = h.dur;
+        let cycle = dur + c.rdelay;
+        let quot = tt / cycle;
+        // `tt % cycle` is exact (JavaScript's `%`); the first iteration
+        // needs no fmod.
+        let rem = if tt < cycle { tt } else { tt % cycle };
+        let mut time = round7(rem);
+        let mut it;
+        if tt == h.tdur {
+            it = if c.repeat > 0 {
+                c.repeat as u32
+            } else {
+                animation_cycle(tt, cycle)
+            };
+            time = dur;
+        } else {
+            let q = round7(quot);
+            let w = crate::floor_small(q);
+            it = w as u32;
+            if w != 0.0 && w == q {
+                time = dur;
+                it = it.saturating_sub(1);
+            } else if time > dur {
+                time = dur;
+            }
+        }
+        let yodd = h.flags & F_YOYO != 0 && it & 1 == 1;
+        if yodd {
+            time = dur - time;
+        }
+        (it, time, yodd)
+    }
+
+    /// The eased ratio at linear progress `p` in (0, 1): the node's ease, or
+    /// on an odd yoyo pass `1 - Y(1 - p)` with the yoyo ease `Y` (its own, or
+    /// the one its stagger group lends it through `yo`).
+    #[inline]
+    pub(crate) fn ratio(&self, n: u32, p: f64, yodd: bool, yo: u32) -> f64 {
+        let c = &self.cold[n as usize];
+        let src = |y: YoyoEase| -> Easing {
+            match y {
+                YoyoEase::Invert => c.ease,
+                YoyoEase::Ease(e) => e,
+            }
+        };
+        if yodd {
+            if let Some(y) = c.yoyo {
+                return 1.0 - src(y).map(1.0 - p);
+            }
+        }
+        if yo != NIL {
+            if let Some(y) = self.cold[yo as usize].yoyo {
+                return 1.0 - src(y).map(1.0 - p);
+            }
+        }
+        c.ease.map(p)
+    }
+
+    /// GSAP `Tween.render` for a non-zero duration (5.8).
+    pub(crate) fn render_tween(
+        &mut self,
+        n: u32,
+        total: f64,
+        suppress: bool,
+        force_in: bool,
+        yo: u32,
+    ) {
+        let mut force = force_in;
+        let h = self.hot[n as usize];
+        let prev_time = h.time;
+        let tdur = h.tdur;
+        let dur = h.dur;
+        let neg = total < 0.0;
+        let tt = if total > tdur - TINY && !neg {
+            tdur
+        } else if total < TINY {
+            0.0
+        } else {
+            total
+        };
+        let initted = h.flags & F_INITTED != 0;
+        // GSAP's "same time" test: a render exactly at 0 always goes
+        // through (it re-writes the start values and reports Update).
+        if !(tt != h.ttime || total == 0.0 || force || (!initted && h.ttime != 0.0)) {
+            return;
+        }
+        let (it, time, yodd) = self.iterate(n, tt);
+        let repeat = self.cold[n as usize].repeat;
+        let mut prev_it = 0;
+        if repeat != 0 {
+            let cycle = dur + self.cold[n as usize].rdelay;
+            // A tween's `iter` is kept equal to animation_cycle(ttime).
+            prev_it = h.iter;
+            debug_assert_eq!(prev_it, animation_cycle(h.ttime, cycle));
+            if time == prev_time && !force && initted && it == prev_it {
+                // Inside the repeat delay: nothing moves.
+                self.hot[n as usize].ttime = tt;
+                return;
+            }
+            if it != prev_it
+                && h.flags & F_REFRESH != 0
+                && !yodd
+                && self.lock(n) == 0
+                && time != cycle
+                && initted
+            {
+                // repeatRefresh: land the ended iteration exactly, then re-capture.
+                self.set_lock(n, 1);
+                self.render_tween(n, round7(cycle * it as f64), true, true, yo);
+                self.invalidate_node(n);
+                self.set_lock(n, 0);
+                force = true;
+            }
+        }
+        let flags = self.hot[n as usize].flags;
+        // A pre-rendered from()/fromTo() has captured its values already;
+        // its initialisation (overwrite Auto) waits for a render past 0.
+        if flags & F_INITTED == 0 && !(flags & F_PRE != 0 && tt <= 0.0) {
+            let local = if neg { total } else { time };
+            self.init(n, local);
+            if flags & F_KEYFRAMES != 0 && local <= 0.0 {
+                // GSAP renders a keyframes timeline to its end at init, so
+                // each step captures the previous step's end value.
+                let end = self.cold[n as usize].inner_dur;
+                self.render_group_inner(n, end, end, true, true, NIL);
+            }
+        }
+        let p = time / dur;
+        let e = if p >= 1.0 {
+            1.0
+        } else if p <= 0.0 {
+            0.0
+        } else {
+            self.ratio(n, p, yodd, yo)
+        };
+        {
+            let hm = &mut self.hot[n as usize];
+            hm.ttime = tt;
+            hm.time = time;
+            hm.iter = it;
+            if tt > 0.0 && tt < tdur {
+                hm.flags |= F_ACT;
+            } else {
+                hm.flags &= !F_ACT;
+            }
+        }
+        // Most tweens report nothing: one mask test skips every emit.
+        let reports = !suppress && self.cold[n as usize].events.0 != 0;
+        if reports && prev_time == 0.0 && tt != 0.0 && prev_it == 0 {
+            self.emit(n, EventKind::Start);
+        }
+        self.write_tracks(n, p, e);
+        if self.kind(n) == K_GROUP {
+            let c = self.cold[n as usize];
+            let inner = if p >= 1.0 {
+                c.inner_dur
+            } else if p <= 0.0 {
+                0.0
+            } else {
+                c.inner_dur * c.remap.map(p)
+            };
+            let child_yo = if yodd && c.yoyo.is_some() { n } else { yo };
+            self.render_group_inner(n, total, inner, suppress, force, child_yo);
+        }
+        if reports {
+            self.emit(n, EventKind::Update);
+            if repeat != 0 && it != prev_it && self.cold[n as usize].parent != NIL {
+                self.emit(n, EventKind::Repeat);
+            }
+        }
+        if (tt == tdur || tt == 0.0) && self.hot[n as usize].ttime == tt {
+            let ts = self.hot[n as usize].ts;
+            if (total != 0.0 || dur == 0.0) && ((tt == tdur && ts > 0.0) || (tt == 0.0 && ts < 0.0))
+            {
+                self.remove_from_parent(n, true);
+            }
+            if reports && !(neg && prev_time == 0.0) && (tt != 0.0 || prev_time != 0.0 || yodd) {
+                let kind = if tt == tdur {
+                    EventKind::Complete
+                } else {
+                    EventKind::ReverseComplete
+                };
+                self.emit(n, kind);
+            }
+        }
+    }
+
+    /// A group's inner timeline (GSAP's nested `tween.timeline.render`): the
+    /// children walk at inner time `inner`, or at the negative total when
+    /// the group is rendered before its start.
+    fn render_group_inner(
+        &mut self,
+        g: u32,
+        total_outer: f64,
+        inner: f64,
+        suppress: bool,
+        force: bool,
+        yo: u32,
+    ) {
+        let total = if total_outer < 0.0 {
+            total_outer
+        } else {
+            inner
+        };
+        let c = self.cold[g as usize];
+        let mut tt = if total <= 0.0 { 0.0 } else { round7(total) };
+        if tt > c.inner_dur && total >= 0.0 {
+            tt = c.inner_dur;
+        }
+        let initted = self.has(g, F_INNER_INIT);
+        let crossing = (c.iztime < 0.0) != (total < 0.0) && (initted || c.inner_dur == 0.0);
+        if !(tt != c.itime || force || crossing) {
+            return;
+        }
+        let mut prev = c.itime;
+        if crossing {
+            if c.inner_dur == 0.0 {
+                prev = c.iztime;
+            }
+            if total != 0.0 || !suppress {
+                self.cold[g as usize].iztime = total;
+            }
+        }
+        self.cold[g as usize].itime = tt;
+        if !initted {
+            self.set_flag(g, F_INNER_INIT, true);
+            self.cold[g as usize].iztime = total;
+            prev = 0.0;
+        }
+        self.walk(g, tt, prev, total, suppress, force, NIL, yo);
+    }
+
+    /// GSAP `_renderZeroDurationTween` (5.9, reconciled): sets, calls, pauses
+    /// and zero-duration tweens. At exactly 0 the ratio is 0 only when the
+    /// node or its parent is reversed; `ztime` fires on arriving at or
+    /// leaving the exact spot, never both.
+    pub(crate) fn render_zero(&mut self, n: u32, total: f64, suppress_in: bool, force: bool) {
+        let h = self.hot[n as usize];
+        let dp = self.cold[n as usize].dp;
+        let reversed = h.ts < 0.0 || (dp != NIL && self.hot[dp as usize].ts < 0.0);
+        let ratio1 = !(total < 0.0 || (total == 0.0 && reversed));
+        let prev1 = h.flags & F_RATIO1 != 0;
+        let zt = self.cold[n as usize].ztime;
+        if !(ratio1 != prev1 || force || zt == TINY || (total == 0.0 && zt != 0.0)) {
+            if zt == 0.0 {
+                self.cold[n as usize].ztime = total;
+            }
+            return;
+        }
+        if h.flags & F_INITTED == 0 {
+            self.init(n, total);
+        }
+        self.cold[n as usize].ztime = if total != 0.0 {
+            total
+        } else if suppress_in {
+            TINY
+        } else {
+            0.0
+        };
+        let suppress = suppress_in || (total != 0.0 && zt == 0.0);
+        {
+            let hm = &mut self.hot[n as usize];
+            if ratio1 {
+                hm.flags |= F_RATIO1;
+            } else {
+                hm.flags &= !F_RATIO1;
+            }
+            hm.time = 0.0;
+            hm.ttime = 0.0;
+            hm.iter = 0;
+        }
+        let r = if ratio1 { 1.0 } else { 0.0 };
+        self.write_tracks(n, r, r);
+        let marker = h.flags & (F_CALL | F_PAUSE_NODE);
+        if !suppress && marker == 0 {
+            self.emit(n, EventKind::Update);
+        }
+        if ratio1 {
+            self.remove_from_parent(n, true);
+        }
+        if !suppress {
+            if marker & F_CALL != 0 {
+                self.emit(n, EventKind::Call { forward: ratio1 });
+            } else if marker == 0 {
+                let kind = if ratio1 {
+                    EventKind::Complete
+                } else {
+                    EventKind::ReverseComplete
+                };
+                self.emit(n, kind);
+            }
+        }
+    }
+
+    /// GSAP `Timeline.render` (5.10, reconciled).
+    pub(crate) fn render_timeline(&mut self, n: u32, total_in: f64, suppress: bool, force: bool) {
+        let mut total = total_in;
+        // Read before the recompute: a negative-start shift moves the playhead.
+        let mut prev_time = self.hot[n as usize].time;
+        let mut tdur = self.total_duration(n);
+        let mut dur = self.hot[n as usize].dur;
+        let root = self.has(n, F_ROOT);
+        let mut tt = if total <= 0.0 { 0.0 } else { round7(total) };
+        let crossing = (self.cold[n as usize].ztime < 0.0) != (total < 0.0)
+            && (self.has(n, F_INITTED) || dur == 0.0);
+        if !root && tt > tdur && total >= 0.0 {
+            tt = tdur;
+        }
+        if !(tt != self.hot[n as usize].ttime || force || crossing) {
+            return;
+        }
+        let shifted = self.hot[n as usize].time;
+        if shifted != prev_time && dur != 0.0 {
+            let d = shifted - prev_time;
+            tt += d;
+            total += d;
+        }
+        let mut time = tt;
+        let prev_start = self.hot[n as usize].start;
+        let time_scale = self.hot[n as usize].ts;
+        let prev_paused = time_scale == 0.0;
+        if crossing {
+            if dur == 0.0 {
+                prev_time = self.cold[n as usize].ztime;
+            }
+            if total != 0.0 || !suppress {
+                self.cold[n as usize].ztime = total;
+            }
+        }
+        let mut it = 0u32;
+        let mut prev_it = 0u32;
+        let mut to_completion = false;
+        let repeat = self.cold[n as usize].repeat;
+        if repeat != 0 {
+            let yoyo = self.has(n, F_YOYO);
+            let cycle = dur + self.cold[n as usize].rdelay;
+            let (i, t, yodd) = self.iterate(n, tt);
+            it = i;
+            time = t;
+            let ttime = self.hot[n as usize].ttime;
+            let mut pit = animation_cycle(ttime, cycle);
+            if prev_time == 0.0
+                && ttime != 0.0
+                && pit != it
+                && ttime - pit as f64 * cycle - dur <= 0.0
+            {
+                pit = it;
+            }
+            prev_it = pit;
+            if it != pit && self.lock(n) == 0 {
+                // Iteration crossing: sweep to the end (or start) of the
+                // iteration being left, report Repeat, then wrap.
+                let mut rewinding = yoyo && pit & 1 == 1;
+                let wraps = rewinding == (yoyo && it & 1 == 1);
+                if it < pit {
+                    rewinding = !rewinding;
+                }
+                let m = tt % dur;
+                prev_time = if rewinding {
+                    0.0
+                } else if m != 0.0 && !m.is_nan() {
+                    dur
+                } else {
+                    tt
+                };
+                self.set_lock(n, 1);
+                let target = if prev_time != 0.0 {
+                    prev_time
+                } else if yodd {
+                    0.0
+                } else {
+                    round7(it as f64 * cycle)
+                };
+                self.render_timeline(n, target, suppress, dur == 0.0);
+                self.set_lock(n, 0);
+                self.hot[n as usize].ttime = tt;
+                if !suppress && self.cold[n as usize].parent != NIL {
+                    self.emit(n, EventKind::Repeat);
+                }
+                if self.has(n, F_REFRESH) && !yodd {
+                    self.invalidate_node(n);
+                    self.set_lock(n, 1);
+                    prev_it = it;
+                }
+                if prev_time != 0.0 && prev_time != self.hot[n as usize].time {
+                    // The sweep's target was tt itself: it already rendered the
+                    // final state. GSAP returns here and so never fires
+                    // Complete on such a jump (bug); the engine still runs the
+                    // completion step.
+                    prev_time = self.hot[n as usize].time;
+                    self.set_lock(n, 0);
+                    to_completion = true;
+                } else if prev_paused != (self.hot[n as usize].ts == 0.0) {
+                    self.set_lock(n, 0);
+                    return;
+                } else {
+                    dur = self.hot[n as usize].dur;
+                    tdur = self.hot[n as usize].tdur;
+                    if wraps {
+                        self.set_lock(n, 2);
+                        prev_time = if rewinding { dur } else { -0.0001 };
+                        self.render_timeline(n, prev_time, true, false);
+                        if self.has(n, F_REFRESH) && !yodd {
+                            self.invalidate_node(n);
+                        }
+                    }
+                    self.set_lock(n, 0);
+                    if self.hot[n as usize].ts == 0.0 && !prev_paused {
+                        return;
+                    }
+                }
+            }
+        }
+        if !to_completion {
+            let mut pause = NIL;
+            if self.has(n, F_HAS_PAUSE) && !self.has(n, F_FORCING) && self.lock(n) < 2 {
+                pause = self.find_next_pause(n, round7(prev_time), round7(time));
+                if pause != NIL {
+                    let ps = self.hot[pause as usize].start;
+                    tt -= time - ps;
+                    time = ps;
+                }
+            }
+            {
+                let hm = &mut self.hot[n as usize];
+                hm.ttime = tt;
+                hm.time = time;
+                hm.iter = it;
+                if tt > 0.0 && tt < tdur {
+                    hm.flags |= F_ACT;
+                } else {
+                    hm.flags &= !F_ACT;
+                }
+            }
+            if !self.has(n, F_INITTED) {
+                self.set_flag(n, F_INITTED, true);
+                self.cold[n as usize].ztime = total;
+                prev_time = 0.0; // the first render always walks forward
+            }
+            if prev_time == 0.0 && tt != 0.0 && dur != 0.0 && !suppress && prev_it == 0 {
+                self.emit(n, EventKind::Start);
+            }
+            if !suppress && self.cold[n as usize].events.has(EventMask::LABELS) {
+                self.emit_labels(n, prev_time, time);
+            }
+            self.walk(n, time, prev_time, total, suppress, force, pause, NIL);
+            if pause != NIL && !suppress {
+                // add_pause: the playhead stops exactly on it.
+                let forward = time >= prev_time;
+                self.set_paused(n, true);
+                self.render_zero(pause, if forward { 0.0 } else { -TINY }, true, false);
+                self.cold[pause as usize].ztime = if forward { 1.0 } else { -1.0 };
+                self.emit(pause, EventKind::Pause);
+            }
+            if !suppress {
+                self.emit(n, EventKind::Update);
+            }
+        }
+        // Completion.
+        let h = self.hot[n as usize];
+        let full = self.total_duration(n);
+        if ((tt == tdur && h.ttime >= full) || (tt == 0.0 && prev_time != 0.0))
+            && (prev_start == h.start || time_scale.abs() != h.ts.abs())
+            && self.lock(n) == 0
+            && !root
+        {
+            if (total != 0.0 || dur == 0.0)
+                && ((tt == tdur && h.ts > 0.0) || (tt == 0.0 && h.ts < 0.0))
+            {
+                self.remove_from_parent(n, true);
+            }
+            if !suppress
+                && !(total < 0.0 && prev_time == 0.0)
+                && (tt != 0.0 || prev_time != 0.0 || tdur == 0.0)
+            {
+                let kind = if tt == tdur && total >= 0.0 {
+                    EventKind::Complete
+                } else {
+                    EventKind::ReverseComplete
+                };
+                self.emit(n, kind);
+            }
+        }
+    }
+
+    /// The child walk shared by timelines and groups (5.11): forward in start
+    /// order (stopping at the first child that has not started and is not in
+    /// flight), backward from the last child.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn walk(
+        &mut self,
+        n: u32,
+        time: f64,
+        prev_time: f64,
+        total: f64,
+        suppress: bool,
+        force: bool,
+        skip: u32,
+        yo: u32,
+    ) {
+        if time >= prev_time && total >= 0.0 {
+            // GSAP visits every child (`_act || time >= _start`). Sorted by
+            // start, nothing after the first unstarted child has started,
+            // and only a control can leave one ACT ahead (F_ACT_AHEAD).
+            let full = self.has(n, F_ACT_AHEAD);
+            let mut c = self.cold[n as usize].first;
+            while c != NIL {
+                let h = self.hot[c as usize];
+                let next = h.next;
+                if h.flags & F_KILLED == 0 && h.ts != 0.0 && c != skip {
+                    if h.flags & F_ACT != 0 || time >= h.start {
+                        let ctt = self.child_time(time, c);
+                        self.render(c, ctt, suppress, force, yo);
+                    } else if !full {
+                        break;
+                    }
+                }
+                c = next;
+            }
+            if full {
+                self.hot[n as usize].flags &= !F_ACT_AHEAD;
+            }
+        } else {
+            let adj = if total < 0.0 { total } else { time };
+            let mut c = self.cold[n as usize].last;
+            while c != NIL {
+                let h = self.hot[c as usize];
+                let prev = h.prev;
+                if h.flags & F_KILLED == 0
+                    && h.ts != 0.0
+                    && c != skip
+                    && (h.flags & F_ACT != 0 || adj <= self.cold[c as usize].end)
+                {
+                    let ctt = self.child_time(adj, c);
+                    self.render(c, ctt, suppress, force, yo);
+                }
+                c = prev;
+            }
+        }
+    }
+
+    /// GSAP `_findNextPauseTween`: the first pause crossed between the two
+    /// (rounded) times, in the direction of travel.
+    fn find_next_pause(&self, n: u32, prev: f64, time: f64) -> u32 {
+        if time > prev {
+            let mut c = self.cold[n as usize].first;
+            while c != NIL && self.hot[c as usize].start <= time {
+                let h = &self.hot[c as usize];
+                if h.flags & F_PAUSE_NODE != 0 && h.flags & F_KILLED == 0 && h.start > prev {
+                    return c;
+                }
+                c = h.next;
+            }
+        } else {
+            let mut c = self.cold[n as usize].last;
+            while c != NIL && self.hot[c as usize].start >= time {
+                let h = &self.hot[c as usize];
+                if h.flags & F_PAUSE_NODE != 0 && h.flags & F_KILLED == 0 && h.start < prev {
+                    return c;
+                }
+                c = h.prev;
+            }
+        }
+        NIL
+    }
+
+    /// Label events (non-GSAP, opt-in): every label crossed, in the order
+    /// of travel. No allocation: a selection scan over the label list.
+    fn emit_labels(&mut self, n: u32, prev: f64, time: f64) {
+        if time == prev {
+            return;
+        }
+        let forward = time > prev;
+        // (time, index) of the last emitted label, lexicographic.
+        let mut last: Option<(f64, usize)> = None;
+        loop {
+            let mut best: Option<(f64, usize)> = None;
+            for (i, l) in self.labels.iter().enumerate() {
+                if l.tl != n {
+                    continue;
+                }
+                let inside = if forward {
+                    l.time > prev && l.time <= time
+                } else {
+                    l.time >= time && l.time < prev
+                };
+                if !inside {
+                    continue;
+                }
+                let key = (l.time, i);
+                let after_last = match last {
+                    None => true,
+                    Some(k) => {
+                        if forward {
+                            key.0 > k.0 || (key.0 == k.0 && key.1 > k.1)
+                        } else {
+                            key.0 < k.0 || (key.0 == k.0 && key.1 > k.1)
+                        }
+                    }
+                };
+                if !after_last {
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    Some(b) => {
+                        if forward {
+                            key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)
+                        } else {
+                            key.0 > b.0 || (key.0 == b.0 && key.1 < b.1)
+                        }
+                    }
+                };
+                if better {
+                    best = Some(key);
+                }
+            }
+            match best {
+                Some(b) => {
+                    let tag = self.labels[b.1].tag;
+                    self.emit(n, EventKind::Label(tag));
+                    last = Some(b);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// GSAP `_initTween` (5.7): captures every unresolved track, runs
+    /// overwrite Auto at the node's global time, marks it initted.
+    pub(crate) fn init(&mut self, n: u32, local: f64) {
+        let (s, e) = self.track_range(n);
+        for k in s..e {
+            let f = self.tr_meta[k as usize].flags;
+            if f & T_ALIVE != 0 && f & T_RESOLVED == 0 {
+                self.resolve_track(k);
+            }
+        }
+        let h = &mut self.hot[n as usize];
+        h.flags |= F_INITTED;
+        h.flags &= !F_PRE;
+        let c = &self.cold[n as usize];
+        if c.overwrite == crate::spec::Overwrite::Auto && c.live_tracks > 0 {
+            let g = self.global_time(n, local);
+            self.overwrite_auto(n, g);
+        }
+    }
+
+    /// Captures one track's endpoints from its spec and its slot's current
+    /// value; an unknown (unseeded or mismatched) value does not move.
+    pub(crate) fn resolve_track(&mut self, k: u32) {
+        let ki = k as usize;
+        let spec = self.tr_spec[ki];
+        let m = self.tr_meta[ki];
+        let s = self.tr_slot[ki] as usize;
+        let cur = if self.sl_seeded[s] && self.sl_kind[s] == m.kind {
+            Some(self.sl_val[s])
+        } else {
+            None
+        };
+        let from = spec.from.or(cur);
+        let to = match spec.end {
+            EndKind::To => Some(spec.val),
+            EndKind::By => from.map(|f| {
+                [
+                    f[0] + spec.val[0],
+                    f[1] + spec.val[1],
+                    f[2] + spec.val[2],
+                    f[3] + spec.val[3],
+                ]
+            }),
+            EndKind::Current => cur,
+        };
+        let (f, t) = match (from, to) {
+            (Some(f), Some(t)) => (f, t),
+            (Some(f), None) => {
+                self.stats.unseeded_starts += 1;
+                (f, f)
+            }
+            (None, Some(t)) => {
+                self.stats.unseeded_starts += 1;
+                (t, t)
+            }
+            (None, None) => {
+                self.stats.unseeded_starts += 1;
+                (spec.val, spec.val)
+            }
+        };
+        let (f, t) = if m.kind == ValueKind::Color && m.space != ColorSpace::Srgb {
+            self.tr_spec[ki].land = [f, t];
+            let rgba = |l: [f64; 4]| Rgba::new(l[0], l[1], l[2], l[3]);
+            encode_pair(rgba(f), rgba(t), m.space)
+        } else {
+            (f, t)
+        };
+        self.tr_from[ki] = f;
+        self.tr_to[ki] = t;
+        self.tr_meta[ki].flags |= T_RESOLVED;
+    }
+
+    /// Writes node `n`'s tracks at progress `p` with eased ratio `e` (6.2):
+    /// `p >= 1` lands `to`, `p <= 0` lands `from`, exactly.
+    pub(crate) fn write_tracks(&mut self, n: u32, p: f64, e: f64) {
+        let (s, end) = self.track_range(n);
+        for k in s as usize..end as usize {
+            let m = self.tr_meta[k];
+            if m.flags & (T_ALIVE | T_RESOLVED) != (T_ALIVE | T_RESOLVED) {
+                continue;
+            }
+            let mut v = if p >= 1.0 {
+                self.tr_to[k]
+            } else if p <= 0.0 {
+                self.tr_from[k]
+            } else {
+                lerp_lanes(self.tr_from[k], self.tr_to[k], e)
+            };
+            match m.kind {
+                ValueKind::Int => v[0] = v[0].round(),
+                ValueKind::Color => v = self.colour_lanes(k, v, p),
+                _ => {}
+            }
+            if m.flags & T_SNAP != 0 {
+                let snap = self.tr_spec[k].snap;
+                for l in v.iter_mut().take(m.lanes as usize) {
+                    *l = (*l / snap).round() * snap;
+                }
+            }
+            let slot = self.tr_slot[k];
+            self.sl_seeded[slot as usize] = true;
+            self.write_slot(slot, v);
+        }
+    }
+
+    /// A colour track's written lanes: the exact captured ends at p <= 0 /
+    /// p >= 1, else the interpolated lanes decoded to sRGB; every channel
+    /// (alpha included) clamped to 0..1, so an overshooting ease stays
+    /// displayable.
+    #[inline]
+    fn colour_lanes(&self, k: usize, v: [f64; 4], p: f64) -> [f64; 4] {
+        let space = self.tr_meta[k].space;
+        let v = if space == ColorSpace::Srgb {
+            v
+        } else if p >= 1.0 {
+            self.tr_spec[k].land[1]
+        } else if p <= 0.0 {
+            self.tr_spec[k].land[0]
+        } else {
+            let c = decode(v, space);
+            [c.r, c.g, c.b, c.a]
+        };
+        v.map(|c| c.clamp(0.0, 1.0))
+    }
+
+    /// GSAP `invalidate()`: the next render re-captures (children too).
+    pub(crate) fn invalidate_node(&mut self, n: u32) {
+        {
+            let h = &mut self.hot[n as usize];
+            h.flags &= !(F_INITTED | F_ACT | F_PRE | F_INNER_INIT | F_LOCK);
+        }
+        let c = &mut self.cold[n as usize];
+        c.ztime = -TINY;
+        c.iztime = -TINY;
+        let (s, e) = self.track_range(n);
+        for k in s..e {
+            self.tr_meta[k as usize].flags &= !T_RESOLVED;
+        }
+        let mut ch = self.cold[n as usize].first;
+        while ch != NIL {
+            self.invalidate_node(ch);
+            ch = self.hot[ch as usize].next;
+        }
+    }
+
+    /// The value tween `a` would give slot `s` at its own total time `t`,
+    /// computed without rendering, writing or reporting. `None` when `a` is
+    /// stale, has no captured track on `s`, or is a timeline or group.
+    pub fn sample(
+        &self,
+        a: crate::ids::TweenId,
+        s: crate::ids::SlotId,
+        t: f64,
+    ) -> Option<TweenValue> {
+        let n = self.node(a)?;
+        if self.kind(n) != K_TWEEN {
+            return None;
+        }
+        let (start, end) = self.track_range(n);
+        let k = (start..end).find(|&k| {
+            let m = self.tr_meta[k as usize];
+            self.tr_slot[k as usize] == s.0
+                && m.flags & (T_ALIVE | T_RESOLVED) == (T_ALIVE | T_RESOLVED)
+        })? as usize;
+        let h = &self.hot[n as usize];
+        let (p, e) = if h.dur == 0.0 {
+            let r = if t < 0.0 { 0.0 } else { 1.0 };
+            (r, r)
+        } else {
+            let tt = if t > h.tdur - TINY {
+                h.tdur
+            } else if t < TINY {
+                0.0
+            } else {
+                t
+            };
+            let (_, time, yodd) = self.iterate(n, tt);
+            let p = time / h.dur;
+            let e = if p >= 1.0 {
+                1.0
+            } else if p <= 0.0 {
+                0.0
+            } else {
+                self.ratio(n, p, yodd, NIL)
+            };
+            (p, e)
+        };
+        let m = self.tr_meta[k];
+        let mut v = if p >= 1.0 {
+            self.tr_to[k]
+        } else if p <= 0.0 {
+            self.tr_from[k]
+        } else {
+            lerp_lanes(self.tr_from[k], self.tr_to[k], e)
+        };
+        if m.kind == ValueKind::Color {
+            v = self.colour_lanes(k, v, p);
+        }
+        if m.flags & T_SNAP != 0 {
+            let snap = self.tr_spec[k].snap;
+            for l in v.iter_mut().take(m.lanes as usize) {
+                *l = (*l / snap).round() * snap;
+            }
+        }
+        Some(TweenValue::from_lanes(m.kind, v))
+    }
+}

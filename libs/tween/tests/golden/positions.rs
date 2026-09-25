@@ -3,21 +3,49 @@
 // Numbers are the golden doubles (shortest round-trip repr, bit-exact). Tolerances are the test's business
 // (see design/gsap_reconciliation.md D: GSAP rounds written property values to 1e-6, so value columns need 5e-7).
 // Each case: children after tl.duration() (sorted by start), start times at add, labels, duration; `extra` flattened.
-#![allow(dead_code, unused_imports, clippy::approx_constant, clippy::excessive_precision, clippy::unreadable_literal)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::approx_constant,
+    clippy::excessive_precision,
+    clippy::unreadable_literal
+)]
 use super::common::*;
 
 pub const GSAP_VERSION: &str = "3.15.0";
 pub const NOTES: &[&str] = &["Every case builds tl = gsap.timeline({paused:true}); children are tweens on fresh plain objects {x:0} with vars {x:1, duration:d} unless stated.", "children_in_timeline_order = tl.getChildren(false,true,true) (sorted by startTime); startTime_at_add = child.startTime() read immediately after the add call (before later adds could shift anything).", "labels = tl.labels after all adds; labels_after_duration_call = same after tl.duration() (which can shift negative starts)."];
 
 #[derive(Clone, Copy, Debug)]
-pub struct Child { pub name: &'static str, pub kind: &'static str, pub data: Option<&'static str>, pub start_time: f64, pub duration: f64, pub total_duration: f64, pub end_time: f64, pub end_time_no_repeats: f64, pub time_scale: f64, pub delay: f64, pub repeat: f64 }
+pub struct Child {
+    pub name: &'static str,
+    pub kind: &'static str,
+    pub data: Option<&'static str>,
+    pub start_time: f64,
+    pub duration: f64,
+    pub total_duration: f64,
+    pub end_time: f64,
+    pub end_time_no_repeats: f64,
+    pub time_scale: f64,
+    pub delay: f64,
+    pub repeat: f64,
+}
 #[derive(Clone, Copy, Debug)]
 pub struct PositionCase {
-    pub id: &'static str, pub description: &'static str, pub gsap_calls: &'static [&'static str],
-    pub children: &'static [Child], pub insertion_order: &'static [&'static str],
-    pub start_time_at_add: &'static [(&'static str, f64)], pub start_times_before_duration_call: &'static [(&'static str, f64)],
-    pub recent: Option<&'static str>, pub labels: &'static [(&'static str, f64)], pub labels_before_duration_call: &'static [(&'static str, f64)],
-    pub duration: f64, pub total_duration: f64, pub child_count: u32, pub timeline_start_time_in_parent: f64, pub extra: Pairs,
+    pub id: &'static str,
+    pub description: &'static str,
+    pub gsap_calls: &'static [&'static str],
+    pub children: &'static [Child],
+    pub insertion_order: &'static [&'static str],
+    pub start_time_at_add: &'static [(&'static str, f64)],
+    pub start_times_before_duration_call: &'static [(&'static str, f64)],
+    pub recent: Option<&'static str>,
+    pub labels: &'static [(&'static str, f64)],
+    pub labels_before_duration_call: &'static [(&'static str, f64)],
+    pub duration: f64,
+    pub total_duration: f64,
+    pub child_count: u32,
+    pub timeline_start_time_in_parent: f64,
+    pub extra: Pairs,
 }
 pub const CASES: &[PositionCase] = &[
     PositionCase { id: "seq_defaults", description: "three tweens with no position parameter",

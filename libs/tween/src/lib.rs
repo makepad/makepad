@@ -20,18 +20,49 @@
 //! - [`event`]: callback events (GSAP onStart, onComplete, ...).
 //! - [`quick`]: `QuickTo`, the engine-free retargetable tween (GSAP `quickTo`).
 //! - [`ticker`]: the app-wide clock policy (GSAP `ticker`, lag smoothing).
+//!
+//! The engine, [`TweenEngine`], is GSAP's global timeline: build tweens and
+//! timelines on it, control them through [`AnimMut`] / [`TimelineMut`],
+//! inspect them through [`AnimRef`], step it once per frame with
+//! [`TweenEngine::advance`] and drain callbacks with
+//! [`TweenEngine::swap_events`].
+//!
+//! # Allocation
+//!
+//! Only building calls allocate (`to`, `timeline`, `tl(..).to(..)`, `seed`,
+//! `add_label`, ...). `advance`, every control, every getter, kills,
+//! overwrites, reclamation and track compaction are allocation-free, provided
+//! the event queue is drained with [`TweenEngine::swap_events`] (or
+//! [`TweenEngine::clear_events`]) between frames.
+//!
+//! # Deviations from GSAP 3.15
+//!
+//! Callbacks are queued events drained after the frame; `time(t)` on a
+//! repeating animation stays in the current iteration; there is no lazy
+//! first render; a paused timeline whose child starts before 0 keeps a
+//! finite start; `yoyo_ease` is a pure function of the local time; values
+//! are not rounded to 1e-6; zero-duration nodes ignore `repeat`; a killed
+//! or completed (not kept) animation's handle goes stale; non-finite numbers
+//! count as unset (options), 0 (the root time scale) or are ignored
+//! (controls).
 #![forbid(unsafe_code)]
 
+mod control;
 pub mod easing;
+mod engine;
 pub mod event;
 pub mod ids;
+mod overwrite;
 pub mod quick;
+mod render;
 pub mod spec;
 pub mod stagger;
 pub mod ticker;
 pub mod value;
 
+pub use control::{AnimMut, AnimRef, TimelineMut};
 pub use easing::*;
+pub use engine::TweenEngine;
 pub use event::*;
 pub use ids::*;
 pub use quick::*;
@@ -64,7 +95,7 @@ pub const TINY: f64 = 1e-8;
 pub fn round7(x: f64) -> f64 {
     if x.abs() < BIG {
         let y = x * 1e7;
-        let f = y.floor();
+        let f = floor_small(y);
         let r = (if y - f >= 0.5 { f + 1.0 } else { f }) / 1e7;
         if r == 0.0 {
             0.0
@@ -85,10 +116,38 @@ pub fn round7(x: f64) -> f64 {
 #[inline]
 pub fn animation_cycle(tt: f64, cycle: f64) -> u32 {
     let q = round7(tt / cycle);
-    let w = q.floor();
+    let w = floor_small(q);
     let w = if q != 0.0 && w == q { w - 1.0 } else { w };
     // `as` saturates for floats: negative and NaN become 0, huge becomes u32::MAX.
     w as u32
+}
+
+/// `x` when finite, else `d`: non-finite numeric inputs never reach the
+/// clock (a NaN start or time would stall or poison every render).
+#[inline]
+pub(crate) fn finite_or(x: f64, d: f64) -> f64 {
+    if x.is_finite() {
+        x
+    } else {
+        d
+    }
+}
+
+/// `x.floor()` for `|x| < 2^62` (exact there) without a libm call: the
+/// integer conversion truncates toward zero, one compare fixes negatives.
+/// NaN and larger values fall back to `f64::floor`.
+#[inline]
+pub(crate) fn floor_small(x: f64) -> f64 {
+    if x.abs() < 4.611_686_018_427_388e18 {
+        let t = x as i64 as f64;
+        if t > x {
+            t - 1.0
+        } else {
+            t
+        }
+    } else {
+        x.floor()
+    }
 }
 
 /// The SplitMix64 mixing function: a fast, well-distributed 64-bit hash.

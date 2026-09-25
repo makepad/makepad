@@ -3,20 +3,51 @@
 // Numbers are the golden doubles (shortest round-trip repr, bit-exact). Tolerances are the test's business
 // (see design/gsap_reconciliation.md D: GSAP rounds written property values to 1e-6, so value columns need 5e-7).
 // fired = callbacks without onUpdate, fired_all = with; "<who>:<callback>"; state = the driven animation after the op (None when no animation existed).
-#![allow(dead_code, unused_imports, clippy::approx_constant, clippy::excessive_precision, clippy::unreadable_literal)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::approx_constant,
+    clippy::excessive_precision,
+    clippy::unreadable_literal
+)]
 use super::common::*;
 
 pub const GSAP_VERSION: &str = "3.15.0";
 pub const NOTES: &[&str] = &["fired = ordered callback names (excluding onUpdate) that fired during the op; fired_all includes onUpdate; update_counts counts onUpdate per animation.", "fired_detail[i].time/totalTime = the firing animation's own time()/totalTime() read inside the callback (for call:mark it is the zero-duration delayedCall).", "state = timeline state after the op. values = target values after the op.", "No ticker ever runs: reverse()/play()/restart() only set flags + (restart) jump; subsequent motion is emulated with explicit totalTime() calls."];
 
 #[derive(Clone, Copy, Debug)]
-pub struct Fired { pub cb: &'static str, pub time: f64, pub total_time: f64 }
+pub struct Fired {
+    pub cb: &'static str,
+    pub time: f64,
+    pub total_time: f64,
+}
 #[derive(Clone, Copy, Debug)]
-pub struct State { pub time: f64, pub total_time: f64, pub progress: f64, pub total_progress: f64, pub iteration: f64, pub reversed: bool, pub paused: bool }
+pub struct State {
+    pub time: f64,
+    pub total_time: f64,
+    pub progress: f64,
+    pub total_progress: f64,
+    pub iteration: f64,
+    pub reversed: bool,
+    pub paused: bool,
+}
 #[derive(Clone, Copy, Debug)]
-pub struct Op { pub op: &'static str, pub fired: &'static [&'static str], pub fired_all: &'static [&'static str], pub update_counts: &'static [(&'static str, u32)], pub fired_detail: &'static [Fired], pub state: Option<State>, pub values: Pairs }
+pub struct Op {
+    pub op: &'static str,
+    pub fired: &'static [&'static str],
+    pub fired_all: &'static [&'static str],
+    pub update_counts: &'static [(&'static str, u32)],
+    pub fired_detail: &'static [Fired],
+    pub state: Option<State>,
+    pub values: Pairs,
+}
 #[derive(Clone, Copy, Debug)]
-pub struct Trace { pub id: &'static str, pub description: &'static str, pub build: &'static [&'static str], pub ops: &'static [Op] }
+pub struct Trace {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub build: &'static [&'static str],
+    pub ops: &'static [Op],
+}
 pub const TRACES: &[Trace] = &[
     Trace { id: "lazy_first_render_progress_1", description: "progress(1) on a fresh main timeline BEFORE entering a ticker frame: b and inner>c have never rendered, so their first render is deferred and their callbacks fire late (compare main_ops_seek_events op \"progress(1)\" which is identical except that a/b/inner were not rendered before either)",
         build: &["tl = gsap.timeline({paused:true, repeat:1, onStart, onUpdate, onRepeat, onComplete, onReverseComplete})", "tl.to(a,{x:1,duration:1,repeat:1,yoyo:true,ease:\"none\", onStart,onUpdate,onRepeat,onComplete,onReverseComplete})   // 0..2", "tl.to(b,{x:1,duration:1,ease:\"none\", onStart,onUpdate,onComplete,onReverseComplete}, \"+=0.5\")                     // 2.5..3.5", "tl.call(mark, [], 1.25)                                                                                             // \"call:mark\" (delayedCall: same fn is onComplete AND onReverseComplete)", "tl.addLabel(\"mid\", 2)", "inner = gsap.timeline({onStart,onUpdate,onComplete,onReverseComplete}); inner.to(c,{x:1,duration:1,ease:\"none\"}); tl.add(inner, 3)   // 3..4", "=> tl.duration()=4, tl.totalDuration()=8"],
@@ -1591,58 +1622,207 @@ pub const TRACES: &[Trace] = &[
 ];
 
 #[derive(Clone, Copy, Debug)]
-pub struct ImmediateRenderCase { pub id: &'static str, pub gsap_calls: &'static [&'static str], pub values: Pairs }
+pub struct ImmediateRenderCase {
+    pub id: &'static str,
+    pub gsap_calls: &'static [&'static str],
+    pub values: Pairs,
+}
 pub const IMMEDIATE_RENDER: &[ImmediateRenderCase] = &[
-    ImmediateRenderCase { id: "from_unpaused", gsap_calls: &["o={x:0}", "gsap.from(o,{x:100,duration:1})"],
-        values: &[("after_create.x", Val::F(100.0))] },
-    ImmediateRenderCase { id: "from_paused", gsap_calls: &["o={x:0}", "gsap.from(o,{x:100,duration:1,paused:true})"],
-        values: &[("after_create.x", Val::F(100.0))] },
-    ImmediateRenderCase { id: "from_paused_immediateRender_false", gsap_calls: &["o={x:0}", "t=gsap.from(o,{x:100,duration:1,paused:true,immediateRender:false})", "t.totalTime(0)", "t.totalTime(0.5)"],
+    ImmediateRenderCase {
+        id: "from_unpaused",
+        gsap_calls: &["o={x:0}", "gsap.from(o,{x:100,duration:1})"],
+        values: &[("after_create.x", Val::F(100.0))],
+    },
+    ImmediateRenderCase {
+        id: "from_paused",
+        gsap_calls: &["o={x:0}", "gsap.from(o,{x:100,duration:1,paused:true})"],
+        values: &[("after_create.x", Val::F(100.0))],
+    },
+    ImmediateRenderCase {
+        id: "from_paused_immediateRender_false",
+        gsap_calls: &[
+            "o={x:0}",
+            "t=gsap.from(o,{x:100,duration:1,paused:true,immediateRender:false})",
+            "t.totalTime(0)",
+            "t.totalTime(0.5)",
+        ],
         values: &[
-            ("after_create.x", Val::F(0.0)), ("after_totalTime_0.x", Val::F(100.0)), ("after_totalTime_0_5.x", Val::F(25.0)),
-        ] },
-    ImmediateRenderCase { id: "fromTo_paused", gsap_calls: &["o={x:0}", "gsap.fromTo(o,{x:10},{x:20,duration:1,paused:true})"],
-        values: &[("after_create.x", Val::F(10.0))] },
-    ImmediateRenderCase { id: "fromTo_paused_immediateRender_false", gsap_calls: &["o={x:0}", "gsap.fromTo(o,{x:10},{x:20,duration:1,paused:true,immediateRender:false})"],
-        values: &[("after_create.x", Val::F(0.0))] },
-    ImmediateRenderCase { id: "to_paused_immediateRender_true", gsap_calls: &["o={x:0}", "t=gsap.to(o,{x:100,duration:1,ease:\"none\",paused:true,immediateRender:true})", "o.x=50 (external change)", "t.totalTime(0.5)"],
+            ("after_create.x", Val::F(0.0)),
+            ("after_totalTime_0.x", Val::F(100.0)),
+            ("after_totalTime_0_5.x", Val::F(25.0)),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "fromTo_paused",
+        gsap_calls: &[
+            "o={x:0}",
+            "gsap.fromTo(o,{x:10},{x:20,duration:1,paused:true})",
+        ],
+        values: &[("after_create.x", Val::F(10.0))],
+    },
+    ImmediateRenderCase {
+        id: "fromTo_paused_immediateRender_false",
+        gsap_calls: &[
+            "o={x:0}",
+            "gsap.fromTo(o,{x:10},{x:20,duration:1,paused:true,immediateRender:false})",
+        ],
+        values: &[("after_create.x", Val::F(0.0))],
+    },
+    ImmediateRenderCase {
+        id: "to_paused_immediateRender_true",
+        gsap_calls: &[
+            "o={x:0}",
+            "t=gsap.to(o,{x:100,duration:1,ease:\"none\",paused:true,immediateRender:true})",
+            "o.x=50 (external change)",
+            "t.totalTime(0.5)",
+        ],
         values: &[
-            ("after_create.x", Val::F(0.0)), ("after_external_change_then_totalTime_0_5.x", Val::F(50.0)),
-            ("after_external_change_then_totalTime_0_5.note", Val::S("start value recorded at creation (0): 0 + 0.5*100 = 50")),
-        ] },
-    ImmediateRenderCase { id: "to_paused_default_start_capture", gsap_calls: &["o={x:0}", "t=gsap.to(o,{x:100,duration:1,ease:\"none\",paused:true})", "o.x=50 (external change)", "t.totalTime(0.5)"],
+            ("after_create.x", Val::F(0.0)),
+            ("after_external_change_then_totalTime_0_5.x", Val::F(50.0)),
+            (
+                "after_external_change_then_totalTime_0_5.note",
+                Val::S("start value recorded at creation (0): 0 + 0.5*100 = 50"),
+            ),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "to_paused_default_start_capture",
+        gsap_calls: &[
+            "o={x:0}",
+            "t=gsap.to(o,{x:100,duration:1,ease:\"none\",paused:true})",
+            "o.x=50 (external change)",
+            "t.totalTime(0.5)",
+        ],
         values: &[
-            ("after_create.x", Val::F(0.0)), ("after_external_change_then_totalTime_0_5.x", Val::F(75.0)),
-            ("after_external_change_then_totalTime_0_5.note", Val::S("start value captured at first render (50): 50 + 0.5*50 = 75")),
-        ] },
-    ImmediateRenderCase { id: "timeline_from_at_2", gsap_calls: &["o={x:0}", "tl=gsap.timeline({paused:true})", "tl.from(o,{x:100,duration:1},2)", "tl.seek(1); tl.seek(2.5); tl.seek(0)"],
+            ("after_create.x", Val::F(0.0)),
+            ("after_external_change_then_totalTime_0_5.x", Val::F(75.0)),
+            (
+                "after_external_change_then_totalTime_0_5.note",
+                Val::S("start value captured at first render (50): 50 + 0.5*50 = 75"),
+            ),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "timeline_from_at_2",
+        gsap_calls: &[
+            "o={x:0}",
+            "tl=gsap.timeline({paused:true})",
+            "tl.from(o,{x:100,duration:1},2)",
+            "tl.seek(1); tl.seek(2.5); tl.seek(0)",
+        ],
         values: &[
-            ("after_create.x", Val::F(100.0)), ("after_seek_1.x", Val::F(100.0)), ("after_seek_2_5.x", Val::F(25.0)), ("after_seek_0.x", Val::F(100.0)),
-        ] },
-    ImmediateRenderCase { id: "timeline_set_at_0", gsap_calls: &["o={x:0}", "tl=gsap.timeline({paused:true})", "tl.set(o,{x:5},0)", "tl.seek(0)", "tl.totalTime(0.01)"],
-        values: &[("after_create.x", Val::F(0.0)), ("after_seek_0.x", Val::F(5.0)), ("after_totalTime_0_01.x", Val::F(5.0))] },
-    ImmediateRenderCase { id: "timeline_set_at_0_unpaused_root", gsap_calls: &["o={x:0}", "tl=gsap.timeline()", "tl.set(o,{x:5},0)"],
-        values: &[("after_create.x", Val::F(0.0))] },
-    ImmediateRenderCase { id: "gsap_set", gsap_calls: &["o={x:0}", "gsap.set(o,{x:5})"],
-        values: &[("after_create.x", Val::F(5.0))] },
-    ImmediateRenderCase { id: "to_zero_duration_root", gsap_calls: &["o={x:0}", "gsap.to(o,{x:5,duration:0})"],
-        values: &[("after_create.x", Val::F(5.0))] },
-    ImmediateRenderCase { id: "to_zero_duration_paused", gsap_calls: &["o={x:0}", "gsap.to(o,{x:5,duration:0,paused:true})"],
-        values: &[("after_create.x", Val::F(0.0))] },
-    ImmediateRenderCase { id: "two_froms_same_prop", gsap_calls: &["o={x:0}", "tl=gsap.timeline({paused:true})", "tl.from(o,{x:100,duration:1,ease:\"none\"})", "tl.from(o,{x:50,duration:1,ease:\"none\"})", "tl.seek(t) for t in 0,0.25,0.5,0.75,1,1.5,2,0 (in this order)"],
+            ("after_create.x", Val::F(100.0)),
+            ("after_seek_1.x", Val::F(100.0)),
+            ("after_seek_2_5.x", Val::F(25.0)),
+            ("after_seek_0.x", Val::F(100.0)),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "timeline_set_at_0",
+        gsap_calls: &[
+            "o={x:0}",
+            "tl=gsap.timeline({paused:true})",
+            "tl.set(o,{x:5},0)",
+            "tl.seek(0)",
+            "tl.totalTime(0.01)",
+        ],
         values: &[
-            ("after_first_create.x", Val::F(100.0)), ("after_create.x", Val::F(50.0)), ("seek.len", Val::F(8.0)), ("seek.0.t", Val::F(0.0)),
-            ("seek.0.x", Val::F(50.0)), ("seek.1.t", Val::F(0.25)), ("seek.1.x", Val::F(75.0)), ("seek.2.t", Val::F(0.5)), ("seek.2.x", Val::F(50.0)),
-            ("seek.3.t", Val::F(0.75)), ("seek.3.x", Val::F(25.0)), ("seek.4.t", Val::F(1.0)), ("seek.4.x", Val::F(50.0)), ("seek.5.t", Val::F(1.5)),
-            ("seek.5.x", Val::F(75.0)), ("seek.6.t", Val::F(2.0)), ("seek.6.x", Val::F(100.0)), ("seek.7.t", Val::F(0.0)), ("seek.7.x", Val::F(100.0)),
-        ] },
-    ImmediateRenderCase { id: "two_froms_same_prop_immediateRender_false_on_second", gsap_calls: &["o={x:0}", "tl=gsap.timeline({paused:true})", "tl.from(o,{x:100,duration:1,ease:\"none\"})", "tl.from(o,{x:50,duration:1,ease:\"none\",immediateRender:false})", "tl.seek(t)"],
+            ("after_create.x", Val::F(0.0)),
+            ("after_seek_0.x", Val::F(5.0)),
+            ("after_totalTime_0_01.x", Val::F(5.0)),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "timeline_set_at_0_unpaused_root",
+        gsap_calls: &["o={x:0}", "tl=gsap.timeline()", "tl.set(o,{x:5},0)"],
+        values: &[("after_create.x", Val::F(0.0))],
+    },
+    ImmediateRenderCase {
+        id: "gsap_set",
+        gsap_calls: &["o={x:0}", "gsap.set(o,{x:5})"],
+        values: &[("after_create.x", Val::F(5.0))],
+    },
+    ImmediateRenderCase {
+        id: "to_zero_duration_root",
+        gsap_calls: &["o={x:0}", "gsap.to(o,{x:5,duration:0})"],
+        values: &[("after_create.x", Val::F(5.0))],
+    },
+    ImmediateRenderCase {
+        id: "to_zero_duration_paused",
+        gsap_calls: &["o={x:0}", "gsap.to(o,{x:5,duration:0,paused:true})"],
+        values: &[("after_create.x", Val::F(0.0))],
+    },
+    ImmediateRenderCase {
+        id: "two_froms_same_prop",
+        gsap_calls: &[
+            "o={x:0}",
+            "tl=gsap.timeline({paused:true})",
+            "tl.from(o,{x:100,duration:1,ease:\"none\"})",
+            "tl.from(o,{x:50,duration:1,ease:\"none\"})",
+            "tl.seek(t) for t in 0,0.25,0.5,0.75,1,1.5,2,0 (in this order)",
+        ],
         values: &[
-            ("after_create.x", Val::F(100.0)), ("seek.len", Val::F(8.0)), ("seek.0.t", Val::F(0.0)), ("seek.0.x", Val::F(100.0)), ("seek.1.t", Val::F(0.25)),
-            ("seek.1.x", Val::F(75.0)), ("seek.2.t", Val::F(0.5)), ("seek.2.x", Val::F(50.0)), ("seek.3.t", Val::F(0.75)), ("seek.3.x", Val::F(25.0)),
-            ("seek.4.t", Val::F(1.0)), ("seek.4.x", Val::F(50.0)), ("seek.5.t", Val::F(1.5)), ("seek.5.x", Val::F(25.0)), ("seek.6.t", Val::F(2.0)),
-            ("seek.6.x", Val::F(0.0)), ("seek.7.t", Val::F(0.0)), ("seek.7.x", Val::F(100.0)),
-        ] },
-    ImmediateRenderCase { id: "from_paused_outside_frame_lazy", gsap_calls: &["(before the harness frame tick) o={x:0}", "gsap.from(o,{x:100,duration:1,paused:true})", "gsap.ticker.tick()  // the frame flushes lazy renders"],
-        values: &[("after_create.x", Val::F(0.0)), ("after_frame_tick.x", Val::F(100.0))] },
+            ("after_first_create.x", Val::F(100.0)),
+            ("after_create.x", Val::F(50.0)),
+            ("seek.len", Val::F(8.0)),
+            ("seek.0.t", Val::F(0.0)),
+            ("seek.0.x", Val::F(50.0)),
+            ("seek.1.t", Val::F(0.25)),
+            ("seek.1.x", Val::F(75.0)),
+            ("seek.2.t", Val::F(0.5)),
+            ("seek.2.x", Val::F(50.0)),
+            ("seek.3.t", Val::F(0.75)),
+            ("seek.3.x", Val::F(25.0)),
+            ("seek.4.t", Val::F(1.0)),
+            ("seek.4.x", Val::F(50.0)),
+            ("seek.5.t", Val::F(1.5)),
+            ("seek.5.x", Val::F(75.0)),
+            ("seek.6.t", Val::F(2.0)),
+            ("seek.6.x", Val::F(100.0)),
+            ("seek.7.t", Val::F(0.0)),
+            ("seek.7.x", Val::F(100.0)),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "two_froms_same_prop_immediateRender_false_on_second",
+        gsap_calls: &[
+            "o={x:0}",
+            "tl=gsap.timeline({paused:true})",
+            "tl.from(o,{x:100,duration:1,ease:\"none\"})",
+            "tl.from(o,{x:50,duration:1,ease:\"none\",immediateRender:false})",
+            "tl.seek(t)",
+        ],
+        values: &[
+            ("after_create.x", Val::F(100.0)),
+            ("seek.len", Val::F(8.0)),
+            ("seek.0.t", Val::F(0.0)),
+            ("seek.0.x", Val::F(100.0)),
+            ("seek.1.t", Val::F(0.25)),
+            ("seek.1.x", Val::F(75.0)),
+            ("seek.2.t", Val::F(0.5)),
+            ("seek.2.x", Val::F(50.0)),
+            ("seek.3.t", Val::F(0.75)),
+            ("seek.3.x", Val::F(25.0)),
+            ("seek.4.t", Val::F(1.0)),
+            ("seek.4.x", Val::F(50.0)),
+            ("seek.5.t", Val::F(1.5)),
+            ("seek.5.x", Val::F(25.0)),
+            ("seek.6.t", Val::F(2.0)),
+            ("seek.6.x", Val::F(0.0)),
+            ("seek.7.t", Val::F(0.0)),
+            ("seek.7.x", Val::F(100.0)),
+        ],
+    },
+    ImmediateRenderCase {
+        id: "from_paused_outside_frame_lazy",
+        gsap_calls: &[
+            "(before the harness frame tick) o={x:0}",
+            "gsap.from(o,{x:100,duration:1,paused:true})",
+            "gsap.ticker.tick()  // the frame flushes lazy renders",
+        ],
+        values: &[
+            ("after_create.x", Val::F(0.0)),
+            ("after_frame_tick.x", Val::F(100.0)),
+        ],
+    },
 ];

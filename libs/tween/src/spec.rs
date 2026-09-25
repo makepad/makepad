@@ -56,7 +56,7 @@ impl Targets<'_> {
     pub fn get(&self, i: u32) -> TargetId {
         match *self {
             Targets::One(t) => t,
-            Targets::Range { first, .. } => TargetId(first + i),
+            Targets::Range { first, .. } => TargetId(first.wrapping_add(i)),
             Targets::List(l) => l[i as usize],
         }
     }
@@ -572,6 +572,19 @@ impl TweenOpts {
             inherit: self.inherit.or(parent.inherit),
             tag: self.tag,
             events: self.events,
+        }
+    }
+
+    /// The same options with every non-finite number unset, so it falls
+    /// through to the inherited or built-in value.
+    pub(crate) fn finite(self) -> Self {
+        let f = |x: Option<f64>| x.filter(|v| v.is_finite());
+        Self {
+            duration: f(self.duration),
+            delay: f(self.delay),
+            repeat_delay: f(self.repeat_delay),
+            time_scale: f(self.time_scale),
+            ..self
         }
     }
 }

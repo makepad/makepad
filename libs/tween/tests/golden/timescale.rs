@@ -3,14 +3,30 @@
 // Numbers are the golden doubles (shortest round-trip repr, bit-exact). Tolerances are the test's business
 // (see design/gsap_reconciliation.md D: GSAP rounds written property values to 1e-6, so value columns need 5e-7).
 // Sampled cases: columnar series (outer.time, inner.time, ..., x) against outer.totalTime(t); `ops` cases: flattened rows in call order.
-#![allow(dead_code, unused_imports, clippy::approx_constant, clippy::excessive_precision, clippy::unreadable_literal)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::approx_constant,
+    clippy::excessive_precision,
+    clippy::unreadable_literal
+)]
 use super::common::*;
 
 pub const GSAP_VERSION: &str = "3.15.0";
-pub const NOTES: &[&str] = &["samples columns aligned with samples.t = outer.totalTime(t) values set in increasing order."];
+pub const NOTES: &[&str] = &[
+    "samples columns aligned with samples.t = outer.totalTime(t) values set in increasing order.",
+];
 
 #[derive(Clone, Copy, Debug)]
-pub struct TimeScaleCase { pub id: &'static str, pub description: &'static str, pub gsap_calls: &'static [&'static str], pub meta: Pairs, pub t: &'static [f64], pub series: &'static [Series], pub ops: &'static [Pairs] }
+pub struct TimeScaleCase {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub gsap_calls: &'static [&'static str],
+    pub meta: Pairs,
+    pub t: &'static [f64],
+    pub series: &'static [Series],
+    pub ops: &'static [Pairs],
+}
 pub const CASES: &[TimeScaleCase] = &[
     TimeScaleCase { id: "inner_timescale_2", description: "inner (2 s, x 0->100 linear) with timeScale 2 added at 1 -> occupies 1..2",
         gsap_calls: &["outer=gsap.timeline({paused:true})", "inner=gsap.timeline(); inner.to(o,{x:100,duration:2,ease:\"none\"})", "inner.timeScale(2)", "outer.add(inner, 1)"],

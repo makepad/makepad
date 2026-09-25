@@ -16,7 +16,7 @@ use crate::spec::{
     TimelineOpts, TweenOpts,
 };
 use crate::value::{ColorSpace, TweenValue, ValueKind};
-use crate::{round7, splitmix64, BIG, INFINITE, TINY};
+use crate::{finite_or, round7, splitmix64, BIG, INFINITE, TINY};
 
 /// "No node" / "no track" / "no slot" in the intrusive links.
 pub(crate) const NIL: u32 = u32::MAX;
@@ -53,10 +53,18 @@ pub(crate) const F_PRE: u32 = 1 << 18;
 pub(crate) const F_REFRESH: u32 = 1 << 19;
 pub(crate) const F_PAUSE_NODE: u32 = 1 << 20;
 pub(crate) const F_CALL: u32 = 1 << 21;
+/// On a timeline: a child may be ACT with a start after the playhead (a
+/// control drove or moved it). The forward walk then visits every child
+/// like GSAP instead of stopping at the first unstarted one, and clears
+/// the flag once such a full walk has rendered them all.
+pub(crate) const F_ACT_AHEAD: u32 = 1 << 22;
 pub(crate) const F_FREE: u32 = 1 << 23;
 /// A group's inner timeline has rendered once.
 pub(crate) const F_INNER_INIT: u32 = 1 << 24;
 pub(crate) const F_IN_REAP: u32 = 1 << 25;
+/// A keyframes group: its first init renders the inner timeline to the end
+/// (GSAP `_initTween`), so every step captures from the previous step's end.
+pub(crate) const F_KEYFRAMES: u32 = 1 << 26;
 
 // ---- track flags (TrackMeta::flags) ----
 pub(crate) const T_ALIVE: u8 = 1;
@@ -64,8 +72,8 @@ pub(crate) const T_RESOLVED: u8 = 2;
 pub(crate) const T_SNAP: u8 = 4;
 
 /// The record the child walk reads for every visited child: exactly one
-/// 64-byte cache line.
-#[repr(C)]
+/// 64-byte cache line (aligned to one).
+#[repr(C, align(64))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Hot {
     /// Start in the parent's local time, delay included (round7).
@@ -93,15 +101,28 @@ pub(crate) struct Hot {
 const _: () = assert!(std::mem::size_of::<Hot>() == 64);
 
 /// Everything a node needs besides the walk data: touched by building,
-/// controls, callbacks and by nodes that actually render.
+/// controls, callbacks and by nodes that actually render. The fields a
+/// render reads come first (one cache line for a plain tween).
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Cold {
+    pub ease: Easing,
+    pub rdelay: f64,
+    /// First track and track count (contiguous range).
+    pub tracks: u32,
+    pub n_tracks: u32,
+    pub repeat: i32,
+    /// Linked parent (NIL when unlinked).
+    pub parent: u32,
+    pub events: EventMask,
+    pub overwrite: Overwrite,
+    pub reduce: Reduce,
+    pub yoyo: Option<YoyoEase>,
     /// End in the parent's time (round7).
     pub end: f64,
     /// Requested time scale (kept while paused; negative = reversed).
     pub rts: f64,
     pub delay: f64,
-    pub rdelay: f64,
     /// Total time recorded when paused.
     pub ptime: f64,
     /// GSAP `_zTime`: the "exactly at zero" bookkeeping.
@@ -111,27 +132,17 @@ pub(crate) struct Cold {
     pub iztime: f64,
     /// A group's inner (content) duration.
     pub inner_dur: f64,
-    pub repeat: i32,
     pub gen: u32,
-    /// Linked parent (NIL when unlinked) and last parent (GSAP `_dp`).
-    pub parent: u32,
+    /// Last parent (GSAP `_dp`), kept when unlinked.
     pub dp: u32,
     pub first: u32,
     pub last: u32,
     /// The most recently added child (GSAP `recent()`).
     pub recent: u32,
-    /// First track and track count (contiguous range).
-    pub tracks: u32,
-    pub n_tracks: u32,
     pub live_tracks: u32,
-    pub ease: Easing,
-    pub yoyo: Option<YoyoEase>,
     /// A group's outer ease: inner time = inner_dur * remap(time / dur).
     pub remap: Easing,
-    pub overwrite: Overwrite,
-    pub reduce: Reduce,
     pub tag: Tag,
-    pub events: EventMask,
     /// This node's share of the event reserve (section 6.3).
     pub weight: u64,
 }
@@ -194,6 +205,9 @@ pub(crate) struct TrackSpec {
     pub end: EndKind,
     pub val: [f64; 4],
     pub snap: f64,
+    /// A colour track's captured ends in sRGB, so both ends land exactly
+    /// (the interpolation-space round trip is not bit-exact).
+    pub land: [[f64; 4]; 2],
 }
 
 /// A timeline label.
@@ -210,7 +224,6 @@ pub(crate) struct Resolved {
     pub duration: f64,
     pub delay: f64,
     pub ease: Easing,
-    pub explicit_ease: Option<Easing>,
     pub ease_each: Option<Easing>,
     pub yoyo_ease: Option<YoyoEase>,
     pub repeat: i32,
@@ -281,7 +294,14 @@ pub struct TweenEngine {
     pub(crate) events: Vec<TweenEvent>,
     pub(crate) event_weight: u64,
     pub(crate) build_scratch: Vec<f64>,
+    /// The root node (GSAP's global timeline); NIL until the first build.
     pub(crate) root: u32,
+    /// The root time scale, kept while the root does not exist yet.
+    pub(crate) root_ts: f64,
+    /// The root's unrounded total time. GSAP's root reads the absolute
+    /// ticker time, so its 1e-7 rounding never accumulates; the engine
+    /// integrates `dt` here and hands the root `round7` of the sum.
+    pub(crate) root_clock: f64,
     pub(crate) defaults: TweenOpts,
     pub(crate) stats: Stats,
 }
@@ -293,8 +313,9 @@ impl Default for TweenEngine {
 }
 
 impl TweenEngine {
-    /// An empty engine (GSAP's global timeline with nothing on it). Only the
-    /// root node is allocated.
+    /// An empty engine (GSAP's global timeline with nothing on it). Allocates
+    /// nothing: the storage (and the root node) is created by the first
+    /// building call.
     pub fn new() -> Self {
         Self::with_capacity(0, 0, 0)
     }
@@ -302,8 +323,8 @@ impl TweenEngine {
     /// An empty engine with room for `nodes` animations, `tracks` property
     /// tracks and `slots` value slots before any storage grows.
     pub fn with_capacity(nodes: usize, tracks: usize, slots: usize) -> Self {
-        let nodes = nodes + 1;
-        let mut e = TweenEngine {
+        let nodes = if nodes > 0 { nodes + 1 } else { 0 };
+        TweenEngine {
             hot: Vec::with_capacity(nodes),
             cold: Vec::with_capacity(nodes),
             free_nodes: Vec::with_capacity(nodes),
@@ -323,7 +344,11 @@ impl TweenEngine {
             sl_first_track: Vec::with_capacity(slots),
             sl_stamp: Vec::with_capacity(slots),
             sl_seeded: Vec::with_capacity(slots),
-            sl_index: Vec::new(),
+            sl_index: if slots > 0 {
+                vec![NIL; (slots * 2).next_power_of_two()]
+            } else {
+                Vec::new()
+            },
             slot_gen: 0,
             labels: Vec::new(),
             tl_defaults: Vec::new(),
@@ -332,17 +357,26 @@ impl TweenEngine {
             events: Vec::new(),
             event_weight: 0,
             build_scratch: Vec::new(),
-            root: 0,
+            root: NIL,
+            root_ts: 1.0,
+            root_clock: 0.0,
             defaults: TweenOpts::new(),
             stats: Stats::default(),
-        };
-        let root = e.alloc_node(K_TIMELINE);
-        e.hot[root as usize].flags |= F_ROOT | F_SMOOTH | F_AUTO_REMOVE | F_KEEP;
-        e.root = root;
-        if slots > 0 {
-            e.sl_index = vec![NIL; (slots * 2).next_power_of_two()];
         }
-        e
+    }
+
+    /// The root node, created on first use (building calls only).
+    pub(crate) fn ensure_root(&mut self) -> u32 {
+        if self.root == NIL {
+            let root = self.alloc_node(K_TIMELINE);
+            let h = &mut self.hot[root as usize];
+            h.flags |= F_ROOT | F_SMOOTH | F_AUTO_REMOVE | F_KEEP;
+            h.ts = self.root_ts;
+            self.cold[root as usize].rts = self.root_ts;
+            self.root = root;
+            self.stats.live_nodes -= 1; // the root is not an animation
+        }
+        self.root
     }
 
     /// GSAP `gsap.defaults()`: options every new tween inherits (after its
@@ -454,7 +488,7 @@ impl TweenEngine {
     /// timeline's `defaults` innermost first (unless `inherit: false`), then
     /// the engine defaults, then the built-ins.
     pub(crate) fn resolve_opts(&self, parent: u32, o: &TweenOpts) -> Resolved {
-        let mut r = *o;
+        let mut r = o.finite();
         if o.inherit != Some(false) {
             let mut p = parent;
             while p != NIL {
@@ -465,14 +499,13 @@ impl TweenEngine {
                 p = if c.parent != NIL { c.parent } else { c.dp };
             }
         }
-        r = r.or(&self.defaults);
+        r = r.or(&self.defaults).finite();
         let ease = r.ease.unwrap_or_default();
         let repeat = r.repeat.unwrap_or(0);
         Resolved {
             duration: r.duration.unwrap_or(0.5).max(0.0),
             delay: r.delay.unwrap_or(0.0),
             ease,
-            explicit_ease: o.ease,
             ease_each: r.ease_each,
             yoyo_ease: r.yoyo_ease,
             repeat,
@@ -501,10 +534,13 @@ impl TweenEngine {
     /// current time plus `delay`. A `stagger` builds a staggered group,
     /// [`End::Keys`] / [`End::Values`] props build a keyframes group.
     pub fn tween(&mut self, t: Targets, props: &[PropTo], o: TweenOpts) -> TweenId {
-        let root = self.root;
+        let root = self.ensure_root();
         let n = self.build_tween(root, t, props, &o, Place::Now);
+        // The handle is taken before reclamation: an animation that completed
+        // at creation (a root-level set) reports under it, then goes stale.
+        let id = self.id_of(n);
         self.finish_build();
-        self.id_of(n)
+        id
     }
 
     /// GSAP `gsap.to()`: from the current values to the given ends.
@@ -549,28 +585,37 @@ impl TweenEngine {
     /// to back on `targets`, each with its own props and options (its ease
     /// defaults to linear, GSAP `"none"`); `o.ease` eases the whole run.
     pub fn keyframes(&mut self, t: Targets, steps: &[KeyStep], o: TweenOpts) -> TweenId {
-        let root = self.root;
+        let root = self.ensure_root();
         let n = self.build_keyframes(root, t, steps, &o, Place::Now);
+        // The handle is taken before reclamation: an animation that completed
+        // at creation (a root-level set) reports under it, then goes stale.
+        let id = self.id_of(n);
         self.finish_build();
-        self.id_of(n)
+        id
     }
 
     /// GSAP `gsap.delayedCall()`: reports [`EventKind::Call`] with `tag`
     /// after `delay` seconds.
     pub fn delayed_call(&mut self, delay: f64, tag: Tag) -> TweenId {
-        let root = self.root;
+        let root = self.ensure_root();
         let n = self.build_marker(root, F_CALL, tag, delay, Place::Now);
+        // The handle is taken before reclamation: an animation that completed
+        // at creation (a root-level set) reports under it, then goes stale.
+        let id = self.id_of(n);
         self.finish_build();
-        self.id_of(n)
+        id
     }
 
     /// GSAP `gsap.timeline()`: an empty timeline on the root at its current
     /// time plus `delay`. Fill it through [`TweenEngine::tl`].
     pub fn timeline(&mut self, o: TimelineOpts) -> TweenId {
-        let root = self.root;
+        let root = self.ensure_root();
         let n = self.build_timeline(root, &o, Place::Now);
+        // The handle is taken before reclamation: an animation that completed
+        // at creation (a root-level set) reports under it, then goes stale.
+        let id = self.id_of(n);
         self.finish_build();
-        self.id_of(n)
+        id
     }
 
     /// Housekeeping after every building call: reclaim what an immediate
@@ -591,16 +636,16 @@ impl TweenEngine {
         let n = self.alloc_node(K_TIMELINE);
         {
             let c = &mut self.cold[n as usize];
-            c.delay = o.delay;
+            c.delay = finite_or(o.delay, 0.0);
             c.repeat = o.repeat;
-            c.rdelay = o.repeat_delay.max(0.0);
+            c.rdelay = finite_or(o.repeat_delay, 0.0).max(0.0);
             c.reduce = o.reduce;
             c.tag = o.tag;
             c.events = o.events;
-            c.rts = o.time_scale;
+            c.rts = finite_or(o.time_scale, 1.0);
         }
         let h = &mut self.hot[n as usize];
-        h.ts = o.time_scale;
+        h.ts = finite_or(o.time_scale, 1.0);
         if o.yoyo {
             h.flags |= F_YOYO;
         }
@@ -646,7 +691,7 @@ impl TweenEngine {
         {
             let c = &mut self.cold[n as usize];
             c.tag = tag;
-            c.delay = delay;
+            c.delay = finite_or(delay, 0.0);
         }
         self.set_duration_raw(n, 0.0);
         let at = self.place_time(parent, place, None);
@@ -657,10 +702,9 @@ impl TweenEngine {
     /// The parent-local time a [`Place`] resolves to (before the child's delay).
     pub(crate) fn place_time(&mut self, parent: u32, place: Place, child: Option<u32>) -> f64 {
         match place {
-            Place::Now => {
-                self.total_duration(parent);
-                self.hot[parent as usize].time
-            }
+            // GSAP places root-level animations at the root's raw time; a
+            // pending negative-start shift moves them with everything else.
+            Place::Now => self.hot[parent as usize].time,
             Place::Pos(p) => self.resolve_position(parent, p, child),
         }
     }
@@ -875,6 +919,7 @@ impl TweenEngine {
                     end,
                     val: val.to_lanes(),
                     snap: p.snap,
+                    land: [[0.0; 4]; 2],
                 });
                 self.tr_node.push(n);
                 self.tr_next_in_slot
@@ -908,6 +953,9 @@ impl TweenEngine {
         delays.clear();
         delays.resize(n as usize, 0.0);
         st.delays(n, &mut delays);
+        for d in delays.iter_mut() {
+            *d = finite_or(*d, 0.0);
+        }
         let has_keys = props
             .iter()
             .any(|p| matches!(p.to, End::Keys(_) | End::Values(_)));
@@ -1009,6 +1057,7 @@ impl TweenEngine {
         place: Place,
     ) -> u32 {
         let g = self.alloc_node(K_GROUP);
+        self.hot[g as usize].flags |= F_KEYFRAMES;
         let outer = o.ease.unwrap_or(Easing::Linear);
         let mut gr = *r;
         gr.ease = outer;
@@ -1037,9 +1086,16 @@ impl TweenEngine {
                 End::Keys(ks) => order.extend(ks.iter().enumerate().map(|(i, k)| (k.at, i))),
                 End::Values(vs) => {
                     let last = vs.len().saturating_sub(1).max(1) as f64;
-                    order.extend(
-                        (0..vs.len()).map(|i| (if vs.len() == 1 { 100.0 } else { i as f64 / last * 100.0 }, i)),
-                    );
+                    order.extend((0..vs.len()).map(|i| {
+                        (
+                            if vs.len() == 1 {
+                                100.0
+                            } else {
+                                i as f64 / last * 100.0
+                            },
+                            i,
+                        )
+                    }));
                 }
                 _ => continue,
             }
@@ -1096,6 +1152,7 @@ impl TweenEngine {
     ) -> u32 {
         let r = self.resolve_opts(parent, o);
         let g = self.alloc_node(K_GROUP);
+        self.hot[g as usize].flags |= F_KEYFRAMES;
         let outer = o.ease.unwrap_or(Easing::Linear);
         let mut gr = r;
         gr.ease = outer;
@@ -1141,7 +1198,9 @@ impl TweenEngine {
             self.unlink(c);
         }
         let delay = self.cold[c as usize].delay;
-        let start = round7(at + delay);
+        // A non-finite place (NaN from a 0/0 layout) counts as 0: NaN never
+        // compares as started and would stall the forward child walk.
+        let start = finite_or(round7(at + delay), 0.0);
         self.hot[c as usize].start = start;
         let tdur = self.total_duration(c);
         let rts = self.time_scale_of(c).abs();
@@ -1151,6 +1210,9 @@ impl TweenEngine {
             round7(start + tdur / TINY)
         };
         self.cold[c as usize].end = end;
+        if self.has(c, F_ACT) {
+            self.hot[tl as usize].flags |= F_ACT_AHEAD;
+        }
         self.insert_sorted(tl, c);
         self.cold[tl as usize].recent = c;
         self.update_weights(c);
@@ -1308,6 +1370,12 @@ impl TweenEngine {
     /// GSAP `_parsePosition`: the parent-local time a [`Position`] names, for
     /// inserting `child` (whose total duration percent offsets use).
     pub(crate) fn resolve_position(&mut self, tl: u32, p: Position, child: Option<u32>) -> f64 {
+        if let (Anchor::Zero, Offset::Secs(t)) = (p.anchor, p.offset) {
+            // A plain number: GSAP skips _parsePosition (no duration refresh).
+            if t.is_finite() {
+                return t;
+            }
+        }
         self.total_duration(tl);
         let dur = self.hot[tl as usize].dur;
         let recent = self.cold[tl as usize].recent;
@@ -1363,7 +1431,13 @@ impl TweenEngine {
             // "+=50%" as 50 seconds there and throws on "<+=50%" (deviation).
             Offset::PercentOfChild(pc) => child_tdur.map_or(0.0, |d| pc / 100.0 * d),
         };
-        base + off
+        // GSAP reads a NaN position as an unknown label: the end.
+        let at = base + off;
+        if at.is_finite() {
+            at
+        } else {
+            clipped
+        }
     }
 
     /// GSAP `endTime(includeRepeats)`.
@@ -1462,9 +1536,7 @@ impl TweenEngine {
                 max -= start;
                 let parent = self.cold[tl as usize].parent;
                 let dp = self.cold[tl as usize].dp;
-                if (parent == NIL && dp == NIL)
-                    || (parent != NIL && self.has(parent, F_SMOOTH))
-                {
+                if (parent == NIL && dp == NIL) || (parent != NIL && self.has(parent, F_SMOOTH)) {
                     // Deviation: GSAP divides by _ts (0 while paused, giving
                     // -Infinity); the requested scale keeps the start finite.
                     let ts = self.hot[tl as usize].ts;
@@ -1481,6 +1553,8 @@ impl TweenEngine {
                     th.ttime -= start;
                     if parent != NIL {
                         self.set_end(tl);
+                        // The parent sees a moved child (the root then shifts too).
+                        self.uncache(parent);
                     }
                 }
                 self.shift_children_raw(tl, -start, f64::NEG_INFINITY);
@@ -1501,6 +1575,7 @@ impl TweenEngine {
     /// `shiftChildren` without the uncache).
     pub(crate) fn shift_children_raw(&mut self, tl: u32, amount: f64, ignore_before: f64) {
         let amount = round7(amount);
+        self.hot[tl as usize].flags |= F_ACT_AHEAD;
         let mut c = self.cold[tl as usize].first;
         while c != NIL {
             let h = &mut self.hot[c as usize];
@@ -1895,7 +1970,8 @@ impl TweenEngine {
 
     fn index_insert(&mut self, s: u32) {
         let mask = self.sl_index.len() - 1;
-        let mut i = Self::slot_hash(self.sl_target[s as usize], self.sl_key[s as usize]) as usize & mask;
+        let mut i =
+            Self::slot_hash(self.sl_target[s as usize], self.sl_key[s as usize]) as usize & mask;
         while self.sl_index[i] != NIL {
             i = (i + 1) & mask;
         }
@@ -1939,6 +2015,11 @@ impl TweenEngine {
         self.sl_kind[s as usize] = v.kind();
         self.sl_seeded[s as usize] = true;
         self.write_slot(s, v.to_lanes());
+        // A seed is always listed, even when it equals the stored lanes.
+        if self.sl_stamp[s as usize] != self.change_gen {
+            self.sl_stamp[s as usize] = self.change_gen;
+            self.changed.push(SlotId(s));
+        }
         SlotId(s)
     }
 
@@ -1966,9 +2047,13 @@ impl TweenEngine {
         self.find_slot(t, p).map(|s| self.sl_val[s as usize][0])
     }
 
-    /// The (target, property) pair of slot `s`.
+    /// The (target, property) pair of slot `s` (defaults for an unknown slot).
     pub fn slot_key(&self, s: SlotId) -> (TargetId, PropKey) {
-        (self.sl_target[s.0 as usize], self.sl_key[s.0 as usize])
+        let i = s.0 as usize;
+        if i >= self.sl_target.len() {
+            return (TargetId::default(), PropKey::default());
+        }
+        (self.sl_target[i], self.sl_key[i])
     }
 
     /// How many slots exist.
@@ -2051,12 +2136,7 @@ impl TweenEngine {
     pub fn kill_all(&mut self) {
         for n in 0..self.hot.len() as u32 {
             if n != self.root && self.hot[n as usize].flags & (F_FREE | F_KILLED) == 0 {
-                let p = self.cold[n as usize].dp;
-                // Kill only subtree roots: nodes whose last parent is the root
-                // or who are orphans.
-                if p == self.root || p == NIL || self.hot[p as usize].flags & F_FREE != 0 {
-                    self.kill_node(n, false);
-                }
+                self.kill_node(n, false);
             }
         }
         self.flush_reap();
@@ -2064,15 +2144,20 @@ impl TweenEngine {
 
     /// GSAP `gsap.globalTimeline.timeScale()`.
     pub fn root_time_scale(&self) -> f64 {
-        self.hot[self.root as usize].ts
+        self.root_ts
     }
 
     /// Sets the root time scale: every root-level animation speeds up or
-    /// slows down (0 freezes the engine).
+    /// slows down (0 freezes the engine). A non-finite scale counts as 0
+    /// (GSAP `+value || 0`), so the root clock never turns NaN.
     pub fn set_root_time_scale(&mut self, s: f64) {
-        let r = self.root as usize;
-        self.hot[r].ts = s;
-        self.cold[r].rts = s;
+        let s = if s.is_finite() { s } else { 0.0 };
+        self.root_ts = s;
+        if self.root != NIL {
+            let r = self.root as usize;
+            self.hot[r].ts = s;
+            self.cold[r].rts = s;
+        }
     }
 }
 

@@ -45,7 +45,7 @@ impl Tag {
 
 /// One value cell of the engine's value store: a (target, property) pair.
 /// Tweens write it every frame; the host reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SlotId(pub u32);
 
 /// A handle to a built animation: a tween, timeline, stagger group, delayed
@@ -57,6 +57,13 @@ pub struct SlotId(pub u32);
 pub struct TweenId {
     pub(crate) ix: u32,
     pub(crate) gen: u32,
+}
+
+impl Default for TweenId {
+    /// [`TweenId::NONE`] (for `#[rust]` handle fields).
+    fn default() -> Self {
+        TweenId::NONE
+    }
 }
 
 impl TweenId {

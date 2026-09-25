@@ -3,16 +3,31 @@
 // Numbers are the golden doubles (shortest round-trip repr, bit-exact). Tolerances are the test's business
 // (see design/gsap_reconciliation.md D: GSAP rounds written property values to 1e-6, so value columns need 5e-7).
 // Each step is a flattened snapshot (obj.x, t1_has_parent, callbacks.0, ...), in the order the GSAP calls ran.
-#![allow(dead_code, unused_imports, clippy::approx_constant, clippy::excessive_precision, clippy::unreadable_literal)]
+#![allow(
+    dead_code,
+    unused_imports,
+    clippy::approx_constant,
+    clippy::excessive_precision,
+    clippy::unreadable_literal
+)]
 use super::common::*;
 
 pub const GSAP_VERSION: &str = "3.15.0";
 pub const NOTES: &[&str] = &["All tweens live on the root timeline; the root never advances (frozen clock), so t1 \"playing\" means un-paused with its start aligned so that root time 0 == t1 time 0.5.", "t1_live_props_internal_ptLookup / t1_overwritten_props_internal_op read GSAP internals (_ptLookup, _op); t1.vars is never modified by overwriting.", "gsap.getTweensOf(obj) lists tweens still attached to a timeline; a fully killed tween is removed from its parent."];
 
 #[derive(Clone, Copy, Debug)]
-pub struct Step { pub at: &'static str, pub vals: Pairs }
+pub struct Step {
+    pub at: &'static str,
+    pub vals: Pairs,
+}
 #[derive(Clone, Copy, Debug)]
-pub struct OverwriteCase { pub id: &'static str, pub description: &'static str, pub overwrite: &'static str, pub gsap_calls: &'static [&'static str], pub steps: &'static [Step] }
+pub struct OverwriteCase {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub overwrite: &'static str,
+    pub gsap_calls: &'static [&'static str],
+    pub steps: &'static [Step],
+}
 pub const CASES: &[OverwriteCase] = &[
     OverwriteCase { id: "auto_t1_playing", description: "overwrite:\"auto\", t1 un-paused (on root) and moved to 0.5 -> t1 is \"active\" at t2 init time", overwrite: "auto",
         gsap_calls: &["obj={x:0,y:0}", "t1=gsap.to(obj,{x:100,y:100,duration:1,ease:\"none\"})", "t1.totalTime(0.5)", "t2=gsap.to(obj,{x:200,duration:1,ease:\"none\",overwrite:\"auto\",paused:true})", "t2.totalTime(0)", "t1.totalTime(1)", "t2.totalTime(1)"],

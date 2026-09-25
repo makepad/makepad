@@ -251,7 +251,17 @@ pub fn rgb_to_hsv(rgb: [f64; 3]) -> [f64; 3] {
         60.0 * ((r - g) / delta + 4.0)
     };
     let s = if max <= 0.0 { 0.0 } else { delta / max };
-    [h, s, max]
+    [below_360(h), s, max]
+}
+
+/// `rem_euclid(360)` can return exactly 360 for a hue a hair below 0.
+#[inline]
+fn below_360(h: f64) -> f64 {
+    if h >= 360.0 {
+        0.0
+    } else {
+        h
+    }
 }
 
 /// `[h, s, v]` (hue in degrees, any range) to sRGB-encoded `[r, g, b]`.
@@ -308,7 +318,11 @@ pub fn oklab_to_linear(lab: [f64; 3]) -> [f64; 3] {
 /// OKLab `[L, a, b]` to OKLCH `[L, C, h]`, hue in degrees `[0, 360)`.
 pub fn oklab_to_oklch(lab: [f64; 3]) -> [f64; 3] {
     let [l, a, b] = lab;
-    [l, a.hypot(b), (b.atan2(a) * (180.0 / PI)).rem_euclid(360.0)]
+    [
+        l,
+        a.hypot(b),
+        below_360((b.atan2(a) * (180.0 / PI)).rem_euclid(360.0)),
+    ]
 }
 
 /// OKLCH `[L, C, h]` (hue in degrees) to OKLab `[L, a, b]`.

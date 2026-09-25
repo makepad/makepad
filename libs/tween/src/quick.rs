@@ -70,6 +70,13 @@ pub struct QuickTo<V: Lerp> {
     ease: Easing,
 }
 
+impl<V: Lerp + Default> Default for QuickTo<V> {
+    /// At rest on `V::default()` (for `#[rust]` widget fields).
+    fn default() -> Self {
+        Self::at(V::default())
+    }
+}
+
 impl<V: Lerp> QuickTo<V> {
     /// At rest on `v`.
     pub fn at(v: V) -> Self {

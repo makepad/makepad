@@ -295,7 +295,8 @@ impl Stagger {
     fn layout(&self, n: u32) -> Layout {
         let n = n as f64;
         let wrap = match self.grid {
-            Some(g) => g.cols as f64,
+            // A zero-column grid counts as one column (no NaN delays).
+            Some(g) => g.cols.max(1) as f64,
             None => BIG,
         };
         let ratio = match self.from {
