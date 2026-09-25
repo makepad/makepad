@@ -728,18 +728,29 @@ impl Widget for TipLayer {
         // under-measures wide glyphs (all-caps text most of all) and the
         // bubble then clips its own last letter. The estimate stays only as
         // the fallback for text the layout engine returns no row for.
-        let text_w = self
-            .draw_text
-            .prepare_single_line_run(cx, &text)
-            .map(|run| run.width_in_lpxs as f64)
-            .unwrap_or_else(|| text.chars().count() as f64 * font_size * 0.62);
+        // Line by line: a tip may carry its own line breaks (a key's
+        // bindings, one per line), and the bubble is as wide as the widest
+        // of them and as tall as all of them.
+        let mut text_w = 0.0f64;
+        let mut breaks = 0.0f64;
+        for line in text.lines() {
+            let line_w = self
+                .draw_text
+                .prepare_single_line_run(cx, line)
+                .map(|run| run.width_in_lpxs as f64)
+                .unwrap_or_else(|| line.chars().count() as f64 * font_size * 0.62);
+            text_w = text_w.max(line_w);
+            breaks += 1.0;
+        }
+        let breaks = breaks.max(1.0);
         // A wrapped tip is as wide as it was told and as tall as the lines
-        // it needs; an unwrapped one is one line, as it always was.
+        // it needs; an unwrapped one is as tall as its own lines, one as
+        // it always was.
         let (w, lines) = if tip.wrap_width > 0.0 && text_w + TIP_PAD_X * 2.0 > tip.wrap_width {
             let room = (tip.wrap_width - TIP_PAD_X * 2.0).max(font_size * 4.0);
-            (tip.wrap_width, (text_w / room).ceil().max(1.0))
+            (tip.wrap_width, (text_w / room).ceil().max(1.0) * breaks)
         } else {
-            (text_w + TIP_PAD_X * 2.0 + 4.0, 1.0)
+            (text_w + TIP_PAD_X * 2.0 + 4.0, breaks)
         };
         let h = font_size * 1.6 * lines + TIP_PAD_Y * 2.0;
         // The role decides the bubble's colours; Neutral keeps the chrome
