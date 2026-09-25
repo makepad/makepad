@@ -2470,7 +2470,13 @@ pub struct CxDrawList {
     pub zbias_hold: Option<u32>,
 
     pub os: CxOsDrawList,
+    /// The rect areas this list has recorded, kept across a re-record the
+    /// way instance buffers are: a new record overwrites from the front and
+    /// leaves the tail in place, so an area handed out last frame still
+    /// reads while this frame is being drawn (the overlay reads mid-frame).
+    /// `rect_area_count` is how many belong to the current record.
     pub rect_areas: Vec<CxRectArea>,
+    pub rect_area_count: usize,
     pub find_appendable_draw_shader_check: Vec<u64>,
 }
 
@@ -2870,8 +2876,21 @@ impl CxDrawList {
             order.clear();
             self.draw_item_reorder_spare = order;
         }
-        self.rect_areas.clear();
+        self.rect_area_count = 0;
         self.find_appendable_draw_shader_check.clear();
+    }
+
+    /// Record a rect area for the current record and return its id: the
+    /// slot from the previous record is overwritten, or a new one is added.
+    pub fn push_rect_area(&mut self, area: CxRectArea) -> usize {
+        let rect_id = self.rect_area_count;
+        if rect_id < self.rect_areas.len() {
+            self.rect_areas[rect_id] = area;
+        } else {
+            self.rect_areas.push(area);
+        }
+        self.rect_area_count = rect_id + 1;
+        rect_id
     }
 
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {

@@ -617,8 +617,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
         // ok so we have to add
-        let rect_id = draw_list.rect_areas.len();
-        draw_list.rect_areas.push(CxRectArea {
+        let rect_id = draw_list.push_rect_area(CxRectArea {
             rect,
             draw_clip: Default::default(),
         });
