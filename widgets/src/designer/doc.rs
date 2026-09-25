@@ -128,6 +128,43 @@ impl DesignDoc {
         Ok(hunk)
     }
 
+    /// Fold the last edit into the one before it, so the two undo as one
+    /// step and count as one hunk: the text from before the earlier edit
+    /// to the text now, as one replacement of the span that differs.
+    pub fn squash_last_two(&mut self) {
+        if self.undo.len() < 2 || self.hunks.len() < 2 {
+            return;
+        }
+        self.undo.pop();
+        let (before, hunks_before) = self.undo.last().cloned().unwrap();
+        let label = self.hunks[self.hunks.len() - 2].label.clone();
+        let old = before.as_bytes();
+        let new = self.text.as_bytes();
+        let mut start = 0;
+        while start < old.len() && start < new.len() && old[start] == new[start] {
+            start += 1;
+        }
+        let mut tail = 0;
+        while tail < old.len() - start && tail < new.len() - start && old[old.len() - 1 - tail] == new[new.len() - 1 - tail] {
+            tail += 1;
+        }
+        while start > 0 && !(before.is_char_boundary(start) && self.text.is_char_boundary(start)) {
+            start -= 1;
+        }
+        while tail > 0 && !(before.is_char_boundary(old.len() - tail) && self.text.is_char_boundary(new.len() - tail)) {
+            tail -= 1;
+        }
+        let hunk = Hunk {
+            start,
+            end: old.len() - tail,
+            replacement: self.text[start..new.len() - tail].to_string(),
+            removed: before[start..old.len() - tail].to_string(),
+            label,
+        };
+        self.hunks = hunks_before;
+        self.hunks.push(hunk);
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

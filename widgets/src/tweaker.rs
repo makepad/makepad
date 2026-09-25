@@ -19631,7 +19631,7 @@ impl Widget for Tweaker {
                 if ke.key_code == KeyCode::KeyZ
                     && ke.modifiers.logo
                     && tweak_is_on()
-                    && cx.key_focus() == Area::Empty =>
+                    && !self.focus_is_text(cx) =>
             {
                 if ke.modifiers.shift {
                     self.redo(cx);
@@ -25104,11 +25104,17 @@ impl Tweaker {
             return;
         }
         let path = indexed_path(cx, uid);
+        // Its name, or its type when it has none (a nameless node's path
+        // ends in its index, which says nothing on a chip).
         let label = pick
             .path
             .rsplit('.')
             .next()
-            .filter(|name| !name.is_empty() && !name.starts_with('['))
+            .filter(|name| {
+                !name.is_empty()
+                    && !name.starts_with('[')
+                    && !name.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+            })
             .map(|name| name.to_string())
             .unwrap_or_else(|| pick.ty.clone());
         self.drag_grab = Some((from - pick.rect.pos, pick.rect.size));
@@ -25229,15 +25235,66 @@ impl Tweaker {
             }
             return;
         }
-        if let Some((uid, place, _)) = &self.design_ghost {
-            if matches!(&next, Some((pick, p)) if pick.uid == *uid && p == place) {
+        if let Some((ghost_uid, ghost_place, path)) = self.design_ghost.clone() {
+            if matches!(&next, Some((pick, p)) if pick.uid == ghost_uid && *p == ghost_place) {
                 return;
             }
-            self.ghost_retract(cx);
-            if self.design.as_ref().is_some_and(|s| s.is_landing()) {
-                self.design_ghost_want = Some(next);
+            let Some((pick, place)) = next else {
+                self.ghost_retract(cx);
+                return;
+            };
+            if self.design_ghost_failed.contains(&(pick.uid, place)) {
                 return;
             }
+            // The ghost is a real node on the canvas: it goes to the new
+            // target as one more step of the same edit, so the canvas
+            // lands once and the widgets around it keep their identity
+            // (taking it out first renumbers every nameless sibling after
+            // it, and the target picked on the ghost's layout is gone).
+            let ghost = path.as_deref().and_then(|p| resolve_widget_by_path(cx, p).ok()).filter(|w| !w.is_empty());
+            let Some(ghost) = ghost else {
+                // Landed and not yet drawn: ask again after the frame.
+                self.design_ghost_want = Some(Some((pick, place)));
+                self.design_ghost_due = Some(cx.seconds_since_app_start() + 0.05);
+                self.next_frame = cx.new_next_frame();
+                return;
+            };
+            let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+            if target.is_empty() {
+                log!("DESIGN ghost: the target {} is gone from the tree", pick.path);
+                return;
+            }
+            log!("DESIGN ghost moved: {place:?} {}", pick.path);
+            self.design_ghost_pending = true;
+            let result = self.design.as_mut().map(|s| s.move_ghost(cx, &ghost, &target, place));
+            match result {
+                Some(Ok(())) => {
+                    let sync = self.design.as_mut().is_some_and(|s| s.take_sync_landing());
+                    let landing = self.design.as_ref().is_some_and(|s| s.is_landing());
+                    if sync || landing {
+                        self.design_ghost = Some((pick.uid, place, None));
+                        if sync {
+                            self.design_landed(cx);
+                        }
+                    } else {
+                        // The same place by another name (before the next
+                        // sibling is after this one): nothing to land, the
+                        // ghost stands as it is under the new target's key.
+                        self.design_ghost_pending = false;
+                        self.design_ghost = Some((pick.uid, place, path));
+                    }
+                }
+                Some(Err(err)) => {
+                    // The ghost stays where it was; this target is not
+                    // asked again during the drag.
+                    self.design_ghost_pending = false;
+                    self.design_ghost = Some((ghost_uid, ghost_place, path));
+                    self.design_ghost_failed.push((pick.uid, place));
+                    log!("DESIGN ghost: {err}");
+                }
+                None => self.design_ghost_pending = false,
+            }
+            return;
         }
         let Some((pick, place)) = next else {
             return;

@@ -345,6 +345,24 @@ impl DesignSession {
         self.preview(cx, Some(select))
     }
 
+    /// Move a widget the last edit put in place (a drag's ghost) to another
+    /// target, as part of that same edit: the two undo as one step, and
+    /// the canvas lands once instead of retracting and landing again.
+    pub fn move_ghost(
+        &mut self,
+        cx: &mut Cx,
+        ghost: &WidgetRef,
+        target: &WidgetRef,
+        place: Place,
+    ) -> Result<(), String> {
+        let before = self.doc.hunks().len();
+        self.move_relative(cx, ghost, target, place)?;
+        if self.doc.hunks().len() == before + 1 {
+            self.doc.squash_last_two();
+        }
+        Ok(())
+    }
+
     /// Write a property into the selection's literal (a dotted key descends
     /// into typed properties through `+:`).
     pub fn set_prop(
