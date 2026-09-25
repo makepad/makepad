@@ -48,8 +48,14 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Whether a line names `name` as one segment of a lookup macro's path.
+/// A bare `live_id!` is an id for anything (a menu row, a hotkey), so it
+/// counts only on a line that looks a widget up with it.
 pub fn line_names(line: &str, name: &str) -> bool {
+    let widget_lookup = ["child(", "widget(", "widget_flood(", "widgets("].iter().any(|call| line.contains(call));
     for lookup in LOOKUPS {
+        if *lookup == "live_id!(" && !widget_lookup {
+            continue;
+        }
         let mut rest = line;
         while let Some(at) = rest.find(lookup) {
             let inner = &rest[at + lookup.len()..];
@@ -78,10 +84,16 @@ pub fn rust_references(file: &str, name: &str) -> Vec<Reference> {
     let mut files = Vec::new();
     rust_files(&root.join("src"), &mut files);
     files.sort();
+    let design_file = Path::new(file);
     for path in files {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        // Another file that declares a widget of the same name looks up
+        // its own, not this one.
+        if path != design_file && declares(&text, name) {
+            continue;
+        }
         for (index, line) in text.lines().enumerate() {
             if line_names(line, name) {
                 let rel = path.strip_prefix(&root).unwrap_or(&path);
@@ -93,6 +105,15 @@ pub fn rust_references(file: &str, name: &str) -> Vec<Reference> {
         }
     }
     out
+}
+
+/// Whether `text` declares a Splash widget called `name` (`name := ...`).
+fn declares(text: &str, name: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.trim_start().starts_with(":="))
+    })
 }
 
 /// One line for the panel naming where `name` is looked up from Rust, or

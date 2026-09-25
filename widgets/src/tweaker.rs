@@ -6999,6 +6999,12 @@ fn coalesce_diff(entries: &[TweakDiffEntry]) -> Vec<TweakDiffEntry> {
     out
 }
 
+/// A file path as a reader writes it: without the Windows verbatim prefix
+/// (`//?/`, `\\?\`) a canonicalised path carries.
+fn shown_path(path: &str) -> &str {
+    path.strip_prefix("//?/").or_else(|| path.strip_prefix("\\\\?\\")).unwrap_or(path)
+}
+
 /// The panel a `/design/*` op talks to: the one with a design session
 /// open, else the one in the pinned widget's window, else the first.
 fn design_tweaker(cx: &Cx) -> Option<WidgetRef> {
@@ -24453,7 +24459,7 @@ impl Tweaker {
         match op {
             "open" => {
                 if let Some(s) = &self.design {
-                    return Err(format!("a session is open on {}; /design/close first", s.file()));
+                    return Err(format!("a session is open on {}; /design/close first", shown_path(s.file())));
                 }
                 let widget = self.remote_widget(cx, args, &["path", "p"])?;
                 let session = DesignSession::open(cx, &widget)?;
@@ -24622,7 +24628,7 @@ impl Tweaker {
                 hunks.push(']');
                 Ok(format!(
                     "{{\"file\":{},\"base_hash\":\"{:016x}\",\"new_hash\":\"{:016x}\",\"base_matches_disk\":{},\"dirty\":{},\"hunks\":{},\"diff\":{}}}",
-                    json_str(s.file()),
+                    json_str(shown_path(s.file())),
                     doc.base_hash(),
                     doc.text_hash(),
                     doc.base_matches_disk() as u8,
@@ -24701,7 +24707,7 @@ impl Tweaker {
         hunks.push(']');
         let mut out = format!(
             "{{\"open\":1,\"file\":{},\"edits\":{},\"dirty\":{},\"status\":{},\"can_undo\":{},\"can_redo\":{},\"landing\":{},\"hunks\":{}",
-            json_str(s.file()),
+            json_str(shown_path(s.file())),
             doc.hunks().len(),
             doc.is_dirty() as u8,
             json_str(&s.status),
@@ -24756,11 +24762,21 @@ impl Tweaker {
                         s.diff.retain(|e| !(e.path == entry.path && e.prop == entry.prop));
                     }
                     baked.push(format!("{}.{}", entry.path, entry.prop));
-                    self.design_after(cx, Some(Ok(())));
+                    // Land now (the storybook rebuilds on the spot), so the
+                    // next tweak's widget is found in the rebuilt tree.
+                    self.design_settle(cx);
                 }
                 Some(Err(err)) => skipped.push(format!("{}.{}: {}", entry.path, entry.prop, err)),
                 None => break,
             }
+        }
+        // One bake is one edit: a single hunk and a single undo step, however
+        // many tweaks (a padding's sides are one each) it wrote.
+        if !baked.is_empty() {
+            if let Some(s) = self.design.as_mut() {
+                s.squash_edits(baked.len());
+            }
+            self.design_after(cx, Some(Ok(())));
         }
         let list = |items: &[String]| {
             let inner: Vec<String> = items.iter().map(|i| json_str(i)).collect();
@@ -24809,7 +24825,7 @@ impl Tweaker {
         let inner: Vec<String> = failed.iter().map(|f| json_str(f)).collect();
         Ok(format!(
             "{{\"file\":{},\"checked\":{},\"mapped\":{},\"failed\":[{}]}}",
-            json_str(&file),
+            json_str(shown_path(&file)),
             checked,
             mapped,
             inner.join(",")

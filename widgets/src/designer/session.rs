@@ -167,6 +167,15 @@ impl DesignSession {
         )
     }
 
+    /// Fold the last `n` edits into one: one hunk, one undo step. For an
+    /// operation made of several edits (a bake of several tweaks).
+    pub fn squash_edits(&mut self, n: usize) {
+        for _ in 1..n {
+            self.doc.squash_last_two();
+        }
+        self.status = self.status_line();
+    }
+
     /// Whether `widget` can be found in the working text: the check an
     /// edit makes first, without making the edit.
     pub fn locate_check(&self, cx: &mut Cx, widget: &WidgetRef) -> Result<(), String> {
