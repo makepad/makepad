@@ -24531,6 +24531,9 @@ impl Tweaker {
                     // Plain marks: the panel font has no triangle glyphs.
                     let mark = if *open { "-" } else { "+" };
                     item.set_text(cx, &format!("{mark} {group}  ({count})"));
+                    // An open folder wears the selected fill, as the place
+                    // button that is up does: the mark alone was too quiet.
+                    set_button_fill(cx, item.clone(), *open);
                     self.palette_heads.push((item.widget_uid().0, group.to_string()));
                     item.draw_all(cx, &mut Scope::empty());
                 }
