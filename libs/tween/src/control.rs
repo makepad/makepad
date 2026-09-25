@@ -8,7 +8,7 @@
 
 use crate::engine::*;
 use crate::ids::{PropKey, Tag, TargetId, TweenId};
-use crate::spec::{Emit, KeyStep, Position, PropTo, Reduce, Seek, Targets, TweenOpts};
+use crate::spec::{Emit, EventMask, KeyStep, Position, PropTo, Reduce, Seek, Targets, TweenOpts};
 use crate::{animation_cycle, round7, BIG, TINY};
 
 impl TweenEngine {
@@ -1069,6 +1069,18 @@ impl<'a> AnimMut<'a> {
         self.run(|e, n| e.invalidate_node(n))
     }
 
+    /// Replaces the callbacks this animation reports (GSAP
+    /// `eventCallback(type, fn)` after creation: a script layer that
+    /// attaches `onComplete` to a built timeline). Events already queued
+    /// stay queued.
+    pub fn set_events(&mut self, m: EventMask) -> &mut Self {
+        self.run(|e, n| {
+            e.cold[n as usize].events = m;
+            e.update_weights(n);
+            e.reserve_events();
+        })
+    }
+
     /// GSAP `kill()`: reports Interrupt (below progress 1) and frees the
     /// animation; its handle goes stale. Slots keep their values.
     pub fn kill(self) {
@@ -1298,6 +1310,16 @@ impl<'a> AnimRef<'a> {
     /// GSAP `yoyo()`.
     pub fn yoyo(&self) -> bool {
         self.live() && self.e.has(self.n, F_YOYO)
+    }
+
+    /// The callbacks this animation reports ([`EventMask::NONE`] for a
+    /// stale handle).
+    pub fn events(&self) -> EventMask {
+        if self.live() {
+            self.e.cold[self.n as usize].events
+        } else {
+            EventMask::NONE
+        }
     }
 
     /// GSAP `vars.id`.

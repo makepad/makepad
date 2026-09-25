@@ -2154,6 +2154,13 @@ impl TweenEngine {
         self.find_slot(t, p).map(SlotId)
     }
 
+    /// Whether slot `s` holds a known value: seeded, or written by a
+    /// track. A slot a build created for a key nobody seeded is not, and a
+    /// `to()` that starts on it does not move; a host seeds it first.
+    pub fn is_seeded(&self, s: SlotId) -> bool {
+        self.sl_seeded.get(s.0 as usize).copied().unwrap_or(false)
+    }
+
     /// The value in slot `s`.
     pub fn value(&self, s: SlotId) -> TweenValue {
         let i = s.0 as usize;

@@ -19,6 +19,7 @@ pub use makepad_draw::makepad_zune_png;
 // Core modules (used internally first)
 pub mod animator;
 pub mod tween;
+pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
 pub mod app_icon;
@@ -591,6 +592,8 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
     crate::animator::script_mod(vm);
+    // `mod.tween` (GSAP-style tweens from script), once per VM.
+    crate::tween_script::script_mod(vm);
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
@@ -659,6 +662,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             ..mod.animator.Play,
             ..mod.animator.Ease,
             draw:mod.draw,
+            tween:mod.tween,
             MouseCursor:mod.draw.MouseCursor
         }
     });

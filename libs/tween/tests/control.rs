@@ -742,3 +742,65 @@ fn finish_all_playing_skips_paused_and_stopped_clocks() {
     close(val(&e, 1, X), 50.0, 1e-9, "resumed from its playhead");
     close(val(&e, 2, X), 25.0, 1e-9, "time scale 0 still holds");
 }
+
+#[test]
+fn set_events_attaches_and_detaches_callbacks_after_the_build() {
+    // A script layer attaches `on_complete` to a timeline it already built
+    // (GSAP `eventCallback`): the mask changes on the live node.
+    let mut e = TweenEngine::new();
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    let tl = e.timeline(TimelineOpts::new());
+    e.tl(tl)
+        .to(one(0), &[to(X, 100.0)], lin(1.0), Position::END);
+    assert_eq!(e.anim_ref(tl).events(), EventMask::NONE);
+    e.anim(tl)
+        .set_events(EventMask::COMPLETE.with(EventMask::UPDATE));
+    assert_eq!(
+        e.anim_ref(tl).events(),
+        EventMask::COMPLETE.with(EventMask::UPDATE)
+    );
+    let mut buf = Vec::new();
+    e.advance(0.5);
+    e.swap_events(&mut buf);
+    let kinds: Vec<EventKind> = buf.iter().map(|ev| ev.kind).collect();
+    assert_eq!(kinds, [EventKind::Update]);
+    // Detach the update callback: only the completion reports.
+    e.anim(tl).set_events(EventMask::COMPLETE);
+    e.advance(0.6);
+    e.swap_events(&mut buf);
+    let kinds: Vec<EventKind> = buf.iter().map(|ev| ev.kind).collect();
+    assert_eq!(kinds, [EventKind::Complete]);
+    assert!(buf.iter().all(|ev| ev.id == tl));
+    // A stale handle answers no events and ignores the call.
+    e.anim(tl).kill();
+    assert_eq!(e.anim_ref(tl).events(), EventMask::NONE);
+    e.anim(tl).set_events(EventMask::ALL);
+    assert_eq!(e.anim_ref(tl).events(), EventMask::NONE);
+}
+
+#[test]
+fn is_seeded_tells_a_known_value_from_an_unseeded_slot() {
+    let mut e = TweenEngine::new();
+    // A to() on a key nobody seeded creates the slot but knows no value.
+    let t = e.to(one(0), &[to(X, 100.0)], lin(1.0));
+    let s = e.slot(tg(0), X).expect("the build made the slot");
+    assert!(!e.is_seeded(s));
+    e.anim(t).kill();
+    // Seeding makes it known; so does a track writing it.
+    e.seed(tg(0), X, TweenValue::F64(10.0));
+    assert!(e.is_seeded(s));
+    e.from_to(
+        one(1),
+        &[PropTo::from_to(
+            X,
+            TweenValue::F64(0.0),
+            TweenValue::F64(1.0),
+        )],
+        lin(1.0),
+    );
+    let s1 = e.slot(tg(1), X).expect("from_to made the slot");
+    e.advance(0.5);
+    assert!(e.is_seeded(s1), "a written slot is known");
+    // An unknown slot id is not seeded.
+    assert!(!e.is_seeded(SlotId(9999)));
+}

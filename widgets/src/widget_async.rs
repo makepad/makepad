@@ -116,6 +116,9 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
+    // Script tweens: the isolate's host (its rooted apply objects), its
+    // callback closures and its handle type go with it.
+    crate::tween_script::gc_vms(cx, &dead);
     crate::desktop_style::gc_heaps(cx,&dead_heaps);
     // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
     // frees that address for the next isolate, and a leftover entry would hand
@@ -595,6 +598,26 @@ impl CxSplashVmExt for Cx {
 /// The isolate (if any) that owns a heap, for host-bridge response routing.
 pub(crate) fn vm_for_heap(cx: &mut Cx, heap_key: usize) -> Option<SplashVmId> {
     cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()
+}
+
+/// Whether `vm_id` can be entered with `with_script_vm_id` right now: the
+/// main VM always, an isolate while it is allocated and parked in the table
+/// (one that is installed on `Cx` is out of the table and answers false).
+pub(crate) fn splash_vm_is_live(cx: &mut Cx, vm_id: SplashVmId) -> bool {
+    vm_id == MAIN_SPLASH_VM_ID
+        || cx
+            .global::<CxWidgetAsync>()
+            .isolated_vms
+            .vms
+            .contains_key(&vm_id)
+}
+
+/// The widget a script `ui` handle names (`ui`, `ui.card`): its uid, read
+/// exactly as the handle's own getter reads it. `None` for any other value.
+pub(crate) fn ui_handle_uid(vm: &ScriptVm, value: ScriptValue) -> Option<WidgetUid> {
+    let handle = value.as_handle()?;
+    vm.downcast_handle_gc::<CxWidgetHandleGc>(handle)
+        .map(|gc| gc.uid)
 }
 
 /// Deliver `Event::NetworkResponses` to a Splash isolate's script (resolving its
