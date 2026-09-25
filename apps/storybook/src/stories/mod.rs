@@ -18,6 +18,7 @@ pub mod welcome;
 pub mod slug;
 pub mod foundations;
 pub mod tween;
+pub mod ease_editor;
 pub mod layout;
 pub mod grid;
 pub mod masonry;
@@ -170,6 +171,7 @@ static FILES: &[StoryModule] = &[
     // 1 Foundations
     file(foundations::script_mod, foundations::STORIES),
     file(tween::script_mod, tween::STORIES),
+    file(ease_editor::script_mod, ease_editor::STORIES),
     // 2 Layout
     file(layout::script_mod, layout::STORIES),
     file(grid::script_mod, grid::STORIES),

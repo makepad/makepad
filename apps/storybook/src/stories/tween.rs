@@ -123,7 +123,11 @@ script_mod! {
         readout_values := Readout{}
         readout_setup := Readout{}
         readout_events := Readout{}
-        canvas := mod.storybook.StoryTweenCanvas{}
+        StoryRow{
+            align: Align{x: 0. y: 0.}
+            canvas := mod.storybook.StoryTweenCanvas{}
+            tl_ease := EaseEditor{width: 260}
+        }
         StoryRow{
             Caption{text: "Jump to label"}
             jump_intro := Button{text: "intro"}
@@ -167,7 +171,7 @@ script_mod! {
     }
 
     mod.stories.FoundationsMotionTween = StoryPage{
-        StoryNote{text: "One timeline, built the way GSAP builds one: a title fades and lifts in, the label `grid` sits 0.1 s before it ends, forty dots pop in with a stagger from that label, a call fires when they are done, and after the label `outro` two swatches change colour, the left one in sRGB and the right one in the space picked below. Press Play. Drag the playhead to scrub, jump to a label, change a knob and the timeline is rebuilt where it was."}
+        StoryNote{text: "One timeline, built the way GSAP builds one: a title fades and lifts in, the label `grid` sits 0.1 s before it ends, forty dots pop in with a stagger from that label, a call fires when they are done, and after the label `outro` two swatches change colour, the left one in sRGB and the right one in the space picked below. Press Play. Drag the playhead to scrub, jump to a label, change a knob and the timeline is rebuilt where it was. The curve beside the stage is the timeline's ease: it follows the picker (sampled, without handles, for an ease with no control points), and when you drag a handle, type a number or pick a preset there the timeline is rebuilt with it on release."}
         StoryHeading{text: "A timeline with labels, a stagger and a colour tween"}
         stage := mod.storybook.StoryTweenStage{}
     }
@@ -263,10 +267,12 @@ fn opt_tag_name(t: Option<Tag>) -> &'static str {
 }
 
 /// Writes the ease picker's row name `i` into `s`: the theme ease, the GSAP
-/// strings, then the CSS presets.
+/// strings, the CSS presets, then the ease editor's curve.
 fn write_ease_label(s: &mut String, i: usize) {
     if i == 0 {
         s.push_str("theme ease (Controls tab)");
+    } else if i == editor_row() {
+        s.push_str("ease editor");
     } else if i <= GSAP_EASES.len() {
         s.push_str(GSAP_EASES[i - 1]);
     } else {
@@ -285,13 +291,39 @@ fn ease_label(i: usize) -> String {
 }
 
 fn ease_count() -> usize {
+    editor_row() + 1
+}
+
+/// The picker's last row: the curve of the ease editor beside the stage.
+fn editor_row() -> usize {
     1 + GSAP_EASES.len() + CSS_PRESETS.len()
 }
 
-/// The ease picked in row `i`, or `None` for the theme ease. Parses: call
-/// it when the pick changes, never per frame.
+/// Appends `e` to `out`: `cubic-bezier(..)` for the parity bezier,
+/// `css cubic-bezier(..)` for the precise one, else its Debug form. `tmp`
+/// is scratch space (its capacity is reused).
+fn write_easing(out: &mut String, tmp: &mut String, e: Easing) {
+    match e {
+        Easing::Bezier { x1, y1, x2, y2 } => {
+            write_cubic_bezier(tmp, [x1, y1, x2, y2]);
+            out.push_str(tmp);
+        }
+        Easing::CubicBezier { x1, y1, x2, y2 } => {
+            write_cubic_bezier(tmp, [x1, y1, x2, y2]);
+            out.push_str("css ");
+            out.push_str(tmp);
+        }
+        _ => {
+            let _ = write!(out, "{:?}", e);
+        }
+    }
+}
+
+/// The ease picked in row `i`, or `None` for the theme ease (and for the
+/// editor row, whose ease the stage reads off the editor). Parses: call it
+/// when the pick changes, never per frame.
 fn picked_ease(i: usize) -> Option<Easing> {
-    if i == 0 {
+    if i == 0 || i == editor_row() {
         None
     } else if i <= GSAP_EASES.len() {
         parse_gsap_ease(GSAP_EASES[i - 1])
@@ -518,6 +550,18 @@ pub struct StoryTweenStage {
     /// The ease of `picks.ease`, parsed when the pick changes.
     #[rust]
     picked: Option<Easing>,
+    /// The editor's curve as `cubic-bezier(..)`, written when it commits.
+    #[rust]
+    edited: String,
+    /// The ease last pushed into the editor (`None`: push on the next sync).
+    #[rust]
+    editor_shows: Option<Easing>,
+    /// Timelines built so far: the setup line's proof of a rebuild.
+    #[rust]
+    builds: u64,
+    /// A scratch buffer for the setup line.
+    #[rust]
+    scratch: String,
     #[rust]
     ev_buf: Vec<TweenEvent>,
     #[rust]
@@ -611,6 +655,7 @@ impl StoryTweenStage {
             }
             self.build(&k);
             self.built_from = Some(k);
+            self.builds += 1;
             self.setup_dirty = true;
             let tl = self.tl;
             let mut c = self.motion.control(cx, tl);
@@ -862,6 +907,17 @@ impl StoryTweenStage {
             let p = self.picks;
             s.push_str("ease ");
             write_ease_label(&mut s, p.ease);
+            if p.ease == editor_row() {
+                s.push(' ');
+                s.push_str(&self.edited);
+            }
+            // What the running timeline was really built with, and how many
+            // builds there have been: a rebuild shows as a new number.
+            let _ = write!(s, " | built #{} with ", self.builds);
+            match self.built_from {
+                Some(k) => write_easing(&mut s, &mut self.scratch, k.ease),
+                None => s.push('-'),
+            }
             let _ = write!(
                 s,
                 " | stagger from {} axis {} {} {:.3} | right swatch {} | duration {:.2} repeat {} yoyo {} addPause {}",
@@ -925,6 +981,41 @@ impl StoryTweenStage {
         }
     }
 
+    /// Makes the editor's ease the picked one (the knobs then differ, so
+    /// the next `ensure_built` rebuilds the timeline with it). `e` is what
+    /// the editor shows: its bezier, or the sampled ease it was handed.
+    fn take_editor_ease(&mut self, e: Easing) {
+        self.picked = Some(e);
+        self.edited.clear();
+        write_easing(&mut self.edited, &mut self.scratch, e);
+    }
+
+    /// Shows the ease in play in the editor beside the stage: the theme
+    /// ease on row 0, the picked ease on the GSAP and CSS rows (sampled,
+    /// without handles, when it has no control points). On the editor row
+    /// the editor is the source and nothing is pushed. A compare when
+    /// nothing changed, so it runs on every draw (a Controls tab ease
+    /// arrives as an apply and a redraw).
+    fn sync_editor(&mut self, cx: &mut Cx) {
+        if self.picks.ease == editor_row() {
+            return;
+        }
+        let e = self.picked.unwrap_or_else(|| Easing::from(&self.ease));
+        if self.editor_shows == Some(e) {
+            return;
+        }
+        let editor = self.view.ease_editor(cx, ids!(tl_ease));
+        if editor.borrow().is_none() {
+            return;
+        }
+        match self.picked {
+            // The theme's Ease itself, so a Bezier token shows its points.
+            None => editor.set_ease(cx, self.ease),
+            Some(p) => editor.set_easing(cx, p),
+        }
+        self.editor_shows = Some(e);
+    }
+
     /// Puts the ticker row back in step with the ticker (a remote op or
     /// another page may have changed it).
     fn sync_ticker_row(&mut self, cx: &mut Cx) {
@@ -958,6 +1049,7 @@ impl StoryTweenStage {
         ];
         let pause_at_grid = v.check_box(cx, ids!(pause_at_grid));
         let ease_pick = v.drop_down(cx, ids!(ease_pick));
+        let tl_ease = v.ease_editor(cx, ids!(tl_ease));
         let from = v.segmented_control(cx, ids!(stagger_from));
         let axis = v.segmented_control(cx, ids!(stagger_axis));
         let spread = v.segmented_control(cx, ids!(stagger_spread));
@@ -1030,6 +1122,7 @@ impl StoryTweenStage {
 
         // Picks that rebuild the timeline.
         let mut picks = self.picks;
+        let mut rebuild = false;
         if let Some(b) = pause_at_grid.changed(actions) {
             picks.pause_at_grid = b;
         }
@@ -1038,7 +1131,23 @@ impl StoryTweenStage {
                 picks.ease = i;
                 // Parsed here, once per pick: knobs() reads the result.
                 self.picked = picked_ease(i);
+                if i == editor_row() {
+                    self.take_editor_ease(tl_ease.easing());
+                }
+                // Any other row shows in the editor (sync_editor, below).
+                self.editor_shows = None;
             }
+        }
+        // The editor's curve becomes the timeline's ease when it settles.
+        // Changed (every drag step) is not followed: a live preview would
+        // rebuild the forty-dot timeline on every pointer move.
+        if tl_ease.committed(actions).is_some() {
+            picks.ease = editor_row();
+            self.take_editor_ease(tl_ease.easing());
+            self.editor_shows = None;
+            ease_pick.set_selected_item(cx, editor_row());
+            // The same row with a new curve: rebuild even if no pick moved.
+            rebuild = true;
         }
         if let Some(i) = from.selected(actions) {
             picks.from = i;
@@ -1052,9 +1161,13 @@ impl StoryTweenStage {
         if let Some(i) = space.selected(actions) {
             picks.space = i;
         }
-        if picks != self.picks {
+        if picks != self.picks || rebuild {
             self.picks = picks;
+            // A new curve on the editor row changes no pick: say so.
+            self.setup_dirty = true;
             self.ensure_built(cx);
+            self.sync_editor(cx);
+            acted |= rebuild;
         }
 
         // The app-wide ticker (GSAP globalTimeline / ticker).
@@ -1079,6 +1192,7 @@ impl Widget for StoryTweenStage {
         // Knobs from the Controls tab arrive as applies followed by a
         // redraw: this is where a changed knob rebuilds the timeline.
         self.ensure_built(cx.cx.cx);
+        self.sync_editor(cx.cx.cx);
         self.motion.draw_check(cx.cx.cx);
         let epoch = tween_ticker_ref(cx.cx.cx).epoch;
         if self.seen_epoch != Some(epoch) {
@@ -1171,7 +1285,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "FoundationsMotionTween",
     added: "2026-09-24",
     tags: &["new", "tween", "timeline", "stagger", "gsap", "keyframes", "scrub", "yoyo"],
-    doc: "# Tweens and timelines\n\n`makepad_widgets::tween` is GSAP 3's model in Rust: tweens, timelines, positions and labels, staggers, eases, repeat and yoyo, callbacks and playback control. A widget keeps a `TweenHost` in a `#[rust]` field, builds on it, forwards its events to `handle_event` and pushes or pulls the values it reports.\n\n## This page\n\nOne timeline: `from_to` on the title at 0, the label `grid` at `prev_end(-0.1)` (GSAP `\"<-0.1\"` of the end), a staggered `from_to` of forty dots from that label, a `call` at the end, the label `outro` at `rel(0.4)` (GSAP `\"+=0.4\"`) and two colour tweens from it, one in sRGB and one in the space picked on the page.\n\n- **Play, Pause, Resume, Restart** are GSAP's `play()`, `pause()`, `resume()` and `restart()`. **Reverse** toggles the direction and resumes (GSAP's `reverse()` only sets it).\n- **The playhead** seeks the total progress with events suppressed while it is held, then resumes if the timeline was playing. While the timeline plays the slider follows it.\n- **Jump to label** is `seek(\"label\")`.\n- **addPause at grid** stops the playhead at the label and reports a `Pause` event.\n- **Stagger from / axis / spread** are GSAP's `stagger: {from, axis, each | amount, grid: [5, 8]}`.\n- **The ease picker** overrides the timeline's default ease with a GSAP ease string or a CSS preset; its first row uses the ease from the Controls tab.\n- **Global ticker** is the app-wide `TweenTicker`: GSAP's `globalTimeline.pause()` and `timeScale()`, plus reduced motion, which finishes animations instead of playing them.\n\nChanging any knob rebuilds the timeline where it was: same total progress, same direction, still playing if it was.\n\n## The readout\n\nEvery line under the playhead is a label that is rewritten on each frame that changed something: time and total time, progress, iteration, state, the current label, a few current values and the last six events. On the `--remote` surface `/snap?q=readout` reads it, and `/tweak/op?op=tween&scale=0.25&paused=1&reduced=0` sets the ticker.",
+    doc: "# Tweens and timelines\n\n`makepad_widgets::tween` is GSAP 3's model in Rust: tweens, timelines, positions and labels, staggers, eases, repeat and yoyo, callbacks and playback control. A widget keeps a `TweenHost` in a `#[rust]` field, builds on it, forwards its events to `handle_event` and pushes or pulls the values it reports.\n\n## This page\n\nOne timeline: `from_to` on the title at 0, the label `grid` at `prev_end(-0.1)` (GSAP `\"<-0.1\"` of the end), a staggered `from_to` of forty dots from that label, a `call` at the end, the label `outro` at `rel(0.4)` (GSAP `\"+=0.4\"`) and two colour tweens from it, one in sRGB and one in the space picked on the page.\n\n- **Play, Pause, Resume, Restart** are GSAP's `play()`, `pause()`, `resume()` and `restart()`. **Reverse** toggles the direction and resumes (GSAP's `reverse()` only sets it).\n- **The playhead** seeks the total progress with events suppressed while it is held, then resumes if the timeline was playing. While the timeline plays the slider follows it.\n- **Jump to label** is `seek(\"label\")`.\n- **addPause at grid** stops the playhead at the label and reports a `Pause` event.\n- **Stagger from / axis / spread** are GSAP's `stagger: {from, axis, each | amount, grid: [5, 8]}`.\n- **The ease picker** overrides the timeline's default ease with a GSAP ease string or a CSS preset; its first row uses the ease from the Controls tab.\n- **The ease editor** beside the stage (`tl_ease`) is an `EaseEditor` that always shows the timeline's ease: the picked row's curve, sampled without handles for an ease with no control points (elastic, bounce, steps), or the theme ease on the first row. When it commits (finger up, a preset pick, a field commit, a key nudge) its `Ease::Bezier` becomes the timeline's default ease (the picker's last row, `ease editor`) and the timeline is rebuilt. It rebuilds on commit only: following `changed` would rebuild the forty-dot timeline on every pointer move.\n- **Global ticker** is the app-wide `TweenTicker`: GSAP's `globalTimeline.pause()` and `timeScale()`, plus reduced motion, which finishes animations instead of playing them.\n\nChanging any knob rebuilds the timeline where it was: same total progress, same direction, still playing if it was.\n\n## The readout\n\nEvery line under the playhead is a label that is rewritten on each frame that changed something: time and total time, progress, iteration, state, the current label, a few current values and the last six events. The setup line also says `built #N with <ease>`: the ease the running timeline was built with, and a number that goes up on every rebuild. On the `--remote` surface `/snap?q=readout` reads it, and `/tweak/op?op=tween&scale=0.25&paused=1&reduced=0` sets the ticker.",
     subject: "stage",
     feature: None,
     controls: &[

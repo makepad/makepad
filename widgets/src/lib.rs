@@ -107,6 +107,7 @@ pub mod tip;
 pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
+pub mod ease_editor;
 pub mod fab_controls;
 pub mod menu_bar;
 
@@ -369,6 +370,7 @@ pub use crate::{
     scroll_shadow::*,
     slide_panel::*,
     number_field::*,
+    ease_editor::*,
     range_slider::*,
     slider::*,
     slides_view::*,
@@ -798,6 +800,7 @@ true
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
+    crate::ease_editor::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
