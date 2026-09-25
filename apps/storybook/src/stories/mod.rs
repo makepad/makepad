@@ -71,9 +71,12 @@ pub mod date_picker;
 pub mod calendar;
 pub mod time_picker;
 pub mod color;
+pub mod gradient_editor;
 pub mod dropzone;
 pub mod form;
 pub mod property_inspector;
+pub mod hotkeys;
+pub mod gizmo;
 pub mod checkbox;
 pub mod radio_group;
 pub mod select;
@@ -232,10 +235,13 @@ static FILES: &[StoryModule] = &[
     file(calendar::script_mod, calendar::STORIES),
     file(time_picker::script_mod, time_picker::STORIES),
     file(color::script_mod, color::STORIES),
+    file(gradient_editor::script_mod, gradient_editor::STORIES),
     file(dropzone::script_mod, dropzone::STORIES),
     file(dropzone_states::script_mod, dropzone_states::STORIES),
     file(form::script_mod, form::STORIES),
     file(property_inspector::script_mod, property_inspector::STORIES),
+    file(hotkeys::script_mod, hotkeys::STORIES),
+    file(gizmo::script_mod, gizmo::STORIES),
     // 8 Selection
     file(checkbox::script_mod, checkbox::STORIES),
     file(radio_group::script_mod, radio_group::STORIES),
@@ -379,6 +385,14 @@ fn evaluate(vm: &mut ScriptVm, index: usize) {
         evaluated.flags[index] = true;
     }
     (modules()[index].script_mod)(vm);
+}
+
+/// Forget which files were evaluated, without touching the module: the next
+/// page a canvas asks for evaluates its file again, on top of what is there.
+/// For a designer preview of one story file: its override is installed,
+/// the record dropped, and the canvas rebuilt, and no other file runs.
+pub fn forget_evaluated(cx: &mut Cx) {
+    cx.global::<Evaluated>().flags.clear();
 }
 
 /// How many story files this context has evaluated.

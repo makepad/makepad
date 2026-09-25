@@ -1394,12 +1394,21 @@ impl Win32Window {
     // ShowWindow's synchronous WM_SIZE is queued and drained by do_callback, so it
     // already reaches the app; posting a compensating WM_SIZE would duplicate it.
     pub fn restore(&self) {
+        // MAKEPAD_HIDE_WINDOWS: a restore or maximize would put the window
+        // on the desktop as surely as a show; the hidden instance keeps
+        // its state change without the window (see `show`).
+        if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+            return;
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_RESTORE);
         }
     }
 
     pub fn maximize(&self) {
+        if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+            return;
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_MAXIMIZE);
         }

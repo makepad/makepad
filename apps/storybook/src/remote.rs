@@ -26,6 +26,59 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn install(cx: &mut Cx) {
     cx.tweak_callback = Some(callback);
+    cx.design_preview_callback = Some(design_preview);
+}
+
+/// The designer's preview of a story file, without the app-wide live edit:
+/// the file's override is installed, the evaluated record dropped, and the
+/// canvas rebuilt, which re-runs that one file. Files outside the stories
+/// (a widget's own source) are left to the platform's live edit.
+fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), String>> {
+    let normalized = file.replace('\\', "/");
+    if !normalized.contains("/apps/storybook/src/stories/") {
+        return None;
+    }
+    // The canvas by type, not by name: a name search takes the shallowest
+    // `canvas` in the tree, which need not be the story canvas.
+    let canvas = cx
+        .widget_tree()
+        .flat_tree(cx)
+        .into_iter()
+        .find(|row| row.ty == "StoryCanvas")
+        .map(|row| cx.widget_tree().widget(WidgetUid(row.uid)))
+        .filter(|w| !w.is_empty());
+    let Some(canvas) = canvas else {
+        log!("storybook: design preview found no StoryCanvas; the live edit takes it");
+        return None;
+    };
+    let changed = match cx.install_live_edit_text(file, text) {
+        Ok(changed) => changed,
+        Err(err) => return Some(Err(err)),
+    };
+    crate::stories::forget_evaluated(cx);
+    // The rebuild runs the story file again under reload, as the live edit
+    // would, so widgets that guard their state on `is_reload` behave alike.
+    cx.live_edit_capture_begin();
+    cx.with_vm(|vm| vm.bx.is_reload = true);
+    let rebuilt = match canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
+        Some(mut canvas) => {
+            canvas.rebuild(cx);
+            true
+        }
+        None => false,
+    };
+    cx.with_vm(|vm| vm.bx.is_reload = false);
+    cx.live_edit_capture_end();
+    log!(
+        "storybook: design preview of {} (override {}, canvas {})",
+        normalized.rsplit('/').next().unwrap_or(&normalized),
+        if changed { "installed" } else { "unchanged" },
+        if rebuilt { "rebuilt" } else { "NOT rebuilt" }
+    );
+    if !rebuilt {
+        return None;
+    }
+    Some(Ok(()))
 }
 
 /// The app records the story it shows so `story_state` can report it.

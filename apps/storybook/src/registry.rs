@@ -398,9 +398,12 @@ mod tests {
                 ("DatePicker", &["Overview", "Calendar"]),
                 ("TimePicker", &["Overview"]),
                 ("ColorPicker", &["Overview"]),
+                ("GradientEditor", &["Overview"]),
                 ("Dropzone", &["Overview", "Well states"]),
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
+                ("Hotkeys", &["Hotkey editor", "Keyboard map"]),
+                ("Gizmo3d", &["3D Gizmo"]),
             ],
         ),
         (

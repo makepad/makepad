@@ -1,0 +1,623 @@
+//! A design session: one file under design, driven from a running app.
+//!
+//! The session is what a builder UI talks to. It opens the file a picked
+//! widget was declared in, turns gestures into operations over that widget's
+//! literal, previews every change through hot reload, and, when the reload
+//! lands, says which widget to select next or rolls the change back when
+//! the runtime refused it. It never writes the source file: a patch is
+//! written under `local/design/` for the person or the agent to apply.
+
+use super::doc::{DesignDoc, PreviewOutcome};
+use super::locate::{locate_widget, widget_source_file, NodeSpan};
+use super::ops::{fresh_name, DesignOp, Placement};
+use super::refs;
+use super::text;
+use crate::makepad_draw::*;
+use crate::view::View;
+use crate::widget::*;
+use crate::widget_tree::{live_id_token, CxWidgetExt};
+
+/// Where an insert goes, relative to the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Place {
+    Before,
+    #[default]
+    Inside,
+    After,
+}
+
+/// A structural operation on the selection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Structural {
+    Delete,
+    Duplicate,
+    /// Put the selection inside a new `View{flow: Down}`.
+    Wrap,
+    /// Swap with the previous sibling.
+    Up,
+    /// Swap with the next sibling.
+    Down,
+    /// Move out of its parent, right after it.
+    Out,
+}
+
+/// What a landed preview reported.
+pub struct Landed {
+    /// The runtime's errors, when the change was rolled back.
+    pub errors: Vec<String>,
+    /// The path of the widget to select once the tree is rebuilt.
+    pub select: Option<String>,
+}
+
+struct Landing {
+    select: Option<String>,
+}
+
+/// One palette entry: the type to insert, the body it comes with, and the
+/// folder it is filed under.
+#[derive(Clone, Debug)]
+pub struct PaletteEntry {
+    pub name: String,
+    pub body: String,
+    pub group: &'static str,
+}
+
+/// The palette's folders, in the order they are shown.
+pub const PALETTE_GROUPS: &[&str] = &[
+    "Common",
+    "Layout",
+    "Text",
+    "Controls",
+    "Lists & tables",
+    "Navigation",
+    "Media & charts",
+    "Other",
+];
+
+/// The folder a widget type is filed under, from its name.
+fn palette_group(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&["view", "splitter", "dock", "grid", "masonry", "panel", "layout", "spacer", "filler", "hr", "vr", "modal", "dialog", "popover", "drawer", "card", "accordion", "fold"]) {
+        "Layout"
+    } else if has(&["label", "text", "markdown", "html", "code", "rich", "math", "badge", "tooltip", "tip"]) {
+        "Text"
+    } else if has(&["button", "check", "radio", "slider", "input", "dropdown", "drop_down", "toggle", "knob", "picker", "field", "combo", "switch", "stepper", "range", "fader", "color"]) {
+        "Controls"
+    } else if has(&["list", "table", "tree", "portal", "kanban", "data", "tile", "carousel", "wheel"]) {
+        "Lists & tables"
+    } else if has(&["nav", "menu", "tab", "bar", "breadcrumb", "pill", "stack", "page", "toolbar"]) {
+        "Navigation"
+    } else if has(&["image", "video", "icon", "svg", "chart", "spark", "gauge", "meter", "wave", "progress", "spinner", "canvas", "vector"]) {
+        "Media & charts"
+    } else {
+        "Other"
+    }
+}
+
+pub struct DesignSession {
+    doc: DesignDoc,
+    landing: Option<Landing>,
+    /// The last preview landed on the spot (the app's hook rebuilt the tree
+    /// itself); the host lands it without waiting for a live edit.
+    sync_landed: bool,
+    /// One line for the panel: what is under design and what last happened.
+    pub status: String,
+    /// A warning the last edit raised beside its success: Rust code that
+    /// looks a renamed or deleted widget up by name. Taken by the host.
+    pub note: Option<String>,
+}
+
+impl DesignSession {
+    /// Open a session on the file `widget` was declared in.
+    pub fn open(cx: &mut Cx, widget: &WidgetRef) -> Result<Self, String> {
+        let span = locate_widget(cx, widget, None)?;
+        let doc = DesignDoc::from_text(&span.file, span.text);
+        let mut session =
+            Self { doc, landing: None, sync_landed: false, status: String::new(), note: None };
+        session.status = session.status_line();
+        Ok(session)
+    }
+
+    pub fn file(&self) -> &str {
+        &self.doc.file
+    }
+
+    pub fn doc(&self) -> &DesignDoc {
+        &self.doc
+    }
+
+    /// Whether a preview has been queued and its reload has not landed yet.
+    pub fn is_landing(&self) -> bool {
+        self.landing.is_some()
+    }
+
+    /// Whether the last preview already rebuilt the tree, so `land` is due
+    /// now rather than on the next live edit. Reading it clears it.
+    pub fn take_sync_landing(&mut self) -> bool {
+        std::mem::take(&mut self.sync_landed)
+    }
+
+    /// Give the selection a name, change it, or drop it (`None`). Returns
+    /// once the preview is queued; the renamed widget is selected by its
+    /// new path when it lands.
+    pub fn rename(&mut self, cx: &mut Cx, widget: &WidgetRef, name: Option<&str>) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let parent = parent_path(&path_of(cx, widget));
+        let old_name = span.node.name().map(|n| n.to_string());
+        DesignOp::Rename { node: span, name: name.map(|n| n.to_string()) }.apply(&mut self.doc)?;
+        self.note = old_name.and_then(|old| refs::references_note(self.file(), &old));
+        let select = match name {
+            Some(name) if !parent.is_empty() => format!("{}.{}", parent, name),
+            Some(name) => name.to_string(),
+            None => parent,
+        };
+        self.preview(cx, Some(select))
+    }
+
+    /// The panel's status line: the file, the edit count, the dirty mark.
+    pub fn status_line(&self) -> String {
+        let n = self.doc.hunks().len();
+        format!(
+            "{}: {} edit{}{}",
+            short(&self.doc.file),
+            n,
+            if n == 1 { "" } else { "s" },
+            if self.doc.is_dirty() { " (previewed, not written)" } else { "" }
+        )
+    }
+
+    /// Fold the last `n` edits into one: one hunk, one undo step. For an
+    /// operation made of several edits (a bake of several tweaks).
+    pub fn squash_edits(&mut self, n: usize, label: &str) {
+        for _ in 1..n {
+            self.doc.squash_last_two();
+        }
+        if n > 1 {
+            self.doc.relabel_last(label);
+        }
+        self.status = self.status_line();
+    }
+
+    /// Whether `widget` can be found in the working text: the check an
+    /// edit makes first, without making the edit.
+    pub fn locate_check(&self, cx: &mut Cx, widget: &WidgetRef) -> Result<(), String> {
+        self.locate(cx, widget).map(|_| ())
+    }
+
+    /// The path the pending preview will select once it lands, if one is
+    /// still landing.
+    pub fn landing_select(&self) -> Option<String> {
+        self.landing.as_ref().and_then(|l| l.select.clone())
+    }
+
+    fn locate(&self, cx: &mut Cx, widget: &WidgetRef) -> Result<NodeSpan, String> {
+        let file = widget_source_file(cx, widget)?;
+        if file != self.doc.file {
+            return Err(format!(
+                "declared in {}, not in {} which is under design",
+                short(&file),
+                short(&self.doc.file)
+            ));
+        }
+        locate_widget(cx, widget, Some(self.doc.text())).map_err(|err| {
+            if self.landing.is_some() {
+                "the preview is still landing; try again after the next frame".to_string()
+            } else {
+                err
+            }
+        })
+    }
+
+    /// The literal holding `span` and the index of `span` among its
+    /// children.
+    fn parent_of(span: &NodeSpan) -> Result<(NodeSpan, usize), String> {
+        let block = &span.blocks[span.block];
+        let (parent, index) =
+            text::parent_of(&span.text, block.body_start..block.body_end, &span.node)
+                .ok_or_else(|| "the literal has no parent in its block".to_string())?;
+        Ok((NodeSpan { node: parent, ..span.clone() }, index))
+    }
+
+    /// Insert `ty` with `body` (e.g. `Button`, `{text: "Save"}`) relative to
+    /// `widget`. The new widget is named `<ty>_<n>` so it can be addressed by
+    /// path. Returns the path to select once the preview lands.
+    pub fn insert(
+        &mut self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        place: Place,
+        ty: &str,
+        body: &str,
+    ) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let path = path_of(cx, widget);
+        let name = fresh_name(self.doc.text(), ty);
+        let splash = format!("{} := {}{}", name, ty, body.trim());
+        let (parent, placement, parent_path) = match place {
+            Place::Inside => {
+                if !is_container(cx, widget) {
+                    return Err(format!(
+                        "{} is not a container; insert before or after it",
+                        span.node.ty
+                    ));
+                }
+                (span, Placement::Last, path)
+            }
+            Place::Before | Place::After => {
+                let (parent, index) = Self::parent_of(&span)?;
+                let placement = if place == Place::Before {
+                    Placement::Before(index)
+                } else {
+                    Placement::After(index)
+                };
+                (parent, placement, parent_path(&path))
+            }
+        };
+        DesignOp::Insert { parent, placement, splash }.apply(&mut self.doc)?;
+        let select = if parent_path.is_empty() { name } else { format!("{}.{}", parent_path, name) };
+        self.preview(cx, Some(select))
+    }
+
+    /// Delete, duplicate, wrap or move the selection.
+    pub fn structural(
+        &mut self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        op: Structural,
+    ) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let path = path_of(cx, widget);
+        let select = match op {
+            Structural::Delete => {
+                let name = span.node.name().map(|n| n.to_string());
+                DesignOp::Delete { node: span }.apply(&mut self.doc)?;
+                self.note = name.and_then(|name| refs::references_note(self.file(), &name));
+                Some(parent_path(&path))
+            }
+            Structural::Duplicate => {
+                DesignOp::Duplicate { node: span }.apply(&mut self.doc)?;
+                Some(path)
+            }
+            Structural::Wrap => {
+                DesignOp::Wrap { node: span, wrapper: "View{flow: Down}".to_string() }
+                    .apply(&mut self.doc)?;
+                Some(path)
+            }
+            Structural::Up | Structural::Down => {
+                let (parent, index) = Self::parent_of(&span)?;
+                let count = text::children(&span.text, &parent.node).len();
+                // The placement indexes the siblings once the node is out.
+                let placement = match op {
+                    Structural::Up if index > 0 => Placement::Before(index - 1),
+                    Structural::Down if index + 1 < count => Placement::After(index),
+                    _ => return Err("already at that end".to_string()),
+                };
+                DesignOp::Move { node: span, parent, placement, name: None }.apply(&mut self.doc)?;
+                Some(path)
+            }
+            Structural::Out => {
+                let (parent, _) = Self::parent_of(&span)?;
+                let (grand, parent_index) = Self::parent_of(&parent)?;
+                let name = span.node.name().map(|n| n.to_string());
+                DesignOp::Move { node: span, parent: grand, placement: Placement::After(parent_index), name: None }
+                    .apply(&mut self.doc)?;
+                let grand_path = parent_path(&parent_path(&path));
+                Some(match name {
+                    Some(name) if !grand_path.is_empty() => format!("{}.{}", grand_path, name),
+                    Some(name) => name,
+                    None => grand_path,
+                })
+            }
+        };
+        self.preview(cx, select)
+    }
+
+    /// Move `widget` next to, or into, `target`: what a drag in the tree
+    /// does. `Before`/`After` place it among the target's siblings; `Inside`
+    /// appends it to the target's children.
+    pub fn move_relative(
+        &mut self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        target: &WidgetRef,
+        place: Place,
+    ) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let target_span = self.locate(cx, target)?;
+        if span.node.open == target_span.node.open {
+            return Err("a node cannot be moved next to itself".to_string());
+        }
+        // A nameless node is named on the way: the moved node is selected
+        // (and, mid-drag, ghosted) by its path, and a path needs a name.
+        let name = Some(
+            span.node
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| fresh_name(self.doc.text(), &span.node.ty)),
+        );
+        let (parent, placement, parent_path) = match place {
+            Place::Inside => {
+                if !is_container(cx, target) {
+                    return Err(format!("{} is not a container", target_span.node.ty));
+                }
+                (target_span, Placement::Last, path_of(cx, target))
+            }
+            Place::Before | Place::After => {
+                let (parent, mut index) = Self::parent_of(&target_span)?;
+                // Once the node is out, a sibling before it in the same
+                // parent moves up one.
+                if let Some((own_parent, own_index)) = Self::parent_of(&span).ok() {
+                    if own_parent.node.open == parent.node.open && own_index < index {
+                        index -= 1;
+                    }
+                }
+                let placement = if place == Place::Before {
+                    Placement::Before(index)
+                } else {
+                    Placement::After(index)
+                };
+                (parent, placement, parent_path(&path_of(cx, target)))
+            }
+        };
+        DesignOp::Move { node: span, parent, placement, name: name.clone() }.apply(&mut self.doc)?;
+        let select = match name {
+            Some(name) if !parent_path.is_empty() => format!("{}.{}", parent_path, name),
+            Some(name) => name,
+            None => parent_path,
+        };
+        self.preview(cx, Some(select))
+    }
+
+    /// Move a widget the last edit put in place (a drag's ghost) to another
+    /// target, as part of that same edit: the two undo as one step, and
+    /// the canvas lands once instead of retracting and landing again.
+    pub fn move_ghost(
+        &mut self,
+        cx: &mut Cx,
+        ghost: &WidgetRef,
+        target: &WidgetRef,
+        place: Place,
+    ) -> Result<(), String> {
+        let before = self.doc.hunks().len();
+        self.move_relative(cx, ghost, target, place)?;
+        if self.doc.hunks().len() == before + 1 {
+            self.doc.squash_last_two();
+        }
+        Ok(())
+    }
+
+    /// Write a property into the selection's literal (a dotted key descends
+    /// into typed properties through `+:`).
+    pub fn set_prop(
+        &mut self,
+        cx: &mut Cx,
+        widget: &WidgetRef,
+        key: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let span = self.locate(cx, widget)?;
+        let path = path_of(cx, widget);
+        let merge = value.contains('{');
+        DesignOp::SetProp { node: span, key: key.to_string(), value: value.to_string(), merge }
+            .apply(&mut self.doc)?;
+        self.preview(cx, Some(path))
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.doc.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.doc.can_redo()
+    }
+
+    /// Undo the last edit; `reselect` is the path to select again once the
+    /// reload lands (the selection, whose widget the reload may rebuild).
+    pub fn undo(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
+        if !self.doc.undo() {
+            return Err("nothing to undo".to_string());
+        }
+        self.preview(cx, reselect)
+    }
+
+    pub fn redo(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
+        if !self.doc.redo() {
+            return Err("nothing to redo".to_string());
+        }
+        self.preview(cx, reselect)
+    }
+
+    /// Back to the file as it was opened; the app runs its compiled code
+    /// again.
+    pub fn reset(&mut self, cx: &mut Cx, reselect: Option<String>) -> Result<(), String> {
+        self.doc.reset();
+        self.preview(cx, reselect)
+    }
+
+    /// Queue the working text for the running app and remember what to do
+    /// when it lands. A refused text is undone on the spot.
+    fn preview(&mut self, cx: &mut Cx, select: Option<String>) -> Result<(), String> {
+        match self.doc.preview(cx) {
+            PreviewOutcome::Refused(err) => {
+                self.doc.undo();
+                self.status = format!("refused: {}", err);
+                Err(err)
+            }
+            PreviewOutcome::Unchanged => {
+                self.status = self.status_line();
+                Ok(())
+            }
+            PreviewOutcome::Queued | PreviewOutcome::Reverted => {
+                self.landing = Some(Landing { select });
+                self.status = self.status_line();
+                cx.redraw_all();
+                Ok(())
+            }
+            PreviewOutcome::Landed => {
+                self.landing = Some(Landing { select });
+                self.sync_landed = true;
+                self.status = self.status_line();
+                cx.redraw_all();
+                Ok(())
+            }
+        }
+    }
+
+    /// Called on `Event::LiveEdit`, after the tree has been rebuilt. Reads
+    /// the errors the re-run raised; errors in the file under design roll
+    /// the last edit back and queue the text before it.
+    pub fn land(&mut self, cx: &mut Cx) -> Landed {
+        let landing = self.landing.take();
+        let errors = cx.take_live_edit_errors();
+        let name = short(&self.doc.file);
+        let mine: Vec<String> = errors.iter().filter(|e| e.contains(name)).cloned().collect();
+        if !mine.is_empty() && landing.is_some() {
+            let rolled_back = self.doc.undo();
+            self.status = format!("rolled back: {}", mine[0]);
+            if rolled_back {
+                match self.doc.preview(cx) {
+                    PreviewOutcome::Queued | PreviewOutcome::Reverted => {
+                        self.landing = Some(Landing { select: None });
+                        cx.redraw_all();
+                    }
+                    PreviewOutcome::Landed => {
+                        // Rebuilt on the spot; nothing further to wait for.
+                        cx.take_live_edit_errors();
+                        cx.redraw_all();
+                    }
+                    _ => {}
+                }
+            }
+            return Landed { errors: mine, select: None };
+        }
+        self.status = if errors.is_empty() {
+            self.status_line()
+        } else {
+            format!("{} ({} error(s) elsewhere)", self.status_line(), errors.len())
+        };
+        Landed { errors: Vec::new(), select: landing.and_then(|l| l.select) }
+    }
+
+    /// Write the unified diff of the session to `local/design/<file>.patch`
+    /// and return that path. The source file itself is never written.
+    pub fn write_patch(&mut self) -> Result<String, String> {
+        if !self.doc.is_dirty() {
+            return Err("nothing to write: the file is as it was opened".to_string());
+        }
+        let dir = std::path::Path::new("local").join("design");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+        let path = dir.join(format!("{}.patch", short(&self.doc.file)));
+        let mut diff = self.doc.unified_diff();
+        if !self.doc.base_matches_disk() {
+            diff.insert_str(0, "# NOTE: the file on disk has changed since this session opened; apply with care\n");
+        }
+        std::fs::write(&path, diff).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let path = path.display().to_string();
+        self.status = format!("patch written: {}", path);
+        Ok(path)
+    }
+}
+
+/// Whether `widget` takes children in its literal's body the way a View
+/// does: a View (and every Splash template over one), a Grid, a Masonry.
+/// Slot and template hosts (Splitter, Dock, PortalList, Tabs) do not, and
+/// an insert inside them is refused with the reason.
+pub fn is_container(cx: &Cx, widget: &WidgetRef) -> bool {
+    if widget.borrow::<View>().is_some() {
+        return true;
+    }
+    let Some(type_id) = widget.widget_type_id() else {
+        return false;
+    };
+    let registry = cx.components.get::<WidgetRegistry>();
+    let Some((info, _)) = registry.map.get(&type_id) else {
+        return false;
+    };
+    matches!(live_id_token(info.name).as_str(), "Grid" | "Masonry" | "KeyboardView")
+}
+
+/// The widget's dotted path in the widget tree.
+pub fn path_of(cx: &Cx, widget: &WidgetRef) -> String {
+    let Some(uid) = widget.try_widget_uid() else {
+        return String::new();
+    };
+    cx.widget_tree()
+        .path_to(uid)
+        .iter()
+        .map(|id| live_id_token(*id))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn parent_path(path: &str) -> String {
+    match path.rfind('.') {
+        Some(i) => path[..i].to_string(),
+        None => String::new(),
+    }
+}
+
+fn short(file: &str) -> &str {
+    file.rsplit(['/', '\\']).next().unwrap_or(file)
+}
+
+/// The palette: a curated set with a useful body first, then every other
+/// typed entry of `mod.widgets` with an empty body.
+pub fn palette(cx: &mut Cx) -> Vec<PaletteEntry> {
+    const CURATED: &[(&str, &str)] = &[
+        ("View", "{width: Fill height: Fit flow: Down spacing: 4 padding: 4}"),
+        ("RoundedView", "{width: Fill height: 40 draw_bg +: {color: #x3a3a44}}"),
+        ("ScrollYView", "{width: Fill height: Fill flow: Down}"),
+        ("Label", "{text: \"Label\"}"),
+        ("Button", "{text: \"Button\"}"),
+        ("TextInput", "{width: 160 empty_text: \"Type here\"}"),
+        ("CheckBox", "{text: \"Check\"}"),
+        ("Slider", "{width: 160}"),
+        ("Image", "{width: 64 height: 64}"),
+        ("Hr", "{}"),
+        ("Vr", "{}"),
+        ("Filler", "{}"),
+    ];
+    let mut out: Vec<PaletteEntry> = CURATED
+        .iter()
+        .map(|(name, body)| PaletteEntry { name: name.to_string(), body: body.to_string(), group: "Common" })
+        .collect();
+    let mut rest: Vec<String> = cx.with_vm(|vm| {
+        let widgets = vm.module(id!(widgets));
+        let top: Vec<(String, ScriptValue)> = vm.map_mut_with(widgets, |_vm, map| {
+            map.iter()
+                .filter_map(|(k, v)| k.as_id().map(|id| (live_id_token(id), v.value)))
+                .collect()
+        });
+        let mut names = Vec::new();
+        for (name, value) in top {
+            let Some(obj) = value.as_object() else {
+                continue;
+            };
+            // Typed somewhere up its prototypes: a widget, not a namespace
+            // or a plain table.
+            let mut typed = false;
+            let mut cur = Some(obj);
+            for _ in 0..32 {
+                let Some(o) = cur else {
+                    break;
+                };
+                if vm.bx.heap.object_type_id(o).is_some() {
+                    typed = true;
+                    break;
+                }
+                cur = vm.bx.heap.proto(o).as_object();
+            }
+            if typed && !name.ends_with("Base") && !CURATED.iter().any(|(n, _)| *n == name) {
+                names.push(name);
+            }
+        }
+        names
+    });
+    rest.sort();
+    out.extend(rest.into_iter().map(|name| {
+        let group = palette_group(&name);
+        PaletteEntry { name, body: "{}".to_string(), group }
+    }));
+    out
+}

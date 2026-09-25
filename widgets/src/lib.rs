@@ -82,6 +82,7 @@ pub mod keyboard_view;
 pub mod nav_control;
 pub mod nav_list;
 pub mod tweaker;
+pub mod designer;
 pub mod reflect;
 pub mod ai_slot;
 #[cfg(feature = "voice")]
@@ -136,6 +137,9 @@ pub mod rating;
 pub mod tag_field;
 pub mod radio_group;
 pub mod kbd;
+pub mod hotkeys;
+pub mod hotkey_editor;
+pub mod keyboard_map;
 pub mod typography;
 pub mod tree;
 pub mod list_item;
@@ -153,6 +157,7 @@ pub mod carousel;
 pub mod dropzone;
 pub mod form;
 pub mod color;
+pub mod gradient_editor;
 pub mod column_picker;
 pub mod picker_parts;
 pub mod tree_select;
@@ -163,6 +168,7 @@ pub mod floating_action;
 pub mod hamburger_menu;
 pub mod property_inspector;
 pub mod chart_shapes;
+pub mod gizmo;
 pub mod toolbar;
 mod column_fit;
 pub mod masonry;
@@ -317,6 +323,9 @@ pub use crate::{
     tag_field::*,
     radio_group::*,
     kbd::*,
+    hotkeys::*,
+    hotkey_editor::*,
+    keyboard_map::*,
     typography::*,
     tree::*,
     list_item::*,
@@ -333,6 +342,7 @@ pub use crate::{
     dropzone::*,
     form::*,
     color::*,
+    gradient_editor::*,
     column_picker::*,
     picker_parts::*,
     tree_select::*,
@@ -870,16 +880,21 @@ true
     crate::dropzone::script_mod(vm);
     crate::form::script_mod(vm);
     crate::color::script_mod(vm);
+    crate::gradient_editor::script_mod(vm);
     // Before the three that draw with its panel and row surfaces.
     crate::picker_parts::script_mod(vm);
     crate::column_picker::script_mod(vm);
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
     crate::command_palette::script_mod(vm);
+    // After TextInput, Button, KbdGroup and the tip they build on.
+    crate::hotkey_editor::script_mod(vm);
+    crate::keyboard_map::script_mod(vm);
     crate::radial_menu::script_mod(vm);
     crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
     crate::chart_shapes::script_mod(vm);
+    crate::gizmo::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::floating_action::script_mod(vm);
     crate::masonry::script_mod(vm);

@@ -68,12 +68,46 @@ fn live_rect_area<'a>(
     ra: &RectArea,
     cx: &'a Cx,
 ) -> Option<(&'a crate::draw_list::CxDrawList, &'a crate::draw_list::CxRectArea)> {
+    live_rect_area_inner(ra, cx, false)
+}
+
+/// `ignore_redraw` reads a rect area a retained draw list still holds
+/// (see `clipped_rect_union_attached`); the bounds checks stay.
+fn live_rect_area_inner<'a>(
+    ra: &RectArea,
+    cx: &'a Cx,
+    ignore_redraw: bool,
+) -> Option<(&'a crate::draw_list::CxDrawList, &'a crate::draw_list::CxRectArea)> {
     let draw_list = cx.draw_lists.checked_index(ra.draw_list_id)?;
-    if draw_list.redraw_id != ra.redraw_id {
+    if !ignore_redraw && draw_list.redraw_id != ra.redraw_id {
         return None;
     }
     let rect_area = draw_list.rect_areas.get(ra.rect_id)?;
     Some((draw_list, rect_area))
+}
+
+/// The clipped rect of a rect area, through its draw list's clip and shift.
+fn rect_area_clipped(ra: &RectArea, cx: &Cx, ignore_redraw: bool) -> Rect {
+    let Some((draw_list, rect_area)) = live_rect_area_inner(ra, cx, ignore_redraw) else {
+        return Rect::default();
+    };
+    if draw_list.draw_list_has_clip {
+        let p3 = dvec2(
+            draw_list.draw_list_uniforms.view_clip.x as f64,
+            draw_list.draw_list_uniforms.view_clip.y as f64,
+        );
+        let p4 = dvec2(
+            draw_list.draw_list_uniforms.view_clip.z as f64,
+            draw_list.draw_list_uniforms.view_clip.w as f64,
+        );
+        let shift = dvec2(
+            draw_list.draw_list_uniforms.view_shift.x as f64,
+            draw_list.draw_list_uniforms.view_shift.y as f64,
+        );
+        rect_area.rect.clip(rect_area.draw_clip).translate(shift).clip((p3, p4))
+    } else {
+        rect_area.rect.clip(rect_area.draw_clip)
+    }
 }
 
 impl Area {
@@ -248,30 +282,7 @@ impl Area {
                 // Clip this draw list too. Stale rect areas are common after a
                 // hide/rebuild; Instance already bails on redraw_id, Rect must
                 // too, and must bounds-check — Win32 WndProc cannot unwind.
-                let Some((draw_list, rect_area)) = live_rect_area(ra, cx) else {
-                    return Rect::default();
-                };
-                if draw_list.draw_list_has_clip {
-                    let p3 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.x as f64,
-                        draw_list.draw_list_uniforms.view_clip.y as f64,
-                    );
-                    let p4 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.z as f64,
-                        draw_list.draw_list_uniforms.view_clip.w as f64,
-                    );
-                    let shift = dvec2(
-                        draw_list.draw_list_uniforms.view_shift.x as f64,
-                        draw_list.draw_list_uniforms.view_shift.y as f64,
-                    );
-                    return rect_area
-                        .rect
-                        .clip(rect_area.draw_clip)
-                        .translate(shift)
-                        .clip((p3, p4));
-                } else {
-                    return rect_area.rect.clip(rect_area.draw_clip);
-                }
+                rect_area_clipped(ra, cx, false)
             }
             _ => Rect::default(),
         };
@@ -299,8 +310,13 @@ impl Area {
     }
 
     fn clipped_rect_union_inner(&self, cx: &Cx, ignore_redraw: bool) -> Rect {
-        let Area::Instance(inst) = self else {
-            return self.clipped_rect(cx);
+        let inst = match self {
+            Area::Instance(inst) => inst,
+            // A container without a background owns a rect area; attached
+            // means on screen for it exactly as for an instance, so a
+            // retained list that did not redraw this frame still answers.
+            Area::Rect(ra) => return rect_area_clipped(ra, cx, ignore_redraw),
+            _ => return self.clipped_rect(cx),
         };
         if inst.instance_count == 0 {
             // A probe, not a draw: an instance-less area is simply "nothing

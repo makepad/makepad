@@ -686,6 +686,36 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Arm the VM's captured-error sink for the live-edit re-run that
+    /// follows, so a hot-reloaded block that fails to run is reported to
+    /// the caller as well as the log. Called by the `app_main!` expansion,
+    /// which is why it is public.
+    pub fn live_edit_capture_begin(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        self.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+    }
+
+    /// Take the errors the re-run raised: log them, and keep them for
+    /// `take_live_edit_errors`. Public for the `app_main!` expansion.
+    pub fn live_edit_capture_end(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        let errors = self.with_vm(|vm| vm.take_errors());
+        for error in &errors {
+            crate::error!("live edit: {}", error);
+        }
+        self.live_edit_errors = errors;
+    }
+
+    /// The script errors raised by the most recent live-edit re-run, if any.
+    /// Taking them clears the record.
+    pub fn take_live_edit_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.live_edit_errors)
+    }
+
     /// The `Apply` variant the currently dispatching `Event::LiveEdit` should
     /// be re-applied with — `Reload` for a file-change hot reload, `Rebake`
     /// for a `request_live_edit()` re-bake. `app_main!` reads this; app code
@@ -1538,10 +1568,20 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::HideSelectionHandles);
     }
 
+    /// Start a drag of `items` inside the app. Items that are not files
+    /// (strings, and anything with an `internal_id`) are the app's own
+    /// data, so they are dragged by the platform-independent path on every
+    /// backend: the pointer's moves become `Event::Drag`, its release
+    /// `Event::Drop` then `Event::DragEnd`. Files alone go to the OS drag
+    /// where a backend has one, since a file may leave the app.
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
-        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-        {
+        let files_only = items
+            .iter()
+            .all(|item| matches!(item, DragItem::FilePath { internal_id: None, .. }));
+        let os_drag = cfg!(not(any(target_arch = "wasm32", target_os = "linux", test))) && files_only;
+        if !os_drag {
             self.drag_drop.start_internal_drag(items);
+            return;
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
         {

@@ -19,6 +19,7 @@ workspace.members = [
     "apps/calculator",
     "libs/wm_theme",
     "libs/civil_time",
+    "libs/gizmo",
     "libs/wm_api",
     "libs/app_module",
     "apps/task",

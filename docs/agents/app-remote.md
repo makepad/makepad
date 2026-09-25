@@ -128,8 +128,8 @@ backend cannot grab; do not replace a failed grab with an OS screenshot.
   (`Event::MouseDown` never arrives) — relaunch before debugging the widget;
   tick-sampled keys need `/k?k=down` … ≥150 ms … `/k?k=up`, a `press` lands
   between ticks; in the code map every `/g` drops keyboard focus, click the
-  map before the next key batch; `MAKEPAD_HIDE_WINDOWS` is implemented only
-  on macOS. Test instances of apps with audio or a shared home run with
+  map before the next key batch; `MAKEPAD_HIDE_WINDOWS` is implemented on
+  macOS and Windows. Test instances of apps with audio or a shared home run with
   `SANDBOX_MUTE=1` and their own `SANDBOX_HOME` / `--state-dir`.
 
 ## Coordinate and lifecycle details
@@ -188,4 +188,5 @@ The existing [remote smoke script](../../tools/remote_smoke.sh) exercises
 the protocol across example apps. Inspect its current launch/setup behavior
 before using it for a task.
 
-For design feedback and styling, see [Tweaker](tweaker.md).
+For design feedback, styling and structural source edits (`/design/*`),
+see [Tweaker](tweaker.md).

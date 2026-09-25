@@ -196,12 +196,14 @@ impl DrawVars {
 }
 
 impl Cx {
-    /// gpusim compiles shaders synchronously in `gpusim_compile_shaders`, so a
-    /// shader is window-ready as soon as it has an `os_shader_id`. Mirrors the
-    /// GL and D3D11 backends, which `DrawText::slug_draw_is_ready` calls on
-    /// Linux and Windows.
+    /// A shader is "window-ready" once its backend entry exists. The
+    /// simulated GPU compiles synchronously, so this mirrors the D3D11 rule
+    /// rather than GL's asynchronous readiness poll; the shared SLUG helper
+    /// path on Linux asks this before choosing between curves and raster.
     pub fn is_draw_shader_window_ready(&self, shader_id: DrawShaderId) -> bool {
-        self.draw_shaders.shaders[shader_id.index].os_shader_id.is_some()
+        self.draw_shaders.shaders[shader_id.index]
+            .os_shader_id
+            .is_some()
     }
 
     pub(crate) fn gpusim_compile_shaders(&mut self) {

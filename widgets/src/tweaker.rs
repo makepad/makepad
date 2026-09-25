@@ -1062,6 +1062,9 @@ enum UndoStep {
         prop: String,
         removed: Vec<TweakDiffEntry>,
     },
+    /// One hunk of the Build tab's design session: undone and redone by the
+    /// session's own history, previewed through hot reload.
+    Source { label: String },
 }
 
 /// One freehand annotation stroke, in window-local points, tagged with the
@@ -1259,6 +1262,11 @@ pub(crate) struct TweakSession {
     /// Bumped by every applied change (any origin) and by resets/clears:
     /// the sidebar rebuilds its rows when it sees a new generation.
     apply_gen: u64,
+    /// The pointer's last move was over the panel band: the cursor was
+    /// put back to the arrow on the way in, and the panel's own widgets
+    /// (a hand on a row that can be dragged or pressed, an I-beam) keep
+    /// theirs while it stays.
+    band_hovered: bool,
 }
 
 fn session() -> &'static Mutex<TweakSession> {
@@ -1345,6 +1353,9 @@ fn selection_ring(rect: Rect) -> Rect {
 /// same click — the gesture that climbs to the parent. A hand does not put
 /// the pointer back on the same pixel.
 const CLIMB_SLOP: f64 = 3.0;
+/// How far a press on the pinned widget travels before it lifts the
+/// widget off the canvas.
+const LIFT_SLOP: f64 = 4.0;
 
 /// A complete current design delta. Empty entries mean all edits were undone.
 /// No source files are written by the tweaker or this export.
@@ -1584,6 +1595,131 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
     widget.area().clipped_rect_union_attached(cx)
 }
 
+
+/// The gap among a container's drawn children that a pointer on the
+/// container's own space falls in: before the first child past the
+/// pointer along the container's flow, else after the last. None when
+/// the container has no drawn child (the drop goes inside it).
+fn gap_target(cx: &Cx, container: &WidgetRef, abs: DVec2) -> Option<(WidgetRef, DesignPlace)> {
+    use crate::makepad_draw::Flow;
+    let mut children: Vec<(WidgetRef, Rect)> = Vec::new();
+    container.children(&mut |_, child| {
+        let rect = child.area().clipped_rect_union(cx);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            children.push((child.clone(), rect));
+        }
+    });
+    if children.is_empty() {
+        return None;
+    }
+    let horizontal = match container.borrow::<View>().map(|view| view.layout.flow) {
+        Some(Flow::Right { .. }) => true,
+        Some(Flow::Down) => false,
+        _ => children.windows(2).any(|pair| {
+            let (a, b) = (pair[0].1, pair[1].1);
+            let share_y = a.pos.y < b.pos.y + b.size.y && b.pos.y < a.pos.y + a.size.y;
+            let apart_x = a.pos.x + a.size.x <= b.pos.x + 0.5 || b.pos.x + b.size.x <= a.pos.x + 0.5;
+            share_y && apart_x
+        }),
+    };
+    let centre = |rect: &Rect| {
+        if horizontal {
+            rect.pos.x + rect.size.x * 0.5
+        } else {
+            rect.pos.y + rect.size.y * 0.5
+        }
+    };
+    let at = if horizontal { abs.x } else { abs.y };
+    children.sort_by(|a, b| centre(&a.1).partial_cmp(&centre(&b.1)).unwrap_or(std::cmp::Ordering::Equal));
+    match children.iter().find(|(_, rect)| centre(rect) > at) {
+        Some((child, _)) => Some((child.clone(), DesignPlace::Before)),
+        None => children.last().map(|(child, _)| (child.clone(), DesignPlace::After)),
+    }
+}
+
+/// Where a row was taken hold of: the pointer's offset inside the row and
+/// the row's size, for the chip that carries it. A row with no rect is
+/// held near its left end.
+fn grab_of(row: Option<Rect>, at: DVec2) -> (DVec2, DVec2) {
+    match row {
+        Some(rect) => {
+            let offset = dvec2(
+                (at.x - rect.pos.x).clamp(0.0, rect.size.x),
+                (at.y - rect.pos.y).clamp(0.0, rect.size.y),
+            );
+            (offset, rect.size)
+        }
+        None => (dvec2(12.0, 10.0), dvec2(120.0, 20.0)),
+    }
+}
+
+/// Why a pick the session holds with a rect draws nothing: the widget's
+/// area, its draw list, and what the attached set and the list say about
+/// it, logged once per widget so a frame loop does not flood the log.
+fn log_absent_pick(cx: &Cx, pick: &TweakPick, live: &WidgetRef) {
+    // The window's own chrome (the caption bar and its buttons) has no
+    // path and no mark to draw; a pick that wandered onto it is not worth
+    // a line.
+    if pick.path.is_empty() {
+        return;
+    }
+    thread_local! {
+        static LOGGED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let fresh = LOGGED.with(|logged| {
+        let mut logged = logged.borrow_mut();
+        if logged.contains(&pick.uid) {
+            return false;
+        }
+        if logged.len() >= 64 {
+            logged.remove(0);
+        }
+        logged.push(pick.uid);
+        true
+    });
+    if !fresh {
+        return;
+    }
+    let area = live.area();
+    let attached = attached_cache().lock().unwrap().clone();
+    let on = area.is_attached(cx, &attached);
+    let detail = match area {
+        Area::Instance(inst) => {
+            let list = cx.draw_lists.checked_index(inst.draw_list_id);
+            format!(
+                "instance list={:?} count={} redraw inst={} list={:?}",
+                inst.draw_list_id,
+                inst.instance_count,
+                inst.redraw_id,
+                list.map(|l| l.redraw_id)
+            )
+        }
+        Area::Rect(ra) => {
+            let list = cx.draw_lists.checked_index(ra.draw_list_id);
+            let entry = list.and_then(|l| l.rect_areas.get(ra.rect_id));
+            format!(
+                "rect list={:?} rect_id={} of {:?} redraw ra={} list={:?} rect={:?} clip={:?}",
+                ra.draw_list_id,
+                ra.rect_id,
+                list.map(|l| l.rect_areas.len()),
+                ra.redraw_id,
+                list.map(|l| l.redraw_id),
+                entry.map(|e| e.rect),
+                entry.map(|e| e.draw_clip)
+            )
+        }
+        Area::Empty => "empty".to_string(),
+    };
+    log!(
+        "TWEAK absent {} ({}) session rect {:?}: attached={} of {} lists; {}",
+        pick.path,
+        pick.ty,
+        pick.rect,
+        on,
+        attached.len(),
+        detail
+    );
+}
 
 /// Navigation-class widgets keep working under the pick: "since tabs show
 /// whole new chunks of clickable UI", a plain click on a tab, fold button,
@@ -2203,6 +2339,37 @@ pub fn window_intercept(
         return false;
     }
 
+    // A palette entry being dragged belongs to the design surface from the
+    // press to the drop: the drag events go to the tweaker first and stop
+    // there, or a drop target in the app under the pointer takes the drop
+    // and the tweaker, dispatched after the body, never sees it.
+    if matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd) {
+        let body = window_view
+            .children
+            .iter()
+            .find(|(id, _)| *id == live_id!(body))
+            .map(|(_, widget)| widget.clone());
+        let tweaker = window_view
+            .children
+            .iter()
+            .find(|(id, _)| *id == live_id!(tweaker))
+            .map(|(_, widget)| widget.clone());
+        if let (Some(body), Some(tweaker)) = (body, tweaker) {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                if tw.design.is_some() && (tw.palette_drag.is_some() || tw.move_drag.is_some()) {
+                    tw.handle_palette_drag(cx, event, &body);
+                    return true;
+                }
+                if tw.tree_drag {
+                    // The row rides the pointer wherever it goes; the tree
+                    // itself still gets the event for its drop zones.
+                    tw.follow_tree_drag(cx, event);
+                }
+            }
+        }
+        return false;
+    }
+
     let (abs, kind) = match event {
         Event::MouseMove(e) if e.window_id == window_id => (e.abs, PointerKind::Move),
         Event::MouseDown(e) if e.window_id == window_id => (e.abs, PointerKind::Down),
@@ -2462,11 +2629,22 @@ pub fn window_intercept(
                 log!("TWEAK press {:.0},{:.0} in the panel band: not a pick", abs.x, abs.y);
             }
             if kind == PointerKind::Move {
-                // The body's pick-hand must not linger over the panel; the
-                // panel's own widgets set theirs (I-beam etc.) after this.
-                cx.set_cursor(MouseCursor::Default);
+                // The body's pick-hand must not linger over the panel, so
+                // the move that ENTERS the band puts the arrow back. Only
+                // that one: a widget in the panel sets its own cursor once,
+                // on hover-in (a hand on a row that can be dragged, an
+                // I-beam on a field), and a reset on every move took it
+                // straight back off.
+                let entering = !session().lock().unwrap().band_hovered;
+                if entering {
+                    cx.set_cursor(MouseCursor::Default);
+                    session().lock().unwrap().band_hovered = true;
+                }
             }
             return false;
+        }
+        if kind == PointerKind::Move {
+            session().lock().unwrap().band_hovered = false;
         }
     }
 
@@ -2544,6 +2722,9 @@ pub fn window_intercept(
                             let mut s = session().lock().unwrap();
                             s.down_consumed = true;
                             s.edit_hold = true;
+                            // A new drag is a new gesture: its steps coalesce into one undo
+                            // step of their own, not into the last drag's.
+                            s.undo_open = false;
                         }
                         redraw_tweaker(cx, &tweaker);
                         return true;
@@ -2592,6 +2773,127 @@ pub fn window_intercept(
                     }
                     redraw_tweaker(cx, &tweaker);
                     return true;
+                }
+            }
+            PointerKind::Scroll => {}
+        }
+    }
+
+    // The edge handles: the selection's width and height, dragged. And the
+    // lift: with a design session open a press on the pinned widget may be
+    // the start of a move, so the click it would be waits for the release.
+    if !annotate && !cx.sploded_transformed() {
+        match kind {
+            PointerKind::Down => {
+                let pinned = session().lock().unwrap().pinned.clone();
+                if let Some(pin) = pinned.filter(|p| p.window_id == window_id.id()) {
+                    if let Some(handle) = Tweaker::size_handle_at(pin.rect, abs) {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.size_drag = Some((handle, pin.rect, abs));
+                        }
+                        {
+                            let mut s = session().lock().unwrap();
+                            s.down_consumed = true;
+                            s.edit_hold = true;
+                            // A new drag is a new gesture: its steps coalesce into one undo
+                            // step of their own, not into the last drag's.
+                            s.undo_open = false;
+                        }
+                        redraw_tweaker(cx, &tweaker);
+                        return true;
+                    }
+                }
+                // Any widget can be lifted: the selection when the press is
+                // inside it (a container reached by climbing is moved as a
+                // whole), else the widget under the pointer.
+                let held = session().lock().unwrap().edit_hold;
+                let design_open = tweaker.borrow::<Tweaker>().is_some_and(|tw| tw.design.is_some());
+                if design_open && !held {
+                    let pinned = session().lock().unwrap().pinned.clone();
+                    let lift = match pinned.filter(|p| p.window_id == window_id.id() && p.rect.contains(abs)) {
+                        Some(pin) => Some(pin),
+                        None => resolve_pick(cx, &body, abs, window_id.id()),
+                    };
+                    if let Some(pick) = lift {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.move_press = Some((pick, abs));
+                        }
+                    }
+                }
+            }
+            PointerKind::Move => {
+                let drag = tweaker.borrow::<Tweaker>().and_then(|tw| tw.size_drag);
+                if let Some((handle, start, from)) = drag {
+                    let w = (start.size.x + abs.x - from.x).round().max(1.0);
+                    let h = (start.size.y + abs.y - from.y).round().max(1.0);
+                    let chunk = match handle {
+                        0 => format!("width: {}", fmt_f64(w)),
+                        1 => format!("height: {}", fmt_f64(h)),
+                        _ => format!("width: {} height: {}", fmt_f64(w), fmt_f64(h)),
+                    };
+                    let sel = session().lock().unwrap().pinned.clone();
+                    if let Some(sel) = sel {
+                        let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+                        if !widget.is_empty() {
+                            if let Err(error) =
+                                apply_splash_chunk(cx, &widget, &sel.path, &chunk, "handle")
+                            {
+                                log!("TWEAK handle apply failed: {error}");
+                            }
+                        }
+                    }
+                    cx.set_cursor(Tweaker::size_handle_cursor(handle));
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                let press = tweaker.borrow::<Tweaker>().and_then(|tw| tw.move_press.clone());
+                if let Some((pick, from)) = press {
+                    let travelled = (abs.x - from.x).abs() > LIFT_SLOP || (abs.y - from.y).abs() > LIFT_SLOP;
+                    if travelled {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.lift(cx, &pick, from);
+                        }
+                        session().lock().unwrap().press_pick = None;
+                    }
+                    // Held, not yet lifted: the pointer's wander inside the
+                    // slop is not a hover pick.
+                    return true;
+                }
+                // Over a handle the cursor says what a press would do, and
+                // the hover outline stands aside for the selection's edge.
+                let pinned = session().lock().unwrap().pinned.clone();
+                if let Some(pin) = pinned.filter(|p| p.window_id == window_id.id()) {
+                    if let Some(handle) = Tweaker::size_handle_at(pin.rect, abs) {
+                        cx.set_cursor(Tweaker::size_handle_cursor(handle));
+                        let stale = session().lock().unwrap().hover.take().is_some();
+                        if stale {
+                            redraw_tweaker(cx, &tweaker);
+                        }
+                        return true;
+                    }
+                }
+            }
+            PointerKind::Up => {
+                let was_sizing = tweaker
+                    .borrow::<Tweaker>()
+                    .is_some_and(|tw| tw.size_drag.is_some());
+                if was_sizing {
+                    if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                        tw.size_drag = None;
+                        tw.rows_uid = 0;
+                    }
+                    {
+                        let mut s = session().lock().unwrap();
+                        s.down_consumed = false;
+                        s.edit_hold = false;
+                    }
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                // A release in place: the held press is a click, and the
+                // pick arm below takes it.
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    tw.move_press = None;
                 }
             }
             PointerKind::Scroll => {}
@@ -2798,7 +3100,11 @@ pub fn window_intercept(
                 // be the first pixel of an ORBIT, and an orbit is a change of
                 // viewpoint, not of selection. Hold the pick for the release
                 // and take it only if the pointer stayed where it was put.
-                if cx.sploded_active() {
+                // A press on the pinned widget with a design session open
+                // is held the same way: it may be the start of a lift, and
+                // a lift is a move, not a click (nor a climb).
+                let may_lift = tweaker.borrow::<Tweaker>().is_some_and(|tw| tw.move_press.is_some());
+                if cx.sploded_active() || may_lift {
                     session().lock().unwrap().press_pick = Some(abs);
                 } else {
                     commit_pick(cx, &tweaker, abs, window_id.id(), pick.clone());
@@ -2807,9 +3113,13 @@ pub fn window_intercept(
                 // tab / fold / dropdown as well, and so will its release.
                 if let Some(pick) = &pick {
                     if is_navigation_pick(cx, WidgetUid(pick.uid)) {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.move_press = None;
+                        }
                         let mut s = session().lock().unwrap();
                         s.down_consumed = false;
                         s.pass_up = true;
+                        s.press_pick = None;
                         return false;
                     }
                 }
@@ -5400,6 +5710,45 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     });
 }
 
+/// A panel tab up or down. Up wears the body's face with a hairline
+/// edge and bright ink; down sits on a darker face, as the dock's tabs
+/// do, in dimmer ink, lit a little under the pointer. Literals, for the
+/// same reason `set_button_fill` uses them.
+fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
+    let mut btn = btn;
+    let (base, hover, down, border, ink): (Vec4f, Vec4f, Vec4f, Vec4f, Vec4f) = if selected {
+        (
+            vec4(0.20, 0.20, 0.21, 1.0),
+            vec4(0.22, 0.22, 0.23, 1.0),
+            vec4(0.18, 0.18, 0.19, 1.0),
+            vec4(0.36, 0.36, 0.38, 1.0),
+            vec4(0.93, 0.93, 0.93, 1.0),
+        )
+    } else {
+        (
+            vec4(0.12, 0.12, 0.13, 1.0),
+            vec4(0.15, 0.15, 0.16, 1.0),
+            vec4(0.10, 0.10, 0.11, 1.0),
+            vec4(0.09, 0.09, 0.10, 1.0),
+            vec4(0.64, 0.64, 0.66, 1.0),
+        )
+    };
+    script_apply_eval!(cx, btn, {
+        draw_bg +: {
+            color: #(base)
+            color_hover: #(hover)
+            color_down: #(down)
+            color_focus: #(base)
+            border_color: #(border)
+            border_color_hover: #(border)
+            border_color_down: #(border)
+            border_color_focus: #(border)
+        }
+        draw_text +: { color: #(ink) }
+        draw_icon +: { color: #(ink) }
+    });
+}
+
 /// A Button live or off, as one thing. Its `enabled` is what makes it
 /// inert and its disabled track is what makes it look so, and neither
 /// drives the other; this sets both. Guarded on the track, so a sidebar
@@ -6650,12 +6999,56 @@ fn coalesce_diff(entries: &[TweakDiffEntry]) -> Vec<TweakDiffEntry> {
     out
 }
 
+/// A file path as a reader writes it: without the Windows verbatim prefix
+/// (`//?/`, `\\?\`) a canonicalised path carries.
+fn shown_path(path: &str) -> &str {
+    path.strip_prefix("//?/").or_else(|| path.strip_prefix("\\\\?\\")).unwrap_or(path)
+}
+
+/// The panel a `/design/*` op talks to: the one with a design session
+/// open, else the one in the pinned widget's window, else the first.
+fn design_tweaker(cx: &Cx) -> Option<WidgetRef> {
+    let pinned_window = session().lock().unwrap().pinned.as_ref().map(|p| p.window_id);
+    let mut in_window = None;
+    let mut first = None;
+    for row in cx.widget_tree().flat_tree(cx).into_iter().filter(|row| row.inspector) {
+        let widget = cx.widget_tree().widget(WidgetUid(row.uid));
+        let (designing, window) = match widget.borrow::<Tweaker>() {
+            Some(tw) => (tw.design.is_some(), tw.my_window),
+            None => continue,
+        };
+        if designing {
+            return Some(widget);
+        }
+        if in_window.is_none() && window.is_some() && window == pinned_window {
+            in_window = Some(widget.clone());
+        }
+        if first.is_none() {
+            first = Some(widget);
+        }
+    }
+    in_window.or(first)
+}
+
+/// `/design/<op>`: the designer's remote surface, answered by the panel
+/// that holds (or will hold) the session.
+fn design_remote(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, String> {
+    let tweaker = design_tweaker(cx).ok_or_else(|| "no tweaker in this app".to_string())?;
+    let mut tw = tweaker
+        .borrow_mut::<Tweaker>()
+        .ok_or_else(|| "the tweaker is busy; try again".to_string())?;
+    tw.design_remote(cx, op, args)
+}
+
 /// The `Cx::tweak_callback` the widgets crate registers in `set_ui_root`.
 pub fn tweak_callback(
     cx: &mut Cx,
     op: &str,
     args: &[(String, String)],
 ) -> Result<String, String> {
+    if let Some(design_op) = op.strip_prefix("design_") {
+        return design_remote(cx, design_op, args);
+    }
     match op {
         "toggle" => {
             let on = match arg(args, &["on"]) {
@@ -7379,6 +7772,9 @@ script_mod! {
     set_type_default() do #(DrawTweakOutline::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn() {
+            if self.solid > 0.5 {
+                return self.fill_color
+            }
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
             sdf.fill_keep(self.fill_color)
@@ -7427,8 +7823,19 @@ script_mod! {
     mod.widgets.Tweaker = set_type_default() do mod.widgets.TweakerBase{
         width: 0
         height: 0
+        // The panel's own face, declared here and not taken from the draw
+        // crate's default: an app that ships only the fonts it declares
+        // leaves that default out, and a label on it draws nothing.
         draw_label +: {
-            text_style +: {
+            text_style: mod.text.TextStyle{
+                font_family: mod.text.FontFamily{
+                    latin := mod.text.FontMember{
+                        res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                        asc: -0.1
+                        desc: 0.0
+                    }
+                }
+                line_spacing: 1.2
                 font_size: 7.5
             }
             color: #xffffff
@@ -7615,6 +8022,10 @@ pub struct DrawTweakOutline {
     /// Device pixels per point, for dpi-true hairlines and dashes.
     #[live(1.0)]
     pub dpi: f32,
+    /// 1.0 = a solid fill to the quad's edge, no antialiased rim: a bar a
+    /// few points wide keeps its full width instead of fading at both edges.
+    #[live]
+    pub solid: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -7924,6 +8335,9 @@ enum PanelTab {
     /// the rules that stand over the whole app. The app-wide field is why
     /// this tab has to work with nothing selected.
     Spec,
+    /// The builder: insert, move, delete and wrap widgets by editing the
+    /// source file, previewed through hot reload. See [`crate::designer`].
+    Build,
 }
 
 /// One built-in thing the Theme tab's picker offers: a theme the library is
@@ -8351,6 +8765,8 @@ struct VisRow {
     item: WidgetRef,
 }
 
+use crate::designer::{DesignSession, PaletteEntry, Place as DesignPlace};
+
 #[derive(Script, Widget)]
 pub struct Tweaker {
     #[uid]
@@ -8640,7 +9056,7 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 5],
+    tab_uids: [u64; 6],
     /// The Theme tab's picker and its three commands, captured at draw. A
     /// click arrives as a uid and nothing else; 0 is no widget, so a control
     /// that is not on screen routes nothing.
@@ -8833,6 +9249,121 @@ pub struct Tweaker {
     /// Open the readable default levels once per tree refresh.
     #[rust]
     tree_open_defaults_pending: bool,
+    /// The Build tab's design session, when one is open.
+    #[rust]
+    design: Option<DesignSession>,
+    /// Where the next palette insert goes, relative to the selection.
+    #[rust]
+    design_place: DesignPlace,
+    /// What the Build tab last answered, shown beside the session's line.
+    #[rust]
+    design_msg: String,
+    /// The path to select once a landed preview has been drawn, and the
+    /// frames left to find it in.
+    #[rust]
+    design_reselect: Option<(String, u32)>,
+    /// The last ledger step written into the source: (path, prop, value),
+    /// so a step is written once.
+    #[rust]
+    design_baked: Option<(String, String, String)>,
+    /// The hunk count the patch pane shows.
+    #[rust]
+    design_patch_shown: usize,
+    /// The Build tab's buttons, captured at build; indexed by `BUILD_*`.
+    #[rust]
+    build_uids: [u64; 14],
+    #[rust]
+    palette_list_uid: u64,
+    #[rust]
+    palette_filter_uid: u64,
+    /// The palette, built on first draw from the widget module.
+    #[rust]
+    palette_entries: Vec<PaletteEntry>,
+    /// Palette rows drawn this frame: (button uid, entry index).
+    #[rust]
+    palette_visible: Vec<(u64, usize)>,
+    /// Palette folder heads drawn this frame: (button uid, group).
+    #[rust]
+    palette_heads: Vec<(u64, String)>,
+    /// The palette folders that are open; the rest show their head only.
+    #[rust]
+    palette_open: Vec<String>,
+    #[rust]
+    palette_filter: String,
+    /// A tree row being dragged over: (target widget uid, where relative
+    /// to it), for the drop indicator and the drop.
+    #[rust]
+    tree_drop: Option<(u64, DesignPlace)>,
+    /// A palette entry being dragged (its index), from the press on its row
+    /// until the drop or the click that ends it.
+    #[rust]
+    palette_drag: Option<usize>,
+    /// Where a dragged palette entry would land on the canvas: the widget
+    /// under the pointer and the zone (before, inside, after).
+    #[rust]
+    design_drop: Option<(TweakPick, DesignPlace)>,
+    /// The provisional insert a palette drag has previewed: the target it
+    /// was made for (uid, place) and, once landed, the path of the ghost
+    /// widget that occupies the space. The canvas is laid out as if the
+    /// drop had happened; the drop keeps it, leaving retracts it.
+    #[rust]
+    design_ghost: Option<(u64, DesignPlace, Option<String>)>,
+    /// The next landing names the ghost, not a selection to make.
+    #[rust]
+    design_ghost_pending: bool,
+    /// A ghost target asked for while a preview was still landing, or
+    /// while the pointer's dwell on it is still running; taken when the
+    /// landing or the dwell is over.
+    #[rust]
+    design_ghost_want: Option<Option<(TweakPick, DesignPlace)>>,
+    /// When the dwell on the wanted target is over (app seconds): a target
+    /// is only inserted once the pointer has rested on it a beat, so a
+    /// drag across the canvas does not preview every widget it crosses.
+    #[rust]
+    design_ghost_due: Option<f64>,
+    /// Targets this drag could not ghost (a widget from another file, the
+    /// page root): not tried again, not logged again, until the drag ends.
+    #[rust]
+    design_ghost_failed: Vec<(u64, DesignPlace)>,
+    /// The chip that rides the pointer through a palette or tree drag: its
+    /// text and where the pointer is.
+    #[rust]
+    drag_chip: Option<(String, DVec2)>,
+    /// How the row was picked up: where inside the row the pointer took
+    /// hold, and the row's size. The chip is the row, held at that spot.
+    #[rust]
+    drag_grab: Option<(DVec2, DVec2)>,
+    /// A tree row is being dragged (from the tree's own drag start until
+    /// the drop or the end), so the chip follows the pointer anywhere.
+    #[rust]
+    tree_drag: bool,
+    /// A press on the canvas with a design session open: the widget it
+    /// would lift (the selection when the press is inside it, else the
+    /// widget under the pointer) and where it was pressed. A move past the
+    /// slop lifts it; a release in place is the click it would otherwise
+    /// have been.
+    #[rust]
+    move_press: Option<(TweakPick, DVec2)>,
+    /// The widget lifted off the canvas: the path that finds it in the
+    /// tree while no ghost stands (the provisional moves act on it), and
+    /// the label its chip carries.
+    #[rust]
+    move_drag: Option<(String, String)>,
+    /// An in-flight edge-handle drag: (handle 0 right, 1 bottom, 2 corner;
+    /// the selection's rect at the press; the press position).
+    #[rust]
+    size_drag: Option<(usize, Rect, DVec2)>,
+    /// Where the last drag event of a design drag was: one delivered
+    /// again at the same point (the OS repeats a move when the window
+    /// under a still pointer changes) is not a new position.
+    #[rust]
+    drag_last: Option<DVec2>,
+    /// The window body the design drag picks from, kept for the end of a
+    /// dwell: the target is picked again there from the layout on screen,
+    /// not taken from a drag event that may have read the frame before a
+    /// rebuild settled.
+    #[rust]
+    drag_body: Option<WidgetRef>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -9360,6 +9891,39 @@ impl Tweaker {
                         color_down: fab.color_text_active
                         color_focus: fab.color_text
                         color_disabled: panel.text_muted
+                    }
+                }
+                // A tab of the panel, in the dock's shape: a rounded top and
+                // an open bottom where it meets the body it stands for. An
+                // off tab is its bare word (its face and edge are set
+                // transparent); the tab that is up wears the body's face.
+                let PanelTabButton = PanelButton {
+                    width: Fit
+                    height: 20
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    padding: Inset{left: 5 right: 5 top: 2 bottom: 2}
+                    spacing: 0
+                    draw_text +: { text_style +: { font_size: 8.0 } }
+                    draw_bg +: {
+                        border_radius: 4.0
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box_y(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y + 6.0
+                                self.border_radius
+                                0.5
+                            )
+                            let fill = self.color
+                                .mix(self.color_hover, self.hover)
+                                .mix(self.color_down, self.down)
+                            let stroke = self.border_color.mix(self.border_color_hover, self.hover)
+                            sdf.fill_keep(fill)
+                            sdf.stroke(stroke, self.border_size)
+                            return sdf.result
+                        }
                     }
                 }
                 // The panel's text field, hardened the same way and for the
@@ -9898,7 +10462,7 @@ impl Tweaker {
                         w_clamp := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_min_label := PanelLabelSmall { width: Fit text: "min" }
@@ -9910,7 +10474,7 @@ impl Tweaker {
                         w_grow := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_grow_label := PanelLabelSmall { width: Fit text: "grow" }
@@ -9945,7 +10509,7 @@ impl Tweaker {
                         h_clamp := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_min_label := PanelLabelSmall { width: Fit text: "min" }
@@ -9957,7 +10521,7 @@ impl Tweaker {
                         h_grow := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_grow_label := PanelLabelSmall { width: Fit text: "grow" }
@@ -9977,7 +10541,7 @@ impl Tweaker {
                         aspect_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             aspect_label := PanelLabelSmall { width: Fit text: "aspect" }
@@ -10096,7 +10660,7 @@ impl Tweaker {
                         dir_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             flow_seg := View { width: Fit height: Fit flow: Right spacing: 1
@@ -10114,7 +10678,7 @@ impl Tweaker {
                         gap_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right
+                            flow: Right{wrap: true}
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             gap_label := PanelLabelSmall { width: Fit text: "gap" }
@@ -10135,7 +10699,7 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        just_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        just_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             just_label := PanelLabelSmall { width: 34 text: "justify" }
                             just_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 j_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10145,7 +10709,7 @@ impl Tweaker {
                             }
                             just_axis := PanelLabelSmall { width: Fit text: "" }
                         }
-                        space_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        space_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             space_label := PanelLabelSmall { width: 34 text: "space" }
                             space_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 s_between := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10153,7 +10717,7 @@ impl Tweaker {
                                 s_evenly := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
-                        cross_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        cross_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             cross_label := PanelLabelSmall { width: 34 text: "align" }
                             cross_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 c_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10184,7 +10748,7 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        mode_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                        mode_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 6 align: Align{x: 0.0 y: 0.5}
                             mode_label := PanelLabelSmall { width: Fit text: "" }
                             convert := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                         }
@@ -10192,7 +10756,7 @@ impl Tweaker {
                         // the grid/flex ask, not instead of it: that one
                         // changes the container's type, this one wraps it in
                         // its parent, and both can stand.
-                        dock_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                        dock_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 6 align: Align{x: 0.0 y: 0.5}
                             dock_check := PanelCheckBox { width: Fit height: Fit text: "" }
                             dock_label := PanelLabelSmall { width: Fit text: "dockable" }
                         }
@@ -10213,7 +10777,7 @@ impl Tweaker {
                     abs_col := View {
                         width: Fill
                         height: Fit
-                        flow: Right
+                        flow: Right{wrap: true}
                         spacing: 6
                         align: Align{x: 0.0 y: 0.5}
                         abs_check := PanelCheckBox { width: Fit height: Fit text: "" }
@@ -10243,14 +10807,14 @@ impl Tweaker {
                             rows_label := PanelLabelSmall { width: 40 text: "rows" }
                             rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
-                        gaps_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        gaps_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             gap_label := PanelLabelSmall { width: 34 text: "gap" }
                             gap_x := PanelLabelSmall { width: Fit text: "\u{2194}" }
                             gap_col := FabValueInput { width: 40 height: 18 }
                             gap_y := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
                             gap_row_in := FabValueInput { width: 40 height: 18 }
                         }
-                        fill_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        fill_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             fill_label := PanelLabelSmall { width: 40 text: "fill" }
                             fill_seg := View { width: Fit height: Fit flow: Right spacing: 1
                                 f_rows := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
@@ -10273,13 +10837,13 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        place_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        place_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             col_label := PanelLabelSmall { width: Fit text: "col" }
                             cell_c := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                             row_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
                             cell_r := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
-                        span_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        span_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
                             span_label := PanelLabelSmall { width: Fit text: "span" }
                             cell_cs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                             by_label := PanelLabelSmall { width: Fit text: "\u{00d7}" }
@@ -10458,17 +11022,28 @@ impl Tweaker {
                             }
                         }
                     }
+                    // Words while they fit the band, icons when they do
+                    // not: each tab is one of two buttons, and the draw
+                    // shows the pair's word or its icon.
                     tab_row := View {
                         width: Fill
                         height: 22
                         flow: Right
-                        spacing: 2
-                        padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
-                        tab_props := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_shader := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        spacing: 1
+                        align: Align{x: 0.0 y: 1.0}
+                        padding: Inset{left: 2 right: 2 top: 0 bottom: 0}
+                        tab_props := PanelTabButton { text: "Props" }
+                        tab_props_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_list.svg") } }
+                        tab_shader := PanelTabButton { text: "Shader" }
+                        tab_shader_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_brush.svg") } }
+                        tab_tree := PanelTabButton { text: "Tree" }
+                        tab_tree_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_tree.svg") } }
+                        tab_theme := PanelTabButton { text: "Theme" }
+                        tab_theme_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_palette.svg") } }
+                        tab_spec := PanelTabButton { text: "Spec" }
+                        tab_spec_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_braces.svg") } }
+                        tab_build := PanelTabButton { text: "Build" }
+                        tab_build_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_hammer.svg") } }
                     }
                     // The Theme tab's head: which theme the whole library
                     // is running under, and what may be done with it. It
@@ -10555,7 +11130,7 @@ impl Tweaker {
                             eq_appearance_row := View {
                                 width: Fill
                                 height: Fit
-                                flow: Right
+                                flow: Right{wrap: true}
                                 spacing: 3
                                 align: Align{x: 0.0 y: 0.5}
                                 eq_dark := PanelButton {
@@ -10983,6 +11558,85 @@ impl Tweaker {
                             }
                         }
                     }
+                    // The Build tab: the structural designer. A session opens
+                    // on the selection's source file; the palette inserts a
+                    // widget before, inside or after the selection; the ops
+                    // row moves, copies, wraps or deletes it; every change is
+                    // previewed through hot reload and written as a patch,
+                    // never into the file itself.
+                    build_wrap := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        build_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right{wrap: true}
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
+                            design := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Design" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            undo := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Undo" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            redo := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Redo" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            reset := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Reset" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            patch := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Patch" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        build_status := PanelLabelSmall {
+                            width: Fill
+                            margin: Inset{left: 8 right: 8 top: 0 bottom: 2}
+                            text: ""
+                            max_lines: 2
+                        }
+                        place_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right{wrap: true}
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            place_label := PanelLabelSmall { width: Fit text: "insert" }
+                            place_before := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Before" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            place_inside := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Inside" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            place_after := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "After" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        ops_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right{wrap: true}
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            op_delete := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Delete" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_dup := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Dup" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_wrap := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Wrap" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_up := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Up" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_down := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Down" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            op_out := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Out" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        palette_filter := PanelInput {
+                            width: Fill
+                            height: 22
+                            margin: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            empty_text: "filter widgets"
+                        }
+                        palette := PortalList {
+                            width: Fill
+                            height: Fill
+                            margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
+                            drag_scrolling: false
+                            PaletteHead := PanelButton { width: Fill height: 20 padding: Inset{left: 6 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 3 bottom: 1} text: "" draw_bg +: { color: fab.color_panel_sub } draw_text +: { text_style +: { font_size: 8.0 } } }
+                            PaletteRow := PanelButton { width: Fill height: 20 padding: Inset{left: 16 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        }
+                        patch_text := PanelInput {
+                            width: Fill
+                            height: 110
+                            margin: Inset{left: 8 right: 8 top: 2 bottom: 4}
+                            is_multiline: true
+                            is_read_only: true
+                            empty_text: "the patch appears here"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                    }
                     props_wrap := View {
                         width: Fill
                         height: Fill
@@ -11138,7 +11792,7 @@ impl Tweaker {
                             scope_line := View {
                                 width: Fill
                                 height: Fit
-                                flow: Right
+                                flow: Right{wrap: true}
                                 spacing: 4
                                 align: Align{x: 0.0 y: 0.5}
                                 scope_label := PanelLabelSmall { width: Fit text: "scope" }
@@ -11206,6 +11860,29 @@ impl Tweaker {
         self.tree_isolate_uid = tree_head.child(live_id!(isolate)).widget_uid().0;
         self.view_center_uid = tree_head.child(live_id!(center)).widget_uid().0;
         self.view_zoom_uid = tree_head.child(live_id!(zoom)).widget_uid().0;
+        let build_wrap = sidebar.child(live_id!(build_wrap));
+        let build_head = build_wrap.child(live_id!(build_head));
+        let place_row = build_wrap.child(live_id!(place_row));
+        let ops_row = build_wrap.child(live_id!(ops_row));
+        self.build_uids = [
+            build_head.child(live_id!(design)).widget_uid().0,
+            build_head.child(live_id!(undo)).widget_uid().0,
+            build_head.child(live_id!(redo)).widget_uid().0,
+            build_head.child(live_id!(reset)).widget_uid().0,
+            build_head.child(live_id!(patch)).widget_uid().0,
+            place_row.child(live_id!(place_before)).widget_uid().0,
+            place_row.child(live_id!(place_inside)).widget_uid().0,
+            place_row.child(live_id!(place_after)).widget_uid().0,
+            ops_row.child(live_id!(op_delete)).widget_uid().0,
+            ops_row.child(live_id!(op_dup)).widget_uid().0,
+            ops_row.child(live_id!(op_wrap)).widget_uid().0,
+            ops_row.child(live_id!(op_up)).widget_uid().0,
+            ops_row.child(live_id!(op_down)).widget_uid().0,
+            ops_row.child(live_id!(op_out)).widget_uid().0,
+        ];
+        self.palette_list_uid = build_wrap.child(live_id!(palette)).widget_uid().0;
+        self.palette_filter_uid = build_wrap.child(live_id!(palette_filter)).widget_uid().0;
+        self.palette_entries.clear();
         self.shader_list_uid = sidebar
             .child(live_id!(shader_col))
             .child(live_id!(shader_rows))
@@ -11259,6 +11936,17 @@ impl Tweaker {
     /// AI can do it in the source where it belongs.
     fn request_rename(&mut self, cx: &mut Cx, to: &str) {
         let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        // With a design session open the rename is a source edit, made now.
+        if self.design.is_some() {
+            let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+            if !widget.is_empty() {
+                let name = to.trim();
+                let name = (!name.is_empty()).then_some(name);
+                let result = self.design.as_mut().map(|s| s.rename(cx, &widget, name));
+                self.design_after(cx, result);
+                return;
+            }
+        }
         let reference = self.sel_ref(cx, sel.uid);
         let from = tree_name_of(cx, sel.uid);
         let renames = {
@@ -11659,7 +12347,30 @@ impl Tweaker {
             fields.push(row.item.child(live_id!(value)).area());
             fields.push(row.item.child(live_id!(name_field)).area());
         }
-        fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area))
+        if fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area)) {
+            return true;
+        }
+        // Every other text field in the panel (the size column's width,
+        // height, bounds and aspect inputs among them): whichever holds
+        // the key owns the keys typed into it, Cmd+Z included.
+        fn holds_text(cx: &Cx, widget: &WidgetRef, depth: usize) -> bool {
+            if depth > 24 {
+                return false;
+            }
+            if widget.borrow::<crate::text_input::TextInput>().is_some() {
+                let area = widget.area();
+                return !area.is_empty() && cx.has_key_focus(area);
+            }
+            let mut found = false;
+            widget.children(&mut |_, child| {
+                if !found && holds_text(cx, &child, depth + 1) {
+                    found = true;
+                }
+            });
+            found
+        }
+        self.sidebar.as_ref().is_some_and(|sidebar| holds_text(cx, sidebar, 0))
+            || self.visible.iter().any(|row| holds_text(cx, &row.item, 0))
     }
 
     /// The selection's exact reference: its indexed path. This is what a note
@@ -11947,7 +12658,7 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 32] = [
+        let chrome: [(&[LiveId], &str); 38] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -11965,6 +12676,12 @@ impl Tweaker {
             (&[live_id!(tab_row), live_id!(tab_tree)], "the widget tree: isolate a branch, centre, zoom"),
             (&[live_id!(tab_row), live_id!(tab_theme)], "the theme's colours and values, edited live everywhere"),
             (&[live_id!(tab_row), live_id!(tab_spec)], "notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tab_row), live_id!(tab_props_i)], "Props: the selection's properties, edited live"),
+            (&[live_id!(tab_row), live_id!(tab_shader_i)], "Shader: the selection's draw layers: preview, source, states"),
+            (&[live_id!(tab_row), live_id!(tab_tree_i)], "Tree: the widget tree: isolate a branch, centre, zoom"),
+            (&[live_id!(tab_row), live_id!(tab_theme_i)], "Theme: the theme's colours and values, edited live everywhere"),
+            (&[live_id!(tab_row), live_id!(tab_spec_i)], "Spec: notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tab_row), live_id!(tab_build_i)], "Build: the designer: palette, structure, patch"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(isolate)], "show only the selection and what is inside it"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(center)], "keep the view centred on the selection"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(zoom)], "magnify the app view \u{00b7} 1 is life size"),
@@ -13373,6 +14090,12 @@ impl Tweaker {
             sidebar
                 .child(live_id!(theme_head))
                 .set_visible(cx, tab == PanelTab::Theme);
+            sidebar
+                .child(live_id!(build_wrap))
+                .set_visible(cx, tab == PanelTab::Build);
+            if tab == PanelTab::Build {
+                self.draw_build_head(cx, &sidebar);
+            }
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -13512,16 +14235,33 @@ impl Tweaker {
             }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
-                (live_id!(tab_props), PanelTab::Props, "Props"),
-                (live_id!(tab_shader), PanelTab::Shader, "Shader"),
-                (live_id!(tab_tree), PanelTab::Tree, "Tree"),
-                (live_id!(tab_theme), PanelTab::Theme, "Theme"),
-                (live_id!(tab_spec), PanelTab::Spec, "Spec"),
+                (live_id!(tab_props), live_id!(tab_props_i), PanelTab::Props, "Props"),
+                (live_id!(tab_shader), live_id!(tab_shader_i), PanelTab::Shader, "Shader"),
+                (live_id!(tab_tree), live_id!(tab_tree_i), PanelTab::Tree, "Tree"),
+                (live_id!(tab_theme), live_id!(tab_theme_i), PanelTab::Theme, "Theme"),
+                (live_id!(tab_spec), live_id!(tab_spec_i), PanelTab::Spec, "Spec"),
+                (live_id!(tab_build), live_id!(tab_build_i), PanelTab::Build, "Build"),
             ];
-            for (i, (id, t, label)) in tabs.into_iter().enumerate() {
-                let btn = tab_row.child(id);
-                btn.set_text(cx, label);
-                set_button_fill(cx, btn.clone(), t == tab);
+            // The words while the row can hold every one of them, the
+            // icons when the band is too narrow: measured, not guessed.
+            let mut need = 4.0 + 5.0;
+            for (_, _, _, label) in &tabs {
+                let word = self
+                    .draw_label
+                    .prepare_single_line_run(cx, label)
+                    .map(|run| run.width_in_lpxs as f64)
+                    .unwrap_or_else(|| label.chars().count() as f64 * 5.4);
+                // The label is measured at 7.5 pt; the tab word is 8 pt.
+                need += word * (8.0 / 7.5) + 10.0;
+            }
+            let narrow = need > self.band.size.x - SPLITTER_WIDTH;
+            for (i, (id, icon_id, t, _)) in tabs.into_iter().enumerate() {
+                let word = tab_row.child(id);
+                let icon = tab_row.child(icon_id);
+                word.set_visible(cx, !narrow);
+                icon.set_visible(cx, narrow);
+                let btn = if narrow { icon } else { word };
+                set_tab_fill(cx, btn.clone(), t == tab);
                 self.tab_uids[i] = btn.widget_uid().0;
             }
             if tab == PanelTab::Spec {
@@ -13788,6 +14528,10 @@ impl Tweaker {
         });
         self.tree_visible.clear();
         while let Some(step_widget) = sidebar.draw_walk(cx, scope, walk).step() {
+            if self.palette_list_uid != 0 && step_widget.widget_uid().0 == self.palette_list_uid {
+                self.draw_palette(cx, &step_widget);
+                continue;
+            }
             // The tree tab's list fills from the flattened hierarchy.
             if step_widget.widget_uid().0 == self.tree_list_uid {
                 let sel_uid = self.rows_uid;
@@ -13817,6 +14561,9 @@ impl Tweaker {
                 let Some(mut tree) = step_widget.borrow_mut::<FileTree>() else {
                     continue;
                 };
+                // With a session open the rows can be carried to another
+                // place in the tree, and the pointer over them says so.
+                tree.drag_cursor = self.design.is_some();
                 // First fill (or selection change): open the levels that
                 // make the tree readable / reveal the selection.
                 if self.tree_open_defaults_pending {
@@ -14989,6 +15736,7 @@ impl Tweaker {
                 });
             }
         }
+        self.draw_tree_drop_indicator(cx, &sidebar);
         self.visible = visible_rects;
     }
 
@@ -15493,6 +16241,12 @@ impl Tweaker {
             log!("TWEAK sidebar apply failed: {error}");
         }
         self.rows_uid = 0;
+        // A tweak made while designing is part of the design: it is written
+        // into the source once the gesture is over (HoldOff), or now when
+        // there is no gesture (a toggle, a pick from a list).
+        if !session().lock().unwrap().edit_hold {
+            self.design_bake_gesture(cx);
+        }
     }
 
     /// Reset one property to its session-original value: apply it back
@@ -15633,6 +16387,27 @@ impl Tweaker {
                 drop(s);
                 log!("TWEAK undo reset {} {} -> {}", path, prop, last);
             }
+            UndoStep::Source { label } => {
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.undo(cx, keep));
+                match result {
+                    Some(Ok(())) => {
+                        log!("TWEAK undo source {label}");
+                        // The note the undone edit raised is about that edit.
+                        self.design_msg.clear();
+                        self.design_settle(cx);
+                    }
+                    Some(Err(error)) => {
+                        log!("TWEAK undo source failed: {error}");
+                        session().lock().unwrap().undo.push(step);
+                        return;
+                    }
+                    None => {
+                        // The session is gone; its history went with it.
+                        return;
+                    }
+                }
+            }
         }
         session().lock().unwrap().redo.push(step);
         self.rows_uid = 0;
@@ -15710,6 +16485,24 @@ impl Tweaker {
                 s.undo_open = false;
                 drop(s);
                 log!("TWEAK redo reset {} {}", path_c, prop_c);
+            }
+            UndoStep::Source { label } => {
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.redo(cx, keep));
+                match result {
+                    Some(Ok(())) => {
+                        log!("TWEAK redo source {label}");
+                        self.design_settle(cx);
+                        session().lock().unwrap().undo.push(step.clone());
+                        self.design_msg.clear();
+                    }
+                    Some(Err(error)) => {
+                        log!("TWEAK redo source failed: {error}");
+                        session().lock().unwrap().redo.push(step);
+                        return;
+                    }
+                    None => return,
+                }
             }
         }
         self.rows_uid = 0;
@@ -15820,6 +16613,58 @@ impl Tweaker {
                 if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
                 {
                     self.request_rename(cx, text.trim());
+                }
+            }
+            {
+                let uid = widget_action.widget_uid.0;
+                if uid != 0 {
+                    if let Some(slot) = self.build_uids.iter().position(|u| *u == uid) {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            self.build_button(cx, slot);
+                        }
+                    } else if let Some(group) = self
+                        .palette_heads
+                        .iter()
+                        .find(|(u, _)| *u == uid)
+                        .map(|(_, g)| g.clone())
+                    {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            match self.palette_open.iter().position(|g| *g == group) {
+                                Some(i) => {
+                                    self.palette_open.remove(i);
+                                }
+                                None => self.palette_open.push(group),
+                            }
+                            self.redraw_sidebar(cx);
+                        }
+                    } else if let Some(&(_, index)) =
+                        self.palette_visible.iter().find(|(u, _)| *u == uid)
+                    {
+                        match widget_action.cast::<ButtonAction>() {
+                            ButtonAction::Pressed(_) if self.design.is_some() => {
+                                // A press arms a drag onto the canvas; a
+                                // release on the row is a plain click.
+                                self.palette_drag = Some(index);
+                                cx.start_dragging(vec![DragItem::String {
+                                    value: "design-palette".to_string(),
+                                    internal_id: Some(LiveId(index as u64)),
+                                }]);
+                            }
+                            ButtonAction::Clicked(_) => {
+                                // The press's drag ended on the row: a click.
+                                self.palette_drag = None;
+                                self.build_insert(cx, index);
+                            }
+                            _ => {}
+                        }
+                    } else if uid == self.palette_filter_uid {
+                        if let TextInputAction::Changed(text) =
+                            widget_action.cast::<TextInputAction>()
+                        {
+                            self.palette_filter = text;
+                            self.redraw_sidebar(cx);
+                        }
+                    }
                 }
             }
             if self.tab_uids.contains(&widget_action.widget_uid.0)
@@ -16004,6 +16849,26 @@ impl Tweaker {
                             self.tree_hover_active = false;
                             session().lock().unwrap().hover = None;
                             self.redraw_overlay(cx);
+                        }
+                    }
+                    FileTreeAction::ShouldFileStartDrag(id) => {
+                        // With a design session open a row can be dragged to
+                        // another place in the tree: the drop moves the
+                        // widget's literal in the source.
+                        if self.design.is_some() {
+                            self.tree_drag = true;
+                            if let Some(tree) = self.tree_widget() {
+                                if let Some(mut tree) = tree.borrow_mut::<FileTree>() {
+                                    tree.start_dragging_file_node(
+                                        cx,
+                                        id,
+                                        vec![DragItem::String {
+                                            value: "design-node".to_string(),
+                                            internal_id: Some(id),
+                                        }],
+                                    );
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -16630,6 +17495,7 @@ impl Tweaker {
                     // step (two scrubs on one prop never merge).
                     s.undo_open = false;
                     drop(s);
+                    self.design_bake_gesture(cx);
                     self.text_edit_origin = None;
                     self.redraw_overlay(cx);
                 }
@@ -16721,6 +17587,7 @@ impl Tweaker {
             2 => PanelTab::Tree,
             3 => PanelTab::Theme,
             4 => PanelTab::Spec,
+            5 => PanelTab::Build,
             _ => PanelTab::Props,
         };
         // Entering the Theme tab is the moment to look at the theme folder
@@ -18322,6 +19189,9 @@ impl Widget for Tweaker {
             self.splitter_drag = false;
             return;
         }
+        if self.panel_tab == PanelTab::Tree && self.design.is_some() {
+            self.handle_tree_drag(cx, event);
+        }
         discard_unavailable_picks(cx);
         let in_frame = self.settle_frame.is_event(event).is_some();
         if self.settle_isolation(cx, in_frame) {
@@ -18370,6 +19240,7 @@ impl Widget for Tweaker {
         // on. A frame count would be a guess; this is the event itself.
         if matches!(event, Event::LiveEdit) {
             self.land_the_pending_pins(cx);
+            self.design_landed(cx);
             // ...and the mix, which the rebuild this event follows has just
             // thrown away. Every `request_style_reload` the panel asks for
             // lands here, and so does a live edit arriving from the file
@@ -18498,6 +19369,34 @@ impl Widget for Tweaker {
         if self.swatch_refresh && self.next_frame.is_event(event).is_some() {
             self.swatch_refresh = false;
             self.redraw_sidebar(cx);
+        }
+        // The dwell on a drag target is over: make the ghost there.
+        if self.next_frame.is_event(event).is_some() {
+            if let Some(due) = self.design_ghost_due {
+                let now = cx.seconds_since_app_start();
+                if now >= due {
+                    self.design_ghost_due = None;
+                    if let Some(want) = self.design_ghost_want.take() {
+                        // The pointer has rested: what is under it now, on
+                        // the frame on screen, is the target.
+                        let want = match (self.drag_body.clone(), self.drag_last) {
+                            (Some(body), Some(at)) if want.is_some() => {
+                                let now_under = self.palette_drop_target(cx, at, &body);
+                                if now_under.is_some() {
+                                    self.design_drop = now_under.clone();
+                                    now_under
+                                } else {
+                                    want
+                                }
+                            }
+                            _ => want,
+                        };
+                        self.ghost_retarget(cx, want);
+                    }
+                } else {
+                    self.next_frame = cx.new_next_frame();
+                }
+            }
         }
         // The suppression window expired: bring the solid outline back.
         if self.next_frame.is_event(event).is_some() {
@@ -18819,7 +19718,7 @@ impl Widget for Tweaker {
                 if ke.key_code == KeyCode::KeyZ
                     && ke.modifiers.logo
                     && tweak_is_on()
-                    && cx.key_focus() == Area::Empty =>
+                    && !self.focus_is_text(cx) =>
             {
                 if ke.modifiers.shift {
                     self.redo(cx);
@@ -19039,6 +19938,7 @@ impl Widget for Tweaker {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        self.design_reselect_step(cx);
         let on = tweak_is_on();
         if on {
             discard_unavailable_picks(cx);
@@ -19161,7 +20061,7 @@ impl Widget for Tweaker {
         // pinned outline yields to a faint hairline stipple so the widget is
         // judged exactly as it renders.
         let now = cx.seconds_since_app_start();
-        let quiet = edit_hold || now < suppress_until || self.radius_drag.is_some();
+        let quiet = edit_hold || now < suppress_until || self.radius_drag.is_some() || self.size_drag.is_some();
         if now < suppress_until {
             // Re-check when the linger expires.
             self.next_frame = cx.new_next_frame();
@@ -19212,6 +20112,11 @@ impl Widget for Tweaker {
                 } else if rect.size.x <= 0.0 {
                     // Not drawn this frame (another tab is up): the pin
                     // stands, but there is nothing on screen to outline.
+                    // A widget lifted off the canvas is expected to be
+                    // gone from its place: not worth a line.
+                    if self.move_drag.is_none() {
+                        log_absent_pick(cx, &pick, &live);
+                    }
                     pick.rect = Rect::default();
                 }
             }
@@ -19221,6 +20126,9 @@ impl Widget for Tweaker {
             let live = cx.widget_tree().widget(WidgetUid(pick.uid));
             if !live.is_empty() {
                 let rect = live_rect(cx, &live);
+                if rect.size.x <= 0.0 {
+                    log_absent_pick(cx, &pick, &live);
+                }
                 pick.rect = if rect.size.x > 0.0 { rect } else { Rect::default() };
             }
             pick
@@ -19308,6 +20216,19 @@ impl Widget for Tweaker {
             pick
         });
         let flat_outlines = !cx.sploded_active();
+        let ghost_drawn = flat_outlines && self.draw_ghost(cx);
+        if let Some((pick, place)) = self.design_drop.clone().filter(|_| !ghost_drawn) {
+            if Some(pick.window_id) == window_id && flat_outlines {
+                let horizontal = match place {
+                    DesignPlace::Inside => {
+                        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+                        !widget.is_empty() && flows_right(cx, &widget)
+                    }
+                    _ => siblings_run_horizontal(cx, pick.uid),
+                };
+                self.draw_place_bar(cx, pick.rect, place, horizontal);
+            }
+        }
         if flat_outlines {
         if let Some(pick) = &pinned {
             if Some(pick.window_id) == window_id {
@@ -19317,6 +20238,9 @@ impl Widget for Tweaker {
                     PickStyle::Pinned
                 };
                 self.draw_pick(cx, pick, style);
+                if self.panel_tab == PanelTab::Build && self.design.is_some() {
+                    self.draw_insert_caret(cx, pick);
+                }
                 // Direct-manipulation handles, HOVER-REVEALED: the radius
                 // dots exist for the hand, not the eye — parked on the
                 // selection's corners they read as chrome and hide the very
@@ -19335,6 +20259,20 @@ impl Widget for Tweaker {
                     });
                     if near {
                         self.draw_radius_handles(cx, pick.rect);
+                    }
+                }
+                // The edge handles, revealed the same way, and held up
+                // through their own drag.
+                if !cx.sploded_transformed() {
+                    let pointer = session().lock().unwrap().pointer_abs;
+                    let near = self.size_drag.is_some()
+                        || Self::size_handle_centers(pick.rect).iter().any(|c| {
+                            let dx = pointer.x - c.x;
+                            let dy = pointer.y - c.y;
+                            dx * dx + dy * dy <= 28.0 * 28.0
+                        });
+                    if near {
+                        self.draw_size_handles(cx, pick.rect);
                     }
                 }
             }
@@ -19469,6 +20407,7 @@ impl Widget for Tweaker {
             self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(approx, label_height) });
             self.draw_label.draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
         }
+        self.draw_drag_chip(cx);
         // Last into the topmost list, so it lies over the panel too.
         if draw_hands_off_frame(cx, &mut self.draw_outline) {
             self.next_frame = cx.new_next_frame();
@@ -23415,5 +24354,1753 @@ line two");
             panel.next_frame, frame,
             "and asked for a frame to pay a debt nobody owes"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Build tab: the structural designer, over `crate::designer`.
+// ---------------------------------------------------------------------------
+
+/// Whether a container lays its children out side by side. A `View` says so
+/// through its layout; anything else (and an Overlay) is read from where two
+/// drawn children sit: rows that share a band of y and stand apart in x, so a
+/// centre-aligned row whose children differ by a few points still reads as a
+/// row. A lone or unknown child reads as a column.
+fn flows_right(cx: &Cx2d, container: &WidgetRef) -> bool {
+    use crate::makepad_draw::Flow;
+    if let Some(view) = container.borrow::<View>() {
+        match view.layout.flow {
+            Flow::Right { .. } => return true,
+            Flow::Down => return false,
+            Flow::Overlay => {}
+        }
+    }
+    let mut rects: Vec<Rect> = Vec::new();
+    container.children(&mut |_, child| {
+        let rect = live_rect(cx, &child);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            rects.push(rect);
+        }
+    });
+    rects.windows(2).any(|pair| {
+        let (a, b) = (pair[0], pair[1]);
+        let share_y = a.pos.y < b.pos.y + b.size.y && b.pos.y < a.pos.y + a.size.y;
+        let apart_x =
+            a.pos.x + a.size.x <= b.pos.x + 0.5 || b.pos.x + b.size.x <= a.pos.x + 0.5;
+        share_y && apart_x
+    })
+}
+
+/// Whether a widget's siblings run side by side: its parent's flow.
+fn siblings_run_horizontal(cx: &Cx2d, uid: u64) -> bool {
+    let tree = cx.widget_tree();
+    let Some(parent_uid) = tree.parent_of(WidgetUid(uid)) else {
+        return false;
+    };
+    let parent = tree.widget(parent_uid);
+    if parent.is_empty() {
+        return false;
+    }
+    flows_right(cx, &parent)
+}
+
+/// Slots of `Tweaker::build_uids`, in the order the buttons are captured.
+const BUILD_DESIGN: usize = 0;
+const BUILD_UNDO: usize = 1;
+const BUILD_REDO: usize = 2;
+const BUILD_RESET: usize = 3;
+const BUILD_PATCH: usize = 4;
+const BUILD_BEFORE: usize = 5;
+const BUILD_INSIDE: usize = 6;
+const BUILD_AFTER: usize = 7;
+const BUILD_DELETE: usize = 8;
+const BUILD_DUP: usize = 9;
+const BUILD_WRAP: usize = 10;
+const BUILD_UP: usize = 11;
+const BUILD_DOWN: usize = 12;
+const BUILD_OUT: usize = 13;
+// The array in `Tweaker::build_uids` holds BUILD_OUT + 1 slots.
+
+impl Tweaker {
+    /// The pinned selection and its live widget, when both exist.
+    fn design_target(&self, cx: &Cx) -> Option<(TweakPick, WidgetRef)> {
+        let pinned = session().lock().unwrap().pinned.clone()?;
+        let widget = cx.widget_tree().widget(WidgetUid(pinned.uid));
+        if widget.is_empty() {
+            return None;
+        }
+        Some((pinned, widget))
+    }
+
+    /// One `/design/*` op. Edits go through the same session calls and the
+    /// same undo bookkeeping as the Build tab, so a person and an agent
+    /// share one history; the app never writes the file.
+    fn design_remote(&mut self, cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, String> {
+        use crate::designer::{DesignSession, Place, Structural};
+        let place_of = |text: Option<&str>, default: Place| -> Result<Place, String> {
+            match text.map(|t| t.trim().to_ascii_lowercase()) {
+                None => Ok(default),
+                Some(t) if t.is_empty() => Ok(default),
+                Some(t) => match t.as_str() {
+                    "before" | "b" => Ok(Place::Before),
+                    "after" | "a" => Ok(Place::After),
+                    "inside" | "in" | "i" => Ok(Place::Inside),
+                    _ => Err(format!("place={t}: want before, after or inside")),
+                },
+            }
+        };
+        let need_session = |tw: &Self| -> Result<(), String> {
+            if tw.design.is_some() {
+                Ok(())
+            } else {
+                Err("no design session: /design/open first".to_string())
+            }
+        };
+        match op {
+            "open" => {
+                if let Some(s) = &self.design {
+                    return Err(format!("a session is open on {}; /design/close first", shown_path(s.file())));
+                }
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let session = DesignSession::open(cx, &widget)?;
+                self.design_msg.clear();
+                self.design_baked = None;
+                self.design_patch_shown = usize::MAX;
+                self.design = Some(session);
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+                Ok(self.design_state_json(cx, None))
+            }
+            "close" => {
+                let Some(mut session) = self.design.take() else {
+                    return Err("no design session".to_string());
+                };
+                let written = session.write_patch();
+                let msg = match &written {
+                    Ok(path) => format!("stopped; patch written to {path}"),
+                    Err(err) => format!("stopped; {err}"),
+                };
+                self.design_patch_shown = usize::MAX;
+                self.design_say(cx, msg);
+                self.redraw_overlay(cx);
+                Ok(match written {
+                    Ok(path) => format!("{{\"closed\":1,\"patch\":{}}}", json_str(&path)),
+                    Err(err) => format!("{{\"closed\":1,\"patch\":null,\"note\":{}}}", json_str(&err)),
+                })
+            }
+            "state" => Ok(self.design_state_json(cx, None)),
+            "palette" => {
+                let mut out = String::from("{\"palette\":[");
+                for (index, entry) in crate::designer::palette(cx).iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!(
+                        "{{\"name\":{},\"group\":{},\"body\":{}}}",
+                        json_str(&entry.name),
+                        json_str(entry.group),
+                        json_str(&entry.body)
+                    ));
+                }
+                out.push_str("]}");
+                Ok(out)
+            }
+            "insert" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let ty = arg(args, &["type", "ty"]).ok_or_else(|| "need type= (a palette name)".to_string())?;
+                let body = match arg(args, &["body"]) {
+                    Some(body) => body.to_string(),
+                    None => crate::designer::palette(cx)
+                        .into_iter()
+                        .find(|entry| entry.name == ty)
+                        .map(|entry| entry.body)
+                        .unwrap_or_else(|| "{}".to_string()),
+                };
+                let default = if crate::designer::is_container(cx, &widget) { Place::Inside } else { Place::After };
+                let place = place_of(arg(args, &["place"]), default)?;
+                let result = self.design.as_mut().map(|s| s.insert(cx, &widget, place, ty, &body));
+                self.design_remote_after(cx, result)
+            }
+            "move" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let to = arg(args, &["to"]).ok_or_else(|| "need to= (the target's path)".to_string())?;
+                let target = resolve_widget_by_path(cx, to)?;
+                let place = place_of(arg(args, &["place"]), Place::After)?;
+                let result = self.design.as_mut().map(|s| s.move_relative(cx, &widget, &target, place));
+                self.design_remote_after(cx, result)
+            }
+            "delete" | "duplicate" | "wrap" | "up" | "down" | "out" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let structural = match op {
+                    "delete" => Structural::Delete,
+                    "duplicate" => Structural::Duplicate,
+                    "wrap" => Structural::Wrap,
+                    "up" => Structural::Up,
+                    "down" => Structural::Down,
+                    _ => Structural::Out,
+                };
+                let result = self.design.as_mut().map(|s| s.structural(cx, &widget, structural));
+                self.design_remote_after(cx, result)
+            }
+            "rename" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let name = arg(args, &["name"]).map(str::trim).filter(|n| !n.is_empty());
+                let result = self.design.as_mut().map(|s| s.rename(cx, &widget, name));
+                self.design_remote_after(cx, result)
+            }
+            "set" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let key = arg(args, &["key", "prop"]).ok_or_else(|| "need key=".to_string())?;
+                let value = arg(args, &["value", "v"]).ok_or_else(|| "need value=".to_string())?;
+                let result = self.design.as_mut().map(|s| s.set_prop(cx, &widget, key, value));
+                self.design_remote_after(cx, result)
+            }
+            "undo" | "redo" | "reset" => {
+                need_session(self)?;
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| match op {
+                    "undo" => s.undo(cx, keep),
+                    "redo" => s.redo(cx, keep),
+                    _ => s.reset(cx, keep),
+                });
+                if let Some(Err(err)) = &result {
+                    return Err(err.clone());
+                }
+                // The panel's shared history follows: the source step moves
+                // between the undo and redo stacks as a Cmd+Z would move it.
+                {
+                    let mut s = session().lock().unwrap();
+                    match op {
+                        "undo" => {
+                            if let Some(i) = s.undo.iter().rposition(|step| matches!(step, UndoStep::Source { .. })) {
+                                let step = s.undo.remove(i);
+                                s.redo.push(step);
+                            }
+                        }
+                        "redo" => {
+                            if let Some(i) = s.redo.iter().rposition(|step| matches!(step, UndoStep::Source { .. })) {
+                                let step = s.redo.remove(i);
+                                s.undo.push(step);
+                            }
+                        }
+                        _ => {
+                            s.undo.retain(|step| !matches!(step, UndoStep::Source { .. }));
+                            s.redo.clear();
+                        }
+                    }
+                    s.undo_open = false;
+                }
+                self.design_msg.clear();
+                self.design_settle(cx);
+                self.rows_uid = 0;
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+                Ok(self.design_state_json(cx, None))
+            }
+            "patch" => {
+                need_session(self)?;
+                let diff = self.design.as_ref().map(|s| s.doc().unified_diff()).unwrap_or_default();
+                Ok(format!("{{\"diff\":{}}}", json_str(&diff)))
+            }
+            "commit" => {
+                need_session(self)?;
+                let s = self.design.as_ref().unwrap();
+                let doc = s.doc();
+                let mut hunks = String::from("[");
+                for (index, hunk) in doc.hunks().iter().enumerate() {
+                    if index > 0 {
+                        hunks.push(',');
+                    }
+                    hunks.push_str(&format!(
+                        "{{\"label\":{},\"start\":{},\"end\":{},\"removed\":{},\"replacement\":{}}}",
+                        json_str(&hunk.label),
+                        hunk.start,
+                        hunk.end,
+                        json_str(&hunk.removed),
+                        json_str(&hunk.replacement)
+                    ));
+                }
+                hunks.push(']');
+                Ok(format!(
+                    "{{\"file\":{},\"base_hash\":\"{:016x}\",\"new_hash\":\"{:016x}\",\"base_matches_disk\":{},\"dirty\":{},\"hunks\":{},\"diff\":{}}}",
+                    json_str(shown_path(s.file())),
+                    doc.base_hash(),
+                    doc.text_hash(),
+                    doc.base_matches_disk() as u8,
+                    doc.is_dirty() as u8,
+                    hunks,
+                    json_str(&doc.unified_diff())
+                ))
+            }
+            "bake" => {
+                need_session(self)?;
+                self.design_remote_bake(cx)
+            }
+            "verify" => {
+                need_session(self)?;
+                self.design_remote_verify(cx)
+            }
+            other => Err(format!("unknown design op {other:?}")),
+        }
+    }
+
+    /// The widget an op acts on: `path=` when given, else the pinned one.
+    fn remote_widget(&self, cx: &Cx, args: &[(String, String)], keys: &[&str]) -> Result<WidgetRef, String> {
+        match arg(args, keys).map(str::trim).filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let widget = resolve_widget_by_path(cx, path)?;
+                if widget.is_empty() {
+                    return Err(format!("no widget at path {path:?}"));
+                }
+                Ok(widget)
+            }
+            None => self
+                .design_target(cx)
+                .map(|(_, widget)| widget)
+                .ok_or_else(|| "name a widget with path= or pin one".to_string()),
+        }
+    }
+
+    /// The tail of a remote edit: the Build tab's own tail (undo history,
+    /// landing, panel line), then the answer: an error, or the state with
+    /// the path the edit selects.
+    fn design_remote_after(&mut self, cx: &mut Cx, result: Option<Result<(), String>>) -> Result<String, String> {
+        let outcome = match &result {
+            None => Err("no design session: /design/open first".to_string()),
+            Some(Err(err)) => Err(err.clone()),
+            Some(Ok(())) => Ok(()),
+        };
+        let note = self.design.as_ref().and_then(|s| s.note.clone());
+        self.design_after(cx, result);
+        outcome?;
+        let select = self
+            .design_reselect
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .or_else(|| self.design.as_ref().and_then(|s| s.landing_select()));
+        let mut out = self.design_state_json(cx, select.as_deref());
+        if let Some(note) = note {
+            out.pop();
+            out.push_str(&format!(",\"note\":{}}}", json_str(&note)));
+        }
+        Ok(out)
+    }
+
+    /// The session as one JSON object.
+    fn design_state_json(&self, _cx: &Cx, select: Option<&str>) -> String {
+        let Some(s) = &self.design else {
+            return "{\"open\":0}".to_string();
+        };
+        let doc = s.doc();
+        let mut hunks = String::from("[");
+        for (index, hunk) in doc.hunks().iter().enumerate() {
+            if index > 0 {
+                hunks.push(',');
+            }
+            hunks.push_str(&json_str(&hunk.label));
+        }
+        hunks.push(']');
+        let mut out = format!(
+            "{{\"open\":1,\"file\":{},\"edits\":{},\"dirty\":{},\"status\":{},\"can_undo\":{},\"can_redo\":{},\"landing\":{},\"hunks\":{}",
+            json_str(shown_path(s.file())),
+            doc.hunks().len(),
+            doc.is_dirty() as u8,
+            json_str(&s.status),
+            s.can_undo() as u8,
+            s.can_redo() as u8,
+            s.is_landing() as u8,
+            hunks
+        );
+        if let Some(select) = select {
+            out.push_str(&format!(",\"select\":{}", json_str(select)));
+        }
+        if !self.design_msg.is_empty() {
+            out.push_str(&format!(",\"msg\":{}", json_str(&self.design_msg)));
+        }
+        out.push('}');
+        out
+    }
+
+    /// `/design/bake`: every tweak in the value ledger on a widget of the
+    /// file under design becomes a property in its literal, and leaves the
+    /// ledger. Tweaks on widgets of other files stay value tweaks. An app
+    /// that lands its previews later stops after the first bake: call
+    /// again once it has landed.
+    fn design_remote_bake(&mut self, cx: &mut Cx) -> Result<String, String> {
+        let entries = coalesce_diff(&session().lock().unwrap().diff);
+        let file = self.design.as_ref().map(|s| s.file().to_string()).unwrap_or_default();
+        let mut baked: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        let mut remaining = 0usize;
+        for entry in entries {
+            if entry.path == "theme" || entry.prop.starts_with("const:") {
+                continue;
+            }
+            if self.design.as_ref().is_some_and(|s| s.is_landing()) {
+                remaining += 1;
+                continue;
+            }
+            let Ok(widget) = resolve_widget_for_history(cx, &entry.path) else {
+                skipped.push(format!("{}.{}: gone", entry.path, entry.prop));
+                continue;
+            };
+            let mine = crate::designer::widget_source_file(cx, &widget).map(|f| f == file).unwrap_or(false);
+            if !mine {
+                skipped.push(format!("{}.{}: another file", entry.path, entry.prop));
+                continue;
+            }
+            let result = self.design.as_mut().map(|s| s.set_prop(cx, &widget, &entry.prop, &entry.new));
+            match result {
+                Some(Ok(())) => {
+                    {
+                        let mut s = session().lock().unwrap();
+                        s.diff.retain(|e| !(e.path == entry.path && e.prop == entry.prop));
+                    }
+                    baked.push(format!("{}.{}", entry.path, entry.prop));
+                    // Land now (the storybook rebuilds on the spot), so the
+                    // next tweak's widget is found in the rebuilt tree.
+                    self.design_settle(cx);
+                }
+                Some(Err(err)) => skipped.push(format!("{}.{}: {}", entry.path, entry.prop, err)),
+                None => break,
+            }
+        }
+        // One bake is one edit: a single hunk and a single undo step, however
+        // many tweaks (a padding's sides are one each) it wrote.
+        if !baked.is_empty() {
+            let label = format!("bake {} tweak{}", baked.len(), if baked.len() == 1 { "" } else { "s" });
+            if let Some(s) = self.design.as_mut() {
+                s.squash_edits(baked.len(), &label);
+            }
+            self.design_after(cx, Some(Ok(())));
+        }
+        let list = |items: &[String]| {
+            let inner: Vec<String> = items.iter().map(|i| json_str(i)).collect();
+            format!("[{}]", inner.join(","))
+        };
+        let mut out = self.design_state_json(cx, None);
+        out.pop();
+        out.push_str(&format!(
+            ",\"baked\":{},\"skipped\":{},\"remaining\":{}}}",
+            list(&baked),
+            list(&skipped),
+            remaining
+        ));
+        Ok(out)
+    }
+
+    /// `/design/verify`: every widget on screen declared in the file under
+    /// design, and whether the locator finds its literal in the working
+    /// text. A miss is an edit the designer would refuse.
+    fn design_remote_verify(&mut self, cx: &mut Cx) -> Result<String, String> {
+        let file = self.design.as_ref().map(|s| s.file().to_string()).unwrap_or_default();
+        let rows = rows_without_inspectors(cx.widget_tree().flat_tree(cx), 0, 0);
+        let mut checked = 0usize;
+        let mut mapped = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for row in rows {
+            let widget = cx.widget_tree().widget(WidgetUid(row.uid));
+            if widget.is_empty() {
+                continue;
+            }
+            let mine = crate::designer::widget_source_file(cx, &widget).map(|f| f == file).unwrap_or(false);
+            if !mine {
+                continue;
+            }
+            checked += 1;
+            match self.design.as_ref().map(|s| s.locate_check(cx, &widget)) {
+                Some(Ok(())) => mapped += 1,
+                Some(Err(err)) => {
+                    if failed.len() < 20 {
+                        failed.push(format!("{}: {}", indexed_path(cx, row.uid), err));
+                    }
+                }
+                None => break,
+            }
+        }
+        let inner: Vec<String> = failed.iter().map(|f| json_str(f)).collect();
+        Ok(format!(
+            "{{\"file\":{},\"checked\":{},\"mapped\":{},\"failed\":[{}]}}",
+            json_str(shown_path(&file)),
+            checked,
+            mapped,
+            inner.join(",")
+        ))
+    }
+
+    /// What the Build tab answers, beside the session's own line.
+    fn design_say(&mut self, cx: &mut Cx, msg: impl Into<String>) {
+        let msg = msg.into();
+        log!("DESIGN {msg}");
+        self.design_msg = msg;
+        self.redraw_sidebar(cx);
+    }
+
+    /// The common tail of a session action: no session, an error, or done.
+    /// A done edit joins the panel's undo history as a `Source` step, so
+    /// Cmd+Z walks value tweaks and structural edits in one timeline.
+    fn design_after(&mut self, cx: &mut Cx, result: Option<Result<(), String>>) {
+        match result {
+            None => self.design_say(cx, "press Design first"),
+            Some(Err(err)) => self.design_say(cx, err),
+            Some(Ok(())) => {
+                let label = self
+                    .design
+                    .as_ref()
+                    .and_then(|s| s.doc().hunks().last().map(|h| h.label.clone()))
+                    .unwrap_or_default();
+                let mut s = session().lock().unwrap();
+                s.undo.push(UndoStep::Source { label });
+                s.redo.clear();
+                s.undo_open = false;
+                drop(s);
+                // A rename or delete may leave Rust looking the widget up by
+                // its old name: the edit stands, the note stays on the line.
+                match self.design.as_mut().and_then(|s| s.note.take()) {
+                    Some(note) => self.design_say(cx, note),
+                    None => self.design_msg.clear(),
+                }
+                // The app's own hook may have rebuilt the tree already (the
+                // storybook re-runs one story file): land now, no live edit
+                // is coming.
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+            }
+        }
+    }
+
+    /// Replay the value ledger after a reload: a reload re-applies the tree
+    /// from source, which drops every eval-applied tweak; the ledger says
+    /// what the person had set, so it is set again. Baked tweaks are in the
+    /// source already and come back unchanged.
+    fn design_replay_ledger(&mut self, cx: &mut Cx) {
+        let entries = coalesce_diff(&session().lock().unwrap().diff);
+        for entry in entries {
+            if entry.path == "theme" || entry.prop.starts_with("const:") {
+                continue;
+            }
+            let Ok(widget) = resolve_widget_for_history(cx, &entry.path) else {
+                continue;
+            };
+            if let Err(error) = eval_chunk(cx, &widget, &format!("{}: {}", entry.prop, entry.new)) {
+                log!("DESIGN replay {} {} failed: {error}", entry.path, entry.prop);
+            }
+        }
+    }
+
+    fn build_button(&mut self, cx: &mut Cx, slot: usize) {
+        use crate::designer::{DesignSession, Place, Structural};
+        match slot {
+            BUILD_DESIGN => {
+                if let Some(mut session) = self.design.take() {
+                    // Stop: the preview stays in the running app; the patch
+                    // is written so the work does not go with the session.
+                    let msg = match session.write_patch() {
+                        Ok(path) => format!("stopped; patch written to {path}"),
+                        Err(err) => format!("stopped; {err}"),
+                    };
+                    self.design_patch_shown = usize::MAX;
+                    self.design_say(cx, msg);
+                } else {
+                    let Some((_, widget)) = self.design_target(cx) else {
+                        self.design_say(cx, "pick a widget first, then press Design");
+                        return;
+                    };
+                    match DesignSession::open(cx, &widget) {
+                        Ok(session) => {
+                            self.design_msg.clear();
+                            self.design_baked = None;
+                            self.design_patch_shown = usize::MAX;
+                            self.design = Some(session);
+                            self.redraw_sidebar(cx);
+                            self.redraw_overlay(cx);
+                        }
+                        Err(err) => self.design_say(cx, err),
+                    }
+                }
+            }
+            BUILD_UNDO => self.undo(cx),
+            BUILD_REDO => self.redo(cx),
+            BUILD_RESET => {
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| s.reset(cx, keep));
+                self.design_after(cx, result);
+            }
+            BUILD_PATCH => {
+                let result = self.design.as_mut().map(|s| s.write_patch().map(|_| ()));
+                self.design_after(cx, result);
+            }
+            BUILD_BEFORE | BUILD_INSIDE | BUILD_AFTER => {
+                self.design_place = match slot {
+                    BUILD_BEFORE => Place::Before,
+                    BUILD_AFTER => Place::After,
+                    _ => Place::Inside,
+                };
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+            }
+            BUILD_DELETE | BUILD_DUP | BUILD_WRAP | BUILD_UP | BUILD_DOWN | BUILD_OUT => {
+                let op = match slot {
+                    BUILD_DELETE => Structural::Delete,
+                    BUILD_DUP => Structural::Duplicate,
+                    BUILD_WRAP => Structural::Wrap,
+                    BUILD_UP => Structural::Up,
+                    BUILD_DOWN => Structural::Down,
+                    _ => Structural::Out,
+                };
+                let Some((_, widget)) = self.design_target(cx) else {
+                    self.design_say(cx, "nothing is selected");
+                    return;
+                };
+                let result = self.design.as_mut().map(|s| s.structural(cx, &widget, op));
+                self.design_after(cx, result);
+            }
+            _ => {}
+        }
+    }
+
+    /// A palette row was clicked: insert that entry at the caret.
+    fn build_insert(&mut self, cx: &mut Cx, index: usize) {
+        let Some(entry) = self.palette_entries.get(index).cloned() else {
+            return;
+        };
+        let Some((_, widget)) = self.design_target(cx) else {
+            self.design_say(cx, "pick a widget to insert next to");
+            return;
+        };
+        let place = self.design_place;
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| s.insert(cx, &widget, place, &entry.name, &entry.body));
+        self.design_after(cx, result);
+    }
+
+    /// A preview the app's own hook has already rebuilt the tree for (the
+    /// storybook re-runs one story file) lands now: no live edit is coming
+    /// to land it, and a landing left standing holds every later ghost.
+    fn design_settle(&mut self, cx: &mut Cx) {
+        if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+            self.design_landed(cx);
+        }
+    }
+
+    /// `Event::LiveEdit` with a preview in flight: it has landed. The
+    /// session reads the re-run's errors (a refused change is rolled back)
+    /// and names the widget to select once it is drawn.
+    fn design_landed(&mut self, cx: &mut Cx) {
+        let Some(design) = self.design.as_mut() else {
+            return;
+        };
+        if !design.is_landing() {
+            return;
+        }
+        let landed = design.land(cx);
+        if let Some(path) = landed.select {
+            if self.design_ghost_pending {
+                if let Some(ghost) = self.design_ghost.as_mut() {
+                    ghost.2 = Some(path);
+                }
+            } else {
+                self.design_reselect = Some((path, 8));
+            }
+        }
+        self.design_ghost_pending = false;
+        self.design_replay_ledger(cx);
+        // The rebuilt tree has new widgets: the rows and the Tree tab's
+        // list, both keyed on the apply generation, are stale until it
+        // moves.
+        session().lock().unwrap().apply_gen += 1;
+        self.rows_uid = 0;
+        self.design_baked = None;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+        // A target the drag asked for while this was landing (one still
+        // in its dwell waits for the dwell).
+        if self.design_ghost_due.is_none() {
+            if let Some(want) = self.design_ghost_want.take() {
+                self.ghost_retarget(cx, want);
+            }
+        }
+    }
+
+    /// Select the widget a landed preview named, once the app has drawn it:
+    /// its rect is known only after the app's own draw, which precedes the
+    /// overlay's in the same frame.
+    fn design_reselect_step(&mut self, cx: &mut Cx2d) {
+        let Some((path, tries)) = self.design_reselect.take() else {
+            return;
+        };
+        let widget = match resolve_widget_by_path(cx, &path) {
+            Ok(widget) => widget,
+            Err(_) => {
+                if tries > 0 {
+                    self.design_reselect = Some((path, tries - 1));
+                }
+                return;
+            }
+        };
+        let Some(uid) = widget.try_widget_uid() else {
+            return;
+        };
+        let rect = live_rect(cx, &widget);
+        if rect.size.x <= 0.0 {
+            if tries > 0 {
+                self.design_reselect = Some((path, tries - 1));
+            }
+            return;
+        }
+        let ty = type_name_of(cx, uid.0).unwrap_or_else(|| "-".to_string());
+        let path = crate::designer::path_of(cx, &widget);
+        session().lock().unwrap().pinned = Some(TweakPick {
+            uid: uid.0,
+            path,
+            ty,
+            rect,
+            window_id: self.my_window.unwrap_or(0),
+            band: None,
+            level: 0,
+        });
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// The value ledger's latest step, written into the source while a
+    /// session is open: a tweak made while designing is part of the design.
+    fn design_bake_gesture(&mut self, cx: &mut Cx) {
+        if self.design.is_none() {
+            return;
+        }
+        let step = {
+            let s = session().lock().unwrap();
+            match (s.undo.last(), s.pinned.as_ref()) {
+                (Some(UndoStep::Value { path, prop, new, .. }), Some(pinned))
+                    if *path == pinned.path =>
+                {
+                    Some((path.clone(), prop.clone(), new.clone()))
+                }
+                _ => None,
+            }
+        };
+        let Some(step) = step else {
+            return;
+        };
+        if self.design_baked.as_ref() == Some(&step) {
+            return;
+        }
+        let Some((_, widget)) = self.design_target(cx) else {
+            return;
+        };
+        // A tweak on a widget from another file is not this session's to
+        // write; it stays a value tweak, quietly, rather than an error on
+        // every pointer move of the gesture.
+        let mine = crate::designer::widget_source_file(cx, &widget)
+            .map(|file| self.design.as_ref().is_some_and(|s| s.file() == file))
+            .unwrap_or(false);
+        if !mine {
+            self.design_baked = Some(step);
+            return;
+        }
+        let result = self
+            .design
+            .as_mut()
+            .map(|s| s.set_prop(cx, &widget, &step.1, &step.2));
+        if matches!(result, Some(Ok(()))) {
+            // The gesture's Value step is superseded: the value now lives in
+            // the source, and the Source step design_after pushes undoes it.
+            // Its ledger entries go too: a reload replays the ledger, so an
+            // entry left behind would put the value back over the undone
+            // source.
+            let mut s = session().lock().unwrap();
+            if let Some(UndoStep::Value { seq_start, .. }) = s.undo.last().cloned() {
+                s.undo.pop();
+                let (path, prop) = (step.0.clone(), step.1.clone());
+                s.diff.retain(|e| !(e.path == path && e.prop == prop && e.seq >= seq_start));
+            }
+            drop(s);
+            self.design_baked = Some(step);
+        }
+        self.design_after(cx, result);
+    }
+
+    /// The Tree tab's FileTree widget, once the sidebar is built.
+    fn tree_widget(&self) -> Option<WidgetRef> {
+        let sidebar = self.sidebar.as_ref()?;
+        let tree = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree));
+        (!tree.is_empty()).then_some(tree)
+    }
+
+    /// A design-node drag over the tree: the row under the pointer and the
+    /// third of it the pointer is in decide the drop (before, inside,
+    /// after); the drop moves the literal.
+    fn handle_tree_drag(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(tree) = self.tree_widget() else {
+            return;
+        };
+        let dragged = |items: &[DragItem]| {
+            items.iter().find_map(|item| match item {
+                DragItem::String { value, internal_id: Some(id) } if value == "design-node" => Some(*id),
+                _ => None,
+            })
+        };
+        match event.drag_hits(cx, tree.area()) {
+            DragHit::Drag(f) => {
+                if dragged(&f.items).is_none() {
+                    return;
+                }
+                let row = tree.borrow::<FileTree>().and_then(|t| t.node_at(cx, f.abs));
+                let next = row.map(|(id, rect)| {
+                    let third = (f.abs.y - rect.pos.y) / rect.size.y.max(1.0);
+                    let place = if third < 1.0 / 3.0 {
+                        DesignPlace::Before
+                    } else if third > 2.0 / 3.0 {
+                        DesignPlace::After
+                    } else {
+                        DesignPlace::Inside
+                    };
+                    (id.0, place)
+                });
+                if let Ok(mut response) = f.response.lock() {
+                    *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
+                }
+                if next != self.tree_drop {
+                    self.tree_drop = next;
+                    self.redraw_sidebar(cx);
+                }
+            }
+            DragHit::Drop(f) => {
+                let target = self.tree_drop.take();
+                self.redraw_sidebar(cx);
+                let (Some(node_id), Some((target_uid, place))) = (dragged(&f.items), target) else {
+                    return;
+                };
+                if node_id.0 == target_uid {
+                    return;
+                }
+                let node = cx.widget_tree().widget(WidgetUid(node_id.0));
+                let target = cx.widget_tree().widget(WidgetUid(target_uid));
+                if node.is_empty() || target.is_empty() {
+                    self.design_say(cx, "the dragged row is gone");
+                    return;
+                }
+                let result = self
+                    .design
+                    .as_mut()
+                    .map(|s| s.move_relative(cx, &node, &target, place));
+                self.design_after(cx, result);
+            }
+            DragHit::DragEnd => {
+                if self.tree_drop.take().is_some() {
+                    self.redraw_sidebar(cx);
+                }
+            }
+            DragHit::NoHit => {}
+        }
+    }
+
+    /// The drop indicator over the tree: a bar above or below the target
+    /// row, or a frame around it for a drop inside.
+    fn draw_tree_drop_indicator(&mut self, cx: &mut Cx2d, sidebar: &WidgetRef) {
+        let Some((uid, place)) = self.tree_drop else {
+            return;
+        };
+        if self.panel_tab != PanelTab::Tree {
+            return;
+        }
+        let tree = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree));
+        let Some(rect) = tree.borrow::<FileTree>().and_then(|t| t.node_rect(cx, LiveId(uid))) else {
+            return;
+        };
+        let accent = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.dash = 0.0;
+        match place {
+            DesignPlace::Inside => {
+                self.draw_outline.border_color = accent;
+                self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.12);
+                self.draw_outline.border_size = 1.0;
+                self.draw_outline.draw_abs(cx, rect);
+            }
+            DesignPlace::Before | DesignPlace::After => {
+                self.draw_outline.border_color = accent;
+                self.draw_outline.fill_color = accent;
+                self.draw_outline.border_size = 0.0;
+                let y = if place == DesignPlace::Before { rect.pos.y } else { rect.pos.y + rect.size.y - 2.0 };
+                self.draw_outline.draw_abs(cx, Rect { pos: dvec2(rect.pos.x, y), size: dvec2(rect.size.x, 2.0) });
+            }
+        }
+    }
+
+    /// The Build tab's head: the session's state on its buttons and line,
+    /// and the patch pane when the edits changed.
+    fn draw_build_head(&mut self, cx: &mut Cx2d, sidebar: &WidgetRef) {
+        use crate::designer::Place;
+        let wrap = sidebar.child(live_id!(build_wrap));
+        let head = wrap.child(live_id!(build_head));
+        let on = self.design.is_some();
+        let design = head.child(live_id!(design));
+        design.set_text(cx, if on { "Stop" } else { "Design" });
+        set_button_fill(cx, design, on);
+        let place_row = wrap.child(live_id!(place_row));
+        for (id, place) in [
+            (live_id!(place_before), Place::Before),
+            (live_id!(place_inside), Place::Inside),
+            (live_id!(place_after), Place::After),
+        ] {
+            set_button_fill(cx, place_row.child(id), self.design_place == place);
+        }
+        let status = match &self.design {
+            Some(session) if self.design_msg.is_empty() => session.status.clone(),
+            Some(session) => format!("{} \u{2014} {}", session.status, self.design_msg),
+            None if self.design_msg.is_empty() => {
+                "Pick a widget, then press Design to edit its file".to_string()
+            }
+            None => self.design_msg.clone(),
+        };
+        wrap.child(live_id!(build_status)).set_text(cx, &status);
+        let shown = self.design.as_ref().map_or(0, |s| s.doc().hunks().len());
+        if self.design_patch_shown != shown {
+            let diff = self
+                .design
+                .as_ref()
+                .filter(|s| s.doc().is_dirty())
+                .map(|s| s.doc().unified_diff())
+                .unwrap_or_default();
+            wrap.child(live_id!(patch_text)).set_text(cx, &diff);
+            self.design_patch_shown = shown;
+        }
+    }
+
+    /// The palette list: folders in a fixed order, each a head row that
+    /// opens or closes it, with the entries that match the filter under it.
+    /// A filter opens every folder that has a match.
+    fn draw_palette(&mut self, cx: &mut Cx2d, list_widget: &WidgetRef) {
+        if self.palette_entries.is_empty() {
+            self.palette_entries = crate::designer::palette(cx);
+            self.palette_open = vec!["Common".to_string()];
+        }
+        let filter = self.palette_filter.trim().to_lowercase();
+        enum Row {
+            Head(&'static str, usize, bool),
+            Entry(usize),
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for group in crate::designer::PALETTE_GROUPS {
+            let members: Vec<usize> = self
+                .palette_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.group == *group)
+                .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
+                .map(|(i, _)| i)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let open = !filter.is_empty() || self.palette_open.iter().any(|g| g == group);
+            rows.push(Row::Head(group, members.len(), open));
+            if open {
+                rows.extend(members.into_iter().map(Row::Entry));
+            }
+        }
+        let Some(mut list) = list_widget.borrow_mut::<PortalList>() else {
+            return;
+        };
+        list.set_item_range(cx, 0, rows.len());
+        self.palette_visible.clear();
+        self.palette_heads.clear();
+        while let Some(entry_id) = list.next_visible_item(cx) {
+            let Some(row) = rows.get(entry_id) else {
+                continue;
+            };
+            match row {
+                Row::Head(group, count, open) => {
+                    let item = list.item(cx, entry_id, live_id!(PaletteHead));
+                    if item.is_empty() {
+                        continue;
+                    }
+                    // Plain marks: the panel font has no triangle glyphs.
+                    let mark = if *open { "-" } else { "+" };
+                    item.set_text(cx, &format!("{mark} {group}  ({count})"));
+                    // An open folder wears the selected fill, as the place
+                    // button that is up does: the mark alone was too quiet.
+                    set_button_fill(cx, item.clone(), *open);
+                    self.palette_heads.push((item.widget_uid().0, group.to_string()));
+                    item.draw_all(cx, &mut Scope::empty());
+                }
+                Row::Entry(index) => {
+                    let item = list.item(cx, entry_id, live_id!(PaletteRow));
+                    if item.is_empty() {
+                        continue;
+                    }
+                    item.set_text(cx, &self.palette_entries[*index].name);
+                    self.palette_visible.push((item.widget_uid().0, *index));
+                    item.draw_all(cx, &mut Scope::empty());
+                }
+            }
+        }
+    }
+
+    /// Where a palette entry dragged to `abs` would land: the widget under
+    /// the point and the zone of its rect the point is in (the middle of a
+    /// container: inside; else the near or far half: before or after).
+    /// `None` over the panel or over nothing.
+    fn palette_drop_target(&self, cx: &mut Cx, abs: DVec2, body: &WidgetRef) -> Option<(TweakPick, DesignPlace)> {
+        let on_panel = self.band.size.x > 0.0 && abs.x >= self.band.pos.x;
+        if on_panel {
+            return None;
+        }
+        // Picked from the window's body view, as every other pick is: the
+        // widget tree's root handle is not a widget to walk from.
+        let Some(pick) = resolve_pick(cx, body, abs, self.my_window.unwrap_or(0)) else {
+            // Right after a landing nothing has a rect yet: the pick finds
+            // nothing until the rebuilt tree has drawn. The target holds
+            // until the ghost is on screen; a miss after that is a miss.
+            return if self.ghost_settling(cx) { self.design_drop.clone() } else { None };
+        };
+        // The ghost occupies the space the drop would take: a pointer over
+        // it (or anything inside it) is still on the target it stands for.
+        if self.pick_is_ghost(cx, pick.uid) {
+            return self.design_drop.clone();
+        }
+        // The lifted widget is no target: it cannot be moved next to or
+        // into itself.
+        if self.pick_is_lifted(cx, pick.uid) {
+            return None;
+        }
+        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+        // Only the file under design takes a drop: the rest of the window
+        // (the docs pane, the panels around the canvas) is not a target,
+        // and the pointer says so on its way across.
+        let in_file = crate::designer::widget_source_file(cx, &widget)
+            .map(|file| self.design.as_ref().is_some_and(|s| s.file() == file))
+            .unwrap_or(false);
+        if !in_file {
+            return None;
+        }
+        let container = crate::designer::is_container(cx, &widget);
+        // The pointer on a container's own space, between or beside its
+        // children: the drop goes into the nearest gap between them, which
+        // is where the eye puts it, not before or after the container.
+        if container {
+            if let Some((child, place)) = gap_target(cx, &widget, abs) {
+                let window_id = self.my_window.unwrap_or(0);
+                if let Some(child_pick) = pick_of_widget(cx, &child, abs, window_id) {
+                    if self.pick_is_ghost(cx, child_pick.uid) {
+                        return self.design_drop.clone();
+                    }
+                    if self.pick_is_lifted(cx, child_pick.uid) {
+                        return None;
+                    }
+                    return Some((child_pick, place));
+                }
+            }
+        }
+        let r = pick.rect;
+        let fx = ((abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
+        let fy = ((abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
+        let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
+            DesignPlace::Inside
+        } else if fy < 0.5 {
+            DesignPlace::Before
+        } else {
+            DesignPlace::After
+        };
+        Some((pick, place))
+    }
+
+    /// A dragged palette entry, or a widget lifted off the canvas, over
+    /// the canvas: the widget under the pointer and the zone of it the
+    /// pointer is in decide where it lands; the drop inserts or moves it
+    /// there. Over the panel a palette drop means the selection, like a
+    /// click on the row.
+    fn handle_palette_drag(&mut self, cx: &mut Cx, event: &Event, body: &WidgetRef) {
+        let is_palette = |items: &[DragItem]| {
+            items.iter().any(|item| {
+                matches!(item, DragItem::String { value, .. } if value == "design-palette" || value == "design-move")
+            })
+        };
+        match event {
+            Event::Drag(e) => {
+                if !is_palette(&e.items) {
+                    return;
+                }
+                // The entry rides the pointer: the row itself, held where
+                // it was taken hold of. A lifted widget rides as its own
+                // rect, held where it was pressed.
+                let label = match &self.move_drag {
+                    Some((_, label)) => label.clone(),
+                    None => self
+                        .palette_drag
+                        .and_then(|index| self.palette_entries.get(index))
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_default(),
+                };
+                if self.drag_grab.is_none() {
+                    let row = self
+                        .palette_drag
+                        .and_then(|index| self.palette_visible.iter().find(|(_, i)| *i == index))
+                        .map(|(uid, _)| cx.widget_tree().widget(WidgetUid(*uid)))
+                        .filter(|w| !w.is_empty())
+                        .map(|w| w.area().clipped_rect_union(cx))
+                        .filter(|r| r.size.x > 0.0 && r.size.y > 0.0);
+                    self.drag_grab = Some(grab_of(row, e.abs));
+                }
+                self.drag_chip = Some((label, e.abs));
+                self.redraw_sidebar(cx);
+                self.drag_body = Some(body.clone());
+                if self.drag_last == Some(e.abs) {
+                    if let Ok(mut response) = e.response.lock() {
+                        *response =
+                            if self.design_drop.is_some() { DragResponse::Move } else { DragResponse::None };
+                    }
+                    return;
+                }
+                self.drag_last = Some(e.abs);
+                let next = self.palette_drop_target(cx, e.abs, body);
+                if let Ok(mut response) = e.response.lock() {
+                    *response = if next.is_some() { DragResponse::Move } else { DragResponse::None };
+                }
+                // By path: a rebuild gives every widget a new uid, and the
+                // same widget under a still pointer is not a new target.
+                let changed = match (&next, &self.design_drop) {
+                    (Some((a, pa)), Some((b, pb))) => a.path != b.path || pa != pb,
+                    (None, None) => false,
+                    _ => true,
+                };
+                if changed {
+                    session().lock().unwrap().hover = next.as_ref().map(|(p, _)| p.clone());
+                    self.design_drop = next.clone();
+                    self.redraw_overlay(cx);
+                    // The canvas shows the drop before it happens: the entry
+                    // is inserted at the target for real and the siblings
+                    // make room; a ghost marks it until the drop or the leave.
+                    // After a beat on the target, not on the way across.
+                    self.design_ghost_want = Some(next);
+                    self.design_ghost_due = Some(cx.seconds_since_app_start() + 0.12);
+                    self.next_frame = cx.new_next_frame();
+                }
+            }
+            Event::Drop(e) => {
+                if !is_palette(&e.items) {
+                    return;
+                }
+                let index = self.palette_drag.take();
+                let lifted = self.move_drag.take();
+                if index.is_none() && lifted.is_none() {
+                    return;
+                }
+                self.drag_chip = None;
+                self.drag_grab = None;
+                self.drag_last = None;
+                // The target is read from the drop itself: the pointer-up
+                // that precedes the drop goes through the body's pick
+                // handling, which may have moved the hover and the state
+                // under it since the last drag event.
+                let drop = self.palette_drop_target(cx, e.abs, body);
+                self.design_drop = None;
+                session().lock().unwrap().hover = None;
+                self.redraw_overlay(cx);
+                self.redraw_sidebar(cx);
+                // The ghost already IS the insert (or the move) when the
+                // drop lands on the target it was made for: keep it, and
+                // the drop is done.
+                if let Some((ghost_uid, ghost_place, _)) = self.design_ghost.clone() {
+                    let same = match &drop {
+                        Some((pick, place)) => {
+                            (pick.uid == ghost_uid && *place == ghost_place)
+                                || self.ghost_holds_place(cx, pick.uid, *place)
+                        }
+                        None => false,
+                    };
+                    if same {
+                        self.ghost_commit(cx);
+                        return;
+                    }
+                    self.ghost_retract(cx);
+                }
+                match drop {
+                    Some((pick, place)) => {
+                        let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+                        if target.is_empty() {
+                            self.design_say(cx, "the target is gone");
+                            return;
+                        }
+                        let result = self.design_drag_apply(cx, index, lifted.as_ref(), &target, place);
+                        self.design_after(cx, result);
+                    }
+                    None => {
+                        let on_panel = self.band.size.x > 0.0 && e.abs.x >= self.band.pos.x;
+                        if let (true, Some(index)) = (on_panel, index) {
+                            self.build_insert(cx, index);
+                        }
+                    }
+                }
+            }
+            Event::DragEnd => {
+                self.drag_chip = None;
+                self.drag_grab = None;
+                self.drag_last = None;
+                self.drag_body = None;
+                self.redraw_sidebar(cx);
+                if self.design_drop.take().is_some() {
+                    session().lock().unwrap().hover = None;
+                    self.redraw_overlay(cx);
+                }
+                self.design_ghost_due = None;
+                self.ghost_retract(cx);
+                self.design_ghost_failed.clear();
+                // A drag called off (Escape) never drops: the entry is no
+                // longer in hand. A click on the row still follows on its
+                // own through the row's own press and release.
+                self.palette_drag = None;
+                self.move_drag = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Insert the dragged palette entry, or move the lifted widget, at
+    /// `target`/`place`: the one operation a design drag stands for, run
+    /// for the ghost and again for the drop.
+    fn design_drag_apply(
+        &mut self,
+        cx: &mut Cx,
+        index: Option<usize>,
+        lifted: Option<&(String, String)>,
+        target: &WidgetRef,
+        place: DesignPlace,
+    ) -> Option<Result<(), String>> {
+        if let Some((path, _)) = lifted {
+            let node = match resolve_widget_by_path(cx, path) {
+                Ok(node) if !node.is_empty() => node,
+                _ => return Some(Err("the lifted widget is gone".to_string())),
+            };
+            return self.design.as_mut().map(|s| s.move_relative(cx, &node, target, place));
+        }
+        let entry = index.and_then(|i| self.palette_entries.get(i)).cloned()?;
+        self.design.as_mut().map(|s| s.insert(cx, target, place, &entry.name, &entry.body))
+    }
+
+    /// Whether `uid` is the lifted widget or lies inside it, while it still
+    /// stands at its own place (with a ghost up it is the ghost, and the
+    /// ghost check answers first).
+    fn pick_is_lifted(&self, cx: &mut Cx, uid: u64) -> bool {
+        if self.design_ghost.is_some() {
+            return false;
+        }
+        let Some((path, _)) = &self.move_drag else {
+            return false;
+        };
+        let Ok(node) = resolve_widget_by_path(cx, path) else {
+            return false;
+        };
+        let Some(node_uid) = node.try_widget_uid() else {
+            return false;
+        };
+        uid == node_uid.0 || is_ancestor_of(cx, node_uid.0, uid)
+    }
+
+    /// Lift a widget off the canvas: from here to the drop it rides the
+    /// pointer as its own rect, held where it was pressed, and the canvas
+    /// shows where it would land.
+    fn lift(&mut self, cx: &mut Cx, pick: &TweakPick, from: DVec2) {
+        self.move_press = None;
+        let uid = pick.uid;
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        let path = indexed_path(cx, uid);
+        // Its name, or its type when it has none (a nameless node's path
+        // ends in its index, which says nothing on a chip).
+        let label = pick
+            .path
+            .rsplit('.')
+            .next()
+            .filter(|name| {
+                !name.is_empty()
+                    && !name.starts_with('[')
+                    && !name.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+            })
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| pick.ty.clone());
+        self.drag_grab = Some((from - pick.rect.pos, pick.rect.size));
+        self.drag_chip = Some((label.clone(), from));
+        self.move_drag = Some((path.clone(), label));
+        cx.start_dragging(vec![DragItem::String {
+            value: "design-move".to_string(),
+            internal_id: Some(LiveId(uid)),
+        }]);
+        log!("DESIGN lift {path}");
+        self.redraw_sidebar(cx);
+    }
+
+    /// The three edge-handle centres for the pinned rect: right edge,
+    /// bottom edge, bottom-right corner, each just outside the rect so
+    /// they hide none of it.
+    fn size_handle_centers(rect: Rect) -> [DVec2; 3] {
+        const OUT: f64 = 5.0;
+        [
+            dvec2(rect.pos.x + rect.size.x + OUT, rect.pos.y + rect.size.y * 0.5),
+            dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y + OUT),
+            dvec2(rect.pos.x + rect.size.x + OUT, rect.pos.y + rect.size.y + OUT),
+        ]
+    }
+
+    /// The edge handle under `abs`, if any (0 right, 1 bottom, 2 corner).
+    fn size_handle_at(rect: Rect, abs: DVec2) -> Option<usize> {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        // The corner first: it overlaps the two edges' reach.
+        let centers = Self::size_handle_centers(rect);
+        [2usize, 0, 1].into_iter().find(|&i| {
+            let dx = abs.x - centers[i].x;
+            let dy = abs.y - centers[i].y;
+            dx * dx + dy * dy <= 49.0
+        })
+    }
+
+    fn size_handle_cursor(handle: usize) -> MouseCursor {
+        match handle {
+            0 => MouseCursor::EwResize,
+            1 => MouseCursor::NsResize,
+            _ => MouseCursor::NwseResize,
+        }
+    }
+
+    /// The edge handles: squares on the selection's right edge, bottom
+    /// edge and corner, in the corner dots' style.
+    fn draw_size_handles(&mut self, cx: &mut Cx2d, rect: Rect) {
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        for center in Self::size_handle_centers(rect) {
+            if center.x + 4.0 > max_x {
+                continue;
+            }
+            self.draw_stroke.stroke_color = vec4(0.04, 0.04, 0.04, 0.9);
+            self.draw_stroke.draw_abs(
+                cx,
+                Rect { pos: dvec2(center.x - 4.0, center.y - 4.0), size: dvec2(8.0, 8.0) },
+            );
+            self.draw_stroke.stroke_color = vec4(1.0, 0.72, 0.2, 1.0);
+            self.draw_stroke.draw_abs(
+                cx,
+                Rect { pos: dvec2(center.x - 3.0, center.y - 3.0), size: dvec2(6.0, 6.0) },
+            );
+        }
+    }
+
+    /// Whether the ghost already stands where `uid`/`place` would put it:
+    /// before its next sibling, after its previous one, or inside its
+    /// parent as the last child.
+    fn ghost_holds_place(&self, cx: &Cx, uid: u64, place: DesignPlace) -> bool {
+        let Some((_, _, Some(path))) = &self.design_ghost else {
+            return false;
+        };
+        let Some(ghost) = resolve_widget_by_path(cx, path).ok().and_then(|w| w.try_widget_uid()) else {
+            return false;
+        };
+        let Some(parent_uid) = cx.widget_tree().parent_of(ghost) else {
+            return false;
+        };
+        let parent = cx.widget_tree().widget(parent_uid);
+        let mut children: Vec<u64> = Vec::new();
+        parent.children(&mut |_, child| {
+            if let Some(u) = child.try_widget_uid() {
+                children.push(u.0);
+            }
+        });
+        let Some(i) = children.iter().position(|u| *u == ghost.0) else {
+            return false;
+        };
+        match place {
+            DesignPlace::Before => children.get(i + 1) == Some(&uid),
+            DesignPlace::After => i > 0 && children.get(i - 1) == Some(&uid),
+            DesignPlace::Inside => uid == parent_uid.0 && i + 1 == children.len(),
+        }
+    }
+
+    /// Whether a ghost is up but not yet on screen: still landing, or
+    /// landed and not drawn, so its path finds nothing.
+    fn ghost_settling(&self, cx: &Cx) -> bool {
+        match &self.design_ghost {
+            None => false,
+            Some((_, _, None)) => self.design_ghost_pending,
+            Some((_, _, Some(path))) => {
+                resolve_widget_by_path(cx, path).ok().and_then(|w| w.try_widget_uid()).is_none()
+            }
+        }
+    }
+
+    /// Whether `uid` is the ghost widget or lies inside it. A ghost that
+    /// has landed but not yet drawn is not in the widget tree to be found;
+    /// until it is, every pick counts as the ghost's own, because the
+    /// pointer has not moved and the layout under it is mid-change.
+    fn pick_is_ghost(&self, cx: &Cx, uid: u64) -> bool {
+        let Some((_, _, path)) = &self.design_ghost else {
+            return false;
+        };
+        // Still landing: nothing to resolve yet. A landing that named no
+        // widget leaves nothing to hold on to.
+        let Some(path) = path else {
+            return self.design_ghost_pending;
+        };
+        let Ok(ghost) = resolve_widget_by_path(cx, path) else {
+            return true;
+        };
+        let Some(ghost_uid) = ghost.try_widget_uid() else {
+            return true;
+        };
+        let mut cur = Some(WidgetUid(uid));
+        for _ in 0..64 {
+            let Some(u) = cur else { break };
+            if u == ghost_uid {
+                return true;
+            }
+            cur = cx.widget_tree().parent_of(u);
+        }
+        false
+    }
+
+    /// Point the provisional insert at `next`: retract the one in place,
+    /// insert at the new target. While a preview is still landing the wish
+    /// is kept for the landing to apply.
+    fn ghost_retarget(&mut self, cx: &mut Cx, next: Option<(TweakPick, DesignPlace)>) {
+        if self.design.as_ref().is_none_or(|s| s.is_landing()) {
+            if self.design.is_some() {
+                self.design_ghost_want = Some(next);
+            }
+            return;
+        }
+        if let Some((ghost_uid, ghost_place, path)) = self.design_ghost.clone() {
+            if matches!(&next, Some((pick, p)) if pick.uid == ghost_uid && *p == ghost_place) {
+                return;
+            }
+            // Already there: the target names the place the ghost stands
+            // in (before its next sibling, after its previous one, inside
+            // its parent as the last child). A rebuild renews every uid,
+            // so the record's key alone cannot say so.
+            if let Some((pick, p)) = &next {
+                if self.ghost_holds_place(cx, pick.uid, *p) {
+                    self.design_ghost = Some((pick.uid, *p, path));
+                    return;
+                }
+            }
+            let Some((pick, place)) = next else {
+                self.ghost_retract(cx);
+                return;
+            };
+            if self.design_ghost_failed.contains(&(pick.uid, place)) {
+                return;
+            }
+            // The ghost is a real node on the canvas: it goes to the new
+            // target as one more step of the same edit, so the canvas
+            // lands once and the widgets around it keep their identity
+            // (taking it out first renumbers every nameless sibling after
+            // it, and the target picked on the ghost's layout is gone).
+            let ghost = path.as_deref().and_then(|p| resolve_widget_by_path(cx, p).ok()).filter(|w| !w.is_empty());
+            let Some(ghost) = ghost else {
+                // Landed and not yet drawn: ask again after the frame.
+                self.design_ghost_want = Some(Some((pick, place)));
+                self.design_ghost_due = Some(cx.seconds_since_app_start() + 0.05);
+                self.next_frame = cx.new_next_frame();
+                return;
+            };
+            let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+            if target.is_empty() {
+                log!("DESIGN ghost: the target {} is gone from the tree", pick.path);
+                return;
+            }
+            log!("DESIGN ghost moved: {place:?} {}", pick.path);
+            self.design_ghost_pending = true;
+            let result = self.design.as_mut().map(|s| s.move_ghost(cx, &ghost, &target, place));
+            match result {
+                Some(Ok(())) => {
+                    let sync = self.design.as_mut().is_some_and(|s| s.take_sync_landing());
+                    let landing = self.design.as_ref().is_some_and(|s| s.is_landing());
+                    if sync || landing {
+                        self.design_ghost = Some((pick.uid, place, None));
+                        if sync {
+                            self.design_landed(cx);
+                        }
+                    } else {
+                        // The same place by another name (before the next
+                        // sibling is after this one): nothing to land, the
+                        // ghost stands as it is under the new target's key.
+                        self.design_ghost_pending = false;
+                        self.design_ghost = Some((pick.uid, place, path));
+                    }
+                }
+                Some(Err(err)) => {
+                    // The ghost stays where it was; this target is not
+                    // asked again during the drag.
+                    self.design_ghost_pending = false;
+                    self.design_ghost = Some((ghost_uid, ghost_place, path));
+                    self.design_ghost_failed.push((pick.uid, place));
+                    log!("DESIGN ghost: {err}");
+                }
+                None => self.design_ghost_pending = false,
+            }
+            return;
+        }
+        let Some((pick, place)) = next else {
+            return;
+        };
+        if self.design_ghost_failed.contains(&(pick.uid, place)) {
+            return;
+        }
+        log!("DESIGN ghost: {place:?} {}", pick.path);
+        let index = self.palette_drag;
+        let lifted = self.move_drag.clone();
+        if index.is_none() && lifted.is_none() {
+            return;
+        }
+        let target = cx.widget_tree().widget(WidgetUid(pick.uid));
+        if target.is_empty() {
+            log!("DESIGN ghost: the target {} is gone from the tree", pick.path);
+            return;
+        }
+        self.design_ghost_pending = true;
+        let result = self.design_drag_apply(cx, index, lifted.as_ref(), &target, place);
+        match result {
+            Some(Ok(())) => {
+                self.design_ghost = Some((pick.uid, place, None));
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
+            }
+            Some(Err(err)) => {
+                // Nothing to show for this target (a non-container asked
+                // for Inside, a widget from another file): the bar stands,
+                // and this target is not asked again during this drag.
+                self.design_ghost_pending = false;
+                self.design_ghost_failed.push((pick.uid, place));
+                log!("DESIGN ghost: {err}");
+            }
+            None => self.design_ghost_pending = false,
+        }
+    }
+
+    /// Take the provisional insert back out of the source and the canvas.
+    fn ghost_retract(&mut self, cx: &mut Cx) {
+        let Some((uid, place, _)) = self.design_ghost.take() else {
+            self.design_ghost_want = None;
+            return;
+        };
+        log!("DESIGN ghost retracted (was {place:?} {uid})");
+        self.design_ghost_pending = false;
+        let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+        let result = self.design.as_mut().map(|s| s.undo(cx, keep));
+        match result {
+            Some(Ok(())) => {
+                if self.design.as_mut().is_some_and(|s| s.take_sync_landing()) {
+                    self.design_landed(cx);
+                }
+            }
+            Some(Err(err)) => log!("DESIGN ghost retract: {err}"),
+            None => {}
+        }
+        self.redraw_overlay(cx);
+    }
+
+    /// The drop landed on the ghost's own target: the insert stays, joins
+    /// the undo history, and the new widget becomes the selection.
+    fn ghost_commit(&mut self, cx: &mut Cx) {
+        // A lifted widget carried back to its own place: the drag's edit
+        // came out as no change at all. Nothing to keep, nothing to undo
+        // later; take the empty step back out.
+        let no_op = self
+            .design
+            .as_ref()
+            .and_then(|s| s.doc().hunks().last().map(|h| h.removed == h.replacement))
+            .unwrap_or(false);
+        if no_op && self.design_ghost.is_some() {
+            log!("DESIGN drop: back in its own place, no edit");
+            self.ghost_retract(cx);
+            self.design_msg.clear();
+            self.redraw_sidebar(cx);
+            return;
+        }
+        let Some((_, _, path)) = self.design_ghost.take() else {
+            return;
+        };
+        let label = self
+            .design
+            .as_ref()
+            .and_then(|s| s.doc().hunks().last().map(|h| h.label.clone()))
+            .unwrap_or_default();
+        let mut s = session().lock().unwrap();
+        s.undo.push(UndoStep::Source { label });
+        s.redo.clear();
+        s.undo_open = false;
+        drop(s);
+        self.design_msg.clear();
+        match path {
+            Some(path) => self.design_reselect = Some((path, 8)),
+            // Not landed yet: the landing selects it, as a plain insert's does.
+            None => self.design_ghost_pending = false,
+        }
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// The chip for a tree row drag: the row's name at the pointer, and
+    /// gone with the drop or the end.
+    fn follow_tree_drag(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::Drag(e) => {
+                let dragged = e.items.iter().find_map(|item| match item {
+                    DragItem::String { value, internal_id: Some(id) } if value == "design-node" => {
+                        Some(id.0)
+                    }
+                    _ => None,
+                });
+                let Some(uid) = dragged else {
+                    return;
+                };
+                let label = self
+                    .tree_rows
+                    .iter()
+                    .find(|row| row.uid == uid)
+                    .map(|row| if row.name.is_empty() { row.ty.clone() } else { row.name.clone() })
+                    .unwrap_or_default();
+                if self.drag_grab.is_none() {
+                    let row = self
+                        .tree_widget()
+                        .and_then(|tree| tree.borrow::<FileTree>().and_then(|t| t.node_rect(cx, LiveId(uid))));
+                    self.drag_grab = Some(grab_of(row, e.abs));
+                }
+                self.drag_chip = Some((label, e.abs));
+                self.redraw_sidebar(cx);
+            }
+            Event::Drop(_) | Event::DragEnd => {
+                self.tree_drag = false;
+                self.drag_chip = None;
+                self.drag_grab = None;
+                self.redraw_sidebar(cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// The ghost's scrim: an amber wash and dashed edge over the widget the
+    /// provisional insert put on the canvas.
+    fn draw_ghost(&mut self, cx: &mut Cx2d) -> bool {
+        let Some((_, _, Some(path))) = self.design_ghost.clone() else {
+            return false;
+        };
+        let Ok(ghost) = resolve_widget_by_path(cx, &path) else {
+            return false;
+        };
+        let rect = live_rect(cx, &ghost);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return false;
+        }
+        let rect = self.screen_rect(cx, rect);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.border_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.18);
+        self.draw_outline.border_size = 1.0;
+        self.draw_outline.dash = 1.0;
+        if let Some(rect) = self.clip_to_viewport(cx, rect) {
+            self.draw_outline.draw_abs(cx, rect);
+        }
+        true
+    }
+
+    /// The chip riding the pointer through a drag, over the panel as well
+    /// as the canvas.
+    fn draw_drag_chip(&mut self, cx: &mut Cx2d) {
+        let Some((text, at)) = self.drag_chip.clone() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        // The row as it was picked up: its own size, the pointer at the
+        // spot where it took hold, so it reads as carried, not towed.
+        let (offset, size) = self.drag_grab.unwrap_or((dvec2(12.0, 10.0), dvec2(120.0, 20.0)));
+        let text_w = self
+            .draw_label
+            .prepare_single_line_run(cx, &text)
+            .map(|run| run.width_in_lpxs as f64)
+            .unwrap_or_else(|| text.chars().count() as f64 * 5.4);
+        let size = dvec2(size.x.max(text_w + 16.0), size.y.max(16.0));
+        let pos = at - offset;
+        let rect = Rect { pos, size };
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.fill_color = vec4(0.30, 0.30, 0.32, 0.96);
+        self.draw_outline.border_color = vec4(0.50, 0.50, 0.53, 1.0);
+        self.draw_outline.border_size = 1.0;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.solid = 0.0;
+        self.draw_outline.draw_abs(cx, rect);
+        let text_pos = dvec2(pos.x + (size.x - text_w) * 0.5, pos.y + (size.y - 11.0) * 0.5);
+        self.draw_label.draw_abs(cx, text_pos, &text);
+    }
+
+    /// The insertion caret: where the next palette insert goes, on the
+    /// selection's near or far edge (before, after) or inside its far edge,
+    /// along the selection's flow.
+    fn draw_insert_caret(&mut self, cx: &mut Cx2d, pick: &TweakPick) {
+        let horizontal = match self.design_place {
+            // Inside: along the selection's own flow.
+            DesignPlace::Inside => {
+                let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+                !widget.is_empty() && flows_right(cx, &widget)
+            }
+            // Before or after: along the parent's flow.
+            _ => siblings_run_horizontal(cx, pick.uid),
+        };
+        self.draw_place_bar(cx, pick.rect, self.design_place, horizontal);
+    }
+
+    /// An amber bar on `r`: on its near edge for `Before`, its far edge for
+    /// `After`, inside its far edge for `Inside`; the edges run across the
+    /// flow, so `horizontal` picks left/right over top/bottom.
+    fn draw_place_bar(&mut self, cx: &mut Cx2d, r: Rect, place: DesignPlace, horizontal: bool) {
+        use crate::designer::Place;
+        if r.size.x <= 0.0 || r.size.y <= 0.0 {
+            return;
+        }
+        let t = 3.0;
+        let bar = match (place, horizontal) {
+            (Place::Before, true) => Rect { pos: dvec2(r.pos.x - 4.0, r.pos.y), size: dvec2(t, r.size.y) },
+            (Place::Before, false) => Rect { pos: dvec2(r.pos.x, r.pos.y - 4.0), size: dvec2(r.size.x, t) },
+            (Place::After, true) => {
+                Rect { pos: dvec2(r.pos.x + r.size.x + 2.0, r.pos.y), size: dvec2(t, r.size.y) }
+            }
+            (Place::After, false) => {
+                Rect { pos: dvec2(r.pos.x, r.pos.y + r.size.y + 2.0), size: dvec2(r.size.x, t) }
+            }
+            (Place::Inside, true) => Rect {
+                pos: dvec2(r.pos.x + r.size.x - 6.0, r.pos.y + 4.0),
+                size: dvec2(t, (r.size.y - 8.0).max(t)),
+            },
+            (Place::Inside, false) => Rect {
+                pos: dvec2(r.pos.x + 4.0, r.pos.y + r.size.y - 6.0),
+                size: dvec2((r.size.x - 8.0).max(t), t),
+            },
+        };
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.border_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.fill_color = vec4(1.0, 0.72, 0.2, 0.95);
+        self.draw_outline.border_size = 0.0;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.solid = 1.0;
+        if let Some(bar) = self.clip_to_viewport(cx, bar) {
+            self.draw_outline.draw_abs(cx, bar);
+        }
+        self.draw_outline.solid = 0.0;
     }
 }
