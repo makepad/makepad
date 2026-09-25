@@ -34,7 +34,7 @@
 //! here reads `draw_pass.time`, which would pin the window at display rate for as
 //! long as the glass is on screen — see the note on `ripple_age`.
 use crate::{
-    gauss_stack::{gauss_render_texture_y_flip_for_os, GaussStack},
+    gauss_stack::GaussStack,
     makepad_derive_widget::*,
     makepad_draw::*,
     view::View,
@@ -294,19 +294,19 @@ pub fn bind_gauss_snapshot(vars: &mut DrawVars, cx: &mut Cx2d, snapshot: Option<
     }
 }
 
-/// A capture's own gauss pyramid — the blur an app hosted in a texture of
-/// its own gets when it asks for the window's ([`request_window_gauss`]):
-/// built from the APP'S frame, never the window's, and recorded into the
-/// app's pass tree, so the result is baked into the app's texture and the
-/// host only composites that.
-///
-/// Same shape as the `Window`'s gauss frame: when something asked for it
-/// last frame, the app's body renders into a scene pass (sized and shifted
-/// like the capture), the pyramid is built from that at `end`, and the
-/// scene is drawn back into the capture under the app's overlays. Frames
-/// nobody asks for cost nothing: the body records straight into the
-/// capture. A request that appears or disappears repaints the capture once
-/// (`end` returns `true`), the way the window repaints itself.
+// A capture's own gauss pyramid — the blur an app hosted in a texture of
+// its own gets when it asks for the window's ([`request_window_gauss`]):
+// built from the APP'S frame, never the window's, and recorded into the
+// app's pass tree, so the result is baked into the app's texture and the
+// host only composites that.
+//
+// Same shape as the `Window`'s gauss frame: when something asked for it
+// last frame, the app's body renders into a scene pass (sized and shifted
+// like the capture), the pyramid is built from that at `end`, and the
+// scene is drawn back into the capture under the app's overlays. Frames
+// nobody asks for cost nothing: the body records straight into the
+// capture. A request that appears or disappears repaints the capture once
+// (`end` returns `true`), the way the window repaints itself.
 pub struct CaptureGauss {
     stack: GaussStack,
     downsample: DrawGaussDownsample,
@@ -330,7 +330,7 @@ impl CaptureGauss {
     /// begun: `shift` and `size` are the capture pass's, `root_size` the
     /// root turtle's (the enclosing window's).
     pub fn begin(&mut self, cx: &mut Cx2d, pass: DrawPassId, shift: Vec2d, size: Vec2d, root_size: Vec2d) {
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 0.0;
         let dpi_factor = cx.current_dpi_factor();
         let wants = std::env::var_os("MAKEPAD_NO_GAUSS").is_none() && {
             let global = cx.global::<GaussWindowGlobal>();
@@ -406,19 +406,19 @@ impl CaptureGauss {
     }
 }
 
-/// A capture's own gauss pyramid — the blur an app hosted in a texture of
-/// its own gets when it asks for the window's ([`request_window_gauss`]):
-/// built from the APP'S frame, never the window's, and recorded into the
-/// app's pass tree, so the result is baked into the app's texture and the
-/// host only composites that.
-///
-/// Same shape as the `Window`'s gauss frame: when something asked for it
-/// last frame, the app's body renders into a scene pass (sized and shifted
-/// like the capture), the pyramid is built from that at `end`, and the
-/// scene is drawn back into the capture under the app's overlays. Frames
-/// nobody asks for cost nothing: the body records straight into the
-/// capture. A request that appears or disappears repaints the capture once
-/// (`end` returns `true`), the way the window repaints itself.
+// A capture's own gauss pyramid — the blur an app hosted in a texture of
+// its own gets when it asks for the window's ([`request_window_gauss`]):
+// built from the APP'S frame, never the window's, and recorded into the
+// app's pass tree, so the result is baked into the app's texture and the
+// host only composites that.
+//
+// Same shape as the `Window`'s gauss frame: when something asked for it
+// last frame, the app's body renders into a scene pass (sized and shifted
+// like the capture), the pyramid is built from that at `end`, and the
+// scene is drawn back into the capture under the app's overlays. Frames
+// nobody asks for cost nothing: the body records straight into the
+// capture. A request that appears or disappears repaints the capture once
+// (`end` returns `true`), the way the window repaints itself.
 
 // DRAW-ORDER RULE FOR GLASS SURFACES
 // -----------------------------------

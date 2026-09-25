@@ -15,7 +15,7 @@
 //! under its shell (templates in `device/`).
 
 use super::stage::read_pairs;
-use super::{Dyn, RUST_HOST};
+use super::{Dyn, Kind, RUST_HOST};
 use crate::android::compile;
 use makepad_lz4::FrameEncoder;
 use makepad_tar::TarWriter;
@@ -115,7 +115,15 @@ pub fn pack(d: &Dyn, apk_in: &Path, tc: &Path) -> Result<PathBuf, String> {
     //    stream through an LZ4 frame of independent 4 MB blocks the phone
     //    decodes as it reads.
     let host_strip: Vec<String> = read_pairs(&d.stage.join("host-strip.txt"))?.into_iter().map(|(_, c)| c).collect();
-    let apps: Vec<String> = d.apps.iter().map(|a| a.replace('-', "_")).collect();
+    // Dyn: the tile apps' lib units stay behind (the phone compiles every
+    // tile). Proc: every unit the Mac built ships — the apps' own too, Fresh
+    // on the phone until their source changes — except the final hosted
+    // libraries (`libapp_<bin>.so`): the APK carries those, and cargo relinks
+    // one on its first device build.
+    let (apps, outputs): (Vec<String>, Vec<String>) = match &d.kind {
+        Kind::Dyn => (d.apps.iter().map(|a| a.replace('-', "_")).collect(), Vec::new()),
+        Kind::Proc { wrappers } => (Vec::new(), wrappers.iter().map(|w| format!("lib{}.so", w.lib())).collect()),
+    };
     let mut fp_lib_dirs = lib_fingerprint_dirs(&d.target.join("release"), &host_strip)?;
     fp_lib_dirs.extend(lib_fingerprint_dirs(&d.target.join(d.triple()).join("release"), &apps)?);
     let (_ndk_version, ndk_prebuilt_root) =
@@ -126,7 +134,7 @@ pub fn pack(d: &Dyn, apk_in: &Path, tc: &Path) -> Result<PathBuf, String> {
     let mut tars: Vec<(&str, usize, u64)> = Vec::new();
     let sources: [(&str, &Path, Box<dyn Fn(&str) -> bool>); 3] = [
         ("src", &d.src, Box::new(|_| false)),
-        ("target", &d.target, Box::new(|rel| target_skip(rel, &fp_lib_dirs, &host_strip, &apps, &triple))),
+        ("target", &d.target, Box::new(|rel| target_skip(rel, &fp_lib_dirs, &host_strip, &apps, &outputs, &triple))),
         ("tc", tc, Box::new(tc_skip)),
     ];
     for (name, root, skip) in &sources {
@@ -334,7 +342,14 @@ fn lib_fingerprint_dirs(release: &Path, crates: &[String]) -> Result<BTreeSet<St
 /// proof built and ran them on the Mac, so on the phone they are Fresh and
 /// their OUT_DIR output (apps/files: generated PNGs) ships as it is here.
 /// `.rustc_info.json` is a per-machine cache; the env marker is ours.
-fn target_skip(rel: &str, fp_lib_dirs: &BTreeSet<String>, host_strip: &[String], apps: &[String], triple: &str) -> bool {
+fn target_skip(
+    rel: &str,
+    fp_lib_dirs: &BTreeSet<String>,
+    host_strip: &[String],
+    apps: &[String],
+    outputs: &[String],
+    triple: &str,
+) -> bool {
     let parts: Vec<&str> = rel.split('/').collect();
     if rel == ".rustc_info.json" || rel == ".makepad-dyn-env" || parts[0] == "makepad-android-apk" {
         return true;
@@ -360,6 +375,10 @@ fn target_skip(rel: &str, fp_lib_dirs: &BTreeSet<String>, host_strip: &[String],
             return false;
         }
         if rest.len() == 1 && apps.iter().any(|a| rest[0].starts_with(&format!("lib{a}"))) {
+            return true;
+        }
+        let file = rest[rest.len() - 1];
+        if (rest.len() == 1 || (rest.len() == 2 && rest[0] == "deps")) && outputs.iter().any(|o| o == file) {
             return true;
         }
         if rest[0] == "deps"
@@ -403,7 +422,14 @@ fn tc_skip(rel: &str) -> bool {
 /// proc-macro can never carry the recorded SVH by itself (the SVH hashes the
 /// host triple and std).
 fn proc_macro_svh(d: &Dyn) -> Result<String, String> {
-    let engine = read(&d.engine_dylib(&d.target))?;
+    // Where the recorded SVHs live: the engine dylib's CrateDep table (Dyn);
+    // the target's rlibs (Proc: the engine is linked statically into each
+    // app, so its crates' metadata is what the phone's rustc reads).
+    let recorders: Vec<Vec<u8>> = match d.kind {
+        Kind::Dyn => vec![read(&d.engine_dylib(&d.target))?],
+        Kind::Proc { .. } => Vec::new(),
+    };
+    let rlibs = d.target.join(d.triple()).join("release/deps");
     let pairs = read_pairs(&d.stage.join("host-strip.txt"))?;
     let packages: Vec<String> = read_pairs(&d.stage.join("proc-macros.txt"))?.into_iter().map(|(p, _)| p).collect();
     let deps = d.target.join("release/deps");
@@ -420,10 +446,29 @@ fn proc_macro_svh(d: &Dyn) -> Result<String, String> {
                 continue;
             }
             let h = makepad_rmeta::read_header(&read(&p)?).map_err(|e| format!("{n}: {e}"))?;
-            if h.proc_macro && engine.windows(16).filter(|w| *w == h.svh).count() == 1 {
-                found.push(format!("lib{crate_name}{}.so {}", h.extra_filename, makepad_rmeta::svh_hex(&h.svh)));
+            if !h.proc_macro {
+                continue;
+            }
+            let recorded = match d.kind {
+                Kind::Dyn => recorders[0].windows(16).filter(|w| *w == h.svh).count() == 1,
+                // One candidate is the one every rlib names; several (a
+                // stale target) are told apart by the rlibs that record them.
+                Kind::Proc { .. } => true,
+            };
+            if recorded {
+                found.push((format!("lib{crate_name}{}.so {}", h.extra_filename, makepad_rmeta::svh_hex(&h.svh)), h.svh));
             }
         }
+        if found.len() > 1 && d.is_proc() {
+            let mut kept = Vec::new();
+            for (line, svh) in found.drain(..) {
+                if any_rlib_records(&rlibs, &svh)? {
+                    kept.push((line, svh));
+                }
+            }
+            found = kept;
+        }
+        let found: Vec<String> = found.into_iter().map(|(line, _)| line).collect();
         if found.len() != 1 {
             return Err(format!(
                 "{pkg}: {} proc-macro dylibs whose SVH the engine records ({found:?}); stale {}/release/deps or a bad cross-build",
@@ -437,6 +482,17 @@ fn proc_macro_svh(d: &Dyn) -> Result<String, String> {
         return Err(format!("proc-macro-svh: {} of {} proc-macros resolved", lines.len(), packages.len()));
     }
     Ok(lines.iter().map(|l| format!("{l}\n")).collect())
+}
+
+/// Whether any rlib in `deps` carries `svh` (a crate that depends on the
+/// proc-macro records its SVH in its metadata).
+fn any_rlib_records(deps: &Path, svh: &[u8]) -> Result<bool, String> {
+    for p in list_sorted(deps)? {
+        if p.extension().map(|e| e == "rlib").unwrap_or(false) && read(&p)?.windows(svh.len()).any(|w| w == svh) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn git_head(cwd: &Path) -> String {

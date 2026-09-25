@@ -36,6 +36,9 @@ pub struct PortView {
     /// Host-defined style and compatibility key.
     pub kind: String,
     pub connected: bool,
+    /// An ordered port: it takes any number of wires, each an entry with
+    /// its own key, rather than one.
+    pub many: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -44,12 +47,19 @@ pub struct EdgeView {
     pub from_port: String,
     pub to: String,
     pub to_port: String,
+    /// The entry this wire is on an ordered input: what tells two wires
+    /// between the same ports apart, and what a disconnect names.
+    pub key: Option<u64>,
 }
 
 /// Targets keyed by the output that may connect to them. Keeping this beside
 /// (rather than inside) `GraphView` leaves type-system policy with the host.
 pub type CompatiblePorts =
     HashMap<(String, String), HashSet<(String, String)>>;
+
+/// Port-style keys for the icons of exact sockets: `(node id, port name,
+/// output)` to a `PortStyle` kind. Icon only; kinds keep every other role.
+pub type PortIconOverrides = HashMap<(String, String, bool), String>;
 
 /// A host-defined port appearance, keyed by `PortView::kind`.
 #[derive(Script, ScriptHook, Clone, Default)]
@@ -182,6 +192,10 @@ impl CanvasStyles {
     pub(crate) fn port_icon(&mut self, kind: &str) -> Option<&mut DrawSvg> {
         self.port_icons.get_mut(kind)
     }
+
+    pub(crate) fn has_port_icon(&self, kind: &str) -> bool {
+        self.port_icons.contains_key(kind)
+    }
 }
 
 fn icons_of<T>(vm: &mut ScriptVm, styles: &HashMap<String, T>) -> HashMap<String, DrawSvg>
@@ -225,9 +239,73 @@ impl Style for PortStyle {
     }
 }
 
-/// The three face-host operations the canvas needs while drawing.
+/// Geometry supplied by the canvas while its mutable draw borrow is active.
+/// Graph geometry is world-space; the camera and content clip are window-local.
+#[derive(Clone, Debug)]
+pub struct FaceViewport {
+    pub canvas: crate::canvas::CanvasViewport,
+    pub geometry: crate::canvas::NodeGeometry,
+    pub content_clip: Rect,
+    /// Port tips in window coordinates, including animated card facing.
+    pub ports: Vec<FacePort>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FacePort {
+    pub name: String,
+    pub kind: String,
+    pub output: bool,
+    pub anchor: DVec2,
+}
+
+/// Optional host material on the canvas's authoritative, cached wire path.
+/// Coordinates are render-local; the enclosing canvas supplies its transform
+/// and clip. Materials never alter routing, hit targets or the graph document.
+pub trait WirePainter {
+    /// Return true when this edge has an observation, including silence. The
+    /// canvas then uses a thin centreline without generic activity animation.
+    fn draw_wire(
+        &mut self,
+        cx: &mut Cx2d,
+        edge: &EdgeView,
+        route: &crate::wire_route::WireRoute,
+        viewport: &crate::canvas::CanvasViewport,
+    ) -> bool;
+}
+
+/// Face-host operations borrowed by the canvas for one drawing dispatch.
 pub trait NodeFaces {
+    /// A host may briefly retire a face while replacing its source. Keep the
+    /// last measured geometry until its replacement is ready; data admission
+    /// and visual layout need not become ready in the same event.
+    fn face_measurement_pending(&self, _node: &str) -> bool { false }
+
+    fn draw_wire(
+        &mut self,
+        _cx: &mut Cx2d,
+        _edge: &EdgeView,
+        _route: &crate::wire_route::WireRoute,
+        _viewport: &crate::canvas::CanvasViewport,
+    ) -> bool { false }
+
+    /// Passive annotations are drawn after the face has been measured. Their
+    /// content must never become a card dimension or a routing obstacle.
+    fn draw_node_overlay(&mut self, _cx: &mut Cx2d, _node: &str, _viewport: &FaceViewport) {}
+
     fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk, card_sized: bool);
+    /// Override to draw an independently transformed canvas inside a card.
+    /// The default preserves ordinary face drawing. A nested scope must borrow
+    /// its own face host; do not retain this callback or NodeFacesScope.
+    fn draw_face_in_viewport(
+        &mut self,
+        cx: &mut Cx2d,
+        node: &str,
+        walk: Walk,
+        card_sized: bool,
+        _viewport: &FaceViewport,
+    ) {
+        self.draw_face(cx, node, walk, card_sized);
+    }
     fn set_z_order(&mut self, order: &[String]);
     fn set_popup_anchor_transform(
         &mut self,
@@ -239,13 +317,26 @@ pub trait NodeFaces {
 /// Concrete `Scope` payload for a borrowed [`NodeFaces`] implementation.
 pub struct NodeFacesScope {
     faces: *mut dyn NodeFaces,
+    canvas_policy: Option<(WidgetUid, crate::canvas::CanvasEventPolicy)>,
 }
 
 impl NodeFacesScope {
     pub fn new<T: NodeFaces + 'static>(faces: &mut T) -> Self {
         Self {
             faces: faces as *mut T as *mut dyn NodeFaces,
+            canvas_policy: None,
         }
+    }
+
+    /// Override one canvas's input routing during a whole-widget-tree dispatch.
+    /// Drawing and other widgets in the borrowed scope are unaffected.
+    pub fn with_canvas_policy(mut self, canvas: WidgetUid, policy: crate::canvas::CanvasEventPolicy) -> Self {
+        self.canvas_policy = Some((canvas, policy));
+        self
+    }
+
+    pub(crate) fn policy_for(&self, canvas: WidgetUid) -> Option<crate::canvas::CanvasEventPolicy> {
+        self.canvas_policy.filter(|(uid, _)| *uid == canvas).map(|(_, policy)| policy)
     }
 
     pub(crate) fn faces(&mut self) -> &mut dyn NodeFaces {

@@ -115,6 +115,9 @@ pub enum FromJavaMessage {
         time: f64,
     },
     Touch(Vec<TouchPoint>),
+    /// `ACTION_CANCEL`: the system took every pointer away; each is a Stop
+    /// dispatched as a cancellation.
+    TouchCancel(Vec<TouchPoint>),
     Character {
         character: u32,
     },
@@ -475,6 +478,10 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
 
 pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
     let mut env: *mut jni_sys::JNIEnv = std::ptr::null_mut();
+    // A hosted child process (android_hosted.rs) has no JVM at all.
+    if get_java_vm().is_null() {
+        return env;
+    }
     let attach_current_thread = (**get_java_vm()).AttachCurrentThread.unwrap();
 
     let res = attach_current_thread(get_java_vm(), &mut env, std::ptr::null_mut());
@@ -852,15 +859,59 @@ pub extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnLongClick(
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
     env: *mut jni_sys::JNIEnv,
-    _: jni_sys::jclass,
+    class: jni_sys::jclass,
     event: jni_sys::jobject,
 ) {
+    let time = unsafe { ndk_utils::call_long_method!(env, event, "getEventTime", "()J") } as i64;
+    unsafe { surface_on_touch(env, class, event, time as f64 / 1000.0) };
+}
+
+/// The event with its nanosecond time.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouchNanos(
+    env: *mut jni_sys::JNIEnv,
+    class: jni_sys::jclass,
+    event: jni_sys::jobject,
+    time_nanos: jni_sys::jlong,
+) {
+    unsafe { surface_on_touch(env, class, event, time_nanos as f64 / 1.0e9) };
+}
+
+/// One of a move's batched samples: every pointer where it was then.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouchHistory(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    event: jni_sys::jobject,
+    history: jni_sys::jint,
+    time_nanos: jni_sys::jlong,
+) {
+    let touch_count = unsafe { ndk_utils::call_int_method!(env, event, "getPointerCount", "()I") };
+    let mut touches = Vec::with_capacity(touch_count as usize);
+    for touch_index in 0..touch_count {
+        let id = unsafe { ndk_utils::call_int_method!(env, event, "getPointerId", "(I)I", touch_index) };
+        let x = unsafe { ndk_utils::call_float_method!(env, event, "getHistoricalX", "(II)F", touch_index, history) };
+        let y = unsafe { ndk_utils::call_float_method!(env, event, "getHistoricalY", "(II)F", touch_index, history) };
+        touches.push(TouchPoint {
+            state: TouchState::Move,
+            uid: id as u64,
+            rotation_angle: 0.0,
+            force: 1.0,
+            radius: dvec2(0.0, 0.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+            abs: dvec2(x as f64, y as f64),
+            time: time_nanos as f64 / 1.0e9,
+        });
+    }
+    send_from_java_message(FromJavaMessage::Touch(touches));
+}
+
+unsafe fn surface_on_touch(env: *mut jni_sys::JNIEnv, _: jni_sys::jclass, event: jni_sys::jobject, time_secs: f64) {
     let action_masked =
         unsafe { ndk_utils::call_int_method!(env, event, "getActionMasked", "()I") };
     let action_index = unsafe { ndk_utils::call_int_method!(env, event, "getActionIndex", "()I") };
     let touch_count = unsafe { ndk_utils::call_int_method!(env, event, "getPointerCount", "()I") };
-
-    let time = unsafe { ndk_utils::call_long_method!(env, event, "getEventTime", "()J") } as i64;
 
     let mut touches = Vec::with_capacity(touch_count as usize);
     for touch_index in 0..touch_count {
@@ -887,7 +938,10 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
 
         touches.push(TouchPoint {
             state: {
-                if action_index == touch_index {
+                if action_masked == 3 {
+                    // ACTION_CANCEL ends every pointer of the gesture.
+                    TouchState::Stop
+                } else if action_index == touch_index {
                     match action_masked {
                         0 | 5 => TouchState::Start,
                         1 | 6 => TouchState::Stop,
@@ -905,10 +959,14 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnTouch(
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
-            time: time as f64 / 1000.0,
+            time: time_secs,
         });
     }
-    send_from_java_message(FromJavaMessage::Touch(touches));
+    send_from_java_message(if action_masked == 3 {
+        FromJavaMessage::TouchCancel(touches)
+    } else {
+        FromJavaMessage::Touch(touches)
+    });
 }
 
 #[no_mangle]
@@ -1579,6 +1637,9 @@ unsafe fn open_raw_asset(filepath: &str, mode: ::std::os::raw::c_uint) -> Option
 }
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
+    if super::android_hosted::is_hosted() {
+        return super::android_hosted::load_asset(filepath);
+    }
     let (asset, length) = open_raw_asset(filepath, ndk_sys::AASSET_MODE_BUFFER)?;
     let mut buffer = Vec::new();
     buffer.resize(length.max(0) as usize, 0u8);
@@ -1603,6 +1664,42 @@ pub unsafe fn to_java_copy_to_clipboard(content: String) {
         "(Ljava/lang/String;)V",
         content
     );
+}
+
+/// `MakepadActivity.openUrl`: an ACTION_VIEW Intent for `url`.
+pub unsafe fn to_java_open_url(url: &str) {
+    let env = attach_jni_env();
+    let Ok(url) = CString::new(url) else { return };
+    let url = ((**env).NewStringUTF.unwrap())(env, url.as_ptr());
+    ndk_utils::call_void_method!(env, get_activity(), "openUrl", "(Ljava/lang/String;)V", url);
+    (**env).DeleteLocalRef.unwrap()(env, url);
+}
+
+/// `MakepadActivity.performHaptic`: a system haptic (`kind`: 0 click,
+/// 1 virtual key, 2 tick) on the activity's window.
+pub unsafe fn to_java_haptic(kind: i32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "performHaptic", "(I)V", kind as jni_sys::jint);
+}
+
+/// `MakepadActivity.copyContentUri`: the bytes of a picked `content://`
+/// document into the plain file `dest`.
+pub unsafe fn to_java_copy_content_uri(uri: &str, dest: &str) -> bool {
+    let env = attach_jni_env();
+    let (Ok(uri), Ok(dest)) = (CString::new(uri), CString::new(dest)) else { return false };
+    let uri = ((**env).NewStringUTF.unwrap())(env, uri.as_ptr());
+    let dest = ((**env).NewStringUTF.unwrap())(env, dest.as_ptr());
+    let ok = ndk_utils::call_bool_method!(
+        env,
+        get_activity(),
+        "copyContentUri",
+        "(Ljava/lang/String;Ljava/lang/String;)Z",
+        uri,
+        dest
+    );
+    (**env).DeleteLocalRef.unwrap()(env, uri);
+    (**env).DeleteLocalRef.unwrap()(env, dest);
+    ok != 0
 }
 
 pub unsafe fn to_java_paste_from_clipboard() -> String {
@@ -1886,6 +1983,11 @@ pub unsafe fn to_java_socket_stream_close(stream_id: LiveId) {
 pub fn to_java_get_audio_devices(flag: jni_sys::jlong) -> Vec<String> {
     unsafe {
         let env = attach_jni_env();
+        // A hosted child process has no JVM to list devices with; AAudio
+        // still opens the default device.
+        if env.is_null() {
+            return Vec::new();
+        }
         let string_array = ndk_utils::call_object_method!(
             env,
             get_activity(),

@@ -27,6 +27,8 @@ mod vulkan_profile;
 #[cfg(target_os = "android")]
 #[path = "vulkan_android.rs"]
 mod android_frames;
+#[cfg(target_os = "android")]
+pub use android_frames::HostedSyncRole;
 // Only the direct (DRM/KMS) event loop paces on this; windowed Linux builds
 // never ask.
 #[cfg(all(target_os = "linux", linux_direct))]
@@ -224,6 +226,9 @@ struct FrameResources {
     /// destroyed with the frame, after its fence, never at replacement.
     retired_textures: Vec<VulkanTextureResource>,
     retired_geometries: Vec<VulkanGeometryResource>,
+    /// Semaphores this frame's submission waited on (imported hosted-frame
+    /// fences); destroyed after its fence.
+    sync_semaphores: Vec<vk::Semaphore>,
 }
 
 #[cfg(target_os = "android")]
@@ -552,6 +557,10 @@ pub struct CxVulkan {
     swapchain_format: vk::Format,
     depth_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    /// The surface's `current_transform` when the swapchain was made (it is
+    /// made with an IDENTITY pre-transform): see
+    /// `suboptimal_needs_new_swapchain`.
+    swapchain_surface_transform: vk::SurfaceTransformFlagsKHR,
     render_pass: vk::RenderPass,
     xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
@@ -621,6 +630,8 @@ pub struct CxVulkan {
     /// `frame_serial_in_flight` are the open slot's while a repaint records.
     #[cfg(target_os = "android")]
     repaints: android_frames::RepaintRing,
+    #[cfg(target_os = "android")]
+    hosted_sync: android_frames::HostedSync,
     #[cfg(target_os = "linux")]
     profile: vulkan_profile::VulkanProfile,
     #[cfg(target_os = "linux")]
@@ -736,15 +747,22 @@ impl CxVulkan {
         self.frame_resources.buffers.push(buffer);
     }
 
+    /// A renderer with no window: a hosted child draws every pass into
+    /// textures, its window pass into the host's shared hardware buffers
+    /// (`android_hosted`), so it has no surface and no swapchain.
+    #[cfg(target_os = "android")]
+    pub fn new_headless(width: u32, height: u32) -> Result<Self, String> {
+        Self::new(std::ptr::null_mut(), width, height)
+    }
+
+    /// The renderer for `window`, or a headless one when `window` is null.
     #[cfg(target_os = "android")]
     pub fn new(
         window: *mut ndk_sys::ANativeWindow,
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        if window.is_null() {
-            return Err("Android Vulkan init failed: null ANativeWindow".to_string());
-        }
+        let headless = window.is_null();
 
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| format!("Android Vulkan init failed: Entry::load: {e:?}"))?;
@@ -796,15 +814,17 @@ impl CxVulkan {
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
         let android_surface_loader = ash::khr::android_surface::Instance::new(&entry, &instance);
 
-        unsafe { ANativeWindow_acquire(window) };
-
-        let create_surface_result = Self::create_surface(&android_surface_loader, window);
-        let surface = match create_surface_result {
-            Ok(surface) => surface,
-            Err(err) => {
-                unsafe { ndk_sys::ANativeWindow_release(window) };
-                unsafe { instance.destroy_instance(None) };
-                return Err(err);
+        let surface = if headless {
+            vk::SurfaceKHR::null()
+        } else {
+            unsafe { ANativeWindow_acquire(window) };
+            match Self::create_surface(&android_surface_loader, window) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    unsafe { ndk_sys::ANativeWindow_release(window) };
+                    unsafe { instance.destroy_instance(None) };
+                    return Err(err);
+                }
             }
         };
 
@@ -813,8 +833,10 @@ impl CxVulkan {
             Ok(pick) => pick,
             Err(err) => {
                 unsafe {
-                    surface_loader.destroy_surface(surface, None);
-                    ndk_sys::ANativeWindow_release(window);
+                    if !headless {
+                        surface_loader.destroy_surface(surface, None);
+                        ndk_sys::ANativeWindow_release(window);
+                    }
                     instance.destroy_instance(None);
                 }
                 return Err(err);
@@ -841,10 +863,23 @@ impl CxVulkan {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_extensions = [
+        // Hosted frames fence each other with SYNC_FD semaphores
+        // (`HostedSync`) when the device has them.
+        let sync_fd_supported = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .map(|exts| {
+                exts.iter().any(|ext| {
+                    (unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) })
+                        == vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME
+                })
+            })
+            .unwrap_or(false);
+        let mut device_extensions = vec![
             vk::KHR_SWAPCHAIN_NAME.as_ptr(),
             vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
         ];
+        if sync_fd_supported {
+            device_extensions.push(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME.as_ptr());
+        }
         let mut sampler_ycbcr_features =
             vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
                 .sampler_ycbcr_conversion(true);
@@ -995,6 +1030,7 @@ impl CxVulkan {
                 width: 0,
                 height: 0,
             },
+            swapchain_surface_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             render_pass: vk::RenderPass::null(),
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
@@ -1038,15 +1074,20 @@ impl CxVulkan {
             xr_in_flight_frames: Vec::new(),
             xr_in_flight_index: 0,
             repaints: android_frames::RepaintRing::default(),
+            hosted_sync: Default::default(),
         };
         vulkan.repaints = vulkan
             .create_repaint_ring()
             .map_err(|err| format!("Android Vulkan init failed: {err}"))?;
+        let instance = vulkan.instance.clone();
+        vulkan.init_hosted_sync(&instance, sync_fd_supported);
 
-        if let Err(err) = vulkan.recreate_swapchain() {
-            return Err(format!(
-                "Android Vulkan init failed: recreate_swapchain: {err}"
-            ));
+        if !headless {
+            if let Err(err) = vulkan.recreate_swapchain() {
+                return Err(format!(
+                    "Android Vulkan init failed: recreate_swapchain: {err}"
+                ));
+            }
         }
 
         vulkan.try_enable_debug_messenger();
@@ -1406,6 +1447,7 @@ impl CxVulkan {
                 width: 0,
                 height: 0,
             },
+            swapchain_surface_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             render_pass: vk::RenderPass::null(),
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
@@ -1449,6 +1491,7 @@ impl CxVulkan {
             xr_in_flight_frames: Vec::new(),
             xr_in_flight_index: 0,
             repaints: android_frames::RepaintRing::default(),
+            hosted_sync: Default::default(),
         };
         vulkan.repaints = vulkan
             .create_repaint_ring()
@@ -1580,6 +1623,9 @@ impl CxVulkan {
         for resource in frame_resources.retired_geometries.drain(..) {
             Self::destroy_buffer_with(device, resource.vertex_buffer);
             Self::destroy_buffer_with(device, resource.index_buffer);
+        }
+        for semaphore in frame_resources.sync_semaphores.drain(..) {
+            unsafe { device.destroy_semaphore(semaphore, None) };
         }
     }
 
@@ -1773,7 +1819,11 @@ impl CxVulkan {
             self.destroy_swapchain();
             self.destroy_surface();
 
-            unsafe { ndk_sys::ANativeWindow_release(self.window) };
+            // `suspend_surface` (SurfaceDestroyed: switching away from the
+            // app) already released the old window and left it null.
+            if !self.window.is_null() {
+                unsafe { ndk_sys::ANativeWindow_release(self.window) };
+            }
             self.window = window;
 
             self.surface = Self::create_surface(&self.android_surface_loader, window)?;
@@ -3269,15 +3319,23 @@ impl CxVulkan {
             self.device.cmd_set_viewport(
                 self.command_buffer,
                 0,
+                // THE Y LAW: the 2D camera is GL-style -- the top of the
+                // pass rect lands at clip y = +1 -- and Vulkan's clip space
+                // points down, so every pass drawn with that camera, window
+                // and capture alike, renders through a negative-height
+                // viewport. The window comes out upright and a capture's
+                // rows are stored top-left like Metal's, on Android as on
+                // the desktop, so nobody downstream flips V. (The direct
+                // display's letterbox blit is not such a pass: its own
+                // vertex shader maps uv.y = 0 to clip -1 and keeps a
+                // positive viewport.) Make this positive and a whole
+                // Wayland or X11 window stands on its head; make one pass
+                // differ and every consumer starts flipping V again.
                 &[vk::Viewport {
                     x: 0.0,
-                    // Window/swapchain: Android is already Y-down. A
-                    // negative-height viewport here inverts the desk while
-                    // WindowFrame captures (offscreen, still negative-Y)
-                    // stay upright.
-                    y: 0.0,
+                    y: self.swapchain_extent.height as f32,
                     width: self.swapchain_extent.width as f32,
-                    height: self.swapchain_extent.height as f32,
+                    height: -(self.swapchain_extent.height as f32),
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],
@@ -3481,10 +3539,12 @@ impl CxVulkan {
             }
         }
 
-        if acquire_suboptimal || present_suboptimal {
+        if (acquire_suboptimal || present_suboptimal) && self.suboptimal_needs_new_swapchain() {
             self.recreate_swapchain()?;
         }
 
+        #[cfg(target_os = "android")]
+        crate::trace!("pace", "wm present_done={:.2} record_ms={:.3} present_ms={:.3}", super::android::android_hosted::pace_ms(), recorded.duration_since(image_acquired).as_secs_f64() * 1000.0, recorded.elapsed().as_secs_f64() * 1000.0);
         crate::trace!(
             "gpu.present",
             "present time={:.6} fence_wait_ms={:.3} acquire_wait_ms={:.3} record_ms={:.3} present_ms={:.3} packets={} instances={}",
@@ -3514,6 +3574,17 @@ impl CxVulkan {
         height: usize,
     ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
+        // A hosted child's window pass draws into the host's buffer as it was
+        // imported (`bind_shared_hardware_buffer`); never reallocate it.
+        #[cfg(target_os = "android")]
+        if self
+            .textures
+            .get(&texture_key)
+            .is_some_and(|resource| resource.hardware_buffer.is_some())
+        {
+            cx.textures[texture_id].alloc_render(width, height);
+            return Ok(());
+        }
         #[cfg(target_os = "linux")]
         if self.is_shared_image(texture_id) {
             let resource = &self.textures[&texture_key];
@@ -4209,15 +4280,14 @@ impl CxVulkan {
             self.device.cmd_set_viewport(
                 self.command_buffer,
                 0,
+                // Same law as the window pass above: a negative-height
+                // viewport, so this texture's row 0 is the top of the pass
+                // and whoever samples it plain-samples.
                 &[vk::Viewport {
                     x: 0.0,
-                    // Same origin as the swapchain (y=0, +height): Android
-                    // is Y-down. Do not invert captures independently —
-                    // that is what made the compiling card flip whenever
-                    // the desk was corrected.
-                    y: 0.0,
+                    y: target_height as f32,
                     width: target_width as f32,
-                    height: target_height as f32,
+                    height: -(target_height as f32),
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],
@@ -5422,7 +5492,9 @@ impl CxVulkan {
                 .map_err(|e| format!("reset Vulkan frame fence: {e:?}"))?;
             #[cfg(target_os = "linux")]
             let result = self.shared_submit(info);
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "android")]
+            let result = self.hosted_sync_queue_submit(info, self.in_flight_fence);
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             let result = self.device.queue_submit(self.queue, &[*info], self.in_flight_fence);
             if let Err(err) = result {
                 // An unsuccessful submission does not signal its reset fence.
@@ -5512,6 +5584,26 @@ impl CxVulkan {
         width: u32,
         height: u32,
     ) -> Result<VulkanTextureResource, String> {
+        self.create_imported_hardware_buffer_texture_resource_with_usage(
+            hardware_buffer,
+            width,
+            height,
+            vk::ImageUsageFlags::SAMPLED,
+        )
+    }
+
+    /// Import `hardware_buffer` as a texture with `usage`: sampled for the
+    /// camera and for a host reading a hosted child's frames, a colour
+    /// attachment too for the child that draws into it. A shared frame's
+    /// memory is dedicated to its image, as the external-memory rules ask.
+    #[cfg(target_os = "android")]
+    fn create_imported_hardware_buffer_texture_resource_with_usage(
+        &mut self,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<VulkanTextureResource, String> {
         if hardware_buffer.is_null() {
             return Err("Android Vulkan camera import failed: null AHardwareBuffer".to_string());
         }
@@ -5563,7 +5655,7 @@ impl CxVulkan {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -5587,10 +5679,14 @@ impl CxVulkan {
 
         let mut import_info =
             vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(hardware_buffer.cast());
-        let alloc_info = vk::MemoryAllocateInfo::default()
+        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+        let mut alloc_info = vk::MemoryAllocateInfo::default()
             .push_next(&mut import_info)
             .allocation_size(allocation_size.max(memory_req.size))
             .memory_type_index(memory_type_index);
+        if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
+            alloc_info = alloc_info.push_next(&mut dedicated);
+        }
         let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }.map_err(|e| {
             unsafe {
                 self.device.destroy_image(image, None);
@@ -6254,6 +6350,50 @@ impl CxVulkan {
         }
 
         Ok(crate::event::video_playback::VideoYuvMetadata::disabled())
+    }
+
+    /// Back `texture_id` with `hardware_buffer`, a frame shared between a
+    /// host and a hosted child: sampled on the host, drawn into by the child
+    /// (`render_target`). The resource holds its own buffer reference.
+    #[cfg(target_os = "android")]
+    pub fn bind_shared_hardware_buffer(
+        &mut self,
+        texture_id: TextureId,
+        hardware_buffer: *mut ndk_sys::AHardwareBuffer,
+        width: u32,
+        height: u32,
+        render_target: bool,
+    ) -> Result<(), String> {
+        let texture_key = Self::texture_key(texture_id);
+        if self.textures.get(&texture_key).and_then(|resource| resource.hardware_buffer)
+            == Some(hardware_buffer)
+        {
+            return Ok(());
+        }
+        if let Some(old_resource) = self.textures.remove(&texture_key) {
+            self.retire_texture_resource(old_resource);
+        }
+        let usage = if render_target {
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::COLOR_ATTACHMENT
+        } else {
+            vk::ImageUsageFlags::SAMPLED
+        };
+        let resource = self.create_imported_hardware_buffer_texture_resource_with_usage(
+            hardware_buffer,
+            width,
+            height,
+            usage,
+        )?;
+        self.textures.insert(texture_key, resource);
+        Ok(())
+    }
+
+    /// Wait until the GPU has finished everything submitted so far: a hosted
+    /// child tells its host a frame is ready only once it is.
+    #[cfg(target_os = "android")]
+    pub fn wait_queue_idle(&self) -> Result<(), String> {
+        unsafe { self.device.queue_wait_idle(self.queue) }
+            .map_err(|e| format!("queue_wait_idle failed: {e:?}"))
     }
 
     #[cfg(target_os = "android")]
@@ -8396,6 +8536,10 @@ impl CxVulkan {
             if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 continue;
             }
+            // A headless renderer presents nothing: graphics is enough.
+            if surface == vk::SurfaceKHR::null() {
+                return Ok(index as u32);
+            }
             let supports_surface = unsafe {
                 surface_loader.get_physical_device_surface_support(
                     physical_device,
@@ -8424,6 +8568,32 @@ impl CxVulkan {
             }
         }
         Err("No graphics queue family found for OpenXR Vulkan device".to_string())
+    }
+
+    /// Whether a SUBOPTIMAL acquire/present asks for a new swapchain. Always
+    /// yes, except for the one known Android case: the swapchain was made
+    /// with an IDENTITY pre-transform on a rotated display (the compositor
+    /// rotates), which reports SUBOPTIMAL on every frame; rebuilding for it
+    /// each frame (device idle, pipelines rebuilt) made landscape crawl at
+    /// ~35 ms a present. That case is skipped only while the surface's
+    /// extent and transform are what the swapchain was made with.
+    fn suboptimal_needs_new_swapchain(&self) -> bool {
+        if !cfg!(target_os = "android") || self.surface == vk::SurfaceKHR::null() {
+            return true;
+        }
+        if self.swapchain_surface_transform == vk::SurfaceTransformFlagsKHR::IDENTITY {
+            return true;
+        }
+        let Ok(capabilities) = (unsafe {
+            self.surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, self.surface)
+        }) else {
+            return true;
+        };
+        let extent = capabilities.current_extent;
+        !(extent.width == self.swapchain_extent.width
+            && extent.height == self.swapchain_extent.height
+            && capabilities.current_transform == self.swapchain_surface_transform)
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), String> {
@@ -8584,6 +8754,13 @@ impl CxVulkan {
         self.swapchain_format = format.format;
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
+        // Recorded only when the swapchain's pre-transform differs from it:
+        // IDENTITY here means "no accepted mismatch".
+        self.swapchain_surface_transform = if pre_transform == vk::SurfaceTransformFlagsKHR::IDENTITY {
+            capabilities.current_transform
+        } else {
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        };
 
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
@@ -8901,6 +9078,8 @@ impl Drop for CxVulkan {
         self.destroy_xr_in_flight_frames();
         #[cfg(target_os = "android")]
         self.destroy_repaint_ring();
+        #[cfg(target_os = "android")]
+        self.destroy_hosted_sync();
         self.retained_instances.clear();
         self.destroy_geometry_resources();
         #[cfg(target_os = "linux")]

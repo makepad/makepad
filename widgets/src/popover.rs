@@ -1168,7 +1168,15 @@ impl Widget for Popover {
             // The release of the press that opened this: the anchor's own
             // widget has just seen it (the lock was not held yet), so the
             // lock owed since the press is taken now.
+            // ...or the opening mouse press itself taken away: its release
+            // will not come. A cancel of anything else leaves the lock owed.
             Event::MouseUp(_) => {
+                if self.open && self.lock_pending {
+                    self.lock_pending = false;
+                    cx.sweep_lock(area);
+                }
+            }
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
                 if self.open && self.lock_pending {
                     self.lock_pending = false;
                     cx.sweep_lock(area);
@@ -1533,6 +1541,50 @@ impl FocusTrap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pending sweep lock belongs to the press that opened the popover:
+    /// only that mouse press taken away discharges it. Another finger's
+    /// cancel, or a cancel of some other capture, leaves it owed.
+    #[test]
+    fn only_the_opening_press_taken_away_takes_the_pending_lock() {
+        crate::on_test_cx(|| {
+        let mut cx = crate::checkout_test_cx();
+        let mut popover = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            Popover::script_new_with_default(vm)
+        });
+        popover.open = true;
+        popover.lock_pending = true;
+        let touch: crate::event::DigitId = live_id_num!(touch, 5).into();
+        let mouse: crate::event::DigitId = live_id!(mouse).into();
+        let other = finger_cancel(&mut cx, touch, crate::event::DigitDevice::Touch { uid: 5 }, true);
+        popover.handle_event(&mut cx, &other, &mut Scope::empty());
+        assert!(popover.lock_pending, "another finger's cancel took the lock");
+        let partial = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, false);
+        popover.handle_event(&mut cx, &partial, &mut Scope::empty());
+        assert!(popover.lock_pending, "a cancel of another capture took the lock");
+        let own = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, true);
+        popover.handle_event(&mut cx, &own, &mut Scope::empty());
+        assert!(!popover.lock_pending, "the opening press taken away left the lock owed");
+        });
+    }
+
+    /// A `FingerCancel` for `digit`; with `taken_away` the press itself was
+    /// cancelled first (`cancel_digit`), as a host or the OS does.
+    fn finger_cancel(cx: &mut Cx, digit: crate::event::DigitId, device: crate::event::DigitDevice, taken_away: bool) -> Event {
+        if taken_away {
+            cx.fingers.cancel_digit(digit);
+        }
+        Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device,
+            abs: dvec2(1.0, 1.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
+        })
+    }
+
 
     const PASS: DVec2 = DVec2 { x: 800.0, y: 600.0 };
     const OFFSET: f64 = 4.0;

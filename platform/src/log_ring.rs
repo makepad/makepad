@@ -133,6 +133,7 @@ mod tests {
     fn a_line_the_app_logs_reaches_the_ring_with_no_remote_surface_running() {
         let _serial = serial();
         reset_for_test();
+        crate::Cx::init_log();
         crate::log::log_with_level_makepad_platform(
             "widgets/src/thing.rs",
             41,
@@ -142,7 +143,24 @@ mod tests {
             "the thing happened".into(),
             LogLevel::Warning,
         );
-        let (_, lines) = read_since(0, 10);
+        // Native logging is asynchronous, and other tests may log too.
+        // Wait for this record, without requiring a remote surface or an
+        // otherwise empty process-wide ring.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let lines = loop {
+            let (_, lines) = read_since(0, CAP);
+            let lines: Vec<_> = lines
+                .into_iter()
+                .filter(|line| {
+                    line.text.contains("widgets/src/thing.rs")
+                        && line.text.contains("the thing happened")
+                })
+                .collect();
+            if !lines.is_empty() || std::time::Instant::now() >= deadline {
+                break lines;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].level, LogLevel::Warning);
         assert!(

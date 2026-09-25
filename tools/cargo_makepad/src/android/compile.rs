@@ -434,7 +434,7 @@ fn rewrite_relative_toml_value(line: &mut String, key: &str, crate_dir: &Path) {
     }
 }
 
-fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String {
+pub(crate) fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String {
     let mut out = String::with_capacity(cargo_toml.len() + 256);
     for raw_line in cargo_toml.lines() {
         let mut line = raw_line.to_string();
@@ -447,7 +447,7 @@ fn rewrite_wrapper_manifest_paths(cargo_toml: &str, crate_dir: &Path) -> String 
     out
 }
 
-fn extract_workspace_patch_sections(workspace_manifest: &str) -> String {
+pub(crate) fn extract_workspace_patch_sections(workspace_manifest: &str) -> String {
     let mut out = String::new();
     let mut current_section: Option<String> = None;
     let mut current_body = Vec::new();
@@ -2797,8 +2797,11 @@ pub fn build(
     )?;
     // For APK builds, debuggable matches the cargo profile: release -> false,
     // anything else -> true (matches the historical behavior of `cargo makepad
-    // android run`).
-    let debuggable = get_profile_from_args(args) != "release";
+    // android run`). `MAKEPAD_ANDROID_DEBUGGABLE=1` makes a release APK
+    // debuggable: `proc-pack --proc-toolchain` sets it, so `adb shell run-as`
+    // reaches the source tree the phone builds its apps from.
+    let debuggable = get_profile_from_args(args) != "release"
+        || std::env::var("MAKEPAD_ANDROID_DEBUGGABLE").map(|v| v == "1").unwrap_or(false);
     let prep_opts = PrepareBuildOpts {
         build_crate,
         java_url: &resolved.java_url,

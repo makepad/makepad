@@ -47,8 +47,11 @@ makepad-strict-json = { path = "../../libs/strict_json" }
 # binary's say (src/build.rs), never a feature of this crate.
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+# The super-app provisions its shipped toolchain, checkout and target/ and
+# rebuilds the host proc-macros under their recorded SVHs (the packer is
+# cargo-makepad's dyn-pack).
+makepad-ondevice-build = { path = "../../libs/ondevice_build" }
+
+# dlopen for on-demand app dylibs (src/dylib_host.rs): native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading = { path = "../../libs/vulkan/libloading" }
-# The super-app unpacks its shipped toolchain and checkout with our own reader.
-makepad-tar = { path = "../../libs/tar" }
-# The proc-macro SVH rewrite after the on-device bootstrap (the packer records them with the same crate).
-makepad-rmeta = { path = "../../libs/rmeta" }

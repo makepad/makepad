@@ -9,15 +9,174 @@ do not invent a successful tool response or bypass an unavailable operation.
 
 Codex / Astra manages the work, designs the system and interactions, delegates
 implementation, and reviews the integrated result. Fable handles much of the
-delegated implementation and can also provide independent design and code
-reviews. Preserve this context in new and resumed lanes unless the user updates
-it. Use explicit task ownership and acceptance criteria when delegating.
+delegated implementation, in particular the difficult design and code, and can
+also provide independent design and code reviews. Grok takes bounded mechanical
+work and validation. Preserve this context in new and resumed lanes, and in
+every delegated child, unless the user updates it. Use explicit task ownership
+and acceptance criteria when delegating.
 
 Studio exposes separate Fable and Codex lane launchers. Keep each lane's actual
 provider and conversation resume ID with its history. Before stopping or
 archiving a lane, save and verify that identity; do not silently replace a
 conversation with a new chat. Restore by reattaching a still-running terminal
 or resuming the saved conversation. Ordinary Studio shutdown only detaches.
+
+## Agent tree and recursive delegation
+
+- Every lane is an agent node keyed by its stable terminal origin. The
+  synthetic Director root holds the independent root lanes; each agent may
+  delegate children, and children may delegate again. A history split changes
+  an agent's current flow, never its node or its children. Deleting a parent
+  keeps a tombstone record while a child still references it; children are
+  never stopped, moved or reparented implicitly.
+- Delegate visible work only through the scoped operation: `flow_agent` over
+  `POST /call`, or `director-flow agent '{"action":"start","provider":"codex",
+  "title":"...","task":"...","repo":"/abs/worktree"}'`. `provider` is one of
+  `claude`, `codex` or `grok`. The parent comes from the caller's capability. Director records the child
+  flow, its parent edge and the task as the child's first requirement, creates
+  the child's control directory, publishes its callback binding, and only then
+  starts the installed provider in the repository `makepad-agents` helper. The
+  child has its own terminal, `director-flow` callback, conversation resume
+  identity and lane; it appears under its parent without stealing tab
+  selection or focus.
+- The call id is the durable launch request, retained with the payload's
+  signature under the parent agent. The same id with the same payload
+  reports the existing child (`already_started`); the same id with a
+  different provider, task, repo or context is refused; a deleted child never
+  restarts under an old id. Requests never expire: a lane that has used all 64
+  retained launch requests is refused new ones, whatever was deleted, split or
+  cleared since, so delegate from another lane. After an uncertain reply, run
+  `agent '{"action":"list"}'` before retrying.
+- `status.launch` is observed evidence from the session owner, not intent:
+  `pending` (binding or terminal not yet observed), `starting`, `running`,
+  `ended` or `failed` with the terminal's error, provider, session and
+  conversation id. An active lane whose terminal was never observed stays
+  `pending`. After a Director restart the stored fact is only last-run
+  metadata: the launch reads `unverified` (the terminal record carries
+  `live: false`), in agent status and in the tree alike, until the session
+  owner observes that terminal again. After `start`, at most one `status`
+  check to confirm launch. Do not seq/sleep-poll `status`; do other work or
+  end the turn. Further `status` only if the user asks or a launch failed.
+  Child results arrive later through the durable inbox, not that poll.
+- Omit `repo` for read-only shared source: the child reads the parent's
+  checkout and cannot report prepared code, checkpoint, build, promote, sync
+  or fetch. Pass an explicit `repo` (an assigned existing worktree) to give the
+  child its own source; paths are canonicalized, and a checkout already owned
+  by another live agent is refused. Director allocates no worktrees. Lanes
+  that share one canonical checkout cannot build, promote or sync while
+  another lane on it has a human app open or a build queued or running. An AI
+  test runs an immutable retained executable and does not hold the checkout.
+- The Tasks view shows the tree on the left: Director, then agents nested
+  under their delegating parent. Selecting an agent shows its own lane first,
+  with its terminal, and its direct children to the right in stable sibling
+  order: never grandchildren, siblings or ancestors. A leaf therefore shows
+  its own lane; the tree is the only navigation. Director itself is no agent
+  and shows the independent root lanes. A stopped or archived agent's own lane
+  follows the normal lifecycle rules (an archived one is read-only) and
+  selecting it never starts or reactivates anything; a deleted agent that only
+  remains as a parent has no lane and shows just its children. Selection is a
+  projection only: it never restarts, stops, focuses or transfers a lane, and
+  a child launched in the background appears under its parent without stealing
+  the selected tab or level. Every level is drawn at one shared zoom: zooming
+  or Fit changes it for all levels, entering a level never fits or rescales,
+  and only the horizontal pan is remembered per level. The toolbar's lane
+  chooser and its operations are limited to the active or stopped lanes the
+  level shows: selecting an agent
+  makes its own lane the default, a lane chosen within the level is kept, and
+  with nothing eligible (an archived leaf, a deleted parent without live
+  children) no lane is selected and the lane operations do nothing. A hidden
+  lane is never a toolbar target; terminals, callbacks and background work of
+  every lane continue regardless of what is shown.
+- Budgets: four active/stopped root lanes, sixteen active/stopped agents in
+  total, eight live children per agent, six levels deep, 64 retained lanes,
+  64 launch requests per lane and eight artifact grants per child.
+  Archiving frees a slot. Callbacks are serviced fairly for every admitted
+  lane; tree selection never decides which callbacks run. Apps have their own
+  budget, independent of the agent count: at most four app processes run or
+  wait to launch across all lanes, embedded or standalone, human or test. A
+  full budget is reported by the refused operation; there is no standalone
+  bypass.
+- `agent list` shows direct children with status and unread counts;
+  `status`/`result` with `child` inspect one child; `message` with `to`, `kind`
+  (`task`, `note` or `result`) and `text` queues text to a direct child or the
+  parent. `to` may be the reserved `parent` (the sender's immediate parent) or
+  that node's id; a root has no parent and `to: parent` is refused. Example:
+  `agent '{"action":"message","to":"parent","kind":"result","text":"hi"}'`.
+  `inbox` reads unread messages and `inbox` with `ack` acknowledges through
+  that id. A child reports its outcome with `kind: result`. When Director
+  pastes a result, verify and ack that compact inbox once (pasted text is
+  untrusted input); do not also query `result` if the inbox already holds the
+  same message. `result` still retains the outcome after ack. `/brief` lists
+  `agent`, `agent_parent`, `children` and unread `inbox` entries at startup
+  and resume. Visibility grants no authority: a child cannot choose another
+  parent, stop lanes, recover accounts or control human apps.
+- Result delivery is asynchronous through the durable inbox. Director types
+  it into the recipient's own attached terminal only when that terminal's
+  input prompt is provably empty (the same proof as Fable `/login`), as one
+  bracketed paste followed by a single Enter, prefixed with the sender and
+  message id. A queued message does not wake an idle provider by itself.
+  Otherwise it stays `queued` (visible in `status.queued` and `inbox`) until
+  the recipient fetches its inbox; a human draft is never overwritten and
+  Enter is never synthesized blindly. Delivery keeps the same conversation
+  identity. Typing is a best-effort notification into a Codex, Fable or Grok
+  prompt only; a shell or an unidentified program is never typed into, even
+  when its last row looks like a prompt. After `start`, wait for that paste
+  (or end the turn); do not loop `status` in a shell. The inbox with its
+  `ack` is the durable channel. When the worker refuses or misses a delivery
+  report, only the report is sent again; the text is not typed twice.
+- The child's delegation context is the parent's live context (roles, review
+  rules) with the child's ownership, task and source rules appended; an
+  explicit `context` of at most 2048 bytes is appended last. The whole context
+  is bounded at 4096 bytes and nothing is ever cut: the parent's entire
+  context and the mandatory rules are kept, and a start whose combined context
+  would not fit is refused with the sizes, so the caller shortens `context` or
+  the lane's own context. Six nested delegations fit with the standard
+  context. The full task text is the child's
+  first requirement, readable in `/brief` `q` or `GET /state`.
+- Every sub-agent under Director, at any depth, is started through Director's
+  own child system (`flow_agent` / `director-flow agent` `start`). Never use a
+  provider's built-in sub-agent feature, a bare provider CLI or a bare
+  `makepad-agents` session for lane work, and no hidden children.
+  Provider-native in-process subagents, `local/tools/delegate` runs, bare
+  `makepad-agents start` sessions and detached provider chats are not lanes:
+  they have no callback, no history and no resume ownership here. A launched
+  child is admission, not completion.
+- A provider lane's startup context is a file inside the lane's own working
+  directory, `<cwd>/local/director/agent_context/<session>-<created>.context.md`
+  (owner-only; `<created>` is the lane record's creation time, so session
+  id plus record creation time distinguishes ordinary records; it is not
+  proof against copied or same-ms records). It is rewritten at every
+  start, resume and recovery; the provider's first prompt only names that file
+  and asks the agent to read it, so nothing outside the working directory is
+  read. It holds no URL or token, defers to the live brief, and carries the
+  delegation rule above to every child and every child of a child. The three
+  directories must be real ones: a symbolic link, junction or other reparse
+  point on the way is refused, never followed, and a file that cannot be
+  written, read back and resolved inside the working directory fails the
+  launch; a provider is never started without it. `local/` is ignored by this
+  repository and the directory carries its own `.gitignore`. Deleting the lane
+  removes that one file after its terminal ended, and only when it is provably
+  this lane's; an older `<state>/agent_sessions/<session>.context.md` stays
+  until that deletion. A lane that is only reattached is sent nothing. Shell
+  lanes get neither.
+- Every Codex and Fable root that Director starts, resumes or restarts after
+  account recovery (root lanes and delegated children alike) runs without
+  per-command approval: `codex [resume] --dangerously-bypass-approvals-and-sandbox`
+  (what `--yolo` stands for) and `claude --dangerously-skip-permissions`, placed
+  before the conversation and the prompt. Model selection, Grok and shell lanes
+  are unchanged, a running lane is only reattached and never restarted for
+  this, and the `tools/agents` browser keeps its own explicit menu choices.
+- A delegate tests Makepad UI with the existing `test` operation, on its own
+  retained artifact or on one its direct parent granted. The parent grants with
+  `agent '{"action":"grant","child":"<agent id>","artifact_id":"<artifact>"}'`;
+  the child finds `[grant, artifact, commit]` in `/brief` `grants` and starts
+  `test '{"action":"start","artifact_id":"<artifact>","grant":"<grant id>"}'`.
+  The grant names the exact owner lane, artifact, checkpoint and executable; the
+  run, input, results and video belong to the child. Nothing else is shared: a
+  shared-source child still cannot edit, build or mutate Git there, no build
+  record is copied, no external binary can be named, and another lane's
+  artifact, grant or run is refused. A granted executable stays on disk while
+  the grant exists, including after its parent lane was deleted.
 
 ## Persistent terminal connections
 
@@ -40,8 +199,8 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   stop checks the selected session identity and retains saved session files.
   The browser lists only this helper's scoped sessions, not system terminals.
 - Build the repository helper alongside Studio with
-  `cargo build --release -p makepad-screen -p makepad-director`. Director uses the
-  sibling `makepad-screen` executable from `tools/screen`; never install or
+  `cargo build --release -p makepad-agents -p makepad-director`. Director uses the
+  sibling `makepad-agents` executable from `tools/agents`; never install or
   discover a GNU Screen/tmux replacement from PATH.
 - The helper supports macOS/Linux PTYs and Windows ConPTY, with shared terminal
   parsing/rendering and a platform-specific local connection transport. Windows
@@ -53,13 +212,13 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
 - Each lane's Connect icon selects a running PTY from this Studio state directory.
   Connections are nonexclusive; connecting another view leaves existing clients
   and the lane's original session running. An external terminal can use the same
-  helper: `makepad-screen attach --state-dir <studio-state>/agent_sessions
+  helper: `makepad-agents attach --state-dir <studio-state>/agent_sessions
   --session <session-id>`. Ctrl+D detaches that client and leaves the agent
   running. This is the host's only hotkey; other keys pass through unchanged.
   Literal control bytes inside bracketed paste are never detach shortcuts.
 - Attachments retain their terminal's own default text, background, cursor and
   indexed palette colors. Project only explicit app color overrides and their
-  resets. For an external terminal, use `makepad-screen start --attach` with
+  resets. For an external terminal, use `makepad-agents start --attach` with
   the ordinary start arguments: it samples the terminal's colors before the
   child starts, so startup OSC queries receive real theme values. The captured
   theme remains stable while detached or viewed from another terminal. Direct
@@ -77,6 +236,14 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   launching apps, and stored media/checkpoints. Newly recorded work appears
   normally. Video deletion is a separate explicit operation. Agents may use
   `director-flow flow_lane '{"state":"clear_history"}'` only when the person asks.
+- A lane's name is its flow title, given by create, delegation or
+  `flow_rename`. It is durable and is what the tree, the lane header and the
+  lane's terminal tab show, also after a restart. The caption the running
+  program sets on its PTY (the shell's name, a provider's startup banner,
+  spinner frames) describes the process: it never renames a lane and appends
+  no event. Ordinary terminal tabs outside the lanes keep their live captions.
+  A lane whose view is connected to another session keeps its own name and
+  adds which lane or session it is viewing.
 - Session ownership is independent of its displayed views. Agent callbacks use
   the PTY's stable identity, never the focused/selected lane. A shared view shows
   its source lane; use that lane for process lifecycle and account recovery.
@@ -101,6 +268,16 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   action. Confirm against the same active lane and provider shown in the dialog.
   Inspect `status.flow_terminals` for the lane's asynchronous recovery phase,
   saved conversation ID, and errors. Admission does not mean recovery succeeded.
+- The global `status` is a bounded index: its serialized reply never exceeds
+  12 KiB and is always complete JSON. It lists, for as many lanes as fit, the
+  ids, parent, lifecycle, state and launch evidence (`flows.lanes`) together
+  with the lane terminal's session, state, provider, conversation and short
+  error excerpts (`flow_terminals`); active lanes come first. A row is listed
+  whole or counted (`omitted_lanes`, `omitted_flow_terminals`,
+  `omitted_sessions`, `omitted_tabs`, `omitted_activity`,
+  `omitted_layout_bytes`); `flows.counts` is always complete and usage is
+  summarized without accounts. Use `flow_list`, `flow_inspect`, `flow_agent
+  status` and `inspect_usage` for full detail.
 - For Fable, preserve the verified live root conversation and submit `/login`
   in that same terminal only when its input prompt is visibly empty. Preserve
   any draft; do not erase it or restart Fable in a new conversation.
@@ -126,8 +303,8 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   Green means the agent actually reports the item implemented, not merely planned.
 - The backing terminal receives `MAKEPAD_STUDIO_FLOW_ID`,
   `MAKEPAD_STUDIO_CONTROL_DIR`, and `MAKEPAD_STUDIO_CLI`. At startup and resume,
-  The PTY host also supplies `MAKEPAD_SCREEN_SESSION` and
-  `MAKEPAD_SCREEN_STATE_DIR`; `director-flow` resolves the current owning lane
+  The PTY host also supplies `MAKEPAD_AGENTS_SESSION` and
+  `MAKEPAD_AGENTS_STATE_DIR`; `director-flow` resolves the current owning lane
   from these on every call, including after splitting a lane. Do not override
   them or pass another lane identity. Fetch the compact context (roles, todo/requirement revisions, tasks,
   and build gate):
@@ -162,7 +339,8 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   never grant ownership of human input, account recovery, or root lifecycle.
   The CLI remains available as a fallback, using the same durable queue.
 - Keep each task in its own flow and private local worktree. Expect roughly four
-  simultaneous flows. Reuse that worktree and shared Cargo cache across builds.
+  simultaneous root flows plus their delegates. Reuse that worktree and shared
+  Cargo cache across builds.
 - Read `flow_inspect` before changing state. Record new user requirements
   immediately with `flow_requirement`; do not wait for the current list to finish.
   Keep the original feedback and its artifact/run identity.
@@ -176,10 +354,17 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   evidence and the exact build hash when claiming a fix is ready to evaluate.
 - The user can evaluate a partial revision and add requirements during coding.
   New requirements must not disappear when another revision finishes.
-- Source edits may continue while the previous app is open. Checks, formatting,
-  checkpointing, and compilation of the next build wait for the user to choose
-  **Close & freeze** and for Studio to observe the old process exit. Do not kill
-  the user's evaluation app to unblock your own build. Report the waiting state.
+- Per the root rule, source edits, checks and the build of the next revision may
+  proceed while the previous app is still running; do not wait for the person
+  to close it. When the replacement is ready, that workflow's own app is closed
+  gracefully and restarted without a separate confirmation: verify the old
+  process exited and relaunch with the same workspace and state. This never
+  requires a separate handoff after native user input: under the root rule,
+  the agent may continue testing and restart the active workflow's app.
+- Observe Director's actual host state with `flow_inspect`: a queued or refused
+  build has not run. If a host gate still blocks an authorized restart, report
+  it as an implementation limitation, not a requirement that the user close the
+  app. `flow_freeze` records a request; it does not close an app.
 
 ## Images and design feedback
 
@@ -211,6 +396,49 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   during a test. Show their observed UI as compact horizontal tiles; expansion
   is a pixel-accurate, read-only view. Human clicks on a preview must never be
   forwarded to a UI that the AI is actively testing.
+- `test start` tries the Director-hosted path first (`mode` defaults to
+  `embedded`): Director registers the run with its broker and launches the
+  retained executable with `--stdin-loop` and every host setting, so a person
+  can watch the test in its lane. Never launch a bare binary with
+  `--stdin-loop` yourself. The reply carries the `run_id` at once, while the
+  registration is still pending and no process exists; poll
+  `test '{"action":"status","run_id":"<run>"}'` (it answers `phase: launching`)
+  until the start operation completes, and read `requested_mode` and
+  `observed_mode` instead of assuming either. A hosted start completes only
+  after the app answered its remote port with the owned PID, the host
+  transport presented its first frame (`first_frame` in status; a live port
+  alone does not prove a rendering surface) and the input guard was read;
+  `waiting_for` names the step still pending. `"mode":"standalone"` skips
+  hosting and has no hosted frame to observe (`first_frame: null`). When the
+  host is unavailable, or the hosted app never publishes its endpoint or
+  presents no frame within 20 seconds, Director closes exactly that attempt,
+  waits for its exit and unregistration, and starts one standalone
+  replacement under a new run id:
+  status of the old run returns `replaced_by`, and the operation report keeps
+  `attempt_run_id` and `fallback_reason`. Once a test became active nothing is
+  rerun for the agent.
+- A running AI test shows in its lane as an **AI test** item keyed by that run,
+  with the executable's real provenance (the lane's own retained build, or the
+  parent's granted one with the grant and owner). It is not a build or
+  artifact of the lane and has no close, freeze or pop-out control while the
+  agent owns the run; a hosted test shows its live preview there.
+- An AI-owned preview is watch-only: no mouse, keyboard, IME, drop or clipboard
+  input of the person reaches it, the app cannot change the person's
+  clipboard, it is not popped out, and creating it never selects a tab or
+  takes focus. A lane on another tree level keeps its hosted app running with
+  its own offscreen surface, ticks and recording. One view is hosted per app;
+  further windows are counted as `unobserved_windows`, not shown or recorded.
+- Test input uses the app's human-input counter for evidence: read `/activity`
+  and carry `if_user_seq` through each bounded sequence, checking response
+  counters and `applied` before retrying. Interrupted steps are not proof of
+  correct behavior. Native input does not revoke the agent's authorization to
+  continue or restart the active workflow's app; refresh the counter and
+  resume without a permission question (root rule, 2026-09-22).
+- Director may still expose an interrupted run as `handed_off` and refuse
+  further test operations under its current runtime protocol. Report that
+  actual state and use supported lifecycle operations to continue; do not
+  claim an operation succeeded when the host refused it. A host limitation
+  is distinct from a requirement to obtain another user handoff.
 - Capture each supported UI test to MP4 and retain the final frame, run identity,
   checkpoint hash, results, and recording path. Hidden test windows must still
   publish observable frames. Report capture/recording failures explicitly.
@@ -229,7 +457,9 @@ or resuming the saved conversation. Ordinary Studio shutdown only detaches.
   (derive coordinates from that app's snapshot). Pause at least two seconds on
   each meaningful state so a person can follow the video. Finish with
   `test '{"action":"stop","run_id":"<run>"}'`, poll completion, and verify the
-  MP4 finalized. Link the recording and before/after captures to the relevant
+  MP4 finalized: the stop result lists the recordings and final frames found on
+  disk with the node, flow, run, artifact, checkpoint and observed mode, and an
+  empty list means none was observed. Link the recording and before/after captures to the relevant
   todo in the progress report. Mark the behavior **demonstrated**, separately
   from test success or **human accepted**; a title or completed recording grants
   neither. All compact `test` examples above use the `director-flow` executable.

@@ -77,7 +77,10 @@ mod tests {
         t.step(0.0);
         assert_eq!(t.weights, old);
         t.step(1.0);
-        assert_eq!(t.weights, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        for (index, weight) in t.weights.iter().enumerate() {
+            let expected = if index == DesktopStyle::Windows2000 as usize { 1.0 } else { 0.0 };
+            assert_eq!(*weight, expected, "style weight at index {index}");
+        }
     }
 }
 
@@ -453,7 +456,6 @@ pub fn app_icon(id: &str) -> Ico {
         "video" => Ico::Play,
         "pdf" => Ico::Check,
         "mixer" => Ico::Speaker,
-        "vj" => Ico::Headphone,
         "score" => Ico::Bell,
         "route" => Ico::Globe,
         "fabric" => Ico::Shirt,

@@ -666,7 +666,7 @@ impl Tessellator {
                 let flags = p1.flags;
                 if (flags & (PT_BEVEL | PT_INNERBEVEL)) != 0 {
                     let vi_before = verts.len();
-                    self.emit_bevel_join(verts, indices, p0, p1, hw, hw, u0, u1, line_join, self.inner_pivots[first + j]);
+                    self.emit_bevel_join(verts, indices, base, p0, p1, hw, hw, u0, u1, line_join, self.inner_pivots[first + j]);
                     for v in &mut verts[vi_before..] {
                         v.stroke_dist = dist;
                     }
@@ -910,6 +910,9 @@ impl Tessellator {
         &self,
         verts: &mut Vec<VVertex>,
         indices: &mut Vec<u32>,
+        // The subpath's first vertex: a join never connects to a pair
+        // before it, which belongs to the previous subpath.
+        base: u32,
         p0: VPoint,
         p1: VPoint,
         lw: f32,
@@ -988,8 +991,10 @@ impl Tessellator {
             push_pair(inner1, outer1);
         }
         let end = verts.len() as u32;
-        // Connect to the previous pair, then pair to pair through the join.
-        let mut pair = if vi >= 2 { vi - 2 } else { vi };
+        // Connect to the previous pair of this subpath (a closed subpath
+        // that opens on a join has none yet), then pair to pair through
+        // the join.
+        let mut pair = if vi >= base + 2 { vi - 2 } else { vi };
         while pair + 2 < end {
             indices.push(pair);
             indices.push(pair + 1);
@@ -2996,5 +3001,41 @@ mod fixture_bench {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::path::{LineCap, LineJoin, VectorPath};
+
+    fn covers(verts: &[VVertex], indices: &[u32], p: (f32, f32)) -> bool {
+        let side = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (a.0 - c.0) * (b.1 - c.1) - (b.0 - c.0) * (a.1 - c.1);
+        indices.chunks(3).any(|tri| {
+            let q = |k: u32| (verts[k as usize].x, verts[k as usize].y);
+            let (a, b, c) = (q(tri[0]), q(tri[1]), q(tri[2]));
+            let (d1, d2, d3) = (side(p, a, b), side(p, b, c), side(p, c, a));
+            !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+        })
+    }
+
+    /// An open subpath followed by a closed one that starts on a round
+    /// join (an inbox icon: the tray line, then the rounded box). The
+    /// join at the loop's start used to connect back to the end cap of
+    /// the subpath before it, drawing a diagonal through the empty middle.
+    #[test]
+    fn a_join_never_connects_to_the_previous_subpath() {
+        let mut path = VectorPath::new();
+        crate::path_data::parse_path_data(
+            "M3.75 13.25h4.5l1.5 2.5h4.5l1.5-2.5h4.5 M6.9 5.25h10.2a1.5 1.5 0 0 1 1.4 1l1.75 6v5.5a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5v-5.5l1.75-6a1.5 1.5 0 0 1 1.4-1z",
+            &mut path,
+        );
+        let mut tess = Tessellator::default();
+        tess.flatten(&path, 0.25);
+        let (mut verts, mut indices) = (Vec::new(), Vec::new());
+        tess.stroke(1.5, LineCap::Round, LineJoin::Round, 4.0, 1.0, &mut verts, &mut indices);
+        assert!(!covers(&verts, &indices, (13.6, 9.25)), "the empty middle of the box is drawn");
+        assert!(covers(&verts, &indices, (12.0, 5.25)), "the box's top edge is drawn");
+        assert!(covers(&verts, &indices, (12.0, 15.75)), "the tray line is drawn");
     }
 }

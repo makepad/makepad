@@ -66,6 +66,35 @@ thread_local! {
     static DEAD_SPLASH_ISOLATES: RefCell<Vec<SplashVmId>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// Script mods the embedding host installs into every Splash isolate, in
+    /// registration order. Registered from host code that has no `Cx` in hand,
+    /// hence a thread-local rather than `CxWidgetAsync` state.
+    static HOST_ISOLATE_MODS: RefCell<Vec<fn(&mut ScriptVm)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Install a script mod into every Splash isolate allocated from here on.
+///
+/// An isolate receives makepad's own mods and nothing else, so a widget type
+/// defined out in host code is otherwise unnameable from a mounted body — the
+/// body has no way to say it, and the host is forced to substitute a built-in.
+/// Pass the `script_mod` fn of the crate whose widgets those bodies should reach.
+///
+/// An isolate takes its mods at allocation, so a registration only reaches
+/// isolates allocated after it: register before the first mount. Registering the
+/// same mod twice installs it twice, which is wasteful but harmless — the second
+/// pass rebinds the same names.
+///
+/// Host mods install last: after the ambient-authority strip (`fs`, `run`, `res`,
+/// `cx.quit`) and after the jailed `fs` and brokered `host` re-registrations. A
+/// host mod therefore cannot be stripped by that pass, and it sees the isolate's
+/// final namespace. This does mean a host mod could re-expose ambient authority
+/// if it deliberately handed one back — the host is trusted code, and it already
+/// chose what to install.
+pub fn register_splash_isolate_mod(f: fn(&mut ScriptVm)) {
+    HOST_ISOLATE_MODS.with(|g| g.borrow_mut().push(f));
+}
+
 /// Queue a Splash isolate for reclamation on the next isolate alloc. Called from
 /// `Splash::drop`, which has no `Cx`. Ignores the main VM (id 0), never an isolate.
 pub(crate) fn mark_splash_isolate_dead(vm_id: SplashVmId) {
@@ -470,6 +499,16 @@ impl CxSplashVmExt for Cx {
             // clipboard, IPC, ...); requests queue for the embedding host to
             // answer, and no host = nothing resolves. See splash_host.rs.
             crate::splash_host::script_mod(&mut vm);
+            // Mods the embedding host registered through
+            // `register_splash_isolate_mod`. Last, so they see the final
+            // namespace and are not removed by the strip above. Collected first
+            // so the thread-local is not borrowed while a mod runs — a mod is
+            // free to register another.
+            let host_mods: Vec<fn(&mut ScriptVm)> =
+                HOST_ISOLATE_MODS.with(|g| g.borrow().clone());
+            for install in host_mods {
+                install(&mut vm);
+            }
             vm.bx
         };
         let std = std::mem::replace(&mut self.script_data.std, outer_std);
@@ -1515,7 +1554,11 @@ mod isolate_bench {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
         let mut rows = Vec::new();
-        for n in [1usize, 2, 8, 32] {
+        // Measured 2026-09-22, release: n=1 30.06 ms, n=2 29.92, n=8 29.63,
+        // n=32 29.49, each with RSS growth. The per-isolate cost is flat, and
+        // the only assertion is that it is positive, so a single isolate and
+        // a pair already cover the shape the 8- and 32-wide rounds repeated.
+        for n in [1usize, 2] {
             let rss0 = rss_kb();
             let t0 = Cx::monotonic_now();
             let ids: Vec<SplashVmId> = (0..n).map(|_| cx.alloc_splash_vm_with_network(false)).collect();
@@ -1640,6 +1683,7 @@ pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
 
 #[cfg(test)]
 mod isolate_entry_tests {
+
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -1697,6 +1741,56 @@ mod isolate_entry_tests {
     }
 
     #[test]
+    fn a_host_registered_mod_reaches_isolates_allocated_after_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static INSTALLS: AtomicUsize = AtomicUsize::new(0);
+
+        fn install_probe(vm: &mut ScriptVm) {
+            INSTALLS.fetch_add(1, AtomicOrdering::Relaxed);
+            vm.eval(crate::makepad_script::script! {
+                mod.host_probe = 7
+            });
+        }
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+
+        // Allocated before any registration: the host mod is not in its
+        // namespace, and nothing was installed.
+        let before = cx.alloc_splash_vm();
+        let missing = cx.with_script_vm_id(before, |vm| {
+            vm.eval(crate::makepad_script::script! { mod.host_probe })
+        });
+        assert!(missing.is_err(), "probe must not exist before registration");
+        assert_eq!(INSTALLS.load(AtomicOrdering::Relaxed), 0);
+
+        register_splash_isolate_mod(install_probe);
+
+        // Allocated after: the mod ran for this isolate and its binding resolves.
+        let after = cx.alloc_splash_vm();
+        assert_eq!(INSTALLS.load(AtomicOrdering::Relaxed), 1);
+        let found = cx.with_script_vm_id(after, |vm| {
+            vm.eval(crate::makepad_script::script! { mod.host_probe })
+        });
+        assert!(!found.is_err(), "probe must resolve inside the isolate");
+
+        // Each further isolate gets its own install — the registry is not
+        // consumed by the first allocation.
+        let third = cx.alloc_splash_vm();
+        assert_eq!(INSTALLS.load(AtomicOrdering::Relaxed), 2);
+
+        // The earlier isolate is unchanged: mods are taken at allocation.
+        let still_missing = cx.with_script_vm_id(before, |vm| {
+            vm.eval(crate::makepad_script::script! { mod.host_probe })
+        });
+        assert!(still_missing.is_err());
+
+        cx.free_splash_vm(before);
+        cx.free_splash_vm(after);
+        cx.free_splash_vm(third);
+    }
+
+    #[test]
     fn entering_an_isolate_makes_it_the_current_vm_and_leaving_restores_the_outer_one() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
@@ -1726,6 +1820,7 @@ mod isolate_entry_tests {
 
 #[cfg(test)]
 mod isolate_tests {
+
     use super::*;
     use crate::splash::Splash;
     use crate::view::View;

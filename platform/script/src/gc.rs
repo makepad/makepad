@@ -760,6 +760,9 @@ impl ScriptHeap {
             handles: self.handles.len() - self.handles_free.len(),
             regexes: self.regexes.len() - self.regexes_free.len(),
         };
+        // A collection is the one point where retained capacity can shrink;
+        // re-derive the retained-heap cap's headroom from the swept state.
+        self.reconcile_heap_bytes_if_limited();
     }
 
     /// Check if garbage collection should be triggered.

@@ -136,8 +136,10 @@ fn map_metal_gpu_times_to_app_timeline(
 // Uses global IOSurface IDs which work across processes without needing Mach port transfer
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 use crate::os::apple::apple_sys::{
-    CFRelease, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
+    CFRelease, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
 };
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use crate::os::apple::apple_sys::{IOSurfaceCreate, IOSurfaceGetID};
 
 impl Cx {
     fn total_drawcall_log_enabled() -> bool {
@@ -576,6 +578,9 @@ impl Cx {
                     .and_then(|id| metal_cx.backings.borrow().get(&id).map(|b| b.bytes));
                 if !draw_item.retained_presentable(backing_bytes.unwrap_or_else(|| draw_item.os.instance_buffer.inner.as_ref().map_or(0, |inner| inner.len))) {
                     self.passes[draw_pass_id].paint_dirty = true;
+                    // Not ready yet either: a frame without it is partial.
+                    self.pipeline_skips += 1;
+                    self.pipeline_skip_repaint = Some(self.repaint_id);
                     continue;
                 }
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
@@ -587,6 +592,8 @@ impl Cx {
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
+                    self.pipeline_skips += 1;
+                    self.pipeline_skip_repaint = Some(self.repaint_id);
                     continue;
                 }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
@@ -686,6 +693,8 @@ impl Cx {
                         // Keep this pass live while the driver compiles. No wait,
                         // no fallback synchronous compile on first use.
                         self.passes[draw_pass_id].paint_dirty = true;
+                        self.pipeline_skips += 1;
+                        self.pipeline_skip_repaint = Some(self.repaint_id);
                         continue;
                     }
                 };
@@ -1669,7 +1678,21 @@ impl Cx {
             }
             DrawPassMode::Drawable(drawable, target_presentation_time) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                let screenshot = self.build_screenshot_struct(
+                // A frame held back (whole frames only, one part not ready)
+                // is not the picture on screen: no grab or snapshot of it.
+                let withheld = (self.pipeline_skip_repaint == Some(self.repaint_id) || std::mem::take(&mut self.hold_next_paint))
+                    && crate::cx_api::CxOsApi::seconds_since_app_start(self) < self.whole_frames_until;
+                if !withheld {
+                    if let Some(began) = self.whole_hold_began.take() {
+                        crate::trace!(
+                            "switch",
+                            "whole frame presented {:.0} ms after the hold began ({} draws not ready so far)",
+                            (crate::cx_api::CxOsApi::seconds_since_app_start(self) - began) * 1000.0,
+                            self.pipeline_skips
+                        );
+                    }
+                }
+                let screenshot = if withheld { None } else { self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
                     0,
@@ -1678,13 +1701,16 @@ impl Cx {
                     first_texture,
                     None,
                     pass_window_id,
-                );
+                ) };
                 // A repaint that stopped for a hole in any of its passes
                 // commits this window pass (queue order) but does not
                 // present it: the last whole frame stays up. The uniform
                 // starvation of THIS pass is caught here too — it is only
                 // known once its draw list is encoded.
-                let present = if metal_cx.aborted_repaint == Some(self.repaint_id) {
+                // Asked for whole frames only (a change that should appear
+                // in one step): a frame missing a draw whose pipeline is
+                // still compiling is not shown either.
+                let present = if metal_cx.aborted_repaint == Some(self.repaint_id) || withheld {
                     None
                 } else {
                     Some((drawable, target_presentation_time))
@@ -1710,7 +1736,19 @@ impl Cx {
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                let screenshot = self.build_screenshot_struct(
+                let withheld = (self.pipeline_skip_repaint == Some(self.repaint_id) || std::mem::take(&mut self.hold_next_paint))
+                    && crate::cx_api::CxOsApi::seconds_since_app_start(self) < self.whole_frames_until;
+                if !withheld {
+                    if let Some(began) = self.whole_hold_began.take() {
+                        crate::trace!(
+                            "switch",
+                            "whole frame presented {:.0} ms after the hold began ({} draws not ready so far)",
+                            (crate::cx_api::CxOsApi::seconds_since_app_start(self) - began) * 1000.0,
+                            self.pipeline_skips
+                        );
+                    }
+                }
+                let screenshot = if withheld { None } else { self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
                     0,
@@ -1719,7 +1757,7 @@ impl Cx {
                     first_texture,
                     None,
                     pass_window_id,
-                );
+                ) };
                 self.commit_command_buffer(
                     metal_cx,
                     screenshot,
@@ -1729,7 +1767,7 @@ impl Cx {
                     gpu_counters,
                     gpu_profile_label.clone(),
                     command_buffer,
-                    (metal_cx.aborted_repaint != Some(self.repaint_id)).then_some((drawable, None)),
+                    (metal_cx.aborted_repaint != Some(self.repaint_id) && !withheld).then_some((drawable, None)),
                 );
             }
         }
@@ -1755,6 +1793,63 @@ impl Cx {
         painted
     }
 
+    /// The frame this window pass presents, copied for any pending
+    /// transition snapshots (`window_snapshot.rs`) in the same command
+    /// buffer: exactly the picture on screen, ready for later passes to
+    /// sample (one queue, so they run after the copy).
+    fn copy_window_snapshots(
+        &mut self,
+        metal_cx: &MetalCx,
+        command_buffer: ObjcId,
+        in_texture: ObjcId,
+        window_id: Option<usize>,
+    ) {
+        let Some(index) = window_id else { return };
+        if !self.window_snapshot_wanted(index) {
+            return;
+        }
+        // A repaint that is not presented is not the picture on screen: the
+        // request waits for the next whole one.
+        if metal_cx.aborted_repaint == Some(self.repaint_id) {
+            return;
+        }
+        let width: usize = unsafe { msg_send![in_texture, width] };
+        let height: usize = unsafe { msg_send![in_texture, height] };
+        let format: u64 = unsafe { msg_send![in_texture, pixelFormat] };
+        if width == 0 || height == 0 {
+            return;
+        }
+        for at in 0..self.window_snapshots.len() {
+            let request = &self.window_snapshots[at];
+            if request.window_id.0 != index || request.state != crate::window_snapshot::WindowSnapshotState::Pending {
+                continue;
+            }
+            let texture_id = request.texture.texture_id();
+            let descriptor = RcObjcId::from_owned(
+                NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
+            );
+            unsafe {
+                let () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
+                let () = msg_send![descriptor.as_id(), setDepth: 1u64];
+                let () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
+                let () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
+                let () = msg_send![descriptor.as_id(), setWidth: width as u64];
+                let () = msg_send![descriptor.as_id(), setHeight: height as u64];
+                let () = msg_send![descriptor.as_id(), setPixelFormat: format];
+            }
+            let texture = RcObjcId::from_owned(
+                NonNull::new(unsafe { msg_send![metal_cx.device, newTextureWithDescriptor: descriptor.as_id()] }).unwrap(),
+            );
+            unsafe {
+                let blit_encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+                let () = msg_send![blit_encoder, copyFromTexture: in_texture toTexture: texture.as_id()];
+                let () = msg_send![blit_encoder, endEncoding];
+            }
+            self.textures[texture_id].os.texture = Some(texture);
+            self.window_snapshots[at].state = crate::window_snapshot::WindowSnapshotState::Captured;
+        }
+    }
+
     fn build_screenshot_struct(
         &mut self,
         metal_cx: &MetalCx,
@@ -1766,6 +1861,7 @@ impl Cx {
         _alloc: Option<TextureAlloc>,
         window_id: Option<usize>,
     ) -> Option<ScreenshotInfo> {
+        self.copy_window_snapshots(metal_cx, command_buffer, in_texture, window_id);
         let request_ids =
             self.take_studio_screenshot_request_ids_for_window(kind_id as u32, window_id);
         // A pending grab/probe request, or a screen-capture sink that is due a
@@ -2716,6 +2812,8 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
     for staging in used {
         // Excess buffers are released on the completion thread. UI never
         // contends with this callback, nor frees a rejected pool return.
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if pool
             .count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -2725,6 +2823,8 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
         {
             continue;
         }
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if pool
             .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bytes| {
@@ -5798,7 +5898,7 @@ impl CxTexture {
         staging_len as u64
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn update_shared_texture(&mut self, metal_device: ObjcId) -> IOSurfaceID {
         // we need a width/height for this one.
         if !self.alloc_shared() {

@@ -1,0 +1,49 @@
+// The workspace script. It runs ALONE while it warms the cache every other
+// script reads, then gives the wall back: the app tiles start while it goes on
+// with the workspace's own checks and tests beside them.
+// A compiler warning is orange, never red: only an error fails a check.
+use mod.std.*
+use mod.ci;
+
+// Director drives cargo builds and child processes: a desktop tool, so it is
+// warmed for the desktop rows only, as its own script asks.
+ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-director"]})
+
+// The pty helper a terminal starts its shell through. The terminal, director
+// and window manager scripts ask for it; built here it is a cache answer for
+// them instead of a cargo run that waits on the test build below.
+ci.step("build the pty helper", fn(){
+    ci.build({package: "makepad-agents" binary: "agents"})
+})
+
+ci.shared()
+
+ci.step("check host", fn(){
+    ci.cargo(["check", "--workspace"])
+})
+
+// Each app owns its other-platform checks. These are the shared UI crates.
+ci.check_targets({
+    packages: ["makepad-platform", "makepad-draw", "makepad-widgets"]
+    targets: ci.host.targets
+})
+
+// The platform's own tests, in release, every binary timed: two minutes is
+// the budget, and going over it turns this block orange and names the slow ones.
+ci.step("platform tests", fn(){
+    ci.test({dirs: ["platform", "draw", "widgets", "tools/ci"] budget_secs: 120})
+})
+
+// Every other crate's tests: the deep run, opt-in with `deep_tests = true` in
+// ci.toml or `ci --deep`.
+if ci.deep {
+    ci.step("deep tests", fn(){
+        ci.test({workspace: true budget_secs: 1200 cap_secs: 900 timeout_secs: 10800})
+    })
+}
+
+// Optional native Windows coverage, with [machines.windows] in ci.toml:
+// let win = ci.machine("windows")
+// win.sync()
+// win.cargo(["test", "-p", "makepad-platform"])
+nil

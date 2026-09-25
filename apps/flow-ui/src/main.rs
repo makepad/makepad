@@ -1637,7 +1637,27 @@ impl App {
                     return;
                 }
             },
-            CanvasEdit::Disconnect { to_node, to_port } => {
+            // A wire picked up and dropped elsewhere: one revision that
+            // lets go of the old input and takes the new one.
+            CanvasEdit::Reconnect {
+                from_node,
+                from_port,
+                old_to_node,
+                old_to_port,
+                to_node,
+                to_port,
+                ..
+            } => {
+                let detached = graph_edit::disconnect(&graph, &old_to_node, &old_to_port);
+                match graph_edit::connect(&detached, &from_node, &from_port, &to_node, &to_port) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        self.set_error(cx, &error);
+                        return;
+                    }
+                }
+            }
+            CanvasEdit::Disconnect { to_node, to_port, .. } => {
                 graph_edit::disconnect(&graph, &to_node, &to_port)
             }
             CanvasEdit::Delete { node } => graph_edit::delete_node(&graph, &node),
@@ -2390,6 +2410,7 @@ impl App {
                     from_port,
                     to_node,
                     to_port,
+                    ..
                 }) => inspector.show_edge(
                     cx,
                     graph.as_ref(),
@@ -3800,7 +3821,7 @@ impl App {
                     Some(Selection::Node(node)) => Some(CanvasEdit::Delete { node }),
                     Some(Selection::Edge {
                         to_node, to_port, ..
-                    }) => Some(CanvasEdit::Disconnect { to_node, to_port }),
+                    }) => Some(CanvasEdit::Disconnect { to_node, to_port, key: None }),
                     None => None,
                 };
                 if let Some(edit) = edit {
@@ -4134,6 +4155,8 @@ impl MatchEvent for App {
         for action in canvas_actions {
             match action {
                 FlowCanvasAction::None => {}
+                // Flow's nodes have no inner graph to open.
+                FlowCanvasAction::Open { .. } => {}
                 FlowCanvasAction::Select(selection) => {
                     self.selected_node = selection
                         .as_ref()
@@ -5819,6 +5842,7 @@ mod layout_tests {
                 rect: Rect::default(),
                 is_over: true,
                 is_sweep: false,
+                cancelled: false,
             })),
             widget_uid: asset_item.widget_uid(),
             group: Some(WidgetActionGroup {

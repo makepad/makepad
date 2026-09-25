@@ -2163,6 +2163,14 @@ impl RadialMenu {
                 self.press_while_open(cx, me.abs, follows);
                 true
             }
+            // The press taken away picks nothing: the menu it holds closes.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if follows && self.open.is_some() {
+                    self.cancel(cx);
+                }
+                // Not consumed: the cancel goes on to anything else holding it.
+                false
+            }
             Event::MouseUp(me) => {
                 if follows {
                     self.release_at(cx, me.abs);
@@ -2288,6 +2296,12 @@ impl RadialMenu {
             Hit::FingerMove(fe) => self.pointer_at(cx, fe.abs),
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.pointer_at(cx, fe.abs),
             Hit::FingerHoverOut(_) => self.pointer_left(cx),
+            // A press taken away picks nothing: the menu it holds closes.
+            Hit::FingerUp(fe) if fe.is_primary_hit() && fe.cancelled => {
+                if self.open.is_some() {
+                    self.cancel(cx);
+                }
+            }
             Hit::FingerUp(fe) if fe.is_primary_hit() => self.release_at(cx, fe.abs),
             Hit::KeyDown(ke) => {
                 if self.open.is_some() {
@@ -2678,6 +2692,7 @@ impl Widget for RadialMenu {
         if self.swallow_up {
             let released = match event {
                 Event::MouseUp(_) => true,
+                Event::FingerCancel(c) => c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id),
                 Event::TouchUpdate(te) => te.touches.iter().any(|touch| touch.state == TouchState::Stop),
                 _ => false,
             };
@@ -2914,6 +2929,7 @@ mod tests {
     /// the order the list declared it, so the log names each mistake.
     #[test]
     fn build_tree_keeps_order_and_drops_orphans_duplicates_and_depth() {
+        crate::on_test_cx(|| {
         let flat: Vec<(&str, &str, &str, bool)> = ["a", "b", "b/x", "b/y", "c/z", "b/x/q", "b/x/q/deep", "a", "b//w"]
             .iter()
             .map(|key| (*key, "label", "", true))
@@ -2924,12 +2940,14 @@ mod tests {
         assert_eq!(tree[1].children[0].id, LiveId::from_str("b/x"), "the id is the full path's");
         let (empty, dropped) = build_tree(&[("", "nothing", "", true)]);
         assert!(empty.is_empty() && dropped == vec![String::new()], "an empty key is an empty segment");
+        });
     }
 
     /// Nodes built in Rust carry their full path too, however deep they
     /// were built before being placed.
     #[test]
     fn children_carry_their_parents_key() {
+        crate::on_test_cx(|| {
         let share = RadialNode::new("share", "Share").children(vec![
             RadialNode::new("mail", "Mail"),
             RadialNode::new("export", "Export").children(vec![RadialNode::new("text", "Text")]),
@@ -2943,6 +2961,7 @@ mod tests {
         prune(&mut deep, 0, &mut dropped);
         assert_eq!(dropped, vec!["a/b/c/d"]);
         assert_eq!(levels(&deep), MAX_DEPTH);
+        });
     }
 
     /// A flat ring of `count` choices around a hub of `hub` points, which is
@@ -2964,6 +2983,7 @@ mod tests {
     /// which is the whole reason a ring beats a list.
     #[test]
     fn the_dead_zone_answers_nothing_and_distance_past_it_says_nothing_more() {
+        crate::on_test_cx(|| {
         let ring = flat(4, 30.0);
         assert_eq!(pick(&ring, 30.0, 0.0, 0.0), None, "the centre itself");
         let (dx, dy) = aim(45.0, 29.0);
@@ -2972,6 +2992,7 @@ mod tests {
         assert_eq!(pick(&ring, 30.0, dx, dy), Some((0, 1)), "one point out and it answers");
         let (dx, dy) = aim(45.0, 4000.0);
         assert_eq!(pick(&ring, 30.0, dx, dy), Some((0, 1)), "a mile out is the same wedge");
+        });
     }
 
     /// Wedge 0 is CENTRED on twelve o'clock, so the seam between the last
@@ -2981,6 +3002,7 @@ mod tests {
     /// fault line down the middle of the most-aimed-at target on the ring.
     #[test]
     fn the_seam_between_the_last_wedge_and_the_first_is_at_twelve_oclock() {
+        crate::on_test_cx(|| {
         assert_eq!(flat_at(4, 10.0, 0.0), Some(0), "straight up");
         assert_eq!(flat_at(4, 10.0, 0.5), Some(0), "a hair clockwise of up");
         assert_eq!(flat_at(4, 10.0, -0.5), Some(0), "a hair anticlockwise of up");
@@ -2988,6 +3010,7 @@ mod tests {
         assert_eq!(flat_at(4, 10.0, 45.1), Some(1), "just over it");
         assert_eq!(flat_at(4, 10.0, 314.9), Some(3), "just short of the last seam");
         assert_eq!(flat_at(4, 10.0, 315.1), Some(0), "and over that one, back to the first");
+        });
     }
 
     /// An odd ring has no wedge opposite another and no seam on any axis,
@@ -2996,6 +3019,7 @@ mod tests {
     /// side.
     #[test]
     fn an_odd_ring_still_lands_every_wedge_on_its_own_direction() {
+        crate::on_test_cx(|| {
         for i in 0..5 {
             let centre = i as f64 * 72.0;
             assert_eq!(flat_at(5, 20.0, centre), Some(i), "the middle of wedge {i}");
@@ -3007,6 +3031,7 @@ mod tests {
         assert_eq!(flat_at(3, 20.0, 0.0), Some(0), "up");
         assert_eq!(flat_at(3, 20.0, 90.0), Some(1), "right");
         assert_eq!(flat_at(3, 20.0, 270.0), Some(2), "left");
+        });
     }
 
     /// The wedge that is drawn and the wedge that is picked are the same
@@ -3015,6 +3040,7 @@ mod tests {
     /// a flick to fall into.
     #[test]
     fn the_drawn_spans_tile_the_circle_and_agree_with_the_picking() {
+        crate::on_test_cx(|| {
         for count in [1usize, 2, 3, 5, 8] {
             let ring = ArcRing::full(count, 20.0, 96.0);
             for i in 0..count {
@@ -3029,17 +3055,20 @@ mod tests {
                 );
             }
         }
+        });
     }
 
     /// One choice is a whole circle, and an empty ring answers nothing at
     /// all rather than a wedge that is not there.
     #[test]
     fn a_ring_of_one_takes_every_direction_and_a_ring_of_none_takes_none() {
+        crate::on_test_cx(|| {
         for deg in [0.0, 90.0, 180.0, 270.0, 359.0] {
             assert_eq!(flat_at(1, 15.0, deg), Some(0), "{deg} degrees");
         }
         assert_eq!(pick(&flat(1, 15.0), 15.0, 0.0, 0.0), None, "even so, not from the hub");
         assert_eq!(flat_at(0, 15.0, 90.0), None, "nothing to pick");
+        });
     }
 
     /// Wedge 0's label goes straight above the centre, and the offsets run
@@ -3047,6 +3076,7 @@ mod tests {
     /// reads as correct until the picking disagrees with it.
     #[test]
     fn the_first_wedge_sits_above_the_centre_and_the_rest_run_clockwise() {
+        crate::on_test_cx(|| {
         let ring = ArcRing::full(4, 20.0, 96.0);
         let (dx, dy) = ring.offset(0, 50.0);
         assert!(dx.abs() < 1e-9 && (dy + 50.0).abs() < 1e-9, "up is ({dx}, {dy})");
@@ -3054,6 +3084,7 @@ mod tests {
         assert!((dx - 50.0).abs() < 1e-9 && dy.abs() < 1e-9, "right is ({dx}, {dy})");
         let (dx, dy) = ring.offset(2, 50.0);
         assert!(dx.abs() < 1e-9 && (dy - 50.0).abs() < 1e-9, "down is ({dx}, {dy})");
+        });
     }
 
     /// Rings opened near an edge are nudged until all of them is in the
@@ -3061,6 +3092,7 @@ mod tests {
     /// field too small for the rings centres them rather than refusing.
     #[test]
     fn a_ring_opened_at_the_edge_is_nudged_until_all_of_it_is_reachable() {
+        crate::on_test_cx(|| {
         let field = Rect { pos: dvec2(0.0, 0.0), size: dvec2(400.0, 300.0) };
         let middle = fit_centre(field, dvec2(200.0, 150.0), 50.0);
         assert_eq!(middle, dvec2(200.0, 150.0), "room to spare: left where it was asked for");
@@ -3074,6 +3106,7 @@ mod tests {
             dvec2(30.0, 30.0),
             "no room at all: centred, and let to overflow"
         );
+        });
     }
 
     /// The middle of a child arc is its parent's direction, however much the
@@ -3081,6 +3114,7 @@ mod tests {
     /// children straddle the seam.
     #[test]
     fn a_child_arc_is_centred_on_its_parent() {
+        crate::on_test_cx(|| {
         let roots = ArcRing::full(6, 30.0, 96.0);
         let (inner, outer) = (100.0, 164.0);
         let three = ArcRing::child(&roots, 1, 3, inner, outer, 44.0);
@@ -3098,6 +3132,7 @@ mod tests {
         assert!((straddling.centre(2) / DEG - 9.55).abs() < 0.01, "child 2 at {}", straddling.centre(2) / DEG);
         let crowded = ArcRing::child(&roots, 2, 40, inner, outer, 44.0);
         assert_eq!(crowded.span, TAU, "forty children take the whole circle and no more");
+        });
     }
 
     fn pick_at(rings: &[ArcRing], deg: f64, r: f64) -> Option<(usize, usize)> {
@@ -3110,6 +3145,7 @@ mod tests {
     /// falls back to ring 0.
     #[test]
     fn the_pick_reads_bands_outward_and_falls_back_outside_an_arc() {
+        crate::on_test_cx(|| {
         let roots = ArcRing::full(6, 30.0, 96.0);
         let rings = [roots, ArcRing::child(&roots, 1, 3, 100.0, 164.0, 44.0)];
         assert_eq!(pick_at(&rings, 60.0, 29.0), None, "the hub");
@@ -3118,12 +3154,14 @@ mod tests {
         assert_eq!(pick_at(&rings, 60.0, 4000.0), Some((1, 1)), "and so does a mile out");
         assert_eq!(pick_at(&rings, 100.0, 130.0), Some((0, 2)), "outside ring 1's arc");
         assert_eq!(pick_at(&rings, 35.0, 130.0), Some((1, 0)), "the first child");
+        });
     }
 
     /// With three rings open the deepest arc that holds the direction wins;
     /// a direction outside it but inside the ring beneath picks that ring.
     #[test]
     fn the_deepest_ring_wins_over_the_one_beneath() {
+        crate::on_test_cx(|| {
         let bands = defaults();
         let roots = ArcRing::full(6, bands.band(0).0, bands.band(0).1);
         let ring1 = ArcRing::child(&roots, 1, 3, bands.band(1).0, bands.band(1).1, 44.0);
@@ -3134,11 +3172,13 @@ mod tests {
         assert_eq!(pick_at(&rings, 95.0, 300.0), Some((2, 2)));
         assert_eq!(pick_at(&rings, 40.0, 300.0), Some((1, 0)), "outside ring 2's arc");
         assert_eq!(pick_at(&rings, 80.0, 150.0), Some((1, 2)), "short of ring 2's band");
+        });
     }
 
     /// The defaults give the radii the widget's box and the fit assume.
     #[test]
     fn ring_radii_climb_and_reach_matches_the_box() {
+        crate::on_test_cx(|| {
         let bands = defaults();
         assert_eq!(bands.hub, 30.0);
         assert_eq!(bands.band(0), (30.0, 96.0));
@@ -3148,12 +3188,14 @@ mod tests {
         assert_eq!(bands.reach(2) * 2.0 + 8.0, 472.0, "the full-depth disc, pad included");
         let wide_hub = RingBands::new(120.0, 96.0, 64.0, 4.0);
         assert_eq!(wide_hub.band(0), (120.0, 128.0), "a hub past the radius still leaves a ring");
+        });
     }
 
     /// A wedge's box holds the bulge where it crosses up, right, down or
     /// left, not just its four corners.
     #[test]
     fn sector_bounds_includes_the_extremes_it_crosses() {
+        crate::on_test_cx(|| {
         let rect = sector_bounds(dvec2(0.0, 0.0), 100.0, 164.0, 330.0 * DEG, 30.0 * DEG);
         assert!((rect.pos.x - (-84.0)).abs() < 0.01, "{rect:?}");
         assert!((rect.pos.y - (-166.0)).abs() < 0.01, "{rect:?}");
@@ -3163,11 +3205,13 @@ mod tests {
         assert!(right.pos.x + right.size.x >= 164.0 && right.pos.y <= 0.0 && right.pos.y + right.size.y >= 0.0, "{right:?}");
         let whole = sector_bounds(dvec2(10.0, 10.0), 30.0, 96.0, PI, PI);
         assert!((whole.size.x - 196.0).abs() < 1e-9 && (whole.size.y - 196.0).abs() < 1e-9, "{whole:?}");
+        });
     }
 
     /// Inward is back at once; outward waits unless the hand crosses.
     #[test]
     fn ring_rule_crossing_opens_at_once_and_inward_is_back() {
+        crate::on_test_cx(|| {
         use RingChange::*;
         assert_eq!(ring_change(&[1, 0], None, false, false, true), Truncate(0), "the hub closes everything");
         assert_eq!(ring_change(&[], Some((0, 1)), true, true, true), Open { depth: 0, index: 1 }, "crossing");
@@ -3179,47 +3223,57 @@ mod tests {
         assert_eq!(ring_change(&[], Some((0, 1)), false, true, false), Keep, "resting does nothing with no delay");
         assert_eq!(ring_change(&[], Some((0, 1)), true, true, false), Open { depth: 0, index: 1 }, "crossing still opens");
         assert_eq!(ring_change(&[], Some((0, 3)), false, false, true), Keep, "a leaf with nothing open");
+        });
     }
 
     /// The digits count from one on the deepest open ring.
     #[test]
     fn digits_act_on_the_focus_ring() {
+        crate::on_test_cx(|| {
         assert_eq!(digit_target(&[1], KeyCode::Key2, 4), Some((1, 1)));
         assert_eq!(digit_target(&[1], KeyCode::Numpad4, 4), Some((1, 3)));
         assert_eq!(digit_target(&[1], KeyCode::Key0, 4), None, "no zero");
         assert_eq!(digit_target(&[1], KeyCode::Key5, 4), None, "past the count");
         assert_eq!(digit_target(&[], KeyCode::Key6, 6), Some((0, 5)));
+        });
     }
 
     /// The opening press has to travel a hub's width before its release
     /// picks; any other release counts wherever it lands.
     #[test]
     fn the_opening_release_needs_travel() {
+        crate::on_test_cx(|| {
         let press = dvec2(100.0, 100.0);
         assert!(!release_counts(true, press, dvec2(129.0, 100.0), 30.0));
         assert!(release_counts(true, press, dvec2(130.0, 100.0), 30.0));
         assert!(release_counts(false, press, press, 30.0));
+        });
     }
 
     #[test]
     fn a_press_is_outside_only_past_the_slop() {
+        crate::on_test_cx(|| {
         assert!(!press_is_outside(120.0, 96.0, 24.0));
         assert!(press_is_outside(120.01, 96.0, 24.0));
+        });
     }
 
     /// The centre is fitted against the full depth, inside the safe area
     /// and the edge margin.
     #[test]
     fn the_centre_is_fitted_for_the_deepest_ring() {
+        crate::on_test_cx(|| {
         let bounds = fit_bounds(dvec2(800.0, 600.0), 0.0, 0.0, 0.0, 0.0);
         assert_eq!(bounds, Rect { pos: dvec2(6.0, 6.0), size: dvec2(788.0, 588.0) });
         assert_eq!(fit_centre(bounds, dvec2(20.0, 20.0), 232.0), dvec2(242.0, 242.0));
         let notched = fit_bounds(dvec2(800.0, 600.0), 10.0, 40.0, 0.0, 0.0);
         assert_eq!(notched.pos, dvec2(16.0, 46.0));
+        });
     }
 
     #[test]
     fn snapshot_value_spells_the_state() {
+        crate::on_test_cx(|| {
         assert_eq!(format_snapshot(None), "closed");
         let rings = vec!["share".to_string()];
         assert_eq!(
@@ -3228,12 +3282,14 @@ mod tests {
         );
         let none: Vec<String> = Vec::new();
         assert_eq!(format_snapshot(Some((dvec2(10.0, 20.0), 0, None, &none))), "open at=10,20 focus=0 hot=- rings=");
+        });
     }
 
     /// A reduced-motion reader gets every ring at full size at once, on any
     /// curve, and a zero time is the same cut.
     #[test]
     fn reduced_motion_lands_every_grow_at_once() {
+        crate::on_test_cx(|| {
         for ease in [Ease::Linear, Ease::OutElastic, Ease::InElastic] {
             assert_eq!(grow_at(0.0, 0.12, true, &ease), 1.0, "{ease:?}");
             assert_eq!(grow_share(0.0, 0.12, true), 1.0);
@@ -3241,6 +3297,7 @@ mod tests {
         }
         assert_eq!(grow_share(0.06, 0.12, false), 0.5);
         assert_eq!(drawn_outer(30.0, 96.0, -0.2), 30.0, "a dip stops at the hole");
+        });
     }
 
     /// The theme's easings, in the order Foundations > Motion plays them.
@@ -3283,7 +3340,8 @@ mod tests {
     /// never.
     #[test]
     fn the_rings_grow_on_the_theme_easings() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let secs = theme_number(vm, "motion_short_3");
@@ -3312,13 +3370,15 @@ mod tests {
             assert!(widest(&theme_ease(vm, "motion_ease_spring")) > 1.0, "a spring swings past its edge");
             assert!(widest(&theme_ease(vm, "motion_ease_bounce")) <= 1.0, "a bounce never does");
         });
+        });
     }
 
     /// The menu's own motion is the theme's tokens, read from the theme and
     /// not restated, and a page can hand it any other easing token.
     #[test]
     fn the_enter_motion_defaults_to_the_theme_tokens() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {use mod.widgets.* RadialMenu{}});
@@ -3335,6 +3395,7 @@ mod tests {
             assert_eq!(sprung.enter_ease, theme_ease(vm, "motion_ease_spring"));
             assert_ne!(sprung.enter_ease, menu.enter_ease);
         });
+        });
     }
 
     /// On the spring, ring 0 is drawn well past its edge for part of its
@@ -3344,8 +3405,8 @@ mod tests {
     /// swinging ring is drawn under both.
     #[test]
     fn an_overshooting_ring_is_picked_by_its_resting_edge() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {
@@ -3378,24 +3439,28 @@ mod tests {
                 assert!(!menu.is_open(), "a press past the resting edge is off the menu");
             });
         });
+        });
     }
 
     /// The enums are written qualified in the DSL: their bare names would
     /// shadow words other widgets already use.
     #[test]
     fn no_enum_is_splatted() {
+        crate::on_test_cx(|| {
         let source = include_str!("radial_menu.rs");
         for name in ["RadialLook", "RadialTrigger"] {
             let needle = format!("splat(mod.widgets.{name})");
             assert!(!source.contains(&needle), "{name} is splatted");
         }
+        });
     }
 
     /// The wedge shader is compiled nowhere else, and an error in it would
     /// only show as rings that never paint.
     #[test]
     fn the_wedge_shader_compiles() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {
@@ -3412,6 +3477,7 @@ mod tests {
             for name in ["io_frost", "io_sample_blur", "tex_mip5_texture", "uni_frost_tint", "uni_color_wedge_open_rim"] {
                 assert!(text.contains(name), "the compiled wedge has no {name}");
             }
+        });
         });
     }
 
@@ -3439,6 +3505,7 @@ mod tests {
     /// E of Export, the P of Picture, Document, Paste and Delete.
     #[test]
     fn a_number_keeps_clear_of_every_word() {
+        crate::on_test_cx(|| {
         let bands = defaults();
         let half_gap = 1.0 * DEG;
         let digit = dvec2(8.0, 8.0);
@@ -3500,22 +3567,26 @@ mod tests {
         for named in ["4 Export", "1 Picture", "2 Document", "3 Paste", "5 Delete"] {
             assert!(overprinted.iter().any(|hit| hit == named), "the fixed spot no longer overprints {named}: {overprinted:?}");
         }
+        });
     }
 
     /// A number with nothing in its way stays on its wedge's middle line at
     /// the depth it always had, so only a crowded wedge's number moves.
     #[test]
     fn a_number_with_room_stays_where_it_was() {
+        crate::on_test_cx(|| {
         let roots = ArcRing::full(6, 30.0, 96.0);
         let spot = number_spot(&roots, 0, 1.0 * DEG, dvec2(8.0, 8.0), &[]);
         let (x, y) = roots.offset(0, 30.0 + 66.0 * NUMBER_AT);
         assert!((spot.x - x).abs() < 1e-9 && (spot.y - y).abs() < 1e-9, "{spot:?}");
+        });
     }
 
     /// The farthest a curve swings, found on the curve: 1 for one that only
     /// settles, past 1 for the spring.
     #[test]
     fn the_swing_is_read_off_the_curve() {
+        crate::on_test_cx(|| {
         assert_eq!(ease_peak(&Ease::Linear), 1.0);
         let finest = (0..=100_000).map(|i| Ease::OutElastic.map(i as f64 / 100_000.0)).fold(f64::MIN, f64::max);
         assert!((ease_peak(&Ease::OutElastic) - finest).abs() < 1e-4, "{} against {finest}", ease_peak(&Ease::OutElastic));
@@ -3524,6 +3595,7 @@ mod tests {
         assert_eq!(fit_reach(bands, 3, 1.0, 1.0), 232.0, "at rest, the deepest ring's edge");
         assert!((fit_reach(bands, 3, 1.0, 1.354) - (168.0 + 64.0 * 1.354)).abs() < 1e-9);
         assert!((fit_reach(bands, 1, 1.354, 1.354) - (30.0 + 66.0 * 1.354)).abs() < 1e-9, "one ring");
+        });
     }
 
     /// Opened in a corner on the spring, the centre is moved in far enough
@@ -3532,8 +3604,8 @@ mod tests {
     /// resting reach is kept.
     #[test]
     fn the_centre_is_fitted_for_the_swing() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {
@@ -3567,6 +3639,7 @@ mod tests {
                 menu.open_at(cx, dvec2(20.0, 20.0));
                 assert_eq!(menu.centre(), Some(dvec2(242.0, 242.0)), "no swing, only the resting reach");
             });
+        });
         });
     }
 
@@ -3604,7 +3677,8 @@ mod tests {
     /// is in the compiled wedge.
     #[test]
     fn the_open_parent_is_marked_in_every_theme() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             for theme in ["dark", "light", "skeleton"] {
@@ -3624,6 +3698,7 @@ mod tests {
             });
             let text = vm.bx.heap.string_with(value, |_heap, text| text.to_string()).expect("source");
             assert!(text.contains("uni_color_wedge_open_rim"), "the wedge draws no band");
+        });
         });
     }
 
@@ -3674,9 +3749,7 @@ mod tests {
     /// window, answering what it reported. The widget's own pointer and key
     /// paths run; only the platform's event plumbing is left out.
     fn drive(drive: impl FnOnce(&mut RadialMenu, &mut Cx)) -> Vec<RadialAction> {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The rings time their growth and their dwell against the app clock.
-        cx.init_cx_os();
+        let mut cx = drawn_cx();
         let mut reports = Vec::new();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
@@ -3701,6 +3774,7 @@ mod tests {
     /// and the release picks two rings deep.
     #[test]
     fn one_stroke_picks_two_rings_deep() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_with(cx, dvec2(400.0, 300.0), true);
             let c = menu.centre().unwrap();
@@ -3722,11 +3796,13 @@ mod tests {
         assert_eq!(reports.first(), Some(&RadialAction::Opened));
         assert!(reports.contains(&RadialAction::RingOpened(LiveId::from_str("share"))));
         assert_eq!(reports.last(), Some(&picked("share/mail", &[1, 0])));
+        });
     }
 
     /// Two crossings in one stroke reach the third ring.
     #[test]
     fn one_stroke_reaches_the_third_ring() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_with(cx, dvec2(400.0, 300.0), true);
             let c = menu.centre().unwrap();
@@ -3740,6 +3816,7 @@ mod tests {
             menu.release_at(cx, toward(c, 76.0, 200.0));
         });
         assert_eq!(reports.last(), Some(&picked("share/export/picture", &[1, 3, 0])));
+        });
     }
 
     /// Resting on a parent opens its ring when the wait ends. A disabled
@@ -3747,6 +3824,7 @@ mod tests {
     /// back into the hub closes every outer ring.
     #[test]
     fn resting_opens_a_ring_and_inward_is_back() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_with(cx, dvec2(400.0, 300.0), true);
             let c = menu.centre().unwrap();
@@ -3767,6 +3845,7 @@ mod tests {
         });
         assert_eq!(reports.last(), Some(&RadialAction::Cancelled));
         assert!(!reports.iter().any(|report| matches!(report, RadialAction::Picked(_))));
+        });
     }
 
     /// The press that opened the menu, let go where it opened, leaves it up;
@@ -3774,6 +3853,7 @@ mod tests {
     /// though the nudged centre put a wedge under it.
     #[test]
     fn the_opening_press_neither_cancels_nor_picks_by_accident() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_with(cx, dvec2(400.0, 300.0), true);
             menu.release_at(cx, dvec2(400.0, 300.0));
@@ -3789,6 +3869,7 @@ mod tests {
         assert!(!reports
             .iter()
             .any(|report| matches!(report, RadialAction::Picked(_) | RadialAction::Cancelled)));
+        });
     }
 
     /// A press well past the outermost ring takes the menu down and leaves
@@ -3797,6 +3878,7 @@ mod tests {
     /// `the_dismissing_release_is_eaten_before_the_lock_goes`.
     #[test]
     fn a_press_past_the_slop_cancels_and_eats_its_release() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_at(cx, dvec2(400.0, 300.0));
             menu.press_while_open(cx, dvec2(400.0, 300.0 - 119.0), true);
@@ -3806,12 +3888,14 @@ mod tests {
             assert!(menu.swallow_up, "the release is still to be eaten");
         });
         assert_eq!(reports.last(), Some(&RadialAction::Cancelled));
+        });
     }
 
     /// Digits act on the outermost ring and follow it outward, Backspace
     /// steps back one ring, and Escape takes the whole menu down.
     #[test]
     fn the_keyboard_walks_the_rings() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_at(cx, dvec2(400.0, 300.0));
             menu.key_down(cx, &key(KeyCode::Key2));
@@ -3832,13 +3916,15 @@ mod tests {
         });
         assert!(reports.contains(&RadialAction::Cancelled));
         assert_eq!(reports.last(), Some(&picked("edit/cut", &[4, 0])));
+        });
     }
 
     /// A menu declared in the DSL builds its tree from the flat list, and the
     /// presets change only what they say they change.
     #[test]
     fn the_dsl_list_becomes_the_tree() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {
@@ -3865,6 +3951,7 @@ mod tests {
             assert_eq!(frosted.look, RadialLook::Frosted);
             assert_eq!(frosted.trigger, RadialTrigger::Press);
         });
+        });
     }
 
     /// Clicked open, then a press just past ring 0's rim in Share's
@@ -3872,6 +3959,7 @@ mod tests {
     /// picks nothing from a ring that was not on screen when it was made.
     #[test]
     fn a_press_past_a_rim_acts_on_the_rings_shown() {
+        crate::on_test_cx(|| {
         let reports = drive(|menu, cx| {
             menu.open_at(cx, dvec2(400.0, 300.0));
             let c = menu.centre().unwrap();
@@ -3886,6 +3974,7 @@ mod tests {
         });
         assert!(!reports.iter().any(|report| matches!(report, RadialAction::Picked(_))), "{reports:?}");
         assert!(reports.contains(&RadialAction::RingOpened(LiveId::from_str("share"))));
+        });
     }
 
     /// One frame of `root` into a window-less pass of `size`, with the
@@ -3919,11 +4008,8 @@ mod tests {
         }
     }
 
-    fn drawn_cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn drawn_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A menu opened only from Rust above a context menu's field, both
@@ -3987,6 +4073,7 @@ mod tests {
     /// Once the pointer is free the same press opens the context menu.
     #[test]
     fn a_right_press_another_overlay_holds_opens_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = two_menus(&mut cx);
         let subject = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4005,6 +4092,7 @@ mod tests {
 
         root.handle_event(&mut cx, &mouse_down(at, MouseButton::SECONDARY), &mut Scope::empty());
         assert!(context.is_open(), "with the pointer free the same press opens it");
+        });
     }
 
     fn mouse_move(abs: DVec2) -> Event {
@@ -4050,6 +4138,7 @@ mod tests {
     /// at nothing on the way and picks nothing when the drag lets go.
     #[test]
     fn rings_raised_over_a_drag_aim_at_nothing_and_pick_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = button_and_menu(&mut cx);
         let menu = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4072,6 +4161,7 @@ mod tests {
             "and its release picks nothing"
         );
         assert!(menu.is_open(), "the menu is still up: standing down is not closing");
+        });
     }
 
     /// The exception: the press that opened the rings is the menu's own
@@ -4080,6 +4170,7 @@ mod tests {
     /// still picks on its release.
     #[test]
     fn the_rings_own_opening_press_still_aims_and_picks() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = button_and_menu(&mut cx);
         let menu = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4107,21 +4198,25 @@ mod tests {
             root.handle_event(cx, &mouse_up(at, MouseButton::PRIMARY), &mut Scope::empty());
         });
         assert!(reports_in(&actions).contains(&picked("rotate", &[2])), "and still picks on the release");
+        });
     }
 
     /// The rule and its exception in one place.
     #[test]
     fn rings_follow_only_a_pointer_that_is_their_own() {
+        crate::on_test_cx(|| {
         assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
         assert!(!menu_follows_pointer(true, false), "another control is being dragged");
         assert!(menu_follows_pointer(true, true), "the press that opened the rings is still down");
         assert!(menu_follows_pointer(false, true));
+        });
     }
 
     /// Opened before its first draw the field has no area, which can take
     /// neither the lock nor the keyboard; the first draw takes both.
     #[test]
     fn opened_before_its_first_draw_it_takes_the_pointer_when_drawn() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -4140,12 +4235,14 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), Some(field), "the first draw took the lock");
         settle_focus(&mut cx);
         assert!(cx.has_key_focus(field), "and gave the field the keyboard");
+        });
     }
 
     /// The menu takes the keyboard for its digits and gives it back to
     /// where it was when it closes.
     #[test]
     fn closing_gives_the_keyboard_back() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = two_menus(&mut cx);
         let before = field_of(&root, &cx, ids!(context));
@@ -4160,12 +4257,14 @@ mod tests {
         assert!(!subject.is_open());
         settle_focus(&mut cx);
         assert!(cx.has_key_focus(before), "closing gave it back");
+        });
     }
 
     /// An overlay locked above the open menu has the Escape, whichever of
     /// the two hears it first.
     #[test]
     fn escape_belongs_to_an_overlay_locked_above() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = two_menus(&mut cx);
         let subject = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4177,12 +4276,14 @@ mod tests {
         cx.sweep_unlock(above);
         root.handle_event(&mut cx, &Event::KeyDown(key(KeyCode::Escape)), &mut Scope::empty());
         assert!(!subject.is_open());
+        });
     }
 
     /// Through the event path: a press past the rings closes the menu but
     /// holds the pointer, and its release is eaten before the lock goes.
     #[test]
     fn the_dismissing_release_is_eaten_before_the_lock_goes() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = two_menus(&mut cx);
         let subject = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4194,12 +4295,14 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), Some(held), "held until the release");
         root.handle_event(&mut cx, &mouse_up(far, MouseButton::PRIMARY), &mut Scope::empty());
         assert_eq!(cx.sweep_lock_area(), None);
+        });
     }
 
     /// Dropped while open, the menu cannot let go of the pointer itself,
     /// having no `Cx`; it leaves the lock for the next event to release.
     #[test]
     fn a_menu_dropped_open_leaves_its_lock_for_the_next_event() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -4217,6 +4320,7 @@ mod tests {
         assert!(cx.sweep_lock_area().is_some(), "nothing could let go of it on drop");
         crate::overlay_place::release_orphaned_sweep_locks(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "the next event does");
+        });
     }
 
     /// Every tab stop in the frame `target` drew last, in tab order.
@@ -4235,6 +4339,7 @@ mod tests {
     /// moves on to the next menu's stop.
     #[test]
     fn tab_under_an_open_menu_finds_nowhere_to_go() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -4277,6 +4382,7 @@ mod tests {
         settle_focus(&mut cx);
         assert!(cx.has_key_focus(field_of(&root, &cx, ids!(first))), "open, Tab found no stop to move to");
         assert!(first.is_open());
+        });
     }
 
     /// A wheel over the page while the menu is up scrolls nothing: the page
@@ -4284,6 +4390,7 @@ mod tests {
     /// wheel scrolls the page.
     #[test]
     fn the_wheel_under_an_open_menu_scrolls_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -4332,6 +4439,7 @@ mod tests {
         subject.close(&mut cx);
         root.handle_event(&mut cx, &wheel(), &mut Scope::empty());
         assert_ne!(scrolled(&root), before, "closed, the same wheel scrolls the page");
+        });
     }
 
     /// Enter or Space on a menu's tab stop opens the rings around the middle
@@ -4340,6 +4448,7 @@ mod tests {
     /// key opens it.
     #[test]
     fn a_key_on_the_tab_stop_opens_the_rings() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, mut target) = two_menus(&mut cx);
         let subject = root.widget(&cx, ids!(subject)).as_radial_menu();
@@ -4369,6 +4478,7 @@ mod tests {
         root.handle_event(&mut cx, &Event::KeyDown(key(KeyCode::ReturnKey)), &mut Scope::empty());
         settle_focus(&mut cx);
         assert!(context.is_open(), "Enter opens it too, the keyboard given back to the stop");
+        });
     }
 
     /// Opened from its tab stop and closed again, by Escape or by a pick,
@@ -4378,10 +4488,12 @@ mod tests {
     /// opened names nothing by then.
     #[test]
     fn the_keyboard_is_back_on_the_stop_after_the_page_is_drawn_again() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, mut target) = two_menus(&mut cx);
         let context = root.widget(&cx, ids!(context)).as_radial_menu();
-        cx.set_key_focus(field_of(&root, &cx, ids!(context)));
+        let focus = field_of(&root, &cx, ids!(context));
+        cx.set_key_focus(focus);
         settle_focus(&mut cx);
         for close in [KeyCode::Escape, KeyCode::Key1] {
             let opened_on = field_of(&root, &cx, ids!(context));
@@ -4400,6 +4512,7 @@ mod tests {
         }
         root.handle_event(&mut cx, &Event::KeyDown(key(KeyCode::ReturnKey)), &mut Scope::empty());
         assert!(context.is_open(), "and Enter opens it once more");
+        });
     }
 
     /// With the rings up, every choice on them is a part of the tree, its
@@ -4407,6 +4520,7 @@ mod tests {
     /// and the one that cannot be picked marked so. Closed, there are none.
     #[test]
     fn the_open_rings_are_parts_of_the_tree() {
+        crate::on_test_cx(|| {
         drive(|menu, cx| {
             assert!(menu.snapshot_parts(cx).is_empty(), "closed");
             menu.open_at(cx, dvec2(400.0, 300.0));
@@ -4429,6 +4543,7 @@ mod tests {
             assert_eq!(selected, vec!["Edit"]);
             assert!(parts.iter().any(|part| part.text == "Paste" && !part.enabled));
         });
+        });
     }
 
     /// The ring in its field is a preset that changes only what it says it
@@ -4436,7 +4551,8 @@ mod tests {
     /// ring whose keys are their positions, and items win over words.
     #[test]
     fn the_ring_in_its_field_is_a_preset_and_words_are_a_flat_ring() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = drawn_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let bare = crate::script_eval!(vm, {use mod.widgets.* RadialMenu{}});
@@ -4480,6 +4596,7 @@ mod tests {
         let pick = RadialPick { id: LiveId::from_str("2"), key: "2".to_string(), path: vec![2] };
         assert_eq!(pick.index(), 2, "the position a host of bare words reads");
         assert_eq!(flat_ring(&["a", "a"])[1].key, "1", "two words alike are still two choices");
+        });
     }
 
     /// A pinned ring above a field a press raises a ring in, drawn once into
@@ -4515,6 +4632,7 @@ mod tests {
     /// `close` pass it by, and Escape is left for an overlay that wants it.
     #[test]
     fn a_pinned_ring_is_up_from_its_first_draw_and_nothing_takes_it_down() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, mut target) = rings_in_fields(&mut cx);
         let ring = root.widget(&cx, ids!(pinned)).as_radial_menu();
@@ -4552,6 +4670,7 @@ mod tests {
         target.draw(&mut cx, &root, dvec2(800.0, 600.0));
         assert!(ring.is_open());
         assert_eq!(cx.sweep_lock_area(), None);
+        });
     }
 
     /// A press in the field raises the ring where the press landed, nudged
@@ -4561,6 +4680,7 @@ mod tests {
     /// with nothing left to eat.
     #[test]
     fn a_ring_in_its_field_opens_where_the_press_lands_and_holds_nothing() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let (root, _target) = rings_in_fields(&mut cx);
         let ring = root.widget(&cx, ids!(summoned)).as_radial_menu();
@@ -4604,5 +4724,6 @@ mod tests {
         let widget = root.widget(&cx, ids!(summoned));
         let menu = widget.borrow::<RadialMenu>().unwrap();
         assert!(!menu.is_open() && !menu.swallow_up && !menu.locked, "with no release owed and nothing held");
+        });
     }
 }

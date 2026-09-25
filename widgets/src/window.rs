@@ -1,4 +1,4 @@
-use crate::gauss_stack::{GaussStack, gauss_render_texture_y_flip_for_os};
+use crate::gauss_stack::GaussStack;
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
 use crate::{
@@ -119,6 +119,19 @@ script_mod! {
             let p = self.source_offset + self.pos * self.source_scale
             let uv = vec2(p.x, mix(p.y, 1.0 - p.y, self.source_y_flip))
             return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+    }
+
+    // A transition's frozen frame (`Window::begin_crossfade`), fading out
+    // over whatever is drawn after it.
+    set_type_default() do #(DrawWindowSnapshot::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        snapshot: texture_2d(float)
+        snapshot_alpha: uniform(1.0)
+
+        pixel: fn() {
+            let c = self.snapshot.sample_as_bgra(clamp(self.pos, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return vec4(c.xyz, 1.0) * self.snapshot_alpha
         }
     }
 
@@ -336,6 +349,19 @@ pub struct Window {
     draw_gauss_scene: DrawGaussScene,
     #[live]
     draw_ssaa_resolve: DrawSsaaResolve,
+    #[live]
+    draw_snapshot: DrawWindowSnapshot,
+    /// A transition in progress: nothing exists for a window that never
+    /// asks for one.
+    #[rust]
+    crossfade: Option<Crossfade>,
+    #[rust]
+    crossfade_frame: NextFrame,
+    #[new]
+    crossfade_list: DrawList2d,
+    /// The crossfade list holds a quad that must be cleared.
+    #[rust]
+    crossfade_drawn: bool,
     #[rust]
     use_gauss_capture: bool,
     #[rust]
@@ -449,6 +475,9 @@ enum DrawState {
 #[derive(Clone, Debug, Default)]
 pub enum WindowAction {
     EventForOtherWindow,
+    /// `begin_crossfade`'s picture is frozen (or cannot be): make the
+    /// change now; it is revealed through the fade.
+    CrossfadeReady,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
     #[default]
@@ -475,6 +504,39 @@ pub struct DrawGaussScene {
     #[deref]
     draw_super: DrawQuad,
 }
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawWindowSnapshot {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+/// A frozen frame fading out over the new one.
+struct Crossfade {
+    texture: Texture,
+    secs: f64,
+    asked_at: f64,
+    /// Held fully frozen after ready until `start_crossfade` (or
+    /// [`CROSSFADE_HOLD`]): for a change that lands a while after it is made.
+    hold: bool,
+    ready_at: Option<f64>,
+    /// `start_crossfade` was called: the fade begins once the change has
+    /// been drawn for [`CROSSFADE_SETTLE`] frames (what lays itself out a
+    /// frame late has landed).
+    start_asked: bool,
+    settle: u32,
+    /// When the fade began.
+    started: Option<f64>,
+}
+
+/// How long a snapshot may take to arrive before the change goes ahead
+/// without one (a window that is not painting).
+const CROSSFADE_WAIT: f64 = 0.5;
+/// The longest a held crossfade waits for its change to be drawn.
+const CROSSFADE_HOLD: f64 = 1.5;
+/// Frames a started crossfade stays frozen while the change settles.
+const CROSSFADE_SETTLE: u32 = 6;
 
 /// Resolve (downscale) shader for full-window supersampling: samples the supersized scene
 /// texture into the window framebuffer. See `DrawSsaaResolve` shader in the Window script.
@@ -682,8 +744,8 @@ impl SplodedStack {
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
         // Same orientation as the gauss compositor, NOT the SSAA one: this
         // pass renders at the window's own dpi, so its texture comes back
-        // top-down (grab-verified — the inverted flag renders the UI mirrored).
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        // top-down like every render texture (the platform's Y law).
+        let source_y_flip = 0.0;
         resolve
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
@@ -767,8 +829,10 @@ impl SsaaStack {
     /// Draw the single fullscreen resolve quad into the (now-active) window pass, sampling the
     /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
-        // Scene texture is bottom-up — flip opposite to the gauss compositor or the UI shows upside-down.
-        let source_y_flip = 1.0 - gauss_render_texture_y_flip_for_os(cx.os_type());
+        // The supersized scene is an ordinary render texture: top-left rows
+        // like every other (the platform's Y law), sampled as stored. With
+        // the flip this resolve mirrored the whole window on Metal.
+        let source_y_flip = 0.0;
         resolve
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
@@ -889,6 +953,29 @@ impl Window {
             Rect::default()
         };
         (visible, caption_rect, buttons_rect, caption_area)
+    }
+
+    /// The rects of what the app put in the caption bar: its children other
+    /// than the stock title, voice wave and window buttons, and what the app
+    /// put beside the title inside `caption_label`.
+    fn caption_app_rects(&mut self, cx: &mut Cx) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        let stock_bar = |id: LiveId| matches!(id, id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen));
+        let stock_label = |id: LiveId| matches!(id, id!(caption_icon) | id!(label));
+        for (path, stock) in [(ids!(caption_bar), &stock_bar as &dyn Fn(LiveId) -> bool), (ids!(caption_label), &stock_label)] {
+            let view = self.view(cx, path);
+            let Some(view) = view.borrow() else { continue };
+            for (id, child) in view.children.iter() {
+                if stock(*id) || !child.visible() {
+                    continue;
+                }
+                let rect = child.area().rect(cx);
+                if rect.size.x > 0.0 && rect.size.y > 0.0 {
+                    rects.push(rect);
+                }
+            }
+        }
+        rects
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
@@ -1065,7 +1152,7 @@ impl Window {
         cx.begin_root_turtle(size, Layout::flow_overlay());
         let window_id = self.window.handle.window_id();
         self.use_gauss_capture = window_wants_gauss_capture(cx, window_id);
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 0.0;
         let gauss_snapshot = if self.use_gauss_capture {
             Some(
                 self.gauss_stack
@@ -1105,6 +1192,16 @@ impl Window {
         } else {
             self.overlay.begin(cx);
         }
+        // The pass the body draws into, for the relief buffer: window-shaped
+        // only when it is the window itself or its supersampled scene.
+        let relief_body = if self.use_sploded || self.use_gauss_capture {
+            None
+        } else if self.use_ssaa {
+            Some(self.ssaa_stack.scene_pass.draw_pass_id())
+        } else {
+            Some(self.pass.handle.draw_pass_id())
+        };
+        crate::relief::begin_window_relief_frame(cx, window_id, relief_body);
 
         Redrawing::yes()
     }
@@ -1181,7 +1278,11 @@ impl Window {
         } else {
             self.overlay.end(cx);
         }
+        // A transition's frozen frame: the window pass's last list, over
+        // the body and every overlay.
+        self.draw_crossfade(cx);
         let window_id = self.window.handle.window_id();
+        crate::relief::end_window_relief_frame(cx, window_id);
         if finish_window_gauss_frame(cx, window_id) {
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
         }
@@ -1321,15 +1422,6 @@ fn caption_press_is_clients(over_content: bool, mouse_held_outside: bool) -> boo
 mod tests {
     use super::*;
 
-    #[test]
-    fn gauss_render_texture_y_flip_is_platform_specific() {
-        assert_eq!(gauss_render_texture_y_flip_for_os(&OsType::Macos), 0.0);
-        assert_eq!(
-            gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
-            1.0
-        );
-    }
-
     /// The bare caption is the window manager's to drag — that is the whole
     /// point of a caption bar, and the fix must not take it away.
     #[test]
@@ -1423,7 +1515,124 @@ mod tests {
     }
 }
 
+impl Window {
+    /// Freeze what the window shows now, then fade from it to what is drawn
+    /// next over `secs`. Make the change on [`WindowAction::CrossfadeReady`]
+    /// ([`WindowRef::crossfade_ready`]). With `hold` the frozen frame stays
+    /// fully up after ready until [`Window::start_crossfade`] (for a change
+    /// that lands later, like a restyle that recompiles shaders), at most
+    /// 1.5 s. Costs nothing until asked: one GPU copy of the frame, a quad
+    /// for the fade, then everything is freed.
+    pub fn begin_crossfade(&mut self, cx: &mut Cx, secs: f64, hold: bool) {
+        if let Some(old) = self.crossfade.take() {
+            cx.release_window_snapshot(&old.texture);
+        }
+        let texture = cx.request_window_snapshot(self.window.handle.window_id());
+        let now = cx.seconds_since_app_start();
+        self.crossfade = Some(Crossfade { texture, secs: secs.max(0.01), asked_at: now, hold, ready_at: None, start_asked: false, settle: 0, started: None });
+        self.crossfade_frame = cx.new_next_frame();
+    }
+
+    /// The change is drawn: fade a held crossfade out from now.
+    pub fn start_crossfade(&mut self, cx: &mut Cx) {
+        if let Some(fade) = &mut self.crossfade {
+            if fade.ready_at.is_some() && fade.started.is_none() {
+                fade.start_asked = true;
+                self.crossfade_list.redraw(cx);
+            }
+        }
+    }
+
+    fn step_crossfade(&mut self, cx: &mut Cx) {
+        let uid = self.widget_uid();
+        let Some(fade) = &mut self.crossfade else { return };
+        let now = cx.seconds_since_app_start();
+        match cx.window_snapshot_state(&fade.texture) {
+            WindowSnapshotState::Pending if now - fade.asked_at < CROSSFADE_WAIT => {
+                self.crossfade_frame = cx.new_next_frame();
+            }
+            WindowSnapshotState::Pending | WindowSnapshotState::Unavailable => {
+                let fade = self.crossfade.take().unwrap();
+                cx.release_window_snapshot(&fade.texture);
+                cx.widget_action(uid, WindowAction::CrossfadeReady);
+            }
+            WindowSnapshotState::Captured => {
+                if fade.ready_at.is_none() {
+                    fade.ready_at = Some(now);
+                    cx.widget_action(uid, WindowAction::CrossfadeReady);
+                }
+                let ready_at = fade.ready_at.unwrap_or(now);
+                if fade.started.is_none() && (!fade.hold || now - ready_at >= CROSSFADE_HOLD) {
+                    fade.started = Some(now);
+                }
+                let started = fade.started.unwrap_or(now);
+                if fade.started.is_some() && now - started >= fade.secs {
+                    let fade = self.crossfade.take().unwrap();
+                    cx.release_window_snapshot(&fade.texture);
+                } else {
+                    self.crossfade_frame = cx.new_next_frame();
+                }
+                self.crossfade_list.redraw(cx);
+            }
+        }
+    }
+
+    /// The frozen frame over everything, fading; an empty list once done.
+    fn draw_crossfade(&mut self, cx: &mut Cx2d) {
+        let now = cx.seconds_since_app_start();
+        if let Some(fade) = &mut self.crossfade {
+            if fade.start_asked && fade.started.is_none() {
+                fade.settle += 1;
+                if fade.settle > CROSSFADE_SETTLE {
+                    fade.started = Some(now);
+                }
+            }
+        }
+        let alpha = match &self.crossfade {
+            Some(Crossfade { texture, secs, ready_at: Some(_), started, .. }) => {
+                let t = started.map(|started| ((now - started) / secs).clamp(0.0, 1.0)).unwrap_or(0.0);
+                self.draw_snapshot.draw_vars.set_texture(0, texture);
+                Some((1.0 - t * t * (3.0 - 2.0 * t)) as f32)
+            }
+            _ => None,
+        };
+        if alpha.is_none() && !self.crossfade_drawn {
+            return;
+        }
+        self.crossfade_list.begin_always(cx);
+        if let Some(alpha) = alpha {
+            self.draw_snapshot.draw_vars.set_uniform(cx, live_id!(snapshot_alpha), &[alpha]);
+            // Above the overlays' depth ladder (at most 64 + their content's
+            // 20), under the near plane at 100.
+            self.draw_snapshot.draw_depth = 40.0;
+            let size = cx.current_pass_size();
+            self.draw_snapshot.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size });
+        }
+        self.crossfade_list.end(cx);
+        self.crossfade_drawn = alpha.is_some();
+    }
+}
+
 impl WindowRef {
+    pub fn begin_crossfade(&self, cx: &mut Cx, secs: f64, hold: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.begin_crossfade(cx, secs, hold);
+        }
+    }
+
+    pub fn start_crossfade(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.start_crossfade(cx);
+        }
+    }
+
+    /// The frozen picture is up: make the change now.
+    pub fn crossfade_ready(&self, actions: &Actions) -> bool {
+        actions
+            .find_widget_action(self.widget_uid())
+            .is_some_and(|action| matches!(action.cast(), WindowAction::CrossfadeReady))
+    }
+
     pub fn set_title(&self, cx: &mut Cx, title: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.window.title == title {
@@ -1574,6 +1783,9 @@ impl Widget for Window {
         crate::overlay_place::release_orphaned_sweep_locks(cx);
         // And the scroll blocks of a modal dropped while it was open.
         crate::modal::release_orphaned_scroll_blocks(cx);
+        if self.crossfade_frame.is_event(event).is_some() {
+            self.step_crossfade(cx);
+        }
         self.handle_direct_mouse_cursor(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
@@ -1826,6 +2038,10 @@ impl Widget for Window {
                     // A press on the caption that is the client's rather than the window
                     // manager's, for the `Caption` arm below.
                     let caption_is_clients = caption_press_is_clients(over_content, mouse_held);
+                    // Controls the app hangs in the caption bar (its own keys beside the
+                    // title) are the client's: a press on them is a click, not a window
+                    // drag. The bar's empty space stays the window manager's.
+                    let over_app_control = visible && self.caption_app_rects(cx).iter().any(|r| r.contains(dq.abs));
                     match classify_window_drag_query(
                         visible,
                         caption_rect,
@@ -1837,7 +2053,7 @@ impl Widget for Window {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        WindowDragQueryResponse::Caption if caption_is_clients => {
+                        WindowDragQueryResponse::Caption if caption_is_clients || over_app_control => {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }

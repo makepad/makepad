@@ -299,6 +299,23 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_comment_after_the_end_record_is_skipped() {
+        let mut w = ZipWriter::new();
+        w.add("a.txt", b"alpha", ZipMethod::Deflate).unwrap();
+        let mut bytes = w.finish().unwrap();
+        // Rewrite the end record's comment length and append a comment,
+        // as GitHub's generated archives do.
+        let comment = b"0180df21f5e0bd39b9060cc5de420ed2f1f9e509";
+        let n = bytes.len();
+        bytes[n - 2..].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(comment);
+        let mut cursor = Cursor::new(&bytes);
+        let dir = zip_read_central_directory(&mut cursor).unwrap();
+        assert_eq!(dir.file_headers.len(), 1);
+        assert_eq!(dir.file_headers[0].extract(&mut cursor).unwrap(), b"alpha");
+    }
+
+    #[test]
     fn empty_archive_and_empty_member_are_readable() {
         let bytes = ZipWriter::new().finish().unwrap();
         let mut cursor = Cursor::new(&bytes);

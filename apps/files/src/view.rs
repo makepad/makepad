@@ -89,6 +89,31 @@ script_mod! {
         }
     }
 
+    // One segment of the phone's view switch: a 48 pt hit row around a
+    // 40 pt pill, lit (`seg_pill` colour) when its view is on screen.
+    // The three share the control's width, so the row fits a 360 pt phone
+    // with every label whole.
+    let PhoneSegment = View{
+        width: Fill
+        height: 48
+        align: Align{y: 0.5}
+        cursor: MouseCursor.Hand
+        seg_pill := RoundedView{
+            width: Fill
+            height: 40
+            padding: Inset{left: 6 right: 6}
+            align: Align{x: 0.5 y: 0.5}
+            draw_bg +: {color: #0000 border_size: 0 border_radius: 10.0}
+            seg_label := Label{
+                padding: 0
+                draw_text +: {
+                    color: mod.mpf.fg
+                    text_style: theme.font_regular{font_size: 10.5}
+                }
+            }
+        }
+    }
+
     let SideItem = SolidView{
         width: Fill
         height: 34
@@ -575,7 +600,10 @@ script_mod! {
                                         }
                                     }
                                 }
-                                treemap_button := ToolButton{
+                                // The tile view, three ways: flat 2D, extruded
+                                // 2.5D, and perspective. One scan, one pick.
+                                View{width: 8 height: 1}
+                                proj_flat := ToolButton{
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -584,10 +612,28 @@ script_mod! {
                                         }
                                     }
                                 }
+                                proj_ortho := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/treemap25.svg")
+                                            color: mod.mpf.fg
+                                        }
+                                    }
+                                }
+                                proj_persp := ToolButton{
+                                    Icon{
+                                        icon_walk: Walk{width: 18 height: 18}
+                                        draw_icon +: {
+                                            svg: crate_resource("self://resources/icons/treemap3d.svg")
+                                            color: mod.mpf.fg
+                                        }
+                                    }
+                                }
 
                             }
                             search_button := ToolButton{
-                                Icon{
+                                tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/search.svg")
@@ -597,7 +643,7 @@ script_mod! {
                             }
                             storage_button := ToolButton{
                                 visible: false
-                                Icon{
+                                tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/filter.svg")
@@ -606,7 +652,7 @@ script_mod! {
                                 }
                             }
                             menu_button := ToolButton{
-                                Icon{
+                                tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/menu-dots.svg")
@@ -616,13 +662,20 @@ script_mod! {
                             }
                         }
 
+                        // Browse is its own action; the three views are one
+                        // segmented control whose current segment is lit.
                         phone_navigation := View{
                             visible: false width: Fill height: Fit
-                            flow: Right{wrap: true} spacing: 6 padding: Inset{left: 12 right: 12 bottom: 8}
-                            phone_places := Button{text: "Browse" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
-                            phone_icons := Button{text: "Icons" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
-                            phone_list := Button{text: "List" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
-                            phone_map := Button{text: "Storage" padding: Inset{left: 10 right: 10} draw_text.text_style.font_size: 11}
+                            flow: Right spacing: 8 padding: Inset{left: 16 right: 16 bottom: 8}
+                            align: Align{y: 0.5}
+                            phone_places := Button{text: "Browse" height: 48 padding: Inset{left: 12 right: 12} draw_text.text_style.font_size: 10.5}
+                            phone_modes := RoundedView{
+                                width: Fill height: 48 flow: Right spacing: 0 padding: Inset{left: 4 right: 4}
+                                draw_bg +: {color: theme.color_inset border_size: 0 border_radius: 12.0}
+                                phone_icons := PhoneSegment{seg_pill.seg_label.text: "Icons"}
+                                phone_list := PhoneSegment{seg_pill.seg_label.text: "List"}
+                                phone_map := PhoneSegment{seg_pill.seg_label.text: "Storage"}
+                            }
                         }
                         tab_strip := SolidView{
                             visible: false
@@ -890,7 +943,7 @@ script_mod! {
 
                                 status_bar := SolidView{
                                     width: Fill
-                                    height: 26
+                                    height: 24
                                     padding: Inset{left: 16 right: 16}
                                     align: Align{y: 0.5}
                                     draw_bg +: {color: mod.mpf.bg_dark}
@@ -901,7 +954,7 @@ script_mod! {
                                         text: "Loading…"
                                         draw_text +: {
                                             color: mod.mpf.fg_dim
-                                            text_style: theme.font_regular{font_size: 8.5}
+                                            text_style: theme.font_regular{font_size: 9}
                                         }
                                     }
                                 }
@@ -1314,16 +1367,26 @@ const COLUMN_ROWS: [(&[LiveId], model::SortKey); 5] = [
     (ids!(menu_permissions), model::SortKey::Permissions),
 ];
 
-const MODE_BUTTONS: [(&[LiveId], ViewMode); 4] = [
+const MODE_BUTTONS: [(&[LiveId], ViewMode); 3] = [
     (ids!(icons_button), ViewMode::Icons),
     (ids!(list_button), ViewMode::List),
     (ids!(compact_button), ViewMode::Compact),
-    (ids!(treemap_button), ViewMode::Treemap),
 ];
 
-/// The projection switch on the map's own strip: how the block view renders,
-/// not which view is open.
+/// The tile view. Each button opens the treemap in that projection: flat
+/// 2D, extruded 2.5D, perspective. The scan, camera and pick are shared.
+const PROJ_BUTTONS: [(&[LiveId], MapProjection); 3] = [
+    (ids!(proj_flat), MapProjection::Flat),
+    (ids!(proj_ortho), MapProjection::Ortho),
+    (ids!(proj_persp), MapProjection::Persp),
+];
 
+/// The phone's view switch: its three segments and the view each opens.
+const PHONE_SEGMENTS: [(&[LiveId], ViewMode); 3] = [
+    (ids!(phone_icons), ViewMode::Icons),
+    (ids!(phone_list), ViewMode::Compact),
+    (ids!(phone_map), ViewMode::Treemap),
+];
 
 /// The tab strip's slots. More tabs than this and the strip would be a
 /// horizontal scroll problem instead of a tab strip.
@@ -1523,8 +1586,7 @@ pub struct FilesView {
     /// What each running job will mean for the size map once it lands. The
     /// map is expensive to build and cheap to correct, so every operation the
     /// app performs itself is folded straight into it — a scan of a full home
-    /// directory is minutes, and moving one file to the Trash should not cost
-    /// them.
+    /// directory is minutes, and moving one file should not cost them.
     #[rust]
     map_jobs: Vec<MapJob>,
     /// A file to select, and maybe rename, once the folder is re-listed.
@@ -1556,11 +1618,6 @@ pub struct FilesView {
     submenu_apps: Vec<AppChoice>,
     #[rust]
     submenu_hover: Option<usize>,
-    /// A permanent delete that has been asked for once and is waiting for the
-    /// second press that means it. There is no undo behind this one, so it is
-    /// the only thing in the app that asks twice.
-    #[rust]
-    pending_delete: Vec<PathBuf>,
     /// Warm-pool dormancy — see `Dormancy`.
     #[rust]
     dormancy: Dormancy,
@@ -2058,12 +2115,17 @@ impl FilesView {
         let mobile=cx.with_vm(makepad_widgets::desktop_style::current_style).mobile();
         let bar_height=if mobile {56.0}else{48.0};
         let field_height=if mobile {44.0}else{34.0};
+        // The phone's bar: 56 pt, 16 pt sides, 24 pt glyphs in 48 pt targets.
+        let side_pad=if mobile {16.0}else{12.0};
         let mut bar=self.view.view(cx,ids!(top_bar));
-        script_apply_eval!(cx,bar,{height: #(bar_height)});
-        let hit_size=if mobile {44.0}else{30.0};
+        script_apply_eval!(cx,bar,{height: #(bar_height) padding.left: #(side_pad) padding.right: #(side_pad)});
+        let hit_size=if mobile {48.0}else{30.0};
+        let glyph=if mobile {24.0}else{18.0};
         for id in [ids!(back_button),ids!(forward_button),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
             let mut button=self.view.view(cx,id);
             script_apply_eval!(cx,button,{width: #(hit_size) height: #(hit_size)});
+            let mut icon=self.view.widget(cx,id).widget(cx,ids!(tool_icon));
+            script_apply_eval!(cx,icon,{icon_walk.width: #(glyph) icon_walk.height: #(glyph)});
         }
         let mut field=self.view.view(cx,ids!(path_box));
         script_apply_eval!(cx,field,{height: #(field_height)});
@@ -2074,10 +2136,12 @@ impl FilesView {
         self.view.view(cx, ids!(phone_navigation)).set_visible(cx, narrow);
         self.view.view(cx, ids!(sidebar)).set_visible(cx, !narrow);
         self.view.view(cx, ids!(view_modes)).set_visible(cx, !narrow);
-        for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button)] {
+        for path in [ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(proj_flat),ids!(proj_ortho),ids!(proj_persp)] {
             self.view.widget(cx,path).set_visible(cx,!narrow);
         }
         if narrow {self.with_contents(cx,|contents,cx|contents.set_zoom(cx,0));}
+        self.with_contents(cx,|contents,cx|contents.set_phone(cx,narrow));
+        if let Some(mode)=self.tabs.get(self.tab).map(|t|t.mode) {self.style_phone_segments(cx,mode);}
         if narrow && !self.tabs.is_empty() && self.tabs[self.tab].mode==ViewMode::Treemap {
             self.set_mode(cx,ViewMode::Icons);
         }
@@ -2143,6 +2207,8 @@ impl FilesView {
                 .widget(cx, ids!(btn_sel))
                 .set_visible(cx, button_mode == mode);
         }
+        self.style_projection_buttons(cx);
+        self.style_phone_segments(cx, mode);
         // Storage options share the main toolbar. Preserve the map's pick
         // and filter sidebar when changing views.
         self.view
@@ -2174,8 +2240,41 @@ impl FilesView {
         self.with_contents(cx, |contents, cx| {
             contents.treemap(cx).set_projection(cx, projection);
         });
+        self.style_projection_buttons(cx);
         self.report(cx);
         self.view.redraw(cx);
+    }
+
+    /// Light the phone's view segment that matches the view on screen:
+    /// the selection colour behind it and its label in bold.
+    fn style_phone_segments(&mut self, cx: &mut Cx, mode: ViewMode) {
+        let palette = Palette::for_cx(cx);
+        let lit = Palette::vec4(&palette.sel);
+        for (id, segment_mode) in PHONE_SEGMENTS {
+            // The phone's List shows the compact rows, but a List chosen on
+            // a wider window stays lit when the window narrows.
+            let on = segment_mode == mode
+                || (segment_mode.is_treemap() && mode.is_treemap())
+                || (segment_mode == ViewMode::Compact && mode == ViewMode::List);
+            let color = if on { lit } else { Vec4f::default() };
+            let mut pill = self.view.widget(cx, id).widget(cx, ids!(seg_pill));
+            script_apply_eval!(cx, pill, {draw_bg +: {color: #(color)}});
+        }
+    }
+
+    /// Light the tile-view button that matches the projection on screen.
+    /// The other folder views leave all three dark.
+    fn style_projection_buttons(&mut self, cx: &mut Cx) {
+        let on_map = self
+            .tabs
+            .get(self.tab)
+            .is_some_and(|tab| tab.mode.is_treemap());
+        for (id, projection) in PROJ_BUTTONS {
+            self.view
+                .widget(cx, id)
+                .widget(cx, ids!(btn_sel))
+                .set_visible(cx, on_map && projection == self.projection);
+        }
     }
 
     fn zoom(&mut self, cx: &mut Cx, delta: isize) {
@@ -2760,9 +2859,7 @@ impl FilesView {
             } else {
                 Palette::vec4(&palette.bg)
             };
-            let text = if row.danger {
-                Palette::vec4(&palette.danger)
-            } else if hovered {
+            let text = if hovered {
                 Palette::vec4(&palette.accent)
             } else {
                 Palette::vec4(&palette.fg)
@@ -2868,8 +2965,7 @@ impl FilesView {
                 self.with_contents(cx, |contents, cx| contents.select_all(cx));
                 self.report(cx);
             }
-            MenuAction::Trash => self.trash_selection(cx),
-            MenuAction::DeleteForever => self.delete_forever(cx),
+            MenuAction::ShowInFileManager => self.show_in_file_manager(cx, target),
             MenuAction::RevealInTreemap => self.reveal_in_treemap(cx, target),
             MenuAction::Properties => self.set_props(cx, true),
             MenuAction::OpenInTerminal => self.open_terminal(cx),
@@ -2939,29 +3035,29 @@ impl FilesView {
         self.status(cx, &format!("{name} is highlighted on the map"));
     }
 
-    /// Erase, with nothing behind it. Asked once in the status bar and done on
-    /// the second press: there is no undo for this, so a single slip must not
-    /// be enough.
-    fn delete_forever(&mut self, cx: &mut Cx) {
-        let paths = self.target_paths(cx);
-        if paths.is_empty() {
-            self.status(cx, "Nothing selected to delete");
-            return;
-        }
-        if self.pending_delete != paths {
-            let count = paths.len();
-            self.pending_delete = paths;
-            self.status(
-                cx,
-                &format!(
-                    "Delete {count} item{} permanently? This cannot be undone — press Shift+Delete again to confirm, Esc to cancel",
-                    if count == 1 { "" } else { "s" }
-                ),
-            );
-            return;
-        }
-        self.pending_delete.clear();
-        self.submit(cx, OpKind::Delete, paths, None);
+    /// Hand the item to the platform's own file manager — the item under the
+    /// pointer, else the first of the selection, else the folder being shown.
+    /// Deleting is done there: this app has no delete of its own.
+    fn show_in_file_manager(&mut self, cx: &mut Cx, entry: Option<FileEntry>) {
+        let path = match entry {
+            Some(entry) => entry.path,
+            None => self
+                .target_paths(cx)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.current_dir()),
+        };
+        let message = preview::show_in_file_manager(&path);
+        self.status(cx, &message);
+    }
+
+    /// What a delete key says here: where deleting is done instead.
+    fn no_delete_here(&mut self, cx: &mut Cx) {
+        let label = crate::menu::file_manager_label();
+        self.status(
+            cx,
+            &format!("Files does not delete — use {label} and delete it there"),
+        );
     }
 
     fn toggle_hidden(&mut self, cx: &mut Cx) {
@@ -3185,7 +3281,6 @@ impl FilesView {
             sources,
             dest_dir: self.current_dir(),
             new_name,
-            home: self.home.clone(),
         };
         // An in-memory tree changes at once: sending it to a worker would only
         // buy a progress bar for work that is already finished.
@@ -3275,7 +3370,7 @@ impl FilesView {
                 }
                 OpUpdate::Done {
                     id,
-                    kind,
+                    kind: _,
                     message,
                     undo,
                     touched,
@@ -3288,12 +3383,7 @@ impl FilesView {
                     }
                     self.finish_op(cx);
                     self.map_absorb(cx, id, &touched);
-                    // What a job left behind is worth selecting only when it
-                    // landed *here*: a trashed file's `touched` path is inside
-                    // the Trash, and selecting it would select nothing.
-                    if kind != OpKind::Trash {
-                        self.pending_select = touched;
-                    }
+                    self.pending_select = touched;
                     self.status(cx, &message);
                     self.pending_status = Some(message);
                     self.request_directory(cx);
@@ -3377,15 +3467,6 @@ impl FilesView {
             .unwrap_or_default()
     }
 
-    fn trash_selection(&mut self, cx: &mut Cx) {
-        let paths = self.target_paths(cx);
-        if paths.is_empty() {
-            self.status(cx, "Nothing selected to move to the Trash");
-            return;
-        }
-        self.submit(cx, OpKind::Trash, paths, None);
-    }
-
     fn new_folder(&mut self, cx: &mut Cx) {
         if self.tabs[self.tab].mode.is_treemap() {self.set_mode(cx, ViewMode::Icons);}
         let name = ops::unique_path(&self.current_dir(), "untitled folder");
@@ -3402,18 +3483,11 @@ impl FilesView {
             return;
         };
         let id = self.next_op_id();
-        // An undo is a move backwards or a removal, and both sides of it are
-        // already known — so the map follows it without a rescan too.
-        match &undo {
-            Undo::Moved { pairs } => {
-                let sources: Vec<PathBuf> = pairs.iter().map(|(_, to)| to.clone()).collect();
-                self.remember_for_map(id, MapEffect::Move, sources);
-            }
-            Undo::Created { paths } => {
-                self.remember_for_map(id, MapEffect::Remove, paths.clone());
-            }
-        }
-        let home = self.home.clone();
+        // An undo is a move backwards, and both sides of it are already known
+        // — so the map follows it without a rescan too.
+        let Undo::Moved { pairs } = &undo;
+        let sources: Vec<PathBuf> = pairs.iter().map(|(_, to)| to.clone()).collect();
+        self.remember_for_map(id, MapEffect::Move, sources);
         let description = undo.describe();
         if vfs().is_instant() {
             let update = match vfs().perform_undo(&undo) {
@@ -3437,7 +3511,7 @@ impl FilesView {
         let Some(engine) = self.ops.as_ref() else {
             return;
         };
-        engine.submit_undo(id, undo, home);
+        engine.submit_undo(id, undo);
         self.active_op = Some(id);
         self.show_progress(cx, true, 0.0, &description);
         let left = self.journal.len();
@@ -3696,11 +3770,6 @@ impl FilesView {
             {
                 return self.report(cx);
             }
-            if !self.pending_delete.is_empty() {
-                self.pending_delete.clear();
-                self.status(cx, "Nothing was deleted");
-                return;
-            }
             if self.batch_open {
                 return self.close_batch(cx);
             }
@@ -3770,7 +3839,7 @@ impl FilesView {
                     self.report(cx);
                     return;
                 }
-                KeyCode::Backspace if !editing => return self.trash_selection(cx),
+                KeyCode::Backspace if !editing => return self.no_delete_here(cx),
                 KeyCode::Equals | KeyCode::NumpadAdd if !editing => return self.zoom(cx, 1),
                 KeyCode::Minus | KeyCode::NumpadSubtract if !editing => return self.zoom(cx, -1),
                 KeyCode::KeyH => return self.toggle_hidden(cx),
@@ -3810,16 +3879,10 @@ impl FilesView {
         if event.key_code == KeyCode::F5 && !editing {
             return self.rescan_map(cx);
         }
+        // The keys other file managers delete with (Delete here, Cmd+Backspace
+        // above) say where deleting is done instead of doing anything.
         if event.key_code == KeyCode::Delete && !editing {
-            if shift {
-                return self.delete_forever(cx);
-            }
-            return self.trash_selection(cx);
-        }
-        // The macOS keyboard's Delete key is Backspace, so the same pair holds
-        // there: with Cmd it trashes, with Cmd+Shift it erases.
-        if event.key_code == KeyCode::Backspace && command && shift && !editing {
-            return self.delete_forever(cx);
+            return self.no_delete_here(cx);
         }
         if editing {
             return;
@@ -3944,11 +4007,6 @@ impl FilesView {
         let Some(map) = map else { return };
         match job.effect {
             MapEffect::Nothing => {}
-            MapEffect::Remove => {
-                let moves: Vec<(PathBuf, Option<PathBuf>)> =
-                    job.sources.into_iter().map(|from| (from, None)).collect();
-                map.absorb_moves(cx, &moves);
-            }
             MapEffect::Move => {
                 // A job that reported fewer destinations than sources did not
                 // move all of them; the ones it cannot account for are treated
@@ -4000,8 +4058,6 @@ impl FilesView {
 /// What a finished operation does to the size map.
 #[derive(Clone, Copy, PartialEq)]
 enum MapEffect {
-    /// The sources stop existing anywhere the map can see.
-    Remove,
     /// The sources end up somewhere else, which may or may not be on the map.
     Move,
     /// The sources stay and are duplicated.
@@ -4013,8 +4069,7 @@ enum MapEffect {
 impl MapEffect {
     fn of(kind: OpKind) -> MapEffect {
         match kind {
-            OpKind::Delete => MapEffect::Remove,
-            OpKind::Trash | OpKind::Move | OpKind::Rename => MapEffect::Move,
+            OpKind::Move | OpKind::Rename => MapEffect::Move,
             OpKind::Copy => MapEffect::Copy,
             OpKind::NewFolder => MapEffect::Nothing,
         }
@@ -4813,6 +4868,7 @@ impl FilesView {
         // The block view's saved rendering and whether its filter sidebar
         // was left open — both come back exactly as they were left.
         self.projection = match model::pref_get("projection").as_deref() {
+            Some("flat") => MapProjection::Flat,
             Some("ortho") => MapProjection::Ortho,
             Some("persp") => MapProjection::Persp,
             _ => MapProjection::default(),
@@ -4878,13 +4934,16 @@ impl FilesView {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        for id in [ids!(back_button),ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(treemap_button),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
+        for id in [ids!(back_button),ids!(forward_button),ids!(icons_button),ids!(list_button),ids!(compact_button),ids!(proj_flat),ids!(proj_ortho),ids!(proj_persp),ids!(search_button),ids!(storage_button),ids!(menu_button)] {
             let mut button=self.view.view(cx,id);
             let hover=button.finger_hover_in(actions).is_some();
             if hover || button.finger_hover_out(actions).is_some() {
                 let color=if hover {Palette::vec4(&Palette::for_cx(cx).hover_soft)}else{Vec4f::default()};
                 script_apply_eval!(cx,button,{draw_bg +: {color: #(color)}});
             }
+        }
+        for (path,mode) in PHONE_SEGMENTS {
+            if self.view.view(cx,path).finger_up(actions).is_some_and(|fe|fe.is_over && !fe.cancelled) {self.set_mode(cx,mode);}
         }
         if self.view.button(cx,ids!(phone_places)).clicked(actions) {
             self.phone_places_open=!self.phone_places_open;
@@ -4893,9 +4952,6 @@ impl FilesView {
             let mut side=self.view.view(cx,ids!(sidebar));
             let width=self.layout_width;
             script_apply_eval!(cx,side,{width: #(width)});
-        }
-        for (path,mode) in [(ids!(phone_icons),ViewMode::Icons),(ids!(phone_list),ViewMode::Compact),(ids!(phone_map),ViewMode::Treemap)] {
-            if self.view.button(cx,path).clicked(actions) {self.set_mode(cx,mode);}
         }
         if self.menu_open && self.handle_menu_actions(cx, actions) {
             return;
@@ -4943,6 +4999,14 @@ impl FilesView {
         for (id, mode) in MODE_BUTTONS {
             if self.view.view(cx, id).finger_down(actions).is_some() {
                 self.set_mode(cx, mode);
+            }
+        }
+        if !self.tabs.is_empty() {
+            for (id, projection) in PROJ_BUTTONS {
+                if self.view.view(cx, id).finger_down(actions).is_some() {
+                    self.set_projection_choice(cx, projection);
+                    self.set_mode(cx, ViewMode::Treemap);
+                }
             }
         }
         for (id, storage) in [(ids!(menu_button), false), (ids!(storage_button), true)] {

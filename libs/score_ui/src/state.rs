@@ -117,6 +117,10 @@ pub struct ScoreUiState {
     /// What the open dialog is about to apply, and what went wrong last time.
     pub draft: DialogDraft,
     pub dialog_error: Option<String>,
+    /// A Save As target that already exists and is not this document's
+    /// file: the dialog asked, and a second Save to the same path replaces
+    /// it. Reopening the dialog forgets it.
+    pub overwrite_armed: Option<PathBuf>,
 }
 
 /// The pending, not-yet-applied values of the setup dialogs. Keeping them out
@@ -165,6 +169,7 @@ impl Default for ScoreUiState {
                 tempo: 108.0,
             },
             dialog_error: None,
+            overwrite_armed: None,
         }
     }
 }
@@ -1312,6 +1317,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         ScoreAction::OpenDialog(dialog) => {
             state.ui.dialog = *dialog;
             state.ui.dialog_error = None;
+            state.ui.overwrite_armed = None;
             if *dialog == DialogKind::Library {
                 // The folder is read here, not at launch: a browser nobody
                 // opens costs nothing.
@@ -1524,6 +1530,20 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         },
         ScoreAction::SavePath(path) => {
             let path = crate::document::with_native_extension(path);
+            // Save As onto another existing file asks first: the dialog says
+            // so and stays open, and saving to the same path again replaces
+            // it.
+            let confirmed = state.ui.overwrite_armed.take().as_ref() == Some(&path);
+            if !confirmed && state.document.would_replace_other_file(&path) {
+                let message = format!(
+                    "{} already exists. Save again to replace it.",
+                    path.display()
+                );
+                state.ui.overwrite_armed = Some(path);
+                state.ui.dialog_error = Some(message.clone());
+                state.ui.status = message;
+                return true;
+            }
             match state.document.save(path.clone()) {
                 Ok(()) => {
                     state.ui.dialog = DialogKind::None;

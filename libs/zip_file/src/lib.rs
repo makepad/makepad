@@ -272,9 +272,33 @@ pub enum ZipError {
 pub fn zip_read_central_directory(
     zip_data: &mut (impl Seek + Read),
 ) -> Result<ZipCentralDirectory, ZipError> {
-    // lets read the the dirend
+    // The end record is the last 22 bytes unless the archive carries a
+    // comment after it (GitHub's generated zips hold the commit id there),
+    // so search back through the largest possible comment for its signature.
+    let len = zip_data
+        .seek(SeekFrom::End(0))
+        .map_err(|_| ZipError::CantSeekToDirEnd)?;
+    if len < END_OF_CENTRAL_DIRECTORY_SIZE as u64 {
+        return Err(ZipError::EndOfCentralDirectoryInvalid);
+    }
+    let window = len.min(END_OF_CENTRAL_DIRECTORY_SIZE as u64 + u16::MAX as u64);
     zip_data
-        .seek(SeekFrom::End(-(END_OF_CENTRAL_DIRECTORY_SIZE as i64)))
+        .seek(SeekFrom::Start(len - window))
+        .map_err(|_| ZipError::CantSeekToDirEnd)?;
+    let tail = read_binary(zip_data, window as usize)?;
+    let signature = END_OF_CENTRAL_DIRECTORY_SIGNATURE.to_le_bytes();
+    let found = (0..=tail.len() - END_OF_CENTRAL_DIRECTORY_SIZE)
+        .rev()
+        .find(|&i| {
+            tail[i..i + 4] == signature
+                // The comment length must reach exactly to the end.
+                && i + END_OF_CENTRAL_DIRECTORY_SIZE
+                    + u16::from_le_bytes([tail[i + 20], tail[i + 21]]) as usize
+                    == tail.len()
+        })
+        .ok_or(ZipError::EndOfCentralDirectoryInvalid)?;
+    zip_data
+        .seek(SeekFrom::Start(len - window + found as u64))
         .map_err(|_| ZipError::CantSeekToDirEnd)?;
     let eocd = EndOfCentralDirectory::from_stream(zip_data)?;
     zip_data

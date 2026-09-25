@@ -8503,11 +8503,12 @@ fn current_theme_preset(cx: &mut Cx) -> usize {
 
 /// The mix's weight rows, in the order the lab lists them.
 ///
-/// Eight, because the longest appearance group the library ships is eight
-/// themes and the sidebar is one chunk evaluated once -- there is no making
-/// a row at the moment a group turns out to want it. A shorter group hides
-/// the tail and zeroes its uids, which shuts the route as well as the row.
-const EQ_ROW_IDS: [LiveId; 8] = [
+/// Twelve, because the longest appearance group the library ships is ten
+/// themes (the light one, since the material sheets joined it) and the
+/// sidebar is one chunk evaluated once -- there is no making a row at the
+/// moment a group turns out to want it. A shorter group hides the tail and
+/// zeroes its uids, which shuts the route as well as the row.
+const EQ_ROW_IDS: [LiveId; 12] = [
     live_id!(eq_row_0),
     live_id!(eq_row_1),
     live_id!(eq_row_2),
@@ -8516,6 +8517,10 @@ const EQ_ROW_IDS: [LiveId; 8] = [
     live_id!(eq_row_5),
     live_id!(eq_row_6),
     live_id!(eq_row_7),
+    live_id!(eq_row_8),
+    live_id!(eq_row_9),
+    live_id!(eq_row_10),
+    live_id!(eq_row_11),
 ];
 
 /// How long the mix waits between installs while a weight is being dragged.
@@ -9191,7 +9196,7 @@ pub struct Tweaker {
     eq_random_uid: u64,
     /// One per weight row on show, in the group's own order; the rest 0.
     #[rust]
-    eq_row_uids: [u64; 8],
+    eq_row_uids: [u64; 12],
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -11186,6 +11191,10 @@ impl Tweaker {
                                 eq_row_5 := EqRowT {}
                                 eq_row_6 := EqRowT {}
                                 eq_row_7 := EqRowT {}
+                                eq_row_8 := EqRowT {}
+                                eq_row_9 := EqRowT {}
+                                eq_row_10 := EqRowT {}
+                                eq_row_11 := EqRowT {}
                             }
                             // How the mix reads. Two themes that were each
                             // readable can average into one that is not: both
@@ -18080,7 +18089,7 @@ impl Tweaker {
             self.eq_absolute_uid = 0;
             self.eq_relative_uid = 0;
             self.eq_random_uid = 0;
-            self.eq_row_uids = [0; 8];
+            self.eq_row_uids = [0; 12];
             return;
         }
         // Only where something is waiting on it. The settle is an interval
@@ -18879,7 +18888,7 @@ impl Tweaker {
         // seam wherever it meets different content behind it, which reads as
         // a rendering bug rather than as "the rest is out of the way".
         self.draw_outline.fill_color = vec4(0.09, 0.09, 0.10, 1.0);
-        let mut band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
+        let band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
             if w > 0.0 && h > 0.0 {
                 this.draw_outline
                     .draw_abs(cx, Rect { pos: dvec2(x, y), size: dvec2(w, h) });
@@ -20776,6 +20785,10 @@ mod tests {
             ("eq_row_5", "EqRowT"),
             ("eq_row_6", "EqRowT"),
             ("eq_row_7", "EqRowT"),
+            ("eq_row_8", "EqRowT"),
+            ("eq_row_9", "EqRowT"),
+            ("eq_row_10", "EqRowT"),
+            ("eq_row_11", "EqRowT"),
             ("eq_weight", "FabSlider"),
             ("eq_absolute", "PanelButton"),
             ("eq_relative", "PanelButton"),
@@ -21468,10 +21481,6 @@ mod tests {
             // Display drops the enum and the fields equal to the defaults.
             assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
         });
-    }
-
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
     }
 
     #[test]

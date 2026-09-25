@@ -298,7 +298,8 @@ impl Widget for Modal {
             // * If there was a click/tap in the background area, outside of the inner `content` view.
             let should_close = back_pressed
                 || match bg_area_hit {
-                    Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
+                    // A press taken away dismisses nothing.
+                    Hit::FingerUp(fe) => !fe.cancelled && !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || (owns_cancel && (
@@ -591,11 +592,8 @@ mod tests {
     use crate::popover::PopoverWidgetRefExt;
     use std::cell::Cell;
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
@@ -720,6 +718,7 @@ mod tests {
     /// the modal away and gives the pointer back.
     #[test]
     fn nothing_walked_before_the_modal_hears_a_press_through_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -744,12 +743,14 @@ mod tests {
         walk(&mut cx, &root, &release(on_scrim));
         assert!(!modal.as_modal().is_open(), "a press on the scrim dismisses");
         assert_eq!(cx.sweep_lock_area(), None, "and gives the pointer back");
+        });
     }
 
     /// A popover opened inside the content keeps the pointer over the modal
     /// that holds it: its choice hears the press, the modal stays open.
     #[test]
     fn an_overlay_opened_inside_the_content_stays_above_the_modal() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -775,6 +776,7 @@ mod tests {
         let actions = walk(&mut cx, &root, &press(on_choice));
         assert!(pressed(&actions, &choice), "the popover's choice did not hear its press");
         assert!(modal.as_modal().is_open());
+        });
     }
 
     /// A popover on the page under the scrim is as deaf as a button there:
@@ -783,6 +785,7 @@ mod tests {
     /// With the modal gone the same press opens the popover.
     #[test]
     fn a_popover_under_the_scrim_does_not_open() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -845,6 +848,7 @@ mod tests {
             });
         }
         assert!(pop.as_popover().is_open(), "with the modal gone the press opens it");
+        });
     }
 
     /// A modal opened over another one beside it in the tree hears its own
@@ -852,6 +856,7 @@ mod tests {
     /// hears nothing; closed, it gives the pointer back to the first.
     #[test]
     fn a_modal_opened_over_another_hears_its_own_content() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -911,6 +916,7 @@ mod tests {
         second.as_modal().close(&mut cx);
         let now = cx.sweep_lock_area().expect("the first modal still holds the pointer");
         assert!(same_slot(now, held.unwrap()), "the first modal has the pointer again, not {now:?}");
+        });
     }
 
     /// The keyboard goes back to what had it when the modal opened, though
@@ -918,6 +924,7 @@ mod tests {
     /// content took the keyboard.
     #[test]
     fn closing_gives_the_keyboard_back_after_the_page_has_been_drawn_again() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -931,7 +938,8 @@ mod tests {
         modal.as_modal().open(&mut cx);
         target.draw(&mut cx, &root);
         settle_focus(&mut cx);
-        cx.set_key_focus(root.widget(&cx, ids!(inner)).area());
+        let inner = root.widget(&cx, ids!(inner)).area();
+        cx.set_key_focus(inner);
         settle_focus(&mut cx);
         root.redraw(&mut cx);
         target.draw(&mut cx, &root);
@@ -940,12 +948,14 @@ mod tests {
         modal.as_modal().close(&mut cx);
         settle_focus(&mut cx);
         assert!(cx.has_key_focus(under.area()), "the keyboard went to {:?}, not back to {:?}", cx.key_focus(), under.area());
+        });
     }
 
     /// A page rebuilt under an open modal takes the modal with it; the next
     /// event gives the pointer and the wheel back.
     #[test]
     fn a_modal_dropped_while_open_lets_go_of_the_pointer_and_the_wheel() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let mut target = Target::new(&mut cx);
         let old = page(&mut cx);
@@ -962,12 +972,14 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), None, "the dropped modal still holds the pointer");
         let area = new.widget(&cx, ids!(under)).area();
         assert!(cx.is_scrolling_allowed_within(&area), "the dropped modal still blocks the wheel");
+        });
     }
 
     /// A handle kept across redraws is followed to the slot's handle now,
     /// and to nothing once the list no longer draws that slot.
     #[test]
     fn a_kept_handle_is_followed_to_the_handle_its_slot_has_now() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -980,5 +992,6 @@ mod tests {
         assert_ne!(under.area(), kept);
         assert_eq!(area_after_redraws(&cx, kept), under.area());
         assert_eq!(area_after_redraws(&cx, Area::Empty), Area::Empty);
+        });
     }
 }

@@ -515,6 +515,10 @@ pub struct Video {
     is_looping: bool,
     #[live(false)]
     hold_to_pause: bool,
+    /// This press paused playback for as long as it is held
+    /// (`hold_to_pause`): its end, released or taken away, resumes it.
+    #[rust]
+    held_paused: bool,
     #[live(false)]
     autoplay: bool,
     #[live(false)]
@@ -1504,12 +1508,22 @@ impl Video {
                 } else if self.controls_interactable() && self.hit_test_controls(cx, fe.abs) {
                     // Will be handled on FingerUp
                 } else if !self.show_controls && self.hold_to_pause {
+                    // Only a pause this press caused is its to undo.
+                    self.held_paused = self.playback_state == PlaybackState::Playing;
                     self.pause_playback(cx);
                 }
             }
             Hit::FingerMove(fe) => {
                 if self.is_dragging_progress {
                     self.seek_to_position_from_x(cx, fe.abs.x);
+                }
+            }
+            // Taken away: no seek, no play toggle, no controls toggle — but a
+            // hold that paused playback lets go of it.
+            Hit::FingerUp(fe) if fe.is_primary_hit() && fe.cancelled => {
+                self.is_dragging_progress = false;
+                if std::mem::take(&mut self.held_paused) {
+                    self.resume_playback(cx);
                 }
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
@@ -1533,6 +1547,7 @@ impl Video {
                         self.animator_play(cx, ids!(hover.off));
                     }
                 } else if !self.show_controls && self.hold_to_pause {
+                    self.held_paused = false;
                     self.resume_playback(cx);
                 }
             }

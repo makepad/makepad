@@ -1267,8 +1267,7 @@ pub fn compile_prepared_graph(
     main_storage: BufferStorageMode,
     tail_storage: BufferStorageMode,
 ) -> Result<MetalCompiledGraph, String> {
-    let main_bytes = collect_main_buffer_bytes(ctx, prepared.main_buffer_size)?;
-    let main_buffer = runtime.create_buffer_with_bytes(&main_bytes, main_storage)?;
+    let main_buffer = create_main_buffer(runtime, ctx, prepared.main_buffer_size, main_storage)?;
     let tail_buffer = if prepared.tail_buffer_size > 0 {
         Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
     } else {
@@ -2061,7 +2060,49 @@ impl GraphBindingPlanner {
     }
 }
 
+/// Host bytes written per `write_buffer` call when seeding a main buffer.
+const MAIN_BUFFER_WRITE_CHUNK: usize = 32 << 20;
+
+/// The main buffer with exactly the contents `collect_main_buffer_bytes`
+/// would produce (the used arena prefix, zeros after it, `len.max(1)`
+/// bytes), built on the device from bounded host chunks, so no host
+/// allocation the size of the whole planned buffer (multi-GiB for large
+/// graphs) is needed; such a request can fail under an embedding host's
+/// capped allocator. The tail is zeroed explicitly rather than relying on
+/// new Metal buffers being zero-filled.
+fn create_main_buffer(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    len: usize,
+    storage: BufferStorageMode,
+) -> Result<makepad_ai_metal::MetalBuffer, String> {
+    let used = main_buffer_used_bytes(ctx, len)?;
+    let total = len.max(1);
+    let buffer = runtime.create_buffer(total, storage)?;
+    for (index, chunk) in ctx.mem_buffer()[..used].chunks(MAIN_BUFFER_WRITE_CHUNK).enumerate() {
+        runtime.write_buffer(&buffer, index * MAIN_BUFFER_WRITE_CHUNK, chunk)?;
+    }
+    if used < total {
+        let zeros = vec![0u8; MAIN_BUFFER_WRITE_CHUNK.min(total - used)];
+        let mut offset = used;
+        while offset < total {
+            let count = (total - offset).min(zeros.len());
+            runtime.write_buffer(&buffer, offset, &zeros[..count])?;
+            offset += count;
+        }
+    }
+    Ok(buffer)
+}
+
 fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, String> {
+    let used = main_buffer_used_bytes(ctx, len)?;
+    let mut bytes = vec![0u8; len.max(1)];
+    bytes[..used].copy_from_slice(&ctx.mem_buffer()[..used]);
+    Ok(bytes)
+}
+
+/// The arena prefix a main buffer of `len` bytes starts with, validated.
+fn main_buffer_used_bytes(ctx: &Context, len: usize) -> Result<usize, String> {
     let src = ctx.mem_buffer();
     // Two-region: mem_buffer is only the dirty prefix. used_mem is a
     // logical offset (ro_split + dirty_used).
@@ -2083,9 +2124,7 @@ fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, Strin
             src.len()
         ));
     }
-    let mut bytes = vec![0u8; len.max(1)];
-    bytes[..used].copy_from_slice(&src[..used]);
-    Ok(bytes)
+    Ok(used)
 }
 
 fn execute_node(

@@ -2,7 +2,7 @@ use crate::makepad_shell::{shell_env_cap, write_text};
 use crate::utils::{
     get_build_crate_from_args, get_crate_dir, get_package_binary_name, get_profile_from_args,
     get_target_from_args, resolve_app_icon_env, AppIconEnv, APP_ICON_ENV_VARS, APP_ICON_IDX_1024,
-    APP_ICON_IDX_512, APP_ICON_IDX_ICO,
+    APP_ICON_IDX_512,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,72 +65,39 @@ fn cargo_target_dir() -> PathBuf {
     }
 }
 
+/// The executable's icon resource, made in-process (no rc.exe/windres) from the
+/// same source as the macOS bundle in `write_macos_app_bundle`:
+/// `resources/icon.icns`, else the largest `icon_*.png`.
 fn write_windows_icon_resource(
+    args: &[String],
     icon_env: &AppIconEnv,
     build_crate: &str,
 ) -> Result<Option<PathBuf>, String> {
+    use makepad_win_resource::{app_link_input, LinkFormat};
+    let target = get_target_from_args(args).unwrap_or_else(|| {
+        format!("{}-pc-windows-msvc", std::env::consts::ARCH)
+    });
+    let env = if target.ends_with("-gnu") || target.ends_with("-gnullvm") { "gnu" } else { "msvc" };
+    let arch = target.split('-').next().unwrap_or_default();
+    let Some(format) = LinkFormat::for_target("windows", env, arch)? else {
+        return Ok(None);
+    };
+
+    let icns = get_crate_dir(build_crate)?.join("resources/icon.icns");
+    let source = if icns.is_file() {
+        icns
+    } else {
+        PathBuf::from(&icon_env[APP_ICON_IDX_1024])
+    };
+    let bytes = fs::read(&source).map_err(|e| format!("failed to read {:?}: {e}", source))?;
+    let input = app_link_input(format, Some(&bytes), None)
+        .map_err(|e| format!("Windows icon from {:?}: {e}", source))?;
+
     let out_dir = PathBuf::from("target/makepad-desktop/windows-res").join(build_crate);
     fs::create_dir_all(&out_dir).map_err(|e| format!("failed to create {:?}: {e}", out_dir))?;
-
-    let rc_path = out_dir.join("app_icon.rc");
-    let res_path = out_dir.join("app_icon.res");
-    let ico = &icon_env[APP_ICON_IDX_ICO];
-    fs::write(
-        &rc_path,
-        format!("1 ICON \"{}\"\n", ico.replace('\\', "\\\\")),
-    )
-    .map_err(|e| format!("failed to write {:?}: {e}", rc_path))?;
-
-    let mut tries: Vec<(&str, Vec<String>)> = Vec::new();
-    tries.push((
-        "llvm-rc",
-        vec![
-            "/nologo".to_string(),
-            format!("/fo{}", res_path.to_string_lossy()),
-            rc_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "rc",
-        vec![
-            "/nologo".to_string(),
-            format!("/fo{}", res_path.to_string_lossy()),
-            rc_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "llvm-windres",
-        vec![
-            rc_path.to_string_lossy().to_string(),
-            "-O".to_string(),
-            "coff".to_string(),
-            "-o".to_string(),
-            res_path.to_string_lossy().to_string(),
-        ],
-    ));
-    tries.push((
-        "windres",
-        vec![
-            rc_path.to_string_lossy().to_string(),
-            "-O".to_string(),
-            "coff".to_string(),
-            "-o".to_string(),
-            res_path.to_string_lossy().to_string(),
-        ],
-    ));
-
-    for (tool, args) in tries {
-        if let Ok(status) = Command::new(tool).args(&args).status() {
-            if status.success() && res_path.is_file() {
-                return Ok(Some(res_path));
-            }
-        }
-    }
-
-    eprintln!(
-        "warning: could not compile Windows .rc icon resource (tried llvm-rc/rc/llvm-windres/windres). executable icon embedding skipped."
-    );
-    Ok(None)
+    let path = out_dir.join(format!("app_icon.{}", format.extension()));
+    fs::write(&path, input).map_err(|e| format!("failed to write {:?}: {e}", path))?;
+    Ok(Some(path))
 }
 
 fn add_windows_icon_link_arg(
@@ -142,7 +109,7 @@ fn add_windows_icon_link_arg(
     if !is_windows_target(args) {
         return Ok(());
     }
-    let Some(res) = write_windows_icon_resource(icon_env, build_crate)? else {
+    let Some(res) = write_windows_icon_resource(args, icon_env, build_crate)? else {
         return Ok(());
     };
 
@@ -244,9 +211,13 @@ fn macos_app_bundle_path_for(binary_name: &str, profile: &str) -> PathBuf {
         .join(format!("{binary_name}.app"))
 }
 
-fn resolve_codesign_identity(cert: Option<&str>) -> Result<String, String> {
+pub(crate) fn resolve_codesign_identity(cert: Option<&str>) -> Result<String, String> {
     if let Some(cert) = cert {
         return Ok(cert.to_string());
+    }
+    // A standing choice for machines with several identities.
+    if let Some(cert) = std::env::var("MAKEPAD_CODESIGN_IDENTITY").ok().filter(|cert| !cert.trim().is_empty()) {
+        return Ok(cert.trim().to_string());
     }
 
     let cwd = std::env::current_dir().unwrap();
@@ -256,34 +227,79 @@ fn resolve_codesign_identity(cert: Option<&str>) -> Result<String, String> {
         "security",
         &["find-identity", "-v", "-p", "codesigning"],
     )?;
+    pick_codesign_identity(&identities)
+}
 
-    let mut apple_development = Vec::new();
-    let mut all = Vec::new();
-    for line in identities.lines() {
+/// The identity to sign with from `security find-identity -v` output: the
+/// Apple Development one, or the only one there is. Several certificates
+/// under one name (a renewed certificate beside the old one) are the same
+/// signer as far as a designated requirement is concerned, which names the
+/// certificate's subject, not the certificate: the first is taken, by hash,
+/// since the shared name alone is ambiguous to codesign.
+fn pick_codesign_identity(listing: &str) -> Result<String, String> {
+    let mut apple_development: Vec<(String, String)> = Vec::new();
+    let mut all: Vec<(String, String)> = Vec::new();
+    for line in listing.lines() {
         let name = line
             .split('"')
             .nth(1)
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        if let Some(name) = name {
-            all.push(name.to_string());
+        let hash = line
+            .split_whitespace()
+            .nth(1)
+            .filter(|hash| hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()));
+        if let (Some(name), Some(hash)) = (name, hash) {
+            all.push((hash.to_string(), name.to_string()));
             if name.starts_with("Apple Development:") {
-                apple_development.push(name.to_string());
+                apple_development.push((hash.to_string(), name.to_string()));
             }
         }
     }
 
-    match apple_development.len() {
-        1 => Ok(apple_development.remove(0)),
-        0 if all.len() == 1 => Ok(all.remove(0)),
-        0 => Err(
+    let pick = |mut found: Vec<(String, String)>| {
+        if found.len() == 1 {
+            let (_, name) = found.remove(0);
+            Some(name)
+        } else if found.windows(2).all(|pair| pair[0].1 == pair[1].1) {
+            found.first().map(|(hash, _)| hash.clone())
+        } else {
+            None
+        }
+    };
+    match (apple_development.is_empty(), all.is_empty()) {
+        (_, true) => Err(
             "no codesigning identity found; pass --cert=\"Apple Development: ...\" explicitly"
                 .to_string(),
         ),
-        _ => Err(
-            "multiple Apple Development identities found; pass --cert=<identity or hash> explicitly"
-                .to_string(),
-        ),
+        (false, _) => pick(apple_development).ok_or_else(|| {
+            "multiple Apple Development identities found; pass --cert=<identity or hash> or set MAKEPAD_CODESIGN_IDENTITY"
+                .to_string()
+        }),
+        (true, false) => pick(all).ok_or_else(|| {
+            "multiple codesigning identities and no Apple Development one; pass --cert=<identity or hash>"
+                .to_string()
+        }),
+    }
+}
+
+#[cfg(test)]
+mod codesign_identity_tests {
+    use super::pick_codesign_identity;
+
+    #[test]
+    fn a_renewed_certificate_beside_the_old_one_is_one_signer() {
+        let listing = "  1) 82B72FFCA0221B8B84962F0D6D10B2743ED9E118 \"Apple Development: A B (TEAM)\"\n  2) ED88B9ACB31D482F8746EEE08B057BE803095162 \"Apple Development: A B (TEAM)\"\n     2 valid identities found\n";
+        assert_eq!(pick_codesign_identity(listing).unwrap(), "82B72FFCA0221B8B84962F0D6D10B2743ED9E118");
+    }
+
+    #[test]
+    fn one_identity_is_named_and_different_names_need_a_choice() {
+        let one = "  1) 82B72FFCA0221B8B84962F0D6D10B2743ED9E118 \"Apple Development: A B (TEAM)\"\n";
+        assert_eq!(pick_codesign_identity(one).unwrap(), "Apple Development: A B (TEAM)");
+        let two = "  1) 82B72FFCA0221B8B84962F0D6D10B2743ED9E118 \"Apple Development: A B (TEAM)\"\n  2) ED88B9ACB31D482F8746EEE08B057BE803095162 \"Apple Development: C D (TEAM2)\"\n";
+        assert!(pick_codesign_identity(two).is_err());
+        assert!(pick_codesign_identity("     0 valid identities found\n").is_err());
     }
 }
 
@@ -325,7 +341,7 @@ fn maybe_write_generated_entitlements(
     Ok(Some(out_path))
 }
 
-fn codesign_path(
+pub(crate) fn codesign_path(
     path: &Path,
     identity: &str,
     entitlements: Option<&Path>,
@@ -500,7 +516,7 @@ fn resolve_icons_for_args(args: &[String]) -> Result<Option<AppIconEnv>, String>
 
 pub fn handle_desktop(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
-        return Err("desktop requires a subcommand: build, run, check, sign".to_string());
+        return Err("desktop requires a subcommand: build, run, check, bundle, sign".to_string());
     }
 
     match args[0].as_str() {
@@ -528,6 +544,7 @@ pub fn handle_desktop(args: &[String]) -> Result<(), String> {
             let icon_env = resolve_icons_for_args(&cargo_args)?;
             run_cargo("check", &cargo_args, icon_env, &sign)
         }
+        "bundle" => crate::desktop_bundle::handle_desktop_bundle(&args[1..]),
         "sign" => {
             let (mut sign, cargo_args) = parse_macos_sign_options(&args[1..])?;
             sign.enabled = true;

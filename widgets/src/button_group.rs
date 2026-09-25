@@ -730,6 +730,10 @@ pub struct SegmentedControl {
     /// can be aimed.
     #[rust]
     segments: Vec<Rect>,
+    /// The row's corner when the segments were measured: they are relative
+    /// to it, whatever the layout moved the row by afterwards.
+    #[rust]
+    drawn_at: DVec2,
     /// Which segment the keyboard is on.
     #[rust]
     focused: usize,
@@ -849,6 +853,7 @@ impl Widget for SegmentedControl {
             ..walk
         };
         let rect = self.draw_bg.draw_walk(cx, walk);
+        self.drawn_at = rect.pos;
 
         // Where each answer sits, and where the pill should be.
         self.segments.clear();
@@ -881,14 +886,18 @@ impl Widget for SegmentedControl {
                 }
             }
         } else if let Some(target) = self.segments.get(self.selected).copied() {
-            self.pill.aim(target, self.glide_secs);
+            // The glide runs in the row's own frame: a new answer slides,
+            // but the row moving (a parent re-laid out around it) moves the
+            // pill with it at once instead of sending it after the row.
+            self.pill.aim(Rect { pos: target.pos - rect.pos, size: target.size }, self.glide_secs);
             let now = cx.seconds_since_app_start();
             let dt = if self.last_time > 0.0 { (now - self.last_time).max(0.0) } else { 0.0 };
             self.last_time = now;
             if self.pill.step(dt) {
                 cx.new_next_frame();
             }
-            self.draw_pill.draw_abs(cx, self.pill.current());
+            let pill = self.pill.current();
+            self.draw_pill.draw_abs(cx, Rect { pos: pill.pos + rect.pos, size: pill.size });
         }
 
         for (i, seg) in self.segments.clone().iter().enumerate() {
@@ -902,11 +911,14 @@ impl Widget for SegmentedControl {
                 w: rest.w * alpha,
                 ..if on { family.on_container } else { rest }
             };
-            let size = draw.text_style.font_size as f64;
             let text_w = measure(draw, cx, &option);
+            // Centred by the laid-out line (ascender to descender), which is
+            // what `draw_abs` places at `pos`: the point size is shorter
+            // than the line, and centring by it set every label low.
+            let text_h = draw.layout(cx, 0.0, 0.0, None, false, Align::default(), &option).size_in_lpxs.height as f64;
             let pos = dvec2(
                 seg.pos.x + (seg.size.x - text_w) * 0.5,
-                seg.pos.y + (seg.size.y - size) * 0.5,
+                seg.pos.y + (seg.size.y - text_h) * 0.5,
             );
             draw.draw_abs(cx, pos, &option);
             draw.color = rest;
@@ -936,7 +948,13 @@ impl Widget for SegmentedControl {
                 cx.set_key_focus(self.draw_bg.area());
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over && fe.was_tap() => {
-                if let Some(index) = self.segments.iter().position(|seg| seg.contains(fe.abs)) {
+                // The segments were placed where the row was first laid
+                // out; a parent that aligns its children (centred, or after
+                // a Fill sibling) moves the row afterwards. Place the press
+                // against the row as drawn (`fe.rect`), then in the frame
+                // the segments were measured in.
+                let at = fe.abs - fe.rect.pos + self.drawn_at;
+                if let Some(index) = self.segments.iter().position(|seg| seg.contains(at)) {
                     self.press(cx, index);
                 }
             }

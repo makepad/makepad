@@ -3104,6 +3104,21 @@ impl Widget for FloatingAction {
                 self.release_moving_item(cx, me.abs);
                 self.release_at(cx, me.abs);
             }
+            // The mouse press itself taken away: its bookkeeping ends as a
+            // release's would, but nothing is picked.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if self.swallow_up {
+                    self.swallow_up = false;
+                    if !self.open {
+                        self.unlock(cx);
+                    }
+                }
+                self.pressed_item = None;
+                if std::mem::take(&mut self.opening_press) && self.open && self.lock_pending {
+                    self.lock_pending = false;
+                    self.lock(cx);
+                }
+            }
             // Touch never becomes a mouse press: without this arm a set
             // opens on a phone and a tap outside never puts it away. The
             // first touch only.
@@ -3411,6 +3426,10 @@ impl FloatingActionRef {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
 
     const BOUNDS: Rect = Rect {
@@ -3457,6 +3476,7 @@ mod tests {
     /// in a catalogue would never show.
     #[test]
     fn the_main_button_lands_at_each_anchor() {
+        crate::on_test_cx(|| {
         for (anchor, centre) in [
             (FloatingAnchor::TopLeft, dvec2(44.0, 44.0)),
             (FloatingAnchor::TopCenter, dvec2(400.0, 44.0)),
@@ -3471,6 +3491,7 @@ mod tests {
             assert_eq!(rect.center(), centre, "{anchor:?}");
             assert_eq!(rect.size, dvec2(MAIN, MAIN), "{anchor:?}");
         }
+        });
     }
 
     /// A container smaller than the button cannot hold it, and the button
@@ -3478,12 +3499,14 @@ mod tests {
     /// its top would be under whatever sits above the container.
     #[test]
     fn a_container_smaller_than_the_button_keeps_its_low_edge() {
+        crate::on_test_cx(|| {
         let tiny = Rect {
             pos: dvec2(10.0, 10.0),
             size: dvec2(40.0, 40.0),
         };
         let rect = main_rect(FloatingAnchor::BottomRight, tiny, MAIN, MARGIN);
         assert_eq!(rect.pos, dvec2(10.0, 10.0));
+        });
     }
 
     /// A notch or a home indicator takes its insets out of the rect the
@@ -3491,6 +3514,7 @@ mod tests {
     /// rather than under it.
     #[test]
     fn pin_bounds_leave_the_safe_area() {
+        crate::on_test_cx(|| {
         let insets = SafeAreaInsets {
             top: 40.0,
             bottom: 30.0,
@@ -3509,6 +3533,7 @@ mod tests {
             size: dvec2(200.0, 200.0),
         };
         assert_eq!(pin_bounds(host, BOUNDS.size, insets), host);
+        });
     }
 
     /// Every arc starts along one edge its anchor touches and ends along
@@ -3516,6 +3541,7 @@ mod tests {
     /// the table's.
     #[test]
     fn the_arc_table_opens_inward() {
+        crate::on_test_cx(|| {
         for (anchor, start, dir, span) in [
             (FloatingAnchor::BottomRight, 0.0, -1.0, 90.0),
             (FloatingAnchor::BottomLeft, 0.0, 1.0, 90.0),
@@ -3539,12 +3565,14 @@ mod tests {
         ]) {
             assert!(close_to(*got, want, 0.01), "{got:?} is not {want:?}");
         }
+        });
     }
 
     /// The arc grows before two actions' discs would touch, rather than
     /// the discs shrinking, and never closes in on the main button.
     #[test]
     fn the_fan_grows_before_neighbours_touch() {
+        crate::on_test_cx(|| {
         let quarter = f64::to_radians(90.0);
         let half = f64::to_radians(180.0);
         assert!((radial_radius(4, quarter, ITEM, GAP, MAIN, MIN_R) - 100.46).abs() < 0.01);
@@ -3558,6 +3586,7 @@ mod tests {
                 assert!(r >= MAIN * 0.5 + GAP + ITEM * 0.5, "n {n} span {span}: radius {r}");
             }
         }
+        });
     }
 
     /// Past the chord rule, an arc grows until no two squares on it meet and
@@ -3565,6 +3594,7 @@ mod tests {
     /// quarter arc at the chord rule's radius share corners on the diagonal.
     #[test]
     fn the_arc_grows_before_neighbouring_squares_meet() {
+        crate::on_test_cx(|| {
         let quarter = f64::to_radians(90.0);
         let half = f64::to_radians(180.0);
         assert!(arc_radius(4, quarter, ITEM, GAP, MAIN, MIN_R) > radial_radius(4, quarter, ITEM, GAP, MAIN, MIN_R));
@@ -3588,6 +3618,7 @@ mod tests {
         }
         assert!(arc_step(ITEM, GAP) >= ITEM * std::f64::consts::SQRT_2);
         assert_eq!(arc_step(ITEM, 30.0), ITEM + 30.0);
+        });
     }
 
     /// No action ever goes outward, past the edge the button is pinned to.
@@ -3595,6 +3626,7 @@ mod tests {
     /// arc, go strictly inward on both axes.
     #[test]
     fn every_offset_points_inward() {
+        crate::on_test_cx(|| {
         for anchor in FloatingAnchor::ALL {
             let inward = interior(anchor);
             for dial in LAYOUTS {
@@ -3611,12 +3643,14 @@ mod tests {
                 }
             }
         }
+        });
     }
 
     /// One step is an action's diameter and the gap. A row with no inward
     /// run along its own axis is centred on the button, one step in.
     #[test]
     fn rows_and_columns_step_by_size_and_gap() {
+        crate::on_test_cx(|| {
         let run = |anchor, dial| dial_offsets(anchor, dial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX);
         assert_eq!(
             run(FloatingAnchor::BottomRight, SpeedDialLayout::Horizontal),
@@ -3634,12 +3668,14 @@ mod tests {
             run(FloatingAnchor::CenterRight, SpeedDialLayout::Vertical),
             vec![dvec2(-60.0, -52.0), dvec2(-60.0, 0.0), dvec2(-60.0, 52.0)]
         );
+        });
     }
 
     /// Chips go on the side that faces the interior, for all twenty-four
     /// anchor and layout pairs.
     #[test]
     fn chips_go_on_the_inside() {
+        crate::on_test_cx(|| {
         use ChipSide::*;
         use FloatingAnchor::*;
         for (anchor, vertical, horizontal) in [
@@ -3656,12 +3692,14 @@ mod tests {
             assert_eq!(chip_side(anchor, SpeedDialLayout::Horizontal), horizontal, "{anchor:?} row");
             assert_eq!(chip_side(anchor, SpeedDialLayout::Radial), Outward, "{anchor:?} arc");
         }
+        });
     }
 
     /// A chip pulled toward the window's edge stays inside it, whichever
     /// side it asked for, and an outward chip clears its disc by the gap.
     #[test]
     fn a_chip_stays_in_the_window() {
+        crate::on_test_cx(|| {
         let window = Rect {
             pos: dvec2(6.0, 6.0),
             size: dvec2(300.0, 200.0),
@@ -3676,6 +3714,7 @@ mod tests {
         // An action on an inner arc puts its chip out past the outer arc.
         let past = chip_rect(dvec2(150.0, 100.0), ITEM, 8.0, size, ChipSide::Outward, dvec2(0.0, -60.0), 30.0, window);
         assert_eq!(past.pos, dvec2(110.0, 22.0), "carried out past the arc beyond it");
+        });
     }
 
     /// Pulled back inside the window, a chip that would land on its own
@@ -3683,6 +3722,7 @@ mod tests {
     /// interior when that covers nothing and on the other side when it would.
     #[test]
     fn a_chip_pulled_over_its_own_action_goes_beside_it() {
+        crate::on_test_cx(|| {
         let window = Rect {
             pos: dvec2(6.0, 6.0),
             size: dvec2(400.0, 300.0),
@@ -3709,6 +3749,7 @@ mod tests {
             chip_rect(low, ITEM, 8.0, size, ChipSide::Outward, up, 0.0, window),
             "with room, where it was asked for"
         );
+        });
     }
 
     /// Once a row or a column has folded, a chip is carried out past the
@@ -3717,6 +3758,7 @@ mod tests {
     /// button, from every anchor.
     #[test]
     fn a_chip_on_folded_lines_covers_no_other_action() {
+        crate::on_test_cx(|| {
         let size = dvec2(90.0, 22.0);
         for anchor in FloatingAnchor::ALL {
             for (dial, w, h) in [(SpeedDialLayout::Horizontal, 300.0, 900.0), (SpeedDialLayout::Vertical, 900.0, 300.0)] {
@@ -3740,12 +3782,14 @@ mod tests {
         let (host, window) = small_window(1400.0, 900.0);
         let (_, plan) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, host, window);
         assert_eq!(chip_place(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 0, &plan, ITEM, GAP), (ChipSide::Left, 0.0));
+        });
     }
 
     /// A column's chips never meet, so Auto shows them all; an arc's or a
     /// row's would, so Auto shows the one being aimed at.
     #[test]
     fn auto_labels_resolve_by_layout() {
+        crate::on_test_cx(|| {
         assert_eq!(labels_shown(SpeedDialLabels::Auto, SpeedDialLayout::Vertical), SpeedDialLabels::Always);
         assert_eq!(labels_shown(SpeedDialLabels::Auto, SpeedDialLayout::Radial), SpeedDialLabels::Hot);
         assert_eq!(labels_shown(SpeedDialLabels::Auto, SpeedDialLayout::Horizontal), SpeedDialLabels::Hot);
@@ -3763,6 +3807,7 @@ mod tests {
         assert_eq!(labels_shown_in(Auto, SpeedDialLayout::Vertical, 1), Always);
         assert_eq!(labels_shown_in(Always, SpeedDialLayout::Radial, 2), Always);
         assert_eq!(labels_shown_in(Never, SpeedDialLayout::Horizontal, 3), Never);
+        });
     }
 
     /// Arrows go where the actions went. Along a column the arrow the
@@ -3772,6 +3817,7 @@ mod tests {
     /// better aligned one is the one the arrow means.
     #[test]
     fn arrows_follow_the_direction_the_actions_went() {
+        crate::on_test_cx(|| {
         let up = dvec2(0.0, -1.0);
         let down = dvec2(0.0, 1.0);
         let left = dvec2(-1.0, 0.0);
@@ -3786,12 +3832,14 @@ mod tests {
         let arc = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX);
         assert_eq!(arrow_target(&arc, None, origin, left), Some(2));
         assert_eq!(arrow_target(&arc, None, origin, up), Some(0));
+        });
     }
 
     /// Each action sets off a stagger after the one before and eases out
     /// into place; with motion reduced every one is already there.
     #[test]
     fn items_arrive_in_turn() {
+        crate::on_test_cx(|| {
         let (enter, stagger) = (0.2, 0.03);
         let ease = Ease::OutCubic;
         assert_eq!(enter_progress(0, 0.0, enter, stagger, &ease, false), 0.0);
@@ -3801,6 +3849,7 @@ mod tests {
         for (i, elapsed) in [(0usize, 0.0), (3, 0.01), (7, -1.0), (1, 0.13)] {
             assert_eq!(enter_progress(i, elapsed, enter, stagger, &ease, true), 1.0);
         }
+        });
     }
 
     const COUNTS: [usize; 6] = [1, 2, 3, 5, 8, 12];
@@ -3901,6 +3950,7 @@ mod tests {
     /// none overlaps another.
     #[test]
     fn any_number_of_actions_stay_in_the_window_and_apart() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(480.0, 360.0);
         for anchor in FloatingAnchor::ALL {
             for dial in LAYOUTS {
@@ -3910,6 +3960,7 @@ mod tests {
                 }
             }
         }
+        });
     }
 
     /// A small button pinned close to the window's edge has less room
@@ -3919,6 +3970,7 @@ mod tests {
     /// in every layout.
     #[test]
     fn a_small_button_at_the_edge_keeps_its_set_in_the_window() {
+        crate::on_test_cx(|| {
         let flush = Inset {
             left: 0.0,
             top: 0.0,
@@ -3956,6 +4008,7 @@ mod tests {
         let (host, window) = small_window(1400.0, 900.0);
         let (_, plan) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, host, window);
         assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX));
+        });
     }
 
     /// The window the live checks force: eight and twelve on a corner arc
@@ -3963,6 +4016,7 @@ mod tests {
     /// a row from a corner fold into lines, all still inside.
     #[test]
     fn a_crowded_set_takes_a_second_arc_or_a_second_line() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(400.0, 300.0);
         for (anchor, dial, n) in [
             (FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 8),
@@ -3980,6 +4034,7 @@ mod tests {
         assert_eq!(plan.row_count(), 1);
         assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX));
         assert!(plan.offsets.iter().all(|offset| inside(resting_rect(centre, *offset), window)));
+        });
     }
 
     /// An arc takes all it can hold before the arc outside it takes any:
@@ -3987,6 +4042,7 @@ mod tests {
     /// the window lets it be, with the arcs outside it still inside.
     #[test]
     fn the_inner_arc_fills_first() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(400.0, 300.0);
         let anchor = FloatingAnchor::BottomRight;
         let (_, _, span) = radial_arc(anchor);
@@ -4009,6 +4065,7 @@ mod tests {
             assert!(plan.radii.windows(2).all(|w| w[1] >= w[0] + arc_step(ITEM, GAP) - 1e-9), "n {n}: {:?}", plan.radii);
             assert!(*plan.radii.last().unwrap() <= room + 1e-9, "n {n}: the outer arc leaves the window");
         }
+        });
     }
 
     /// How many actions rest on each arc or line, innermost first.
@@ -4024,6 +4081,7 @@ mod tests {
     /// its spacing allows.
     #[test]
     fn a_furthest_radius_holds_every_arc_inside_it() {
+        crate::on_test_cx(|| {
         let mut spread = 0;
         for max_r in [MAX_R, 120.0, 156.0, 260.0] {
             for anchor in FloatingAnchor::ALL {
@@ -4053,6 +4111,7 @@ mod tests {
             }
         }
         assert!(spread > 0, "no set here would have reached past its furthest radius on one arc");
+        });
     }
 
     /// The small preset's sizes and furthest radius.
@@ -4084,6 +4143,7 @@ mod tests {
     /// and twelve on one 396.5 out.
     #[test]
     fn the_default_furthest_radius_holds_twelve_from_a_corner() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(1400.0, 900.0);
         let default = Sizes {
             max_r: MAX_R,
@@ -4116,6 +4176,7 @@ mod tests {
             assert_eq!(wide.row_count(), 1, "n {n}");
             assert!((wide.radii[0] - r).abs() < 0.01, "n {n}: {:?}", wide.radii);
         }
+        });
     }
 
     /// Held to a furthest radius as to a small window, a set takes more
@@ -4126,6 +4187,7 @@ mod tests {
     /// a corner and sixteen from an edge fit inside the default.
     #[test]
     fn inside_a_furthest_radius_the_inner_arc_fills_first() {
+        crate::on_test_cx(|| {
         let step = arc_step(ITEM, GAP);
         for (anchor, most) in [(FloatingAnchor::BottomRight, 12usize), (FloatingAnchor::TopCenter, 16)] {
             let (_, _, span) = radial_arc(anchor);
@@ -4147,6 +4209,7 @@ mod tests {
                 assert!(plan.radii.iter().all(|r| *r <= MAX_R + 1e-9), "{what}: {:?}", plan.radii);
             }
         }
+        });
     }
 
     /// A furthest radius of 0 is no limit: the layout is the one a radius
@@ -4155,6 +4218,7 @@ mod tests {
     /// where the widget's own furthest radius takes two.
     #[test]
     fn a_furthest_radius_of_zero_is_no_limit() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(1400.0, 900.0);
         let quarter = f64::to_radians(90.0);
         let laid = |max_r: f64, n: usize| {
@@ -4175,6 +4239,7 @@ mod tests {
             dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 8, MAIN, ITEM, GAP, MIN_R, NO_MAX),
             dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 8, MAIN, ITEM, GAP, MIN_R, 1.0e6)
         );
+        });
     }
 
     /// Lowering the furthest radius never moves an action further out,
@@ -4183,6 +4248,7 @@ mod tests {
     /// at every furthest radius the Max radius control can set.
     #[test]
     fn lowering_the_furthest_radius_never_moves_the_set_out() {
+        crate::on_test_cx(|| {
         let furthest = |offsets: Vec<DVec2>| offsets.iter().map(|offset| offset.length()).fold(0.0, f64::max);
         for s in [DEFAULT_SIZES, SMALL_SIZES, LARGE_SIZES] {
             for anchor in [FloatingAnchor::BottomRight, FloatingAnchor::TopCenter] {
@@ -4202,6 +4268,7 @@ mod tests {
                 }
             }
         }
+        });
     }
 
     /// A set more than the arcs inside its furthest radius can hold keeps
@@ -4215,6 +4282,7 @@ mod tests {
     /// only past the furthest radius, nothing leaves the window.
     #[test]
     fn a_set_too_large_for_its_furthest_radius_rests_as_near_as_it_can_past_it() {
+        crate::on_test_cx(|| {
         let step = arc_step(ITEM, GAP);
         let (host, window) = small_window(1400.0, 900.0);
         for max_r in [156.0, 100.0, 40.0] {
@@ -4279,6 +4347,7 @@ mod tests {
         assert_laid_out("sixteen under a low window", centre, &plan, 16, window);
         assert_eq!(per_row(&plan), vec![4, 5, 7], "{:?}", plan.radii);
         assert!((plan.radii[2] - 222.4).abs() < 0.05, "{:?}", plan.radii);
+        });
     }
 
     /// A small button pinned flush to a corner or an edge moves its set in
@@ -4288,6 +4357,7 @@ mod tests {
     /// centre alone would have left some of them past it.
     #[test]
     fn a_set_moved_in_off_the_edge_keeps_inside_its_furthest_radius() {
+        crate::on_test_cx(|| {
         let flush = Inset {
             left: 0.0,
             top: 0.0,
@@ -4327,6 +4397,7 @@ mod tests {
             }
         }
         assert!(would_have_passed > 0, "no set here was moved past its furthest radius");
+        });
     }
 
     /// The arrows walk an arc in order: from the button onto the inner arc,
@@ -4337,6 +4408,7 @@ mod tests {
     /// direction instead, across to the line beside it.
     #[test]
     fn arrows_walk_the_inner_arc_then_the_outer() {
+        crate::on_test_cx(|| {
         let up = dvec2(0.0, -1.0);
         let down = dvec2(0.0, 1.0);
         let left = dvec2(-1.0, 0.0);
@@ -4410,12 +4482,14 @@ mod tests {
         assert_eq!(arrow_target(&grid.offsets, Some(0), origin, right), Some(1));
         assert_eq!(arrow_target(&grid.offsets, Some(0), origin, down), Some(per_line));
         assert_eq!(arrow_target(&grid.offsets, Some(per_line), origin, up), Some(0));
+        });
     }
 
     /// Twelve open about as quickly as three: however many actions, the
     /// last one is in place no more than the budget after the first.
     #[test]
     fn a_large_set_opens_about_as_quickly_as_a_small_one() {
+        crate::on_test_cx(|| {
         let (enter, stagger) = (0.2, 0.03);
         for n in 1..=48usize {
             let step = stagger_step(n, stagger);
@@ -4428,6 +4502,7 @@ mod tests {
             assert!(legs.iter().all(|leg| leg.done(enter + STAGGER_BUDGET + 1e-9)), "{n}");
         }
         assert!(stagger_step(12, stagger) < stagger);
+        });
     }
 
     /// Going away, the last action out is the first one back; and a set
@@ -4435,6 +4510,7 @@ mod tests {
     /// it is, with no jump.
     #[test]
     fn the_last_out_is_the_first_back_and_a_reopened_set_turns_round() {
+        crate::on_test_cx(|| {
         let linear = Ease::Linear;
         let (exit, stagger) = (0.15, 0.03);
         let still_out: Vec<f64> = (0..3).map(|i| exit_progress(i, 3, 0.05, exit, stagger, &linear, false)).collect();
@@ -4453,6 +4529,7 @@ mod tests {
             assert!((leg.secs - 0.2 * (1.0 - from)).abs() < 1e-12, "the share of the time its distance asks for");
         }
         assert_eq!(exit_progress(0, 3, 0.0, exit, stagger, &linear, true), 0.0, "reduced motion is home at once");
+        });
     }
 
     /// The theme easing a token names, read from the running theme.
@@ -4477,7 +4554,8 @@ mod tests {
     /// spring may carry an action past its place.
     #[test]
     fn the_motion_runs_on_the_theme_eases() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let (enter, exit, stagger) = (0.2, 0.15, 0.03);
@@ -4523,6 +4601,7 @@ mod tests {
             assert_eq!(Some(widget.enter_secs), theme_value(vm, "motion_short_4").as_f64());
             assert_eq!(Some(widget.exit_secs), theme_value(vm, "motion_short_3").as_f64());
         });
+        });
     }
 
     /// An overshoot moves the face and never the resting place: at rest a
@@ -4531,6 +4610,7 @@ mod tests {
     /// how far along the travel is.
     #[test]
     fn an_overshoot_moves_the_face_not_the_resting_place() {
+        crate::on_test_cx(|| {
         let (host, window) = small_window(400.0, 300.0);
         let (centre, plan) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 12, host, window);
         for (k, offset) in plan.offsets.iter().enumerate() {
@@ -4550,10 +4630,12 @@ mod tests {
         let far = dvec2(-200.0, -200.0);
         let rest = resting_rect(dvec2(40.0, 40.0), far);
         assert!(close_to(keep_inside(dvec2(40.0, 40.0) + far, ITEM, bounding(tiny, rest)), dvec2(40.0, 40.0) + far, 1e-9));
+        });
     }
 
     #[test]
     fn snapshot_value_spells_the_state() {
+        crate::on_test_cx(|| {
         assert_eq!(
             snapshot_text(true, false, SpeedDialLayout::Radial, FloatingAnchor::BottomRight),
             "open radial bottom-right"
@@ -4566,6 +4648,7 @@ mod tests {
             snapshot_text(false, false, SpeedDialLayout::Horizontal, FloatingAnchor::CenterLeft),
             "closed horizontal center-left"
         );
+        });
     }
 
     /// The source of the DSL between `from` and the first line that closes
@@ -4583,6 +4666,7 @@ mod tests {
     /// into the two faces in button.rs.
     #[test]
     fn no_enum_is_splatted_and_no_name_starts_with_fab() {
+        crate::on_test_cx(|| {
         let own = block(include_str!("floating_action.rs"), "script_mod! {");
         let faces = block(include_str!("button.rs"), "mod.widgets.ButtonFloating = ");
         for (name, text) in [("floating_action.rs", own), ("button.rs", faces)] {
@@ -4591,6 +4675,7 @@ mod tests {
             assert!(!text.contains(concat!("mod.widgets.", "Fab")), "{name} names a widget with the short prefix");
         }
         assert!(own.contains("FloatingAnchor.BottomRight"));
+        });
     }
 
     /// A widget dropped with its set out cannot release its own lock, and
@@ -4598,7 +4683,8 @@ mod tests {
     /// floating action to hear an event releases it.
     #[test]
     fn a_lock_left_by_a_dropped_widget_is_released() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let value = crate::script_eval!(vm, {use mod.widgets.* FloatingAction{
@@ -4619,13 +4705,15 @@ mod tests {
                 assert_eq!(cx.sweep_lock_area(), None, "the next one released it");
             });
         });
+        });
     }
 
     /// The DSL is markup the compiler never reads: the presets, the item's
     /// face, the two shaders and the enum defaults only exist once it runs.
     #[test]
     fn the_presets_build_and_the_shaders_compile() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             for name in ["DrawFloatingShadowBase", "DrawFloatingChipBase"] {
@@ -4667,6 +4755,7 @@ mod tests {
             assert!(upload.button.borrow::<Button>().is_some(), "each action has its face");
             assert_eq!(snapshot_text(widget.open, widget.pinned, widget.dial, widget.anchor), "closed radial bottom-right");
         });
+        });
     }
 
     /// One frame of `root` into a window-less pass of `size`, with the
@@ -4704,10 +4793,8 @@ mod tests {
     /// A 600 by 400 box with a column of three pinned to its bottom right,
     /// the last one disabled, drawn once. No travel, so a draw lands every
     /// action where it belongs.
-    fn set_in_a_box() -> (Cx, WidgetRef, Target) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+    fn set_in_a_box() -> (crate::PooledCx, WidgetRef, Target) {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.widgets.*
@@ -4732,10 +4819,8 @@ mod tests {
 
     /// As `set_in_a_box`, with motion, and so slow that nothing arrives
     /// while a test runs.
-    fn slow_set_in_a_box() -> (Cx, WidgetRef, Target) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+    fn slow_set_in_a_box() -> (crate::PooledCx, WidgetRef, Target) {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.widgets.*
@@ -4850,10 +4935,8 @@ mod tests {
     /// mouse and keep it. Pinned, so the press on that button does not put
     /// the set away: dismissal is a different rule, and these two tests are
     /// about the pointer.
-    fn a_set_and_a_grabber() -> (Cx, WidgetRef, Target) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+    fn a_set_and_a_grabber() -> (crate::PooledCx, WidgetRef, Target) {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.widgets.*
@@ -4886,6 +4969,7 @@ mod tests {
     /// offer a press that the button's release was always going to cancel.
     #[test]
     fn an_action_does_not_light_under_a_mouse_another_control_holds() {
+        crate::on_test_cx(|| {
         let (mut cx, root, _target) = a_set_and_a_grabber();
         assert!(is_open(&root, &cx), "a pinned set is out from its first draw");
         let over_one = action_area(&root, &cx, 0).rect(&cx).center();
@@ -4916,6 +5000,7 @@ mod tests {
             Some(0),
             "lit again once the hold is let go: the gate is the hold, not a mood"
         );
+        });
     }
 
     /// And the other half, which is what keeps the set working at all: the
@@ -4924,6 +5009,7 @@ mod tests {
     /// whole of it — so every action the hand travels over still lights up.
     #[test]
     fn the_sets_own_press_still_lights_the_actions_it_travels_over() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         let main = main_area(&root, &cx).rect(&cx).center();
         deliver(&mut cx, &root, &press(main));
@@ -4936,6 +5022,7 @@ mod tests {
             Some(1),
             "the set's own press is not a press elsewhere"
         );
+        });
     }
 
     fn key(key_code: KeyCode, shift: bool) -> Event {
@@ -4952,6 +5039,7 @@ mod tests {
     /// the pointer. One gesture, not a click and then another.
     #[test]
     fn a_press_opens_the_set_and_its_release_on_an_action_picks() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         let main = main_area(&root, &cx).rect(&cx).center();
         let reported = deliver(&mut cx, &root, &press(main));
@@ -4964,6 +5052,7 @@ mod tests {
         assert!(reported.contains(&FloatingActionAction::Closed), "{reported:?}");
         assert!(!is_open(&root, &cx));
         assert_eq!(cx.sweep_lock_area(), None, "the pick let go of the pointer");
+        });
     }
 
     /// Opened while the lock is still held from a dismissing press whose
@@ -4971,6 +5060,7 @@ mod tests {
     /// release as the end of its opening press.
     #[test]
     fn a_set_opened_under_a_held_lock_still_picks_on_the_release() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         let fab = root.widget(&cx, ids!(fab)).as_floating_action();
         fab.open(&mut cx);
@@ -4985,12 +5075,14 @@ mod tests {
         let one = action_area(&root, &cx, 0).rect(&cx).center();
         let reported = deliver(&mut cx, &root, &release(one));
         assert!(reported.contains(&FloatingActionAction::Picked(live_id!(one))), "{reported:?}");
+        });
     }
 
     /// A press that misses the set puts it away and is eaten: the grab
     /// stays until its release, so the dismissing click reaches nothing.
     #[test]
     fn a_press_outside_puts_the_set_away_and_its_release_reaches_nothing() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
         target.draw(&mut cx, &root);
@@ -5002,6 +5094,7 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), held, "held until the release");
         deliver(&mut cx, &root, &release(outside));
         assert_eq!(cx.sweep_lock_area(), None);
+        });
     }
 
     /// Return on the button brings the set out with the first action
@@ -5009,8 +5102,10 @@ mod tests {
     /// back to the button.
     #[test]
     fn return_opens_on_the_first_action_and_escape_gives_the_button_back_the_keyboard() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
-        cx.set_key_focus(main_area(&root, &cx));
+        let focus = main_area(&root, &cx);
+        cx.set_key_focus(focus);
         settle_focus(&mut cx);
         let reported = deliver(&mut cx, &root, &key(KeyCode::ReturnKey, false));
         assert!(reported.contains(&FloatingActionAction::Opened), "{reported:?}");
@@ -5020,12 +5115,14 @@ mod tests {
         let reported = deliver(&mut cx, &root, &key(KeyCode::Escape, false));
         assert!(reported.contains(&FloatingActionAction::Closed), "{reported:?}");
         assert!(cx.has_key_focus(main_area(&root, &cx)), "the button has it back");
+        });
     }
 
     /// Tab and Shift+Tab go round the set's stops without resting on a
     /// disabled action, which Return could not pick.
     #[test]
     fn tab_passes_over_a_disabled_action() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
         target.draw(&mut cx, &root);
@@ -5037,12 +5134,14 @@ mod tests {
         assert!(cx.has_key_focus(main_area(&root, &cx)), "past Later to the button");
         deliver(&mut cx, &root, &key(KeyCode::Tab, true));
         assert!(cx.has_key_focus(two), "and back past it again");
+        });
     }
 
     /// Pinned while it is out, a set lets go of the grab and the trap it
     /// took for the open: a pinned set never closes to give them back.
     #[test]
     fn pinning_an_open_set_lets_go_of_the_pointer() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         let mut fab = root.widget(&cx, ids!(fab));
         fab.as_floating_action().open(&mut cx);
@@ -5052,6 +5151,7 @@ mod tests {
         assert!(is_open(&root, &cx), "a pinned set stays out");
         assert!(with_set(&root, &cx, |set| !set.locked && !set.focus_trap.is_active()));
         assert_eq!(cx.sweep_lock_area(), None, "and holds no grab");
+        });
     }
 
     /// An overlay that opened over the set holds the innermost lock. The
@@ -5059,6 +5159,7 @@ mod tests {
     /// lock back on top of that one.
     #[test]
     fn a_lock_under_another_overlay_stays_under_it() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
         target.draw(&mut cx, &root);
@@ -5067,6 +5168,7 @@ mod tests {
         cx.sweep_lock(above);
         root.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
         assert_eq!(cx.sweep_lock_area(), Some(above), "the overlay above is still on top");
+        });
     }
 
     /// A container half scrolled under a view's top edge hides its set along
@@ -5074,6 +5176,7 @@ mod tests {
     /// container's other edges must not cut them off.
     #[test]
     fn only_the_edges_that_hide_the_container_cut_the_set() {
+        crate::on_test_cx(|| {
         let window = Rect {
             pos: dvec2(0.0, 0.0),
             size: dvec2(800.0, 600.0),
@@ -5096,6 +5199,7 @@ mod tests {
             size: dvec2(200.0, 0.0),
         };
         assert_eq!(cut_sides(gone, host, window).size, dvec2(0.0, 0.0), "hidden entirely, nothing drawn");
+        });
     }
 
     /// A scroll moves the container under the edge of the view it scrolls
@@ -5103,6 +5207,7 @@ mod tests {
     /// container is read again, the set is still cut where that edge is.
     #[test]
     fn a_scrolled_container_is_cut_where_the_view_edge_is() {
+        crate::on_test_cx(|| {
         let window = Rect {
             pos: dvec2(0.0, 0.0),
             size: dvec2(800.0, 600.0),
@@ -5134,6 +5239,7 @@ mod tests {
             pos: dvec2(100.0, 0.0),
             size: dvec2(200.0, 140.0),
         });
+        });
     }
 
     /// The first draw after a scroll step slides a container under the top
@@ -5143,9 +5249,8 @@ mod tests {
     /// button over whatever sat above the view: a toolbar, in the catalogue.
     #[test]
     fn a_container_scrolled_under_the_edge_is_cut_on_the_very_next_draw() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
@@ -5198,6 +5303,7 @@ mod tests {
             );
             root.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
         }
+        });
     }
 
     /// While the actions are still on their way, a press and release where
@@ -5205,6 +5311,7 @@ mod tests {
     /// to the button: the hand aims at where the action is going.
     #[test]
     fn a_press_where_an_action_will_rest_picks_it_while_it_is_on_its_way() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = slow_set_in_a_box();
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
         target.draw(&mut cx, &root);
@@ -5216,6 +5323,7 @@ mod tests {
         assert!(!reported.contains(&FloatingActionAction::Closed), "a press on a resting place is not a press outside: {reported:?}");
         let reported = deliver(&mut cx, &root, &release(resting));
         assert!(reported.contains(&FloatingActionAction::Picked(live_id!(two))), "{reported:?}");
+        });
     }
 
     /// The plus turns on the set's own legs: out on the enter ease over the
@@ -5224,6 +5332,7 @@ mod tests {
     /// open at once, so its own track has nothing left to play over the top.
     #[test]
     fn the_glyph_turns_on_the_same_eases_as_the_set() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = slow_set_in_a_box();
         let fab = root.widget(&cx, ids!(fab)).as_floating_action();
         fab.open(&mut cx);
@@ -5241,6 +5350,7 @@ mod tests {
             assert!(set.turn.from < 0.5, "back from where it had got to, not from the cross: {:?}", set.turn);
             assert!(set.moving(cx.seconds_since_app_start()), "the actions are still on their way back");
         });
+        });
     }
 
     /// The set's own actions travel on its own eases, the theme's tokens by
@@ -5248,6 +5358,7 @@ mod tests {
     /// `exit_ease` from wherever each had got to.
     #[test]
     fn the_actions_travel_on_the_sets_own_eases() {
+        crate::on_test_cx(|| {
         let (mut cx, root, _target) = slow_set_in_a_box();
         let fab = root.widget(&cx, ids!(fab));
         fab.as_floating_action().open(&mut cx);
@@ -5276,6 +5387,7 @@ mod tests {
                 assert!((v - leg.from * (1.0 - exit.map(x))).abs() < 1e-9, "back along the exit ease at {x}: {v}");
             }
         }
+        });
     }
 
     /// A hidden action is left out of the set: the others close up and
@@ -5283,6 +5395,7 @@ mod tests {
     /// the hidden one is not drawn.
     #[test]
     fn a_hidden_action_leaves_no_gap() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
         target.draw(&mut cx, &root);
@@ -5298,6 +5411,7 @@ mod tests {
             assert_eq!(set.item_at(set.plan_centre + set.plan.offsets[1]), Some(2), "Later rests where Two did");
         });
         assert!(!has_size(action_area(&root, &cx, 1).rect(&cx)), "Two is not drawn once hidden");
+        });
     }
 
     /// Drawn with the widget's own furthest radius, eight from the corner
@@ -5308,9 +5422,8 @@ mod tests {
     /// and release on each resting place picks the action resting there.
     #[test]
     fn a_set_held_inside_its_furthest_radius_is_walked_labelled_and_picked_where_it_rests() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.widgets.*
@@ -5359,7 +5472,8 @@ mod tests {
             (KeyCode::ArrowLeft, dvec2(-1.0, 0.0)),
             (KeyCode::ArrowRight, dvec2(1.0, 0.0)),
         ];
-        cx.set_key_focus(action_area(&root, &cx, 0));
+        let focus = action_area(&root, &cx, 0);
+        cx.set_key_focus(focus);
         settle_focus(&mut cx);
         for at in 0..7 {
             let (code, _) = arrows
@@ -5370,7 +5484,8 @@ mod tests {
             assert!(cx.has_key_focus(action_area(&root, &cx, at + 1)), "{code:?} from {at} did not move on");
         }
 
-        cx.set_key_focus(action_area(&root, &cx, 0));
+        let focus = action_area(&root, &cx, 0);
+        cx.set_key_focus(focus);
         settle_focus(&mut cx);
         target.draw(&mut cx, &root);
         let chip = root
@@ -5394,6 +5509,7 @@ mod tests {
             let reported = deliver(&mut cx, &root, &release(resting));
             assert!(reported.contains(&FloatingActionAction::Picked(*id)), "action {k}: {reported:?}");
         }
+        });
     }
 
     /// Shown for the first time while the set is out, an action that was
@@ -5401,6 +5517,7 @@ mod tests {
     /// redraw, or the action would not appear until something else redrew.
     #[test]
     fn an_action_shown_for_the_first_time_redraws_its_set() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         root.widget(&cx, ids!(two)).set_visible(&mut cx, false);
         root.widget(&cx, ids!(fab)).as_floating_action().open(&mut cx);
@@ -5413,6 +5530,7 @@ mod tests {
         assert!(cx.new_draw_event.draw_lists.contains(&list), "the set was asked to redraw");
         target.draw(&mut cx, &root);
         assert!(has_size(action_area(&root, &cx, 1).rect(&cx)), "and Two is drawn");
+        });
     }
 
     /// Hidden, the set is put away and its list comes off the screen: a
@@ -5420,6 +5538,7 @@ mod tests {
     /// list whose parent was redrawn without it.
     #[test]
     fn a_hidden_set_comes_off_the_screen() {
+        crate::on_test_cx(|| {
         let (mut cx, root, mut target) = set_in_a_box();
         let fab = root.widget(&cx, ids!(fab));
         fab.as_floating_action().open(&mut cx);
@@ -5436,5 +5555,6 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), None);
         target.draw(&mut cx, &root);
         assert!(!shown(&cx), "the overlay no longer shows it");
+        });
     }
 }

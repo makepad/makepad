@@ -167,15 +167,26 @@ fn unpack_msvc_vsix(
         ids.push(redist);
     }
     let count = ids.len();
+    // One bar for the whole component: every payload's size is in the
+    // manifest, so the work is known before the first download.
+    let mut packages = Vec::new();
     for (index, id) in ids.into_iter().enumerate() {
-        crate::progress::package("Microsoft C++ tools", &id, index + 1, count);
-        let Some(pkg) = pick_pkg(by_id, &id) else {
-            crate::setup_note!("  msvc skip missing {id}");
-            continue;
-        };
-        download_and_unzip_vsix(pkg, cache, dest)?;
+        crate::progress::package("Build tools", &id, index + 1, count);
+        match pick_pkg(by_id, &id) {
+            Some(pkg) => packages.push(pkg),
+            None => crate::setup_note!("  msvc skip missing {id}"),
+        }
     }
-    Ok(())
+    let payloads: Vec<&Value> = packages
+        .iter()
+        .filter_map(|pkg| pkg.get("payloads").and_then(Value::as_arr))
+        .flatten()
+        .filter(|p| payload_url(p).is_ok_and(|(_, _, file)| file.ends_with(".vsix") || file.ends_with(".zip") || file.ends_with(".msi")))
+        .collect();
+    crate::progress::total_begin("Build tools", payloads.iter().map(|p| payload_size(p)).sum());
+    let result = payloads.iter().try_for_each(|p| download_and_unzip(p, cache, dest));
+    crate::progress::total_end();
+    result
 }
 
 fn redist_pkg(by_id: &HashMap<String, Vec<&Value>>, ver: &str, target: &str) -> Option<String> {
@@ -223,11 +234,11 @@ fn unpack_sdk(
         "Universal CRT Headers Libraries and Sources-x86_en-us.msi",
     ];
 
-    let mut cab_map: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut msi_files: Vec<(String, Vec<u8>)> = Vec::new();
-
-    for (index, name) in msi_names.into_iter().enumerate() {
-        crate::progress::package("Windows SDK downloads", name, index + 1, msi_names.len());
+    // The MSIs are small and name the CABs they need; read them first so the
+    // component's bar knows its whole work before the large downloads.
+    crate::progress::package("Windows SDK", "Read package list", 0, 0);
+    let mut msis: Vec<(String, Vec<u8>, u64, Vec<&Value>)> = Vec::new();
+    for name in msi_names {
         let Some(payload) = payload_named(payloads, name) else {
             crate::setup_note!("  sdk skip {name}");
             continue;
@@ -235,50 +246,62 @@ fn unpack_sdk(
         let (url, sha, file) = payload_url(payload)?;
         let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-        for cab in scan_cab_names(&bytes) {
-            if cab_map.contains_key(&cab) {
-                continue;
-            }
-            if let Some(p) = payload_named(payloads, &cab) {
-                let (u, s, f) = payload_url(p)?;
-                let cpath = http::cached_file(cache, &u, &f, s.as_deref())?;
-                cab_map.insert(cab.clone(), fs::read(cpath).map_err(|e| e.to_string())?);
-                cab_map.insert(cab.to_ascii_lowercase(), cab_map.get(&cab).unwrap().clone());
+        let cabs: Vec<&Value> = scan_cab_names(&bytes).iter().filter_map(|cab| payload_named(payloads, cab)).collect();
+        msis.push((name.to_string(), bytes, payload_size(payload), cabs));
+    }
+    let mut cabs: Vec<&Value> = Vec::new();
+    for (_, _, _, needed) in &msis {
+        for cab in needed {
+            if !cabs.iter().any(|c| std::ptr::eq(*c, *cab)) {
+                cabs.push(cab);
             }
         }
-        msi_files.push((name.to_string(), bytes));
     }
-    if cab_map.is_empty() {
+    let fallback = cabs.is_empty();
+    if fallback {
         crate::setup_note!("  no .cab names scanned from msi; downloading sdk cab payloads");
-        for p in payloads {
-            let Ok((url, sha, file)) = payload_url(p) else {
-                continue;
-            };
-            let lower = file.to_ascii_lowercase();
-            if !lower.ends_with(".cab") {
-                continue;
-            }
-            if lower.contains("arm") {
-                continue;
-            }
+        cabs = payloads
+            .iter()
+            .filter(|p| payload_url(p).is_ok_and(|(_, _, file)| {
+                let lower = file.to_ascii_lowercase();
+                lower.ends_with(".cab") && !lower.contains("arm")
+            }))
+            .collect();
+    }
+    let msi_bytes: u64 = msis.iter().map(|m| m.2).sum();
+    let cab_bytes: u64 = cabs.iter().map(|c| payload_size(c)).sum();
+    crate::progress::total_begin("Windows SDK", msi_bytes + cab_bytes);
+    let result = (|| {
+        // The MSIs are already downloaded.
+        crate::progress::step(msi_bytes);
+        crate::progress::step_done();
+        let mut cab_map: HashMap<String, Vec<u8>> = HashMap::new();
+        for cab in &cabs {
+            let (url, sha, file) = payload_url(cab)?;
             crate::setup_note!("  cab {file}");
-            let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
-            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-            cab_map.insert(file.clone(), bytes.clone());
+            crate::progress::step(payload_size(cab));
+            let bytes = fs::read(http::cached_file(cache, &url, &file, sha.as_deref())?).map_err(|e| e.to_string())?;
+            crate::progress::step_done();
+            // unpack_msi searches every CAB it is given; one entry each.
             cab_map.insert(file.to_ascii_lowercase(), bytes);
         }
-    }
-
-    let count = msi_files.len();
-    for (index, (name, bytes)) in msi_files.into_iter().enumerate() {
-        crate::progress::package("Install Windows SDK", &name, index + 1, count);
-        crate::setup_note!("  msi unpack {name} (no msiexec)");
-        match msi::unpack_msi(&bytes, &cab_map, dest) {
-            Ok(n) => crate::setup_note!("    {n} files"),
-            Err(e) => crate::setup_note!("    WARN {name}: {e}"),
+        let count = msis.len().max(1) as u64;
+        for (name, bytes, size, needed) in &msis {
+            // Each MSI unpacks its own CABs; without the scanned names the
+            // CAB bytes are shared out evenly.
+            let weight = size + if fallback { cab_bytes / count } else { needed.iter().map(|c| payload_size(c)).sum() };
+            crate::progress::step(weight);
+            crate::setup_note!("  msi unpack {name} (no msiexec)");
+            match msi::unpack_msi(bytes, &cab_map, dest) {
+                Ok(n) => crate::setup_note!("    {n} files"),
+                Err(e) => crate::setup_note!("    WARN {name}: {e}"),
+            }
+            crate::progress::step_done();
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    crate::progress::total_end();
+    result
 }
 
 fn scan_cab_names(msi: &[u8]) -> Vec<String> {
@@ -368,20 +391,26 @@ fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .map(|p| from + p)
 }
 
-fn download_and_unzip_vsix(pkg: &Value, cache: &Path, dest: &Path) -> Result<(), String> {
-    let payloads = pkg.get("payloads").and_then(Value::as_arr).ok_or("payloads")?;
-    for p in payloads {
-        let (url, sha, file) = payload_url(p)?;
-        if !(file.ends_with(".vsix") || file.ends_with(".zip") || file.ends_with(".msi")) {
-            continue;
-        }
-        crate::setup_note!("  vsix {file}");
-        let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
-        if file.ends_with(".vsix") || file.ends_with(".zip") {
-            extract::unzip_file(&path, dest, Some("Contents"))?;
-        }
+/// One payload: download (a cached copy counts as downloaded), then unpack
+/// VSIX/ZIP contents; each is one step of the payload's size.
+fn download_and_unzip(p: &Value, cache: &Path, dest: &Path) -> Result<(), String> {
+    let (url, sha, file) = payload_url(p)?;
+    let size = payload_size(p);
+    crate::setup_note!("  vsix {file}");
+    crate::progress::step(size);
+    let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
+    crate::progress::step_done();
+    crate::progress::step(size);
+    if file.ends_with(".vsix") || file.ends_with(".zip") {
+        extract::unzip_file(&path, dest, Some("Contents"))?;
     }
+    crate::progress::step_done();
     Ok(())
+}
+
+/// The payload's byte size from the manifest (0 when absent).
+fn payload_size(p: &Value) -> u64 {
+    p.get("size").and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn payload_url(p: &Value) -> Result<(String, Option<String>, String), String> {

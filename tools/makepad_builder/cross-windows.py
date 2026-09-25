@@ -89,11 +89,14 @@ def main():
             archive.write(executable, name)
             binaries[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
         # Fonts are runtime assets, not embedded by app_main's manifest. Ship
-        # the complete existing widget resource set so the terminal can render
-        # international project names and agents' output on a clean machine.
+        # the widget resource set except the large CJK and colour-emoji
+        # fallbacks (about 48 MB): the Builder window (src/app.rs) leaves the
+        # emoji member out of its terminal fonts and never draws CJK, and the
+        # widgets load those two families only when such text appears.
+        excluded = {"LXGWWenKaiRegular.ttf", "LXGWWenKaiBold.ttf", "NotoColorEmoji.ttf"}
         resources = source / "widgets/resources"
         for asset in sorted(resources.rglob("*")):
-            if asset.is_file():
+            if asset.is_file() and asset.name not in excluded:
                 archive.write(asset, "makepad_widgets/resources/" + asset.relative_to(resources).as_posix())
     temporary.replace(output)
     evidence = {"target": TARGET, "rust": subprocess.check_output(["rustc", "--version"], text=True).strip(),

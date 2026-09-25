@@ -43,7 +43,7 @@ script_mod! {
         mini_month := mod.widgets.CalendarMiniMonth{height:208}
     }
     mod.widgets.CalendarPhoneNavigation = mod.widgets.CalendarControlGroup{show_bg:true draw_bg.color:chrome height:52 flow:Right padding:Inset{left:16 right:16} align:Align{y:0.5}
-        year := QuietAction{width:72 text:"2026" draw_text +: {color:action text_style:theme.font_regular{font_size:12.75}}}
+        year := QuietAction{width:72 padding:0 align:Align{x:0.0 y:0.5} text:"2026" draw_text +: {color:action text_style:theme.font_regular{font_size:12.75}}}
         previous := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/previous.svg")}}
         next := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/next.svg")}}
         navigation_space := Plain{width:Fill}
@@ -56,8 +56,10 @@ script_mod! {
         }
         add := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/add.svg")}}
     }
-    mod.widgets.CalendarPhoneTitle = Ink{height:52 width:Fill padding:Inset{left:20} draw_text.text_style:theme.font_bold{font_size:25.5}}
-    mod.widgets.CalendarSelectedDate = Ink{height:36 width:Fill padding:Inset{left:20} draw_text.text_style:theme.font_bold{font_size:11.25}}
+    mod.widgets.CalendarPhoneTitle = Ink{height:52 width:Fill padding:Inset{left:8} draw_text.text_style:theme.font_bold{font_size:21}}
+    // An Ink (Label) pads its walk and its text walk alike, so 8 puts the
+    // text on the 16 pt edge the month grid uses.
+    mod.widgets.CalendarSelectedDate = Ink{height:36 width:Fill padding:Inset{left:8 top:0 bottom:0} align:Align{y:0.5} draw_text.text_style:theme.font_bold{font_size:11.25}}
     mod.widgets.CalendarPhoneToolbar = mod.widgets.CalendarControlGroup{show_bg:true draw_bg.color:chrome height:64 padding:Inset{left:16 right:16 top:10 bottom:10}
         capsule := GlassPanel{draw_bg.border_radius:11.0 width:Fill height:44 flow:Right padding:Inset{left:12 right:12} spacing:0
             today := QuietAction{width:72 text:"Today" draw_text.color:action}
@@ -67,16 +69,29 @@ script_mod! {
             search := QuietAction{width:72 text:"Search" draw_text.color:action}
         }
     }
-    mod.widgets.CalendarLandscapeToolbar = mod.widgets.CalendarControlGroup{show_bg:true draw_bg.color:chrome height:52 flow:Right padding:Inset{left:12 right:12} spacing:4 align:Align{y:0.5}
-        calendars := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/calendars.svg")}}
-        period := Ink{width:150 height:Fill draw_text.text_style:theme.font_bold{font_size:11.25}}
-        previous := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/previous.svg")}}
-        today := QuietAction{width:60 text:"Today"}
-        next := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/next.svg")}}
-        mode := glass.GlassSegmented{width:180 height:44 labels:["Month","Week","Day"]}
+    // One opaque segment of the landscape selector; `pill` shows on the
+    // selected one. (The glass selector drew its selected label white on
+    // its white thumb here.)
+    let ModeSegment = Plain{width:Fill height:Fill flow:Overlay
+        pill := RoundedView{visible:false width:Fill height:Fill draw_bg +: {color:paper border_radius:10.0}}
+        btn := QuietAction{width:Fill height:Fill text:"" draw_text.color:secondary}
+    }
+    mod.widgets.CalendarLandscapeToolbar = mod.widgets.CalendarControlGroup{show_bg:true draw_bg.color:chrome height:56 flow:Right padding:Inset{left:16 right:16} spacing:0 align:Align{y:0.5}
+        calendars := QuietAction{width:48 height:48 text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/calendars.svg")}}
+        period_gap := Plain{width:8}
+        period := Ink{width:240 height:Fit padding:0 max_lines:1 text_overflow:Ellipsis draw_text.text_style:theme.font_bold{font_size:15}}
+        previous := QuietAction{width:48 height:48 text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/previous.svg")}}
+        today := QuietAction{width:64 height:48 text:"Today" draw_text +: {text_style:theme.font_regular{font_size:10.5}}}
+        next := QuietAction{width:48 height:48 text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/next.svg")}}
+        mode_gap := Plain{width:16}
+        mode_bar := RoundedView{width:192 height:48 flow:Right padding:4 spacing:0 draw_bg +: {color:mix(chrome, ink, 0.08) border_radius:12.0}
+            seg_month := ModeSegment{btn +: {text:"Month"}}
+            seg_week := ModeSegment{btn +: {text:"Week"}}
+            seg_day := ModeSegment{btn +: {text:"Day"}}
+        }
         toolbar_space := Plain{width:Fill}
-        search := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/search.svg")}}
-        add := QuietAction{text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/add.svg")}}
+        search := QuietAction{width:48 height:48 text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/search.svg")}}
+        add := QuietAction{width:48 height:48 text:"" icon_walk:Walk{width:20 height:20} draw_icon +: {color:action svg:crate_resource("self:resources/icons/add.svg")}}
     }
     mod.widgets.CalendarEventDetail = ScrollYView{flow:Down padding:20 spacing:8 show_bg:true draw_bg.color:paper
         event_title := Ink{width:Fill height:Fit max_lines:0 flow:Right{wrap:true} draw_text.text_style:theme.font_bold{font_size:18}}
@@ -195,7 +210,12 @@ script_mod! {
                 month_title := mod.widgets.CalendarPhoneTitle{height:52}
                 weekdays := mod.widgets.CalendarWeekdays{height:24 inset:16 abbreviated:true}
                 month_dates := mod.widgets.CalendarPhoneMonth{height:264 margin:Inset{left:16 right:16}}
-                selected_date := mod.widgets.CalendarSelectedDate{height:36}
+                // 16 pt under the grid, a 32 pt 16/24 heading, 8 pt to the
+                // agenda. Spacers, not margins: a Label applies its margin to
+                // its text walk too, which pushed the heading out of its box.
+                selected_gap := Plain{height:16}
+                selected_date := mod.widgets.CalendarSelectedDate{height:32 draw_text.text_style.font_size:12}
+                selected_after := Plain{height:8}
                 selected_agenda := mod.widgets.CalendarAgendaList{}
                 bottom_toolbar := mod.widgets.CalendarPhoneToolbar{height:64}
             }
@@ -226,7 +246,7 @@ script_mod! {
         }
         }
         landscape := Plain{visible:false flow:Down
-            short_toolbar := mod.widgets.CalendarLandscapeToolbar{height:52}
+            short_toolbar := mod.widgets.CalendarLandscapeToolbar{height:56}
             short_body := mod.widgets.CalendarBodyDeck{active:@week
                 week := mod.widgets.CalendarTimeline{}
                 day := mod.widgets.CalendarTimeline{}
@@ -676,6 +696,15 @@ impl CalendarView {
         self.dimensions = size;
         let compact = next.kind == LayoutKind::Compact;
         let short = next.short_height && !compact;
+        if short {
+            // The landscape bar's fixed controls take 552 pt (16 + 48 + 8 |
+            // 48 + 64 + 48 + 16 + 192 | 48 + 48 + 16); the period gets up to
+            // 240 of what is left and elides below that, so Search and Add
+            // stay on screen from the 700 pt breakpoint up.
+            let period_width = (size.x - 552.0 - 16.0).clamp(80.0, 240.0);
+            let mut period = self.view.widget(cx, path!(landscape.short_toolbar.period));
+            script_apply_eval!(cx, period, {width: #(period_width)});
+        }
         self.view
             .widget(cx, path!(wide))
             .set_visible(cx, !compact && !short);
@@ -849,21 +878,30 @@ impl CalendarView {
                 deck.activate(cx, id);
             }
         }
-        for path in [
-            path!(wide.toolbar.mode),
-            path!(landscape.short_toolbar.mode),
-        ] {
-            if let Some(mut mode) = self.view.widget(cx, path).borrow_mut::<GlassSegmented>() {
-                mode.set_selected(cx, self.mode.index());
-            }
+        if let Some(mut mode) = self
+            .view
+            .widget(cx, path!(wide.toolbar.mode))
+            .borrow_mut::<GlassSegmented>()
+        {
+            mode.set_selected(cx, self.mode.index());
+        }
+        let colors = cx.with_vm(CalendarColors::resolve);
+        let bar = self.view.widget(cx, path!(landscape.short_toolbar.mode_bar));
+        for (i, path) in [path!(seg_month), path!(seg_week), path!(seg_day)].into_iter().enumerate() {
+            let segment = bar.widget(cx, path);
+            let selected = i == self.mode.index();
+            segment.widget(cx, path!(pill)).set_visible(cx, selected);
+            let mut btn = segment.widget(cx, path!(btn));
+            let ink = if selected { colors.ink } else { colors.secondary };
+            script_apply_eval!(cx,btn,{draw_text +: {color:#(ink) color_hover:#(ink) color_down:#(ink)}});
         }
         if matches!(self.phone_mode, PhoneMode::Month | PhoneMode::MonthList) {
             self.root_phone_mode = self.phone_mode;
         }
         let month_only = self.root_phone_mode == PhoneMode::Month;
-        self.view
-            .widget(cx, path!(selected_date))
-            .set_visible(cx, !month_only);
+        for path in [path!(selected_gap), path!(selected_date), path!(selected_after)] {
+            self.view.widget(cx, path).set_visible(cx, !month_only);
+        }
         self.view
             .widget(cx, path!(selected_agenda))
             .set_visible(cx, !month_only);
@@ -1914,6 +1952,14 @@ impl CalendarView {
                 if let Some(i) = selected {
                     self.set_mode(cx, CalendarMode::from_index(i));
                 }
+                for (i, seg) in [path!(mode_bar.seg_month), path!(mode_bar.seg_week), path!(mode_bar.seg_day)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if parent.widget(cx, seg).button(cx, path!(btn)).clicked(actions) {
+                        self.set_mode(cx, CalendarMode::from_index(i));
+                    }
+                }
             }
             if let Some(i) = self
                 .view
@@ -2334,6 +2380,40 @@ mod tests {
         cx2d.end_pass(pass);
     }
     #[test]
+    fn landscape_toolbar_keeps_search_and_add_from_the_breakpoint_up() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root=cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);makepad_wm_theme::apply(vm);crate::script_mod(vm);
+            let v=script_eval!(vm,{use mod.prelude.widgets_internal.* use mod.widgets.* CalendarView{}});
+            WidgetRef::script_from_value(vm,v)
+        });
+        {
+            let mut view = root.borrow_mut::<CalendarView>().unwrap();
+            view.seed_for_test(civil::from_ymd(2026, 9, 9));
+            view.started = true;
+        }
+        let mut canvas = Canvas {
+            pass: DrawPass::new(&mut cx),
+            list: DrawList2d::new(&mut cx),
+            overlay: cx.with_vm(|vm| Overlay::script_new(vm)),
+        };
+        for width in [700.0, 760.0, 892.0] {
+            // Two draws: the first allocation decides the layout.
+            draw(&mut cx, &root, dvec2(width, 332.0), &mut canvas);
+            draw(&mut cx, &root, dvec2(width, 332.0), &mut canvas);
+            // The flexible gap before Search/Add keeps room: nothing is
+            // pushed past the right edge.
+            let space = root.widget(&mut cx, path!(landscape.short_toolbar.toolbar_space)).area().rect(&cx);
+            assert!(space.size.x >= 15.9, "{width}: {space:?}");
+            if width >= 892.0 {
+                // At the phone's 892 pt the period keeps its full 240.
+                assert!(space.size.x >= 892.0 - 552.0 - 240.0 - 0.5, "{space:?}");
+            }
+        }
+    }
+
+    #[test]
     fn cpu_layout_reaches_every_screen_at_the_acceptance_sizes() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
@@ -2370,7 +2450,7 @@ mod tests {
                 .rect(&cx)
                 .size
                 .y,
-            288.0
+            268.0
         );
         for size in [
             dvec2(1240.0, 800.0),
@@ -2385,7 +2465,7 @@ mod tests {
                         .rect(&cx)
                         .size
                         .y,
-                    160.0
+                    156.0
                 );
                 assert_eq!(
                     root.widget(&mut cx, path!(landscape.week.body.grid))

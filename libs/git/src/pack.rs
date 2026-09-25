@@ -152,10 +152,10 @@ impl PackIndex {
         if self.read_account.is_some() { return Err(GitError::InvalidObject("whole-pack loading is disabled for a bounded reader".into())); }
         let mut cache = self.pack_data.borrow_mut();
         if cache.is_none() {
-            let start = std::time::Instant::now();
+            let start = crate::clock::Stopwatch::start();
             *cache = Some(fs::read(&self.pack_path)?);
             let mut stats = self.stats.get();
-            stats.pack_load_ms += start.elapsed().as_secs_f64() * 1000.0;
+            stats.pack_load_ms += start.elapsed_ms();
             stats.pack_bytes_read += cache.as_ref().unwrap().len() as u64;
             self.stats.set(stats);
         }
@@ -168,10 +168,10 @@ impl PackIndex {
         self.ensure_loaded()?;
         let cache = self.pack_data.borrow();
         let data = cache.as_ref().unwrap();
-        let start = std::time::Instant::now();
+        let start = crate::clock::Stopwatch::start();
         let result = read_pack_object_at(data, offset as usize, self, data);
         let mut stats = self.stats.get();
-        stats.inflate_ms += start.elapsed().as_secs_f64() * 1000.0;
+        stats.inflate_ms += start.elapsed_ms();
         stats.objects_inflated += 1;
         self.stats.set(stats);
         result
@@ -181,7 +181,7 @@ impl PackIndex {
         use std::io::{Read, Seek, SeekFrom};
         if depth > 128 { return Err(GitError::CorruptPack("delta chain exceeds 128".into())); }
         let account = self.read_account.as_ref().unwrap();
-        let start = std::time::Instant::now();
+        let start = crate::clock::Stopwatch::start();
         let mut file = fs::File::open(&self.pack_path)?;
         let i = self.sorted_offsets.partition_point(|o| *o <= offset);
         let end = self.sorted_offsets.get(i).copied().unwrap_or(file.metadata()?.len().saturating_sub(20));
@@ -190,7 +190,7 @@ impl PackIndex {
         let _compressed = account.try_reserve(length).ok_or_else(|| GitError::InvalidObject("history account cannot admit compressed object".into()))?;
         let mut data = vec![0; length];
         file.seek(SeekFrom::Start(offset))?; file.read_exact(&mut data)?;
-        let mut stats = self.stats.get(); stats.pack_load_ms += start.elapsed().as_secs_f64() * 1000.0; stats.pack_bytes_read += length as u64; self.stats.set(stats);
+        let mut stats = self.stats.get(); stats.pack_load_ms += start.elapsed_ms(); stats.pack_bytes_read += length as u64; self.stats.set(stats);
         let mut pos = 0;
         let next = |pos: &mut usize| -> Result<u8, GitError> { let b = data.get(*pos).copied().ok_or_else(|| GitError::CorruptPack("truncated object header".into()))?; *pos += 1; Ok(b) };
         let first = next(&mut pos)?;
@@ -205,9 +205,9 @@ impl PackIndex {
             7 => { let end = pos + 20; let oid = ObjectId::from_slice(data.get(pos..end).ok_or_else(|| GitError::CorruptPack("truncated delta oid".into()))?)?; pos = end; Some(self.find_offset(&oid).ok_or_else(|| GitError::CorruptPack("delta base absent".into()))?) }
             _ => None,
         };
-        let start = std::time::Instant::now();
+        let start = crate::clock::Stopwatch::start();
         let inflated = zlib_decompress(&data[pos..], size)?;
-        let mut stats = self.stats.get(); stats.inflate_ms += start.elapsed().as_secs_f64() * 1000.0; stats.objects_inflated += 1; self.stats.set(stats);
+        let mut stats = self.stats.get(); stats.inflate_ms += start.elapsed_ms(); stats.objects_inflated += 1; self.stats.set(stats);
         if let Some(base_offset) = base_offset {
             let (_, n) = read_delta_size(&inflated, 0)?;
             let (result_size, _) = read_delta_size(&inflated, n)?;

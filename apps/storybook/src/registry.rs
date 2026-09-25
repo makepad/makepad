@@ -355,6 +355,7 @@ mod tests {
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
+                ("Material", &["Overview"]),
                 ("Splash", &["Overview"]),
             ],
         ),

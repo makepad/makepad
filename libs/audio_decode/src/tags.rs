@@ -54,6 +54,23 @@ impl Tags {
         let key = key.to_ascii_uppercase();
         self.all.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str())
     }
+
+    /// The tempo the file claims, beats per minute: ID3 `TBPM` (`TBP` in
+    /// v2.2) or a Vorbis/FLAC `BPM` / `TEMPO` comment. Leading number only
+    /// (`"128"`, `"127.98"`, `"174 bpm"`); `None` when absent or outside
+    /// 20..=400.
+    pub fn bpm(&self) -> Option<f64> {
+        ["TBPM", "TBP", "BPM", "TEMPO"].iter().find_map(|key| {
+            let value = self.get(key)?.trim();
+            let end = value
+                .char_indices()
+                .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ','))
+                .map(|(i, _)| i)
+                .unwrap_or(value.len());
+            let bpm: f64 = value[..end].replace(',', ".").parse().ok()?;
+            (bpm.is_finite() && (20.0..=400.0).contains(&bpm)).then_some(bpm)
+        })
+    }
 }
 
 /// Trim, drop control characters (including the NULs ID3 pads with), and
@@ -85,6 +102,21 @@ mod tests {
         assert_eq!(t.artist.as_deref(), Some("Artist"));
         assert_eq!(t.all.len(), 3);
         assert_eq!(t.get("TIT2"), Some("Song"));
+    }
+
+    #[test]
+    fn bpm_reads_id3_and_vorbis_spellings() {
+        let mut t = Tags::default();
+        assert_eq!(t.bpm(), None);
+        t.push("TBPM", "174");
+        assert_eq!(t.bpm(), Some(174.0));
+        let mut t = Tags::default();
+        t.push("BPM", "127,98 bpm");
+        assert_eq!(t.bpm(), Some(127.98));
+        let mut t = Tags::default();
+        t.push("TBPM", "0");
+        t.push("TEMPO", "fast");
+        assert_eq!(t.bpm(), None);
     }
 
     #[test]

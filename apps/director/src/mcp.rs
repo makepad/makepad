@@ -396,17 +396,36 @@ struct Shared {
     dispatcher: Arc<dyn ToolDispatcher>,
     stop: Arc<AtomicBool>,
     port: u16,
+    /// Slowloris budget passed to every `next_request`. Production `start`
+    /// sets this to [`HEAD_DEADLINE_MS`].
+    head_deadline_ms: u64,
 }
 
 impl McpServer {
     /// Bind an ephemeral loopback port and start serving. This is the
     /// binding point for the real dispatcher: pass the shared tool registry.
     pub fn start(tokens: Arc<TokenStore>, dispatcher: Arc<dyn ToolDispatcher>) -> Result<Self, String> {
+        Self::start_with_head_deadline(tokens, dispatcher, HEAD_DEADLINE_MS)
+    }
+
+    /// Same server as [`start`], with an explicit slowloris head budget.
+    /// Production callers use [`start`], which passes [`HEAD_DEADLINE_MS`].
+    pub fn start_with_head_deadline(
+        tokens: Arc<TokenStore>,
+        dispatcher: Arc<dyn ToolDispatcher>,
+        head_deadline_ms: u64,
+    ) -> Result<Self, String> {
         let listener =
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("MCP bind: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let stop = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(Shared { tokens, dispatcher, stop: stop.clone(), port });
+        let shared = Arc::new(Shared {
+            tokens,
+            dispatcher,
+            stop: stop.clone(),
+            port,
+            head_deadline_ms,
+        });
         let (tx, rx) = mpsc::sync_channel::<TcpStream>(QUEUE);
         let rx = Arc::new(Mutex::new(rx));
         let mut workers = Vec::with_capacity(WORKERS);
@@ -520,7 +539,7 @@ fn serve_connection(stream: TcpStream, shared: &Shared) {
     };
     let mut served = 0u32;
     loop {
-        let mut head = match conn.next_request(HEAD_DEADLINE_MS, KEEPALIVE_IDLE_MS, &shared.stop) {
+        let mut head = match conn.next_request(shared.head_deadline_ms, KEEPALIVE_IDLE_MS, &shared.stop) {
             Ok(h) => h,
             Err(HeadError::Closed) | Err(HeadError::Io) => return,
             Err(HeadError::Timeout) => {

@@ -332,7 +332,7 @@ impl Browser {
     pub fn windows_key_code(key_code: KeyCode) -> i32 {
         match key_code {
             KeyCode::Escape => 0x1B,
-            KeyCode::Back => 0xA6,
+            KeyCode::Back => 0x08,
             KeyCode::Backtick => 0xC0,
             KeyCode::Key0 => 0x30,
             KeyCode::Key1 => 0x31,
@@ -436,10 +436,222 @@ impl Browser {
         }
     }
 
+    /// What Chromium's Mac keycode table answers with `DomCode::NONE`
+    /// (`kInvalidNativeKeycode` in `keycode_converter.cc`). The only value a
+    /// key without a Carbon code may carry: the Windows VK range overlaps the
+    /// Carbon range everywhere, and a VK passed off as a Carbon code is a
+    /// different key -- VK_L (0x4C) is kVK_ANSI_KeypadEnter, VK_NUMPAD0
+    /// (0x60) is F5, VK_F13 (0x7C) is the right arrow.
+    #[cfg(all(feature = "cef", target_os = "macos"))]
+    pub const NO_MAC_KEY: i32 = 0xFFFF;
+
+    /// Platform scan / virtual key Chromium wants in `native_key_code`.
+    /// On macOS that is the Carbon/NSEvent keyCode, never the Windows VK.
+    #[cfg(feature = "cef")]
+    pub fn native_key_code(key_code: KeyCode) -> i32 {
+        #[cfg(target_os = "macos")]
+        {
+            return match key_code {
+                KeyCode::KeyA => 0x00,
+                KeyCode::KeyS => 0x01,
+                KeyCode::KeyD => 0x02,
+                KeyCode::KeyF => 0x03,
+                KeyCode::KeyH => 0x04,
+                KeyCode::KeyG => 0x05,
+                KeyCode::KeyZ => 0x06,
+                KeyCode::KeyX => 0x07,
+                KeyCode::KeyC => 0x08,
+                KeyCode::KeyV => 0x09,
+                KeyCode::KeyB => 0x0b,
+                KeyCode::KeyQ => 0x0c,
+                KeyCode::KeyW => 0x0d,
+                KeyCode::KeyE => 0x0e,
+                KeyCode::KeyR => 0x0f,
+                KeyCode::KeyY => 0x10,
+                KeyCode::KeyT => 0x11,
+                KeyCode::Key1 => 0x12,
+                KeyCode::Key2 => 0x13,
+                KeyCode::Key3 => 0x14,
+                KeyCode::Key4 => 0x15,
+                KeyCode::Key6 => 0x16,
+                KeyCode::Key5 => 0x17,
+                KeyCode::Equals => 0x18,
+                KeyCode::Key9 => 0x19,
+                KeyCode::Key7 => 0x1a,
+                KeyCode::Minus => 0x1b,
+                KeyCode::Key8 => 0x1c,
+                KeyCode::Key0 => 0x1d,
+                KeyCode::RBracket => 0x1e,
+                KeyCode::KeyO => 0x1f,
+                KeyCode::KeyU => 0x20,
+                KeyCode::LBracket => 0x21,
+                KeyCode::KeyI => 0x22,
+                KeyCode::KeyP => 0x23,
+                KeyCode::ReturnKey => 0x24,
+                KeyCode::KeyL => 0x25,
+                KeyCode::KeyJ => 0x26,
+                KeyCode::Quote => 0x27,
+                KeyCode::KeyK => 0x28,
+                KeyCode::Semicolon => 0x29,
+                KeyCode::Backslash => 0x2a,
+                KeyCode::Comma => 0x2b,
+                KeyCode::Slash => 0x2c,
+                KeyCode::KeyN => 0x2d,
+                KeyCode::KeyM => 0x2e,
+                KeyCode::Period => 0x2f,
+                KeyCode::Tab => 0x30,
+                KeyCode::Space => 0x31,
+                KeyCode::Backtick => 0x32,
+                KeyCode::Backspace | KeyCode::Back => 0x33,
+                KeyCode::Escape => 0x35,
+                KeyCode::Capslock => 0x39,
+                KeyCode::Shift => 0x38,
+                KeyCode::Alt => 0x3a,
+                KeyCode::Control => 0x3b,
+                KeyCode::Logo => 0x37,
+                KeyCode::F5 => 0x60,
+                KeyCode::F6 => 0x61,
+                KeyCode::F7 => 0x62,
+                KeyCode::F3 => 0x63,
+                KeyCode::F8 => 0x64,
+                KeyCode::F9 => 0x65,
+                KeyCode::F11 => 0x67,
+                KeyCode::F10 => 0x6d,
+                KeyCode::F12 => 0x6f,
+                KeyCode::Insert => 0x72,
+                KeyCode::Home => 0x73,
+                KeyCode::PageUp => 0x74,
+                KeyCode::Delete => 0x75,
+                KeyCode::F4 => 0x76,
+                KeyCode::End => 0x77,
+                KeyCode::F2 => 0x78,
+                KeyCode::PageDown => 0x79,
+                KeyCode::F1 => 0x7a,
+                KeyCode::ArrowLeft => 0x7b,
+                KeyCode::ArrowRight => 0x7c,
+                KeyCode::ArrowDown => 0x7d,
+                KeyCode::ArrowUp => 0x7e,
+                KeyCode::NumpadDecimal => 0x41,
+                KeyCode::NumpadMultiply => 0x43,
+                KeyCode::NumpadAdd => 0x45,
+                KeyCode::Numlock => 0x47,
+                KeyCode::NumpadDivide => 0x4b,
+                KeyCode::NumpadEnter => 0x4c,
+                KeyCode::NumpadSubtract => 0x4e,
+                KeyCode::NumpadEquals => 0x51,
+                KeyCode::Numpad0 => 0x52,
+                KeyCode::Numpad1 => 0x53,
+                KeyCode::Numpad2 => 0x54,
+                KeyCode::Numpad3 => 0x55,
+                KeyCode::Numpad4 => 0x56,
+                KeyCode::Numpad5 => 0x57,
+                KeyCode::Numpad6 => 0x58,
+                KeyCode::Numpad7 => 0x59,
+                KeyCode::Numpad8 => 0x5b,
+                KeyCode::Numpad9 => 0x5c,
+                // A Mac keyboard has F13-F15 where a PC one has these.
+                KeyCode::PrintScreen => 0x69,
+                KeyCode::ScrollLock => 0x6b,
+                KeyCode::Pause => 0x71,
+                KeyCode::Unknown => Self::NO_MAC_KEY,
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        Self::windows_key_code(key_code)
+    }
+
+    /// Carbon keyCode for a Unicode character on Mac. Must not use the
+    /// Windows VK: 0x4C is VK_L and also kVK_ANSI_KeypadEnter.
+    #[cfg(feature = "cef")]
+    pub fn native_key_code_for_char(ch: char) -> i32 {
+        #[cfg(target_os = "macos")]
+        {
+            let code = match ch.to_ascii_lowercase() {
+                'a' => KeyCode::KeyA,
+                'b' => KeyCode::KeyB,
+                'c' => KeyCode::KeyC,
+                'd' => KeyCode::KeyD,
+                'e' => KeyCode::KeyE,
+                'f' => KeyCode::KeyF,
+                'g' => KeyCode::KeyG,
+                'h' => KeyCode::KeyH,
+                'i' => KeyCode::KeyI,
+                'j' => KeyCode::KeyJ,
+                'k' => KeyCode::KeyK,
+                'l' => KeyCode::KeyL,
+                'm' => KeyCode::KeyM,
+                'n' => KeyCode::KeyN,
+                'o' => KeyCode::KeyO,
+                'p' => KeyCode::KeyP,
+                'q' => KeyCode::KeyQ,
+                'r' => KeyCode::KeyR,
+                's' => KeyCode::KeyS,
+                't' => KeyCode::KeyT,
+                'u' => KeyCode::KeyU,
+                'v' => KeyCode::KeyV,
+                'w' => KeyCode::KeyW,
+                'x' => KeyCode::KeyX,
+                'y' => KeyCode::KeyY,
+                'z' => KeyCode::KeyZ,
+                '0' => KeyCode::Key0,
+                '1' => KeyCode::Key1,
+                '2' => KeyCode::Key2,
+                '3' => KeyCode::Key3,
+                '4' => KeyCode::Key4,
+                '5' => KeyCode::Key5,
+                '6' => KeyCode::Key6,
+                '7' => KeyCode::Key7,
+                '8' => KeyCode::Key8,
+                '9' => KeyCode::Key9,
+                ' ' => KeyCode::Space,
+                '\r' | '\n' => KeyCode::ReturnKey,
+                '\t' => KeyCode::Tab,
+                '\u{8}' => KeyCode::Backspace,
+                // The US layout's punctuation, shifted or not: the code
+                // point of every one of these is some other Carbon key
+                // ('.' is 0x2E = M, '-' is 0x2D = N, ';' is 0x3B = Control).
+                '`' | '~' => KeyCode::Backtick,
+                '-' | '_' => KeyCode::Minus,
+                '=' | '+' => KeyCode::Equals,
+                '[' | '{' => KeyCode::LBracket,
+                ']' | '}' => KeyCode::RBracket,
+                '\\' | '|' => KeyCode::Backslash,
+                ';' | ':' => KeyCode::Semicolon,
+                '\'' | '"' => KeyCode::Quote,
+                ',' | '<' => KeyCode::Comma,
+                '.' | '>' => KeyCode::Period,
+                '/' | '?' => KeyCode::Slash,
+                ')' => KeyCode::Key0,
+                '!' => KeyCode::Key1,
+                '@' => KeyCode::Key2,
+                '#' => KeyCode::Key3,
+                '$' => KeyCode::Key4,
+                '%' => KeyCode::Key5,
+                '^' => KeyCode::Key6,
+                '&' => KeyCode::Key7,
+                '*' => KeyCode::Key8,
+                '(' => KeyCode::Key9,
+                // A character with no key on the US layout (an accented
+                // letter from a dead key, anything the IME composed): no
+                // Carbon code at all, never its code point.
+                _ => return Self::NO_MAC_KEY,
+            };
+            return Self::native_key_code(code);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if ch.is_ascii_alphabetic() {
+                ch.to_ascii_uppercase() as i32
+            } else {
+                ch as i32
+            }
+        }
+    }
+
     #[cfg(feature = "cef")]
     pub fn key_char(key_code: KeyCode, shift: bool) -> Option<char> {
         match key_code {
-            KeyCode::Backspace => Some('\u{8}'),
+            KeyCode::Backspace | KeyCode::Back => Some('\u{8}'),
             KeyCode::Backtick => Some(if shift { '~' } else { '`' }),
             KeyCode::Key0 => Some(if shift { ')' } else { '0' }),
             KeyCode::Key1 => Some(if shift { '!' } else { '1' }),
@@ -515,7 +727,11 @@ impl Browser {
     pub fn sends_char_on_keydown(key_code: KeyCode) -> bool {
         matches!(
             key_code,
-            KeyCode::Backspace | KeyCode::Tab | KeyCode::ReturnKey | KeyCode::NumpadEnter
+            KeyCode::Backspace
+                | KeyCode::Back
+                | KeyCode::Tab
+                | KeyCode::ReturnKey
+                | KeyCode::NumpadEnter
         )
     }
 
@@ -614,6 +830,27 @@ impl Browser {
                 click_count.max(1),
             ) {
                 log!("Browser mouse click failed: {err}");
+            }
+        }
+    }
+
+    /// End a press the page holds as well as this build of the CEF binding
+    /// allows without a release: the pointer leaves the page with no button
+    /// held, and NO mouse-up is sent. A real downstream cancellation
+    /// (`CefBrowserHost::SendCaptureLostEvent`) has no wrapper in the
+    /// committed `makepad_cef` yet; an up — even off the page — can commit a
+    /// drag the page captured (Pointer Events send captured events to the
+    /// capturing element) or click. So the page is left holding its press
+    /// until the person's next click ends it: nothing is committed. When the
+    /// binding gains `send_capture_lost_event`, call it here instead.
+    #[cfg(feature = "cef")]
+    fn send_mouse_cancel_internal(&mut self, modifiers: KeyModifiers, button: MouseButton) {
+        self.pressed_buttons.remove(button);
+        let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons);
+        if let Some(browser) = &mut self.cef_browser {
+            let off = -10_000;
+            if let Err(err) = browser.send_mouse_move(off, off, cef_modifiers, true) {
+                log!("Browser mouse cancel failed: {err}");
             }
         }
     }
@@ -840,6 +1077,12 @@ impl Browser {
             self.sync_browser_size(w, h, dpi, Cx::monotonic_now());
             self.redraw(cx);
         }
+        // A shrink waits for the size to settle; the next *draw* used to be
+        // the only thing that allocated the new surface, so a resize that
+        // ended without another draw left Chromium on the old view.
+        if let Some((w, h)) = self.wanted_size {
+            self.sync_accelerated_target(cx, w, h, Cx::monotonic_now());
+        }
     }
 
     #[cfg(feature = "cef")]
@@ -887,6 +1130,10 @@ impl Browser {
                         log!("Browser widget navigation failed: {message}");
                         self.init_error = Some(message);
                         self.cef_browser = None;
+                    } else {
+                        // The page has been told: the next draw must not
+                        // tell it again and start the same load twice.
+                        self.last_url.push_str(url);
                     }
                 }
             }
@@ -924,6 +1171,10 @@ impl Widget for Browser {
             #[cfg(feature = "cef")]
             {
                 self.cef_browser = None;
+                // The profile's cookies are committed in batches; a process
+                // that ends now would lose the last half minute of them, and
+                // on macOS this event is the last thing the app hears.
+                makepad_cef::flush_profile();
             }
             return;
         }
@@ -935,6 +1186,10 @@ impl Widget for Browser {
                 self.init_error = Some(message);
             }
             return;
+        }
+
+        if let Event::WindowGeomChange(_) = event {
+            self.redraw(cx);
         }
 
         if self.pump_timer.is_event(event).is_some() {
@@ -1005,6 +1260,15 @@ impl Widget for Browser {
                 Hit::FingerMove(fe) if !pointer_held_elsewhere => {
                     self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
                 }
+                // The press was taken away (a list or the host took the finger):
+                // the page must let go of it too, but nothing may click.
+                Hit::FingerUp(fe) if fe.cancelled => {
+                    let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
+                    if self.pressed_buttons.contains(button) {
+                        self.send_mouse_cancel_internal(fe.modifiers, button);
+                    }
+                    self.pressed_buttons.remove(button);
+                }
                 Hit::FingerUp(fe) => {
                     let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
                     // Only release a button the page was actually told about: a
@@ -1041,6 +1305,7 @@ impl Widget for Browser {
                     } else {
                         let modifiers = Self::key_event_modifiers(&key_event);
                         let windows_key_code = Self::windows_key_code(key_event.key_code);
+                        let native_key_code = Self::native_key_code(key_event.key_code);
                         let character = if key_event.modifiers.control
                             || key_event.modifiers.alt
                             || key_event.modifiers.logo
@@ -1053,11 +1318,15 @@ impl Widget for Browser {
                         };
 
                         if let Some(browser) = &mut self.cef_browser {
+                            // OSR expects RAWKEYDOWN (the translated KEYDOWN is
+                            // Chromium's internal follow-up). Sending KEYDOWN
+                            // from here dropped Backspace and let some keys
+                            // look like browser chrome (history / reload).
                             if let Err(err) = browser.send_key_event(
-                                makepad_cef::KEY_EVENT_KEYDOWN,
+                                makepad_cef::KEY_EVENT_RAWKEYDOWN,
                                 modifiers,
                                 windows_key_code,
-                                windows_key_code,
+                                native_key_code,
                                 character,
                                 character,
                                 false,
@@ -1074,7 +1343,7 @@ impl Widget for Browser {
                                     makepad_cef::KEY_EVENT_CHAR,
                                     modifiers,
                                     windows_key_code,
-                                    windows_key_code,
+                                    native_key_code,
                                     character,
                                     character,
                                     false,
@@ -1088,6 +1357,7 @@ impl Widget for Browser {
                 Hit::KeyUp(key_event) => {
                     let modifiers = Self::key_event_modifiers(&key_event);
                     let windows_key_code = Self::windows_key_code(key_event.key_code);
+                    let native_key_code = Self::native_key_code(key_event.key_code);
                     let character = if key_event.modifiers.control
                         || key_event.modifiers.alt
                         || key_event.modifiers.logo
@@ -1104,7 +1374,7 @@ impl Widget for Browser {
                             makepad_cef::KEY_EVENT_KEYUP,
                             modifiers,
                             windows_key_code,
-                            windows_key_code,
+                            native_key_code,
                             character,
                             character,
                             false,
@@ -1136,11 +1406,17 @@ impl Widget for Browser {
                         } else if let Some((windows_key_code, character)) =
                             Self::char_event_data(&text_event.input)
                         {
+                            // native_key_code is Carbon/NSEvent on Mac, NOT the
+                            // Windows VK. VK_L is 0x4C, which on Mac is
+                            // kVK_ANSI_KeypadEnter — L was submitting like Enter.
+                            let native_key_code = Self::native_key_code_for_char(
+                                char::from_u32(character as u32).unwrap_or('\0'),
+                            );
                             if let Err(err) = browser.send_key_event(
                                 makepad_cef::KEY_EVENT_CHAR,
                                 modifiers,
                                 windows_key_code,
-                                windows_key_code,
+                                native_key_code,
                                 character,
                                 character,
                                 false,
@@ -1245,5 +1521,19 @@ impl BrowserRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_visible_internal(cx, visible);
         }
+    }
+
+    /// The CEF page behind this widget, for what the widget does not wrap:
+    /// where the page has navigated to, its history, its audio capture.
+    /// `None` until the page exists (it is created by the first draw) and
+    /// under any other backend. Call on the UI thread, which is the thread
+    /// that pumps CEF.
+    #[cfg(feature = "cef")]
+    pub fn with_cef_browser<R>(
+        &self,
+        f: impl FnOnce(&mut makepad_cef::Browser) -> R,
+    ) -> Option<R> {
+        let mut inner = self.borrow_mut()?;
+        inner.cef_browser.as_mut().map(f)
     }
 }

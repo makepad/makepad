@@ -175,6 +175,25 @@ pub struct TouchPoint {
     pub sweep_lock: Cell<Area>,
 }
 
+/// A press taken away before it lifted: its gesture was claimed by
+/// another widget (a list that started scrolling under a pressed row,
+/// [`CxFingers::claim_gesture`]) or by the host (a window that rotated,
+/// lost focus or covered the content, [`CxFingers::cancel_digit`]).
+/// Dispatched like any event; every area still holding a cancelled
+/// capture of `digit_id` receives it as a terminal
+/// `Hit::FingerUp` with `cancelled: true` (never over, never a tap), and
+/// its capture ends there — wherever the finger is and whether or not
+/// that point is still on the widget.
+#[derive(Clone, Debug)]
+pub struct FingerCancelEvent {
+    pub window_id: WindowId,
+    pub digit_id: DigitId,
+    pub device: DigitDevice,
+    pub abs: Vec2d,
+    pub time: f64,
+    pub modifiers: KeyModifiers,
+}
+
 #[derive(Clone, Debug)]
 pub struct TouchUpdateEvent {
     pub time: f64,
@@ -317,6 +336,19 @@ pub struct CxDigitCapture {
     /// state lives on the capture, it structurally cannot outlive the
     /// button — `mouse_up` releases the capture and the pin with it.
     pub pinned: bool,
+    /// This press was taken away (another area claimed the gesture, or the
+    /// host cancelled the finger): its terminal FingerUp says
+    /// `cancelled`, never over, never a tap; no long press fires for it.
+    pub cancelled: bool,
+    /// This area claimed the finger's gesture ([`CxFingers::claim_gesture`]):
+    /// the one owner of the digit until it lifts.
+    pub owner: bool,
+    /// The time of the event that first showed this cancelled capture to
+    /// its area. Every hit test of that one event — every consumer that
+    /// shares the area, in any order — sees the same terminal cancelled
+    /// FingerUp; later events see nothing from it. The capture itself
+    /// retires with its digit, like an ordinary release.
+    cancel_seen: Option<f64>,
 }
 
 #[derive(Default, Clone)]
@@ -338,6 +370,21 @@ pub struct CxDigitHover {
 pub struct CxFingers {
     pub first_mouse_button: Option<(MouseButton, WindowId)>,
     captures: Vec<CxDigitCapture>,
+    /// Presses taken away, kept apart from the live `captures`: they own
+    /// nothing, count as no capture, and block no other finger; they exist
+    /// only so each area gets its one terminal cancelled FingerUp. They
+    /// retire with their digit.
+    cancelled: Vec<CxDigitCapture>,
+    /// Fingers whose gesture was just claimed: the platform dispatches an
+    /// `Event::FingerCancel` for each right after the current event, so the
+    /// losers that handled that event BEFORE the claim end their press
+    /// before any further input (`take_pending_cancels`).
+    pending_cancels: Vec<FingerCancelEvent>,
+    /// Fingers whose physical press was taken away as a whole (the host or
+    /// the OS cancelled it: `cancel_digit`), until the digit is released.
+    /// A claim or a recycle cancels only some captures of a press that is
+    /// still held; those fingers are not here.
+    taken_away: Vec<DigitId>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     xr_poke_locks: Vec<DigitId>,
@@ -390,7 +437,9 @@ impl CxFingers {
                 hover.area = new_area;
             }
         }
-        for capture in &mut self.captures {
+        // Cancelled presses follow their widget through a redraw too, or a
+        // cancelled finger would no longer be recognised as that widget's.
+        for capture in self.captures.iter_mut().chain(self.cancelled.iter_mut()) {
             if capture.area == old_area {
                 capture.area = new_area;
             }
@@ -464,6 +513,9 @@ impl CxFingers {
             has_long_press_occurred: false,
             switch_capture: None,
             pinned: false,
+            cancelled: false,
+            owner: false,
+            cancel_seen: None,
         })
         /*}*/
     }
@@ -478,6 +530,12 @@ impl CxFingers {
 
     pub(crate) fn find_area_capture(&mut self, area: Area) -> Option<&mut CxDigitCapture> {
         self.captures.iter_mut().find(|v| v.area == area)
+    }
+
+    /// `area`'s capture of THIS finger: a touch's move or lift resolves by
+    /// its own digit, never by whichever finger holds the area.
+    pub(crate) fn find_digit_area_capture(&mut self, digit_id: DigitId, area: Area) -> Option<&mut CxDigitCapture> {
+        self.captures.iter_mut().find(|v| v.digit_id == digit_id && v.area == area)
     }
 
     /// Reassign the finger currently captured by `from` to `to` (also updating its
@@ -515,6 +573,130 @@ impl CxFingers {
         self.captures
             .retain(|v| v.digit_id != digit || v.area == over);
         self.captures.len() != before
+    }
+
+    /// `area` takes the gesture of the finger `digit_id` it captured (a
+    /// scroller starting to scroll): it becomes the digit's one owner and
+    /// every other capture of that finger is cancelled. Each loser gets a
+    /// terminal cancelled FingerUp from the first event that reaches it
+    /// after this — the [`Event::FingerCancel`] the owner dispatches to its
+    /// children at once, or, for areas outside the owner (an ancestor
+    /// scroller), the very pointer event being dispatched — and nothing
+    /// from that finger after it: a loser never moves again.
+    /// Returns false when the gesture is not `area`'s to take: it holds no
+    /// live capture of the finger, its capture was already cancelled, or
+    /// another area owns the finger — a loser must stand down.
+    pub fn claim_gesture(&mut self, digit_id: DigitId, area: Area) -> bool {
+        let Some(own) = self.captures.iter().position(|v| v.digit_id == digit_id && v.area == area) else {
+            // No live capture: none, or already cancelled.
+            return false;
+        };
+        if self.captures[own].owner {
+            return true;
+        }
+        if self.captures.iter().any(|v| v.digit_id == digit_id && v.owner) {
+            let lost = self.captures.remove(own);
+            self.cancelled.push(CxDigitCapture { cancelled: true, ..lost });
+            return false;
+        }
+        self.captures[own].owner = true;
+        let before = self.cancelled.len();
+        self.move_to_cancelled(|v| v.digit_id == digit_id && !v.owner);
+        if self.cancelled.len() > before {
+            let abs = self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.abs_start).unwrap_or_default();
+            self.queue_cancel(digit_id, abs);
+        }
+        true
+    }
+
+    /// The host takes the finger `digit_id` away entirely (its window
+    /// rotated, lost focus, or the content it pressed left the front):
+    /// every capture of it is cancelled. The host then dispatches
+    /// [`Event::FingerCancel`] so each widget ends its press, and retires
+    /// the digit.
+    pub fn cancel_digit(&mut self, digit_id: DigitId) {
+        self.move_to_cancelled(|v| v.digit_id == digit_id);
+        if !self.taken_away.contains(&digit_id) {
+            self.taken_away.push(digit_id);
+        }
+    }
+
+    /// Whether the press of `digit_id` itself was taken away (`cancel_digit`:
+    /// the host rotated, the OS cancelled the touch) — as opposed to a
+    /// `FingerCancel` that ends only some captures of a press still held (a
+    /// list took the finger, a pressed row was recycled). Widgets that follow
+    /// the raw pointer end their own gesture only on this: its release will
+    /// not come.
+    pub fn press_taken_away(&self, digit_id: DigitId) -> bool {
+        self.taken_away.contains(&digit_id)
+    }
+
+    /// A container is about to drop, hide or recycle what a live press of
+    /// `digit_id` landed on (a list recycling a pressed row): every capture of
+    /// that finger except the container's own `keep` is cancelled, and a
+    /// `FingerCancel` is queued so each ends its press right after the
+    /// current event, wherever it now lives.
+    pub fn cancel_digit_except(&mut self, digit_id: DigitId, keep: Area) {
+        let before = self.cancelled.len();
+        self.move_to_cancelled(|v| v.digit_id == digit_id && v.area != keep);
+        if self.cancelled.len() > before {
+            let abs = self.cancelled.last().map(|v| v.abs_start).unwrap_or_default();
+            self.queue_cancel(digit_id, abs);
+        }
+    }
+
+    fn move_to_cancelled(&mut self, which: impl Fn(&CxDigitCapture) -> bool) {
+        let mut index = 0;
+        while index < self.captures.len() {
+            if which(&self.captures[index]) {
+                let capture = self.captures.remove(index);
+                self.cancelled.push(CxDigitCapture { cancelled: true, owner: false, cancel_seen: None, ..capture });
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn queue_cancel(&mut self, digit_id: DigitId, abs: Vec2d) {
+        if self.pending_cancels.iter().any(|e| e.digit_id == digit_id) {
+            return;
+        }
+        let device = if digit_id == live_id!(mouse).into() {
+            DigitDevice::Mouse { button: MouseButton::PRIMARY }
+        } else {
+            DigitDevice::Touch { uid: 0 }
+        };
+        self.pending_cancels.push(FingerCancelEvent {
+            window_id: WindowId(0, 0),
+            digit_id,
+            device,
+            abs,
+            time: 0.0,
+            modifiers: KeyModifiers::default(),
+        });
+    }
+
+    /// The cancellations a claim queued during the event just dispatched,
+    /// stamped `now`: the platform dispatches each as `Event::FingerCancel`
+    /// before any further input. A test harness driving widgets directly
+    /// does the same after each event.
+    pub fn take_pending_cancels(&mut self, now: f64) -> Vec<FingerCancelEvent> {
+        let mut pending = std::mem::take(&mut self.pending_cancels);
+        for event in &mut pending {
+            event.time = now;
+        }
+        pending
+    }
+
+    /// The terminal hit of a cancelled capture, if `area` holds one of
+    /// `digit_id`: `Some(true)` while the event at `time` is the one that
+    /// shows the cancel (every consumer of that event sees it), `Some(false)`
+    /// for any later event (nothing more from this finger), `None` when the
+    /// capture is not cancelled (ordinary handling).
+    fn cancelled_capture(&mut self, digit_id: DigitId, area: Area, time: f64) -> Option<(bool, CxDigitCapture)> {
+        let capture = self.cancelled.iter_mut().find(|v| v.digit_id == digit_id && v.area == area)?;
+        let seen = *capture.cancel_seen.get_or_insert(time);
+        Some((seen == time, capture.clone()))
     }
 
     pub fn is_area_captured(&self, area: Area) -> bool {
@@ -593,6 +775,8 @@ impl CxFingers {
     }
 
     pub(crate) fn release_digit(&mut self, digit_id: DigitId) {
+        self.cancelled.retain(|v| v.digit_id != digit_id);
+        self.taken_away.retain(|d| *d != digit_id);
         while let Some(index) = self
             .captures
             .iter_mut()
@@ -654,7 +838,14 @@ impl CxFingers {
         }
     }
 
-    pub(crate) fn process_touch_update_end(&mut self, touches: &[TouchPoint]) {
+    /// Bookkeeping after a `TouchUpdate` was dispatched: a lifted finger
+    /// releases its capture and hover, the others cycle their hover. The
+    /// platform backends call it for real touches; a host that synthesizes
+    /// a touch for content it embeds (a phone simulator presenting the
+    /// mouse as a finger — its tap count is the mouse press's own) calls it
+    /// after each dispatch, and on a cancel whether or not anything is left
+    /// to dispatch to.
+    pub fn process_touch_update_end(&mut self, touches: &[TouchPoint]) {
         for touch in touches {
             let digit_id = live_id_num!(touch, touch.uid).into();
             match touch.state {
@@ -965,6 +1156,11 @@ pub struct FingerUpEvent {
     /// Whether this finger-up event (`abs`) occurred within the hits area.
     pub is_over: bool,
     pub is_sweep: bool,
+    /// The press was taken away rather than released (see
+    /// [`FingerCancelEvent`]): end the press — let go of a pressed look,
+    /// stop a drag without flinging — but activate nothing. Never over,
+    /// never a tap.
+    pub cancelled: bool,
 }
 impl Deref for FingerUpEvent {
     type Target = DigitDevice;
@@ -975,7 +1171,7 @@ impl Deref for FingerUpEvent {
 impl FingerUpEvent {
     /// Returns `true` if this FingerUp event was a regular tap/click (not a long press).
     pub fn was_tap(&self) -> bool {
-        if self.has_long_press_occurred {
+        if self.cancelled || self.has_long_press_occurred {
             return false;
         }
         self.time - self.capture_time < TAP_COUNT_TIME
@@ -1105,6 +1301,59 @@ impl HitOptions {
 }
 
 impl Event {
+    /// `area`'s answer for a pointer event that meets one of its CANCELLED
+    /// captures: the terminal `FingerUp { cancelled: true }` for the one
+    /// event that shows the cancel, `Hit::Nothing` for every event after it
+    /// (a cancelled press never moves, taps or long-presses again). `None`
+    /// when this event holds no cancelled capture of `area`.
+    fn cancelled_press_hit(&self, cx: &mut Cx, area: Area) -> Option<Hit> {
+        let (digit_id, device, abs, time, window_id, modifiers) = match self {
+            Event::FingerCancel(e) => (e.digit_id, e.device.clone(), e.abs, e.time, e.window_id, e.modifiers),
+            Event::TouchUpdate(e) => {
+                // Only a cancelled finger whose terminal is due in THIS event
+                // answers here; a finger already told is skipped by the
+                // ordinary per-touch loop, so it never hides another finger
+                // of the same batch.
+                let t = e.touches.iter().find(|t| {
+                    let digit: DigitId = live_id_num!(touch, t.uid).into();
+                    cx.fingers.cancelled.iter().any(|c| {
+                        c.digit_id == digit && c.area == area && c.cancel_seen.map_or(true, |seen| seen == e.time)
+                    })
+                })?;
+                (live_id_num!(touch, t.uid).into(), DigitDevice::Touch { uid: t.uid }, t.abs, e.time, e.window_id, e.modifiers)
+            }
+            Event::LongPress(e) => {
+                let digit: DigitId = live_id_num!(touch, e.uid).into();
+                cx.fingers.cancelled.iter().any(|c| c.digit_id == digit && c.area == area).then_some(())?;
+                return Some(Hit::Nothing);
+            }
+            Event::MouseMove(e) => (live_id!(mouse).into(), DigitDevice::Mouse { button: MouseButton::PRIMARY }, e.abs, e.time, e.window_id, e.modifiers),
+            Event::MouseUp(e) => (live_id!(mouse).into(), DigitDevice::Mouse { button: e.button }, e.abs, e.time, e.window_id, e.modifiers),
+            _ => return None,
+        };
+        let (terminal, capture) = cx.fingers.cancelled_capture(digit_id, area, time)?;
+        if !terminal {
+            return Some(Hit::Nothing);
+        }
+        let rect = if area.is_valid(cx) { area.clipped_rect(cx) } else { Rect::default() };
+        Some(Hit::FingerUp(FingerUpEvent {
+            window_id,
+            abs,
+            abs_start: capture.abs_start,
+            capture_time: capture.time,
+            time,
+            digit_id,
+            device,
+            has_long_press_occurred: capture.has_long_press_occurred,
+            tap_count: cx.fingers.tap_count(),
+            modifiers,
+            rect,
+            is_over: false,
+            is_sweep: false,
+            cancelled: true,
+        }))
+    }
+
     pub fn unhandle(&self, cx: &mut Cx, area: &Area) {
         match self {
             Event::TouchUpdate(e) => {
@@ -1188,6 +1437,12 @@ impl Event {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        // A cancelled press ends before anything else — even for an area
+        // that is no longer drawn: its terminal FingerUp is owed to it
+        // whatever became of its drawable.
+        if let Some(hit) = self.cancelled_press_hit(cx, area) {
+            return hit;
+        }
         if !area.is_valid(cx) {
             return Hit::Nothing;
         }
@@ -1290,6 +1545,11 @@ impl Event {
                 for t in &e.touches {
                     let digit_id = live_id_num!(touch, t.uid).into();
                     let device = DigitDevice::Touch { uid: t.uid };
+                    // A finger this area's press was taken from: it already
+                    // had its terminal hit; nothing more of it here.
+                    if cx.fingers.cancelled.iter().any(|c| c.digit_id == digit_id && c.area == area) {
+                        continue;
+                    }
 
                     match t.state {
                         TouchState::Start => {
@@ -1363,7 +1623,7 @@ impl Event {
                         TouchState::Stop => {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
-                            if let Some(capture) = cx.fingers.find_area_capture(area) {
+                            if let Some(capture) = cx.fingers.find_digit_area_capture(digit_id, area) {
                                 // See the note in TouchState::Start above: hit-test on the
                                 // touch centroid only, without inflating by `t.radius`.
                                 let rect_check = rect.contains(t.abs);
@@ -1374,7 +1634,7 @@ impl Event {
                                     < TAP_COUNT_TIME)
                                     && ((t.abs - capture.abs_start).length() < TAP_COUNT_DISTANCE);
 
-                                let is_over = rect_check || layout_shift_fallback;
+                                let is_over = !capture.cancelled && (rect_check || layout_shift_fallback);
 
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
@@ -1390,6 +1650,7 @@ impl Event {
                                     time: e.time,
                                     is_over,
                                     is_sweep: false,
+                                    cancelled: capture.cancelled,
                                 });
                             }
                         }
@@ -1455,11 +1716,12 @@ impl Event {
                                             modifiers: e.modifiers,
                                             time: e.time,
                                             is_sweep: true,
+                                            cancelled: capture.cancelled,
                                             is_over: false,
                                         });
                                     }
                                 }
-                            } else if let Some(capture) = cx.fingers.find_area_capture(area) {
+                            } else if let Some(capture) = cx.fingers.find_digit_area_capture(digit_id, area) {
                                 let is_over = hit_test(t.abs, &rect, &options.margin_for(&device));
                                 return Hit::FingerMove(FingerMoveEvent {
                                     window_id: e.window_id,
@@ -1551,6 +1813,7 @@ impl Event {
                                     modifiers: e.modifiers,
                                     time: e.time,
                                     is_sweep: true,
+                                    cancelled: capture.cancelled,
                                     is_over: false,
                                 });
                             }
@@ -1702,7 +1965,7 @@ impl Event {
                 let rect = area.clipped_rect(&cx);
 
                 if let Some(capture) = cx.fingers.find_area_capture(area) {
-                    let is_over = hit_test(e.abs, &rect, &options.margin);
+                    let is_over = !capture.cancelled && hit_test(e.abs, &rect, &options.margin);
                     let event = Hit::FingerUp(FingerUpEvent {
                         abs_start: capture.abs_start,
                         rect,
@@ -1717,6 +1980,7 @@ impl Event {
                         time: e.time,
                         is_over,
                         is_sweep: false,
+                        cancelled: capture.cancelled,
                     });
                     if is_over {
                         cx.fingers.new_hover_area(digit_id, area);
@@ -1755,7 +2019,7 @@ impl Event {
                 }
 
                 let rect = area.clipped_rect(&cx);
-                if let Some(capture) = cx.fingers.find_area_capture(area) {
+                if let Some(capture) = cx.fingers.find_area_capture(area).filter(|c| !c.cancelled) {
                     capture.has_long_press_occurred = true;
                     // No hit test is needed because we already did that in the previous
                     // FingerDown `capture` event that started the long press.

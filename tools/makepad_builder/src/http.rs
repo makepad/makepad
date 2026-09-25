@@ -80,6 +80,7 @@ pub fn fetch_method_progress(
                     frac,
                     unit: progress::Unit::Bytes,
                     package: progress::Package::default(),
+                    overall: None,
                 });
             });
         }
@@ -136,7 +137,6 @@ pub fn cached_file(
     let dest = cache.join(safe_name(file_name));
     let part = sidecar(&dest, ".part");
     let ok = sidecar(&dest, ".ok");
-    let _ = fs::remove_file(&part);
 
     progress::stage("Verify cache", file_name, 0.0);
     if dest.is_file() && file_is_complete(&dest, &ok, sha256_hex)? {
@@ -147,9 +147,8 @@ pub fn cached_file(
         return Ok(dest);
     }
     if dest.is_file() {
+        // Replaced by the download below (write_atomic renames over it).
         crate::setup_note!("  incomplete or corrupt {file_name}, redownloading");
-        let _ = fs::remove_file(&dest);
-        let _ = fs::remove_file(&ok);
     }
 
     crate::setup_note!("  download {file_name}");
@@ -244,6 +243,15 @@ pub fn download_probe() -> Result<(), String> {
     match result { Ok(_) | Err(blocking_http::Error::Timeout) => Ok(()), Err(e) => Err(e.to_string()) }
 }
 
+/// The size of a download before fetching it: a cached copy's size, else
+/// the server's Content-Length for a HEAD request; 0 when neither is known.
+pub fn download_size(cache: &Path, url: &str, file_name: &str) -> u64 {
+    if let Ok(meta) = fs::metadata(cache.join(safe_name(file_name))) {
+        return meta.len();
+    }
+    fetch_method("HEAD", url, &[], &[]).ok().and_then(|resp| content_length(&resp)).unwrap_or(0)
+}
+
 fn content_length(resp: &blocking_http::Response) -> Option<u64> {
     resp.header("content-length")
         .and_then(|s| s.trim().parse().ok())
@@ -296,7 +304,7 @@ fn write_atomic(
     body: &[u8],
     sha256_hex: Option<&str>,
 ) -> Result<(), String> {
-    let _ = fs::remove_file(part);
+    // A partial file from an earlier attempt is truncated, not deleted.
     {
         let mut f = OpenOptions::new()
             .create(true)
@@ -311,11 +319,10 @@ fn write_atomic(
         .map(|s| s.to_string())
         .unwrap_or_else(|| sha256::sha256_hex(body));
     let stamp = format!("size={}\nsha256={sha}\n", body.len());
+    // On failure the .part file stays and the next attempt truncates it.
+    fs::rename(part, dest).map_err(|e| e.to_string())?;
+    // The stamp follows the file it describes; a hash check backs it anyway.
     fs::write(ok, stamp).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(part, dest) {
-        let _ = fs::remove_file(part);
-        return Err(e.to_string());
-    }
     Ok(())
 }
 

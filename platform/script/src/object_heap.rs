@@ -1490,3 +1490,46 @@ impl ScriptHeap {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_map_insert_is_refused_before_mutation() {
+        let mut heap = ScriptHeap::empty();
+        let object = heap.new_object();
+        heap.set_max_heap_bytes(Some(usize::MAX));
+        let baseline = heap.accounted_heap_bytes();
+        heap.set_max_heap_bytes(Some(baseline + 1));
+
+        let trap = ScriptTrap::NoTrap;
+        let result = heap.set_value(object, id!(entry).into(), NIL, trap.pass());
+        assert!(result.is_nil(), "{result:?}");
+        assert!(heap.take_heap_limit_exceeded());
+        assert!(heap.objects[object].map.is_empty());
+
+        // Headroom re-opens after the host takes the flag.
+        heap.set_max_heap_bytes(Some(baseline + 64 * 1024));
+        let result = heap.set_value(object, id!(entry).into(), NIL, trap.pass());
+        assert!(result.is_nil(), "{result:?}");
+        assert!(!heap.take_heap_limit_exceeded());
+        assert_eq!(heap.objects[object].map.len(), 1);
+    }
+
+    #[test]
+    fn capped_sparse_vec_index_is_refused_before_mutation() {
+        let mut heap = ScriptHeap::empty();
+        let object = heap.new_object();
+        heap.objects[object].tag.set_vec2();
+        heap.set_max_heap_bytes(Some(usize::MAX));
+        let baseline = heap.accounted_heap_bytes();
+        heap.set_max_heap_bytes(Some(baseline + 1024));
+
+        let trap = ScriptTrap::NoTrap;
+        let result = heap.set_value(object, ScriptValue::from_f64(1_000_000.0), NIL, trap.pass());
+        assert!(result.is_nil(), "{result:?}");
+        assert!(heap.take_heap_limit_exceeded());
+        assert!(heap.objects[object].vec.is_empty());
+    }
+}

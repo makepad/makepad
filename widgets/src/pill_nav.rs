@@ -3400,6 +3400,10 @@ impl PillNavRef {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_script::script;
     use crate::makepad_script::trap::NoTrap;
@@ -3440,8 +3444,7 @@ mod tests {
 
     /// Every theme easing by token, from a VM with the widgets loaded.
     fn theme_eases() -> Vec<(&'static str, Ease)> {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        let mut cx = test_cx();
         cx.with_vm(|vm| EASE_TOKENS.iter().map(|token| (*token, theme_ease(vm, token))).collect())
     }
 
@@ -3505,8 +3508,8 @@ mod tests {
     /// and read back what the apply parsed.
     #[test]
     fn the_dsl_registers_and_the_items_parse() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let nav = cx.with_vm(|vm| {
             let value = vm.eval(script! {
                 use mod.prelude.widgets.*
@@ -3554,13 +3557,15 @@ mod tests {
         });
         assert_eq!(click.open_on, PopoverTrigger::Click);
         assert!(folded.compact);
+        });
     }
 
     /// Every layer is compiled here, because a shader error would otherwise
     /// only show as a bar with nothing in it.
     #[test]
     fn the_bar_and_its_panel_compile() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             for (name, value) in [
@@ -3583,10 +3588,12 @@ mod tests {
                 assert!(!text.is_empty(), "{name} compiled to nothing");
             }
         });
+        });
     }
 
     #[test]
     fn both_presets_are_declared_once() {
+        crate::on_test_cx(|| {
         let source = include_str!("pill_nav.rs");
         // Spelled in pieces, so this test's own text is not what it finds.
         let click = ["mod.widgets.PillNavClick = ", "mod.widgets.PillNav{"].concat();
@@ -3596,24 +3603,29 @@ mod tests {
         // The trigger and placement words are the popover's; an enum of
         // look-alikes splatted here would overwrite them in the module.
         assert!(!source.contains(&["mod.widgets.", "splat("].concat()));
+        });
     }
 
     #[test]
     fn stepping_items_skips_disabled_and_wraps() {
+        crate::on_test_cx(|| {
         let enabled = [true, false, true, true];
         assert_eq!(step_item(&enabled, Some(0), 1), Some(2));
         assert_eq!(step_item(&enabled, Some(3), 1), Some(0));
         assert_eq!(step_item(&enabled, Some(0), -1), Some(3));
         assert_eq!(step_item(&enabled, Some(2), -1), Some(0));
         assert_eq!(step_item(&[false, true], Some(1), 1), Some(1), "a lone stop stays put");
+        });
     }
 
     #[test]
     fn stepping_from_nothing_starts_at_the_first_enabled_item() {
+        crate::on_test_cx(|| {
         assert_eq!(step_item(&[false, true, true], None, 1), Some(1));
         assert_eq!(step_item(&[false, true, true], None, -1), Some(2));
         assert_eq!(step_item(&[false, false], None, 1), None);
         assert_eq!(step_item(&[], None, 1), None);
+        });
     }
 
     fn bar_metrics(items_align: f64) -> BarMetrics {
@@ -3622,16 +3634,19 @@ mod tests {
 
     #[test]
     fn a_bar_is_as_wide_as_its_items_and_their_gaps() {
+        crate::on_test_cx(|| {
         let layout = bar_layout(&[60.0, 80.0, 50.0], &bar_metrics(0.0), dvec2(0.0, 0.0));
         assert_eq!(layout.size, dvec2(4.0 * 2.0 + 190.0 + 2.0 * 2.0, 40.0));
         let xs: Vec<f64> = layout.items.iter().map(|r| r.pos.x).collect();
         assert_eq!(xs, vec![4.0, 66.0, 148.0]);
         assert!(layout.items.iter().all(|r| r.pos.y == 4.0 && r.size.y == 32.0));
         assert_eq!(layout.items[1].size.x, 80.0);
+        });
     }
 
     #[test]
     fn extra_width_places_items_by_items_align() {
+        crate::on_test_cx(|| {
         let widths = [60.0, 80.0, 50.0];
         let given = dvec2(302.0, 60.0);
         assert_eq!(bar_layout(&widths, &bar_metrics(0.0), given).items[0].pos, dvec2(4.0, 14.0));
@@ -3639,18 +3654,22 @@ mod tests {
         assert_eq!(bar_layout(&widths, &bar_metrics(1.0), given).items[0].pos.x, 104.0);
         // A bar narrower than its items runs over rather than squeezing.
         assert_eq!(bar_layout(&widths, &bar_metrics(1.0), dvec2(100.0, 0.0)).items[0].pos.x, 4.0);
+        });
     }
 
     #[test]
     fn the_bar_is_crowded_only_when_its_parent_is_narrower() {
+        crate::on_test_cx(|| {
         assert!(!is_crowded(200.0, None), "a parent that fits gives no room figure");
         assert!(is_crowded(200.0, Some(199.0)));
         assert!(!is_crowded(200.0, Some(200.0)));
         assert!(!is_crowded(200.0, Some(199.6)), "half a point is rounding, not a crowd");
+        });
     }
 
     #[test]
     fn columns_follow_the_first_appearance_of_each_group() {
+        crate::on_test_cx(|| {
         let links = vec![
             PillNavLink::new(id("a"), "A").in_group("Ship"),
             PillNavLink::new(id("b"), "B").in_group("Make"),
@@ -3668,10 +3687,12 @@ mod tests {
         assert!(layout.columns[0].x < layout.columns[1].x && layout.columns[1].x < layout.columns[2].x);
         assert_eq!(layout.rows[2].pos.x, layout.rows[0].pos.x, "a group's links share a column");
         assert!(layout.columns[2].heading.is_none());
+        });
     }
 
     #[test]
     fn a_column_is_clamped_between_its_min_and_max_width() {
+        crate::on_test_cx(|| {
         let m = metrics();
         let one = |label_w: f64, heading_w: f64| {
             let links = vec![PillNavLink::new(id("a"), "A").in_group("G")];
@@ -3682,19 +3703,23 @@ mod tests {
         assert_eq!(one(500.0, 0.0), 320.0);
         assert_eq!(one(200.0, 0.0), 220.0);
         assert_eq!(one(40.0, 250.0), 270.0, "a heading wider than its rows widens the column");
+        });
     }
 
     #[test]
     fn a_row_with_a_hint_is_taller_by_the_hint_and_its_gap() {
+        crate::on_test_cx(|| {
         let m = metrics();
         let plain = row_height(RowMeasure { label: dvec2(60.0, 16.0), hint: dvec2(0.0, 0.0) }, &m);
         let hinted = row_height(RowMeasure { label: dvec2(60.0, 16.0), hint: dvec2(90.0, 14.0) }, &m);
         assert_eq!(plain, 28.0);
         assert_eq!(hinted, plain + 2.0 + 14.0);
+        });
     }
 
     #[test]
     fn a_panel_without_groups_is_one_column_without_a_heading() {
+        crate::on_test_cx(|| {
         let links = vec![PillNavLink::new(id("a"), "A"), PillNavLink::new(id("b"), "B")];
         let measures = vec![RowMeasure { label: dvec2(60.0, 16.0), hint: dvec2(0.0, 0.0) }; 2];
         let layout = panel_layout(&links, &measures, &[], &metrics());
@@ -3703,10 +3728,12 @@ mod tests {
         assert_eq!(layout.rows[0].pos, dvec2(8.0, 8.0), "no heading row above the first link");
         assert_eq!(layout.rows[1].pos.y, 8.0 + 28.0 + 2.0);
         assert_eq!(layout.size, dvec2(8.0 * 2.0 + 180.0, 8.0 * 2.0 + 28.0 * 2.0 + 2.0));
+        });
     }
 
     #[test]
     fn down_walks_a_column_and_up_from_its_top_returns_to_the_bar() {
+        crate::on_test_cx(|| {
         let (links, layout) = build_panel();
         let on = vec![true; links.len()];
         assert_eq!(step_link(&layout, &on, None, LinkKey::Down), LinkStep::To(0));
@@ -3716,28 +3743,34 @@ mod tests {
         assert_eq!(step_link(&layout, &on, Some(1), LinkKey::Up), LinkStep::To(0));
         assert_eq!(step_link(&layout, &on, Some(0), LinkKey::Up), LinkStep::Bar);
         assert_eq!(step_link(&layout, &on, Some(3), LinkKey::Up), LinkStep::Bar, "every column's top leads back");
+        });
     }
 
     #[test]
     fn right_lands_on_the_nearest_row_of_the_next_column() {
+        crate::on_test_cx(|| {
         let (links, layout) = build_panel();
         let on = vec![true; links.len()];
         assert_eq!(step_link(&layout, &on, Some(1), LinkKey::Right), LinkStep::To(4));
         assert_eq!(step_link(&layout, &on, Some(2), LinkKey::Right), LinkStep::To(4));
         assert_eq!(step_link(&layout, &on, Some(0), LinkKey::Right), LinkStep::To(3));
         assert_eq!(step_link(&layout, &on, Some(4), LinkKey::Left), LinkStep::To(1));
+        });
     }
 
     #[test]
     fn right_past_the_last_column_moves_to_the_next_item() {
+        crate::on_test_cx(|| {
         let (links, layout) = build_panel();
         let on = vec![true; links.len()];
         assert_eq!(step_link(&layout, &on, Some(3), LinkKey::Right), LinkStep::NextItem);
         assert_eq!(step_link(&layout, &on, Some(0), LinkKey::Left), LinkStep::PrevItem);
+        });
     }
 
     #[test]
     fn disabled_links_are_never_a_keyboard_stop() {
+        crate::on_test_cx(|| {
         let (_, layout) = build_panel();
         let on = [false, true, false, false, true];
         assert_eq!(step_link(&layout, &on, None, LinkKey::Down), LinkStep::To(1));
@@ -3748,10 +3781,12 @@ mod tests {
         // A column with nothing enabled in it is crossed, not landed in.
         let only_make = [true, true, true, false, false];
         assert_eq!(step_link(&layout, &only_make, Some(0), LinkKey::Right), LinkStep::NextItem);
+        });
     }
 
     #[test]
     fn hovering_an_item_opens_its_panel_only_after_the_open_delay() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent::default();
         assert_eq!(intent.pointer(Over::Item(1), 0.0, &t, &has_panel), None);
@@ -3765,10 +3800,12 @@ mod tests {
         let mut idle = NavIntent::default();
         assert_eq!(idle.pointer(Over::Item(0), 0.0, &t, &has_panel), None);
         assert_eq!(idle.deadline(), None);
+        });
     }
 
     #[test]
     fn sweeping_across_the_bar_opens_nothing() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent::default();
         intent.pointer(Over::Item(1), 0.0, &t, &has_panel);
@@ -3776,10 +3813,12 @@ mod tests {
         intent.pointer(Over::Bar, 0.08, &t, &has_panel);
         assert_eq!(intent.tick(0.2), None);
         assert_eq!(intent.open, None);
+        });
     }
 
     #[test]
     fn an_open_panel_moves_to_another_item_after_the_switch_delay() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent { open: Some(1), pending: None };
         assert_eq!(intent.pointer(Over::Item(2), 1.0, &t, &has_panel), None);
@@ -3787,10 +3826,12 @@ mod tests {
         assert_eq!(intent.tick(1.05), None);
         assert_eq!(intent.tick(1.06), Some(IntentChange::Switched(2)));
         assert_eq!(intent.open, Some(2));
+        });
     }
 
     #[test]
     fn reaching_the_panel_before_the_switch_fires_cancels_it() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent { open: Some(1), pending: None };
         intent.pointer(Over::Item(2), 0.0, &t, &has_panel);
@@ -3798,10 +3839,12 @@ mod tests {
         assert_eq!(intent.pending, None);
         assert_eq!(intent.tick(0.2), None);
         assert_eq!(intent.open, Some(1));
+        });
     }
 
     #[test]
     fn leaving_everything_closes_after_the_grace_and_returning_cancels_it() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent { open: Some(1), pending: None };
         intent.pointer(Over::Nothing, 0.0, &t, &has_panel);
@@ -3812,10 +3855,12 @@ mod tests {
         assert_eq!(intent.tick(0.49), None);
         assert_eq!(intent.tick(0.5), Some(IntentChange::Closed));
         assert_eq!(intent.open, None);
+        });
     }
 
     #[test]
     fn the_gap_between_item_and_panel_counts_as_inside() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent { open: Some(1), pending: None };
         intent.pointer(Over::Nothing, 0.0, &t, &has_panel);
@@ -3826,19 +3871,23 @@ mod tests {
         let bridge = bridge_rect(anchor, panel, Side::Bottom);
         assert!(bridge.contains(dvec2(150.0, 44.0)));
         assert!(bridge.contains(dvec2(62.0, 44.0)), "as wide as the panel where the panel is wider");
+        });
     }
 
     #[test]
     fn resting_on_a_plain_item_closes_the_open_panel() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent { open: Some(1), pending: None };
         assert_eq!(intent.pointer(Over::Item(3), 0.0, &t, &has_panel), None);
         assert_eq!(intent.deadline(), Some(0.06));
         assert_eq!(intent.tick(0.06), Some(IntentChange::Closed));
+        });
     }
 
     #[test]
     fn a_press_toggles_and_clears_anything_pending() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Hover);
         let mut intent = NavIntent::default();
         intent.pointer(Over::Item(2), 0.0, &t, &has_panel);
@@ -3847,10 +3896,12 @@ mod tests {
         assert_eq!(intent.press(2, &t, &has_panel), Some(IntentChange::Switched(2)));
         assert_eq!(intent.press(2, &t, &has_panel), Some(IntentChange::Closed));
         assert_eq!(intent.press(0, &t, &has_panel), None, "a place opens nothing; the widget reports it");
+        });
     }
 
     #[test]
     fn click_mode_never_opens_on_hover_but_slides_once_open() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Click);
         let mut intent = NavIntent::default();
         assert_eq!(intent.pointer(Over::Item(1), 0.0, &t, &has_panel), None);
@@ -3861,10 +3912,12 @@ mod tests {
         assert_eq!(intent.pointer(Over::Nothing, 2.0, &t, &has_panel), None);
         assert_eq!(intent.tick(9.0), None, "a pressed-open panel does not close on leave");
         assert_eq!(intent.open, Some(2));
+        });
     }
 
     #[test]
     fn manual_mode_opens_nothing_by_itself() {
+        crate::on_test_cx(|| {
         let t = times(PopoverTrigger::Manual);
         let mut intent = NavIntent::default();
         assert_eq!(intent.pointer(Over::Item(1), 0.0, &t, &has_panel), None);
@@ -3875,20 +3928,24 @@ mod tests {
         assert_eq!(intent.force_open(2), Some(IntentChange::Switched(2)));
         assert_eq!(intent.force_close(), Some(IntentChange::Closed));
         assert_eq!(intent.force_close(), None);
+        });
     }
 
     #[test]
     fn a_zero_delay_fires_inside_the_pointer_call() {
+        crate::on_test_cx(|| {
         let t = IntentTimes { open_on: PopoverTrigger::Hover, open_delay: 0.0, switch_delay: 0.0, close_delay: 0.0 };
         let mut intent = NavIntent::default();
         assert_eq!(intent.pointer(Over::Item(1), 0.0, &t, &has_panel), Some(IntentChange::Opened(1)));
         assert_eq!(intent.pointer(Over::Item(2), 0.0, &t, &has_panel), Some(IntentChange::Switched(2)));
         assert_eq!(intent.pointer(Over::Nothing, 0.0, &t, &has_panel), Some(IntentChange::Closed));
         assert_eq!(intent.deadline(), None);
+        });
     }
 
     #[test]
     fn the_bridge_spans_from_item_to_panel_on_each_side() {
+        crate::on_test_cx(|| {
         let anchor = Rect { pos: dvec2(100.0, 100.0), size: dvec2(80.0, 40.0) };
         let below = Rect { pos: dvec2(90.0, 148.0), size: dvec2(200.0, 100.0) };
         assert_eq!(bridge_rect(anchor, below, Side::Bottom), Rect { pos: dvec2(90.0, 140.0), size: dvec2(200.0, 8.0) });
@@ -3898,10 +3955,12 @@ mod tests {
         assert_eq!(bridge_rect(anchor, right, Side::Right), Rect { pos: dvec2(180.0, 80.0), size: dvec2(8.0, 60.0) });
         let left = Rect { pos: dvec2(0.0, 110.0), size: dvec2(92.0, 50.0) };
         assert_eq!(bridge_rect(anchor, left, Side::Left), Rect { pos: dvec2(92.0, 100.0), size: dvec2(8.0, 60.0) });
+        });
     }
 
     #[test]
     fn smootherstep_is_flat_at_both_ends() {
+        crate::on_test_cx(|| {
         assert_eq!(smootherstep(0.0), 0.0);
         assert_eq!(smootherstep(1.0), 1.0);
         assert!((smootherstep(0.5) - 0.5).abs() < 1e-12);
@@ -3909,10 +3968,12 @@ mod tests {
         assert!(1.0 - smootherstep(0.99) < 1e-4, "no speed at the end");
         assert_eq!(smootherstep(-1.0), 0.0);
         assert_eq!(smootherstep(2.0), 1.0);
+        });
     }
 
     #[test]
     fn the_morph_starts_on_the_pill_and_ends_on_the_panel() {
+        crate::on_test_cx(|| {
         let pill = Rect { pos: dvec2(100.0, 4.0), size: dvec2(80.0, 32.0) };
         let panel = Rect { pos: dvec2(40.0, 48.0), size: dvec2(400.0, 200.0) };
         let start = morph_at(0.0, 0.0, pill, panel, 16.0, 14.0);
@@ -3929,6 +3990,7 @@ mod tests {
         assert_eq!(end.radius, 14.0);
         assert_eq!(end.content_alpha, 1.0);
         assert_eq!(end.morph, 1.0);
+        });
     }
 
     /// A spring grows the surface past the panel, but its fill, its corner
@@ -3936,6 +3998,7 @@ mod tests {
     /// the pill never turns the surface inside out.
     #[test]
     fn a_swing_past_the_panel_moves_only_the_surface() {
+        crate::on_test_cx(|| {
         let pill = Rect { pos: dvec2(100.0, 4.0), size: dvec2(80.0, 32.0) };
         let panel = Rect { pos: dvec2(40.0, 48.0), size: dvec2(400.0, 200.0) };
         let past = morph_at(1.3, 1.0, pill, panel, 16.0, 14.0);
@@ -3946,14 +4009,15 @@ mod tests {
         assert_eq!((under.morph, under.radius, under.content_alpha), (0.0, 16.0, 0.0));
         // The words fade by how far the grow has come, not where it is now.
         assert_eq!(morph_at(0.8, 1.0, pill, panel, 16.0, 14.0).content_alpha, 1.0);
+        });
     }
 
     /// The curves and the times are the theme's tokens, and a host can name
     /// another token for any of them.
     #[test]
     fn the_motion_takes_its_curves_and_times_from_the_theme() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             let value = vm.eval(script! {
                 use mod.prelude.widgets.*
@@ -3994,6 +4058,7 @@ mod tests {
             assert_eq!(sprung.glide_ease, theme_ease(vm, "motion_ease_linear"));
             assert_eq!(sprung.switch_ease, nav.switch_ease, "a curve not named keeps its default");
         });
+        });
     }
 
     /// The pill comes in where nothing had it along its enter curve and
@@ -4001,8 +4066,8 @@ mod tests {
     /// them the glide's; reduced motion lands it at once.
     #[test]
     fn the_pill_comes_in_and_goes_on_its_own_curves_and_times() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut nav, spring, accelerate) = cx.with_vm(|vm| {
             let value = vm.eval(script! {
                 use mod.prelude.widgets.*
@@ -4047,12 +4112,14 @@ mod tests {
         nav.hover = Some(1);
         assert!(!nav.advance(0.0));
         assert!(nav.highlight_fade.is_at(1.0), "reduced motion brings it in at once");
+        });
     }
 
     /// Each theme easing is read straight off the tween's clock, both ways:
     /// toward 1 the value is the curve, toward 0 it is the curve turned over.
     #[test]
     fn a_tween_reads_every_theme_easing_off_its_clock() {
+        crate::on_test_cx(|| {
         for (token, ease) in theme_eases() {
             let mut enter = UnitTween::at(0.0);
             enter.aim(1.0, 0.4, ease);
@@ -4072,10 +4139,12 @@ mod tests {
             assert!(enter.is_at(1.0) && exit.is_at(0.0));
             assert_eq!((enter.value(), exit.value()), (1.0, 0.0), "{token} lands exactly on its end");
         }
+        });
     }
 
     #[test]
     fn a_spring_carries_the_value_past_its_end_and_lands_on_it() {
+        crate::on_test_cx(|| {
         let spring = named(&theme_eases(), "motion_ease_spring");
         let mut grow = UnitTween::at(0.0);
         grow.aim(1.0, 1.0, spring);
@@ -4089,10 +4158,12 @@ mod tests {
         assert!(highest > 1.2, "the spring swings past 1: {highest}");
         assert!(grow.is_at(1.0));
         assert_eq!((grow.value(), grow.reached()), (1.0, 1.0));
+        });
     }
 
     #[test]
     fn a_bounce_dips_the_surface_but_never_the_words() {
+        crate::on_test_cx(|| {
         let bounce = named(&theme_eases(), "motion_ease_bounce");
         let mut grow = UnitTween::at(0.0);
         grow.aim(1.0, 1.0, bounce);
@@ -4106,12 +4177,14 @@ mod tests {
             alpha = now;
         }
         assert!(deepest_dip > 0.1, "the surface does dip back: {deepest_dip}");
+        });
     }
 
     /// Turning back mid-run starts where the value is, takes the share of
     /// the time the way back needs, and aiming the same way again is free.
     #[test]
     fn a_reversal_turns_back_from_where_the_value_is() {
+        crate::on_test_cx(|| {
         let eases = theme_eases();
         let mut grow = UnitTween::at(0.0);
         grow.aim(1.0, 0.4, named(&eases, "motion_ease_emphasized_decelerate"));
@@ -4130,10 +4203,12 @@ mod tests {
         }
         assert!((spent - there * 0.2).abs() < 0.002, "the way back took {spent}, not {} of a full run", there);
         assert!(grow.is_at(0.0));
+        });
     }
 
     #[test]
     fn a_zero_time_or_a_settle_lands_at_once() {
+        crate::on_test_cx(|| {
         let spring = named(&theme_eases(), "motion_ease_spring");
         let mut grow = UnitTween::at(0.0);
         grow.aim(1.0, 0.0, spring);
@@ -4142,10 +4217,12 @@ mod tests {
         assert!(grow.step(0.1));
         grow.settle();
         assert!(grow.is_at(0.0) && grow.value() == 0.0 && !grow.step(0.1));
+        });
     }
 
     #[test]
     fn a_glide_takes_its_first_place_at_once_and_follows_its_curve_to_the_next() {
+        crate::on_test_cx(|| {
         let spring = named(&theme_eases(), "motion_ease_spring");
         let first = Rect { pos: dvec2(4.0, 4.0), size: dvec2(80.0, 32.0) };
         let next = Rect { pos: dvec2(200.0, 4.0), size: dvec2(60.0, 32.0) };
@@ -4163,10 +4240,12 @@ mod tests {
         assert_eq!(glide.resting(), next, "while where it rests stays put");
         while glide.step(0.01) {}
         assert_eq!(glide.current(), next);
+        });
     }
 
     #[test]
     fn a_swing_is_moved_back_inside_its_room_and_cut_only_when_bigger() {
+        crate::on_test_cx(|| {
         let room = Rect { pos: dvec2(0.0, 0.0), size: dvec2(400.0, 300.0) };
         let inside = Rect { pos: dvec2(10.0, 10.0), size: dvec2(100.0, 50.0) };
         assert_eq!(hold_inside(inside, room), inside);
@@ -4176,10 +4255,12 @@ mod tests {
         assert_eq!(hold_inside(wide, room), Rect { pos: dvec2(0.0, 10.0), size: dvec2(400.0, 50.0) });
         let before = Rect { pos: dvec2(-30.0, -5.0), size: dvec2(20.0, 20.0) };
         assert_eq!(hold_inside(before, room), Rect { pos: dvec2(0.0, 0.0), size: dvec2(20.0, 20.0) });
+        });
     }
 
     #[test]
     fn content_stays_hidden_for_the_first_half_of_the_grow() {
+        crate::on_test_cx(|| {
         for step in 0..=55 {
             assert_eq!(content_alpha(step as f64 / 100.0), 0.0, "shown at {step}%");
         }
@@ -4189,17 +4270,21 @@ mod tests {
             assert!(alpha > last, "the reveal never goes back");
             last = alpha;
         }
+        });
     }
 
     #[test]
     fn a_switch_lets_the_old_words_go_before_the_new_ones_come() {
+        crate::on_test_cx(|| {
         assert_eq!(switch_alphas(0.0), (1.0, 0.0));
         assert_eq!(switch_alphas(0.35), (0.0, 0.0), "a moment with neither, never both");
         assert_eq!(switch_alphas(1.0), (0.0, 1.0));
+        });
     }
 
     #[test]
     fn compact_rows_show_links_only_under_the_expanded_item() {
+        crate::on_test_cx(|| {
         let items = sample_items();
         assert_eq!(
             compact_rows(&items, None),
@@ -4216,10 +4301,12 @@ mod tests {
                 CompactRow::Item(3),
             ]
         );
+        });
     }
 
     #[test]
     fn compact_left_from_a_link_goes_to_its_item_and_again_collapses_it() {
+        crate::on_test_cx(|| {
         let items = sample_items();
         let (expanded, at) = step_compact(&items, None, Some(CompactRow::Item(1)), CompactKey::Right);
         assert_eq!((expanded, at), (Some(1), Some(CompactRow::Item(1))));
@@ -4233,10 +4320,12 @@ mod tests {
         assert_eq!(at, Some(CompactRow::Item(2)), "collapsed links are not walked");
         let (_, at) = step_compact(&items, None, Some(CompactRow::Item(0)), CompactKey::Right);
         assert_eq!(at, Some(CompactRow::Item(0)), "a place has nothing to open");
+        });
     }
 
     #[test]
     fn changing_items_keeps_current_only_if_it_is_still_a_place() {
+        crate::on_test_cx(|| {
         let old = sample_items();
         let moved = vec![PillNavItem::place(id("pricing"), "Pricing"), PillNavItem::place(id("overview"), "Overview")];
         assert_eq!(keep_current(&old, Some(0), &moved), Some(1), "kept by id, wherever it went");
@@ -4244,6 +4333,7 @@ mod tests {
         let grown = vec![PillNavItem::group(id("overview"), "Overview", vec![PillNavLink::new(id("a"), "A")])];
         assert_eq!(keep_current(&old, Some(0), &grown), None, "a place that became a group is not where you are");
         assert_eq!(keep_current(&old, None, &moved), None);
+        });
     }
 
     /// The bar holds the lock while its list is out, and the lock turns away
@@ -4254,9 +4344,8 @@ mod tests {
     /// window-less test has no event loop to release that capture.
     #[test]
     fn a_press_on_the_pill_puts_away_the_list_the_bar_holds_the_lock_for() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
@@ -4323,6 +4412,7 @@ mod tests {
         });
         root.handle_event(&mut cx, &press, &mut Scope::empty());
         assert!(!nav.as_pill_nav().is_open(), "the press on the pill put it away");
+        });
     }
 
     /// A pass, a list and an overlay for a window-less draw.
@@ -4388,9 +4478,8 @@ mod tests {
     /// what was left first.
     #[test]
     fn a_bar_dropped_open_leaves_its_lock_for_the_next_event() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let first = lone_bar(&mut cx);
         let mut first_screen = Screen::new(&mut cx);
         first_screen.draw(&mut cx, &first);
@@ -4416,15 +4505,15 @@ mod tests {
         assert!(nav.as_pill_nav().is_open());
         nav.as_pill_nav().close(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "the other bar let go of its own lock and of the one left behind");
+        });
     }
 
     /// The folded pill goes into the test tree under the id the spec gives
     /// it, as the word `menu` a test can look it up by, not a hash.
     #[test]
     fn the_folded_pill_is_named_menu_in_the_test_tree() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
@@ -4447,6 +4536,7 @@ mod tests {
         let pill = parts.iter().find(|part| part.widget_type == "PillNavMenu").expect("the folded pill");
         assert_eq!(pill.id, live_id!(menu));
         assert_eq!(crate::widget_tree::live_id_token(pill.id), "menu");
+        });
     }
 
     /// While a spring swings the growing panel past where it settles, the
@@ -4456,9 +4546,8 @@ mod tests {
     /// are still arriving. Reduced motion lands the same spring at once.
     #[test]
     fn the_pointer_reads_the_placed_panel_while_a_spring_swings_the_surface() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
@@ -4537,5 +4626,6 @@ mod tests {
         bar.open(&mut cx, id("build"));
         assert!(bar.panel.as_ref().unwrap().grow.is_at(1.0), "and brings it back whole, spring or not");
         assert!(!bar.advance(0.0), "with nothing left to move");
+        });
     }
 }

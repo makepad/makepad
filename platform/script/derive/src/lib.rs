@@ -40,7 +40,7 @@ pub fn script_err_gen(input: TokenStream) -> TokenStream {
         imperative,
         rust,
         pick,
-        splat,
+        script_splat,
         walk,
         layout,
         deref,

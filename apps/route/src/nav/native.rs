@@ -6,8 +6,12 @@
 //! executors query these synchronously — search and province-scale routing
 //! are tens of milliseconds.
 
-use makepad_geodata::knmi_hdf5::{self, KnmiFrame};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_geodata::knmi_hdf5;
+use makepad_geodata::knmi_hdf5::KnmiFrame;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_geodata::query::LayerDb;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_geodata::radar::{RadarConfig, RadarSync};
 use makepad_map_nav::geo::LonLat;
 use makepad_map_nav::graph::{Route, RouteGraph, TravelMode};
@@ -25,7 +29,9 @@ const NAV_DATA_BASENAME: &str = "noord-holland";
 /// `makepad_map_build::testmap::TestMapPaths::in_dir(root, "amsterdam")`
 /// bakes, spelled out here so reading it needs no baker.
 const TEST_MAP_BASENAME: &str = "amsterdam";
+#[cfg(not(target_arch = "wasm32"))]
 const EUROPE_PLACES_PATH: &str = "europe-places.search";
+#[cfg(not(target_arch = "wasm32"))]
 const EUROPE_SEARCHDB_PATH: &str = "europe.searchdb";
 const EUROPE_MAJOR_GRAPH_PATH: &str = "europe-major.graph";
 
@@ -39,6 +45,7 @@ pub struct NavData {
     /// route that leaves NH coverage, not at startup.
     pub major_graph: Option<RouteGraph>,
     major_graph_attempted: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     pub chargers: Option<LayerDb>,
     maps_root: PathBuf,
 }
@@ -66,6 +73,7 @@ pub fn nav_basename(maps_root: &Path) -> Option<String> {
 
 /// Load the nav artifacts at `basename` (and the charger layer at
 /// `chargers`, when it exists) on the heavy lane.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_nav_load(
     pool: TaskPool,
     sender: ToUISender<NavLoad>,
@@ -145,6 +153,18 @@ pub fn start_nav_load(
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn start_nav_load(
+    _pool: TaskPool,
+    sender: ToUISender<NavLoad>,
+    _basename: String,
+    _chargers: PathBuf,
+) {
+    let _ = sender.send(NavLoad::Failed {
+        error: "local navigation data is unavailable on the web".to_string(),
+    });
+}
+
 impl NavData {
     /// Merged search over the NH detail index + Europe-wide index, same
     /// policy as examples/map: score-sorted, name+2km deduped, truncated.
@@ -207,6 +227,7 @@ pub fn radar_display_bbox() -> (f64, f64, f64, f64) {
 }
 
 /// Timestamp digits from a KNMI radar filename ("..._YYYYMMDDHHMM.h5").
+#[cfg(not(target_arch = "wasm32"))]
 fn filename_stamp(filename: &str) -> String {
     filename
         .rsplit('_')
@@ -217,6 +238,7 @@ fn filename_stamp(filename: &str) -> String {
 }
 
 /// Newest timestamp for which BOTH radar volumes are on disk, with paths.
+#[cfg(not(target_arch = "wasm32"))]
 fn newest_volume_pair(
     herwijnen: &RadarSync,
     den_helder: &RadarSync,
@@ -239,6 +261,7 @@ fn newest_volume_pair(
 
 /// Decode both volume files and composite them at 250 m, reprojected to a
 /// mercator BGRA image for `set_rain_now_hires`.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_hires_now(
     projection: &makepad_geodata::radar_raster::RadarProjection,
     herwijnen_path: &std::path::Path,
@@ -271,6 +294,7 @@ fn build_hires_now(
 /// Also syncs the raw volumes of both radars and composites them into the
 /// hi-res "now" image. Files land under `cache_dir`. The worker ends when
 /// the instance that started it is gone (its receiver dropped).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_radar_worker(
     spawner: ThreadSpawner,
     pool: TaskPool,

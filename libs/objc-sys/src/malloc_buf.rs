@@ -1,16 +1,17 @@
+use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::slice;
 
 struct MallocPtr(*mut i8);
 extern "C" {
-    pub fn free(p: *mut i8);
+    pub fn free(p: *mut c_void);
 }
 
 impl Drop for MallocPtr {
     fn drop(&mut self) {
         unsafe {
-            free(self.0);
+            free(self.0.cast());
         }
     }
 }

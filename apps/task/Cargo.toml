@@ -11,3 +11,8 @@ path = "src/main.rs"
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+
+[package.metadata.makepad.desktop]
+name = "Makepad Task Manager"
+identifier = "nl.makepad.task"
+icon = "resources/taskmanager-icon.png"

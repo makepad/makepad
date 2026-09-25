@@ -17,7 +17,7 @@ pub fn write_context(release: &Release, environment: &Environment) -> Result<Pat
         This process already has the selected Rust toolchain, a private Cargo home, build directory, Microsoft SDK include/library paths and bundled LLD linker in its environment. Use these; do not install another compiler, change global PATH, or run rustup.\n\
         Check from the app Cargo workspace with cargo check -p {} and run the relevant existing tests.\n\
         Rebuild and publish the edited app using Makepad Builder beside the executable: makepad-builder.exe rebuild on Windows. Invoke it with PowerShell Start-Process -Wait -PassThru and inspect ExitCode; this command is a GUI-subsystem executable. On macOS/Linux use INSTALL_ROOT/makepad-builder rebuild. Use the absolute installation root shown above for these commands. No download or license credential is needed for a rebuild.\n\
-        The rebuild command runs cargo build --release (with --locked after the first build), sets MAKEPAD_PACKAGE_DIR=., refreshes makepad-package-paths, and places the executable in the installation root (scope.exe on Windows, scope.bin beside the scope shell command on Unix). Cargo output remains under {}.\n\
+        The rebuild command runs cargo build --release (with --offline after the first build: no network, the lockfile follows the pinned sources), sets MAKEPAD_PACKAGE_DIR=., refreshes makepad-package-paths, and places the executable in the installation root (scope.exe on Windows, scope.bin beside the scope shell command on Unix). Cargo output remains under {}.\n\
         Fonts, SVGs, icons, images and other crate resources stay in the downloaded source tree. makepad-package-paths maps actual Cargo artifact crate names to source directories relative to the executable. Never hardcode the installation root or copy resources elsewhere.\n\
         Launch {} --cwd PROJECT_DIRECTORY --remote to verify on the native GPU. Keep the same project/state across rebuilds, gracefully close only your own app before replacing its executable, and use its app remote capture/quit routes for inspection. Do not use a simulated GPU or display screenshots.\n\
         The entire install directory can move. Reopen the agent through Makepad Builder after moving it to refresh paths. Do not read or expose makepad-builder.json, email credentials, unrelated user files or authentication storage.\n",
@@ -27,13 +27,22 @@ pub fn write_context(release: &Release, environment: &Environment) -> Result<Pat
     Ok(context)
 }
 
-pub fn command(name: &str, release: &Release, environment: &Environment) -> Result<Command, String> {
+/// `task`, when given, is the first prompt (Claude and Codex take it as a
+/// positional argument). Grok has no instruction flag here; it reads the
+/// context file named by MAKEPAD_AGENT_CONTEXT like a shell user would.
+pub fn command(name: &str, release: &Release, environment: &Environment, task: Option<&str>) -> Result<Command, String> {
     let context = write_context(release, environment)?;
-    let arguments = match name {
+    let mut arguments = match name {
         "codex" => vec!["-c".to_owned(), format!("developer_instructions='{}'", DIRECTIVE)],
         "claude" => vec!["--append-system-prompt".to_owned(), DIRECTIVE.to_owned()],
+        "grok" => Vec::new(),
         _ => return Err("Unknown app agent".into()),
     };
+    if let Some(task) = task.filter(|_| name != "grok") {
+        // The task is built from fixed text and identifiers; keep it free of
+        // characters CMD would interpret.
+        arguments.push(task.chars().filter(|c| !"\"%!^&|<>\r\n".contains(*c)).collect());
+    }
     let mut command = if cfg!(windows) {
         // Only fixed agent names and our constant instruction enter CMD; paths
         // and credentials never do. This also supports installed npm .cmd shims.

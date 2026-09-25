@@ -3541,17 +3541,6 @@ impl MapUniformSlots {
     }
 }
 
-/// Orientation of the shadow-mask pass texture when the ground shader samples
-/// it by screen position. The pass is a child pass at the window's dpi over
-/// the map rect; on Metal it comes back bottom-up (grab-verified: unflipped,
-/// every shadow lands on the far side of its building and hides behind it).
-fn shadow_mask_y_flip_for_os(os_type: &OsType) -> f32 {
-    match os_type {
-        OsType::Macos | OsType::Ios(_) => 1.0,
-        _ => 0.0,
-    }
-}
-
 /// Writes one draw's uniforms and textures into `draw_vars`: the staging
 /// copy a new draw call is created from, and the source
 /// `DrawVars::update_uniforms_on_area` pushes onto a retained call.
@@ -5131,6 +5120,20 @@ impl Widget for MapView {
         // drawn on top of the map must win the hit test (EventOrder::Up
         // dispatches them first).
         let hit = event.hits(cx, self.draw_bg.area());
+        // The press was taken away (a list or the host took the finger): the
+        // camera stays where the gesture left it; the pan, pinch or rotate
+        // it was in ends here — no tap, no long press, no settle — and no
+        // touch state survives into the next press on the same finger id.
+        if let Hit::FingerUp(fe) = &hit {
+            if fe.cancelled {
+                self.touch_gesture = TouchGesture::None;
+                self.drag_start_abs = None;
+                self.rotate_drag = None;
+                self.gesture_panned = false;
+                self.redraw(cx);
+                return;
+            }
+        }
         if let Event::TouchUpdate(touch_event) = event {
             if self.handle_touch_update(cx, touch_event, &hit) {
                 return;
@@ -5504,7 +5507,9 @@ impl Widget for MapView {
             (
                 self.shadow_mask_texture.clone(),
                 1.0,
-                shadow_mask_y_flip_for_os(cx.os_type()),
+                // The mask is an ordinary render texture: top-left rows on
+                // every backend, sampled by screen position as stored.
+                0.0,
             )
         } else {
             (None, 0.0, 0.0)

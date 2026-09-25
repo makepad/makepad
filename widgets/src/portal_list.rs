@@ -1,13 +1,14 @@
 use {
     crate::{
         animator::AnimatorImpl,
-        event::{ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
+        event::{DigitId, FingerCancelEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         scroll_motion::{
-            estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            drag_origin, estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            touch_drag_slop, touch_fling_limits,
             rubber_band_bounce, soften_bounce_velocity, stretch_displayed, stretch_raw, Fling,
             FrameClock, MomentumStream, ScrollSample, CATCH_PRESS_WINDOW, FLING_BOOST_MAX_DWELL,
             FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, PER_FRAME_TO_PER_SECOND,
@@ -627,6 +628,16 @@ pub struct PortalList {
     /// Cleared on the next finger-down that arrives when not scrolling.
     #[rust]
     suppress_child_events: bool,
+    /// This press's drag claimed the finger (`Cx::claim_finger_gesture`)
+    /// when it began to scroll: the one owner of the gesture, its children's
+    /// presses cancelled.
+    #[rust]
+    drag_claimed: bool,
+    /// Rows a live press landed in, with its finger: a row recycled while
+    /// pressed has its press cancelled first (see `draw_walk`), so it never
+    /// keeps a pressed look or a pending click into its next life.
+    #[rust]
+    pressed_rows: Vec<(usize, DigitId)>,
 
     #[rust]
     first_id: usize,
@@ -1207,6 +1218,22 @@ impl PortalList {
         // so their selection state persists when scrolled back into view.
         if !self.keep_invisible && !self.is_selecting {
             let selection_range = self.get_selection_range();
+            // A pressed row leaving view is recycled (or dropped) only after
+            // its press is taken away: its captures are cancelled (the list
+            // keeps its own) and a FingerCancel follows right after this
+            // draw, which this list also hands to its recycled rows.
+            let area = self.area;
+            let keep_selected = |id: &usize| {
+                !self.reuse_items && selection_range.is_some_and(|(start, end)| *id >= start.0 && *id <= end.0)
+            };
+            let items = &self.items;
+            let (leaving, staying): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pressed_rows)
+                .into_iter()
+                .partition(|(id, _)| items.contains_key(id) && !items.is_visible(id) && !keep_selected(id));
+            self.pressed_rows = staying;
+            for (_, digit) in leaving {
+                cx.fingers.cancel_digit_except(digit, area);
+            }
             if self.reuse_items {
                 let reusable_items = &mut self.reusable_items;
                 self.items.retain_visible_with(|v: WidgetItem| {
@@ -2598,10 +2625,13 @@ impl PortalList {
     /// Check if a point hits any interactive widget (link, button, etc.) in any of the visible items.
     fn point_hits_interactive_item(&self, cx: &Cx, abs: DVec2) -> bool {
         for item in self.items.values() {
-            if item
-                .widget
-                .find_interactive_widget_from_point(cx, abs)
-                .is_some()
+            // The item's root counts too: a row that IS a control (`Row :=
+            // Button{}`) is interactive, not just its descendants.
+            if (item.widget.is_interactive() && item.widget.point_hits_area(cx, abs))
+                || item
+                    .widget
+                    .find_interactive_widget_from_point(cx, abs)
+                    .is_some()
             {
                 return true;
             }
@@ -2819,12 +2849,25 @@ impl Widget for PortalList {
                     pass_through_to_children =
                         !self.is_selecting && self.point_hits_interactive_item(cx, e.abs);
                 }
+                // A release always reaches a child that holds the press,
+                // wherever it lands: otherwise the child never lets go.
                 Event::MouseUp(e) => {
-                    pass_through_to_children =
-                        !self.is_selecting && self.point_hits_interactive_item(cx, e.abs);
+                    pass_through_to_children = cx
+                        .fingers
+                        .is_digit_captured_elsewhere(live_id!(mouse).into(), self.area)
+                        || (!self.is_selecting && self.point_hits_interactive_item(cx, e.abs));
                 }
                 Event::TouchUpdate(e) => {
-                    if self.is_selecting {
+                    let releases_a_child = e.touches.iter().any(|t| {
+                        t.state == TouchState::Stop
+                            && cx.fingers.is_digit_captured_elsewhere(
+                                live_id_num!(touch, t.uid).into(),
+                                self.area,
+                            )
+                    });
+                    if releases_a_child {
+                        pass_through_to_children = true;
+                    } else if self.is_selecting {
                         pass_through_to_children = false;
                     } else if let Some(t) = e.touches.first() {
                         pass_through_to_children = self.point_hits_interactive_item(cx, t.abs);
@@ -2852,6 +2895,56 @@ impl Widget for PortalList {
                 pass_through_to_children = false;
             }
             self.pointer_was_inside = inside;
+        }
+
+        // Which row a press lands in (see `pressed_rows`); a lift forgets it.
+        let presses: Vec<(DVec2, DigitId)> = match event {
+            Event::MouseDown(e) if e.button.is_primary() => vec![(e.abs, live_id!(mouse).into())],
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .filter(|t| t.state == TouchState::Start)
+                .map(|t| (t.abs, live_id_num!(touch, t.uid).into()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        match event {
+            Event::MouseUp(e) if e.button.is_primary() => {
+                let mouse: DigitId = live_id!(mouse).into();
+                self.pressed_rows.retain(|(_, d)| *d != mouse);
+            }
+            Event::TouchUpdate(e) => {
+                for t in e.touches.iter().filter(|t| t.state == TouchState::Stop) {
+                    let digit: DigitId = live_id_num!(touch, t.uid).into();
+                    self.pressed_rows.retain(|(_, d)| *d != digit);
+                }
+            }
+            Event::FingerCancel(e) => {
+                self.pressed_rows.retain(|(_, d)| *d != e.digit_id);
+                // Recycled rows are not in `items`: a cancel still owes them
+                // their terminal hit.
+                let mut templates: Vec<_> = self.reusable_items.keys().copied().collect();
+                templates.sort_unstable();
+                for template in templates {
+                    let rows: Vec<WidgetRef> =
+                        self.reusable_items[&template].iter().map(|item| item.widget.clone()).collect();
+                    for widget in rows {
+                        widget.handle_event(cx, event, scope);
+                    }
+                }
+            }
+            _ => {}
+        }
+        for (abs, digit) in presses {
+            let row = self
+                .items
+                .iter()
+                .find(|(_, item)| item.widget.area().is_valid(cx) && item.widget.area().rect(cx).contains(abs))
+                .map(|(id, _)| *id);
+            if let Some(row) = row {
+                self.pressed_rows.retain(|(_, d)| *d != digit);
+                self.pressed_rows.push((row, digit));
+            }
         }
 
         if pass_through_to_children {
@@ -3459,6 +3552,7 @@ impl Widget for PortalList {
                     };
                     // One press consumes the catch; later presses are ordinary clicks.
                     self.touch_caught_motion_at = None;
+                    self.drag_claimed = false;
 
                     // If the list was animating (flick, pulldown, etc.) when the user
                     // tapped/clicked, suppress forwarding this entire gesture to children.
@@ -3488,7 +3582,11 @@ impl Widget for PortalList {
                     }
 
                     // Handle selection when selectable, but not if clicking on interactive items
-                    let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
+                    // Interactive also when something inside took this very
+                    // press (a row whose root is the control): the list waits
+                    // for the drag threshold before the finger is its own.
+                    let on_interactive = self.point_hits_interactive_item(cx, fe.abs)
+                        || cx.fingers.is_digit_captured_elsewhere(fe.digit_id, self.area);
                     // A selection drag is a gesture of this list's, so it takes
                     // a press only on bare text: not over an interactive item
                     // (`on_interactive`), and not while a control owns the
@@ -3592,6 +3690,74 @@ impl Widget for PortalList {
                             self.scroll_state = ScrollState::Stopped;
                             self.suppress_child_events = false;
                         }
+                        // Scrolling takes the finger the moment it is committed
+                        // and past the threshold, once: this list becomes the
+                        // gesture's one owner and the presses its children
+                        // took end at once, cancelled (whatever the finger's
+                        // point, whatever gets recycled later). A finger
+                        // another scroller already owns is not this list's —
+                        // it stands down.
+                        // Ownership needs intent: travel along this list's axis
+                        // past the threshold and at least as far as across it —
+                        // whether or not the press committed at once on bare
+                        // content. Until then the drag only tracks the finger.
+                        let travel = e.abs - e.abs_start;
+                        let across_axis = if vi == Vec2Index::X { Vec2Index::Y } else { Vec2Index::X };
+                        let (along, across) = (travel.index(vi).abs(), travel.index(across_axis).abs());
+                        // Touch only: a mouse drag keeps its desktop behaviour —
+                        // it takes the pointer on its first move over bare
+                        // content, past the threshold over an interactive row.
+                        let intent = match &self.scroll_state {
+                            ScrollState::Drag { committed, .. } if !e.device.is_touch() => {
+                                *committed || along >= self.drag_scroll_threshold
+                            }
+                            ScrollState::Drag { .. } => {
+                                along >= touch_drag_slop(self.drag_scroll_threshold, true) && along >= across
+                            }
+                            _ => false,
+                        };
+                        let takes = intent && !self.drag_claimed;
+                        let mut just_claimed = false;
+                        if takes {
+                            if cx.claim_finger_gesture(e.digit_id, self.area) {
+                                self.drag_claimed = true;
+                                just_claimed = true;
+                                let cancel = Event::FingerCancel(FingerCancelEvent {
+                                    window_id: e.window_id,
+                                    digit_id: e.digit_id,
+                                    device: e.device.clone(),
+                                    abs: e.abs,
+                                    time: e.time,
+                                    modifiers: e.modifiers,
+                                });
+                                // Every entry the list holds — the live items in
+                                // order, then the recycled ones (a row recycled
+                                // while pressed still owes its press an end).
+                                let mut ids: Vec<usize> = self.items.keys().copied().collect();
+                                ids.sort_unstable();
+                                let mut owed: Vec<WidgetRef> = ids
+                                    .iter()
+                                    .filter_map(|id| self.items.get(id).map(|item| item.widget.clone()))
+                                    .collect();
+                                let mut templates: Vec<_> = self.reusable_items.keys().copied().collect();
+                                templates.sort_unstable();
+                                for template in templates {
+                                    owed.extend(self.reusable_items[&template].iter().map(|item| item.widget.clone()));
+                                }
+                                for widget in owed {
+                                    let item_uid = widget.widget_uid();
+                                    cx.group_widget_actions(uid, item_uid, |cx| {
+                                        widget.handle_event(cx, &cancel, scope);
+                                    });
+                                }
+                            } else {
+                                // Another scroller owns this finger: stand down.
+                                // Its terminal cancel arrives as a cancelled
+                                // FingerUp below; nothing flings.
+                                self.scroll_state = ScrollState::Stopped;
+                                self.suppress_child_events = false;
+                            }
+                        }
                         if let ScrollState::Drag {
                             samples,
                             initial_abs,
@@ -3600,22 +3766,24 @@ impl Widget for PortalList {
                         {
                             let new_abs = e.abs.index(vi);
 
-                            // Check if the drag threshold has been exceeded.
-                            if !*committed {
-                                if (new_abs - *initial_abs).abs() >= self.drag_scroll_threshold {
-                                    *committed = true;
-                                    self.suppress_child_events = true;
-                                } else {
-                                    // Still under threshold — track samples but don't scroll.
-                                    push_sample(samples, new_abs, e.time);
-                                    // Don't apply scroll delta yet.
-                                    return;
-                                }
+                            // Not the list's finger yet: track samples, don't scroll.
+                            if !self.drag_claimed {
+                                push_sample(samples, new_abs, e.time);
+                                return;
                             }
-
-                            let old_sample = *samples.last().unwrap();
+                            *committed = true;
+                            self.suppress_child_events = true;
+                            // The claiming move scrolls by the travel since the
+                            // press (on Android less the touch slop, so the
+                            // content doesn't jump and stays under the finger).
+                            let from = if just_claimed {
+                                let slop = touch_drag_slop(self.drag_scroll_threshold, e.device.is_touch());
+                                drag_origin(*initial_abs, new_abs, slop, e.device.is_touch())
+                            } else {
+                                samples.last().unwrap().abs
+                            };
                             push_sample(samples, new_abs, e.time);
-                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false, 0.0, true, true);
+                            self.delta_top_scroll(cx, new_abs - from, false, false, 0.0, true, true);
                             self.area.redraw(cx);
                         }
                     }
@@ -3632,7 +3800,8 @@ impl Widget for PortalList {
                         self.select_scroll_state = None;
                     }
 
-                    if self.selectable && fe.device.is_touch() {
+                    // A press taken away offers no clipboard actions.
+                    if self.selectable && fe.device.is_touch() && !fe.cancelled {
                         let has_selection = self.has_selection();
                         if has_selection {
                             let selection_rect = self.selection_clipboard_rect(cx);
@@ -3653,9 +3822,10 @@ impl Widget for PortalList {
                         samples, committed, ..
                     } = &mut self.scroll_state
                     {
-                        // If the drag was never committed (finger didn't move past
-                        // threshold), just stop — this was a tap, not a scroll.
-                        if !*committed {
+                        // If the drag never owned the finger (it didn't travel along
+                        // the list past the threshold), just stop — this was a tap,
+                        // not a scroll.
+                        if !*committed || !self.drag_claimed {
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                         } else {
@@ -3664,16 +3834,29 @@ impl Widget for PortalList {
                             // ~4 finger positions. `abs` is the finger position along the scroll
                             // axis in the same pixel units as `first_scroll`, so this is
                             // directly a scroll velocity.
-                            let (release_velocity, total_delta) =
-                                estimate_release_velocity(samples);
+                            // The lift is the path's last sample: a finger that
+                            // rested (or was cancelled) before it let go ages the
+                            // earlier samples out and releases at rest, as a
+                            // native velocity tracker does with the up event.
+                            push_sample(samples, fe.abs.index(vi), fe.time);
+                            // Taken away: no fling, any overscroll settles from rest.
+                            let (release_velocity, total_delta) = if fe.cancelled {
+                                (0.0, 0.0)
+                            } else {
+                                estimate_release_velocity(samples)
+                            };
                             // Cap to a sane maximum flick speed (px/s). `flick_scroll_maximum`
                             // is a per-frame value; ×60 converts it to per-second.
-                            let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
-                            let release_velocity =
-                                release_velocity.clamp(-max_velocity, max_velocity);
                             // Minimum release speed (px/s) below which a lift is treated as a stop,
                             // not a fling. `flick_scroll_minimum` is per-frame; ×60 → per-second.
-                            let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
+                            // On Android a touch uses the platform's own limits.
+                            let (min_velocity, max_velocity) = touch_fling_limits(
+                                self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND,
+                                self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND,
+                                fe.device.is_touch(),
+                            );
+                            let release_velocity =
+                                release_velocity.clamp(-max_velocity, max_velocity);
                             if self.bounce_at_start
                                 && self.first_id == self.range_start
                                 && self.first_scroll > 0.0
@@ -4320,6 +4503,10 @@ impl PortalListSet {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::event::ScrollEvent;
     use crate::log_list::LogList;
@@ -4334,47 +4521,59 @@ mod tests {
     /// the page around it stays put.
     #[test]
     fn a_list_between_its_edges_keeps_the_wheel_both_ways() {
+        crate::on_test_cx(|| {
         assert!(list_keeps_scroll_delta(UP, false, false, false));
         assert!(list_keeps_scroll_delta(DOWN, false, false, false));
+        });
     }
 
     /// At the top, a wheel rolled up has nowhere to take the list and goes on
     /// to the page; rolled down it still moves the list and stays.
     #[test]
     fn at_the_top_only_the_wheel_toward_the_top_passes_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(UP, true, false, false));
         assert!(list_keeps_scroll_delta(DOWN, true, false, false));
+        });
     }
 
     /// The same at the bottom, the other way round.
     #[test]
     fn at_the_bottom_only_the_wheel_toward_the_bottom_passes_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(DOWN, false, true, false));
         assert!(list_keeps_scroll_delta(UP, false, true, false));
+        });
     }
 
     /// A list whose rows all fit rests on both edges and never scrolls, so
     /// it takes no wheel from the page it sits on.
     #[test]
     fn a_list_that_fits_passes_every_wheel_on() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(UP, true, true, false));
         assert!(!list_keeps_scroll_delta(DOWN, true, true, false));
+        });
     }
 
     /// A rubber band past an edge is the list moving: fingers stretching it
     /// keep the delta even at that edge.
     #[test]
     fn a_rubber_band_keeps_what_it_stretches_by() {
+        crate::on_test_cx(|| {
         assert!(list_keeps_scroll_delta(UP, true, true, true));
         assert!(list_keeps_scroll_delta(DOWN, true, true, true));
+        });
     }
 
     /// No delta along the list's axis is nothing to keep: the other axis of
     /// the same event stays free for a scroll view that runs across it.
     #[test]
     fn no_delta_is_never_kept() {
+        crate::on_test_cx(|| {
         assert!(!list_keeps_scroll_delta(0.0, false, false, false));
         assert!(!list_keeps_scroll_delta(0.0, false, false, true));
+        });
     }
 
     // A list showing five rows from row 10, i.e. rows 10 to 14.
@@ -4387,6 +4586,7 @@ mod tests {
     /// list holds exactly where it is, wherever in the window the row sits.
     #[test]
     fn a_row_already_on_screen_holds_the_list_still() {
+        crate::on_test_cx(|| {
         for index in FIRST..FIRST + WINDOW {
             assert_eq!(
                 first_id_keeping_index_visible(index, FIRST, WINDOW, 0, LEAD),
@@ -4394,12 +4594,14 @@ mod tests {
                 "the list moved for row {index}, which was already showing"
             );
         }
+        });
     }
 
     /// A row that went off the top comes back with the lead above it, so it
     /// isn't pinned to the very edge.
     #[test]
     fn a_row_off_the_top_comes_back_short_of_the_top() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(3, FIRST, WINDOW, 0, LEAD),
             Some(2)
@@ -4408,23 +4610,27 @@ mod tests {
             first_id_keeping_index_visible(9, FIRST, WINDOW, 0, 3),
             Some(6)
         );
+        });
     }
 
     /// The same off the bottom: the row lands one row up from the end of the
     /// window rather than half off it.
     #[test]
     fn a_row_off_the_bottom_comes_back_short_of_the_bottom() {
+        crate::on_test_cx(|| {
         let first = first_id_keeping_index_visible(20, FIRST, WINDOW, 0, LEAD).unwrap();
         assert_eq!(first, 17);
         // 17..22 shows the row with one row after it.
         assert!(first <= 20 && 20 < first + WINDOW);
         assert_eq!(20 - first + LEAD, WINDOW - 1);
+        });
     }
 
     /// The lead is daylight, not a promise: near the start of the range there
     /// is none to be had, and the list stops at the first row it has.
     #[test]
     fn the_lead_never_runs_past_the_start_of_the_range() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(0, FIRST, WINDOW, 0, LEAD),
             Some(0)
@@ -4433,12 +4639,14 @@ mod tests {
             first_id_keeping_index_visible(5, FIRST, WINDOW, 5, LEAD),
             Some(5)
         );
+        });
     }
 
     /// A window with no room for the lead still shows the row itself: the row
     /// is the request, the lead is the manners.
     #[test]
     fn a_window_too_short_for_the_lead_still_shows_the_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(20, FIRST, 1, 0, LEAD),
             Some(20)
@@ -4447,22 +4655,26 @@ mod tests {
             first_id_keeping_index_visible(20, FIRST, 2, 0, 4),
             Some(20)
         );
+        });
     }
 
     /// A list that drew nothing has no window to judge against, so the row is
     /// off screen by definition and comes back at the start of one.
     #[test]
     fn a_list_that_drew_nothing_brings_the_row_to_its_start() {
+        crate::on_test_cx(|| {
         assert_eq!(
             first_id_keeping_index_visible(FIRST, FIRST, 0, 0, LEAD),
             Some(FIRST - LEAD)
         );
+        });
     }
 
     /// A short list resting at its start leaves its gap after the last row,
     /// and the ruling runs on past it.
     #[test]
     fn a_list_resting_at_its_start_rules_the_gap_after_its_last_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_band(true, 0.0, 80.0, 120.0),
             Some(FillerBand {
@@ -4471,12 +4683,14 @@ mod tests {
                 step: 1
             })
         );
+        });
     }
 
     /// A short list resting at its end leaves the gap at the other edge, so
     /// the ruling runs back before the first row instead.
     #[test]
     fn a_list_resting_at_its_end_rules_the_gap_before_its_first_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_band(false, 40.0, 120.0, 120.0),
             Some(FillerBand {
@@ -4485,21 +4699,25 @@ mod tests {
                 step: -1
             })
         );
+        });
     }
 
     /// Rows that reach the edge leave nothing to rule, whichever edge the list
     /// rests on — and neither does a sliver too thin to be a row.
     #[test]
     fn rows_that_fill_the_viewport_leave_nothing_to_rule() {
+        crate::on_test_cx(|| {
         assert_eq!(filler_band(true, 0.0, 120.0, 120.0), None);
         assert_eq!(filler_band(false, 0.0, 120.0, 120.0), None);
         assert_eq!(filler_band(true, 0.0, 119.7, 120.0), None);
+        });
     }
 
     /// The gap takes whole rows at the pitch of the row it continues, and the
     /// last one takes what is left over.
     #[test]
     fn whole_rows_fill_the_gap_and_the_last_one_takes_what_is_left() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(45.0, 20.0, MAX_FILLER_ROWS),
             FillerRun {
@@ -4514,6 +4732,7 @@ mod tests {
                 last: 20.0
             }
         );
+        });
     }
 
     /// A gap shorter than one row is one clamped row: that sliver is the top
@@ -4521,6 +4740,7 @@ mod tests {
     /// ragged edge the ruling is there to remove.
     #[test]
     fn a_gap_shorter_than_a_row_is_one_clamped_row() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(5.0, 20.0, MAX_FILLER_ROWS),
             FillerRun {
@@ -4528,12 +4748,14 @@ mod tests {
                 last: 5.0
             }
         );
+        });
     }
 
     /// Nothing is ruled without a gap and a row height to rule it by, and a
     /// number that isn't one rules nothing either.
     #[test]
     fn a_row_with_no_height_rules_nothing() {
+        crate::on_test_cx(|| {
         let none = FillerRun {
             rows: 0,
             last: 0.0,
@@ -4544,12 +4766,14 @@ mod tests {
         assert_eq!(filler_run(f64::NAN, 20.0, MAX_FILLER_ROWS), none);
         assert_eq!(filler_run(40.0, f64::NAN, MAX_FILLER_ROWS), none);
         assert_eq!(filler_run(40.0, 20.0, 0), none);
+        });
     }
 
     /// However thin the rows, one draw only ever puts so many of them down;
     /// the rest would be off the far edge anyway.
     #[test]
     fn the_run_of_rows_is_capped() {
+        crate::on_test_cx(|| {
         assert_eq!(
             filler_run(1000.0, 1.0, 8),
             FillerRun {
@@ -4558,17 +4782,20 @@ mod tests {
             }
         );
         assert_eq!(filler_run(f64::INFINITY, 1.0, 8).rows, 8);
+        });
     }
 
     /// The striping carries on from the row it continues, forwards past the
     /// last row and backwards before the first.
     #[test]
     fn the_striping_carries_on_from_the_row_it_continues() {
+        crate::on_test_cx(|| {
         assert_eq!(filler_alternate(4, 1), 1.0);
         assert_eq!(filler_alternate(4, 2), 0.0);
         assert_eq!(filler_alternate(5, 1), 0.0);
         assert_eq!(filler_alternate(0, -1), 1.0);
         assert_eq!(filler_alternate(0, -2), 0.0);
+        });
     }
 
     /// Drag-to-scroll asks one question at the press: does a control hold the
@@ -4577,8 +4804,10 @@ mod tests {
     /// scrolled the rack the slider sits in.
     #[test]
     fn a_mouse_press_a_control_holds_starts_no_drag_scroll() {
+        crate::on_test_cx(|| {
         assert!(!press_starts_drag_scroll(true, true, true, false, true));
         assert!(press_starts_drag_scroll(true, true, true, false, false));
+        });
     }
 
     /// The one exemption: a TOUCH that lands on a control still scrolls the
@@ -4586,25 +4815,31 @@ mod tests {
     /// ignores touch captures, so this is about the finger's own press.
     #[test]
     fn a_touch_scrolls_the_list_even_from_a_control() {
+        crate::on_test_cx(|| {
         assert!(press_starts_drag_scroll(true, true, true, true, true));
+        });
     }
 
     /// The list's own three conditions still each veto a drag on their own,
     /// whoever holds the mouse.
     #[test]
     fn a_drag_scroll_still_needs_the_lists_own_leave() {
+        crate::on_test_cx(|| {
         assert!(!press_starts_drag_scroll(false, true, true, true, false));
         assert!(!press_starts_drag_scroll(true, false, true, true, false));
         assert!(!press_starts_drag_scroll(true, true, false, true, false));
+        });
     }
 
     /// Asked again on every move: a control that takes the pointer after the
     /// drag began ends it, and a finger's drag is never ended this way.
     #[test]
     fn a_drag_scroll_stands_down_the_move_a_control_takes_the_mouse() {
+        crate::on_test_cx(|| {
         assert!(drag_scroll_stands_down(false, true));
         assert!(!drag_scroll_stands_down(false, false));
         assert!(!drag_scroll_stands_down(true, true));
+        });
     }
 
     const PANE: DVec2 = dvec2(300.0, 120.0);
@@ -4690,8 +4925,8 @@ mod tests {
     /// back with a row to spare beyond it.
     #[test]
     fn the_list_holds_the_row_it_was_asked_to_keep() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4744,6 +4979,7 @@ mod tests {
             far + LEAD < now + rows,
             "the recalled row landed pinned to the bottom edge: {now} + {rows} for {far}"
         );
+        });
     }
 
     /// The continuation rows are ground, not layout: turning them on under a
@@ -4751,8 +4987,8 @@ mod tests {
     /// it was.
     #[test]
     fn the_continuation_rows_leave_the_real_rows_alone() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..3).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4775,6 +5011,7 @@ mod tests {
             frame(&mut cx, &mut log, &pass, &mut draw_list);
         }
         assert_eq!(place(&cx, &log), before, "the ruling moved the rows it fills after");
+        });
     }
 
     /// The wheel over a list inside a scrolling page: the list keeps every
@@ -4783,8 +5020,8 @@ mod tests {
     /// follows its newest line, which puts this one at its bottom to start.
     #[test]
     fn a_list_keeps_the_wheel_it_moves_by_and_hands_on_the_wheel_past_its_edge() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
         let pass = DrawPass::new(&mut cx);
@@ -4822,6 +5059,7 @@ mod tests {
         assert_eq!(place(&cx, &log), (0, 0.0), "the wheel never reached the top");
         assert!(!wheel(&mut cx, &mut log, -60.0, false), "a wheel past the top was kept");
         assert!(wheel(&mut cx, &mut log, 60.0, false), "a wheel down from the top was handed on");
+        });
     }
 
     /// A press through the list's real pointer handling, at `at` over a log of
@@ -4835,8 +5073,7 @@ mod tests {
     /// what the list asks is who holds the mouse, not what kind of control it
     /// is, and a Button takes a press exactly as a Slider's thumb does.
     fn press_over(lines: usize, at: DVec2, touch: bool, control: bool) -> (bool, bool) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        let mut cx = test_cx();
         let mut log = cx.with_vm(LogList::script_new_with_default);
         log.lines = (0..lines).map(|n| format!("log | line {n}")).collect();
         let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
@@ -4915,6 +5152,574 @@ mod tests {
         )
     }
 
+    /// What the control over the list heard of one finger (see
+    /// `touch_over_control`).
+    #[derive(Debug, Default)]
+    struct Heard {
+        clicked: bool,
+        /// Its terminal FingerUp said `cancelled`.
+        cancelled: bool,
+        /// Terminal FingerUps it got (the press must end exactly once).
+        ups: usize,
+        long_pressed: bool,
+        /// After the list took the finger, the control could not claim it.
+        second_claim_refused: bool,
+    }
+
+    /// A finger lands on a control drawn over the list (it takes the press
+    /// first, the way a row's own controls are handled before the list's
+    /// hits), travels `travel` points down in four moves the list alone sees
+    /// (a committed drag keeps its children out of the moves), then — with
+    /// `host_cancel` — the host takes the finger away (`cancel_digit` +
+    /// `Event::FingerCancel`) before it lifts. Both hear every terminal
+    /// event, the control first. The list's own interactive detection
+    /// decides when it commits: nothing is forced.
+    fn touch_over_control(travel: f64, host_cancel: bool) -> Heard {
+        let mut cx = test_cx();
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..50).map(|n| format!("log | line {n}")).collect();
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        let mut button_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        frame_over(&mut cx, &mut button, &pass, &mut button_list);
+        {
+            let list = log.portal_list(&cx, ids!(list));
+            let mut list = list.borrow_mut().expect("the log holds no portal list");
+            list.drag_scrolling = true;
+            list.capture_overload = true;
+            list.selectable = false;
+            list.drag_scroll_threshold = TAP_COUNT_DISTANCE;
+        }
+        let at = |y: f64| dvec2(BARE.x, BARE.y - 60.0 + y);
+        let touch = |state: TouchState, y: f64, time: f64| {
+            Event::TouchUpdate(crate::event::TouchUpdateEvent {
+                time,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                touches: vec![crate::event::TouchPoint {
+                    state,
+                    abs: at(y),
+                    time,
+                    uid: 1,
+                    rotation_angle: 0.0,
+                    force: 1.0,
+                    radius: dvec2(1.0, 1.0),
+                    handled: Cell::new(Area::Empty),
+                    sweep_lock: Cell::new(Area::Empty),
+                }],
+            })
+        };
+        let digit: crate::event::DigitId = live_id_num!(touch, 1).into();
+        let end = |cx: &mut Cx, event: &Event| {
+            if let Event::TouchUpdate(e) = event {
+                cx.fingers.process_touch_update_end(&e.touches);
+            }
+        };
+        let mut heard = Heard::default();
+        let control = |cx: &mut Cx, button: &mut crate::button::Button, event: &Event, heard: &mut Heard| {
+            let area = button.area();
+            let actions = cx.capture_actions(|cx| {
+                if let Hit::FingerUp(fe) = event.hits(cx, area) {
+                    heard.ups += 1;
+                    heard.cancelled |= fe.cancelled;
+                    assert!(!(fe.cancelled && (fe.is_over || fe.was_tap())), "a cancelled release was over or a tap");
+                }
+                if let Hit::FingerLongPress(_) = event.hits(cx, area) {
+                    heard.long_pressed = true;
+                }
+            });
+            let _ = actions;
+            // The real widget hears the same event, for its click: every
+            // consumer of one event sees the same terminal hit.
+            let actions = cx.capture_actions(|cx| button.handle_event(cx, event, &mut Scope::empty()));
+            heard.clicked |= actions.iter().any(|a| {
+                matches!(
+                    a.as_widget_action().map(|w| w.cast::<crate::button::ButtonAction>()),
+                    Some(crate::button::ButtonAction::Clicked(_))
+                )
+            });
+        };
+        let down = touch(TouchState::Start, 0.0, 0.0);
+        button.handle_event(&mut cx, &down, &mut Scope::empty());
+        assert!(cx.fingers.any_areas_captured(), "the control did not take the finger");
+        log.handle_event(&mut cx, &down, &mut Scope::empty());
+        end(&mut cx, &down);
+        for step in 1..=4 {
+            let event = touch(TouchState::Move, travel * step as f64 / 4.0, 0.016 * step as f64);
+            log.handle_event(&mut cx, &event, &mut Scope::empty());
+            end(&mut cx, &event);
+        }
+        heard.second_claim_refused = travel > 0.0 && !cx.claim_finger_gesture(digit, button.area());
+        // A native long press arriving now must not reach a cancelled press.
+        let long = Event::LongPress(crate::event::LongPressEvent {
+            abs: at(travel),
+            uid: 1,
+            window_id: WindowId(1, 1),
+            time: 0.5,
+        });
+        control(&mut cx, &mut button, &long, &mut heard);
+        if host_cancel {
+            cx.fingers.cancel_digit(digit);
+            let cancel = Event::FingerCancel(FingerCancelEvent {
+                window_id: WindowId(1, 1),
+                digit_id: digit,
+                device: crate::event::DigitDevice::Touch { uid: 1 },
+                abs: at(travel),
+                time: 0.07,
+                modifiers: KeyModifiers::default(),
+            });
+            control(&mut cx, &mut button, &cancel, &mut heard);
+            log.handle_event(&mut cx, &cancel, &mut Scope::empty());
+        }
+        let up = touch(TouchState::Stop, travel, 0.08);
+        control(&mut cx, &mut button, &up, &mut heard);
+        log.handle_event(&mut cx, &up, &mut Scope::empty());
+        end(&mut cx, &up);
+        assert!(!cx.fingers.any_areas_captured(), "the lift left a capture behind");
+        heard
+    }
+
+    /// A finger that scrolled the list never clicks the row it landed on —
+    /// its press ends once, cancelled, even though the row travelled with
+    /// the finger and is under it again at the lift — and nothing else can
+    /// take the finger from the list; a tap that stayed put still clicks.
+    #[test]
+    fn a_list_that_takes_the_finger_cancels_the_row_it_landed_on() {
+        crate::on_test_cx(|| {
+        let tap = touch_over_control(0.0, false);
+        assert!(tap.clicked && !tap.cancelled && tap.ups >= 1, "a plain tap no longer clicks: {tap:?}");
+        let scroll = touch_over_control(40.0, false);
+        assert!(!scroll.clicked, "the row the finger scrolled clicked: {scroll:?}");
+        assert!(scroll.cancelled && scroll.ups == 1, "its release was not one cancelled FingerUp: {scroll:?}");
+        assert!(scroll.second_claim_refused, "a second claimant took the finger from the list");
+        assert!(!scroll.long_pressed, "a cancelled press long-pressed");
+        });
+    }
+
+    /// The host takes a finger away (the phone rotated): the press ends at
+    /// once with a cancelled FingerUp — exactly one, the lift after it finds
+    /// nothing left — and nothing clicks.
+    #[test]
+    fn a_host_cancel_ends_the_press_once_without_a_click() {
+        crate::on_test_cx(|| {
+        let heard = touch_over_control(0.0, true);
+        assert!(!heard.clicked && heard.cancelled, "{heard:?}");
+        assert_eq!(heard.ups, 1, "the press ended more than once: {heard:?}");
+        });
+    }
+
+    /// A real list of Button rows, drawn by the list itself, every event
+    /// through the list's own dispatch (its forwarding to the rows included).
+    struct ButtonRows {
+        root: WidgetRef,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        /// The platform loop's clock for the cancels a claim queues.
+        clock: Cell<f64>,
+    }
+
+    impl ButtonRows {
+        const ROW: f64 = 40.0;
+
+        fn new(cx: &mut Cx) -> Self {
+            let root = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        list := PortalList{
+                            width: Fill height: Fill flow: Down
+                            drag_scrolling: true
+                            capture_overload: true
+                            selectable: false
+                            Row := Button{width: Fill height: 40. text: "row"}
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut rows = ButtonRows { root, pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), clock: Cell::new(1000.0) };
+            for _ in 0..3 {
+                rows.draw(cx);
+            }
+            rows
+        }
+
+        fn draw(&mut self, cx: &mut Cx) {
+            self.pass.set_size(cx, PANE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(PANE, Layout::flow_down());
+            let mut scope = Scope::empty();
+            while let Some(step) = self.root.draw_walk(&mut cx2d, &mut scope, Walk::fill()).step() {
+                if let Some(mut list) = step.borrow_mut::<PortalList>() {
+                    list.set_item_range(&mut cx2d, 0, 30);
+                    while let Some(row) = list.next_visible_item(&mut cx2d) {
+                        let item = list.item(&mut cx2d, row, id!(Row));
+                        item.draw_all(&mut cx2d, &mut Scope::empty());
+                    }
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+
+        /// Dispatch through the root, the way the platform loop does: the
+        /// event, its touch bookkeeping, then any cancellation a claim queued
+        /// during it. True when a row clicked.
+        fn send(&self, cx: &mut Cx, event: &Event) -> bool {
+            self.send_with(cx, event, &mut |_, _| false)
+        }
+
+        /// `send`, with `first` handling each event (the queued cancels
+        /// included) before the list does — a control over the list.
+        fn send_with(&self, cx: &mut Cx, event: &Event, first: &mut dyn FnMut(&mut Cx, &Event) -> bool) -> bool {
+            let mut clicked = self.dispatch(cx, event, first);
+            if let Event::TouchUpdate(e) = event {
+                cx.fingers.process_touch_update_end(&e.touches);
+            }
+            self.clock.set(self.clock.get() + 1.0);
+            for cancel in cx.fingers.take_pending_cancels(self.clock.get()) {
+                clicked |= self.dispatch(cx, &Event::FingerCancel(cancel), first);
+            }
+            clicked
+        }
+
+        fn dispatch(&self, cx: &mut Cx, event: &Event, first: &mut dyn FnMut(&mut Cx, &Event) -> bool) -> bool {
+            let mut clicked = first(cx, event);
+            let actions = cx.capture_actions(|cx| self.root.handle_event(cx, event, &mut Scope::empty()));
+            clicked |= actions.iter().any(|a| {
+                matches!(
+                    a.as_widget_action().map(|w| w.cast::<crate::button::ButtonAction>()),
+                    Some(crate::button::ButtonAction::Clicked(_))
+                )
+            });
+            clicked
+        }
+
+        fn list(&self, cx: &Cx) -> PortalListRef {
+            self.root.portal_list(cx, ids!(list))
+        }
+
+        /// Whether any row the list holds — drawn or recycled — shows pressed.
+        fn any_pressed(&self, cx: &Cx) -> bool {
+            let list = self.list(cx);
+            let list = list.borrow().expect("no list");
+            let rows: Vec<WidgetRef> = list
+                .items
+                .values()
+                .map(|item| item.widget.clone())
+                .chain(list.reusable_items.values().flatten().map(|item| item.widget.clone()))
+                .collect();
+            drop(list);
+            rows.iter().any(|row| {
+                row.borrow::<crate::button::Button>().is_some_and(|b| b.animator_in_state(cx, ids!(hover.down)))
+            })
+        }
+
+        /// Whether the row the list drew for `row` shows pressed.
+        fn pressed(&self, cx: &Cx, row: usize) -> bool {
+            let list = self.root.portal_list(cx, ids!(list));
+            let list = list.borrow().expect("no list");
+            let item = list.items.get(&row).expect("row not drawn").widget.clone();
+            let button = item.borrow::<crate::button::Button>().expect("row is not a button");
+            button.animator_in_state(cx, ids!(hover.down))
+        }
+    }
+
+    fn finger(state: TouchState, at: DVec2, time: f64) -> Event {
+        Event::TouchUpdate(crate::event::TouchUpdateEvent {
+            time,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            touches: vec![crate::event::TouchPoint {
+                state,
+                abs: at,
+                time,
+                uid: 1,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty),
+            }],
+        })
+    }
+
+    /// A finger on a row that then scrolls the list: the list takes the
+    /// finger and the row lets go AT ONCE, through the list's own dispatch —
+    /// not pressed any more before the finger lifts, no capture of it left,
+    /// and the lift clicks nothing. The same press lifted in place clicks.
+    #[test]
+    fn a_row_the_list_scrolls_from_under_the_finger_lets_go_at_once() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let rows = ButtonRows::new(&mut cx);
+        let at = dvec2(100.0, ButtonRows::ROW * 1.5);
+        // A tap on row 1 clicks it.
+        assert!(!rows.send(&mut cx, &finger(TouchState::Start, at, 0.0)));
+        assert!(rows.pressed(&cx, 1), "the row did not take the finger");
+        assert!(rows.send(&mut cx, &finger(TouchState::Stop, at, 0.05)), "a tap on the row no longer clicks");
+        assert!(!rows.pressed(&cx, 1));
+        // The same press, then the finger scrolls the list.
+        rows.send(&mut cx, &finger(TouchState::Start, at, 1.0));
+        assert!(rows.pressed(&cx, 1));
+        let mut clicked = false;
+        for step in 1..=4 {
+            clicked |= rows.send(&mut cx, &finger(TouchState::Move, at + dvec2(0.0, -8.0 * step as f64), 1.0 + 0.016 * step as f64));
+        }
+        assert!(!rows.pressed(&cx, 1), "the row still looks pressed while the list scrolls");
+        clicked |= rows.send(&mut cx, &finger(TouchState::Stop, at + dvec2(0.0, -32.0), 1.1));
+        assert!(!clicked, "the row the finger scrolled clicked");
+        assert!(!cx.fingers.any_areas_captured(), "the lift left a capture behind");
+        });
+    }
+
+    fn two_fingers(a: (TouchState, DVec2), b: (TouchState, DVec2), time: f64) -> Event {
+        let point = |uid: u64, (state, abs): (TouchState, DVec2)| crate::event::TouchPoint {
+            state,
+            abs,
+            time,
+            uid,
+            rotation_angle: 0.0,
+            force: 1.0,
+            radius: dvec2(1.0, 1.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+        };
+        Event::TouchUpdate(crate::event::TouchUpdateEvent {
+            time,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            touches: vec![point(1, a), point(2, b)],
+        })
+    }
+
+    /// C: a control that handled the claiming move BEFORE the list (drawn
+    /// over it, dispatched first) is not the list's child, so the list's own
+    /// cancel walk never reaches it. The claim queues a cancellation the loop
+    /// delivers right after that event: the control lets go before any
+    /// further input, and nothing clicks.
+    #[test]
+    fn a_control_handled_before_the_claim_lets_go_before_the_next_input() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let mut rows = ButtonRows::new(&mut cx);
+        let mut control = cx.with_vm(crate::button::Button::script_new_with_default);
+        let mut control_list = DrawList2d::new(&mut cx);
+        rows.draw(&mut cx);
+        frame_over(&mut cx, &mut control, &rows.pass, &mut control_list);
+        let at = dvec2(100.0, ButtonRows::ROW * 1.5);
+        let control = std::cell::RefCell::new(control);
+        let mut first = |cx: &mut Cx, event: &Event| {
+            let actions = cx.capture_actions(|cx| control.borrow_mut().handle_event(cx, event, &mut Scope::empty()));
+            actions.iter().any(|a| {
+                matches!(
+                    a.as_widget_action().map(|w| w.cast::<crate::button::ButtonAction>()),
+                    Some(crate::button::ButtonAction::Clicked(_))
+                )
+            })
+        };
+        let pressed = |cx: &Cx| control.borrow().animator_in_state(cx, ids!(hover.down));
+        let mut clicked = rows.send_with(&mut cx, &finger(TouchState::Start, at, 0.0), &mut first);
+        assert!(pressed(&cx), "the control did not take the finger");
+        // ONE move, past the list's threshold: the control handles it first,
+        // then the list takes the finger. No further input follows before
+        // the check.
+        clicked |= rows.send_with(&mut cx, &finger(TouchState::Move, at + dvec2(0.0, -8.0), 0.016), &mut first);
+        assert!(!pressed(&cx), "the control still looks pressed after the list took the finger");
+        clicked |= rows.send_with(&mut cx, &finger(TouchState::Stop, at + dvec2(0.0, -32.0), 0.1), &mut first);
+        assert!(!clicked, "the control clicked");
+        assert!(!cx.fingers.any_areas_captured());
+        });
+    }
+
+    /// D: a finger whose press was taken away counts as no capture and hides
+    /// no other finger: still down, in one batch with a second finger's press
+    /// on the very same row, the second press is an ordinary press.
+    #[test]
+    fn a_cancelled_finger_blocks_no_other_finger_in_the_same_batch() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let rows = ButtonRows::new(&mut cx);
+        let at = dvec2(100.0, ButtonRows::ROW * 1.5);
+        rows.send(&mut cx, &finger(TouchState::Start, at, 0.0));
+        assert!(rows.pressed(&cx, 1));
+        let row_area = {
+            let list = rows.list(&cx);
+            let list = list.borrow().unwrap();
+            list.items.get(&1).unwrap().widget.area()
+        };
+        // The host takes finger 1 away; it stays down.
+        let one: crate::event::DigitId = live_id_num!(touch, 1).into();
+        cx.fingers.cancel_digit(one);
+        rows.send(&mut cx, &Event::FingerCancel(FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: one,
+            device: crate::event::DigitDevice::Touch { uid: 1 },
+            abs: at,
+            time: 0.05,
+            modifiers: KeyModifiers::default(),
+        }));
+        assert!(!rows.pressed(&cx, 1));
+        assert!(!cx.fingers.is_area_captured(row_area), "the cancelled capture still counts as a live one");
+        // Finger 1 moves a little while finger 2 lands on the same row.
+        rows.send(&mut cx, &two_fingers((TouchState::Move, at + dvec2(1.0, 0.0)), (TouchState::Start, at + dvec2(10.0, 0.0)), 0.1));
+        assert!(rows.pressed(&cx, 1), "finger 2's press was hidden by finger 1's cancelled capture");
+        assert!(cx.fingers.is_area_captured(row_area), "finger 2's press is not a live capture");
+        });
+    }
+
+    fn finger_of(uid: u64, state: TouchState, at: DVec2, time: f64) -> Event {
+        Event::TouchUpdate(crate::event::TouchUpdateEvent {
+            time,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            touches: vec![crate::event::TouchPoint {
+                state,
+                abs: at,
+                time,
+                uid,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty),
+            }],
+        })
+    }
+
+    /// A cancelled finger stays that row's cancelled finger through a redraw
+    /// (its record follows the row's new area), and a touch's moves and lift
+    /// resolve by its own finger: finger A — cancelled, still down — moving
+    /// and lifting after the redraw never releases finger B's press of the
+    /// same row. Only B's own lift clicks.
+    #[test]
+    fn a_cancelled_finger_never_releases_another_fingers_press_after_a_redraw() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let mut rows = ButtonRows::new(&mut cx);
+        let at = dvec2(100.0, ButtonRows::ROW * 1.5);
+        let mut clicked = rows.send(&mut cx, &finger_of(1, TouchState::Start, at, 0.0));
+        let one: crate::event::DigitId = live_id_num!(touch, 1).into();
+        cx.fingers.cancel_digit(one);
+        clicked |= rows.send(&mut cx, &Event::FingerCancel(FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: one,
+            device: crate::event::DigitDevice::Touch { uid: 1 },
+            abs: at,
+            time: 0.05,
+            modifiers: KeyModifiers::default(),
+        }));
+        assert!(!rows.pressed(&cx, 1));
+        // The row is redrawn: its area changes.
+        let before = rows.list(&cx).borrow().unwrap().items.get(&1).unwrap().widget.area();
+        rows.draw(&mut cx);
+        let after = rows.list(&cx).borrow().unwrap().items.get(&1).unwrap().widget.area();
+        assert_ne!(before, after, "the redraw did not move the row's area; the test proves nothing");
+        // Finger B presses the same row.
+        clicked |= rows.send(&mut cx, &finger_of(2, TouchState::Start, at + dvec2(10.0, 0.0), 0.1));
+        assert!(rows.pressed(&cx, 1), "finger B did not press the row");
+        // Finger A moves a little and lifts, over the row, while B holds it.
+        clicked |= rows.send(&mut cx, &finger_of(1, TouchState::Move, at + dvec2(1.0, 0.0), 0.15));
+        clicked |= rows.send(&mut cx, &finger_of(1, TouchState::Stop, at + dvec2(1.0, 0.0), 0.2));
+        assert!(!clicked, "finger A's lift released finger B's press");
+        assert!(rows.pressed(&cx, 1), "finger A's lift ended finger B's press");
+        // B's own lift clicks.
+        assert!(rows.send(&mut cx, &finger_of(2, TouchState::Stop, at + dvec2(10.0, 0.0), 0.25)), "finger B's tap did not click");
+        assert!(!cx.fingers.any_areas_captured());
+        });
+    }
+
+    /// E: a pressed row that scrolls out of view (a wheel under a resting
+    /// finger — no claim) is recycled only after its press is cancelled; the
+    /// cancel reaches it in the recycled pool, and the lift clicks nothing.
+    #[test]
+    fn a_pressed_row_recycled_out_of_view_lets_go_and_never_clicks() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let mut rows = ButtonRows::new(&mut cx);
+        rows.list(&cx).borrow_mut().unwrap().reuse_items = true;
+        rows.draw(&mut cx);
+        let at = dvec2(100.0, ButtonRows::ROW * 0.5);
+        rows.send(&mut cx, &finger(TouchState::Start, at, 0.0));
+        assert!(rows.any_pressed(&cx));
+        let pressed_row = {
+            let list = rows.list(&cx);
+            let list = list.borrow().unwrap();
+            list.items.get(&0).expect("row 0 not drawn").widget.clone()
+        };
+        // The wheel takes the list far down; the rows are redrawn and row 0 leaves.
+        let wheel = Event::Scroll(ScrollEvent {
+            window_id: WindowId(1, 1),
+            scroll: dvec2(0.0, 600.0),
+            abs: dvec2(100.0, 60.0),
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time: 0.1,
+            phase: ScrollPhase::None,
+        });
+        rows.send(&mut cx, &wheel);
+        rows.draw(&mut cx);
+        {
+            let list = rows.list(&cx);
+            let list = list.borrow().unwrap();
+            assert!(!list.items.contains_key(&0), "row 0 is still in view; the test proves nothing");
+        }
+        // The loop delivers what the draw queued.
+        rows.clock.set(rows.clock.get() + 1.0);
+        for cancel in cx.fingers.take_pending_cancels(rows.clock.get()) {
+            rows.send(&mut cx, &Event::FingerCancel(cancel));
+        }
+        let still_pressed = pressed_row
+            .borrow::<crate::button::Button>()
+            .is_some_and(|b| b.animator_in_state(&cx, ids!(hover.down)));
+        assert!(!still_pressed, "the recycled row still looks pressed");
+        let clicked = rows.send(&mut cx, &finger(TouchState::Stop, at, 0.3));
+        assert!(!clicked, "the recycled row clicked on the lift");
+        assert!(!rows.any_pressed(&cx));
+        });
+    }
+
+    /// The host takes the finger away (the phone rotated): one FingerCancel
+    /// through the list ends the row's press there, and nothing clicks.
+    #[test]
+    fn a_host_cancel_through_the_list_ends_the_rows_press() {
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
+        let rows = ButtonRows::new(&mut cx);
+        let at = dvec2(100.0, ButtonRows::ROW * 1.5);
+        rows.send(&mut cx, &finger(TouchState::Start, at, 0.0));
+        assert!(rows.pressed(&cx, 1));
+        let digit: crate::event::DigitId = live_id_num!(touch, 1).into();
+        cx.fingers.cancel_digit(digit);
+        let mut clicked = rows.send(&mut cx, &Event::FingerCancel(FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device: crate::event::DigitDevice::Touch { uid: 1 },
+            abs: at,
+            time: 0.02,
+            modifiers: KeyModifiers::default(),
+        }));
+        assert!(!rows.pressed(&cx, 1), "the row still looks pressed after the cancel");
+        clicked |= rows.send(&mut cx, &finger(TouchState::Stop, at, 0.03));
+        assert!(!clicked, "a cancelled press clicked");
+        assert!(!cx.fingers.any_areas_captured());
+        });
+    }
+
     /// One line drawn at the top of the pane leaves the rest of the list bare,
     /// so a press down here is over the list and over nothing else of its own.
     const BARE: DVec2 = dvec2(150.0, 100.0);
@@ -4924,33 +5729,39 @@ mod tests {
     /// the rack the slider sits in.
     #[test]
     fn a_control_holding_the_mouse_keeps_the_list_around_it_still() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, false, true),
             (false, true),
             "a press the control holds started the list's drag-to-scroll"
         );
+        });
     }
 
     /// And the list is not broken while fixing it: the same press with nothing
     /// holding the mouse is the list's own, and still starts its drag.
     #[test]
     fn a_press_on_bare_list_still_starts_its_drag_scroll() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, false, false),
             (true, false),
             "the list stopped drag-scrolling from a press nothing else holds"
         );
+        });
     }
 
     /// The touch exemption, end to end: a finger that lands on a control still
     /// scrolls the list under it.
     #[test]
     fn a_touch_on_a_control_still_scrolls_the_list_under_it() {
+        crate::on_test_cx(|| {
         assert_eq!(
             press_over(1, BARE, true, true),
             (true, false),
             "a finger on a control stopped scrolling the list under it"
         );
+        });
     }
 
     /// The same rule with the control inside the list rather than over it: a
@@ -4959,6 +5770,7 @@ mod tests {
     /// by it — and a finger's still does.
     #[test]
     fn a_row_holding_the_mouse_keeps_the_list_it_sits_in_still() {
+        crate::on_test_cx(|| {
         let over_a_row = PANE * 0.5;
         assert_eq!(
             press_over(200, over_a_row, false, false),
@@ -4970,6 +5782,7 @@ mod tests {
             (true, false),
             "a finger on a row stopped scrolling the list under it"
         );
+        });
     }
     /// A log of 200 lines drawn until it settles: a real list, taller than its
     /// pane, with a scroll bar showing.
@@ -5012,8 +5825,8 @@ mod tests {
     /// its own scroll bar as an outsider holding the pointer.
     #[test]
     fn a_lists_own_areas_include_its_scroll_bar() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (log, _pass, _list) = drawn_log(&mut cx);
         let list_ref = log.portal_list(&cx, ids!(list));
         let list = list_ref.borrow().expect("the log holds no portal list");
@@ -5028,6 +5841,7 @@ mod tests {
             mine[1].is_valid(&cx) && mine[0] != mine[1],
             "the bar drew no area of its own, so this test proves nothing"
         );
+        });
     }
 
     /// A press on the list's OWN scroll bar belongs to the bar and to nothing
@@ -5041,8 +5855,8 @@ mod tests {
     /// holding it up.
     #[test]
     fn a_press_on_the_lists_own_bar_is_the_bars_alone() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut log, _pass, _list) = drawn_log(&mut cx);
         let list_ref = log.portal_list(&cx, ids!(list));
         let bar = {
@@ -5077,6 +5891,7 @@ mod tests {
         );
         drop(list);
         cx.fingers.first_mouse_button = None;
+        });
     }
 
     /// The other half of the rule for the selection drag: a control can take
@@ -5089,8 +5904,8 @@ mod tests {
     /// stands in for any continuously dragged control.
     #[test]
     fn a_selection_drag_stands_down_when_a_control_takes_the_mouse() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (mut log, pass, _draw_list) = drawn_log(&mut cx);
         let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
         let mut button_list = DrawList2d::new(&mut cx);
@@ -5143,5 +5958,6 @@ mod tests {
             "the selection drag kept running while a control held the mouse"
         );
         cx.fingers.first_mouse_button = None;
+        });
     }
 }

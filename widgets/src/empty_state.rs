@@ -641,7 +641,7 @@ impl Widget for EmptyState {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         for slot in [&self.icon, &self.action, &self.secondary] {

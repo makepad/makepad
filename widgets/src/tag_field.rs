@@ -793,7 +793,7 @@ impl Widget for TagField {
                 self.focus_input(cx);
                 self.redraw(cx);
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) if !fe.cancelled => {
                 // Not redundant with the press. A focused TextInput drops its
                 // own focus on a mouse-up outside its rect — right for a bare
                 // field, wrong for one in a box, because the box's padding is

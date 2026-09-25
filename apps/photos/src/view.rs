@@ -22,7 +22,9 @@ use crate::library;
 use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_widgets::makepad_platform::thread::Lane;
+use makepad_widgets::makepad_platform::thread::TaskHandle;
 use makepad_widgets::hosted_view::{HostedFace, HostedTransition};
 use makepad_widgets::*;
 use std::path::Path;
@@ -44,18 +46,36 @@ script_mod! {
             height: Fill
             flow: Down
             // The as-you-type search: every keystroke re-hangs the wall to the
-            // matches, the pictures flying to their new places.
+            // matches, the pictures flying to their new places. 64 pt tall
+            // (56 in a short landscape, `draw_walk`), 16 pt sides, a 48 pt
+            // field with 16/24 text, and the Fit action beside it.
             search_row := View{
                 width: Fill
-                height: Fit
+                height: 64
                 flow: Right
                 align: Align{y: 0.5}
-                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+                padding: Inset{left: 16 right: 16}
                 spacing: 8
                 search := TextInput{
                     width: Fill
-                    height: Fit
+                    height: 48
                     empty_text: "Search photos"
+                    draw_text +: {text_style: theme.font_regular{font_size: 12}}
+                }
+                // Back from a picture blown up past the screen: frames the
+                // picked one (or the one in the middle) whole.
+                fit := View{
+                    width: 48
+                    height: 48
+                    align: Align{x: 0.5 y: 0.5}
+                    cursor: MouseCursor.Hand
+                    Icon{
+                        icon_walk: Walk{width: 24 height: 24}
+                        draw_icon +: {
+                            svg: crate_resource("self:resources/icons/fit.svg")
+                            color: theme.color_text
+                        }
+                    }
                 }
             }
             grid_wrap := View{
@@ -63,14 +83,24 @@ script_mod! {
                 height: Fill
                 grid := TileGrid{}
             }
-            status := Label{
+            // A reserved 24 pt line, 12/16 text; the phone shows the count
+            // and the library's name, a desk the whole path.
+            status_row := View{
                 width: Fill
-                height: Fit
-                padding: Inset{left: 12 right: 12 top: 5 bottom: 5}
-                text: ""
-                draw_text +: {
-                    color: theme.color_text_meta
-                    text_style: theme.font_regular{font_size: 8.5}
+                height: 24
+                align: Align{y: 0.5}
+                padding: Inset{left: 16 right: 16}
+                status := Label{
+                    width: Fill
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
+                    text: ""
+                    // Full ink: the meta colour came to 2.7:1 on this
+                    // ground, under the 4.5:1 12 pt text needs.
+                    draw_text +: {
+                        color: theme.color_text
+                        text_style: theme.font_regular{font_size: 9}
+                    }
                 }
             }
         }
@@ -163,6 +193,14 @@ pub struct PhotosView {
     library_root: String,
     #[rust]
     status_text: String,
+    /// A phone's chrome: the status line names the library instead of
+    /// spelling out its path.
+    #[rust]
+    phone: bool,
+    /// The picked picture's title, the phone's status line while the pick
+    /// is the latest news (the desk's line has its id and link).
+    #[rust]
+    phone_pick: Option<String>,
     /// Pictures being baked into the wall right now (`photos.add`), each
     /// answered through `reply` when its bake finishes.
     #[rust]
@@ -269,7 +307,7 @@ impl PhotosView {
             return;
         }
         self.view.widget(cx, ids!(search_row)).set_visible(cx, wanted.chrome);
-        self.view.widget(cx, ids!(status)).set_visible(cx, wanted.chrome);
+        self.view.widget(cx, ids!(status_row)).set_visible(cx, wanted.chrome);
         self.view.widget(cx, ids!(tile_caption)).set_visible(cx, wanted.caption);
         // The empty face is a card of its own: the wall (whose ground sits
         // nearer in depth than a sibling's background) steps aside, and the
@@ -346,8 +384,52 @@ impl PhotosView {
 
     fn set_status(&mut self, cx: &mut Cx, text: String) {
         if self.status_text != text {
-            self.status_text = text.clone();
-            self.view.label(cx, ids!(status)).set_text(cx, &text);
+            self.status_text = text;
+            self.phone_pick = None;
+            self.show_status(cx);
+        }
+    }
+
+    /// The status line as this chrome shows it. A desk gets the whole line
+    /// (ids, links, the library's path); a phone gets words: the picked
+    /// picture's title, or the count with the library's name
+    /// ("7881 pictures · smbc").
+    fn show_status(&mut self, cx: &mut Cx) {
+        let text = if !self.phone {
+            self.status_text.clone()
+        } else if let Some(title) = &self.phone_pick {
+            title.clone()
+        } else {
+            match Path::new(&self.library_root).file_name() {
+                Some(name) => self.status_text.replace(
+                    &format!(" — {}", self.library_root),
+                    &format!(" · {}", name.to_string_lossy()),
+                ),
+                None => self.status_text.clone(),
+            }
+        };
+        self.view.label(cx, ids!(status)).set_text(cx, &text);
+    }
+
+    /// Frame the picked picture whole (or, with none picked, the one in
+    /// the middle of the view): the way back from a picture zoomed past
+    /// the screen.
+    /// A pick the search has hidden is not framed (a hidden cell has no
+    /// size and would drive the camera to its limit); nothing is framed
+    /// when nothing matches.
+    fn fit(&mut self, cx: &mut Cx) {
+        let preferred = self.selected.as_ref().map(|s| s.item);
+        let item = self.view.widget(cx, ids!(grid)).borrow::<TileGrid>().and_then(|g| {
+            if g.visible_count() == 0 {
+                return None;
+            }
+            match preferred {
+                Some(p) if g.visible_item(Some(p)).is_some_and(|(id, _)| id == p) => Some(p),
+                _ => g.centred_item().or_else(|| g.visible_item(None)).map(|(id, _)| id),
+            }
+        });
+        if let Some(item) = item {
+            self.show(cx, item);
         }
     }
 
@@ -567,6 +649,9 @@ impl Widget for PhotosView {
             if input.escaped(actions) {
                 self.set_query(cx, "");
             }
+            if self.view.view(cx, ids!(fit)).finger_up(actions).is_some_and(|fe| fe.is_over && !fe.cancelled) {
+                self.fit(cx);
+            }
             for action in actions {
                 let Some(widget_action) = action.as_widget_action() else { continue };
                 match widget_action.cast::<TileGridAction>() {
@@ -608,6 +693,8 @@ impl Widget for PhotosView {
                     TileGridAction::Clicked { item, title, link, .. } => {
                         let text = format!("#{item}  {}  {link}", title.chars().take(140).collect::<String>());
                         self.set_status(cx, text);
+                        self.phone_pick = Some(title.chars().take(140).collect());
+                        self.show_status(cx);
                         self.selected = Some(Selected { item, title });
                         self.applied = None;
                     }
@@ -638,6 +725,14 @@ impl Widget for PhotosView {
             let icon_size = if short {28.0} else {40.0};
             if let Some(mut icon) = self.view.widget(cx, ids!(empty_icon)).borrow_mut::<makepad_widgets::app_icon::AppIcon>() {
                 icon.set_size(cx, icon_size);
+            }
+            let row_height = if size.y < 500.0 { 56.0 } else { 64.0 };
+            let mut row = self.view.widget(cx, ids!(search_row));
+            script_apply_eval!(cx, row, { height: #(row_height) });
+            let phone = cx.with_vm(makepad_widgets::desktop_style::current_style).mobile();
+            if phone != self.phone {
+                self.phone = phone;
+                self.show_status(cx);
             }
             self.last_size = size;
         }

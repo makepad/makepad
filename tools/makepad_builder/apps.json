@@ -263,15 +263,6 @@
     "features": []
   },
   {
-    "id": "vj",
-    "title": "VJ",
-    "package": "makepad-vj",
-    "binary": "makepad-vj",
-    "workspace": "makepad/apps/vj",
-    "features": [],
-    "menu": "other"
-  },
-  {
     "id": "weather",
     "title": "Weather",
     "package": "makepad-weather",

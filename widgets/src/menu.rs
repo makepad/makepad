@@ -78,6 +78,9 @@ pub struct MenuRow {
     /// Flyout rows. A non-empty submenu means this row opens instead of
     /// firing.
     pub submenu: Vec<MenuRow>,
+    /// A small colour chip before the label (a theme, a colour, a tag):
+    /// its fill and a dot of a second colour on it.
+    pub swatch: Option<(Vec4f, Vec4f)>,
 }
 
 impl MenuRow {
@@ -92,6 +95,7 @@ impl MenuRow {
             section: false,
             danger: false,
             submenu: Vec::new(),
+            swatch: None,
         }
     }
 
@@ -132,6 +136,11 @@ impl MenuRow {
 
     pub fn danger(mut self, on: bool) -> Self {
         self.danger = on;
+        self
+    }
+
+    pub fn swatch(mut self, fill: Vec4f, dot: Vec4f) -> Self {
+        self.swatch = Some((fill, dot));
         self
     }
 
@@ -185,7 +194,9 @@ pub enum MenuAction {
     },
     /// Replace the rows of the menu `owner` has open, leaving it open and
     /// leaving the highlight where it is. This is how a set of switches
-    /// shows a mark changing under the pointer.
+    /// shows a mark changing under the pointer. A flyout that is open shows
+    /// its row's new submenu, so a switch inside one changes under the
+    /// pointer as well.
     Update { owner: LiveId, rows: Vec<MenuRow> },
     /// A row was chosen. The `Closed` for that menu is in the same pass.
     Picked { owner: LiveId, id: LiveId },
@@ -286,6 +297,16 @@ const MENU_PAD: f64 = 4.0;
 const MENU_MIN_W: f64 = 150.0;
 /// The leading column that carries the check or radio mark.
 const MARK_COL: f64 = 24.0;
+/// The swatch column after the mark, when a row has one.
+const SWATCH_COL: f64 = 28.0;
+
+fn lead_col(row: &MenuRow) -> f64 {
+    if row.swatch.is_some() {
+        MARK_COL + SWATCH_COL
+    } else {
+        MARK_COL
+    }
+}
 const RIGHT_PAD: f64 = 10.0;
 const ARROW_COL: f64 = 14.0;
 const CHAR_W: f64 = 5.9;
@@ -306,6 +327,9 @@ fn row_height(row: &MenuRow) -> f64 {
 }
 
 /// The bubble size a list of rows needs, estimated from character counts.
+/// The least a menu keeps clear of the window's edges when it must scroll.
+const MENU_MARGIN: f64 = 8.0;
+
 pub fn measure_rows(rows: &[MenuRow]) -> Vec2d {
     let mut w: f64 = MENU_MIN_W;
     let mut h = MENU_PAD * 2.0;
@@ -321,7 +345,7 @@ pub fn measure_rows(rows: &[MenuRow]) -> Vec2d {
             row.shortcut.chars().count() as f64 * SHORT_CHAR_W + SHORT_GAP
         };
         let arrow = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-        w = w.max(MARK_COL + label + short + arrow + RIGHT_PAD);
+        w = w.max(lead_col(row) + label + short + arrow + RIGHT_PAD);
     }
     dvec2(w.ceil(), h)
 }
@@ -339,11 +363,51 @@ struct Level {
     press: Option<usize>,
     /// Row of the PARENT level that opened this flyout.
     from_row: Option<usize>,
+    /// Points scrolled down, when the rows are taller than the room the
+    /// window gives the bubble.
+    scroll: f64,
+}
+
+/// Each open flyout shows its parent row's submenu again, after the root's
+/// rows were replaced: a switch picked inside one then shows its new mark.
+/// A flyout whose rows no longer line up is left as it was, and so is
+/// everything past it.
+fn refresh_flyouts(levels: &mut [Level]) {
+    for index in 1..levels.len() {
+        let Some(from) = levels[index].from_row else { break };
+        let Some(submenu) = levels[index - 1].rows.get(from).map(|row| row.submenu.clone()) else { break };
+        if submenu.len() != levels[index].rows.len() {
+            break;
+        }
+        levels[index].rows = submenu;
+    }
 }
 
 impl Level {
+    /// The rows' whole height: taller than `rect` when the list scrolls.
+    fn content_h(&self) -> f64 {
+        MENU_PAD * 2.0 + self.rows.iter().map(row_height).sum::<f64>()
+    }
+
+    fn max_scroll(&self) -> f64 {
+        (self.content_h() - self.rect.size.y).max(0.0)
+    }
+
+    /// Scroll so that row `i` is inside the bubble.
+    fn scroll_to(&mut self, i: usize) {
+        let r = self.row_rect(i);
+        let top = self.rect.pos.y + MENU_PAD;
+        let bottom = self.rect.pos.y + self.rect.size.y - MENU_PAD;
+        if r.pos.y < top {
+            self.scroll -= top - r.pos.y;
+        } else if r.pos.y + r.size.y > bottom {
+            self.scroll += r.pos.y + r.size.y - bottom;
+        }
+        self.scroll = self.scroll.clamp(0.0, self.max_scroll());
+    }
+
     fn row_rect(&self, i: usize) -> Rect {
-        let mut y = self.rect.pos.y + MENU_PAD;
+        let mut y = self.rect.pos.y + MENU_PAD - self.scroll;
         for row in self.rows.iter().take(i) {
             y += row_height(row);
         }
@@ -358,6 +422,12 @@ impl Level {
 
     fn row_at(&self, p: Vec2d) -> Option<usize> {
         if !self.rect.contains(p) {
+            return None;
+        }
+        // Only the part of a row inside the bubble answers (a scrolled
+        // row half under the edge is not hit through it).
+        let inner = Rect { pos: dvec2(self.rect.pos.x, self.rect.pos.y + MENU_PAD), size: dvec2(self.rect.size.x, (self.rect.size.y - MENU_PAD * 2.0).max(0.0)) };
+        if !inner.contains(p) {
             return None;
         }
         (0..self.rows.len()).find(|i| self.row_rect(*i).contains(p))
@@ -509,6 +579,13 @@ pub struct DrawMenuRow {
     arrow: f32,
     #[live]
     disabled: f32,
+    /// 1 when the row has a swatch.
+    #[live]
+    swatch: f32,
+    #[live]
+    swatch_fill: Vec4f,
+    #[live]
+    swatch_dot: Vec4f,
 }
 
 script_mod! {
@@ -530,6 +607,7 @@ script_mod! {
         mark: 0.0
         arrow: 0.0
         disabled: 0.0
+        swatch: 0.0
 
         /** the row's own colours; the layer sets nothing but the state */
         color_hover: uniform(theme.color_primary_container)
@@ -554,6 +632,14 @@ script_mod! {
                     sdf.line_to(16.0, cy - 3.5)
                     sdf.stroke(self.color_mark, 1.5)
                 }
+            }
+            if self.swatch > 0.5 {
+                // The chip: its fill with an edge, and the dot on its right.
+                sdf.box(24.0, cy - 7.0, 22.0, 14.0, 3.0)
+                sdf.fill_keep(self.swatch_fill)
+                sdf.stroke(vec4(0.0, 0.0, 0.0, 0.35), 1.0)
+                sdf.circle(40.0, cy, 3.0)
+                sdf.fill(self.swatch_dot)
             }
             if self.arrow > 0.5 {
                 let ax = self.rect_size.x - 12.0
@@ -807,7 +893,8 @@ impl MenuLayer {
     }
 
     /// Replace the rows of the menu that is open for `owner`, keeping it
-    /// open and keeping the highlight where it is.
+    /// open and keeping the highlight where it is. Open flyouts take
+    /// their rows from the new ones too.
     pub fn update_rows(&mut self, cx: &mut Cx, owner: LiveId, rows: Vec<MenuRow>) {
         let Some(level) = self.levels.first_mut() else {
             return;
@@ -816,6 +903,7 @@ impl MenuLayer {
             return;
         }
         level.rows = rows;
+        refresh_flyouts(&mut self.levels);
         self.redraw_menus(cx);
     }
 
@@ -837,7 +925,9 @@ impl MenuLayer {
         } else {
             Rect { pos: dvec2(0.0, 0.0), size: cx.default_window_size() }
         };
-        let size = measure_rows(&rows);
+        // Never taller than the window: a long list scrolls in its bubble.
+        let mut size = measure_rows(&rows);
+        size.y = size.y.min((bounds.size.y - MENU_MARGIN * 2.0).max(MENU_PAD * 2.0 + 24.0));
         // A context menu hangs off the point itself, which is an anchor of
         // no size; everything else hangs off the control that raised it.
         let anchor = match menu_place {
@@ -863,6 +953,7 @@ impl MenuLayer {
             hover_t: vec![0.0; n],
             press: None,
             from_row: None,
+            scroll: 0.0,
         });
         self.opened_at = cx.seconds_since_app_start();
         self.last_t = self.opened_at;
@@ -889,7 +980,8 @@ impl MenuLayer {
             }
             (it.submenu.clone(), l.row_rect(row), l.owner)
         };
-        let size = measure_rows(&rows);
+        let mut size = measure_rows(&rows);
+        size.y = size.y.min((self.window.size.y - MENU_MARGIN * 2.0).max(MENU_PAD * 2.0 + 24.0));
         let parent = self.levels[level].rect;
         // A flyout hangs off the parent bubble's edge, not off the row: the
         // row is inside the bubble, and a flyout that overlapped its parent
@@ -916,6 +1008,7 @@ impl MenuLayer {
             hover_t: vec![0.0; n],
             press: None,
             from_row: Some(row),
+            scroll: 0.0,
         });
         self.redraw_menus(cx);
     }
@@ -1038,6 +1131,9 @@ impl MenuLayer {
                 let dir = if ke.key_code == KeyCode::ArrowDown { 1 } else { -1 };
                 let from = self.levels[last].hi;
                 self.levels[last].hi = self.levels[last].step(from, dir);
+                if let Some(hi) = self.levels[last].hi {
+                    self.levels[last].scroll_to(hi);
+                }
                 self.levels.truncate(last + 1);
                 self.redraw_menus(cx);
                 true
@@ -1067,11 +1163,13 @@ impl MenuLayer {
             }
             KeyCode::Home => {
                 self.levels[last].hi = self.levels[last].step(None, 1);
+                self.levels[last].scroll = 0.0;
                 self.redraw_menus(cx);
                 true
             }
             KeyCode::End => {
                 self.levels[last].hi = self.levels[last].step(None, -1);
+                self.levels[last].scroll = self.levels[last].max_scroll();
                 self.redraw_menus(cx);
                 true
             }
@@ -1129,7 +1227,7 @@ impl Widget for MenuLayer {
                     self.text_width(cx, true, &row.shortcut) + SHORT_GAP
                 };
                 let arrow_w = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-                need = need.max(MARK_COL + label_w + short_w + arrow_w + RIGHT_PAD);
+                need = need.max(lead_col(&row) + label_w + short_w + arrow_w + RIGHT_PAD);
             }
             let need = need.ceil();
             if (need - self.levels[li].rect.size.x).abs() > 0.5 {
@@ -1155,8 +1253,17 @@ impl Widget for MenuLayer {
             let rect = self.levels[li].rect;
             let rows = self.levels[li].rows.clone();
             self.draw_bg.draw_abs(cx, rect);
+            // Rows are clipped to the bubble (a long list scrolls in it).
+            let scrolls = self.levels[li].max_scroll() > 0.0;
+            let inner = Rect { pos: dvec2(rect.pos.x, rect.pos.y + MENU_PAD), size: dvec2(rect.size.x, (rect.size.y - MENU_PAD * 2.0).max(0.0)) };
+            if scrolls {
+                cx.push_clip_rect(inner);
+            }
             for (i, row) in rows.iter().enumerate() {
                 let r = self.levels[li].row_rect(i);
+                if r.pos.y + r.size.y < inner.pos.y || r.pos.y > inner.pos.y + inner.size.y {
+                    continue;
+                }
                 if row.separator {
                     self.draw_sep.draw_abs(
                         cx,
@@ -1190,11 +1297,19 @@ impl Widget for MenuLayer {
                     MenuMark::None => 0.0,
                 };
                 self.draw_row.arrow = if row.submenu.is_empty() { 0.0 } else { 1.0 };
+                let (swatch, fill, dot) = match row.swatch {
+                    Some((fill, dot)) => (1.0, fill, dot),
+                    None => (0.0, Vec4f::default(), Vec4f::default()),
+                };
+                self.draw_row.swatch = swatch;
+                self.draw_row.swatch_fill = fill;
+                self.draw_row.swatch_dot = dot;
                 self.draw_row.draw_abs(cx, r);
+                let lead = lead_col(row);
 
                 let short_w = self.text_width(cx, true, &row.shortcut);
                 let arrow_w = if row.submenu.is_empty() { 0.0 } else { ARROW_COL };
-                let text_w = (r.size.x - MARK_COL - RIGHT_PAD - short_w - arrow_w).max(8.0);
+                let text_w = (r.size.x - lead - RIGHT_PAD - short_w - arrow_w).max(8.0);
                 let rest = self.draw_label.color;
                 self.draw_label.color = if !row.enabled {
                     self.color_disabled
@@ -1206,7 +1321,7 @@ impl Widget for MenuLayer {
                 self.draw_label.draw_walk(
                     cx,
                     Walk::abs_rect(Rect {
-                        pos: dvec2(r.pos.x + MARK_COL, r.pos.y),
+                        pos: dvec2(r.pos.x + lead, r.pos.y),
                         size: dvec2(text_w, r.size.y),
                     }),
                     Align { x: 0.0, y: 0.5 },
@@ -1224,6 +1339,19 @@ impl Widget for MenuLayer {
                         &row.shortcut,
                     );
                 }
+            }
+            if scrolls {
+                cx.pop_clip_rect();
+                // Where in the list the bubble is: a thin thumb at its edge.
+                let l = &self.levels[li];
+                let content = l.content_h();
+                let track = inner.size.y;
+                let thumb_h = (track * track / content).max(16.0);
+                let thumb_y = inner.pos.y + (track - thumb_h) * (l.scroll / l.max_scroll().max(1.0));
+                let keep = self.draw_sep.color;
+                self.draw_sep.color = Vec4f { w: keep.w.max(0.5), ..keep };
+                self.draw_sep.draw_abs(cx, Rect { pos: dvec2(rect.pos.x + rect.size.x - 5.0, thumb_y), size: dvec2(3.0, thumb_h) });
+                self.draw_sep.color = keep;
             }
         }
 
@@ -1244,6 +1372,10 @@ impl Widget for MenuLayer {
         match event {
             Event::MouseDown(me) => self.held_press = Some(me.abs),
             Event::MouseUp(_) => {
+                self.held_press = None;
+                self.raised_by_held_press = false;
+            }
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
                 self.held_press = None;
                 self.raised_by_held_press = false;
             }
@@ -1282,7 +1414,9 @@ impl Widget for MenuLayer {
         }
         // The release that belongs to a dismissing press: eat it, then drop
         // the grab, unless a fresh menu is already up.
-        if let Event::MouseUp(_) = event {
+        if matches!(event, Event::MouseUp(_))
+            || matches!(event, Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id))
+        {
             if self.swallow_up {
                 self.swallow_up = false;
                 if self.levels.is_empty() {
@@ -1304,6 +1438,21 @@ impl Widget for MenuLayer {
             return;
         }
         match event {
+            // A list taller than the window scrolls in its bubble.
+            Event::Scroll(e) => {
+                if let Some(li) = self.inside_any(e.abs) {
+                    let l = &mut self.levels[li];
+                    let next = (l.scroll + e.scroll.y).clamp(0.0, l.max_scroll());
+                    if next != l.scroll {
+                        l.scroll = next;
+                        self.levels.truncate(li + 1);
+                        if let Some((li, row)) = self.hit(e.abs) {
+                            self.point_at(cx, li, Some(row));
+                        }
+                        self.redraw_menus(cx);
+                    }
+                }
+            }
             Event::MouseMove(e) => {
                 // The highlight is a hover, and a hover taken from a pointer
                 // another control is holding is the thing the rule forbids.
@@ -1337,6 +1486,13 @@ impl Widget for MenuLayer {
                         cx.action(MenuAction::ClickAway { at: e.abs });
                     }
                 }
+            }
+            // The mouse press itself taken away chooses no row.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                for level in &mut self.levels {
+                    level.press = None;
+                }
+                self.redraw_menus(cx);
             }
             Event::MouseUp(e) => {
                 for level in &mut self.levels {
@@ -1451,13 +1607,45 @@ mod tests {
             hover_t: vec![0.0; n],
             press: None,
             from_row: None,
+            scroll: 0.0,
         }
+    }
+
+    /// A list taller than its bubble scrolls: rows move up by the scroll,
+    /// only rows inside the bubble are hit, and a row the keyboard reaches
+    /// is scrolled into view.
+    #[test]
+    fn a_long_list_scrolls_inside_its_bubble() {
+        let list: Vec<MenuRow> = (0..40).map(|i| MenuRow::new(LiveId(i as u64 + 1), &format!("row {i}"))).collect();
+        let full = measure_rows(&list);
+        let mut l = Level {
+            owner: live_id!(owner),
+            rect: Rect { pos: dvec2(0.0, 0.0), size: dvec2(full.x, 200.0) },
+            rows: list,
+            hi: None,
+            hover_t: vec![0.0; 40],
+            press: None,
+            from_row: None,
+            scroll: 0.0,
+        };
+        assert!(l.max_scroll() > 0.0);
+        assert_eq!(l.row_at(dvec2(20.0, 199.0)), None, "the bottom padding hits nothing");
+        let below = l.row_rect(30);
+        assert!(below.pos.y > 200.0, "row 30 starts outside the bubble");
+        assert_eq!(l.row_at(below.pos + dvec2(20.0, 2.0)), None, "and is not hit through it");
+        l.scroll_to(30);
+        let r = l.row_rect(30);
+        assert!(r.pos.y + r.size.y <= 200.0 - MENU_PAD + 0.01 && r.pos.y >= MENU_PAD);
+        assert_eq!(l.row_at(r.pos + dvec2(20.0, 2.0)), Some(30));
+        l.scroll_to(0);
+        assert_eq!(l.scroll, 0.0);
     }
 
     /// Only rows that can be chosen take the highlight: a heading, a rule
     /// and a disabled row are all skipped, in both directions, wrapping.
     #[test]
     fn the_arrows_walk_only_the_rows_that_can_be_chosen() {
+        crate::on_test_cx(|| {
         let l = level();
         assert_eq!(l.step(None, 1), Some(1), "the heading is skipped");
         assert_eq!(l.step(Some(1), 1), Some(2));
@@ -1465,12 +1653,14 @@ mod tests {
         assert_eq!(l.step(Some(5), 1), Some(1), "and it wraps");
         assert_eq!(l.step(None, -1), Some(5), "up from nowhere is the last row");
         assert_eq!(l.step(Some(1), -1), Some(5));
+        });
     }
 
     /// A letter walks the rows starting with it, from after the highlight,
     /// so pressing it again finds the next one rather than sticking.
     #[test]
     fn a_letter_walks_the_rows_that_start_with_it() {
+        crate::on_test_cx(|| {
         let mut l = level();
         assert_eq!(l.typeahead('s'), Some(2), "Save");
         assert_eq!(l.typeahead('o'), Some(1), "Open");
@@ -1480,12 +1670,40 @@ mod tests {
         // A heading and a disabled row never answer, whatever their letter.
         assert_eq!(l.typeahead('f'), None, "the File heading is not selectable");
         assert_eq!(l.typeahead('c'), None, "the disabled Close is not selectable");
+        });
+    }
+
+    /// A switch picked inside an open flyout shows its new mark: replacing
+    /// the root's rows hands the open flyout its row's new submenu, and a
+    /// flyout whose rows no longer line up keeps what it had.
+    #[test]
+    fn replacing_the_rows_refreshes_the_open_flyout() {
+        crate::on_test_cx(|| {
+        let switches = |on: bool| vec![MenuRow::new(live_id!(a), "A").checked(on), MenuRow::new(live_id!(b), "B")];
+        let root = |on: bool| vec![MenuRow::new(live_id!(group), "Group").submenu(switches(on)), MenuRow::new(live_id!(other), "Other")];
+        let mut root_level = level();
+        root_level.rows = root(false);
+        let mut flyout = level();
+        flyout.rows = switches(false);
+        flyout.from_row = Some(0);
+        let mut levels = vec![root_level, flyout];
+        levels[0].rows = root(true);
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check, "the flyout shows the new mark");
+        // A submenu that changed length is not forced onto the open flyout.
+        levels[0].rows[0].submenu.push(MenuRow::new(live_id!(c), "C"));
+        levels[0].rows[0].submenu[0].mark = MenuMark::None;
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows.len(), 2);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check);
+        });
     }
 
     /// Rows are measured where they are drawn: a rule is thinner than a
     /// row, a heading shorter, and the bubble is the sum plus its padding.
     #[test]
     fn the_bubble_is_as_tall_as_the_rows_it_holds() {
+        crate::on_test_cx(|| {
         let size = measure_rows(&rows());
         let expected = MENU_PAD * 2.0 + SECTION_H + ROW_H * 4.0 + SEP_H;
         assert_eq!(size.y, expected);
@@ -1494,6 +1712,7 @@ mod tests {
         assert_eq!(l.row_rect(0).size.y, SECTION_H);
         assert_eq!(l.row_rect(3).size.y, SEP_H);
         assert_eq!(l.row_rect(1).size.y, ROW_H);
+        });
     }
 
     /// The open menu is one fact, and every change of it broadcasts the
@@ -1501,6 +1720,7 @@ mod tests {
     /// once.
     #[test]
     fn one_menu_is_open_and_every_change_says_so_in_order() {
+        crate::on_test_cx(|| {
         let mut open = OpenMenu::default();
         assert_eq!(open.owner(), None);
         assert_eq!(open.set(Some(live_id!(a))), vec![MenuChange::Opened(live_id!(a))]);
@@ -1512,6 +1732,7 @@ mod tests {
             "close before open"
         );
         assert_eq!(open.set(None), vec![MenuChange::Closed(live_id!(b))]);
+        });
     }
 
     /// The app-wide rule and its one exception, in one place: a menu follows
@@ -1519,16 +1740,19 @@ mod tests {
     /// raised the menu is the one holding it.
     #[test]
     fn a_menu_follows_only_a_pointer_that_is_its_own() {
+        crate::on_test_cx(|| {
         assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
         assert!(!menu_follows_pointer(true, false), "another control is being dragged");
         assert!(menu_follows_pointer(true, true), "the press that raised it is still down");
         assert!(menu_follows_pointer(false, true));
+        });
     }
 
     /// Whose press it is, read from where it landed: on the control the menu
     /// hangs off, or somewhere else entirely.
     #[test]
     fn the_press_that_raised_a_menu_is_the_one_that_landed_on_its_anchor() {
+        crate::on_test_cx(|| {
         let anchor = Rect { pos: dvec2(100.0, 40.0), size: dvec2(80.0, 20.0) };
         assert!(raised_by_the_press(anchor, Some(dvec2(140.0, 50.0))));
         assert!(!raised_by_the_press(anchor, Some(dvec2(400.0, 300.0))), "a press on something else");
@@ -1537,6 +1761,7 @@ mod tests {
         // raised it IS that point.
         let at = dvec2(400.0, 300.0);
         assert!(raised_by_the_press(Rect { pos: at, size: dvec2(0.0, 0.0) }, Some(at)));
+        });
     }
 }
 
@@ -1580,11 +1805,8 @@ mod pointer_tests {
         }
     }
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A button to hold the pointer down on, and a layer to raise menus in.
@@ -1673,6 +1895,7 @@ mod pointer_tests {
     /// it.
     #[test]
     fn a_menu_stands_down_for_a_drag_it_was_not_raised_by() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1690,6 +1913,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "", "no row lights from a pointer another control holds");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(is_open(&cx, &root), "and the release chooses nothing");
+        });
     }
 
     /// The other half: a menu raised BY the press that is still held is the
@@ -1697,6 +1921,7 @@ mod pointer_tests {
     /// release on one — and goes on walking and choosing.
     #[test]
     fn a_menu_raised_by_the_held_press_still_walks_and_chooses() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1712,6 +1937,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "Save", "the gesture's own pointer still lights rows");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "and the release chooses the row it ended on");
+        });
     }
 
     /// Dismissal is not a gesture that stands down: a menu left up while
@@ -1719,6 +1945,7 @@ mod pointer_tests {
     /// it, or nothing could ever take it down.
     #[test]
     fn a_press_outside_still_dismisses_a_menu_while_another_control_is_dragged() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1732,5 +1959,6 @@ mod pointer_tests {
         // The second button, since the first is down on the control.
         root.handle_event(&mut cx, &press(dvec2(40.0, 560.0)), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "a press nowhere near the menu closes it all the same");
+        });
     }
 }

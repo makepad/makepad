@@ -59,7 +59,6 @@ fn icon_for(id: &str) -> Option<Ico> {
         "pdf" => Ico::Check,
         "route" => Ico::Globe,
         "mixer" => Ico::Speaker,
-        "vj" => Ico::Headphone,
         "photos" => Ico::Photo,
         "clock" => Ico::Calendar,
         "weather" => Ico::Brightness,

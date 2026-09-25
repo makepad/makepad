@@ -13,7 +13,6 @@ script_mod! {
         source: vec4(0.0, 0.0, 1.0, 1.0)
         dock: vec4(0.0, 0.0, 1.0, 1.0)
         progress: 0.0
-        y_flip: 0.0
         pixel: fn() {
             let p = self.rect_pos + self.pos * self.rect_size
             let pull = smoothstep(0.0, 0.65, self.progress)
@@ -30,7 +29,7 @@ script_mod! {
             if u < 0.0 || u > 1.0 { discard() }
             let aa = max(length(vec2(dFdx(u), dFdy(u))), 0.00001)
             let edge = smoothstep(0.0, aa, u) * smoothstep(0.0, aa, 1.0-u)
-            let uv = vec2(u, mix(v, 1.0-v, self.y_flip))
+            let uv = vec2(u, v)
             // Match the desktop surface's 14pt macOS corners throughout
             // the warp, including its first and final restored frame.
             let sdf = Sdf2d.viewport(vec2(u, v) * self.source.zw)
@@ -51,23 +50,8 @@ pub struct DrawDockWarp {
     dock: Vec4f,
     #[live]
     progress: f32,
-    #[live]
-    y_flip: f32,
 }
 
-/// Whether a capture sampled into the window needs its V flipped. Vulkan
-/// renders every pass, window and capture alike, through a negative-height
-/// viewport: a capture's rows are stored top-left as Metal stores them and
-/// the window shares that origin, so nothing flips and no pass inverts its
-/// `camera_projection`. The OpenGL ES fallback on Android keeps the flip
-/// its captures needed.
-pub fn capture_y_flip(cx: &Cx) -> f32 {
-    if cx.gpu_backend() == GpuBackend::OpenGl && matches!(cx.os_type(), OsType::Android(_)) {
-        1.0
-    } else {
-        0.0
-    }
-}
 
 /// An app's frame in a texture of its own. Everything the app draws — its
 /// root, the lists it lifts with `begin_overlay_*` (popups, a blur layer),
@@ -263,7 +247,6 @@ impl DockWarp {
             self.dock.size.y as f32,
         );
         draw.progress = self.progress as f32;
-        draw.y_flip = capture_y_flip(cx);
         draw.draw_abs(cx, self.bounds());
     }
 }

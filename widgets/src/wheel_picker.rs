@@ -645,20 +645,6 @@ impl Drum {
         }
     }
 
-    /// Where row `index` sits relative to the band, in rows.
-    ///
-    /// A looping column takes the short way round here too, so the row that
-    /// has just come over the top is drawn where the eye expects it rather
-    /// than a whole turn away.
-    fn rows_from_band(&self, index: usize, offset: f64) -> f64 {
-        let mut d = index as f64 - offset / self.row;
-        if self.looping && self.count > 0 {
-            let n = self.count as f64;
-            d -= (d / n).round() * n;
-        }
-        d
-    }
-
     /// The rows within `reach` rows of the band, each with its distance
     /// from it. Ordered outermost first, so the band's own row is laid down
     /// last and sits over its neighbours wherever they meet.
@@ -1310,8 +1296,16 @@ impl Widget for WheelPicker {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 let col = grab.col;
-                let (velocity, travel) = estimate_release_velocity(&self.spins[col].samples);
-                let carry = if travel.abs() > FLING_MIN_TOTAL_DELTA {
+                // A press taken away is no tap and no throw: the drum settles
+                // from rest on the nearest row.
+                let (velocity, travel) = if fe.cancelled {
+                    (0.0, 0.0)
+                } else {
+                    estimate_release_velocity(&self.spins[col].samples)
+                };
+                let carry = if fe.cancelled {
+                    0.0
+                } else if travel.abs() > FLING_MIN_TOTAL_DELTA {
                     // The finger's velocity is the drum's, negated.
                     spin_travel(-velocity, FLING_DECEL_RATE_PER_MS)
                 } else if !grab.caught {
@@ -1734,14 +1728,6 @@ mod tests {
         let rows = d.rows_in_view(0.0, 2.5);
         assert_eq!(rows.len(), 5, "a two-row drum still fills a five-row window");
         assert_eq!(rows.iter().filter(|(i, _)| *i == 0).count(), 3);
-    }
-
-    #[test]
-    fn a_row_that_has_come_over_the_top_is_drawn_where_the_eye_expects() {
-        let d = drum(6, true);
-        // Row 0 is one row below row 5, not five rows above it.
-        assert_eq!(d.rows_from_band(0, d.offset_of(5)), 1.0);
-        assert_eq!(d.rows_from_band(5, d.offset_of(0)), -1.0);
     }
 
     #[test]

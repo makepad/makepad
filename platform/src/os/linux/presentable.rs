@@ -1,9 +1,13 @@
 use crate::{Cx, Texture, texture::{TextureFormat, TextureUpdated}};
 
 impl Cx {
-    /// The Linux shared-memory transport contains RGBA bytes in GL row order.
-    /// Preserve rows for RunView's existing flip and convert to the renderer
-    /// independent BGRA texture format. The texture handle stays stable.
+    /// The Linux shared-memory transport carries the child's `glReadPixels`
+    /// output, row by row from row 0. The child draws its frame through a
+    /// texture pass, which on GL renders through an inverted projection so
+    /// the texture holds top-left rows like every other render texture (the
+    /// platform's Y law): the rows arrive in picture order and are kept as
+    /// they are, the bytes become the renderer-independent BGRA, and the
+    /// host samples the texture as stored. The texture handle stays stable.
     pub fn upload_presentable_image_software_buffer(
         &mut self, texture: &Texture, width: u32, height: u32, pixels: &[u8],
     ) {

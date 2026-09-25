@@ -305,6 +305,7 @@ impl DesktopInit {
             swapchain_format: vk::Format::UNDEFINED,
             depth_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D::default(),
+            swapchain_surface_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
             render_pass: vk::RenderPass::null(),
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),

@@ -915,6 +915,16 @@ impl Widget for Dialog {
                         return;
                     }
                 }
+                // The mouse press itself taken away: the sheet goes back to
+                // the detent it had; nothing changes detent, nothing
+                // dismisses. The cancel still goes on to the content.
+                Event::FingerCancel(c)
+                    if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) && self.drag_from.is_some() =>
+                {
+                    self.drag_from = None;
+                    self.live_extent = detent_extent(self.detent, base, self.pass_extent);
+                    self.modal.redraw(cx);
+                }
                 Event::MouseUp(_) => {
                     if self.drag_from.take().is_some() {
                         let collapsed = SHEET_COLLAPSED.min(base);
@@ -953,6 +963,13 @@ impl Widget for Dialog {
                 // before: the press that opened the dialog landed while
                 // there was no dialog to hear it.
                 Event::MouseDown(me) => self.press_on_card = !off_card(me.abs),
+                // The mouse press itself taken away: its release will not
+                // come, so there is nothing left to suppress. A cancel of only
+                // some capture of a press still held (a list recycled a row)
+                // leaves the protection in place for the real release.
+                Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                    self.press_on_card = false
+                }
                 Event::MouseUp(me) => {
                     if !std::mem::take(&mut self.press_on_card) && off_card(me.abs) {
                         self.answer(cx, DialogAction::Dismissed);
@@ -1073,12 +1090,8 @@ mod tests {
 
     const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // A panel times its slide against the app clock.
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// Moves the key focus the way the event loop does between events.
@@ -1176,6 +1189,7 @@ mod tests {
     /// the page was drawn again while the dialog was up.
     #[test]
     fn the_keyboard_goes_back_to_the_opener_after_the_page_is_drawn_again() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1218,12 +1232,14 @@ mod tests {
             );
             target.draw(&mut cx, &root);
         }
+        });
     }
 
     /// The rungs are the questions people ask, and they only go up. Full
     /// takes the room it is given rather than a width of its own.
     #[test]
     fn the_size_rungs_climb_and_full_is_not_a_number() {
+        crate::on_test_cx(|| {
         let rungs = [DialogSize::Xs, DialogSize::Sm, DialogSize::Md, DialogSize::Lg, DialogSize::Xl];
         for side in [PanelEdge::Center, PanelEdge::Left, PanelEdge::Right, PanelEdge::Top, PanelEdge::Bottom] {
             let sizes: Vec<f64> = rungs.iter().map(|s| s.extent(side).unwrap()).collect();
@@ -1235,12 +1251,14 @@ mod tests {
             assert_eq!(size.extent(PanelEdge::Center), size.width());
         }
         assert_eq!(DialogSize::Full.width(), None);
+        });
     }
 
     /// A side decides whether the panel is a column or a row, and the size
     /// means the other thing on each.
     #[test]
     fn the_side_decides_what_the_size_means() {
+        crate::on_test_cx(|| {
         assert!(PanelEdge::Left.is_column());
         assert!(PanelEdge::Right.is_column());
         assert!(!PanelEdge::Top.is_column());
@@ -1255,6 +1273,7 @@ mod tests {
         let panel = |side| [DialogSize::Sm, DialogSize::Md, DialogSize::Lg].map(|s: DialogSize| s.extent(side).unwrap());
         assert_eq!(panel(PanelEdge::Left), [260.0, 360.0, 520.0]);
         assert_eq!(panel(PanelEdge::Bottom), [180.0, 300.0, 460.0]);
+        });
     }
 
     /// A sheet's three rungs climb — on a window whose half actually falls
@@ -1263,6 +1282,7 @@ mod tests {
     /// room is past the panel itself, which the clamp test below covers.
     #[test]
     fn the_sheet_rungs_climb() {
+        crate::on_test_cx(|| {
         let base = DialogSize::Md.extent(PanelEdge::Bottom).unwrap();
         let room = 500.0;
         let peek = detent_extent(SheetDetent::Collapsed, base, room);
@@ -1270,6 +1290,7 @@ mod tests {
         let full = detent_extent(SheetDetent::Expanded, base, room);
         assert!(peek < half && half < full, "{peek} {half} {full} must climb");
         assert_eq!(full, base, "expanded is what the panel's own size asks for");
+        });
     }
 
     /// Half the room is clamped into the two rungs either side of it: on a
@@ -1277,6 +1298,7 @@ mod tests {
     /// more than the panel ever asked for.
     #[test]
     fn the_half_rung_is_clamped_into_the_ones_it_sits_between() {
+        crate::on_test_cx(|| {
         let base = 300.0;
         assert_eq!(
             detent_extent(SheetDetent::Half, base, 60.0),
@@ -1288,11 +1310,13 @@ mod tests {
             base,
             "a tall window: half of it is past the panel, so the panel wins"
         );
+        });
     }
 
     /// A panel smaller than a peek never claims to be taller than it is.
     #[test]
     fn a_panel_shorter_than_a_peek_is_still_only_itself() {
+        crate::on_test_cx(|| {
         let base = 40.0;
         for rung in [SheetDetent::Collapsed, SheetDetent::Half, SheetDetent::Expanded] {
             assert!(
@@ -1300,27 +1324,32 @@ mod tests {
                 "{rung:?} must not exceed the panel's own size"
             );
         }
+        });
     }
 
     /// Letting go settles at the nearest rung.
     #[test]
     fn a_drag_settles_at_the_rung_it_is_nearest() {
+        crate::on_test_cx(|| {
         let (peek, half, full) = (96.0, 450.0, 300.0_f64.max(450.0));
         assert_eq!(settle_detent(100.0, peek, half, full), Some(SheetDetent::Collapsed));
         assert_eq!(settle_detent(440.0, peek, half, full), Some(SheetDetent::Half));
         assert_eq!(settle_detent(peek, peek, half, full), Some(SheetDetent::Collapsed));
+        });
     }
 
     /// Dragged most of the way down, letting go closes it rather than
     /// leaving a sliver on screen the pointer has already left.
     #[test]
     fn a_drag_below_the_lowest_rung_lets_the_sheet_go() {
+        crate::on_test_cx(|| {
         assert_eq!(settle_detent(10.0, 96.0, 450.0, 600.0), None);
         assert_eq!(settle_detent(0.0, 96.0, 450.0, 600.0), None);
         assert!(
             settle_detent(48.0, 96.0, 450.0, 600.0).is_some(),
             "exactly at the threshold still settles: dismissing is the far side of it"
         );
+        });
     }
 
     /// A page filled by a list-like button, the button that opens the
@@ -1366,6 +1395,7 @@ mod tests {
     /// dialog stands in the middle, with its answers and no handle.
     #[test]
     fn a_drawer_is_a_dialog_with_a_side_and_no_answers() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1424,6 +1454,7 @@ mod tests {
             dialog.as_dialog().close(&mut cx);
             target.draw(&mut cx, &root);
         }
+        });
     }
 
     /// The markup is read by nothing the compiler checks, and a mistake in
@@ -1431,6 +1462,7 @@ mod tests {
     /// held, the presets and the properties they are made of raise nothing.
     #[test]
     fn the_presets_and_their_properties_raise_no_script_error() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         cx.with_vm(|vm| {
             // Registering the library is every other widget's business too.
@@ -1450,12 +1482,14 @@ mod tests {
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "{errors:#?}");
         });
+        });
     }
 
     /// `side` alone puts a dialog on an edge: the alignment that centres a
     /// card does not move the panel, and the answers stay with it.
     #[test]
     fn a_dialog_given_a_side_stands_on_it_with_its_answers() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1482,12 +1516,14 @@ mod tests {
         let actions = cx.capture_actions(|cx| root.handle_event(cx, &key(KeyCode::ReturnKey), &mut Scope::empty()));
         assert_eq!(reports(&actions, &dialog), vec![DialogAction::Confirmed]);
         assert!(!dialog.as_dialog().is_open());
+        });
     }
 
     /// Return answers a dialog that has a default answer and is left to the
     /// inside of one that has none: a list in a drawer chooses with it.
     #[test]
     fn return_is_left_to_a_panel_with_no_answer() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1502,12 +1538,14 @@ mod tests {
         let actions = cx.capture_actions(|cx| root.handle_event(cx, &key(KeyCode::Escape), &mut Scope::empty()));
         assert_eq!(reports(&actions, &drawer), vec![DialogAction::Dismissed]);
         assert!(drawer.as_dialog().dismissed(&actions), "one report, so a lookup by widget finds it");
+        });
     }
 
     /// A panel given no time to slide stands in place on the frame it
     /// opens; one with time starts at its edge.
     #[test]
     fn a_drawer_given_no_time_to_slide_is_in_place_at_once() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1526,12 +1564,14 @@ mod tests {
             drawer.as_dialog().close(&mut cx);
             target.draw(&mut cx, &root);
         }
+        });
     }
 
     /// The keyboard goes back to the button that opened the drawer, though
     /// the page was drawn again while the drawer was out.
     #[test]
     fn closing_gives_the_keyboard_back_to_the_opener_after_the_page_redraws() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1551,6 +1591,7 @@ mod tests {
         root.widget(&cx, ids!(drawer)).as_dialog().close(&mut cx);
         settle_focus(&mut cx);
         assert!(cx.has_key_focus(opener.area()), "the keyboard went to {:?}, not the opener {:?}", cx.key_focus(), opener.area());
+        });
     }
 
     /// A press on a row in the drawer reaches the row, and a press on the
@@ -1558,6 +1599,7 @@ mod tests {
     /// is walked first; that list hears neither.
     #[test]
     fn a_press_in_the_drawer_never_reaches_the_list_under_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1591,6 +1633,7 @@ mod tests {
         assert_eq!(reports(&actions, &drawer), vec![DialogAction::Dismissed], "and says so once");
         assert!(drawer.as_dialog().dismissed(&actions), "so a lookup by widget finds the drawer's own report");
         assert_eq!(cx.sweep_lock_area(), None, "and gives the pointer back");
+        });
     }
 
     /// A press another control is holding is not the sheet's to use. The
@@ -1599,6 +1642,7 @@ mod tests {
     /// the end of a drag usually is — is not read as a press on the scrim.
     #[test]
     fn a_press_another_control_holds_neither_drags_the_sheet_nor_dismisses_it() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1642,6 +1686,63 @@ mod tests {
         let actions = cx.capture_actions(|cx| sheet.handle_event(cx, &release(outside), &mut Scope::empty()));
         assert_eq!(reports(&actions, &sheet), vec![], "no answer of any kind");
         assert!(sheet.as_dialog().is_open(), "the sheet stayed up");
+        });
+    }
+
+    /// A cancel that ends only some capture of a mouse press still held (a
+    /// list recycled the row the press landed on) leaves the dialog's
+    /// protection in place: the real release off the card, when it comes, is
+    /// still not read as a press on the scrim.
+    #[test]
+    fn a_partial_cancel_keeps_a_card_press_from_dismissing_on_its_release() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    sheet := BottomSheet{title: "Choices"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        open_in_place(&mut cx, &mut target, &root, ids!(sheet));
+        let sheet = root.widget(&cx, ids!(sheet));
+        let card = sheet.widget(&cx, ids!(content)).area().rect(&cx);
+        assert!(card.size.x > 0.0, "the card is drawn");
+        sheet.handle_event(&mut cx, &press(card.pos + card.size * 0.5), &mut Scope::empty());
+        // Some capture of the still-held press is cancelled — not the press.
+        let mouse: crate::event::DigitId = live_id!(mouse).into();
+        let partial = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, false);
+        sheet.handle_event(&mut cx, &partial, &mut Scope::empty());
+        let outside = dvec2(20.0, 20.0);
+        assert!(!card.contains(outside));
+        let actions = cx.capture_actions(|cx| sheet.handle_event(cx, &release(outside), &mut Scope::empty()));
+        assert_eq!(reports(&actions, &sheet), vec![], "the card press's release dismissed the sheet");
+        assert!(sheet.as_dialog().is_open());
+        });
+    }
+
+    /// A `FingerCancel` for `digit`; with `taken_away` the press itself was
+    /// cancelled first (`cancel_digit`), as a host or the OS does.
+    fn finger_cancel(cx: &mut Cx, digit: crate::event::DigitId, device: crate::event::DigitDevice, taken_away: bool) -> Event {
+        if taken_away {
+            cx.fingers.cancel_digit(digit);
+        }
+        Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device,
+            abs: dvec2(1.0, 1.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
+        })
     }
 
     /// A control that takes the pointer AFTER the drag started stops it
@@ -1651,6 +1752,7 @@ mod tests {
     /// and the panel goes back to where the press found it.
     #[test]
     fn a_sheet_lets_go_when_another_control_takes_the_pointer_mid_drag() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1702,6 +1804,7 @@ mod tests {
         });
         assert_eq!(reports(&actions, &sheet), vec![], "no rung was chosen by a pointer we did not own");
         assert!(sheet.as_dialog().is_open(), "and the sheet is still up");
+        });
     }
 
     /// The grabber is a handle: the sheet follows it, settles at the rung
@@ -1709,6 +1812,7 @@ mod tests {
     /// below the lowest one.
     #[test]
     fn a_sheet_follows_its_grabber_and_settles_on_a_rung() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = cx.with_vm(|vm| {
             let value = crate::script_eval!(vm, {
@@ -1759,5 +1863,6 @@ mod tests {
         let actions = cx.capture_actions(|cx| sheet.handle_event(cx, &release(held + dvec2(0.0, 280.0)), &mut Scope::empty()));
         assert_eq!(reports(&actions, &sheet), vec![DialogAction::Dismissed]);
         assert!(!sheet.as_dialog().is_open(), "pulled below the peek, the sheet goes back");
+        });
     }
 }

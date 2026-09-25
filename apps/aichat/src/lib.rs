@@ -16,6 +16,7 @@ use makepad_widgets::ai_slot::AiSlotRequests;
 use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
+pub mod attach;
 pub mod bus;
 #[cfg(feature = "gen")]
 pub mod gen;

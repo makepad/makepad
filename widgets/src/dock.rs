@@ -946,6 +946,21 @@ impl Dock {
                 let Some(tab_rect) = tab_bar.tab_bar.tab_rect(cx, *tab_id) else {
                     continue;
                 };
+                // A tab bar with more tabs than room scrolls them sideways,
+                // and a tab past its edge is drawn clipped (or not at all).
+                // What is reported is the part a person could click: a tab
+                // half out of view has a rect whose centre is still ON it,
+                // not on whatever the neighbouring panel shows there, and a
+                // tab wholly out of view is not reported as present. Only the
+                // scroll axis is clipped: a tab's own height is its own, and
+                // the bar's box does not say where the label sits in it.
+                let tab_rect = tab_rect.clip((
+                    dvec2(bar_rect.pos.x, tab_rect.pos.y),
+                    dvec2(bar_rect.pos.x + bar_rect.size.x, tab_rect.pos.y + tab_rect.size.y),
+                ));
+                if tab_rect.size.x < 1.0 {
+                    continue;
+                }
                 let title = match self.dock_items.get(tab_id) {
                     Some(DockItem::Tab { name, .. }) => name.clone(),
                     _ => String::new(),

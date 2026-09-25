@@ -14,13 +14,6 @@ pub(crate) struct GaussStack {
     chain: GaussChain,
 }
 
-pub(crate) fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
-    match os_type {
-        OsType::Android(_) => 1.0,
-        _ => 0.0,
-    }
-}
-
 impl GaussStack {
     pub(crate) fn new(cx: &mut Cx) -> Self {
         let scene_pass = DrawPass::new_with_name(cx, "gauss_scene");
@@ -200,8 +193,9 @@ impl GaussStack {
     pub(crate) fn draw_scene_at(&mut self, cx: &mut Cx2d, scene: &mut DrawGaussScene, rect: Rect) {
         scene.draw_vars.set_uniform(cx, live_id!(source_offset), &[0.0, 0.0]);
         scene.draw_vars.set_uniform(cx, live_id!(source_scale), &[1.0, 1.0]);
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
-        scene.draw_vars.set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
+        // A render texture is stored top-left on every backend (the
+        // platform's Y law), so the scene is sampled as stored.
+        scene.draw_vars.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
         scene.draw_vars.set_texture(0, &self.scene_texture);
         scene.draw_abs(cx, rect);
     }
@@ -229,7 +223,7 @@ impl GaussStack {
                 (rect.size.y / root_size.y) as f32,
             ],
         );
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 0.0;
         scene
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);

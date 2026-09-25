@@ -1,5 +1,6 @@
 mod compile;
 mod dyn_pack;
+mod proc_pack;
 pub use dyn_pack::rustc_wrapper as android_rustc_wrapper;
 mod sdk;
 
@@ -831,6 +832,20 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
+        "proc-pack" => proc_pack::proc_pack(
+            &sdk_dir,
+            host_os,
+            package_name,
+            app_label,
+            version_code,
+            version_name,
+            min_sdk_version,
+            &args[1..],
+            &targets,
+            &variant,
+            &config,
+            &urls,
+        ),
         "dyn-pack" => dyn_pack::dyn_pack(
             &sdk_dir,
             host_os,

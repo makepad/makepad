@@ -1497,11 +1497,16 @@ impl ImageRef {
 
 #[cfg(test)]
 mod flattened_walk_collision_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
 
     #[test]
     fn image_exposes_walk_bounds_and_distinct_placeholder_dimensions() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             Image::script_proto(vm);
@@ -1524,11 +1529,16 @@ mod flattened_walk_collision_tests {
                 assert!(props.contains_key(&field), "missing flattened/reflected field {field:?}");
             }
         });
+        });
     }
 }
 
 #[cfg(test)]
 mod framing_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
 
@@ -1588,8 +1598,8 @@ mod framing_tests {
     /// contain, smaller than cover, still centred.
     #[test]
     fn crop_dials_between_the_whole_picture_and_a_covering_one() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         for (crop, scale, pan) in [
             (1.0, (0.5, 1.0), (0.25, 0.0)),
@@ -1607,6 +1617,7 @@ mod framing_tests {
                 "crop {crop}: offset {fit_pan:?} is not {pan:?}"
             );
         }
+        });
     }
 
     /// A picture between contain and cover is drawn at a size between the
@@ -1618,8 +1629,8 @@ mod framing_tests {
     /// window is always half as wide as it is tall.
     #[test]
     fn the_dial_never_squashes_the_picture() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         for crop in [0.0, 0.25, 0.5, 0.75, 1.0] {
             image.crop = crop;
@@ -1629,6 +1640,7 @@ mod framing_tests {
                 "crop {crop}: the window is {scale:?}, which is not the picture's shape"
             );
         }
+        });
     }
 
     /// The bar is drawn where the framing left the picture behind, so a
@@ -1638,11 +1650,11 @@ mod framing_tests {
     /// fit has always done.
     #[test]
     fn only_a_dialled_back_crop_asks_for_a_bar() {
+        crate::on_test_cx(|| {
         fn frames_the_whole_box(scale: Vec2f, pan: Vec2f) -> bool {
             pan.x >= 0.0 && pan.y >= 0.0 && pan.x + scale.x <= 1.0 && pan.y + scale.y <= 1.0
         }
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         for crop in [1.0, 2.0, f64::INFINITY, f64::NAN] {
             image.crop = crop;
@@ -1654,6 +1666,7 @@ mod framing_tests {
             let (scale, pan) = draw_once(&mut cx, &mut image);
             assert!(!frames_the_whole_box(scale, pan), "crop {crop} left no bar");
         }
+        });
     }
 
     /// Every other fit resizes the rect and hands the picture the whole of
@@ -1661,8 +1674,8 @@ mod framing_tests {
     /// the bar off every picture in the library that never asked for one.
     #[test]
     fn the_other_fits_frame_nothing_whatever_the_dial_says() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         for fit in [
             ImageFit::Size,
@@ -1681,6 +1694,7 @@ mod framing_tests {
                 "{fit:?} framed the picture: window {scale:?} at {pan:?}"
             );
         }
+        });
     }
 
     /// What a caller gets by writing `Image{}`: no radius, no stroke, a
@@ -1688,7 +1702,8 @@ mod framing_tests {
     /// quad this widget has always drawn.
     #[test]
     fn an_unasked_image_is_the_plain_quad() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let image = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let _ = makepad_platform::shader_error::take();
@@ -1708,6 +1723,7 @@ mod framing_tests {
         );
         assert_eq!(image.slice_modes(), (ImageSliceEdge::Stretch, ImageSliceCenter::Stretch));
         assert_eq!(image.slice_scale(), (1.0, ImageSliceUnits::Points));
+        });
     }
 
     /// The rounding, the stroke and the bar are read off the draw struct by
@@ -1717,7 +1733,8 @@ mod framing_tests {
     /// also what turns a mistake in the pixel function into a failed test.
     #[test]
     fn a_rounded_and_stroked_picture_carries_what_the_dsl_wrote() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let image = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let _ = makepad_platform::shader_error::take();
@@ -1755,6 +1772,7 @@ mod framing_tests {
         assert_eq!((slice.left, slice.top, slice.right, slice.bottom), (4.0, 5.0, 6.0, 7.0));
         assert_eq!(image.slice_modes(), (ImageSliceEdge::Tile, ImageSliceCenter::Hidden));
         assert_eq!(image.slice_scale(), (2.0, ImageSliceUnits::DevicePixels));
+        });
     }
 
     /// A dial that is not a number is the crop this fit has always done, and
@@ -1763,8 +1781,8 @@ mod framing_tests {
     /// taken nowhere at all.
     #[test]
     fn a_dial_that_is_not_a_number_is_the_crop_it_always_did() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         image.crop = f64::NAN;
         let (scale, pan) = draw_once(&mut cx, &mut image);
@@ -1772,6 +1790,7 @@ mod framing_tests {
             close(scale.x, 0.5) && close(scale.y, 1.0) && close(pan.x, 0.25) && close(pan.y, 0.0),
             "a dial that is not a number framed {scale:?} at {pan:?}"
         );
+        });
     }
 
     /// The dial, the rounding, the stroke and the bar are all the bitmap
@@ -1781,8 +1800,8 @@ mod framing_tests {
     /// the settings are perfectly good names either way.
     #[test]
     fn a_vector_source_is_drawn_by_the_vector_call() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = wide_picture_in_a_square(&mut cx);
         // A dial a bitmap of this shape would frame at (1, 2) offset (0, -0.5).
         image.crop = 0.0;
@@ -1797,6 +1816,7 @@ mod framing_tests {
             close(scale.x, 1.0) && close(scale.y, 1.0) && close(pan.x, 0.0) && close(pan.y, 0.0),
             "a vector source reached the bitmap framing: window {scale:?} at {pan:?}"
         );
+        });
     }
 
     /// A plain texture of the given size, installed the way a caller installs
@@ -1844,8 +1864,8 @@ mod framing_tests {
     /// them is drawn at, and the two modes the markup asked for.
     #[test]
     fn a_sliced_picture_keeps_its_box_and_its_framing_at_rest() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = sliced_panel(&mut cx);
         install_texture(&mut cx, &mut image, 64, 64);
         let (scale, pan) = draw_once(&mut cx, &mut image);
@@ -1854,6 +1874,7 @@ mod framing_tests {
         assert_eq!(image.draw_bg.slice_texel_points, 1.0);
         assert_eq!(image.draw_bg.slice_mode, vec2(3.0, 3.0), "a tiled middle between rounded edges takes their spacing");
         assert_eq!(image.draw_bg.rect_size, vec2(100.0, 100.0), "a sliced picture did not take its box");
+        });
     }
 
     /// The shader slices whenever `slice_mode.x` is above zero, so every
@@ -1861,8 +1882,8 @@ mod framing_tests {
     /// from slicing to another fit would keep drawing sliced.
     #[test]
     fn only_a_sliced_fit_asks_the_shader_to_slice() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = sliced_panel(&mut cx);
         install_texture(&mut cx, &mut image, 64, 64);
         draw_once(&mut cx, &mut image);
@@ -1880,6 +1901,7 @@ mod framing_tests {
             draw_once(&mut cx, &mut image);
             assert_eq!(image.draw_bg.slice_mode.x, 0.0, "{fit:?} asked the shader to slice");
         }
+        });
     }
 
     /// With nothing bound there is no texture to measure an inset in, and a
@@ -1887,8 +1909,8 @@ mod framing_tests {
     /// replace wholesale. Both draw the path they drew before.
     #[test]
     fn an_empty_or_rotated_picture_is_not_sliced() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(crate::script_mod);
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = sliced_panel(&mut cx);
         draw_once(&mut cx, &mut image);
         assert_eq!(image.draw_bg.slice_mode.x, 0.0, "a picture with nothing loaded was sliced");
@@ -1900,6 +1922,7 @@ mod framing_tests {
         image.draw_bg.image_dim_w = 0.0;
         draw_once(&mut cx, &mut image);
         assert!(image.draw_bg.slice_mode.x > 0.0, "the same picture unrotated was not sliced");
+        });
     }
 
     /// `Fit` on a sliced picture is the size `ImageFit::Size` would give it,
@@ -1907,7 +1930,8 @@ mod framing_tests {
     /// been given a size is the texture as drawn, corners and all.
     #[test]
     fn a_fit_axis_is_the_sliced_picture_at_its_natural_size() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let source = script! {
@@ -1926,6 +1950,7 @@ mod framing_tests {
         draw_once(&mut cx, &mut image);
         assert_eq!(image.draw_bg.rect_size, vec2(128.0, 96.0));
         assert_eq!(image.draw_bg.slice_texel_points, 2.0);
+        });
     }
 
     /// A sprite sheet's cell, or an animated texture's frame, is the part of
@@ -1934,7 +1959,8 @@ mod framing_tests {
     /// cannot fit and both pairs are scaled down to the window they are in.
     #[test]
     fn a_sprite_window_is_sliced_inside_itself() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let mut image = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let source = script! {
@@ -1952,6 +1978,7 @@ mod framing_tests {
         install_texture(&mut cx, &mut image, 64, 48);
         draw_once(&mut cx, &mut image);
         assert_eq!(image.draw_bg.slice_inset, vec4(16.0, 24.0, 16.0, 24.0));
+        });
     }
 }
 
@@ -1964,6 +1991,10 @@ mod framing_tests {
 /// to close.
 #[cfg(test)]
 mod shader_tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
 
     /// The picture's fragment source, compiled for the web backend — the one
@@ -2049,7 +2080,8 @@ mod shader_tests {
     /// clamp are the axis function's own, so they are pinned there.
     #[test]
     fn a_sliced_picture_reads_through_the_corrected_helper() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let source = fragment_source(&mut cx);
         let branch = block_from(&source, "rustinst_slice_mode.x > 0.0", 3);
         assert!(
@@ -2077,6 +2109,7 @@ mod shader_tests {
             !source.contains("sample2d("),
             "a read in the picture's shader skips the channel-order correction"
         );
+        });
     }
 
     /// The headline behaviour: the picture clips itself to a rounded box and
@@ -2084,7 +2117,8 @@ mod shader_tests {
     /// nowhere else.
     #[test]
     fn the_picture_clips_and_strokes_itself() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let source = fragment_source(&mut cx);
         // The box a view draws: inset by the stroke on all four sides and
         // rounded by the radius the caller wrote.
@@ -2119,6 +2153,7 @@ mod shader_tests {
             plain.contains("rustinst_border_size <= 0.0"),
             "an unasked picture no longer returns before the shape work: {plain}"
         );
+        });
     }
 
     /// `sample_mode` reads the texture a whole texel at a time by snapping
@@ -2129,7 +2164,8 @@ mod shader_tests {
     /// swapped. Zero reads straight through, as the picture always did.
     #[test]
     fn a_whole_texel_read_snaps_and_keeps_the_channel_order() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let source = fragment_source(&mut cx);
         assert!(
             source.contains("sample2d_bgra("),
@@ -2164,6 +2200,7 @@ mod shader_tests {
             source.contains("rustinst_sample_mode == 0.0"),
             "a picture that asked for nothing no longer reads straight through"
         );
+        });
     }
 
     /// The bar is decided by the FRAMING — `fit_scale` and `fit_pan` — and
@@ -2173,7 +2210,8 @@ mod shader_tests {
     /// mapping and its own test.
     #[test]
     fn the_framing_is_what_turns_the_bar_on() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let source = fragment_source(&mut cx);
         // The framing, the test on it and the bar, in the branch that says
         // the picture is not rotated.
@@ -2205,6 +2243,7 @@ mod shader_tests {
             !read.contains("rustinst_letterbox_color"),
             "the bar moved onto the final coordinate, where a pan would grow one: {read}"
         );
+        });
     }
 
     /// The module's markup names the slice enums, and a name the markup
@@ -2213,7 +2252,8 @@ mod shader_tests {
     /// the module evaluates clean.
     #[test]
     fn the_image_markup_evaluates_without_script_errors() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         cx.with_vm(|vm| {
             vm.bx.captured_errors = Some(Vec::new());
             crate::script_mod(vm);
@@ -2224,6 +2264,7 @@ mod shader_tests {
             assert_eq!(image.slice_edge, ImageSliceEdge::Stretch);
             assert_eq!(image.slice_center, ImageSliceCenter::Stretch);
             assert_eq!(image.slice_units, ImageSliceUnits::Points);
+        });
         });
     }
 }

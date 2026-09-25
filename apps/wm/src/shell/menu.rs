@@ -484,11 +484,13 @@ impl MenuModel {
         }
         items.extend(launcher::apps(launchable));
         items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
+        // One row per style. Dark or light is the appearance toggle's to
+        // say, not a second row here, and the black-orange theme is not
+        // offered from this menu.
         for style in crate::desktop::DesktopStyle::ALL {
+            if style == crate::desktop::DesktopStyle::BlackOrange { continue; }
             items.push(MenuItem::new(&format!("desktop.{}",style.id()),style.label(),MenuKind::Action));
         }
-        items.push(MenuItem::new("desktop.macos-dark","macOS · Dark",MenuKind::Action));
-        items.push(MenuItem::new("desktop.windows-dark","Windows · Dark",MenuKind::Action));
         if path.starts_with("style.theme") {
             items.extend(theme_items());
         }
@@ -1390,6 +1392,13 @@ impl ShellMenu {
         if let Some(target) = self.model.activate() {
             self.model.close();
             cx.widget_action(self.uid, ShellMenuAction::Activate(target));
+        } else {
+            // Descended into a submenu, or nothing to activate: said, so a
+            // driver that typed a name and pressed Return can tell which.
+            log!(
+                "wm: shell menu Return activated nothing (filter {:?}, {} rows, selected {})",
+                self.model.filter, self.model.rows.len(), self.model.sel
+            );
         }
         self.gate.reset();
         self.redraw(cx);
@@ -1406,6 +1415,16 @@ impl ShellMenu {
             return self.next_pointer(cx, event);
         }
         match event {
+            // The OS took the menu's touch away: the press ends here — no row
+            // activates, the menu stays as it is — and the next touch starts
+            // fresh.
+            Event::FingerCancel(e) => {
+                let owned = self.touch_press.is_some_and(|(uid, _, _)| e.digit_id == live_id_num!(touch, uid).into());
+                if owned {
+                    self.touch_press = None;
+                }
+                return owned;
+            }
             Event::TouchUpdate(update) => {
                 use makepad_platform::event::TouchState;
                 for point in &update.touches {

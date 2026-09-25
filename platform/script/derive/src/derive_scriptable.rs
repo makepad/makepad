@@ -180,7 +180,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .any(|a| a.name == "splat" || a.name == "walk" || a.name == "layout")
+                .any(|a| a.name == "script_splat" || a.name == "walk" || a.name == "layout")
             {
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
@@ -260,11 +260,11 @@ fn derive_script_impl_inner(
                     .ident(&field.name)
                     .add(".script_to_value_props(vm, obj);");
             }
-            // Also cascade walk/layout/splat fields' properties to the object
+            // Also cascade walk/layout/script_splat fields' properties to the object
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("self.")
@@ -397,7 +397,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("<")
@@ -627,11 +627,7 @@ fn derive_script_impl_inner(
                     tb.add("vm.bx.heap.set_value(enum_object, id!(")
                         .ident(&item.name)
                         .add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
-                    // Which enum this variant belongs to. The variant id is
-                    // the root of the proto chain; the enum's name is nowhere
-                    // else, and a reflected value has to print as Size.Fill
-                    // rather than as a bag of fields. Hidden: `__` keys are
-                    // invisible to reflection and to type checks.
+                    // Reflection needs the enum name as well as the variant's root id.
                     tb.add("vm.bx.heap.set_value(bare, id_lut!(__enum).into(), id_lut!(")
                         .ident(&enum_name)
                         .add(").into(), vm.bx.threads.cur().trap.pass());");
@@ -649,11 +645,6 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
-                    // Which enum this variant belongs to. The variant id is
-                    // the root of the proto chain; the enum's name is nowhere
-                    // else, and a reflected value has to print as Size.Fill
-                    // rather than as a bag of fields. Hidden: `__` keys are
-                    // invisible to reflection and to type checks.
                     tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
                         .ident(&enum_name)
                         .add(").into(), vm.bx.threads.cur().trap.pass());");
@@ -713,13 +704,7 @@ fn derive_script_impl_inner(
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None, is_repr_u32_enum: false};");
                     tb.add("let ty_index = vm.bx.heap.register_type(None, ty_check);");
-                    // Which enum this variant belongs to. The variant id is
-                    // the root of the proto chain; the enum's name is nowhere
-                    // else, and a reflected value has to print as Size.Fill
-                    // rather than as a bag of fields. Hidden: `__` keys are
-                    // invisible to reflection and to type checks. Set BEFORE the
-                    // type is attached: a typed object refuses a key its props do
-                    // not list.
+                    // Set hidden metadata before attaching the restricted property type.
                     tb.add("vm.bx.heap.set_value(named, id_lut!(__enum).into(), id_lut!(")
                         .ident(&enum_name)
                         .add(").into(), vm.bx.threads.cur().trap.pass());");
@@ -881,11 +866,6 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
-                    // Which enum this variant belongs to. The variant id is
-                    // the root of the proto chain; the enum's name is nowhere
-                    // else, and a reflected value has to print as Size.Fill
-                    // rather than as a bag of fields. Hidden: `__` keys are
-                    // invisible to reflection and to type checks.
                     tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
                         .ident(&enum_name)
                         .add(").into(), vm.bx.threads.cur().trap.pass());");

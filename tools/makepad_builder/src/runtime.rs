@@ -65,13 +65,8 @@ pub fn record_rust_choice(root: &Path, choice: &RustChoice) -> Result<(), String
     if cfg!(windows) { return Err("Windows always uses the private Rust toolchain".into()); }
     let file = root.join("selected-rust");
     let text = match choice {
-        RustChoice::Undecided => {
-            return match fs::remove_file(&file) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(format!("Clear selected Rust: {error}")),
-            };
-        }
+        // "Not asked yet" is the absence of a choice; nothing records it.
+        RustChoice::Undecided => return Err("An undecided Rust choice is not recorded".into()),
         RustChoice::Private => "private".to_owned(),
         RustChoice::External(sysroot) => sysroot.clone(),
     };
@@ -388,12 +383,19 @@ impl Environment {
     }
     pub fn build(&self, release: &Release) -> Result<(), String> {
         let cargo = self.vars.get("CARGO").ok_or("Missing Cargo path")?;
+        // Windows executables carry the app's icon and name as resources.
+        // `cargo rustc` passes the linker input to the final link only, so
+        // dependencies in the shared target keep their fingerprints.
+        #[cfg(windows)]
+        let resources = Some(crate::app_icon::windows_resources(&self.root, &self.build, release)?);
+        #[cfg(not(windows))]
+        let resources: Option<PathBuf> = None;
         let mut cmd = Command::new(cargo);
         cmd.current_dir(&self.cwd).envs(&self.vars);
         isolate(&mut cmd);
         cmd.env("MAKEPAD_PACKAGE_DIR", ".")
             .args([
-                "build",
+                if resources.is_some() { "rustc" } else { "build" },
                 "--release",
                 "--message-format=json-render-diagnostics",
                 "-p",
@@ -401,8 +403,14 @@ impl Environment {
                 "--bin",
                 &release.binary,
             ]);
-        if self.cwd.join("Cargo.lock").is_file() { cmd.arg("--locked"); }
+        // The pinned repository commits are the lock: once a Cargo.lock exists,
+        // build offline and let Cargo bring that lockfile in line with the
+        // pinned path crates (--locked failed when an app's own lock went stale).
+        if self.cwd.join("Cargo.lock").is_file() { cmd.arg("--offline"); }
         if !release.features.is_empty() { cmd.args(["--features", &release.features.join(",")]); }
+        if let Some(resources) = &resources {
+            cmd.args(["--", "-C"]).arg(format!("link-arg={}", resources.display()));
+        }
         let status = run_build_logged(&mut cmd, &self.build.join("builder-build.log"))?;
         if !status.success() {
             return Err(format!("Build failed: {status}"));
@@ -510,19 +518,116 @@ pub fn isolate(command: &mut Command) {
     }
 }
 
+/// The POSIX bootstrap compiles this Builder from the pinned Makepad tree and
+/// records that tree in `.builder-version` as "<commit> <rust> <triple>".
+/// The catalog moves on while an installation lives, so once the release
+/// checked out for Scope pins another Makepad commit the Builder is compiled
+/// again from that tree, exactly as the bootstrap did, and the bootstrap's
+/// own pins move along: its fast path then accepts the new binary and its
+/// full path, should it ever run again, starts from these sources. Windows
+/// ships a prebuilt Builder and has no such file, so nothing happens there.
+/// The compiled binary serves the next start; this process keeps running.
+/// Returns a line for the activity pane when the Builder changed.
+pub fn update_builder(environment: &Environment, release: &Release) -> Result<Option<String>, String> {
+    let root = environment.root.as_path();
+    let recorded = match fs::read_to_string(root.join(".builder-version")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Read .builder-version: {error}")),
+    };
+    let mut fields = recorded.split_whitespace();
+    let (Some(built), Some(_), Some(triple)) = (fields.next(), fields.next(), fields.next()) else {
+        return Err("Unreadable .builder-version".into());
+    };
+    let Some(makepad) = release.repositories.iter().find(|repo| repo.name == "makepad") else {
+        return Ok(None);
+    };
+    if built == makepad.commit {
+        return Ok(None);
+    }
+    let directory = release.directory(root);
+    let cargo = environment.vars.get("CARGO").ok_or("Missing Cargo path")?;
+    let mut command = Command::new(cargo);
+    command.current_dir(directory.join(&makepad.path)).envs(&environment.vars);
+    isolate(&mut command);
+    command.args(["build", "--release", "-p", "makepad-loader", "--no-default-features", "--bin", "makepad-builder-cli"]);
+    progress::stage("Compiling Rust", "Makepad Builder", 0.0);
+    let status = run_build_logged(&mut command, &environment.build.join("builder-update.log"))?;
+    if !status.success() {
+        return Err(format!("Builder build failed: {status}"));
+    }
+    let next = root.join("makepad-builder.next");
+    fs::copy(environment.build.join("release").join(exe("makepad-builder-cli")), &next).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&next, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
+    replace_file(&next, &root.join("makepad-builder"))?;
+    fs::write(root.join(".builder-version"), format!("{} {} {triple}", makepad.commit, release.rust)).map_err(|e| e.to_string())?;
+    let receipt = fs::read_to_string(directory.join(".builder-repositories").join(&makepad.name)).map_err(|e| e.to_string())?;
+    let label = directory.file_name().and_then(|name| name.to_str()).ok_or("Source snapshot has no label")?;
+    let pinned = pin_bootstrap(
+        &root.join("bootstrap-builder.sh"),
+        &[("rust", &release.rust), ("commit", &makepad.commit), ("release", label), ("receipt", receipt.trim())],
+    )?;
+    Ok(Some(format!(
+        "Builder compiled from Makepad {}; the next start uses it{}",
+        &makepad.commit[..12],
+        if pinned { "." } else { ", and bootstrap-builder.sh keeps its original pins." }
+    )))
+}
+
+/// Move the `builder_<key>='…'` assignments of the installed bootstrap to
+/// new values, all of them or none: a script without the expected lines is
+/// left as it is and false comes back. The values are commits, versions,
+/// labels and receipts, so none of them needs quoting.
+fn pin_bootstrap(script: &Path, pins: &[(&str, &str)]) -> Result<bool, String> {
+    let text = match fs::read_to_string(script) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Read {}: {error}", script.display())),
+    };
+    let mut found = 0;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        match pins.iter().find(|(key, _)| line.starts_with(&format!("builder_{key}='"))) {
+            Some((key, value)) => {
+                found += 1;
+                lines.push(format!("builder_{key}='{value}'"));
+            }
+            None => lines.push(line.to_owned()),
+        }
+    }
+    if found != pins.len() {
+        return Ok(false);
+    }
+    let next = script.with_extension("sh.next");
+    fs::write(&next, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+    let mode = fs::metadata(script).map_err(|e| e.to_string())?.permissions();
+    fs::set_permissions(&next, mode).map_err(|e| e.to_string())?;
+    replace_file(&next, script)?;
+    Ok(true)
+}
+
 fn replace_file(next: &Path, destination: &Path) -> Result<(), String> {
     // Windows cannot replace an existing file with std::fs::rename.
+    // A running executable can be renamed but not overwritten, so the old
+    // file moves aside first (replacing any older .previous) and the new one
+    // takes its name.
     let backup = destination.with_extension("previous");
     let existed = destination.is_file();
     if existed {
-        if backup.exists() { fs::remove_file(&backup).map_err(|e| e.to_string())?; }
         fs::rename(destination, &backup).map_err(|e| e.to_string())?;
     }
     if let Err(error) = fs::rename(next, destination) {
         if existed { let _ = fs::rename(&backup, destination); }
         return Err(error.to_string());
     }
-    if existed { let _ = fs::remove_file(backup); }
+    // Still running programs keep their .previous file until the next update.
+    if let (true, Some(folder)) = (existed, destination.parent()) {
+        let _ = crate::remove_inside(folder, &backup);
+    }
     Ok(())
 }
 /// Console applications launched for setup/build must not show a second

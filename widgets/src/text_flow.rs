@@ -1377,7 +1377,8 @@ impl Widget for TextFlow {
             Hit::FingerUp(fe) => {
                 self.is_selecting = false;
                 self.selection_word_anchor = None;
-                if fe.device.is_touch() {
+                // A press taken away offers no clipboard actions.
+                if fe.device.is_touch() && !fe.cancelled {
                     let has_selection = self.has_selection();
                     if has_selection {
                         let selection_rect = self.selection_clipboard_rect(cx);
@@ -2887,7 +2888,6 @@ impl Widget for TextFlowLink {
 #[cfg(test)]
 mod table_structure_tests {
     use super::*;
-    use crate::makepad_platform::*;
     use crate::script_eval;
 
     /// `Markdown`, `Html` and `RichTextEditor` reach TextFlow through a Rust

@@ -86,7 +86,8 @@ fn pack(repo: &Path, name: &str, path: &str, out: &Path, snapshot: bool) -> Resu
             Some(format!("Builder source snapshot of {base}\n").as_bytes()),
             None,
         )?)?;
-        let _ = fs::remove_file(index);
+        // The temporary index this command wrote in its own output folder.
+        let _ = crate::remove_inside(out, &index);
         commit
     } else {
         base.clone()

@@ -3557,6 +3557,14 @@ impl FontFamily {
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
+                crate::trace!(
+                    "font",
+                    "family={:?} member={} path={:?} bytes={:?}",
+                    self.id.0,
+                    member.id,
+                    member.resource_path,
+                    font_data.as_ref().map(|d| d.len())
+                );
 
                 if let Some(data) = font_data {
                     if std::env::var_os("MAKEPAD_TRACE_FONT_LOAD").is_some() {
@@ -3606,6 +3614,13 @@ impl FontFamily {
             }
         }
 
+        crate::trace!(
+            "font",
+            "family={:?} defined with {}/{} members",
+            self.id.0,
+            font_ids.len(),
+            expected_member_count
+        );
         fonts.set_font_family_definition(
             family_id,
             FontFamilyDefinition {
@@ -3818,6 +3833,8 @@ impl ScriptHook for FontFamily {
                         _ => None,
                     },
                 });
+            } else {
+                crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);
             }
         }
 

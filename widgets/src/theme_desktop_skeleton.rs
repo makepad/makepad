@@ -419,6 +419,45 @@ script_mod! {
         color_inverse_primary: #xBBBBBBFF
         color_scrim: #x000000FF
         color_elevation_shadow: #x000000FF
+
+        // MATERIAL
+        // Off. The moulded stylesheets raise material_level; every value
+        // below is the default they start from, not a look this theme wears.
+        material_level: 0.
+        material_light_x: -0.35
+        material_light_y: -0.55
+        material_light_z: 0.76
+        material_light_intensity: 1.0
+        material_led_radius: 24.
+        material_led_intensity: 1.0
+        material_bevel_width: 3.
+        material_bevel_curve: 0.35
+        material_specular: 0.25
+        material_roughness: 0.55
+        material_ao: 0.35
+        material_rim: 0.5
+        material_gloss: 0.
+        material_glow: 0.
+        material_ink_glow: 0.
+        material_ink_lift: 1.6
+        material_face_gradient: 0.
+        material_hairline: 0.
+        material_ao_reach: 1.
+        material_inner_shadow: 0.
+        material_inner_radius: 6.
+        material_shadow: 0.
+        material_shadow_blur: 8.
+        material_shadow_falloff: 1.
+        material_contact_ao: 0.
+        material_ground_lip: 0.
+        material_press_invert: 0.
+        material_raise: 3.
+        material_sink: 3.
+        material_press_depth: -6.
+        material_margin: 0.
+        color_material_light: #xFFFFFFFF
+        color_material_shadow: #x404040FF
+        color_material_glow: #x00A0A0FF
         // Surface and outline roles, the light mapping over the ladder above.
         color_surface: #xDDDDDDFF
         color_surface_container: #xEEEEEEFF

@@ -16,6 +16,7 @@ pub struct Options {
     pub ignore_caps: bool,
     pub byte_based: bool,
     pub reversed: bool,
+    pub ascii_word_boundary: bool,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ struct Compiler<'a> {
     ignore_caps: bool,
     reversed: bool,
     byte_based: bool,
+    ascii_word_boundary: bool,
     emitter: Emitter,
     frag_stack: &'a mut Vec<Frag>,
     has_word_boundary: bool,
@@ -76,6 +78,7 @@ impl<'a> Compiler<'a> {
             ignore_caps: options.ignore_caps,
             byte_based: options.byte_based,
             reversed: options.reversed,
+            ascii_word_boundary: options.ascii_word_boundary,
             emitter: Emitter { insts: Vec::new() },
             frag_stack: &mut cache.frag_stack,
             has_word_boundary: false,
@@ -291,6 +294,7 @@ impl<'a> Compiler<'a> {
             start: frag.start,
             byte_classes: self.byte_classes_builder.build(),
             has_word_boundary: self.has_word_boundary,
+            ascii_word_boundary: self.ascii_word_boundary,
             slot_count: self.slot_count,
         }
     }

@@ -1023,7 +1023,7 @@ impl Widget for CommandPalette {
                     self.redraw_overlay(cx);
                 }
             }
-            Hit::FingerUp(fe) if fe.is_primary_hit() => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() && !fe.cancelled => {
                 let row = self
                     .rows
                     .iter()

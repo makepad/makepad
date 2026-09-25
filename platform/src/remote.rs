@@ -115,6 +115,14 @@ mod imp {
     /// quiet on its own, a caller that draws something from it must keep
     /// asking for frames until it does.
     pub fn hands_off_active() -> bool {
+        // The marker is for a person watching the window. A hidden window has
+        // no watcher, and there the frame only lands in the grabs, where it
+        // changes what a pixel test or a vision check sees from one capture
+        // to the next (present within three seconds of a click, absent after).
+        static HIDDEN: OnceLock<bool> = OnceLock::new();
+        if *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()) {
+            return false;
+        }
         if HANDS_OFF.load(Ordering::Relaxed) {
             return true;
         }
@@ -301,6 +309,8 @@ mod imp {
             return;
         }
         let len = job.pixels.len();
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if GRAB_BYTES
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(len)
@@ -479,6 +489,13 @@ mod imp {
         /// The window's own maximise (macOS: toggleFullScreen) — the test
         /// hook for the maximise/occlusion proof.
         Maximize,
+        /// Resize the window's inner size (points): responsive-layout checks
+        /// without relaunching.
+        Resize(f64, f64),
+        /// Ask the window what the OS asks before a native press: is this
+        /// point a window drag (Caption) or the app's (Client)? Remote
+        /// clicks skip that question, so this is how a check sees it.
+        DragQuery(f64, f64),
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -1130,20 +1147,18 @@ mod imp {
             pending |= present_captures(cx, &mut present);
             if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
                 cx.request_remote_window_present(window);
+                // The input has been applied above, whatever the present
+                // does: a frame that cannot be submitted now (the window is
+                // busy presenting) or a pass that stays dirty is painted on
+                // a later beat, and the waiters resolve on that repaint. An
+                // answer of "retry" here made drivers send the input again,
+                // and a busy app took every key twice ("bbrowser").
                 match present(cx, window) {
-                    Some(false) => {
-                        FRAME_WAITERS.with_borrow_mut(|waiters| {
-                            for (_, tx, _, _) in waiters.drain(..) {
-                                let _ = tx.send(Reply::Err(
-                                    "requested input frame could not be submitted; retry".into(),
-                                ));
-                            }
-                        });
-                    }
-                    // the pass stays dirty; the next beat paints it and the
-                    // waiters resolve on its repaint
-                    None => pending = true,
                     Some(true) => {}
+                    Some(false) | None => {
+                        cx.request_remote_window_present(window);
+                        pending = true;
+                    }
                 }
             }
             resolve_frame_waiters(cx);
@@ -1478,6 +1493,22 @@ mod imp {
                         Input::Maximize => {
                             cx.push_unique_platform_op(crate::cx_api::CxOsOp::MaximizeWindow(window_id));
                             input_result = Some("{\"ok\":1,\"maximize\":1}".to_string());
+                            cx.redraw_all();
+                            continue;
+                        }
+                        Input::DragQuery(x, y) => {
+                            let response = std::rc::Rc::new(std::cell::Cell::new(crate::event::WindowDragQueryResponse::NoAnswer));
+                            cx.call_event_handler(&crate::event::Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
+                                window_id,
+                                abs: crate::makepad_math::dvec2(x, y),
+                                response: response.clone(),
+                            }));
+                            input_result = Some(format!("{{\"ok\":1,\"drag\":\"{:?}\"}}", response.get()));
+                            continue;
+                        }
+                        Input::Resize(w, h) => {
+                            cx.push_unique_platform_op(crate::cx_api::CxOsOp::ResizeWindow(window_id, crate::makepad_math::dvec2(w, h)));
+                            input_result = Some(format!("{{\"ok\":1,\"resize\":[{w},{h}]}}"));
                             cx.redraw_all();
                             continue;
                         }
@@ -2008,7 +2039,15 @@ mod imp {
             // next drawn frame with `wait` (the maximise/occlusion proof).
             "/w" | "/window" => match p.get(&["k", "kind"]) {
                 Some("maximize") | Some("max") => send_input(p.window(), vec![Input::Maximize], p.flag(&["wait"])),
-                other => err(&format!("unknown window op {other:?}; k=maximize")),
+                Some("dragquery") => match (p.get(&["x"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["y"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(x), Some(y)) => send_input(p.window(), vec![Input::DragQuery(x, y)], p.flag(&["wait"])),
+                    _ => err("dragquery needs x= and y= (window points)"),
+                },
+                Some("resize") => match (p.get(&["width"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["height"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => send_input(p.window(), vec![Input::Resize(w, h)], p.flag(&["wait"])),
+                    _ => err("resize needs width= and height= (points)"),
+                },
+                other => err(&format!("unknown window op {other:?}; k=maximize|resize|dragquery")),
             },
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next
@@ -2165,9 +2204,9 @@ mod imp {
              /activity         native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in /s)\n\
              \x20                 native input increments user_seq; injected input does not. No input contents are recorded\n\
              \x20                 mutations need 2 seconds without native input; with if_user_seq=N they are also refused once the person intervened after N; held pointer/touch input stays active\n\
-             \x20                 HTTP 409 user_interacting/user_intervened means STOP automation; reads remain available. Resume only after user handoff\n\
+             \x20                 HTTP 409 user_interacting/user_intervened rejects this sequence; inspect applied/state before retrying with a fresh activity counter\n\
              \x20                 all replies include X-Makepad-User-Seq[-Start]; changed epochs invalidate test/capture attribution\n\
-             \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
+             \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — a normal window close, not a crash\n\
              /g?w=&scale=&raw= grab window w (default: first). returns {{\"png\":path,\"w\":id,\"sz\":[w,h],\"capture_ms\":ms,\"encode_ms\":ms}}; raw=1 sends image/png bytes\n\
              \x20                 standalone macOS: pending Draw + immediate present at UI arming, before later input; no animation tick. Other backends: next render\n\
              /gseq?n=8&every_ms=50&scale=1  a separate present per deadline; n=1..64, every_ms>=8, span<=60s; {{\"png\":[paths],\"frames\":[per-frame timings]}}\n\
@@ -2213,7 +2252,7 @@ mod imp {
              /resize?w=&h=     give the window a new inner size, in layout points (like dragging its edge); answers after the frame that shows it\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
-             finish owned tests with /gq (or /quit); if the user intervened, leave their app running — never force-close on 409\n\
+             finish owned tests with /gq (or /quit); a conflict invalidates the sequence evidence, not authorization for the active workflow\n\
              add &wait=1 to any input route to answer only after the next frame is drawn (so a following /g sees it)\n\
              add &w=ID to target a window; omit for the first one. ordinary errors are {{\"err\":\"...\"}} with status 404; interaction conflicts use 409\n\
              POST the same routes with a flat JSON body ({{\"x\":10,\"y\":20}}) when quoting query strings is painful\n",
@@ -2782,6 +2821,8 @@ mod imp {
                 .or_else(|| status_cell().lock().unwrap().windows.first().map(|w| w.id))
                 .ok_or("no windows")?,
         );
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         PENDING_GRABS
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(n)

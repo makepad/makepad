@@ -392,23 +392,35 @@ impl Cx {
         self.start_studio_websocket(studio_http);
     }
 
-    #[cfg(not(target_os = "android"))]
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android",
+        all(target_os = "linux", not(target_env = "ohos")),
+    ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
     #[cfg(not(all(target_os = "linux", linux_direct, use_vulkan)))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
         self.receive_studio_websocket_message(true)
     }
 
-    #[cfg(not(target_os = "android"))]
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android",
+        all(target_os = "linux", not(target_env = "ohos")),
+    ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
     pub(crate) fn try_recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
         self.receive_studio_websocket_message(false)
     }
 
-    #[cfg(not(target_os = "android"))]
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android",
+        all(target_os = "linux", not(target_env = "ohos")),
+    ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
     fn receive_studio_websocket_message(&mut self, wait: bool) -> Option<WebSocketMessage> {
         loop {

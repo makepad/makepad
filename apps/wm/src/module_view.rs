@@ -31,7 +31,7 @@
 //! see the panic.
 
 use crate::desk::phone::DrawPhoneApp;
-use crate::dock_warp::{capture_y_flip, WindowFrame};
+use crate::dock_warp::WindowFrame;
 use crate::hub::ClientId;
 use crate::run_view::MpRunViewAction;
 use crate::tile::TileHost;
@@ -249,8 +249,13 @@ impl Widget for MpModuleView {
         if matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_)) && !self.focused {
             return;
         }
-        if let Event::MouseDown(e) = event {
-            if self.area.is_valid(cx) && self.area.rect(cx).contains(e.abs) {
+        let press = match event {
+            Event::MouseDown(e) => Some(e.abs),
+            Event::TouchUpdate(e) => e.touches.iter().find(|t| t.state == makepad_widgets::makepad_platform::event::TouchState::Start).map(|t| t.abs),
+            _ => None,
+        };
+        if let Some(abs) = press {
+            if self.area.is_valid(cx) && self.area.rect(cx).contains(abs) {
                 if let Some(client) = self.client {
                     // The WM moves focus here (and back to us through
                     // `focus_keyboard`), exactly as for a process tile.
@@ -324,7 +329,6 @@ impl Widget for MpModuleView {
             frame.end(cx);
             self.draw_capture.draw_vars.set_texture(0, frame.texture());
             self.draw_capture.opacity = self.fade;
-            self.draw_capture.y_flip = capture_y_flip(cx);
             self.draw_capture.draw_abs(cx, rect);
         }
         cx.end_turtle_with_area(&mut self.area);

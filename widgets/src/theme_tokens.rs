@@ -87,6 +87,8 @@ pub enum TokenGroup {
     Size,
     Radius,
     Elevation,
+    /// The moulded-surface material: its light, relief and finish.
+    Material,
     Motion,
     State,
     Type,
@@ -241,6 +243,43 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color("color_elevation_4", TokenGroup::Elevation, "Shadow colour of a dragged item.", ALL),
     color("color_elevation_5", TokenGroup::Elevation, "Shadow colour of a dialog.", ALL),
     color("color_elevation_shadow", TokenGroup::Elevation, "The opaque colour the elevation shadows are tints of.", ALL),
+
+    // Material. Zero in every shipped theme: the stylesheets turn it on.
+    spec("material_level", TokenGroup::Material, TokenKind::Factor, "Surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular.", 0.0, 2.0, 1.0, ALL),
+    spec("material_light_x", TokenGroup::Material, TokenKind::Factor, "Key light direction, x to the right of the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_y", TokenGroup::Material, TokenKind::Factor, "Key light direction, y down the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_z", TokenGroup::Material, TokenKind::Factor, "Key light direction, z out of the screen toward the viewer.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_intensity", TokenGroup::Material, TokenKind::Factor, "Strength of the key light every surface shares.", 0.0, 2.0, 0.05, ALL),
+    length("material_led_radius", TokenGroup::Material, "Falloff radius of an indicator light, in points.", 0.0, 64.0, 1.0),
+    spec("material_led_intensity", TokenGroup::Material, TokenKind::Factor, "Brightness of an indicator light.", 0.0, 4.0, 0.05, ALL),
+    length("material_bevel_width", TokenGroup::Material, "Width of the moulded shoulder, in points.", 0.0, 24.0, 0.5),
+    spec("material_bevel_curve", TokenGroup::Material, TokenKind::Factor, "Shoulder profile: 0 a soft pillow, 1 a round moulded edge.", 0.0, 1.0, 0.05, ALL),
+    spec("material_specular", TokenGroup::Material, TokenKind::Factor, "Strength of the specular highlight on a shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_roughness", TokenGroup::Material, TokenKind::Factor, "How broad that highlight is; higher is rougher and duller.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao", TokenGroup::Material, TokenKind::Opacity, "Contact darkening that hugs the inside edge of a surface.", 0.0, 1.0, 0.01, ALL),
+    spec("material_rim", TokenGroup::Material, TokenKind::Opacity, "Brightness of the lit edge band of a raised face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_gloss", TokenGroup::Material, TokenKind::Opacity, "Strength of the sweep across the top of a glossy face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_glow", TokenGroup::Material, TokenKind::Opacity, "Strength of the emissive halo a lit surface throws.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_glow", TokenGroup::Material, TokenKind::Opacity, "How far a label or icon lifts toward the glow colour when lit.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_lift", TokenGroup::Material, TokenKind::Factor, "How far past full brightness lit ink is pushed before it clips.", 1.0, 4.0, 0.05, ALL),
+    spec("material_face_gradient", TokenGroup::Material, TokenKind::Opacity, "Broad light-to-dark gradient across a whole face, separate from its shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_hairline", TokenGroup::Material, TokenKind::Opacity, "Hard thin lit and shaded line right on the boundary, separate from the soft shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao_reach", TokenGroup::Material, TokenKind::Factor, "How far the self-occlusion reaches inside, in units of the shoulder width.", 0.25, 3.0, 0.05, ALL),
+    spec("material_inner_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a surround throws across a sunken or pressed face.", 0.0, 1.0, 0.01, ALL),
+    length("material_inner_radius", TokenGroup::Material, "Blur of the inner shadow along a shaded edge, in points.", 0.0, 32.0, 0.5),
+    spec("material_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a raised surface casts on its ground.", 0.0, 1.0, 0.01, ALL),
+    length("material_shadow_blur", TokenGroup::Material, "Softness of that cast shadow, in points.", 0.5, 40.0, 0.5),
+    spec("material_shadow_falloff", TokenGroup::Material, TokenKind::Factor, "How a cast shadow or a glow dies away: 0 linear, gone at three blur lengths; 1 exponential.", 0.0, 1.0, 0.05, ALL),
+    spec("material_contact_ao", TokenGroup::Material, TokenKind::Opacity, "Tight darkening on the ground where a raised surface meets it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ground_lip", TokenGroup::Material, TokenKind::Opacity, "Light-side counter-shadow, for surfaces EXTRUDED FROM the page rather than resting on it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_press_invert", TokenGroup::Material, TokenKind::Factor, "How far a held face dishes as well as descends: 0 stays convex, 1 fully inverts.", 0.0, 1.0, 0.01, ALL),
+    length("material_raise", TokenGroup::Material, "How far a raised surface stands off its ground, in points.", 0.0, 24.0, 0.5),
+    length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
+    length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
+    length("material_margin", TokenGroup::Material, "The margin a material control keeps between its quad and its face, where its cast shadow and glow fall, in points.", 0.0, 32.0, 0.5),
+    color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
+    color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
+    color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -1376,6 +1415,10 @@ impl Appearance {
 const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
     (DesktopStyle::Omarchy, false, Scheme::Dark),
     (DesktopStyle::BlackOrange, false, Scheme::Dark),
+    (DesktopStyle::Neumorphic, false, Scheme::Light),
+    (DesktopStyle::Molded, false, Scheme::Light),
+    (DesktopStyle::Glossy, false, Scheme::Dark),
+    (DesktopStyle::Milled, false, Scheme::Dark),
     (DesktopStyle::Macos, false, Scheme::Light),
     (DesktopStyle::Macos, true, Scheme::Dark),
     (DesktopStyle::Windows, false, Scheme::Light),
@@ -1585,7 +1628,10 @@ fn take_proportionally(weights: &mut [f64], group: &[usize], amount: f64) -> f64
     }
     let take = amount.min(held);
     for i in group {
-        weights[*i] -= weights[*i] / held * take;
+        // Taking everything a member holds must leave it at nought, not a
+        // rounding error under it; the caller's drift correction settles
+        // the total.
+        weights[*i] = (weights[*i] - weights[*i] / held * take).max(0.0);
     }
     take
 }
@@ -2430,7 +2476,7 @@ mod.theme.color_surface=#123456
     /// and the `color_` roles.
     fn is_new_prefix(key: &str) -> bool {
         const PLAIN: &[&str] = &[
-            "radius_", "elevation_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
+            "radius_", "elevation_", "material_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
             "font_label_",
         ];
         if PLAIN.iter().any(|p| key.starts_with(p)) {
@@ -2445,7 +2491,7 @@ mod.theme.color_surface=#123456
         if let Some(rest) = key.strip_prefix("color_") {
             const ROLES: &[&str] = &[
                 "on_", "primary", "secondary", "tertiary", "error_", "warning_", "success", "info", "surface",
-                "outline", "inverse", "scrim", "elevation", "presence", "placeholder",
+                "outline", "inverse", "scrim", "elevation", "material", "presence", "placeholder",
             ];
             return ROLES.iter().any(|p| rest.starts_with(p));
         }
@@ -2669,6 +2715,10 @@ mod sheet_contrast_tests {
     pub(super) const SHEETS: &[(DesktopStyle, bool)] = &[
         (DesktopStyle::Omarchy, false),
         (DesktopStyle::BlackOrange, false),
+        (DesktopStyle::Neumorphic, false),
+        (DesktopStyle::Molded, false),
+        (DesktopStyle::Glossy, false),
+        (DesktopStyle::Milled, false),
         (DesktopStyle::Macos, false),
         (DesktopStyle::Macos, true),
         (DesktopStyle::Windows, false),
@@ -2693,7 +2743,60 @@ mod sheet_contrast_tests {
         reads_on(ground, ink)
     }
 
-    /// The pairs that fail, as readable lines.
+    struct ThemeSnap {
+        label: String,
+        colors: Vec<(&'static str, Option<u32>)>,
+    }
+
+    /// One walk of every base theme and every sheet. The two contrast tests
+    /// read the same reloads; building the library twelve times per test was
+    /// the whole cost (about 0.25 s each).
+    fn snaps() -> &'static [ThemeSnap] {
+        use std::sync::OnceLock;
+        static SNAPS: OnceLock<Vec<ThemeSnap>> = OnceLock::new();
+        SNAPS.get_or_init(|| {
+            let mut keys = Vec::new();
+            for pairs in [MEANING, SURFACES, VARIANTS] {
+                for (ground, ink) in pairs {
+                    if !keys.contains(ground) {
+                        keys.push(*ground);
+                    }
+                    if !keys.contains(ink) {
+                        keys.push(*ink);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&mut |vm, label| {
+                let colors = keys.iter().map(|key| (*key, val(vm, key))).collect();
+                out.push(ThemeSnap { label: label.to_string(), colors });
+            });
+            out
+        })
+    }
+
+    fn snap_failures(pairs: &[(&str, &str)], need: f64) -> Vec<String> {
+        let mut out = Vec::new();
+        for snap in snaps() {
+            for (ground, ink) in pairs {
+                let color = |name: &str| {
+                    snap.colors.iter().find(|(key, _)| *key == name).and_then(|(_, value)| *value)
+                };
+                if let (Some(ground_color), Some(ink_color)) = (color(ground), color(ink)) {
+                    let contrast = reads(ground_color | 0xFF, ink_color);
+                    if contrast < need {
+                        out.push(format!(
+                            "{}: {ink} on {ground} = {contrast:.2}, wanted {need}",
+                            snap.label
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The pairs that fail under the theme the VM holds, as readable lines.
     fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)], need: f64) -> Vec<String> {
         let mut out = Vec::new();
         for (ground, ink) in pairs {
@@ -2709,6 +2812,8 @@ mod sheet_contrast_tests {
 
     /// Walks the base themes and then every sheet, handing each to `check`.
     fn walk(check: &mut dyn FnMut(&mut ScriptVm, &str)) {
+        // A fresh VM: this walk reloads every sheet and uninstalls at the end,
+        // which must not leak into another test's context.
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
@@ -2741,8 +2846,7 @@ mod sheet_contrast_tests {
     /// holds it to the answer.
     #[test]
     fn a_meaning_family_reads_on_its_own_ground_under_every_sheet() {
-        let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| bad.extend(failures(vm, label, MEANING, READABLE)));
+        let bad = snap_failures(MEANING, READABLE);
         assert!(bad.is_empty(), "text below {READABLE}:1 on its own ground:
 {}", bad.join("
 "));
@@ -2770,11 +2874,8 @@ mod sheet_contrast_tests {
     /// on all of them, in every theme and under every sheet.
     #[test]
     fn the_surface_ladder_carries_its_ink_on_every_rung() {
-        let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| {
-            bad.extend(failures(vm, label, SURFACES, READABLE));
-            bad.extend(failures(vm, label, VARIANTS, LEGIBLE));
-        });
+        let mut bad = snap_failures(SURFACES, READABLE);
+        bad.extend(snap_failures(VARIANTS, LEGIBLE));
         assert!(bad.is_empty(), "ink that does not hold on its rung:
 {}", bad.join("
 "));
@@ -2845,6 +2946,10 @@ mod equalizer_tests {
     use crate::makepad_platform::Cx;
     use std::collections::BTreeMap;
     use std::sync::OnceLock;
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
 
     /// A theme invented for the maths: the tokens the role derivation reads,
     /// two numbers, and one member of each categorical palette. No VM, so the
@@ -3036,8 +3141,8 @@ mod equalizer_tests {
         let pale = BlendTheme::group(Appearance::Light);
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
-        assert_eq!(dark.len(), 7, "{dark:?}");
-        assert_eq!(pale.len(), 8, "{pale:?}");
+        assert_eq!(dark.len(), 9, "{dark:?}");
+        assert_eq!(pale.len(), 10, "{pale:?}");
     }
 
     /// The weights of a relative mix are a hundred parts shared out, so
@@ -3161,7 +3266,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 557, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 592, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
@@ -3184,7 +3289,7 @@ mod equalizer_tests {
         static CACHE: OnceLock<BlendCache> = OnceLock::new();
         CACHE.get_or_init(|| {
             let mut cache = BlendCache::new();
-            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let mut cx = test_cx();
             cx.with_vm(|vm| cache.fill(vm, &BlendTheme::all()));
             cache
         })

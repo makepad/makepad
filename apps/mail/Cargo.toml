@@ -40,3 +40,8 @@ makepad-html = { path = "../../libs/html" }
 name = "mail-index"
 path = "src/index_main.rs"
 required-features = ["standalone"]
+
+[package.metadata.makepad.desktop]
+name = "Makepad Mail"
+identifier = "nl.makepad.mail"
+icon = "resources/mail-icon.png"

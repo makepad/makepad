@@ -335,6 +335,9 @@ pub enum TabAction {
         abs: Vec2d,
         time: f64,
     },
+    /// The touch on this tab was taken away (see `FingerUpEvent::cancelled`):
+    /// end the tab bar's scroll where it is, no flick.
+    TouchCancel,
 }
 
 impl Tab {
@@ -429,7 +432,9 @@ impl Tab {
                     dispatch_action(cx, TabAction::ShouldTabStopDrag);
                     self.is_dragging = false;
                 }
-                if fue.device.is_touch() {
+                if fue.device.is_touch() && fue.cancelled {
+                    dispatch_action(cx, TabAction::TouchCancel);
+                } else if fue.device.is_touch() {
                     if !fue.has_long_press_occurred {
                         dispatch_action(
                             cx,

@@ -5,6 +5,8 @@ workspace.members = [
     "apps/wm",
     "apps/wm-all",
     "apps/wm-dyn",
+    "apps/wm-android",
+    "apps/wm-android/launch",
     "apps/wm-dyn/engine",
     "apps/aichat",
     "apps/finance",
@@ -69,6 +71,8 @@ workspace.members = [
     "libs/asset/creator",
     "libs/bounded_http",
     "libs/flow",
+    # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
+    "libs/core_util",
     "libs/strict_json",
     "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
@@ -107,6 +111,7 @@ workspace.members = [
     "examples/windows_blur",
     "examples/floating_panel",
     "examples/glass",
+    "examples/skeuomorph",
     "examples/bugfix",
     "examples/move_after_draw",
     "examples/xr",
@@ -156,6 +161,8 @@ workspace.members = [
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
+    # === per-application audio tap, mixer input for a host equalizer ===
+    "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
     "libs/video_flow",
@@ -175,12 +182,14 @@ workspace.members = [
     "platform/video",
     "tools/cargo_makepad",
     "tools/makepad_builder",
+    "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
-    "tools/screen",
+    "tools/agents",
+    "tools/ci",
     "tools/dj_pack",
     "libs/system_speech",
     # === tests ===

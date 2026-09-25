@@ -21,7 +21,7 @@
 
 use crate::chat_wire::{ChatRole, ProviderAvailability, ProviderKind};
 use crate::providers::cli::{categorize_cli_error, cli_command, turn_dir, CliTurn};
-use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
+use crate::providers::provider::{validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
 
@@ -46,11 +46,14 @@ pub struct ClaudeCodeChatProvider {
     model: Option<String>,
     resume: Option<String>,
     turn: Option<(CliTurn, ParseState)>,
+    /// Images for the next turn: sent as image blocks of a stream-json
+    /// user message beside the rendered prompt.
+    images: Vec<ToolImage>,
 }
 
 impl ClaudeCodeChatProvider {
     pub fn new(model: Option<String>) -> ClaudeCodeChatProvider {
-        ClaudeCodeChatProvider { cli: find_cli(), model, resume: None, turn: None }
+        ClaudeCodeChatProvider { cli: find_cli(), model, resume: None, turn: None, images: Vec::new() }
     }
 
     /// The CLI conversation id, for persisting broker sessions.
@@ -93,6 +96,28 @@ pub fn build_args(model: &Option<String>, resume: &Option<String>, system: &str)
         args.push(system.to_string());
     }
     args
+}
+
+/// The stdin line for a turn that carries images: one stream-json user
+/// message (`--input-format stream-json`) with the prompt as a text block
+/// and each PNG as a base64 image block.
+pub fn image_message(prompt: &str, images: &[ToolImage]) -> String {
+    let mut content = vec![json::obj(vec![("type", json::s("text")), ("text", json::s(prompt))])];
+    for image in images {
+        let data = String::from_utf8(makepad_base64::base64_encode(&image.png, &makepad_base64::BASE64_STANDARD)).unwrap_or_default();
+        content.push(json::obj(vec![("type", json::s("text")), ("text", json::s(format!("[image: {}]", image.label)))]));
+        content.push(json::obj(vec![
+            ("type", json::s("image")),
+            ("source", json::obj(vec![("type", json::s("base64")), ("media_type", json::s("image/png")), ("data", json::s(data))])),
+        ]));
+    }
+    let message = json::obj(vec![
+        ("type", json::s("user")),
+        ("message", json::obj(vec![("role", json::s("user")), ("content", Value::Arr(content))])),
+    ]);
+    let mut line = message.to_json();
+    line.push('\n');
+    line
 }
 
 /// Render the prompt for one turn. With a resumable CLI conversation only
@@ -311,8 +336,16 @@ impl ChatProvider for ClaudeCodeChatProvider {
         let Some(cli) = self.cli.clone() else {
             return Err("Claude Code CLI not found".to_string());
         };
-        let prompt = render_prompt(input, self.resume.is_some());
-        let args = build_args(&self.model, &self.resume, &input.system_with_dynamic());
+        let mut prompt = render_prompt(input, self.resume.is_some());
+        let mut args = build_args(&self.model, &self.resume, &input.system_with_dynamic());
+        let images = std::mem::take(&mut self.images);
+        if !images.is_empty() {
+            // Images need the structured input: one user message whose
+            // content is the prompt plus the image blocks.
+            args.insert(1, "--input-format".into());
+            args.insert(2, "stream-json".into());
+            prompt = image_message(&prompt, &images);
+        }
         let dir = turn_dir("claude");
         let mut command = cli_command(&cli, &dir);
         command.args(&args);
@@ -325,7 +358,17 @@ impl ChatProvider for ClaudeCodeChatProvider {
         poll_messages_turn(&mut self.turn, &mut self.resume, "Claude Code")
     }
 
+    fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
+        validate_tool_images(&images)?;
+        if self.turn.is_some() {
+            return Err("images must be attached between turns".into());
+        }
+        self.images = images;
+        Ok(())
+    }
+
     fn cancel(&mut self) {
+        self.images.clear();
         if let Some((cli, _)) = self.turn.take() {
             cli.kill_group();
         }

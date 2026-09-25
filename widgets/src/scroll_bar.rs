@@ -1,9 +1,10 @@
 use crate::animator::*;
-use crate::event::ScrollPhase;
+use crate::event::{ScrollPhase, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
-    estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
+    drag_origin, estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
+    touch_drag_slop, touch_fling_limits,
     soften_bounce_velocity, stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample,
     CATCH_PRESS_WINDOW, COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
     FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW, PER_FRAME_TO_PER_SECOND,
@@ -351,6 +352,14 @@ pub struct ScrollBar {
     /// flicks build up speed; consumed by the press's release either way.
     #[rust]
     caught_fling: Option<(f64, f64)>,
+    /// This press's drag scroll owns the finger (`Cx::claim_finger_gesture`):
+    /// until it does, the drag only tracks the finger, it does not scroll.
+    #[rust]
+    drag_claimed: bool,
+    /// Where along the axis this press landed: the claim scrolls by all
+    /// the travel since, so no finger travel is lost to the slop.
+    #[rust]
+    drag_origin: f64,
     /// When the OS momentum stream ended while still live (i.e. was cut by a touch
     /// rather than fading out at rest). The cut and its touch can be delivered in
     /// either order, so the touch handler reads this to see the motion it stopped.
@@ -863,6 +872,24 @@ impl ScrollBar {
     }
 
     /// Handles touch-based drag scrolling
+    /// The drag lost the finger (another scroller owns it) or was taken
+    /// away: no fling, no boost; a stretch springs back from rest.
+    fn stand_down(&mut self, cx: &mut Cx) {
+        self.caught_fling = None;
+        self.drag_claimed = false;
+        self.scroll_state = if self.overscroll != 0.0 {
+            ScrollState::Bounce {
+                next_frame: cx.new_next_frame(),
+                x0: self.overscroll,
+                v0: 0.0,
+                clock: FrameClock::default(),
+                touch: true,
+            }
+        } else {
+            ScrollState::Stopped
+        };
+    }
+
     fn handle_touch_based_drag(
         &mut self,
         cx: &mut Cx,
@@ -926,7 +953,9 @@ impl ScrollBar {
         // would drop TOUCH moves and ups as well and kill finger scrolling
         // whenever a mouse happened to be held anywhere. A touch event is let
         // through to the gesture below; only a mouse-driven one stands down.
-        let touch_event = matches!(event, Event::TouchUpdate(_));
+        // A cancellation is terminal cleanup of this box's own press: it is
+        // never an unrelated mouse gesture, so no held mouse stops it.
+        let touch_event = matches!(event, Event::TouchUpdate(_) | Event::FingerCancel(_));
         if !touch_event && cx.fingers.is_mouse_held_outside(&[scroll_area]) {
             if matches!(self.scroll_state, ScrollState::Drag { .. }) {
                 self.scroll_state = ScrollState::Stopped;
@@ -947,6 +976,8 @@ impl ScrollBar {
                 self.scroll_state = ScrollState::Drag {
                     samples: vec![ScrollSample { abs, time: fe.time }],
                 };
+                self.drag_claimed = false;
+                self.drag_origin = abs;
             }
             Hit::FingerMove(e) => match &mut self.scroll_state {
                 ScrollState::Drag { samples } => {
@@ -954,10 +985,37 @@ impl ScrollBar {
                         ScrollAxis::Horizontal => e.abs.x,
                         ScrollAxis::Vertical => e.abs.y,
                     };
-                    let old_sample = *samples.last().unwrap();
+                    // The drag scrolls only once it owns the finger: it
+                    // claims when the finger travels along this axis past the
+                    // tap slop and at least as far as across it (a sideways
+                    // carousel inside a vertical list leaves the list's drag
+                    // alone). Until then it only tracks the finger. A finger
+                    // another scroller already owns is not this view's — it
+                    // stands down, settling from rest.
+                    let mut from = samples.last().unwrap().abs;
+                    if !self.drag_claimed {
+                        let travel = e.abs - e.abs_start;
+                        let (along, across) = match self.axis {
+                            ScrollAxis::Horizontal => (travel.x.abs(), travel.y.abs()),
+                            ScrollAxis::Vertical => (travel.y.abs(), travel.x.abs()),
+                        };
+                        // Touch only: a mouse drag scrolls from its first move,
+                        // as it always has.
+                        let slop = touch_drag_slop(TAP_COUNT_DISTANCE, e.device.is_touch());
+                        if e.device.is_touch() && (along < slop || along < across) {
+                            push_sample(samples, new_abs, e.time);
+                            return;
+                        }
+                        if !cx.claim_finger_gesture(e.digit_id, scroll_area) {
+                            self.stand_down(cx);
+                            return;
+                        }
+                        self.drag_claimed = true;
+                        from = drag_origin(self.drag_origin, new_abs, slop, e.device.is_touch());
+                    }
                     push_sample(samples, new_abs, e.time);
 
-                    let mut delta = new_abs - old_sample.abs;
+                    let mut delta = new_abs - from;
                     let extent = self.view_visible;
                     let mut changed = false;
 
@@ -1013,11 +1071,25 @@ impl ScrollBar {
                     // Estimate the release velocity (pixels/second) like a native
                     // VelocityTracker (see `scroll_motion`), then start the same momentum
                     // fling as PortalList — same model, same parameters — so drag flicks
-                    // decelerate identically in every scrollable view.
-                    let (release_velocity, total_delta) = estimate_release_velocity(samples);
-                    let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
+                    // decelerate identically in every scrollable view. A press taken
+                    // away (`cancelled`) releases at rest: no fling, no boost, and a
+                    // stretch springs back from rest.
+                    // A drag that never owned the finger never scrolled: it
+                    // releases at rest too.
+                    let at_rest = fe.cancelled || !self.drag_claimed;
+                    self.drag_claimed = false;
+                    let (release_velocity, total_delta) = if at_rest {
+                        (0.0, 0.0)
+                    } else {
+                        estimate_release_velocity(samples)
+                    };
+                    let caught_fling = caught_fling.filter(|_| !at_rest);
+                    let (min_velocity, max_velocity) = touch_fling_limits(
+                        self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND,
+                        self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND,
+                        fe.device.is_touch(),
+                    );
                     let release_velocity = release_velocity.clamp(-max_velocity, max_velocity);
-                    let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
                     if self.overscroll != 0.0 {
                         // Lifted while stretched past an edge: spring back, with the
                         // lift velocity carried into the bounce (positive further

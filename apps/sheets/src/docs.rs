@@ -1,6 +1,8 @@
 //! The document source/sink boundary for native and bundled-demo builds.
 
-use crate::sheet::{self, Sheet, Workbook};
+#[cfg(any(not(target_arch = "wasm32"), feature = "demo", test))]
+use crate::sheet;
+use crate::sheet::{Sheet, Workbook};
 
 pub trait SheetDocs {
     fn initial(&self) -> Workbook;
@@ -8,6 +10,9 @@ pub trait SheetDocs {
     fn load(&self, key: &str) -> Result<Sheet, String>;
     fn save(&self, key: &str, sheet: &Sheet) -> Result<(), String>;
     fn can_save(&self) -> bool;
+    /// Whether something already exists at `key`, so Save can ask before
+    /// replacing a file that is not the sheet's own.
+    fn exists(&self, key: &str) -> bool;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +73,10 @@ impl SheetDocs for BundledDocs {
     fn can_save(&self) -> bool {
         false
     }
+
+    fn exists(&self, _key: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(not(feature = "demo"))]
@@ -108,13 +117,70 @@ impl SheetDocs for FsDocs {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            std::fs::write(key, sheet::to_csv(sheet)).map_err(|e| e.to_string())
+            write_atomic(key, sheet::to_csv(sheet).as_bytes())
         }
     }
 
     fn can_save(&self) -> bool {
         cfg!(not(target_arch = "wasm32"))
     }
+
+    fn exists(&self, key: &str) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = key;
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // symlink_metadata: a dangling link is still something Save
+            // would replace.
+            std::fs::symlink_metadata(key).is_ok()
+        }
+    }
+}
+
+/// Write `bytes` to `path` so a crash or a full disk never leaves a
+/// half-written file: the bytes go to a temporary file in the same folder
+/// (same volume, so the rename is atomic), are flushed, and only then
+/// renamed over the target. On failure the target is untouched and the
+/// temporary file is removed.
+#[cfg(all(not(feature = "demo"), not(target_arch = "wasm32")))]
+fn write_atomic(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::path::Path;
+    if path.trim().is_empty() {
+        return Err("no file name".to_string());
+    }
+    let target = Path::new(path);
+    let name = target
+        .file_name()
+        .ok_or_else(|| format!("{path} is not a file name"))?
+        .to_string_lossy()
+        .to_string();
+    let folder = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let temp = folder.join(format!(".{name}.tmp.{}", std::process::id()));
+    // create_new: never write through something already at the temp name.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, target)
+    })();
+    if let Err(e) = result {
+        // Only the temporary file this call created; the target is intact.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 pub fn docs() -> Box<dyn SheetDocs> {

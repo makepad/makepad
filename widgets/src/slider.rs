@@ -431,6 +431,84 @@ script_mod! {
             /** handle width in pixels 4..60 step 1 */
             handle_size: uniform(20.)
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+
+            /** the outward gradient of a rounded box centred on c with half size h and corner k, by central differences */
+            material_grad: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec2 {
+                let e = 0.5
+                let g = vec2(
+                    Material.sd_box(p + vec2(e, 0.0), c, h, k) - Material.sd_box(p - vec2(e, 0.0), c, h, k),
+                    Material.sd_box(p + vec2(0.0, e), c, h, k) - Material.sd_box(p - vec2(0.0, e), c, h, k)
+                )
+                if length(g) > 0.00001 {
+                    return normalize(g)
+                }
+                return vec2(0.0, 1.0)
+            }
+
+            /** the box centred on c (half size h, corner k, distance d at p)
+             * lit as one face at elevation `elev`: a groove below zero, with
+             * the surround's inner shadow over it, a cap above. Tier 1 is
+             * the relief alone. */
+            material_box: fn(fill: vec4, p: vec2, d: float, c: vec2, h: vec2, k: float, elev: float) -> vec4 {
+                let g = self.material_grad(p, c, h, k)
+                var insh = 0.0
+                if self.material_inner.x > 0.001 && elev < 0.0 {
+                    let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                    insh = 1.0 - Material.box_cov(c - h + ioff, c + h + ioff, p, max(self.material_inner.y * 0.5, 0.35), k)
+                }
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(min(self.material_relief.x, min(h.x, h.y)), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                let o = Material.face(
+                    fill.rgb, d, g, uv, elev, elev, 0.0, insh, 0.0,
+                    self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                return vec4(o, fill.a)
+            }
+
+            /** what the raised handle box (centred on c, half size h, corner
+             * k) throws on the groove at p, premultiplied: its cast shadow,
+             * contact and lip. Laid into the groove's fill, since the
+             * handle travels inside it. */
+            material_handle_under: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec4 {
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let d = Material.sd_box(p, c, h, k)
+                let g = self.material_grad(p, c, h, k)
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let off = Material.cast_offset(raise, self.material_light)
+                // The shadow falls inside the groove: its blur stays in scale
+                // with the handle.
+                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, min(h.x, h.y)), self.material_shadow.z, self.material_shadow.w)
+                return Material.cast(
+                    d, Material.sd_box(p - off, c, h, k), Material.sd_box(p + off, c, h, k), g, px, raise, self.material_relief.z,
+                    self.material_light, sh, self.material_inner.z,
+                    self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                ) * (1.0 - self.disabled)
+            }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let handle_sz = self.handle_size
@@ -563,6 +641,19 @@ script_mod! {
                     handle_stroke_disabled = mix(self.border_color_2_disabled, self.border_color_disabled, dir)
                 }
 
+                // The handle's geometry, before the groove is filled, because
+                // under a material its shadow is laid INTO the groove's fill.
+                let ctrl_height = self.rect_size.y - offset_px.y
+                let offset_sides = self.border_size + /** track side inset 0..20 step 0.5 */ 6.
+                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
+                let handle_padding = /** handle vertical inset 0..6 step 0.5 */ 1.5
+                let handle_box = vec4(
+                    handle_x + offset_sides + self.border_size
+                    offset_px.y + self.border_size + handle_padding
+                    self.handle_size - self.border_size * 2.
+                    ctrl_height - self.border_size * 2. - handle_padding * 2.
+                )
+
                 // Draw main box
                 sdf.box(
                     self.border_size
@@ -572,10 +663,27 @@ script_mod! {
                     self.border_radius
                 )
 
-                let fill = color_fill
+                var fill = color_fill
                     .mix(color_fill_focus, self.focus)
                     .mix(color_fill_hover.mix(color_fill_drag, self.drag), self.hover)
                     .mix(color_fill_disabled, self.disabled)
+
+                // THE MATERIAL: the track is a groove cut into the housing,
+                // the handle a cap standing in it and throwing its shadow on
+                // it. Nothing changes at 0.
+                let p = self.pos * self.rect_size
+                // `sdf.box` draws a corner of TWICE its argument, clamped.
+                let hc = handle_box.xy + handle_box.zw * 0.5
+                let hh = max(handle_box.zw * 0.5, vec2(0.5, 0.5))
+                let hk = min(2.0 * self.border_radius, min(hh.x, hh.y))
+                if self.material > 0.5 {
+                    let c = vec2(self.border_size + slider_width * 0.5, slider_top + slider_bottom * 0.5)
+                    let h = max(vec2(slider_width * 0.5, slider_bottom * 0.5), vec2(0.5, 0.5))
+                    let k = min(2.0 * self.border_radius, min(h.x, h.y))
+                    fill = self.material_box(fill, p, sdf.shape, c, h, k, -self.material_tune.w * (1.0 - self.disabled))
+                    let under = self.material_handle_under(p, hc, hh, hk)
+                    fill = vec4(mix(fill.rgb, under.rgb / max(under.a, 0.0001), under.a), fill.a)
+                }
 
                 sdf.fill_keep(fill)
 
@@ -586,7 +694,6 @@ script_mod! {
                 sdf.stroke(stroke, self.border_size)
 
                 // Ridge
-                let offset_sides = self.border_size + /** track side inset 0..20 step 0.5 */ 6.
                 sdf.rect(
                     self.border_size + offset_sides
                     offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 0.5
@@ -636,21 +743,24 @@ script_mod! {
                 )
 
                 // Handle
-                let ctrl_height = self.rect_size.y - offset_px.y
-                let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
-                let handle_padding = /** handle vertical inset 0..6 step 0.5 */ 1.5
                 sdf.box(
-                    handle_x + offset_sides + self.border_size
-                    offset_px.y + self.border_size + handle_padding
-                    self.handle_size - self.border_size * 2.
-                    ctrl_height - self.border_size * 2. - handle_padding * 2.
+                    handle_box.x
+                    handle_box.y
+                    handle_box.z
+                    handle_box.w
                     self.border_radius
                 )
 
-                let hfill = handle_fill
+                var hfill = handle_fill
                     .mix(handle_fill_hover, self.hover)
                     .mix(handle_fill_focus.mix(handle_fill_hover.mix(handle_fill_drag, self.drag), self.hover), self.focus)
                     .mix(handle_fill_disabled, self.disabled)
+
+                if self.material > 0.5 {
+                    // The cap: raised, lifted a quarter more under the hand.
+                    let raise = self.material_relief.z * (1.0 + 0.25 * max(self.hover, self.drag)) * (1.0 - self.disabled)
+                    hfill = self.material_box(hfill, p, sdf.shape, hc, hh, hk, raise)
+                }
 
                 sdf.fill_keep(hfill)
 
@@ -1731,6 +1841,34 @@ script_mod! {
             // doing nothing. A RotaryKnobGradientY rung is where the _2
             // family would earn its place.
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the margin the disc keeps back from its box under a material, where its cast shadow falls, in points; held to a third of the radius 0..32 step 0.5 */
+            material_margin: uniform(theme.material_margin)
+            /** how far the dome rises: the slope of the cap at its rim, 0 a flat top 0..1.5 step 0.05 */
+            material_dome: uniform(0.55)
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+            /** the emissive ink the lit arc's halo takes */
+            material_glow_ink: uniform(theme.color_material_glow)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -1768,7 +1906,11 @@ script_mod! {
                 let clearance = /** clearance between the bezel and the box, as a fraction of the radius 0..0.15 step 0.01 */ 0.05
                 let bed = /** material either side of the groove, as a fraction of the radius 0..0.3 step 0.01 */ 0.09
                 let ring_gap = max(radius * bed, 1.)
-                let disc_r = radius - max(radius * clearance, 0.5) - self.border_size
+                // Under a material the disc keeps back from its box by the
+                // margin its cast shadow falls into, held to a third of the
+                // radius so a 24-square knob keeps a face. Zero without one.
+                let margin = min(self.material_margin, radius / 3.0) * step(0.5, self.material)
+                let disc_r = radius - max(radius * clearance, 0.5) - self.border_size - margin
                 let ring_w = max(radius * self.ring_size, /** thinnest the groove may draw, in pixels 0.5..3 step 0.25 */ 1.25)
                 let ring_r = disc_r - self.border_size - ring_gap - ring_w * 0.5
                 let field_r = ring_r - ring_w * 0.5 - ring_gap
@@ -1851,12 +1993,55 @@ script_mod! {
                 // when RotaryFlat does it alone.
                 let lifted = max(self.hover, max(self.focus, self.drag)) * (1. - self.disabled)
 
+                // THE MATERIAL: the disc is a domed cap standing off the
+                // page, throwing its shadow into the margin round it, the
+                // shoulder rolling into a shallow dome so the whole cap
+                // catches the light. Nothing changes at 0.
+                var cap = material
+                if self.material > 0.5 {
+                    let p = self.pos * self.rect_size
+                    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                    let q = p - center
+                    let rr = length(q)
+                    let d = rr - disc_r
+                    var g = vec2(0.0, 1.0)
+                    if rr > 0.00001 {
+                        g = q / rr
+                    }
+                    let raise = self.material_relief.z * (1.0 + 0.25 * lifted) * (1.0 - self.disabled)
+                    let off = Material.cast_offset(raise, self.material_light)
+                    let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(margin, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                    var under = Material.cast(
+                        d, length(q - off) - disc_r, length(q + off) - disc_r, g, px, raise, self.material_relief.z,
+                        self.material_light, sh, self.material_inner.z,
+                        self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                    ) * (1.0 - self.disabled)
+                    // Faded out before the box edge, so it ends round.
+                    under = under * smoothstep(0.0, max(margin, 1.0), radius - rr)
+                    // `clear` premultiplies what it is given.
+                    sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
+                    let t2 = step(1.5, self.material)
+                    let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                    let rel = vec4(min(self.material_relief.x, disc_r * 0.5), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                    // No face gradient: a dome's normal carries its own.
+                    let tune = vec4(0.0, self.material_tune.y, self.material_tune.z, self.material_tune.w)
+                    // The dome: a paraboloid, its slope growing with the
+                    // radius, over a raise that the normal multiplies back in.
+                    let dome = self.material_dome * clamp(rr / max(disc_r, 0.001), 0.0, 1.0) / max(raise, 0.001)
+                    let uv = q / (2.0 * disc_r) + vec2(0.5, 0.5)
+                    cap = vec4(Material.face(
+                        material.rgb, d, g, uv, raise, raise, dome, 0.0, 0.0,
+                        self.material_light, rel, fin, tune, self.material_inner.x,
+                        self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                    ), material.a)
+                }
+
                 // The disc, and the bezel on the same shape: fill_keep
                 // hands the circle straight to the stroke, which lays the
                 // width EITHER SIDE of it -- half on the material, half on
                 // the page.
                 sdf.circle(center.x, center.y, disc_r)
-                sdf.fill_keep(material)
+                sdf.fill_keep(cap)
                 sdf.stroke(bezel, self.border_size)
 
                 // The unlit groove, whole.

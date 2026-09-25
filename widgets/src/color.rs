@@ -1011,7 +1011,9 @@ impl Widget for ColorSwatch {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        // A hidden control still ends a press it holds (a cancellation is
+        // terminal cleanup, not input).
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1191,7 +1193,7 @@ impl Widget for ColorWheel {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1232,7 +1234,13 @@ impl Widget for ColorWheel {
             Hit::FingerUp(fe) => {
                 if self.dragging {
                     self.dragging = false;
-                    self.track(cx, uid, fe.abs, true);
+                    if fe.cancelled {
+                        // Taken away: the colour stays the last one the drag
+                        // set, and the edit ends there.
+                        report(cx, uid, self.color, true);
+                    } else {
+                        self.track(cx, uid, fe.abs, true);
+                    }
                 }
             }
             Hit::KeyDown(ke) => {
@@ -1381,7 +1389,7 @@ impl Widget for ColorArea {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1402,7 +1410,13 @@ impl Widget for ColorArea {
             Hit::FingerUp(fe) => {
                 if self.dragging {
                     self.dragging = false;
-                    self.track(cx, uid, fe.abs, true);
+                    if fe.cancelled {
+                        // Taken away: the colour stays the last one the drag
+                        // set, and the edit ends there.
+                        report(cx, uid, self.color, true);
+                    } else {
+                        self.track(cx, uid, fe.abs, true);
+                    }
                 }
             }
             Hit::KeyDown(ke) => {
@@ -1560,7 +1574,7 @@ impl Widget for ColorAlpha {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1581,7 +1595,13 @@ impl Widget for ColorAlpha {
             Hit::FingerUp(fe) => {
                 if self.dragging {
                     self.dragging = false;
-                    self.track(cx, uid, fe.abs, true);
+                    if fe.cancelled {
+                        // Taken away: the colour stays the last one the drag
+                        // set, and the edit ends there.
+                        report(cx, uid, self.color, true);
+                    } else {
+                        self.track(cx, uid, fe.abs, true);
+                    }
                 }
             }
             Hit::KeyDown(ke) => {
@@ -1819,7 +1839,7 @@ impl Widget for PaletteStrip {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -2345,7 +2365,7 @@ impl Widget for ColorPicker {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
 
@@ -2784,7 +2804,7 @@ impl Widget for ColorField {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let input_uid = self.input.widget_uid();

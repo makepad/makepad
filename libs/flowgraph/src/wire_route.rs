@@ -61,25 +61,67 @@ impl Point {
     }
 }
 
+/// An axis-aligned envelope a cable keeps out of. `min..max` is the
+/// envelope the router works with; an obstacle may also remember its `body`,
+/// the solid rectangle inside it that no deflation may ever open up.
+///
+/// The router assumes every obstacle arrives inflated by the caller's card
+/// clearance and deflates it by fixed amounts for its narrower tiers and for
+/// the endpoints' own obstacles. That is sound for a card, whose clearance
+/// is that uniform amount. An obstacle inflated by less on some side (a
+/// slot on a dense rail, whose vertical clearance is capped so its envelope
+/// cannot reach a neighbour's socket) would be opened into by those
+/// deflations; with its body remembered, a deflation stops at the body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Obstacle {
     pub min: Point,
     pub max: Point,
+    body: Option<(Point, Point)>,
 }
 
 impl Obstacle {
     pub fn from_xywh(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self::from_bounds(Point::new(x, y), Point::new(x + width, y + height))
+    }
+
+    pub fn from_bounds(min: Point, max: Point) -> Self {
+        Self { min, max, body: None }
+    }
+
+    /// Remember the current envelope as the solid body. Call it on the raw
+    /// rectangle, before inflating: from then on a negative inflation, from
+    /// any caller, never moves an edge inside the body.
+    pub fn with_body(self) -> Self {
+        Self { body: Some((self.min, self.max)), ..self }
+    }
+
+    /// The solid body, when one was remembered.
+    pub fn body(&self) -> Option<(Point, Point)> {
+        self.body
+    }
+
+    pub(crate) fn translated(self, offset: Point) -> Self {
+        let shift = |point: Point| Point::new(point.x + offset.x, point.y + offset.y);
         Self {
-            min: Point::new(x, y),
-            max: Point::new(x + width, y + height),
+            min: shift(self.min), max: shift(self.max),
+            body: self.body.map(|(min, max)| (shift(min), shift(max))),
         }
     }
 
     pub fn inflate(self, amount: f64) -> Self {
-        Self {
-            min: Point::new(self.min.x - amount, self.min.y - amount),
-            max: Point::new(self.max.x + amount, self.max.y + amount),
+        self.inflate_xy(amount, amount)
+    }
+
+    /// Inflate by `x` on the left and right and by `y` above and below. A
+    /// negative amount deflates, but never past the body.
+    pub fn inflate_xy(self, x: f64, y: f64) -> Self {
+        let mut min = Point::new(self.min.x - x, self.min.y - y);
+        let mut max = Point::new(self.max.x + x, self.max.y + y);
+        if let Some((body_min, body_max)) = self.body {
+            min = Point::new(min.x.min(body_min.x), min.y.min(body_min.y));
+            max = Point::new(max.x.max(body_max.x), max.y.max(body_max.y));
         }
+        Self { min, max, body: self.body }
     }
 
     fn contains_strict(self, point: Point) -> bool {
@@ -103,10 +145,10 @@ pub fn obstacles_in_corridor(
     obstacles: &[Obstacle],
     margin: f64,
 ) -> Vec<Obstacle> {
-    let corridor = Obstacle {
-        min: Point::new(from.x.min(to.x) - margin, from.y.min(to.y) - margin),
-        max: Point::new(from.x.max(to.x) + margin, from.y.max(to.y) + margin),
-    };
+    let corridor = Obstacle::from_bounds(
+        Point::new(from.x.min(to.x) - margin, from.y.min(to.y) - margin),
+        Point::new(from.x.max(to.x) + margin, from.y.max(to.y) + margin),
+    );
     obstacles
         .iter()
         .copied()
@@ -145,6 +187,83 @@ enum RouteChoice {
     Below,
 }
 
+/// The shape of an orthogonal route, in the coordinates it was routed in.
+/// A later routing of the same cable rebuilds this shape against its current
+/// endpoints and obstacles and keeps it while it fits and is not clearly
+/// beaten, so a card that moves a little cannot change the cable's shape
+/// merely by moving the endpoints' midpoint or a row's classification.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Topology {
+    Straight,
+    /// One vertical spine at `x` between the endpoint stubs.
+    Corridor { x: f64 },
+    /// One horizontal row at `y` between the endpoint stubs' columns.
+    Row { y: f64 },
+    /// A column at `x` beside the source carries the cable to the row at `y`.
+    SourceDogleg { x: f64, y: f64 },
+    /// The row at `y` ends in a column at `x` beside the target.
+    TargetDogleg { x: f64, y: f64 },
+}
+
+impl Topology {
+    fn translate(&mut self, offset: Point) {
+        match self {
+            Self::Straight => {}
+            Self::Corridor { x } => *x += offset.x,
+            Self::Row { y } => *y += offset.y,
+            Self::SourceDogleg { x, y } | Self::TargetDogleg { x, y } => {
+                *x += offset.x;
+                *y += offset.y;
+            }
+        }
+    }
+
+    /// The broad choice this shape is for these endpoints: a row is above
+    /// or below by where it runs now, never by where it was first found.
+    fn choice(self, from: Point, to: Point) -> RouteChoice {
+        match self {
+            Self::Straight => RouteChoice::Straight,
+            Self::Corridor { .. } => RouteChoice::CorridorX,
+            Self::Row { y } | Self::SourceDogleg { y, .. } | Self::TargetDogleg { y, .. } => {
+                if y <= (from.y + to.y) * 0.5 { RouteChoice::Above } else { RouteChoice::Below }
+            }
+        }
+    }
+
+    /// How far this shape is from another of the same kind; a shape of
+    /// another kind is as far as can be.
+    fn distance(self, other: Self) -> f64 {
+        match (self, other) {
+            (Self::Straight, Self::Straight) => 0.0,
+            (Self::Corridor { x: a }, Self::Corridor { x: b }) | (Self::Row { y: a }, Self::Row { y: b }) => (a - b).abs(),
+            (Self::SourceDogleg { x: ax, y: ay }, Self::SourceDogleg { x: bx, y: by })
+            | (Self::TargetDogleg { x: ax, y: ay }, Self::TargetDogleg { x: bx, y: by }) => {
+                (ax - bx).abs() + (ay - by).abs()
+            }
+            _ => f64::INFINITY,
+        }
+    }
+
+    /// A complete ordering key: dogleg direction and both coordinates matter.
+    fn order_key(self) -> (u8, f64, f64) {
+        match self {
+            Self::Straight => (0, 0.0, 0.0),
+            Self::Corridor { x } => (1, x, 0.0),
+            Self::Row { y } => (2, y, 0.0),
+            Self::SourceDogleg { x, y } => (3, x, y),
+            Self::TargetDogleg { x, y } => (4, x, y),
+        }
+    }
+
+    fn from_choice(choice: RouteChoice, tie: f64) -> Self {
+        match choice {
+            RouteChoice::Straight => Self::Straight,
+            RouteChoice::CorridorX => Self::Corridor { x: tie },
+            RouteChoice::Above | RouteChoice::Below => Self::Row { y: tie },
+        }
+    }
+}
+
 /// A drawable route plus a dense-enough arc-length table for animation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WireRoute {
@@ -155,10 +274,29 @@ pub struct WireRoute {
     cumulative: Vec<f64>,
     length: f64,
     choice: RouteChoice,
-    tie_x: f64,
+    topology: Topology,
 }
 
 impl WireRoute {
+    /// Change coordinate origins without changing the route or its arc lengths.
+    pub(crate) fn translate(&mut self, offset: Point) {
+        let shift = |point: &mut Point| {
+            point.x += offset.x;
+            point.y += offset.y;
+        };
+        shift(&mut self.from);
+        shift(&mut self.to);
+        match &mut self.kind {
+            RouteKind::Cubic { control_1, control_2 } => {
+                shift(control_1);
+                shift(control_2);
+            }
+            RouteKind::Orthogonal { points, .. } => points.iter_mut().for_each(shift),
+        }
+        self.samples.iter_mut().for_each(shift);
+        self.topology.translate(offset);
+    }
+
     #[cfg(test)]
     pub fn is_straight_cubic(&self) -> bool {
         matches!(self.kind, RouteKind::Cubic { .. })
@@ -166,6 +304,34 @@ impl WireRoute {
 
     pub fn length(&self) -> f64 {
         self.length
+    }
+
+    /// The box the rendered path lies in.
+    pub fn bounds(&self) -> (Point, Point) {
+        self.samples.iter().fold((self.from, self.from), |(min, max), point| {
+            (
+                Point::new(min.x.min(point.x), min.y.min(point.y)),
+                Point::new(max.x.max(point.x), max.y.max(point.y)),
+            )
+        })
+    }
+
+    /// Whether the rendered path enters the interior of any of these.
+    pub fn crosses_obstacles(&self, obstacles: &[Obstacle]) -> bool {
+        crosses_any(self, obstacles)
+    }
+
+    /// The shape this route was chosen as, with its points and fillet
+    /// radius: a narrow-gap route has the 8 px fillet, a full-clearance
+    /// route the style's. For a trace, not for a decision.
+    pub fn describe(&self) -> String {
+        format!("{:?} {:?}", self.topology, self.kind)
+    }
+
+    /// Borrow the cached drawable polyline and its cumulative arc lengths.
+    /// Both slices have the same length and include the rounded route corners.
+    pub fn sampled_path(&self) -> (&[Point], &[f64]) {
+        (&self.samples, &self.cumulative)
     }
 
     pub fn bends(&self) -> usize {
@@ -338,6 +504,9 @@ fn cubic_point(from: Point, c1: Point, c2: Point, to: Point, t: f64) -> Point {
     )
 }
 
+/// Build from a broad choice and a tie coordinate: the cubic, the fixed
+/// route and fixtures. Routed candidates know their shape and use
+/// [`build_topology_route`].
 fn build_route(
     from: Point,
     to: Point,
@@ -345,6 +514,18 @@ fn build_route(
     samples: Vec<Point>,
     choice: RouteChoice,
     tie_x: f64,
+) -> WireRoute {
+    let mut route = build_topology_route(from, to, kind, samples, Topology::from_choice(choice, tie_x));
+    route.choice = choice;
+    route
+}
+
+fn build_topology_route(
+    from: Point,
+    to: Point,
+    kind: RouteKind,
+    samples: Vec<Point>,
+    topology: Topology,
 ) -> WireRoute {
     let mut cumulative = Vec::with_capacity(samples.len());
     let mut length = 0.0;
@@ -360,8 +541,8 @@ fn build_route(
         samples,
         cumulative,
         length,
-        choice,
-        tie_x,
+        choice: topology.choice(from, to),
+        topology,
     }
 }
 
@@ -412,6 +593,34 @@ pub fn route_wire_in_mode(
     )
 }
 
+/// A cable of one fixed shape, for a connection that is part of a card
+/// rather than an edge of the graph (a container port continuing to its
+/// slot inside). No obstacle search and no choice between candidates, so
+/// the same endpoints give the same route on every draw.
+///
+/// Routed: the shape is fixed by the endpoints alone — a horizontal run from
+/// each end to one vertical spine at the midpoint of the endpoints' x
+/// positions, each corner rounded to what its segments allow (a spine of no
+/// height or no width simply drops out); the sides are not consulted.
+/// Bezier: the ordinary directional cubic, whose tangents the sides decide.
+/// The sides are the caller's to decide from what the ends are, never read
+/// off the endpoints' positions.
+pub fn fixed_route_in_mode(
+    mode: WireMode,
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    style: RouteStyle,
+) -> WireRoute {
+    if mode == WireMode::Bezier {
+        return cubic_route(from, source_side, to, target_side);
+    }
+    let spine_x = (from.x + to.x) * 0.5;
+    let points = vec![from, Point::new(spine_x, from.y), Point::new(spine_x, to.y), to];
+    build_orthogonal_route(from, to, points, style.corner_radius, Topology::Straight)
+}
+
 /// Route a cable while retaining the previous broad route choice unless a
 /// different choice is at least five percent shorter.
 pub fn route_wire_sticky(
@@ -457,6 +666,10 @@ pub fn route_wire_sticky_in_mode(
 
     let radius = style.corner_radius.max(16.0);
     let narrow_center_clearance = NARROW_CLEARANCE + style.cable_spacing * 0.5;
+    // The shape the previous route had is rebuilt against the current
+    // endpoints in both tiers: its spine, row or dogleg is offered again
+    // where it still fits, so a corridor the eye already follows is kept.
+    let retained = previous.map(|route| route.topology);
     let comfortable = orthogonal_candidates(
         from,
         source_side,
@@ -470,6 +683,7 @@ pub fn route_wire_sticky_in_mode(
         radius * 2.0,
         CALLER_CARD_CLEARANCE - NARROW_CLEARANCE,
         false,
+        retained,
     );
 
     // The caller supplies cards inflated by 12 px. The narrow tier reserves
@@ -492,28 +706,23 @@ pub fn route_wire_sticky_in_mode(
         0.0,
         narrow_center_clearance - NARROW_CLEARANCE,
         true,
+        retained,
     );
 
-    // Preserve the full-clearance route unless the narrow tier opens a route
-    // with fewer bends or one that is meaningfully shorter. Sticky selection
-    // below is unchanged and still operates within the winning tier.
-    let candidates = match (
-        comfortable.iter().min_by(|left, right| compare_routes(left, right)),
-        narrow.iter().min_by(|left, right| compare_routes(left, right)),
-    ) {
-        (None, _) => narrow,
-        (_, None) => comfortable,
-        (Some(full), Some(tight))
-            if uses_narrow_channel(tight, obstacles, style.cable_spacing)
-                && (tight.bends() < full.bends()
-                    || (tight.bends() == full.bends()
-                        && tight.length() < full.length() * ROUTE_SWITCH_RATIO)) =>
-        {
-            narrow
-        }
-        _ => comfortable,
-    };
-    let Some(best) = candidates.iter().min_by(|left, right| compare_routes(left, right)) else {
+    // Both tiers stay eligible. The narrow tier's gap preference fades in
+    // from a gap's boundary; neither eligibility nor price jumps when a
+    // moving route first touches that boundary.
+    let gaps = narrow_gaps(obstacles, style.cable_spacing, radius * 4.0);
+    let (tight, roomy) = (style.cable_spacing, radius * 4.0);
+    let mut candidates: Vec<Candidate> = comfortable
+        .into_iter()
+        .map(|route| Candidate { route, narrow: false, squeeze: 0.0 })
+        .collect();
+    candidates.extend(narrow.into_iter().map(|route| {
+        let squeeze = squeeze_of(&route, &gaps, tight, roomy);
+        Candidate { route, narrow: true, squeeze }
+    }));
+    if candidates.is_empty() {
         return least_bad_orthogonal(
             from,
             source_side,
@@ -522,53 +731,153 @@ pub fn route_wire_sticky_in_mode(
             &narrow_obstacles,
             style,
             corridor_offset,
+            previous,
         );
-    };
+    }
+    let baseline = score_baseline(candidates.iter().map(|candidate| candidate.route.length()));
+    let best = candidates
+        .iter()
+        .min_by(|left, right| rank_candidates(left, right, baseline))
+        .expect("a non-empty candidate list");
     if let Some(previous) = previous {
-        if let Some(sticky) = candidates
+        // The candidate nearest the previous shape: the same kind of shape
+        // on the same side, and within that the nearest coordinates. Kept
+        // unless the best candidate beats it by the one switch deadband,
+        // so two near-equal corridors, or a card on a corridor's edge
+        // coming and going, cannot swap the cable's shape on every move.
+        // A previous shape that no longer fits is not a candidate at all.
+        let choice = previous.topology.choice(from, to);
+        let narrow_before = is_narrow_tier(previous);
+        let sticky = candidates
             .iter()
-            .filter(|candidate| candidate.choice == previous.choice)
-            .min_by(|left, right| compare_routes(left, right))
-        {
-            if best.choice != sticky.choice && best.length() >= sticky.length() * ROUTE_SWITCH_RATIO
-            {
-                return sticky.clone();
+            .filter(|candidate| candidate.narrow == narrow_before && candidate.route.choice == choice)
+            .filter(|candidate| candidate.route.topology.distance(previous.topology).is_finite())
+            .min_by(|left, right| {
+                left.route
+                    .topology
+                    .distance(previous.topology)
+                    .partial_cmp(&right.route.topology.distance(previous.topology))
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| rank_candidates(left, right, baseline))
+            });
+        if let Some(sticky) = sticky {
+            if !std::ptr::eq(best, sticky) && best.score(baseline) > sticky.score(baseline) - SWITCH_DEADBAND {
+                return sticky.route.clone();
             }
         }
     }
-    best.clone()
+    best.route.clone()
 }
 
-fn uses_narrow_channel(route: &WireRoute, obstacles: &[Obstacle], cable_spacing: f64) -> bool {
-    let envelopes: Vec<_> = obstacles
-        .iter()
-        .map(|obstacle| obstacle.inflate(cable_spacing * 0.5))
-        .collect();
-    for left in 0..envelopes.len() {
-        for right in left + 1..envelopes.len() {
-            let overlap = Obstacle {
-                min: Point::new(
-                    envelopes[left].min.x.max(envelopes[right].min.x),
-                    envelopes[left].min.y.max(envelopes[right].min.y),
-                ),
-                max: Point::new(
-                    envelopes[left].max.x.min(envelopes[right].max.x),
-                    envelopes[left].max.y.min(envelopes[right].max.y),
-                ),
-            };
-            if overlap.min.x >= overlap.max.x || overlap.min.y >= overlap.max.y {
+/// One routed candidate and the tier that produced it.
+struct Candidate {
+    route: WireRoute,
+    narrow: bool,
+    squeeze: f64,
+}
+
+impl Candidate {
+    fn score(&self, baseline: f64) -> f64 {
+        let tier = if self.narrow { NARROW_TIER_COST + NARROW_NO_GAP_COST * self.squeeze } else { 0.0 };
+        route_score(&self.route, baseline) + tier
+    }
+}
+
+fn rank_candidates(left: &Candidate, right: &Candidate, baseline: f64) -> Ordering {
+    left.score(baseline)
+        .partial_cmp(&right.score(baseline))
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.narrow.cmp(&right.narrow))
+        .then_with(|| compare_shape(&left.route, &right.route))
+}
+
+/// The tier a route came from, by the fillet it was built with: the
+/// narrow tier's is `NARROW_RADIUS`, the other's at least twice that.
+fn is_narrow_tier(route: &WireRoute) -> bool {
+    matches!(route.kind, RouteKind::Orthogonal { radius, .. } if radius <= NARROW_RADIUS + 1e-9)
+}
+
+struct NarrowGap {
+    region: Obstacle,
+    width: f64,
+}
+
+fn narrow_gaps(obstacles: &[Obstacle], cable_spacing: f64, roomy: f64) -> Vec<NarrowGap> {
+    let mut gaps = Vec::new();
+    for left in 0..obstacles.len() {
+        for right in left + 1..obstacles.len() {
+            let (a, b) = (obstacles[left], obstacles[right]);
+            let dx = (a.min.x.max(b.min.x) - a.max.x.min(b.max.x)).max(0.0);
+            let dy = (a.min.y.max(b.min.y) - a.max.y.min(b.max.y)).max(0.0);
+            let width = dx.max(dy);
+            if width >= roomy {
                 continue;
             }
-            if route
-                .samples
-                .windows(2)
-                .any(|pair| !segment_clear_rect(pair[0], pair[1], overlap))
-            {
-                return true;
+            let reach = width * 0.5 + cable_spacing * 0.5;
+            let (a, b) = (a.inflate(reach), b.inflate(reach));
+            let region = Obstacle::from_bounds(
+                Point::new(a.min.x.max(b.min.x), a.min.y.max(b.min.y)),
+                Point::new(a.max.x.min(b.max.x), a.max.y.min(b.max.y)),
+            );
+            if region.min.x < region.max.x && region.min.y < region.max.y {
+                gaps.push(NarrowGap { region, width });
             }
         }
     }
-    false
+    gaps
+}
+
+/// Greatest interior depth of a segment in a rectangle. Interior depth is
+/// the minimum of four affine side distances, so its maximum occurs at an
+/// endpoint or where two of those distances meet. Unlike an intersection
+/// flag, this stays zero at tangency and grows continuously as a route enters.
+fn segment_rect_depth(from: Point, to: Point, rect: Obstacle) -> f64 {
+    if from.x.max(to.x) <= rect.min.x || from.x.min(to.x) >= rect.max.x
+        || from.y.max(to.y) <= rect.min.y || from.y.min(to.y) >= rect.max.y
+    {
+        return 0.0;
+    }
+    let start = [from.x - rect.min.x, rect.max.x - from.x, from.y - rect.min.y, rect.max.y - from.y];
+    let delta = [to.x - from.x, from.x - to.x, to.y - from.y, from.y - to.y];
+    let depth = |t: f64| {
+        (0..4).map(|side| start[side] + delta[side] * t).fold(f64::INFINITY, f64::min)
+    };
+    let mut best = depth(0.0).max(depth(1.0)).max(0.0);
+    for left in 0..4 {
+        for right in left + 1..4 {
+            let slope = delta[left] - delta[right];
+            if slope.abs() <= f64::EPSILON {
+                continue;
+            }
+            let t = (start[right] - start[left]) / slope;
+            if (0.0..=1.0).contains(&t) {
+                best = best.max(depth(t));
+            }
+        }
+    }
+    best
+}
+
+fn squeeze_of(route: &WireRoute, gaps: &[NarrowGap], tight: f64, roomy: f64) -> f64 {
+    let feather = (tight * 0.5).max(f64::EPSILON);
+    gaps.iter().map(|gap| {
+        let width = ((gap.width - tight) / (roomy - tight).max(f64::EPSILON)).clamp(0.0, 1.0);
+        let mut penetration = 0.0_f64;
+        for pair in route.samples.windows(2) {
+            penetration = penetration.max(segment_rect_depth(pair[0], pair[1], gap.region));
+            if penetration >= feather { break; }
+        }
+        1.0 - (penetration / feather).clamp(0.0, 1.0) * (1.0 - width)
+    }).fold(1.0, f64::min)
+}
+
+fn crosses_any(route: &WireRoute, rects: &[Obstacle]) -> bool {
+    rects.iter().any(|rect| {
+        route
+            .samples
+            .windows(2)
+            .any(|pair| !segment_clear_rect(pair[0], pair[1], *rect))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -585,6 +894,7 @@ fn orthogonal_candidates(
     channel_width: f64,
     endpoint_clearance_inset: f64,
     allow_doglegs: bool,
+    retained: Option<Topology>,
 ) -> Vec<WireRoute> {
     let stub = style.port_stub.max(MIN_PORT_STUB);
     let source_stub = endpoint_stub(from, source_side, stub, corridor_offset);
@@ -607,7 +917,7 @@ fn orthogonal_candidates(
         && route_samples_clear(&[from, to], obstacles, source_owner, target_owner)
         && route_samples_clear(&[from, to], &endpoint_obstacles, source_owner, target_owner)
     {
-        candidates.push(build_route(
+        candidates.push(build_topology_route(
             from,
             to,
             RouteKind::Orthogonal {
@@ -615,8 +925,7 @@ fn orthogonal_candidates(
                 radius,
             },
             vec![from, to],
-            RouteChoice::Straight,
-            f64::INFINITY,
+            Topology::Straight,
         ));
     }
 
@@ -633,13 +942,16 @@ fn orthogonal_candidates(
     };
     let guides: Vec<Obstacle> = obstacles.iter().map(|rect| rect.inflate(guide_reserve)).collect();
     if source_stub.x <= target_stub.x {
-        if let Some(channel) = choose_forward_channel(
-            source_stub,
-            target_stub,
-            &guides,
-            corridor_offset,
-            channel_width,
-        ) {
+        // The channel nearest the midpoint, and the one the previous route
+        // used when it still fits between the ends: both are offered, and
+        // the sticky selection decides.
+        let nearest = choose_forward_channel(source_stub, target_stub, &guides, corridor_offset, channel_width);
+        let kept = match retained {
+            Some(Topology::Corridor { x }) => forward_channel_holding(source_stub, target_stub, &guides, channel_width, x),
+            _ => None,
+        }
+        .filter(|kept| nearest.is_none_or(|nearest| (nearest - kept).abs() > 1e-6));
+        for channel in nearest.into_iter().chain(kept) {
             if let Some(candidate) = build_orthogonal_candidate(
                 from,
                 to,
@@ -656,8 +968,7 @@ fn orthogonal_candidates(
                 &endpoint_obstacles,
                 source_owner,
                 target_owner,
-                RouteChoice::CorridorX,
-                channel,
+                Topology::Corridor { x: channel },
             ) {
                 candidates.push(candidate);
             }
@@ -667,13 +978,20 @@ fn orthogonal_candidates(
     // Boundary rows find both outside detours and lanes between stacked cards.
     // Boundary columns add the dogleg needed to clear a card before entering
     // such a row, or to leave the row before approaching the target.
-    let columns = routing_columns(from, to, obstacles, row_clearance, corridor_offset);
-    for row in routing_rows(from, to, obstacles, row_clearance, corridor_offset) {
-        let choice = if row <= (from.y + to.y) * 0.5 {
-            RouteChoice::Above
-        } else {
-            RouteChoice::Below
-        };
+    // The previous route's row and dogleg column are offered again, where
+    // they still fit, so a card that moves a little cannot shift the row
+    // the eye already follows to the next boundary.
+    let mut rows = routing_rows(from, to, obstacles, row_clearance, corridor_offset);
+    let mut columns = routing_columns(from, to, obstacles, row_clearance, corridor_offset);
+    match retained {
+        Some(Topology::Row { y }) => offer(&mut rows, y),
+        Some(Topology::SourceDogleg { x, y } | Topology::TargetDogleg { x, y }) => {
+            offer(&mut rows, y);
+            offer(&mut columns, x);
+        }
+        _ => {}
+    }
+    for row in rows {
         if let Some(candidate) = build_orthogonal_candidate(
             from,
             to,
@@ -690,31 +1008,36 @@ fn orthogonal_candidates(
             &endpoint_obstacles,
             source_owner,
             target_owner,
-            choice,
-            source_stub.x.min(target_stub.x),
+            Topology::Row { y: row },
         ) {
             candidates.push(candidate);
         }
-        for column in columns.iter().filter(|_| allow_doglegs) {
-            for points in [
-                vec![
-                    from,
-                    source_stub,
-                    Point::new(*column, from.y),
-                    Point::new(*column, row),
-                    Point::new(target_stub.x, row),
-                    target_stub,
-                    to,
-                ],
-                vec![
-                    from,
-                    source_stub,
-                    Point::new(source_stub.x, row),
-                    Point::new(*column, row),
-                    Point::new(*column, to.y),
-                    target_stub,
-                    to,
-                ],
+        for column in columns.iter().copied().filter(|_| allow_doglegs) {
+            for (points, topology) in [
+                (
+                    vec![
+                        from,
+                        source_stub,
+                        Point::new(column, from.y),
+                        Point::new(column, row),
+                        Point::new(target_stub.x, row),
+                        target_stub,
+                        to,
+                    ],
+                    Topology::SourceDogleg { x: column, y: row },
+                ),
+                (
+                    vec![
+                        from,
+                        source_stub,
+                        Point::new(source_stub.x, row),
+                        Point::new(column, row),
+                        Point::new(column, to.y),
+                        target_stub,
+                        to,
+                    ],
+                    Topology::TargetDogleg { x: column, y: row },
+                ),
             ] {
                 if let Some(candidate) = build_orthogonal_candidate(
                     from,
@@ -725,8 +1048,7 @@ fn orthogonal_candidates(
                     &endpoint_obstacles,
                     source_owner,
                     target_owner,
-                    choice,
-                    *column,
+                    topology,
                 ) {
                     candidates.push(candidate);
                 }
@@ -736,6 +1058,18 @@ fn orthogonal_candidates(
     candidates
 }
 
+/// Offer a retained coordinate as a candidate unless it is already one.
+fn offer(values: &mut Vec<f64>, value: f64) {
+    if value.is_finite() && !values.iter().any(|known| (known - value).abs() < 1e-6) {
+        values.push(value);
+    }
+}
+
+/// When no clear route exists (a blocked stub, cards on both ends): the
+/// route with the fewest collisions, and among those the previous shape,
+/// rebuilt from the current endpoints, unless a better one beats it by the
+/// one deadband. A shape with more collisions than the best is never kept.
+#[allow(clippy::too_many_arguments)]
 fn least_bad_orthogonal(
     from: Point,
     source_side: PortSide,
@@ -744,6 +1078,7 @@ fn least_bad_orthogonal(
     obstacles: &[Obstacle],
     style: RouteStyle,
     corridor_offset: f64,
+    previous: Option<&WireRoute>,
 ) -> WireRoute {
     let stub = style.port_stub.max(MIN_PORT_STUB);
     let source_stub = endpoint_stub(from, source_side, stub, corridor_offset);
@@ -756,11 +1091,6 @@ fn least_bad_orthogonal(
         style.cable_spacing * 0.5,
         corridor_offset,
     ) {
-        let choice = if row <= (from.y + to.y) * 0.5 {
-            RouteChoice::Above
-        } else {
-            RouteChoice::Below
-        };
         candidates.push(build_orthogonal_route(
             from,
             to,
@@ -773,8 +1103,7 @@ fn least_bad_orthogonal(
                 to,
             ],
             NARROW_RADIUS,
-            choice,
-            source_stub.x.min(target_stub.x),
+            Topology::Row { y: row },
         ));
     }
     if candidates.is_empty() {
@@ -789,20 +1118,123 @@ fn least_bad_orthogonal(
                 to,
             ],
             NARROW_RADIUS,
-            RouteChoice::CorridorX,
-            source_stub.x,
+            Topology::Corridor { x: source_stub.x },
         ));
     }
+    // The previous shape, once: its own row, column and fillet tier laid
+    // through the current endpoints and stubs, never its old points. It is
+    // a candidate only if the result is orthogonal, finite, and leaves and
+    // enters the ports the way the sides face now.
+    let rebuilt = previous.and_then(|previous| {
+        let radius = if is_narrow_tier(previous) { NARROW_RADIUS } else { style.corner_radius.max(16.0) };
+        let points = match previous.topology {
+            Topology::Straight => {
+                let level = (from.y - to.y).abs() < 1e-6;
+                let facing = (to.x - from.x) * source_side.sign() >= -1e-6
+                    && (from.x - to.x) * target_side.sign() >= -1e-6;
+                if !level || !facing {
+                    return None;
+                }
+                vec![from, to]
+            }
+            Topology::Corridor { x } => vec![
+                from,
+                source_stub,
+                Point::new(x, source_stub.y),
+                Point::new(x, target_stub.y),
+                target_stub,
+                to,
+            ],
+            Topology::Row { y } => vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, y),
+                Point::new(target_stub.x, y),
+                target_stub,
+                to,
+            ],
+            Topology::SourceDogleg { x, y } => vec![
+                from,
+                source_stub,
+                Point::new(x, from.y),
+                Point::new(x, y),
+                Point::new(target_stub.x, y),
+                target_stub,
+                to,
+            ],
+            Topology::TargetDogleg { x, y } => vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, y),
+                Point::new(x, y),
+                Point::new(x, to.y),
+                target_stub,
+                to,
+            ],
+        };
+        if points.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
+            return None;
+        }
+        let points = simplify(points);
+        if !valid_orthogonal(&points) {
+            return None;
+        }
+        // A held column may have passed an endpoint as it moved. Do not
+        // retain a shape that doubles back through its own horizontal stub.
+        if points.windows(3).any(|triple| {
+            (triple[1].x - triple[0].x) * (triple[2].x - triple[1].x)
+                + (triple[1].y - triple[0].y) * (triple[2].y - triple[1].y)
+                < -1e-6
+        }) {
+            return None;
+        }
+        let last = points.len() - 1;
+        let leaves = (points[1].x - points[0].x) * source_side.sign() > 1e-6
+            && (points[1].y - points[0].y).abs() < 1e-6;
+        let enters = (points[last - 1].x - points[last].x) * target_side.sign() > 1e-6
+            && (points[last - 1].y - points[last].y).abs() < 1e-6;
+        if !leaves || !enters {
+            return None;
+        }
+        Some(build_orthogonal_route(from, to, points, radius, previous.topology))
+    });
     let source_owner = endpoint_obstacle(from, obstacles, source_side);
     let target_owner = endpoint_obstacle(to, obstacles, target_side);
-    candidates
-        .into_iter()
-        .min_by(|left, right| {
-            collision_count(left, obstacles, source_owner, target_owner)
-                .cmp(&collision_count(right, obstacles, source_owner, target_owner))
-                .then_with(|| compare_routes(left, right))
+    let rebuilt_at = rebuilt.map(|route| {
+        candidates.push(route);
+        candidates.len() - 1
+    });
+    // Fewest collisions first, then the same total score a clear route is
+    // ranked by. The rebuilt previous shape is kept only at the minimum
+    // collision count, and only while nothing beats it by the deadband.
+    let collisions: Vec<usize> = candidates
+        .iter()
+        .map(|route| collision_count(route, obstacles, source_owner, target_owner))
+        .collect();
+    let baseline = score_baseline(candidates.iter().map(WireRoute::length));
+    let best = (0..candidates.len())
+        .min_by(|&left, &right| {
+            collisions[left]
+                .cmp(&collisions[right])
+                .then_with(|| {
+                    route_score(&candidates[left], baseline)
+                        .partial_cmp(&route_score(&candidates[right], baseline))
+                        .unwrap_or(Ordering::Equal)
+                })
+                .then_with(|| compare_shape(&candidates[left], &candidates[right]))
         })
-        .unwrap()
+        .expect("at least one fallback candidate");
+    let chosen = match rebuilt_at {
+        Some(at)
+            if at != best
+                && collisions[at] == collisions[best]
+                && route_score(&candidates[best], baseline) > route_score(&candidates[at], baseline) - SWITCH_DEADBAND =>
+        {
+            at
+        }
+        _ => best,
+    };
+    candidates.swap_remove(chosen)
 }
 
 fn build_orthogonal_route(
@@ -810,22 +1242,14 @@ fn build_orthogonal_route(
     to: Point,
     points: Vec<Point>,
     radius: f64,
-    choice: RouteChoice,
-    tie_x: f64,
+    topology: Topology,
 ) -> WireRoute {
     let mut points = simplify(points);
     if points.len() < 2 {
         points.push(to);
     }
     let samples = rounded_samples(&points, radius);
-    build_route(
-        from,
-        to,
-        RouteKind::Orthogonal { points, radius },
-        samples,
-        choice,
-        tie_x,
-    )
+    build_topology_route(from, to, RouteKind::Orthogonal { points, radius }, samples, topology)
 }
 
 fn collision_count(
@@ -877,8 +1301,7 @@ fn build_orthogonal_candidate(
     endpoint_obstacles: &[Obstacle],
     source_owner: Option<usize>,
     target_owner: Option<usize>,
-    choice: RouteChoice,
-    tie_x: f64,
+    topology: Topology,
 ) -> Option<WireRoute> {
     let points = simplify(points);
     if !valid_orthogonal(&points) {
@@ -899,16 +1322,7 @@ fn build_orthogonal_candidate(
         source_owner,
         target_owner,
     ))
-    .then(|| {
-        build_route(
-            from,
-            to,
-            RouteKind::Orthogonal { points, radius },
-            samples,
-            choice,
-            tie_x,
-        )
-    })
+    .then(|| build_topology_route(from, to, RouteKind::Orthogonal { points, radius }, samples, topology))
 }
 
 fn endpoint_run_exemptions(points: &[Point], radius: f64) -> (f64, f64) {
@@ -1032,6 +1446,8 @@ fn routing_columns(
 /// Find a clear vertical track between the stubs. Forbidden x intervals are
 /// accumulated in one pass and merged after sorting. This is O(cards log
 /// cards), with route validation remaining O(cards).
+/// The vertical channel nearest the midpoint of the ends (shifted by the
+/// cable's offset) that a corridor of `channel_width` fits in.
 fn choose_forward_channel(
     from: Point,
     to: Point,
@@ -1039,6 +1455,53 @@ fn choose_forward_channel(
     offset: f64,
     channel_width: f64,
 ) -> Option<f64> {
+    let low = from.x.min(to.x);
+    let high = from.x.max(to.x);
+    let desired = (low + high) * 0.5 + offset;
+    forward_gaps(from, to, obstacles)?
+        .into_iter()
+        .filter(|(a, b)| b - a + 1e-6 >= channel_width)
+        .map(|(a, b)| {
+            let low = a + channel_width * 0.5;
+            let high = b - channel_width * 0.5;
+            let channel = desired.clamp(low, high);
+            ((channel / CHANNEL_CELL).round() * CHANNEL_CELL).clamp(low, high)
+        })
+        .min_by(|a, b| {
+            (a - desired)
+                .abs()
+                .partial_cmp(&(b - desired).abs())
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+        })
+}
+
+/// The channel at `preferred`, when the gap holding it still fits a corridor
+/// of `channel_width` between the ends: the previous route's spine, kept
+/// where it was (moved only as far as the gap's edges require).
+fn forward_channel_holding(
+    from: Point,
+    to: Point,
+    obstacles: &[Obstacle],
+    channel_width: f64,
+    preferred: f64,
+) -> Option<f64> {
+    forward_gaps(from, to, obstacles)?
+        .into_iter()
+        .filter(|(a, b)| b - a + 1e-6 >= channel_width)
+        .find(|(a, b)| preferred >= *a - 1e-6 && preferred <= *b + 1e-6)
+        .map(|(a, b)| {
+            let low = a + channel_width * 0.5;
+            let high = b - channel_width * 0.5;
+            let channel = preferred.clamp(low, high);
+            ((channel / CHANNEL_CELL).round() * CHANNEL_CELL).clamp(low, high)
+        })
+}
+
+/// The x ranges between the ends that no obstacle crosses at the ends'
+/// heights or between them; `None` when the ends are too close or an
+/// obstacle sits on an end.
+fn forward_gaps(from: Point, to: Point, obstacles: &[Obstacle]) -> Option<Vec<(f64, f64)>> {
     let low = from.x.min(to.x);
     let high = from.x.max(to.x);
     if high - low < 32.0 {
@@ -1083,22 +1546,7 @@ fn choose_forward_channel(
     if cursor <= high + 1e-6 {
         gaps.push((cursor, high));
     }
-    let desired = (low + high) * 0.5 + offset;
-    gaps.into_iter()
-        .filter(|(a, b)| b - a + 1e-6 >= channel_width)
-        .map(|(a, b)| {
-            let low = a + channel_width * 0.5;
-            let high = b - channel_width * 0.5;
-            let channel = desired.clamp(low, high);
-            ((channel / CHANNEL_CELL).round() * CHANNEL_CELL).clamp(low, high)
-        })
-        .min_by(|a, b| {
-            (a - desired)
-                .abs()
-                .partial_cmp(&(b - desired).abs())
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-        })
+    Some(gaps)
 }
 
 fn simplify(points: Vec<Point>) -> Vec<Point> {
@@ -1211,29 +1659,48 @@ fn route_samples_clear_with_exemptions(
     })
 }
 
-/// A route this much longer than another candidate is a trip around a card,
-/// not a cleaner line: the shorter one wins whatever its bend count.
-const DETOUR_RATIO: f64 = 1.35;
-const DETOUR_SLACK: f64 = 24.0;
-
-fn is_detour_of(route: &WireRoute, other: &WireRoute) -> bool {
-    route.length() > other.length() * DETOUR_RATIO + DETOUR_SLACK
+/// One total order over a set of candidates: length in units of the set's
+/// shortest candidate, plus a fixed cost per bend. A bend costs 15 % of
+/// that shortest length, so two fewer bends are worth up to 30 %: a clean
+/// two-bend line of comparable length beats a four-bend dogleg, and a
+/// two-bend trip around a whole card loses to the short dogleg beside it.
+/// The baseline is fixed for the whole set, so the order is transitive.
+const BEND_COST: f64 = 0.15;
+/// The one deadband, in units of the shortest candidate: what a new best
+/// must beat the retained shape by, and what a route through a narrow gap
+/// must save over one at full clearance.
+const SWITCH_DEADBAND: f64 = 1.0 - ROUTE_SWITCH_RATIO;
+const NARROW_TIER_COST: f64 = SWITCH_DEADBAND;
+const NARROW_NO_GAP_COST: f64 = 1.0;
+fn score_baseline(lengths: impl Iterator<Item = f64>) -> f64 {
+    lengths.fold(f64::INFINITY, f64::min).max(1.0)
 }
 
-fn compare_routes(left: &WireRoute, right: &WireRoute) -> Ordering {
-    // Fewest bends first — the clear S-curve wins — but only among routes of
-    // comparable length. Bends-first alone let a two-bend row that circled a
-    // whole card beat a short four-bend dogleg beside it.
-    match (is_detour_of(left, right), is_detour_of(right, left)) {
-        (true, false) => return Ordering::Greater,
-        (false, true) => return Ordering::Less,
-        _ => {}
-    }
+fn route_score(route: &WireRoute, baseline: f64) -> f64 {
+    route.length() / baseline + BEND_COST * route.bends() as f64
+}
+
+/// The deterministic order of routes of equal score.
+fn compare_shape(left: &WireRoute, right: &WireRoute) -> Ordering {
+    let (left_kind, left_x, left_y) = left.topology.order_key();
+    let (right_kind, right_x, right_y) = right.topology.order_key();
     left.bends()
         .cmp(&right.bends())
         .then_with(|| left.length().partial_cmp(&right.length()).unwrap_or(Ordering::Equal))
-        .then_with(|| left.tie_x.partial_cmp(&right.tie_x).unwrap_or(Ordering::Equal))
+        .then_with(|| left_kind.cmp(&right_kind))
+        .then_with(|| left_x.total_cmp(&right_x))
+        .then_with(|| left_y.total_cmp(&right_y))
         .then_with(|| route_choice_rank(left.choice).cmp(&route_choice_rank(right.choice)))
+}
+
+/// Two routes against each other, the shorter of them as the baseline.
+#[cfg(test)]
+fn compare_routes(left: &WireRoute, right: &WireRoute) -> Ordering {
+    let baseline = score_baseline([left.length(), right.length()].into_iter());
+    route_score(left, baseline)
+        .partial_cmp(&route_score(right, baseline))
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| compare_shape(left, right))
 }
 
 fn route_choice_rank(choice: RouteChoice) -> u8 {

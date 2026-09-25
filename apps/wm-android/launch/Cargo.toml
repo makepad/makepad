@@ -1,0 +1,18 @@
+# The child-process launcher of apps/wm-android: an executable shipped in the
+# APK's native-library directory (as libmakepad_launch.so, the only place an
+# app may exec from), run by the WM as `launch <app library> --stdin-loop`.
+[package]
+name = "makepad-wm-android-launch"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "makepad-launch"
+path = "src/main.rs"
+
+[dependencies]
+# `--build`: provision the APK's toolchain/source/target and build the app on
+# the phone before running it (the assets are read from the APK file: a child
+# process has no JVM, so no AssetManager).
+makepad-ondevice-build = { path = "../../../libs/ondevice_build" }
+makepad-zip-file = { path = "../../../libs/zip_file" }

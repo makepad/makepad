@@ -798,6 +798,35 @@ impl Cx {
                 });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::TouchCancel(mut touches) => {
+                // ACTION_CANCEL: every pointer was taken away, not lifted. Each
+                // is cancelled for every capture, dispatched as
+                // `Event::FingerCancel` (raw consumers see a cancel, never a
+                // release; an internal drag ends with no drop) and retired.
+                let Some(time) = touches.first().map(|t| t.time) else { return };
+                let window = &self.windows[CxWindowPool::id_zero()];
+                for touch in &mut touches {
+                    touch.abs = window.physical_vec2d_to_layout(touch.abs);
+                    touch.radius = window.physical_vec2d_to_layout(touch.radius);
+                }
+                for touch in &touches {
+                    let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, touch.uid).into();
+                    self.fingers.cancel_digit(digit_id);
+                    self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+                        window_id: CxWindowPool::id_zero(),
+                        digit_id,
+                        device: crate::event::DigitDevice::Touch { uid: touch.uid },
+                        abs: touch.abs,
+                        time,
+                        modifiers: Default::default(),
+                    }));
+                }
+                if self.os.internal_drag_items.take().is_some() {
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+                self.fingers.process_touch_update_end(&touches);
+            }
             FromJavaMessage::Touch(mut touches) => {
                 let time = touches[0].time;
                 let window = &self.windows[CxWindowPool::id_zero()];
@@ -1700,6 +1729,9 @@ impl Cx {
 
         // Live edits
         self.run_live_edit_if_needed("android");
+
+        // `setprop debug.makepad.grab <n>`: the app's own frame grab.
+        self.android_poll_debug_grab();
 
         // Platform operations
         self.handle_platform_ops();
@@ -3206,8 +3238,15 @@ impl CxOsApi for Cx {
             .as_secs_f64()
     }
 
-    fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
-        crate::error!("open_url not implemented on this platform");
+    fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        // A hosted child has no JVM to start an Intent with: its WM does.
+        if super::android_hosted::is_hosted() {
+            Cx::send_studio_message(crate::studio::AppToStudio::Relay(
+                crate::studio::ChildRelay::OpenUrl { url: url.to_string() },
+            ));
+            return;
+        }
+        unsafe { android_jni::to_java_open_url(url) };
     }
 
     fn in_xr_mode(&self) -> bool {

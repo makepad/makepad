@@ -914,6 +914,32 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     Ok(page.granule as f64 / rate as f64)
 }
 
+/// Whether `head` holds the identification and comment packets; `Some`
+/// of a longer head to try when they run past it (a cover picture in the
+/// comments can be megabytes), `None` when they are in, or cannot be.
+pub fn head_needed(head: &[u8]) -> Option<usize> {
+    match read_tags(head) {
+        Err(AudioError::Truncated) => Some(head.len().saturating_mul(2).max(64 * 1024)),
+        _ => None,
+    }
+}
+
+/// Tags from the start of a file and its length from the granule of the
+/// last page, which the last bytes (`tail`, 128 KiB or the whole file)
+/// hold: an Ogg page is at most 64 KiB.
+pub fn probe_ends(head: &[u8], tail: &[u8]) -> Result<(Tags, Option<f64>), AudioError> {
+    let mut reader = PacketReader::new(head);
+    let rate = {
+        let packet = reader.next_packet()?.ok_or(AudioError::Empty)?;
+        read_ident(packet.data, &Limits::default())?.sample_rate
+    };
+    let mut tags = Tags::default();
+    let packet = reader.next_packet()?.ok_or(AudioError::Truncated)?;
+    read_comments(packet.data, &mut tags)?;
+    let seconds = ogg::last_page(tail, reader.serial()).filter(|page| page.granule != ogg::GRANULE_NONE).map(|page| page.granule as f64 / rate as f64);
+    Ok((tags, seconds))
+}
+
 /// Vorbis comments from the second header packet.
 pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {
     let mut reader = PacketReader::new(bytes);

@@ -4265,6 +4265,7 @@ Flow{video}
                 view: rect(10.0, 20.0, 800.0, 600.0),
                 pan: dvec2(30.0, -5.0),
                 scale,
+                render_origin: None,
             };
             let screen = dvec2(140.0, 215.0);
             let expected = dvec2(

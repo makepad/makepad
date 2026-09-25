@@ -36,14 +36,27 @@ impl ScriptIp {
         self.body == u16::MAX && self.index == u32::MAX
     }
 
+    /// Bits of the 40-bit packing that name the script body: 16384 bodies.
+    /// A long-running host that compiles code at runtime (live shaders,
+    /// visualizer presets) creates a body per module, so this is the limit
+    /// that is reached first.
+    pub const BODY_BITS: u32 = 14;
+    /// Bits for the instruction index within a body: 67 million opcodes,
+    /// far above the largest module source.
+    pub const INDEX_BITS: u32 = 40 - Self::BODY_BITS;
+    /// Bodies that can be packed; body ids at or above this would collide.
+    pub const MAX_BODIES: usize = 1 << Self::BODY_BITS;
+    /// Instructions per body that can be packed.
+    pub const MAX_INDEX: usize = 1 << Self::INDEX_BITS;
+
     pub const fn from_u40(value: u64) -> Self {
         Self {
-            body: ((value >> 28) & 0xFFF) as u16,
-            index: ((value) & 0xFFF_FFFF) as u32,
+            body: ((value >> Self::INDEX_BITS) & (Self::MAX_BODIES as u64 - 1)) as u16,
+            index: (value & (Self::MAX_INDEX as u64 - 1)) as u32,
         }
     }
     pub const fn to_u40(&self) -> u64 {
-        ((self.body as u64) << 28) | self.index as u64
+        ((self.body as u64) << Self::INDEX_BITS) | self.index as u64
     }
 }
 
@@ -1128,6 +1141,16 @@ impl ScriptValue {
         self.0 < Self::TYPE_NAN
     }
 
+    /// Checked index for language reads and writes; unlike `as_index`, this
+    /// cannot truncate, saturate, or turn a non-number into item zero.
+    pub fn checked_index(&self) -> Option<usize> {
+        let value = self.as_number()?;
+        // The cast saturates and maps NaN to zero, so only a finite,
+        // non-negative, integral value in range survives the round trip.
+        let index = value as usize;
+        (index as f64 == value && index != usize::MAX).then_some(index)
+    }
+
     pub const fn as_index(&self) -> usize {
         if let Some(f) = self.as_f64() {
             return f as usize;
@@ -1643,5 +1666,25 @@ impl fmt::Display for ScriptValue {
             return write!(f, "{opcode}{args}");
         }
         write!(f, "?{:08x}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod script_ip_tests {
+    use super::*;
+
+    /// The largest body id and index round-trip through the 40-bit packing,
+    /// and neighbouring bodies stay distinct: more than 4096 bodies (the old
+    /// 12-bit limit, reached by hosts compiling shaders at runtime) no
+    /// longer alias.
+    #[test]
+    fn body_ids_past_4096_do_not_alias() {
+        let last = ScriptIp { body: (ScriptIp::MAX_BODIES - 1) as u16, index: (ScriptIp::MAX_INDEX - 1) as u32 };
+        assert_eq!(ScriptIp::from_u40(last.to_u40()), last);
+        assert!(last.to_u40() < 1 << 40);
+        let a = ScriptIp { body: 4096, index: 7 };
+        let b = ScriptIp { body: 0, index: 7 };
+        assert_ne!(a.to_u40(), b.to_u40());
+        assert_eq!(ScriptIp::from_u40(a.to_u40()), a);
     }
 }

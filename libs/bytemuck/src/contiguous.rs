@@ -183,24 +183,24 @@ macro_rules! impl_contiguous {
 impl_contiguous! {
   bool as u8 in [0, 1];
 
-  u8 as u8 in [0, u8::max_value()];
-  u16 as u16 in [0, u16::max_value()];
-  u32 as u32 in [0, u32::max_value()];
-  u64 as u64 in [0, u64::max_value()];
-  u128 as u128 in [0, u128::max_value()];
-  usize as usize in [0, usize::max_value()];
+  u8 as u8 in [0, u8::MAX];
+  u16 as u16 in [0, u16::MAX];
+  u32 as u32 in [0, u32::MAX];
+  u64 as u64 in [0, u64::MAX];
+  u128 as u128 in [0, u128::MAX];
+  usize as usize in [0, usize::MAX];
 
-  i8 as i8 in [i8::min_value(), i8::max_value()];
-  i16 as i16 in [i16::min_value(), i16::max_value()];
-  i32 as i32 in [i32::min_value(), i32::max_value()];
-  i64 as i64 in [i64::min_value(), i64::max_value()];
-  i128 as i128 in [i128::min_value(), i128::max_value()];
-  isize as isize in [isize::min_value(), isize::max_value()];
+  i8 as i8 in [i8::MIN, i8::MAX];
+  i16 as i16 in [i16::MIN, i16::MAX];
+  i32 as i32 in [i32::MIN, i32::MAX];
+  i64 as i64 in [i64::MIN, i64::MAX];
+  i128 as i128 in [i128::MIN, i128::MAX];
+  isize as isize in [isize::MIN, isize::MAX];
 
-  NonZeroU8 as u8 in [1, u8::max_value()];
-  NonZeroU16 as u16 in [1, u16::max_value()];
-  NonZeroU32 as u32 in [1, u32::max_value()];
-  NonZeroU64 as u64 in [1, u64::max_value()];
-  NonZeroU128 as u128 in [1, u128::max_value()];
-  NonZeroUsize as usize in [1, usize::max_value()];
+  NonZeroU8 as u8 in [1, u8::MAX];
+  NonZeroU16 as u16 in [1, u16::MAX];
+  NonZeroU32 as u32 in [1, u32::MAX];
+  NonZeroU64 as u64 in [1, u64::MAX];
+  NonZeroU128 as u128 in [1, u128::MAX];
+  NonZeroUsize as usize in [1, usize::MAX];
 }

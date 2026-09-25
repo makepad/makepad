@@ -259,6 +259,15 @@ struct WidgetTreeInner {
     // Only set when tree topology changes (nodes added/removed, parent changes).
     // Property-only changes (name, widget ref, skip_search) are patched in-place.
     structure_dirty: bool,
+    /// A LOOKUP found a topology change. Lookups settle stale nodes on their
+    /// way through the graph and must not schedule a dense rebuild for it (a
+    /// recycling list would make every frame pay one), so they leave
+    /// `structure_dirty` alone. But they also consume the dirty mark, and with
+    /// it the only thing that told `sync_dirty` the dense arrays are behind:
+    /// children a lookup discovered first (a view's `on_render` output, for
+    /// one) then never reached the dump, the snapshot or the flood searches.
+    /// This remembers it, and only those dense readers act on it.
+    dense_stale: bool,
 }
 
 struct WidgetTreeNode {
@@ -1069,11 +1078,11 @@ impl WidgetTree {
 
     fn sync_dirty(&self) {
         let mut inner = self.inner.borrow_mut();
-        if inner.dirty.is_empty() && !inner.structure_dirty {
+        if inner.dirty.is_empty() && !inner.structure_dirty && !inner.dense_stale {
             return;
         }
         Self::flush_dirty(&mut inner, true);
-        if inner.structure_dirty {
+        if inner.structure_dirty || inner.dense_stale {
             Self::rebuild_dense(&mut inner);
         }
     }
@@ -1672,6 +1681,8 @@ impl WidgetTree {
                     invalidate_uid_cache = true;
                     if mark_structure_dirty {
                         inner.structure_dirty = true;
+                    } else {
+                        inner.dense_stale = true;
                     }
                 }
             }
@@ -1681,6 +1692,8 @@ impl WidgetTree {
                 invalidate_uid_cache = true;
                 if mark_structure_dirty {
                     inner.structure_dirty = true;
+                } else {
+                    inner.dense_stale = true;
                 }
             }
 
@@ -1714,6 +1727,8 @@ impl WidgetTree {
                             prev_parent.children.remove(pos);
                             if mark_structure_dirty {
                                 inner.structure_dirty = true;
+                            } else {
+                                inner.dense_stale = true;
                             }
                         }
                     }
@@ -1757,6 +1772,8 @@ impl WidgetTree {
             invalidate_uid_cache = true;
             if mark_structure_dirty {
                 inner.structure_dirty = true;
+            } else {
+                inner.dense_stale = true;
             }
         }
 
@@ -1821,6 +1838,7 @@ impl WidgetTree {
         if inner.graph.is_empty() {
             inner.root_uid = WidgetUid(0);
             inner.structure_dirty = false;
+            inner.dense_stale = false;
             return;
         }
 
@@ -1862,6 +1880,7 @@ impl WidgetTree {
             Self::build_dense_from_iterative(inner, uid, NONE);
         }
         inner.structure_dirty = false;
+        inner.dense_stale = false;
     }
 
     /// Iterative DFS dense-index builder. Reads children by index directly from
@@ -3027,6 +3046,13 @@ struct UiRoot {
     widget: WidgetWeakRef,
     // Cache a route, never visibility: every query validates the live path.
     active_path: RefCell<Vec<WidgetWeakRef>>,
+}
+
+/// Forget the root a previous case on a pooled test context drew.
+#[cfg(test)]
+pub(crate) fn reset_for_test(cx: &mut Cx) {
+    // `set_global` keeps an existing global; this one must be replaced.
+    *cx.global::<UiRoot>() = UiRoot::default();
 }
 
 fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {

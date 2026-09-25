@@ -48,8 +48,8 @@ makepad-code-editor = { path = "../../code_editor" }
 makepad-code-arch = { path = "../../libs/code_arch" }
 makepad-git = { path = "../../libs/git" }
 
-[target.'cfg(windows)'.dependencies]
-makepad-screen = { path = "../../tools/screen" }
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
+makepad-agents = { path = "../../tools/agents" }
 
 [dev-dependencies]
 makepad-draw = { path = "../../draw" }

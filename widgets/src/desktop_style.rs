@@ -20,14 +20,31 @@ pub enum DesktopStyle {
     /// 4 NeXTSTEP), so a new style takes the next number and `ALL` below
     /// keeps the order they are shown in.
     BlackOrange,
+    /// Soft moulded surfaces on one near-white ground: no borders, every
+    /// visible edge is light on a shoulder. The first sheet built on the
+    /// surface material.
+    Neumorphic,
+    /// Moulded grey plastic: caps standing off a warm grey housing under a
+    /// hard light, wells cut into it. A press deepens.
+    Molded,
+    /// Black glossy plastic with a cyan indicator: a gloss sweep on every
+    /// cap, and a press that lights up rather than moves.
+    Glossy,
+    /// Milled near-black metal lit from inside in orange: flat machined
+    /// faces, a hard hairline on every edge, everything that is on glows.
+    Milled,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 8] = [Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    pub const ALL: [Self; 12] = [Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
             Self::BlackOrange => "black-orange",
+            Self::Neumorphic => "neumorphic",
+            Self::Molded => "molded",
+            Self::Glossy => "glossy",
+            Self::Milled => "milled",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -40,6 +57,10 @@ impl DesktopStyle {
         match self {
             Self::Omarchy => "Omarchy",
             Self::BlackOrange => "Black orange",
+            Self::Neumorphic => "Neumorphic",
+            Self::Molded => "Molded",
+            Self::Glossy => "Glossy",
+            Self::Milled => "Milled",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -61,9 +82,9 @@ impl DesktopStyle {
     /// it.
     pub fn icon_set(self) -> usize {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Glossy | Self::Milled => 0,
             Self::Macos => 1,
-            Self::Windows => 2,
+            Self::Windows | Self::Molded => 2,
             Self::Windows2000 => 3,
             Self::NextStep => 4,
             Self::Ios => 5,
@@ -76,11 +97,11 @@ impl DesktopStyle {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
+        !matches!(self, Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled) && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -89,7 +110,7 @@ impl DesktopStyle {
     }
     pub fn title_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -137,6 +158,22 @@ impl StyleSheet {
             DesktopStyle::BlackOrange => (
                 include_str!("../themes/black-orange/theme.splash"),
                 include_str!("../themes/black-orange/widgets.splash"),
+            ),
+            DesktopStyle::Neumorphic => (
+                include_str!("../themes/neumorphic/theme.splash"),
+                include_str!("../themes/neumorphic/widgets.splash"),
+            ),
+            DesktopStyle::Molded => (
+                include_str!("../themes/molded/theme.splash"),
+                include_str!("../themes/molded/widgets.splash"),
+            ),
+            DesktopStyle::Glossy => (
+                include_str!("../themes/glossy/theme.splash"),
+                include_str!("../themes/glossy/widgets.splash"),
+            ),
+            DesktopStyle::Milled => (
+                include_str!("../themes/milled/theme.splash"),
+                include_str!("../themes/milled/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -372,6 +409,10 @@ mod tests {
                         DesktopStyle::Ios => 14.0,
                         DesktopStyle::Android => 20.0,
                         DesktopStyle::BlackOrange => 2.5,
+                        DesktopStyle::Neumorphic => 8.0,
+                        DesktopStyle::Molded => 5.0,
+                        DesktopStyle::Glossy => 6.0,
+                        DesktopStyle::Milled => 3.0,
                         _ => 0.0,
                     }
                 );

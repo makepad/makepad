@@ -434,6 +434,13 @@ impl ReorderList {
                 }
                 return true;
             }
+            // The press itself taken away (the host or the OS cancelled it):
+            // the row goes back, nothing is reordered. The cancel still goes
+            // on to the rows.
+            if matches!(event, Event::FingerCancel(c) if cx.fingers.press_taken_away(c.digit_id)) {
+                self.cancel_drag(cx);
+                return false;
+            }
             let released = matches!(event, Event::MouseUp(_))
                 || matches!(event, Event::TouchUpdate(e)
                     if e.touches.iter().any(|t| matches!(t.state, makepad_draw::makepad_platform::event::TouchState::Stop)));
@@ -889,3 +896,47 @@ mod tests {
         assert!(cancelled.map_or(true, |d: ReorderDrag| d.commit().is_none()));
     }
 }
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    /// A mouse press the host took away (`Event::FingerCancel`) ends a
+    /// gripper drag with the row back where it was: no `Reordered`, even
+    /// when the drag had reached a slot that WOULD commit.
+    #[test]
+    fn a_cancelled_drag_reorders_nothing() {
+        crate::on_test_cx(|| {
+        let mut cx = crate::checkout_test_cx();
+        let mut list = cx.with_vm(ReorderList::script_new_with_default);
+        let rows: Vec<RowBand> = (0..4).map(|i| (i, 100.0 + i as f64 * 60.0, 60.0)).collect();
+        let mut drag = ReorderDrag::press(0, 110.0);
+        drag.move_to(300.0, 4.0, &rows);
+        assert!(drag.commit().is_some(), "the drag would commit; the test proves nothing otherwise");
+        list.drag_handle = live_id!(grip);
+        list.drag = Some(drag);
+        // The host takes the mouse press itself away.
+        cx.fingers.cancel_digit(live_id!(mouse).into());
+        let cancel = Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: live_id!(mouse).into(),
+            device: DigitDevice::Mouse { button: MouseButton::PRIMARY },
+            abs: dvec2(10.0, 300.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
+        });
+        let mut owned = true;
+        let actions = cx.capture_actions(|cx| owned = list.handle_drag(cx, &cancel));
+        assert!(!owned, "the cancel was kept from the rows");
+        assert!(list.drag.is_none(), "the drag survived its cancel");
+        let reordered = actions.iter().any(|a| {
+            matches!(
+                a.as_widget_action().map(|w| w.cast::<ReorderListAction>()),
+                Some(ReorderListAction::Reordered { .. })
+            )
+        });
+        assert!(!reordered, "a cancelled drag reordered the list");
+        });
+    }
+}
+

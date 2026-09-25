@@ -387,6 +387,42 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     header::probe_duration(bytes)
 }
 
+/// Bytes past the ID3v2 tag the first frames need to be seen in: the
+/// Xing/Info/VBRI header rides in the first frame, and a frame is only
+/// believed with its neighbour.
+const FIRST_FRAMES: usize = 16 * 1024;
+
+/// How many leading bytes [`probe_ends`] needs, judged from `head`: the
+/// whole ID3v2 tag (by its declared size) and the first frames after it.
+/// `None` when `head` holds that, or the whole file.
+pub fn head_needed(head: &[u8], file_len: u64) -> Option<usize> {
+    let need = crate::flac::metadata::skip_id3(head).saturating_add(FIRST_FRAMES);
+    (head.len() < need && (head.len() as u64) < file_len).then_some(need)
+}
+
+/// Tags and length from a file's first bytes (`head`, see [`head_needed`])
+/// and its last (`tail`), the file being `file_len` bytes. The length is the
+/// Xing/Info/VBRI header's when the first frame carries one, else the first
+/// frame's bitrate over the audio bytes — exact for constant bitrate, an
+/// estimate for variable bitrate without a header (which encoders rarely
+/// write). `None` without a frame to go by.
+pub fn probe_ends(head: &[u8], tail: &[u8], file_len: u64) -> (Tags, Option<f64>) {
+    (read_tags(head), estimate_duration(head, tail, file_len))
+}
+
+fn estimate_duration(head: &[u8], tail: &[u8], file_len: u64) -> Option<f64> {
+    let front = header::id3v2_len(head);
+    let (at, first) = header::find_frame(head.get(front..)?, 0)?;
+    let rate = first.sample_rate as f64;
+    if let Some(frames) = header::parse_vbr_header(&head[front + at..], &first).and_then(|vbr| vbr.frames).filter(|&f| f > 0) {
+        return Some(frames as f64 * first.samples_per_frame() as f64 / rate);
+    }
+    let id3v1 = tail.len() >= 128 && &tail[tail.len() - 128..tail.len() - 125] == b"TAG";
+    let end = file_len.saturating_sub(if id3v1 { 128 } else { 0 });
+    let audio = end.saturating_sub((front + at) as u64);
+    (first.bitrate_kbps > 0).then(|| audio as f64 * 8.0 / (first.bitrate_kbps as f64 * 1000.0))
+}
+
 /// ID3v2 text frames. Never fails: a file with an unreadable tag is still a
 /// file we want to play.
 pub fn read_tags(bytes: &[u8]) -> Tags {

@@ -511,7 +511,9 @@ pub fn splash_source(theme: &ImportedTheme) -> String {
 // ----------------------------------------------------------------------
 
 pub fn makepad_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         return PathBuf::from(home);
     }
     std::env::var_os("USERPROFILE")

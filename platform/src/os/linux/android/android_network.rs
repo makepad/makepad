@@ -408,6 +408,23 @@ impl NetworkBackend for AndroidNetworkShimBackend {
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
+        // A hosted child process has no JVM (and Android no public TLS
+        // library): its WM makes the request and relays the answers.
+        if super::android_hosted::is_hosted() {
+            hosted_http()
+                .lock()
+                .map_err(|_| NetworkError::backend("hosted http lock poisoned"))?
+                .insert(request_id, sink);
+            if !request.is_streaming {
+                expire_hosted_http(request_id, request.metadata_id);
+            }
+            crate::cx::Cx::send_studio_message(crate::studio::AppToStudio::Relay(
+                crate::studio::ChildRelay::HttpRequest(crate::hosted_relay::relay_http_request(
+                    request_id, &request,
+                )),
+            ));
+            return Ok(());
+        }
         let internal_request_id = self.next_internal_id();
         {
             let mut state = self
@@ -431,6 +448,15 @@ impl NetworkBackend for AndroidNetworkShimBackend {
     }
 
     fn http_cancel(&self, request_id: LiveId) -> Result<(), NetworkError> {
+        if super::android_hosted::is_hosted() {
+            let known = hosted_http().lock().ok().and_then(|mut m| m.remove(&request_id)).is_some();
+            if known {
+                crate::cx::Cx::send_studio_message(crate::studio::AppToStudio::Relay(
+                    crate::studio::ChildRelay::CancelHttpRequest { request_id: request_id.0 },
+                ));
+            }
+            return Ok(());
+        }
         let mut state = self
             .http
             .lock()
@@ -561,6 +587,43 @@ impl NetworkBackend for AndroidNetworkShimBackend {
 static INIT: Once = Once::new();
 static SHIM_BACKEND: OnceLock<Arc<AndroidNetworkShimBackend>> = OnceLock::new();
 
+/// A hosted child's HTTP requests its WM is making for it, by request id.
+fn hosted_http() -> &'static Mutex<HashMap<LiveId, EventSink>> {
+    static MAP: OnceLock<Mutex<HashMap<LiveId, EventSink>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A relayed request the WM never answers (it closed, or lost the request)
+/// fails after this long instead of waiting forever.
+const HOSTED_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn expire_hosted_http(request_id: LiveId, metadata_id: LiveId) {
+    std::thread::spawn(move || {
+        std::thread::sleep(HOSTED_HTTP_TIMEOUT);
+        let sink = hosted_http().lock().ok().and_then(|mut map| map.remove(&request_id));
+        if let Some(sink) = sink {
+            let _ = sink.emit(NetworkResponse::HttpError {
+                request_id,
+                error: HttpError {
+                    message: "the window manager did not answer this request in time".into(),
+                    metadata_id,
+                },
+            });
+        }
+    });
+}
+
+/// The WM's relayed answer to one of this hosted child's requests.
+pub(crate) fn hosted_http_event(event: &crate::studio::RelayHttpEvent) {
+    let (request_id, response, ends) = crate::hosted_relay::network_response_from_relay(event);
+    let Ok(mut map) = hosted_http().lock() else { return };
+    let sink = if ends { map.remove(&request_id) } else { map.get(&request_id).cloned() };
+    drop(map);
+    if let Some(sink) = sink {
+        let _ = sink.emit(response);
+    }
+}
+
 fn shim_backend() -> Option<&'static Arc<AndroidNetworkShimBackend>> {
     SHIM_BACKEND.get()
 }
@@ -570,9 +633,15 @@ pub(crate) fn install_network_backend_shim() {
         let backend = Arc::new(AndroidNetworkShimBackend::new());
         let _ = SHIM_BACKEND.set(backend.clone());
         crate::makepad_network::register_android_backend_shim(backend);
-        crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
-            AndroidSocketStreamFactoryImpl,
-        ));
+        if super::android_hosted::is_hosted() {
+            crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
+                super::android_hosted::HostedSocketFactory,
+            ));
+        } else {
+            crate::makepad_network::register_android_socket_stream_factory_shim(Arc::new(
+                AndroidSocketStreamFactoryImpl,
+            ));
+        }
     });
 }
 

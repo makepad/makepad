@@ -127,6 +127,16 @@ pub(crate) fn orphan_sweep_locks(areas: &[Area]) {
 /// this as each event reaches it, so a tree left with no overlay of the kind
 /// that was dropped still gets its input back; an overlay does it too before
 /// taking a lock of its own, for a tree with no window above it.
+/// Forget the last Escape claim and every orphaned lock: a pooled test
+/// context is handed to case after case without an event loop, so its
+/// event id never moves and the first case's claim would refuse every
+/// later case's Escape.
+#[cfg(test)]
+pub(crate) fn reset_for_test(cx: &mut Cx) {
+    // `set_global` keeps an existing global; this one must be replaced.
+    *cx.global::<EscapeClaim>() = EscapeClaim::default();
+    let _ = ORPHANED_LOCKS.try_with(|orphans| orphans.borrow_mut().clear());
+}
 pub(crate) fn release_orphaned_sweep_locks(cx: &mut Cx) {
     let orphans = ORPHANED_LOCKS
         .try_with(|orphans| std::mem::take(&mut *orphans.borrow_mut()))
@@ -478,6 +488,22 @@ pub fn slide_for_pointer(placed: Placed, anchor: Rect, bounds: Rect, keep: f64) 
 
 #[cfg(test)]
 mod tests {
+    /// The pooled test contexts are handed from case to case with one
+    /// event id between them: the last case's claim must not refuse the
+    /// next case's Escape.
+    #[test]
+    fn a_pooled_context_forgets_the_last_claim() {
+        crate::on_test_cx(|| {
+            {
+                let mut cx = crate::checkout_test_cx();
+                assert!(super::claim_escape(&mut cx), "a fresh context has no claim");
+                assert!(!super::claim_escape(&mut cx), "one event is claimed once");
+            }
+            let mut cx = crate::checkout_test_cx();
+            assert!(super::claim_escape(&mut cx), "the next case is not refused by the last one's claim");
+        });
+    }
+
     use super::*;
 
     fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
@@ -504,6 +530,7 @@ mod tests {
 
     #[test]
     fn sides_know_their_opposite_and_axis() {
+        crate::on_test_cx(|| {
         assert_eq!(Side::Top.opposite(), Side::Bottom);
         assert_eq!(Side::Bottom.opposite(), Side::Top);
         assert_eq!(Side::Left.opposite(), Side::Right);
@@ -512,18 +539,22 @@ mod tests {
         assert!(Side::Bottom.is_vertical());
         assert!(!Side::Left.is_vertical());
         assert!(!Side::Right.is_vertical());
+        });
     }
 
     #[test]
     fn fits_below_and_stays_there() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&base());
         assert_eq!(p.rect, r(200.0, 224.0, 60.0, 40.0));
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.arrow_at, dvec2(250.0, 224.0));
+        });
     }
 
     #[test]
     fn fits_exactly_and_still_stays() {
+        crate::on_test_cx(|| {
         // Room below is exactly the popup's height: 600 - (556 + 4) = 40.
         let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 536.0, 100.0, 20.0),
@@ -531,10 +562,12 @@ mod tests {
         });
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.rect, r(200.0, 560.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn each_of_the_twelve_placements_lands_where_it_says() {
+        crate::on_test_cx(|| {
         // (placement, expected rect, expected arrow) around the base anchor.
         let table = [
             (Placement::BOTTOM_START, r(200.0, 224.0, 60.0, 40.0), dvec2(250.0, 224.0)),
@@ -559,12 +592,14 @@ mod tests {
             assert_eq!(p.rect, rect, "{placement:?}");
             assert_eq!(p.arrow_at, arrow, "{placement:?}");
         }
+        });
     }
 
     // -- flipping ----------------------------------------------------------
 
     #[test]
     fn flips_up_when_below_is_short_and_above_fits() {
+        crate::on_test_cx(|| {
         // Room below: 600 - (590 + 4) = 6; room above: 566.
         let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 570.0, 100.0, 20.0),
@@ -573,10 +608,12 @@ mod tests {
         assert_eq!(p.side, Side::Top);
         assert_eq!(p.rect, r(200.0, 526.0, 60.0, 40.0));
         assert_eq!(p.arrow_at, dvec2(250.0, 566.0));
+        });
     }
 
     #[test]
     fn flips_left_when_right_is_short_and_left_fits() {
+        crate::on_test_cx(|| {
         // Room right: 800 - (780 + 4) = 16; room left: 696.
         let p = place_overlay(&PlaceRequest {
             anchor: r(700.0, 200.0, 80.0, 20.0),
@@ -586,10 +623,12 @@ mod tests {
         assert_eq!(p.side, Side::Left);
         assert_eq!(p.rect, r(636.0, 200.0, 60.0, 40.0));
         assert_eq!(p.arrow_at, dvec2(696.0, 210.0));
+        });
     }
 
     #[test]
     fn neither_fits_takes_the_roomier_side_and_shrinks_to_it() {
+        crate::on_test_cx(|| {
         // A 100-tall window, anchor at y=30: room below 100 - 54 = 46, room
         // above 30 - 4 = 26. A 60-tall popup fits neither; below wins on
         // room and the popup is cut to 46 with its top edge still on the
@@ -614,10 +653,12 @@ mod tests {
         assert_eq!(p.side, Side::Top);
         assert_eq!(p.rect, r(200.0, 0.0, 60.0, 42.0));
         assert_eq!(p.rect.pos.y + p.rect.size.y, 42.0);
+        });
     }
 
     #[test]
     fn a_tie_between_two_short_sides_keeps_the_requested_side() {
+        crate::on_test_cx(|| {
         // Room below is pass - y - h - gap and room above is y - gap; they
         // tie when y = (pass - h) / 2. In a 100-tall window with a 20-tall
         // anchor that is y = 40: both rooms are 36, short of the 40 asked.
@@ -636,10 +677,12 @@ mod tests {
         });
         assert_eq!(p.side, Side::Top, "{p:?}");
         assert_eq!(p.rect.size.y, 36.0);
+        });
     }
 
     #[test]
     fn the_requested_side_wins_when_it_is_roomier_even_though_nothing_fits() {
+        crate::on_test_cx(|| {
         // Room below 376, room above 196, popup 1000 tall: no flip, 376 tall.
         let p = place_overlay(&PlaceRequest {
             size: dvec2(60.0, 1000.0),
@@ -648,10 +691,12 @@ mod tests {
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.rect, r(200.0, 224.0, 60.0, 376.0));
         assert_eq!(p.arrow_at, dvec2(250.0, 224.0));
+        });
     }
 
     #[test]
     fn taller_than_the_window_flips_when_above_is_roomier() {
+        crate::on_test_cx(|| {
         // Anchor at y=500: room below 76, room above 496.
         let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 500.0, 100.0, 20.0),
@@ -661,10 +706,12 @@ mod tests {
         assert_eq!(p.side, Side::Top);
         assert_eq!(p.rect, r(200.0, 0.0, 60.0, 496.0));
         assert_eq!(p.arrow_at, dvec2(250.0, 496.0));
+        });
     }
 
     #[test]
     fn no_room_on_either_side_gives_a_zero_height_not_a_negative_one() {
+        crate::on_test_cx(|| {
         // Anchor fills the whole window: both rooms are negative.
         let p = place_overlay(&PlaceRequest {
             anchor: r(0.0, 0.0, 800.0, 600.0),
@@ -672,40 +719,48 @@ mod tests {
         });
         assert_eq!(p.rect.size.y, 0.0);
         assert!(p.rect.size.y >= 0.0);
+        });
     }
 
     // -- shifting ----------------------------------------------------------
 
     #[test]
     fn shifts_inboard_on_the_right_edge() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 200.0, 100.0, 20.0),
             ..base()
         });
         assert_eq!(p.rect, r(740.0, 224.0, 60.0, 40.0));
         assert_eq!(p.side, Side::Bottom);
+        });
     }
 
     #[test]
     fn shifts_inboard_on_the_left_edge() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(-30.0, 200.0, 100.0, 20.0),
             ..base()
         });
         assert_eq!(p.rect, r(0.0, 224.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn the_low_edge_wins_when_wider_than_the_bounds() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             bounds: r(10.0, 0.0, 50.0, 600.0),
             ..base()
         });
         assert_eq!(p.rect, r(10.0, 224.0, 50.0, 40.0));
+        });
     }
 
     #[test]
     fn end_alignment_shifts_inboard_too() {
+        crate::on_test_cx(|| {
         // End puts the popup's right edge on the anchor's, at 870: past 800.
         let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 200.0, 100.0, 20.0),
@@ -713,10 +768,12 @@ mod tests {
             ..base()
         });
         assert_eq!(p.rect, r(740.0, 224.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn horizontal_sides_shift_along_y() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(200.0, 590.0, 100.0, 20.0),
             placement: Placement::RIGHT_START,
@@ -724,10 +781,12 @@ mod tests {
         });
         assert_eq!(p.side, Side::Right);
         assert_eq!(p.rect, r(304.0, 560.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn arrow_at_follows_the_anchor_centre_and_clamps_to_the_popup_edge() {
+        crate::on_test_cx(|| {
         // Shifted 30 to the left: the anchor's centre (820) is off the popup,
         // so the arrow sits at the popup's right corner.
         let p = place_overlay(&PlaceRequest {
@@ -744,12 +803,14 @@ mod tests {
         });
         assert_eq!(p.rect, r(255.0, 224.0, 300.0, 40.0));
         assert_eq!(p.arrow_at, dvec2(405.0, 224.0));
+        });
     }
 
     // -- bounds ------------------------------------------------------------
 
     #[test]
     fn an_unbounded_request_never_flips_shifts_or_shrinks() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             size: dvec2(60.0, 1000.0),
@@ -758,20 +819,24 @@ mod tests {
         });
         assert_eq!(p.side, Side::Bottom);
         assert_eq!(p.rect, r(770.0, 604.0, 60.0, 1000.0));
+        });
     }
 
     #[test]
     fn a_negative_bounds_extent_is_unbounded_too() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
             bounds: r(6.0, 6.0, -12.0, -12.0),
             ..base()
         });
         assert_eq!(p.rect, r(770.0, 604.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn each_axis_is_bounded_on_its_own() {
+        crate::on_test_cx(|| {
         // Bounded in x only: the popup shifts inboard but does not flip.
         let p = place_overlay(&PlaceRequest {
             anchor: r(770.0, 580.0, 100.0, 20.0),
@@ -788,10 +853,12 @@ mod tests {
         });
         assert_eq!(p.side, Side::Top);
         assert_eq!(p.rect, r(770.0, 536.0, 60.0, 40.0));
+        });
     }
 
     #[test]
     fn bounds_need_not_start_at_the_origin() {
+        crate::on_test_cx(|| {
         // A 6-point inset on every edge, like DropToggles keeps.
         let p = place_overlay(&PlaceRequest {
             anchor: r(760.0, 200.0, 100.0, 20.0),
@@ -805,12 +872,14 @@ mod tests {
             ..base()
         });
         assert_eq!(p.rect.pos.x, 6.0);
+        });
     }
 
     // -- match_anchor_width ------------------------------------------------
 
     #[test]
     fn match_anchor_width_grows_to_the_anchor_and_never_shrinks() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             match_anchor_width: true,
             ..base()
@@ -828,51 +897,65 @@ mod tests {
             ..base()
         });
         assert_eq!(p.rect.size.x, 100.0);
+        });
     }
 
     #[test]
     fn a_matched_width_still_shrinks_to_the_bounds() {
+        crate::on_test_cx(|| {
         let p = place_overlay(&PlaceRequest {
             anchor: r(0.0, 200.0, 1000.0, 20.0),
             match_anchor_width: true,
             ..base()
         });
         assert_eq!(p.rect, r(0.0, 224.0, 800.0, 40.0));
+        });
     }
 
     // -- span_inboard --------------------------------------------------------
 
     #[test]
     fn span_inboard_leaves_a_span_that_fits_alone() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(100.0, 50.0, 8.0, 784.0), 100.0);
         assert_eq!(span_inboard(8.0, 50.0, 8.0, 784.0), 8.0);
         assert_eq!(span_inboard(742.0, 50.0, 8.0, 784.0), 742.0);
+        });
     }
 
     #[test]
     fn span_inboard_pulls_back_from_the_high_edge() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(780.0, 50.0, 8.0, 784.0), 742.0);
+        });
     }
 
     #[test]
     fn span_inboard_pulls_forward_from_the_low_edge() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(-20.0, 50.0, 8.0, 784.0), 8.0);
+        });
     }
 
     #[test]
     fn span_inboard_lets_the_low_edge_win_when_too_long() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(300.0, 900.0, 8.0, 784.0), 8.0);
         assert_eq!(span_inboard(-300.0, 900.0, 8.0, 784.0), 8.0);
+        });
     }
 
     #[test]
     fn span_inboard_is_a_no_op_without_room() {
+        crate::on_test_cx(|| {
         assert_eq!(span_inboard(300.0, 50.0, 8.0, 0.0), 300.0);
         assert_eq!(span_inboard(-300.0, 50.0, 8.0, -12.0), -300.0);
+        });
     }
 
     #[test]
     fn span_inboard_is_the_one_line_the_sites_had() {
+        crate::on_test_cx(|| {
         // ComboBox and DropDown2 wrote `x.clamp(m, (pass - m - w).max(m))`.
         let cases: [(f64, f64, f64); 3] = [(360.0, 200.0, 400.0), (-5.0, 30.0, 400.0), (50.0, 500.0, 400.0)];
         for (x, w, pass) in cases {
@@ -880,12 +963,14 @@ mod tests {
             let old = x.clamp(m, (pass - m - w).max(m));
             assert_eq!(span_inboard(x, w, m, pass - m * 2.0), old, "x={x} w={w}");
         }
+        });
     }
 
     // -- pointer_on_edge -----------------------------------------------------
 
     #[test]
     fn a_pointer_stands_out_of_the_edge_that_faces_the_anchor() {
+        crate::on_test_cx(|| {
         let size = dvec2(100.0, 60.0);
         let at = dvec2(50.0, 30.0);
         let below = pointer_on_edge(Side::Bottom, size, at, 7.0, 1.0, 10.0);
@@ -896,10 +981,12 @@ mod tests {
         assert_eq!(right, Pointer { base: dvec2(1.0, 30.0), tip: dvec2(-6.0, 30.0) });
         let left = pointer_on_edge(Side::Left, size, at, 7.0, 1.0, 10.0);
         assert_eq!(left, Pointer { base: dvec2(99.0, 30.0), tip: dvec2(106.0, 30.0) });
+        });
     }
 
     #[test]
     fn a_pointer_keeps_its_whole_base_off_the_corners() {
+        crate::on_test_cx(|| {
         let size = dvec2(100.0, 60.0);
         // Aimed past either end: the base's near end stops where the corner does.
         let low = pointer_on_edge(Side::Bottom, size, dvec2(-40.0, 0.0), 7.0, 1.0, 10.0);
@@ -908,13 +995,16 @@ mod tests {
         assert_eq!(high.tip.x, 83.0);
         let side = pointer_on_edge(Side::Left, size, dvec2(0.0, 2.0), 7.0, 1.0, 10.0);
         assert_eq!(side.tip.y, 17.0);
+        });
     }
 
     #[test]
     fn a_pointer_on_an_edge_too_short_for_it_sits_in_the_middle() {
+        crate::on_test_cx(|| {
         let p = pointer_on_edge(Side::Right, dvec2(80.0, 30.0), dvec2(0.0, 2.0), 7.0, 1.0, 10.0);
         assert_eq!(p.base, dvec2(1.0, 15.0));
         assert_eq!(p.tip, dvec2(-6.0, 15.0));
+        });
     }
 
     // -- slide_for_pointer ---------------------------------------------------
@@ -932,6 +1022,7 @@ mod tests {
 
     #[test]
     fn a_slide_brings_a_small_anchors_middle_into_reach_from_either_end() {
+        crate::on_test_cx(|| {
         let anchor = r(300.0, 100.0, 20.0, 20.0);
         let (slid, point) = aimed(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_START);
         assert_eq!(point, 310.0);
@@ -944,25 +1035,31 @@ mod tests {
         assert_eq!(slid.side, Side::Left);
         assert_eq!(point, 110.0);
         assert_eq!(slid.rect.size, dvec2(160.0, 60.0));
+        });
     }
 
     #[test]
     fn a_slide_centres_an_edge_too_short_for_a_pointer_on_the_anchor() {
+        crate::on_test_cx(|| {
         let anchor = r(300.0, 100.0, 20.0, 12.0);
         let (slid, point) = aimed(anchor, dvec2(90.0, 30.0), Placement::RIGHT_START);
         assert_eq!(point, 106.0);
         assert_eq!(slid.rect.pos.y, 91.0);
+        });
     }
 
     #[test]
     fn a_slide_aims_at_a_single_point() {
+        crate::on_test_cx(|| {
         let press = r(400.0, 300.0, 0.0, 0.0);
         let (_, point) = aimed(press, dvec2(200.0, 60.0), Placement::BOTTOM_START);
         assert_eq!(point, 400.0);
+        });
     }
 
     #[test]
     fn a_slide_leaves_an_anchor_long_enough_lined_up() {
+        crate::on_test_cx(|| {
         // Long enough to hold the pointer from its own start: nothing moves.
         let anchor = r(300.0, 100.0, 36.0, 20.0);
         let req = PlaceRequest { anchor, size: dvec2(200.0, 60.0), ..base() };
@@ -974,10 +1071,12 @@ mod tests {
         let (slid, point) = aimed(anchor, dvec2(90.0, 40.0), Placement::RIGHT_START);
         assert_eq!(slid.rect.pos.y, 100.0);
         assert_eq!(point, 122.0);
+        });
     }
 
     #[test]
     fn a_slide_stops_at_the_bounds() {
+        crate::on_test_cx(|| {
         // Against the window's left edge the popup cannot move left, so the
         // pointer stops at the end of the straight part.
         let anchor = r(4.0, 100.0, 10.0, 20.0);
@@ -993,6 +1092,7 @@ mod tests {
         // An unbounded axis lets it go.
         let slid = slide_for_pointer(placed, anchor, r(0.0, 0.0, 0.0, 600.0), 18.0);
         assert_eq!(slid.rect.pos.x, -25.0 - 18.0);
+        });
     }
 }
 
@@ -1037,11 +1137,8 @@ mod lock_tests {
         }
     }
 
-    fn drawn_cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn drawn_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A page of three buttons, the stand-in for any widget that takes the
@@ -1069,6 +1166,7 @@ mod lock_tests {
     /// the lock names nothing drawn, and the next event lets go of it.
     #[test]
     fn a_lock_whose_owner_was_swapped_out_goes_with_the_next_event() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let mut target = Target::new(&mut cx);
         let old = page(&mut cx);
@@ -1081,23 +1179,27 @@ mod lock_tests {
         assert_eq!(cx.sweep_lock_area(), Some(held), "nothing let go of it when its page went");
         release_orphaned_sweep_locks(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "the next event does");
+        });
     }
 
     /// An owner that is still drawn keeps its lock: each draw moves the lock
     /// to the area's fresh handle, so it never reads as left behind.
     #[test]
     fn a_lock_whose_owner_still_draws_is_kept() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let mut target = Target::new(&mut cx);
         let root = page(&mut cx);
         target.draw(&mut cx, &root);
-        cx.sweep_lock(root.widget(&cx, ids!(b)).area());
+        let owner = root.widget(&cx, ids!(b)).area();
+        cx.sweep_lock(owner);
         for _ in 0..3 {
             target.draw(&mut cx, &root);
             release_orphaned_sweep_locks(&mut cx);
         }
         let owner = root.widget(&cx, ids!(b)).area();
         assert_eq!(cx.sweep_lock_area(), Some(owner), "held by the area the last draw gave it");
+        });
     }
 
     /// Only the lock that names nothing goes. One left under a living lock
@@ -1105,6 +1207,7 @@ mod lock_tests {
     /// still has the pointer and the outer gets it back when that one lets go.
     #[test]
     fn only_the_locks_that_name_nothing_go_and_the_rest_keep_their_order() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let mut target = Target::new(&mut cx);
         let root = page(&mut cx);
@@ -1125,12 +1228,14 @@ mod lock_tests {
         assert_eq!(cx.sweep_lock_area(), Some(a), "the one under it went, the outer one did not");
         cx.sweep_unlock(a);
         assert_eq!(cx.sweep_lock_area(), None);
+        });
     }
 
     /// A lock taken in a list of the owner's own goes as soon as that list is
     /// dropped with it, without waiting for anything to be drawn again.
     #[test]
     fn a_lock_in_a_dropped_draw_list_goes_before_any_redraw() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let mut target = Target::new(&mut cx);
         let root = page(&mut cx);
@@ -1145,6 +1250,7 @@ mod lock_tests {
         drop(root);
         release_orphaned_sweep_locks(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "its list went with it, and the lock with the list");
+        });
     }
 
     /// The case that turned the window away: a pill nav's panel open when the
@@ -1152,6 +1258,7 @@ mod lock_tests {
     /// over; the next event after the new page is drawn lets go of it.
     #[test]
     fn a_pill_nav_swapped_out_open_gives_the_pointer_back() {
+        crate::on_test_cx(|| {
         let mut cx = drawn_cx();
         let mut target = Target::new(&mut cx);
         let old = cx.with_vm(|vm| {
@@ -1181,5 +1288,6 @@ mod lock_tests {
         target.draw(&mut cx, &new);
         release_orphaned_sweep_locks(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "the next page has the pointer");
+        });
     }
 }

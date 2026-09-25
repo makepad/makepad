@@ -49,7 +49,6 @@ script_mod! {
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
             host_dpi_factor: instance(1.0)
-            y_flip: instance(0.0)
             packed_header: instance(1.0)
             // The close-crop: while a tile closes, its quad shrinks but the
             // frozen app image must STAY PUT — the quad becomes a moving
@@ -64,7 +63,7 @@ script_mod! {
             fade: instance(1.0)
             pixel: fn() {
                 let cpos = self.crop_origin + self.pos * self.crop_span
-                let uv = vec2(cpos.x, cpos.y + self.y_flip - 2.0 * self.y_flip * cpos.y)
+                let uv = cpos
                 if self.packed_header < 0.5 {
                     return self.tex.sample(uv * self.tex_scale) * self.fade
                 }
@@ -191,6 +190,14 @@ pub struct MpRunView {
     /// files keeps the keyboard so its arrows go on dialing.
     #[rust(true)]
     takes_key_focus: bool,
+    /// The child announced it decodes `StudioToApp::MouseCancel`
+    /// (`HostedPointerCaps`); until it does, a cancelled press is relayed the
+    /// way an older child can take it (see the FingerUp relay).
+    #[rust]
+    child_mouse_cancel: bool,
+    /// The one log line for a child that cannot take a cancellation.
+    #[rust]
+    logged_no_mouse_cancel: bool,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -228,11 +235,60 @@ pub struct MpRunView {
     /// its acknowledgement can start the next frame without another beat.
     #[rust]
     tick_deferred: bool,
+    /// A frame of the child arrived and the desk has not painted it yet.
+    /// On Android the child draws straight into the shared images the desk
+    /// samples, with no GPU fence between the two processes: its next Tick
+    /// waits for this paint (or `tick_fallback`), so the child can never
+    /// run ahead and overwrite the image the desk is still reading — a
+    /// resize used to answer with two back-to-back frames and tear the
+    /// tile-to-app zoom.
+    #[rust]
+    flip_unpainted: Option<f64>,
+    /// The desk's frame after a child frame arrived: whether or not this
+    /// view drew in it (a tile waiting for its face is not drawn), the desk
+    /// is past sampling anything older, so the hold lifts there too.
+    #[rust]
+    paint_frame: NextFrame,
+    /// Paced ticking (Android with GPU-fenced frames, see `paced`): the
+    /// display frame the next Tick goes out on, while one is wanted.
+    #[rust]
+    tick_frame: NextFrame,
+    #[rust]
+    tick_frame_pending: bool,
+    /// The child asked for another frame (`RequestAnimationFrame`, sent at
+    /// the end of every Tick it still animates, and from any thread when a
+    /// signal needs its UI loop).
+    #[rust]
+    child_wants_frame: bool,
+    /// Input went to the child since its last Tick: it draws on the next.
+    #[rust]
+    input_since_tick: bool,
+    /// The child's next timer is due (`HostedWake`).
+    #[rust]
+    wake_timer: Timer,
+    /// A slow safety beat while paced; a child that never asks is still
+    /// pumped now and then.
+    /// The child fences its frames (`HostedFenced`): paced ticking and no
+    /// paint hold apply to it only then.
+    #[rust]
+    child_fenced: bool,
+    /// Ticks sent to the child and `TickDone`s back. The child reads its
+    /// messages in order and draws only inside a Tick, so once every Tick
+    /// sent before some message is acknowledged, each later frame was drawn
+    /// after that message (the phone's tile faces fence on this).
+    #[rust]
+    ticks_sent: u64,
+    #[rust]
+    ticks_done: u64,
     /// The pointer's latest position since the last Tick went out: the
     /// child sees at most one MouseMove per frame, flushed ahead of the
     /// Tick or of any Down/Up/Scroll so their order holds.
     #[rust]
     pending_move: Option<RemoteMouseMove>,
+    /// Paced (Android): the finger's earlier samples since the last Tick,
+    /// oldest first — the child's velocity tracker needs every sample.
+    #[rust]
+    move_history: Vec<RemoteMouseMove>,
     #[rust]
     last_rect: Rect,
     #[rust]
@@ -261,6 +317,10 @@ pub struct MpRunView {
     is_hovered: bool,
     #[rust]
     ime_pos: Option<Vec2d>,
+    /// On a phone: the caret of the child's focused text field, while it has
+    /// one (`HostedImeState`); the soft keyboard shows only then.
+    #[rust]
+    child_ime: Option<Vec2d>,
     /// While the tile rect is being ANIMATED, the layout's settled target
     /// size. The quad draws at the animated rect; the swapchain and the
     /// child's WindowGeomChange always use this, so a tween never causes
@@ -321,9 +381,29 @@ impl ScriptHook for MpRunView {
 }
 
 impl MpRunView {
-    fn emit_to_app(&self, cx: &mut Cx, client: ClientId, msgs: Vec<StudioToApp>) {
+    fn emit_to_app(&mut self, cx: &mut Cx, client: ClientId, msgs: Vec<StudioToApp>) {
         if msgs.is_empty() {
             return;
+        }
+        let with_tick = msgs.iter().any(|msg| matches!(msg, StudioToApp::Tick));
+        if !with_tick && msgs.iter().any(|msg| {
+            matches!(
+                msg,
+                StudioToApp::MouseDown(_)
+                    | StudioToApp::MouseUp(_)
+                    | StudioToApp::MouseMove(_)
+                    | StudioToApp::MouseCancel(_)
+                    | StudioToApp::Scroll(_)
+                    | StudioToApp::Pinch(_)
+                    | StudioToApp::KeyDown(_)
+                    | StudioToApp::KeyUp(_)
+                    | StudioToApp::TextInput(_)
+                    | StudioToApp::TextCopy
+                    | StudioToApp::TextCut
+            )
+        }) {
+            self.input_since_tick = true;
+            self.want_tick(cx);
         }
         let msg_bin = StudioToAppVec(msgs).serialize_bin();
         cx.widget_action(self.uid, MpRunViewAction::ForwardToApp { client, msg_bin });
@@ -332,11 +412,33 @@ impl MpRunView {
     /// A press, release or scroll: the pointer position it happened at
     /// goes out first, in the same batch, so the child sees the move
     /// before the edge exactly as the host did.
-    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
-        let mut msgs = Vec::with_capacity(2);
+    /// What the child said its pointer input understands.
+    /// The child's text field took (`show`) or gave up the keyboard.
+    pub fn set_child_ime(&mut self, cx: &mut Cx, ime: makepad_widgets::makepad_platform::ime::HostedImeState) {
+        self.child_ime = ime.visible.then(|| dvec2(ime.x, ime.y + ime.height));
+        if !ime.visible && crate::host::device_phone() && cx.has_key_focus(self.area) {
+            cx.hide_text_ime();
+        }
+        self.redraw(cx);
+    }
+
+    pub fn set_pointer_caps(&mut self, caps: makepad_widgets::makepad_platform::ime::HostedPointerCaps) {
+        self.child_mouse_cancel = caps.mouse_cancel;
+    }
+
+    /// The pointer samples owed to the child, oldest first.
+    fn take_moves(&mut self, msgs: &mut Vec<StudioToApp>) {
+        for mv in self.move_history.drain(..) {
+            msgs.push(StudioToApp::MouseMove(mv));
+        }
         if let Some(mv) = self.pending_move.take() {
             msgs.push(StudioToApp::MouseMove(mv));
         }
+    }
+
+    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
+        let mut msgs = Vec::with_capacity(2);
+        self.take_moves(&mut msgs);
         msgs.push(msg);
         self.emit_to_app(cx, client, msgs);
     }
@@ -348,20 +450,92 @@ impl MpRunView {
         (self.tick_period * 4.0).max(0.050)
     }
 
+    /// Android with GPU-fenced frames: the child is ticked on the display's
+    /// frames, and only while it has something to do (it asked for a frame,
+    /// input went to it, a timer of its is due, it is still starting up) —
+    /// an idle child is never woken. Elsewhere a fixed interval beat.
+    fn paced(&self, cx: &Cx) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            self.child_fenced && cx.hosted_frames_fenced()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = cx;
+            false
+        }
+    }
+
+    /// Paced: tick on the next display frame.
+    fn want_tick(&mut self, cx: &mut Cx) {
+        if self.tick_frame_pending || self.current_target.is_none() || !self.paced(cx) {
+            return;
+        }
+        self.tick_frame_pending = true;
+        self.tick_frame = cx.new_next_frame();
+    }
+
+    pub fn set_child_fenced(&mut self, cx: &mut Cx, on: bool) {
+        self.child_fenced = on;
+        self.child_wants_frame = true;
+        self.want_tick(cx);
+    }
+
+    /// The child's `RequestAnimationFrame`.
+    pub fn child_frame_request(&mut self, cx: &mut Cx) {
+        self.child_wants_frame = true;
+        self.want_tick(cx);
+    }
+
+    /// The child's next timer is due in `seconds` (paced only).
+    pub fn child_wake_in(&mut self, cx: &mut Cx, seconds: f64) {
+        if !self.paced(cx) {
+            return;
+        }
+        cx.stop_timer(self.wake_timer);
+        self.wake_timer = cx.start_timeout(seconds.clamp(0.0, 60.0));
+    }
+
+    /// The next Tick waits for the desk to paint the child's last frame
+    /// (see `flip_unpainted`).
+    fn paint_holds_tick(&self, cx: &Cx) -> bool {
+        // With GPU fences between the two processes the child's next write
+        // waits for the desk's reads on the GPU, not here.
+        #[cfg(target_os = "android")]
+        if self.child_fenced && cx.hosted_frames_fenced() {
+            return false;
+        }
+        let _ = cx;
+        cfg!(target_os = "android")
+            && self.flip_unpainted.is_some_and(|at| crate::host::now() - at < self.tick_fallback())
+    }
+
     fn append_tick(&mut self, target: RunTarget, msgs: &mut Vec<StudioToApp>) {
         trace_host(&format!("tick c{}", target.client));
-        if let Some(mv) = self.pending_move.take() {
-            msgs.push(StudioToApp::MouseMove(mv));
-        }
+        self.take_moves(msgs);
         msgs.push(StudioToApp::Tick);
+        if makepad_error_log::trace_enabled("pace") {
+            log!("pace wm tick_tx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, target.client);
+        }
+        self.ticks_sent += 1;
         self.tick_outstanding = Some(crate::host::now());
         self.tick_deferred = false;
+        self.child_wants_frame = false;
+        self.input_since_tick = false;
     }
 
     /// Return one tick credit. If a timer beat was missed while the child
     /// rendered, service that retained request now instead of quantizing a
     /// slightly late child to half the compositor's frame rate.
+    /// (Ticks sent, TickDones received) — see `ticks_sent`.
+    pub fn tick_counts(&self) -> (u64, u64) {
+        (self.ticks_sent, self.ticks_done)
+    }
+
     pub fn tick_done(&mut self, cx: &mut Cx) {
+        // The child coalesces queued Ticks into one TickDone: it answers the
+        // newest Tick sent.
+        self.ticks_done = self.ticks_sent;
         if let Some(target) = self.current_target {
             trace_host(&format!("ack c{}", target.client));
         }
@@ -373,7 +547,7 @@ impl MpRunView {
             self.tick_deferred = false;
             return;
         }
-        if self.tick_deferred {
+        if self.tick_deferred && !self.paint_holds_tick(cx) {
             if let Some(target) = self.current_target {
                 let mut msgs = Vec::new();
                 self.append_tick(target, &mut msgs);
@@ -386,6 +560,8 @@ impl MpRunView {
         if self.current_target == target {
             return;
         }
+        self.ticks_sent = 0;
+        self.ticks_done = 0;
         let had_target = self.current_target.is_some();
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
@@ -404,7 +580,18 @@ impl MpRunView {
         self.current_target = target;
         self.tick_outstanding = None;
         self.tick_deferred = false;
+        // A new child is not paced until it says it fences: the interval
+        // beat runs again for it.
+        self.child_fenced = false;
+        if self.tick_timer.0 == 0 {
+            self.tick_timer = cx.start_interval(self.tick_period);
+        }
+        // Paced: a new child starts ticking at once (its bootstrap).
+        self.child_wants_frame = true;
+        self.tick_frame_pending = false;
+        self.want_tick(cx);
         self.pending_move = None;
+        self.move_history.clear();
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.swapchain = None;
@@ -435,9 +622,6 @@ impl MpRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
@@ -472,6 +656,11 @@ impl MpRunView {
         let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
             return false;
         };
+        // A frame bigger than the image it names was clipped by the child
+        // (drawn before it had the bigger frames): never stretch it.
+        if presentable_draw.width > swapchain.alloc_width || presentable_draw.height > swapchain.alloc_height {
+            return false;
+        }
 
         let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
             return false;
@@ -504,24 +693,6 @@ impl MpRunView {
         draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
-        // Linux's software fallback is copied row-for-row from a top-left
-        // framebuffer and needs the historical shader flip. A GPU-shared
-        // DMA-BUF texture already has the orientation expected by the GL
-        // sampler; flipping that path turns every hosted app upside down.
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(y_flip),
-            &[if drawn.software_buffer.is_some() {
-                1.0f32
-            } else {
-                0.0f32
-            }],
-        );
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
 
         *redraw_countdown = (*redraw_countdown).max(20);
         true
@@ -769,6 +940,7 @@ impl MpRunView {
         if rect_changed || needs_new_swapchain {
             self.bootstrap_pending = true;
             self.bootstrap_tick_count = 0;
+            self.want_tick(cx);
         }
 
         self.last_rect = rect;
@@ -825,12 +997,19 @@ impl MpRunView {
     }
 
     pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
+        if makepad_error_log::trace_enabled("pace") {
+            log!("pace wm flip_rx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, self.current_target.map(|t| t.client).unwrap_or(0));
+        }
         if self.try_present_draw(cx, presentable_draw) {
             trace_host(&format!(
                 "pd c{}",
                 self.current_target.map(|t| t.client).unwrap_or(0)
             ));
             self.pending_draw = None;
+            if cfg!(target_os = "android") {
+                self.flip_unpainted = Some(crate::host::now());
+                self.paint_frame = cx.new_next_frame();
+            }
             self.present_ok_count += 1;
             if self.present_ok_count == 1 {
                 // Whatever frames come in first, they fade in quickly
@@ -870,6 +1049,7 @@ impl MpRunView {
         self.first_present_at = None;
         self.bootstrap_pending = true;
         self.bootstrap_tick_count = 0;
+        self.want_tick(cx);
         self.redraw_countdown = self.redraw_countdown.max(240);
         self.redraw(cx);
     }
@@ -1027,6 +1207,19 @@ impl MpRunView {
         self.transport_error
             .as_deref()
             .or_else(|| self.outbox.as_ref().and_then(|sender| sender.error()))
+    }
+
+    /// The child is about to be told it is `size` (a phone tile opening
+    /// full screen): give it frames that big now. Its frames are otherwise
+    /// sized where the view is drawn — for a tile opening, only once a
+    /// full-size frame confirmed the face, which needs frames that big: the
+    /// child used to break that loop by drawing its first full frame into
+    /// the tile's small frames, clipped (the zoom's smeared frame).
+    pub fn prepare_size(&mut self, cx: &mut Cx, size: Vec2d, dpi_factor: f64) {
+        let Some(target) = self.current_target else { return };
+        self.target_size = Some(size);
+        let rect = Rect { pos: self.last_rect.pos, size };
+        self.ensure_swapchain_for_rect(cx, rect, dpi_factor, target);
     }
 
     pub fn set_target_size(&mut self, size: Option<Vec2d>) {
@@ -1189,6 +1382,7 @@ impl Widget for MpRunView {
         }
 
         if self.present_ok_count > 0 {
+            self.flip_unpainted = None;
             trace_host(&format!(
                 "paint c{}",
                 target.map(|t| t.client).unwrap_or(0)
@@ -1272,9 +1466,13 @@ impl Widget for MpRunView {
         }
         self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
-        if target.is_some() && cx.has_key_focus(self.area) {
+        // On a phone ShowTextIME raises the soft keyboard: only while the
+        // child has a focused text field, never for the tile's focus alone.
+        let wants_ime = !crate::host::device_phone() || self.child_ime.is_some();
+        if target.is_some() && wants_ime && cx.has_key_focus(self.area) {
             let ime = self
-                .ime_pos
+                .child_ime
+                .or(self.ime_pos)
                 .unwrap_or_else(|| dvec2(rect.size.x * 0.5, rect.size.y * 0.5));
             // This anchors the native candidate window for a remote process.
             // It is not a text-input request from the WM or a module client.
@@ -1287,9 +1485,40 @@ impl Widget for MpRunView {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let target = self.current_target;
+        if self.paint_frame.is_event(event).is_some() {
+            self.flip_unpainted = None;
+        }
 
+        let mut beat = false;
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
+                if self.paced(cx) {
+                    // Paced from here on: the interval beat stops (a fenced
+                    // child stays fenced for its life).
+                    cx.stop_timer(self.tick_timer);
+                    self.tick_timer = Timer::empty();
+                    self.child_wants_frame = true;
+                    self.want_tick(cx);
+                } else if target.is_none() {
+                    // No child: nothing to beat for (a view without a
+                    // client woke the loop at 125 Hz for nothing);
+                    // `set_target` starts it again.
+                    cx.stop_timer(self.tick_timer);
+                    self.tick_timer = Timer::empty();
+                } else {
+                    beat = true;
+                }
+            } else if self.wake_timer.is_timer(timer_event).is_some() {
+                self.child_wants_frame = true;
+                self.want_tick(cx);
+            }
+        }
+        if self.tick_frame.is_event(event).is_some() {
+            self.tick_frame_pending = false;
+            beat = true;
+        }
+        if beat {
+            {
                 if let Some(target) = target {
                     let mut msgs = Vec::new();
                     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -1308,7 +1537,14 @@ impl Widget for MpRunView {
                             msgs.extend(self.build_bootstrap_msgs(cx, target));
                         }
                     }
-                    if !frozen {
+                    let paced = self.paced(cx);
+                    // Paced: a Tick only when the child has something to do.
+                    let wanted = !paced
+                        || should_bootstrap
+                        || self.child_wants_frame
+                        || self.input_since_tick
+                        || self.pending_move.is_some();
+                    if !frozen && wanted {
                         self.tick_deferred = true;
                         let now = crate::host::now();
                         let due = match self.tick_outstanding {
@@ -1323,9 +1559,17 @@ impl Widget for MpRunView {
                             }
                             Some(_) => false,
                         };
-                        if due {
+                        if due && !self.paint_holds_tick(cx) {
                             self.append_tick(target, &mut msgs);
+                        } else if paced {
+                            // Busy child: look again next frame (its TickDone
+                            // sends the deferred Tick sooner; the fallback
+                            // needs frames to be noticed).
+                            self.want_tick(cx);
                         }
+                    }
+                    if paced && should_bootstrap {
+                        self.want_tick(cx);
                     }
                     self.emit_to_app(cx, target.client, msgs);
                 }
@@ -1377,13 +1621,33 @@ impl Widget for MpRunView {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
                     trace_host("mm");
                     // Held until the next Tick (or the next edge): one
-                    // position per frame is all a frame can show.
+                    // position per frame is all a frame can show. Paced
+                    // (Android), every sample goes (the child's velocity
+                    // tracker wants them all), and a move with no Tick
+                    // out goes at once with its own Tick rather than
+                    // waiting for the next display frame.
+                    let paced = self.paced(cx);
+                    if paced {
+                        if let Some(prev) = self.pending_move.take() {
+                            if self.move_history.len() >= 32 {
+                                self.move_history.remove(0);
+                            }
+                            self.move_history.push(prev);
+                        }
+                    }
                     self.pending_move = Some(RemoteMouseMove {
                         x: local.x,
                         y: local.y,
                         time: e.time,
                         modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
                     });
+                    if paced && self.tick_outstanding.is_none() && !self.paint_holds_tick(cx) {
+                        let mut msgs = Vec::new();
+                        self.append_tick(target, &mut msgs);
+                        self.emit_to_app(cx, target.client, msgs);
+                    } else if paced {
+                        self.want_tick(cx);
+                    }
                 }
             }
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {
@@ -1403,11 +1667,32 @@ impl Widget for MpRunView {
                 cx.set_cursor(MouseCursor::Default);
             }
             Hit::FingerUp(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
+                // A press the WM took away is relayed as a cancellation: the
+                // app lets go of it without clicking or flinging. A child
+                // that never announced `MouseCancel` is sent nothing — the
+                // WM never cancelled its presses before, and any release
+                // could commit what the press started.
+                if e.cancelled && !self.child_mouse_cancel {
+                    if !std::mem::replace(&mut self.logged_no_mouse_cancel, true) {
+                        log!("wm: client {} does not take MouseCancel; its cancelled presses are not relayed", target.client);
+                    }
+                    return;
+                }
+                // A cancel is owed even when the view's area is gone; where
+                // it lands does not matter, it clicks nothing.
+                let local = self.local_from_area(cx, e.abs).or_else(|| e.cancelled.then(Default::default));
+                let release = if e.cancelled && self.child_mouse_cancel { StudioToApp::MouseCancel } else { StudioToApp::MouseUp };
+                if let Some(local) = local {
+                    // A cancel travels in a batch of its own.
+                    if e.cancelled {
+                        if let Some(mv) = self.pending_move.take() {
+                            self.emit_to_app(cx, target.client, vec![StudioToApp::MouseMove(mv)]);
+                        }
+                    }
                     self.emit_after_pending_move(
                         cx,
                         target.client,
-                        StudioToApp::MouseUp(RemoteMouseUp {
+                        release(RemoteMouseUp {
                             button_raw_bits: Self::default_mouse_button(&e.device).bits(),
                             x: local.x,
                             y: local.y,

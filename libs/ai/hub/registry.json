@@ -1036,6 +1036,76 @@
    ]
   },
   {
+   "id": "qwen3.5-9b-vision",
+   "domain": "vision",
+   "backend": "vision",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.5-9B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 9.0,
+   "note": "The CI box's 'does it even run' vision checks on a 16 GB Mac. Pinned language GGUF and matched F16 vision projector; no min_vram_gb gate because Metal uses unified memory.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.5-9B-GGUF",
+     "path": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
+     "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+     "cache_as": "llm/Qwen3.5-9B-UD-Q4_K_XL.gguf",
+     "size": 5966095584,
+     "sha256": "6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.5-9B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+     "cache_as": "llm/Qwen3.5-9B-mmproj-F16.gguf",
+     "size": 918166080,
+     "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+    }
+   ]
+  },
+  {
+   "id": "qwen3.5-4b-vision",
+   "domain": "vision",
+   "backend": "vision",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.5-4B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 5.5,
+   "note": "The CI box's 'does it even run' vision checks on a 16 GB Mac. Pinned language GGUF and matched F16 vision projector; no min_vram_gb gate because Metal uses unified memory.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.5-4B-GGUF",
+     "path": "Qwen3.5-4B-Q5_K_M.gguf",
+     "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+     "cache_as": "llm/Qwen3.5-4B-Q5_K_M.gguf",
+     "size": 3143656608,
+     "sha256": "8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.5-4B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+     "cache_as": "llm/Qwen3.5-4B-mmproj-F16.gguf",
+     "size": 672423616,
+     "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"
+    }
+   ]
+  },
+  {
    "id": "qwen3.8-27b-vision",
    "domain": "vision",
    "backend": "vision",

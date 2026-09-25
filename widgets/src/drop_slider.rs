@@ -438,6 +438,12 @@ impl Widget for DropSlider {
                 Event::MouseUp(_) => {
                     self.dragging = false;
                 }
+                // The host took the mouse press itself away (not a cancel of
+                // some other capture of a press still held): the scrub ends
+                // where it is.
+                Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                    self.dragging = false;
+                }
                 Event::KeyDown(ke)
                     if ke.key_code == KeyCode::Escape
                         && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
@@ -524,6 +530,49 @@ mod tests {
         list.end(&mut cx2d);
         cx2d.end_pass(pass);
         chip
+    }
+
+    /// A scrub the host took away (`Event::FingerCancel` for the mouse)
+    /// ends there: a later move with no press changes nothing.
+    #[test]
+    fn a_cancelled_scrub_ends_and_a_later_move_changes_nothing() {
+        crate::on_test_cx(|| {
+        let mut cx = crate::checkout_test_cx();
+        let mut list = DrawList2d::new(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        let mut chip = drawn_chip(&mut cx, &mut list, &pass);
+        chip.open = true;
+        chip.dragging = true;
+        let chip_rect = chip.draw_bg.area().rect(&cx);
+        let panel = DropSlider::panel_rect(chip_rect);
+        let mv = |x: f64| Event::MouseMove(MouseMoveEvent {
+            abs: dvec2(x, panel.pos.y + panel.size.y * 0.5),
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.1,
+            handled: std::cell::Cell::new(Area::Empty),
+        });
+        // Scrubbing moves the value (so the check below means something).
+        chip.handle_event(&mut cx, &mv(panel.pos.x + 5.0), &mut Scope::empty());
+        let before = chip.value();
+        chip.handle_event(&mut cx, &mv(panel.pos.x + panel.size.x - 5.0), &mut Scope::empty());
+        assert!(chip.value() != before, "the scrub did not move the value; the test proves nothing");
+        // The host takes the mouse press itself away.
+        cx.fingers.cancel_digit(live_id!(mouse).into());
+        chip.handle_event(&mut cx, &Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: live_id!(mouse).into(),
+            device: DigitDevice::Mouse { button: MouseButton::PRIMARY },
+            abs: dvec2(panel.pos.x, panel.pos.y),
+            time: 0.2,
+            modifiers: KeyModifiers::default(),
+        }), &mut Scope::empty());
+        assert!(!chip.dragging, "the scrub survived its cancel");
+        let after_cancel = chip.value();
+        chip.handle_event(&mut cx, &mv(panel.pos.x + 5.0), &mut Scope::empty());
+        assert_eq!(chip.value(), after_cancel, "a move after the cancel still scrubbed");
+        });
     }
 
     #[test]

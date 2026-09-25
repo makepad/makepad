@@ -22,11 +22,37 @@ add_tree() {
 
 # Use each web app's shipped feature set; the union below preserves the
 # feature-resolved wasm graph for every demo while linting shared crates once.
-add_tree makepad-vj --no-default-features
 add_tree makepad-app-route --no-default-features --features demo
 add_tree makepad-files --no-default-features --features demo
 add_tree makepad-sheets
-add_tree makepad-app-finance --no-default-features --features demo
+add_tree makepad-finance --no-default-features --features demo
+
+# The VJ web build was this gate's fifth graph. The app, the asset system and
+# their private closure live in the Stage repository now, with their half of
+# this gate (tools/check_vj_wasm_time.sh there). The libraries of this
+# workspace that only that graph put on wasm stay linted here, as library
+# roots with the features it built them with (all defaults).
+library_roots=(
+    makepad-render
+    makepad-score-view
+    makepad-xr
+    makepad-ai-hub-ui
+    makepad-archive-org
+    makepad-drumkit
+    makepad-frametween
+    makepad-mp4-index
+    makepad-piano-model
+    makepad-show-control
+    makepad-system-speech
+    makepad-audio-encode
+    makepad-audio-picture
+    makepad-rtsmap
+    makepad-midi-file
+    makepad-video-flow
+)
+for name in "${library_roots[@]}"; do
+    add_tree "$name"
+done
 workspace=$(cargo metadata --format-version 1 --no-deps --offline)
 
 package_args=()
@@ -46,7 +72,7 @@ while IFS='|' read -r package features; do
     # the root workspace's complete library union for the web-demo wasm graphs.
     [[ "$workspace" == *"\"manifest_path\":\"$manifest\""* ]] || continue
     case "$name" in
-        makepad-vj|makepad-app-route|makepad-files|makepad-sheets|makepad-app-finance)
+        makepad-app-route|makepad-files|makepad-sheets|makepad-finance)
             continue
             ;;
     esac
@@ -63,13 +89,13 @@ while IFS='|' read -r package features; do
     checked_names+=("$name")
 done <<< "$tree"
 
+# The asset crates this list named (store, importer, chat, chat-ui, data) are
+# required by the Stage half. `makepad-core-util` holds the hashing and socket
+# code this graph used to reach in `makepad-asset-data` and
+# `makepad-asset-client`.
 required=(
     makepad-platform
-    makepad-asset-store
     makepad-network
-    makepad-asset-importer
-    makepad-chat-ui
-    makepad-asset-chat
     makepad-system-speech
     makepad-sqlite
     makepad-widgets
@@ -77,7 +103,7 @@ required=(
     makepad-render
     makepad-tsdf
     makepad-svg
-    makepad-asset-data
+    makepad-core-util
     makepad-filesystem-watcher
     makepad-video-flow
     makepad-archive-org
@@ -121,8 +147,7 @@ check_app() {
         "${clippy_lints[@]}"
 }
 
-# apps/vj is deliberately omitted while its worker loops are changed elsewhere.
 check_app makepad-app-route --no-default-features --features demo
 check_app makepad-files --no-default-features --features demo
 check_app makepad-sheets
-check_app makepad-app-finance --no-default-features --features demo
+check_app makepad-finance --no-default-features --features demo

@@ -156,6 +156,35 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     }
 }
 
+/// How many leading bytes of a `file_len`-byte file [`probe_ends`] needs,
+/// judged from the `head` read so far; `None` when `head` is enough (or the
+/// format is unknown, which the probe then says). A library scan reads a
+/// head, asks, and reads more until this says enough, instead of reading
+/// every file whole: the ID3v2 tag and first frames of an MP3, every FLAC
+/// metadata block, an Ogg file's header packets.
+pub fn head_needed(head: &[u8], file_len: u64) -> Option<usize> {
+    match sniff(head)? {
+        AudioFormat::Mp3 => mp3::head_needed(head, file_len),
+        AudioFormat::OggVorbis => vorbis::head_needed(head),
+        AudioFormat::Flac => flac::head_needed(head),
+    }
+    .filter(|_| (head.len() as u64) < file_len)
+}
+
+/// Tags and length in seconds of a `file_len`-byte file, from its first
+/// bytes (`head`, as long as [`head_needed`] asks) and its last (`tail`,
+/// 128 KiB or the whole file): what [`read_tags`] and [`probe_duration`]
+/// give from the whole file, without reading it. The length is `None` when
+/// the ends do not tell it; an MP3 without a Xing/VBRI header is timed by
+/// its first frame's bitrate.
+pub fn probe_ends(head: &[u8], tail: &[u8], file_len: u64) -> Result<(Tags, Option<f64>), AudioError> {
+    match sniff(head).ok_or(AudioError::UnknownFormat)? {
+        AudioFormat::Mp3 => Ok(mp3::probe_ends(head, tail, file_len)),
+        AudioFormat::OggVorbis => vorbis::probe_ends(head, tail),
+        AudioFormat::Flac => flac::probe_head(head),
+    }
+}
+
 /// Container metadata: ID3v2 text frames or Vorbis comments.
 pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {
     match sniff(bytes).ok_or(AudioError::UnknownFormat)? {
@@ -204,5 +233,80 @@ mod lib_tests {
         assert!(DecodedAudio::default().channel(0).is_empty());
         assert_eq!(DecodedAudio::default().frames(), 0);
         assert_eq!(DecodedAudio::default().duration_secs(), 0.0);
+    }
+
+    /// Grow `head` from a file's start as [`head_needed`] asks, then probe the
+    /// ends: what a library scan does.
+    fn probe_file(file: &[u8], first: usize) -> (Tags, Option<f64>) {
+        let mut head = &file[..first.min(file.len())];
+        while let Some(need) = head_needed(head, file.len() as u64) {
+            assert!(need > head.len(), "asks for more than it has");
+            head = &file[..need.min(file.len())];
+        }
+        let tail = &file[file.len().saturating_sub(128 * 1024)..];
+        probe_ends(head, tail, file.len() as u64).unwrap()
+    }
+
+    /// A constant-bitrate MP3 behind a big ID3v2 tag and before an ID3v1
+    /// one: the head grows past the tag, the length is the bitrate over the
+    /// audio bytes, the title comes from the tag.
+    #[test]
+    fn an_mp3_is_timed_and_tagged_from_its_ends() {
+        let mut title = vec![3u8];
+        title.extend_from_slice(b"Ends");
+        let mut body = Vec::new();
+        body.extend_from_slice(b"TIT2");
+        body.extend_from_slice(&(title.len() as u32).to_be_bytes());
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&title);
+        body.resize(200_000, 0);
+        let size = body.len();
+        let mut file = b"ID3\x03\x00\x00".to_vec();
+        file.extend_from_slice(&[(size >> 21) as u8 & 0x7f, (size >> 14) as u8 & 0x7f, (size >> 7) as u8 & 0x7f, size as u8 & 0x7f]);
+        file.extend_from_slice(&body);
+        // 128 kbit/s, 44.1 kHz, no padding: 417-byte frames of silence.
+        let frames = 2000;
+        for _ in 0..frames {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&0xfffb_9064u32.to_be_bytes());
+            file.extend_from_slice(&frame);
+        }
+        let mut id3v1 = b"TAG".to_vec();
+        id3v1.resize(128, b' ');
+        file.extend_from_slice(&id3v1);
+        let (tags, seconds) = probe_file(&file, 4096);
+        assert_eq!(tags.title.as_deref(), Some("Ends"));
+        let exact = frames as f64 * 1152.0 / 44_100.0;
+        let seconds = seconds.unwrap();
+        assert!((seconds - exact).abs() / exact < 0.01, "{seconds} vs {exact}");
+    }
+
+    /// A FLAC file whose comments sit behind a large cover picture: the head
+    /// grows block by block until the last one is in.
+    #[test]
+    fn flac_metadata_behind_a_picture_is_reached() {
+        let mut file = b"fLaC".to_vec();
+        let mut info = vec![0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0];
+        // 44.1 kHz, 2 channels, 16 bits, 441 000 samples.
+        let word: u64 = (44_100u64 << 44) | (1u64 << 41) | (15u64 << 36) | 441_000;
+        info.extend_from_slice(&word.to_be_bytes());
+        info.extend_from_slice(&[0; 16]);
+        file.extend_from_slice(&[0, 0, 0, 34]);
+        file.extend_from_slice(&info);
+        let picture = 300_000usize;
+        file.extend_from_slice(&[6, (picture >> 16) as u8, (picture >> 8) as u8, picture as u8]);
+        file.resize(file.len() + picture, 0);
+        let mut comment = Vec::new();
+        comment.extend_from_slice(&0u32.to_le_bytes());
+        comment.extend_from_slice(&1u32.to_le_bytes());
+        let entry = b"TITLE=Far In";
+        comment.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        comment.extend_from_slice(entry);
+        file.extend_from_slice(&[0x80 | 4, 0, 0, comment.len() as u8]);
+        file.extend_from_slice(&comment);
+        file.resize(file.len() + 50_000, 0);
+        let (tags, seconds) = probe_file(&file, 4096);
+        assert_eq!(tags.title.as_deref(), Some("Far In"));
+        assert_eq!(seconds, Some(10.0));
     }
 }

@@ -10,6 +10,8 @@ mod check;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
+mod desktop_bundle;
+#[cfg(not(target_arch = "wasm32"))]
 mod font_assets;
 #[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
@@ -251,6 +253,16 @@ fn show_help() {
     );
     println!(
         "    desktop sign [sign opts] <cargo args>        Sign a built macOS desktop artifact"
+    );
+    println!(
+        "    desktop bundle [bundle opts] -p <crate>      Build a self-contained, signed macOS .app (see [package.metadata.makepad.desktop])"
+    );
+    println!("    [bundle opts]:");
+    println!(
+        "       --install[=DIR]                            Also install it into DIR (default ~/.makepad/apps), outside target/"
+    );
+    println!(
+        "       --cert='<IDENTITY>' | --adhoc                Signing identity; defaults to the Apple Development identity (or MAKEPAD_CODESIGN_IDENTITY)"
     );
     println!("    [sign opts]:");
     println!(

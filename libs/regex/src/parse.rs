@@ -21,6 +21,11 @@ pub struct Options {
     pub ignore_case: bool,
     /// Allow '^' and '$' to match next to newline characters.
     pub multiline: bool,
+    /// Decide `\b` on ASCII word characters only, so the DFA keeps running
+    /// through non-ASCII bytes (which are then never word characters).
+    /// Off, a word boundary next to a non-ASCII byte hands the whole rest
+    /// of the input to the NFA.
+    pub ascii_word_boundary: bool,
 }
 
 #[derive(Debug)]
@@ -151,7 +156,14 @@ impl<'a> Parser<'a> {
                 }
                 Some('[') => self.parse_class()?,
                 Some('\\') => {
-                    if self.maybe_parse_class_escape() {
+                    if let (Some('\\'), Some(boundary @ ('b' | 'B'))) = self.peek_2() {
+                        self.skip_2();
+                        self.assert(if boundary == 'b' {
+                            Pred::WordBoundary
+                        } else {
+                            Pred::NotWordBoundary
+                        });
+                    } else if self.maybe_parse_class_escape() {
                         let class = self.char_class_builder.build(false);
                         self.char_class(class);
                     } else {

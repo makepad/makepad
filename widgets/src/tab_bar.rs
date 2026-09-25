@@ -384,6 +384,11 @@ impl Widget for TabBar {
                         }
                     }
                 }
+                TabAction::TouchCancel => {
+                    if matches!(self.finger_scroll, FingerScrollState::Dragging { .. }) {
+                        self.finger_scroll = FingerScrollState::Idle;
+                    }
+                }
                 TabAction::TouchUp { abs: _, time: _ } => {
                     if let FingerScrollState::Dragging { samples } = &self.finger_scroll {
                         // Calculate flick velocity from recent samples.

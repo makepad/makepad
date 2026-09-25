@@ -1433,7 +1433,7 @@ impl GlassRadio {
 
 impl Widget for GlassRadio {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -1812,7 +1812,7 @@ impl GlassButton {
 
 impl Widget for GlassButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             // Hidden mid-press, it will not hear the release: put the lens at
             // rest now, so it is not shown flat when it comes back.
             if !self.press.is_at_rest() {
@@ -2149,7 +2149,7 @@ impl GlassSlider {
 
 impl Widget for GlassSlider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -2444,7 +2444,7 @@ impl GlassSegmented {
 
 impl Widget for GlassSegmented {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if !self.visible {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
             return;
         }
         let uid = self.widget_uid();
@@ -3491,6 +3491,17 @@ impl Widget for GlassFloatingSurface {
                     }
                 }
             },
+            // The mouse press that moves the surface taken away itself: the
+            // move ends where it is (the surface already stands there) and
+            // the cancel goes on to the content.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                if self.drag.take().is_some() {
+                    self.hot = 0.0;
+                    let (pos, size) = (self.pos, self.size);
+                    self.say(cx, GlassFloatingSurfaceAction::Placed { pos, size });
+                    self.redraw(cx);
+                }
+            }
             Event::MouseUp(_) => {
                 if self.drag.take().is_some() {
                     self.hot = 0.0;
@@ -3708,6 +3719,10 @@ impl GlassFloatingSurfaceRef {
 
 #[cfg(test)]
 mod tests {
+
+    fn test_cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
+    }
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
     use std::cell::Cell;
@@ -3745,7 +3760,8 @@ mod tests {
     /// turns a mistake in either into a failed build.
     #[test]
     fn the_glass_presets_build_and_their_shaders_compile() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        crate::on_test_cx(|| {
+        let mut cx = test_cx();
         let (surface, button, slider, segmented) = cx.with_vm(|vm| {
             crate::script_mod(vm);
             // Registering type defaults compiles nothing; making an
@@ -3792,6 +3808,7 @@ mod tests {
         assert_eq!((button.hover_ink, button.down_ink, button.disabled_ink), (0.65, 0.25, 0.4));
         assert_eq!(slider.walk.height.to_fixed(), Some(32.0));
         assert_eq!(segmented.walk.height.to_fixed(), Some(38.0));
+        });
     }
 
     /// The rect the tests press in: the sheet of `surface()`.
@@ -3801,8 +3818,8 @@ mod tests {
     }
 
     /// A surface from the preset, a pass and a draw list to put areas in.
-    fn glass_surface() -> (Cx, GlassFloatingSurface, DrawPass) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+    fn glass_surface() -> (crate::PooledCx, GlassFloatingSurface, DrawPass) {
+        let mut cx = test_cx();
         let surface = cx.with_vm(|vm| {
             crate::script_mod(vm);
             GlassFloatingSurface::script_new_with_default(vm)
@@ -3846,17 +3863,63 @@ mod tests {
         })
     }
 
+    /// A cancel belongs to the gesture it names. A moving surface keeps its
+    /// mouse move through a cancel of another pointer (a touch) and through
+    /// a cancel of some other capture of its still-held mouse press; only
+    /// its own mouse press taken away ends the move, where it stands.
+    #[test]
+    fn only_the_surfaces_own_taken_away_press_ends_its_move() {
+        crate::on_test_cx(|| {
+        let (mut cx, mut surface, _pass) = glass_surface();
+        surface.shown = true;
+        surface.drag = Some(Drag::Move { held_at: dvec2(150.0, 110.0), from: dvec2(100.0, 100.0) });
+        let touch: crate::event::DigitId = live_id_num!(touch, 5).into();
+        let mouse: crate::event::DigitId = live_id!(mouse).into();
+        let other = finger_cancel(&mut cx, touch, crate::event::DigitDevice::Touch { uid: 5 }, true);
+        surface.handle_event(&mut cx, &other, &mut Scope::empty());
+        assert!(surface.drag.is_some(), "a touch's cancel ended the mouse move");
+        let partial = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, false);
+        surface.handle_event(&mut cx, &partial, &mut Scope::empty());
+        assert!(surface.drag.is_some(), "a cancel of another capture of the held press ended the move");
+        let own = finger_cancel(&mut cx, mouse, crate::event::DigitDevice::Mouse { button: MouseButton::PRIMARY }, true);
+        let actions = cx.capture_actions(|cx| surface.handle_event(cx, &own, &mut Scope::empty()));
+        assert!(surface.drag.is_none(), "its own press taken away did not end the move");
+        let placed = actions.iter().any(|a| {
+            matches!(a.as_widget_action().map(|w| w.cast::<GlassFloatingSurfaceAction>()), Some(GlassFloatingSurfaceAction::Placed { .. }))
+        });
+        assert!(placed, "the move's end was not reported where it stands");
+        });
+    }
+
+    /// A `FingerCancel` for `digit`; with `taken_away` the press itself was
+    /// cancelled first (`cancel_digit`), as a host or the OS does.
+    fn finger_cancel(cx: &mut Cx, digit: crate::event::DigitId, device: crate::event::DigitDevice, taken_away: bool) -> Event {
+        if taken_away {
+            cx.fingers.cancel_digit(digit);
+        }
+        Event::FingerCancel(crate::event::FingerCancelEvent {
+            window_id: WindowId(1, 1),
+            digit_id: digit,
+            device,
+            abs: dvec2(1.0, 1.0),
+            time: 1.0,
+            modifiers: KeyModifiers::default(),
+        })
+    }
+
     /// The press the surface takes the pointer with. The drag that follows
     /// is only a drag because of this: until the release the mouse is the
     /// surface's, and nothing else is handed a hover or a press from it.
     #[test]
     fn a_grab_with_the_pointer_free_takes_it_and_says_so() {
+        crate::on_test_cx(|| {
         let (mut cx, mut surface, pass) = glass_surface();
         let mut list = DrawList2d::new(&mut cx);
         let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
         let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
         assert!(surface.grab_pointer(&mut cx, &event, area), "the press was there to take");
         assert!(cx.fingers.is_area_captured(area), "and the pointer came with it");
+        });
     }
 
     /// A press the surface cannot take the pointer for is not the surface's
@@ -3865,6 +3928,7 @@ mod tests {
     /// the grab away still believed it held the mouse.
     #[test]
     fn a_grab_somebody_elses_sweep_lock_turns_away_takes_nothing() {
+        crate::on_test_cx(|| {
         let (mut cx, mut surface, pass) = glass_surface();
         // Each area in its own list, so they are two owners and not one.
         let mut other_list = DrawList2d::new(&mut cx);
@@ -3877,12 +3941,14 @@ mod tests {
         let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
         assert!(!surface.grab_pointer(&mut cx, &event, area), "the lock holds the press");
         assert!(!cx.fingers.is_area_captured(area), "and nothing was captured for a drag");
+        });
     }
 
     /// The other refusal: a digit is already down on a different button, so
     /// `hits` answers this press to nobody.
     #[test]
     fn a_grab_with_another_button_already_down_takes_nothing() {
+        crate::on_test_cx(|| {
         let (mut cx, mut surface, pass) = glass_surface();
         let mut list = DrawList2d::new(&mut cx);
         let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
@@ -3891,6 +3957,7 @@ mod tests {
         let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
         assert!(!surface.grab_pointer(&mut cx, &event, area), "the digit down is not this one");
         assert!(!cx.fingers.is_area_captured(area));
+        });
     }
 
     /// A gesture is re-asked while it is pending. A drag already under way
@@ -3899,6 +3966,7 @@ mod tests {
     /// writes the frame down on a release hears the same thing.
     #[test]
     fn a_drag_gives_the_gesture_up_when_another_control_takes_the_pointer() {
+        crate::on_test_cx(|| {
         let (mut cx, mut surface, pass) = glass_surface();
         let mut other_list = DrawList2d::new(&mut cx);
         let mut list = DrawList2d::new(&mut cx);
@@ -3932,10 +4000,11 @@ mod tests {
             )),
             "the gesture ended without saying where it left the surface"
         );
+        });
     }
 
-    fn glass_button() -> (Cx, GlassButton) {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+    fn glass_button() -> (crate::PooledCx, GlassButton) {
+        let mut cx = test_cx();
         let button = cx.with_vm(|vm| {
             crate::script_mod(vm);
             GlassButton::script_new_with_default(vm)
@@ -3958,6 +4027,7 @@ mod tests {
     /// second still to play, and the rebound adds no second click.
     #[test]
     fn a_click_goes_out_on_the_release_not_after_the_rebound() {
+        crate::on_test_cx(|| {
         let (mut cx, mut button) = glass_button();
         let actions = cx.capture_actions(|cx| button.finger_down(cx));
         assert!(!button.clicked(&actions), "a press is not a click");
@@ -3984,12 +4054,14 @@ mod tests {
         let actions = cx.capture_actions(|cx| button.finger_up(cx, false));
         assert!(!button.clicked(&actions));
         assert!(button.press.is_animating());
+        });
     }
 
     /// A disabled button takes no press and sends no click, and one disabled
     /// while it is held lets the press go rather than finish it.
     #[test]
     fn a_disabled_button_takes_no_press_and_sends_no_click() {
+        crate::on_test_cx(|| {
         let (mut cx, mut button) = glass_button();
         button.set_disabled(&mut cx, true);
         assert!(button.disabled(&cx));
@@ -4011,6 +4083,7 @@ mod tests {
         assert_eq!(button.response, PressResponse::REST);
         let actions = cx.capture_actions(|cx| button.finger_up(cx, true));
         assert!(!button.clicked(&actions), "the release of a press it dropped clicked");
+        });
     }
 
     /// A container that stops passing events on leaves a press that cannot
@@ -4020,6 +4093,7 @@ mod tests {
     /// it frozen, and leaves a live press alone.
     #[test]
     fn a_press_whose_events_stopped_coming_is_put_at_rest() {
+        crate::on_test_cx(|| {
         let (mut cx, mut button) = glass_button();
         button.finger_down(&mut cx);
         button.frame(&mut cx, 1.0);
@@ -4050,6 +4124,7 @@ mod tests {
         assert!(button.settle_lost_press(false, false));
         assert_eq!(button.response, PressResponse::REST);
         assert!(!button.settle_lost_press(false, false), "a lens at rest has nothing to lose");
+        });
     }
 
     /// Frames at 60 Hz from `start` until a held lens stops asking for them.
@@ -4070,6 +4145,7 @@ mod tests {
     /// does with it.
     #[test]
     fn a_press_someone_answered_already_is_not_the_surfaces() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(press_on(f, dvec2(100.0, 175.0), 8.0, true, false, true, true), Press::Taken);
         assert_eq!(press_on(f, dvec2(200.0, 175.0), 8.0, true, false, true, true), Press::Taken);
@@ -4084,6 +4160,7 @@ mod tests {
             Press::Sheet { moves: true },
             "and so is the body"
         );
+        });
     }
 
     /// A sheet that can neither be moved nor sized still answers a press on
@@ -4091,6 +4168,7 @@ mod tests {
     /// would be answered by something nobody can see.
     #[test]
     fn a_sheet_that_cannot_move_or_size_still_claims_its_own_press() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(
             press_on(f, dvec2(200.0, 175.0), 8.0, false, false, false, false),
@@ -4106,6 +4184,7 @@ mod tests {
             Press::Elsewhere,
             "and the page beyond it is still the page's"
         );
+        });
     }
 
     /// The frame is decided before the sheet, and the outward half of the
@@ -4113,6 +4192,7 @@ mod tests {
     /// does not.
     #[test]
     fn the_frame_is_taken_before_the_sheet_and_the_page_after_it() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(
             press_on(f, dvec2(94.0, 175.0), 8.0, false, false, true, true),
@@ -4129,6 +4209,7 @@ mod tests {
             Press::Sheet { moves: true },
             "with sizing off, a press on the edge moves it instead"
         );
+        });
     }
 
     /// Each edge moves its own side and leaves the other three alone. The
@@ -4136,6 +4217,7 @@ mod tests {
     /// and it is the half a naive resize gets wrong.
     #[test]
     fn each_edge_moves_only_its_own_side() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(
             f.resized(grip(false, true, false, false), dvec2(40.0, 0.0)),
@@ -4157,11 +4239,13 @@ mod tests {
             (dvec2(100.0, 80.0), dvec2(200.0, 170.0)),
             "the top edge moves up and the bottom stays at 250"
         );
+        });
     }
 
     /// A corner is both of its edges at once, and neither of the other two.
     #[test]
     fn each_corner_moves_both_of_its_sides() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(
             f.resized(grip(false, true, false, true), dvec2(50.0, 40.0)),
@@ -4183,6 +4267,7 @@ mod tests {
             (dvec2(100.0, 115.0), dvec2(230.0, 135.0)),
             "top-right moves down on y only"
         );
+        });
     }
 
     /// Dragged past the floor, the edge under the finger stops and the far
@@ -4191,6 +4276,7 @@ mod tests {
     /// only trying to make smaller.
     #[test]
     fn the_floor_pins_the_dragged_edge_and_spares_the_far_one() {
+        crate::on_test_cx(|| {
         let f = surface();
         let (pos, size) = f.resized(grip(true, false, false, false), dvec2(400.0, 0.0));
         assert_eq!(size.x, 140.0, "stopped at the floor");
@@ -4203,6 +4289,7 @@ mod tests {
         // The far edges do the same thing, without moving the surface.
         let (pos, size) = f.resized(grip(false, true, false, true), dvec2(-500.0, -500.0));
         assert_eq!((pos, size), (dvec2(100.0, 100.0), dvec2(140.0, 96.0)));
+        });
     }
 
     /// A ceiling stops a drag the same way a floor does, and a zero ceiling
@@ -4210,6 +4297,7 @@ mod tests {
     /// mistaken for "may not be wider than nothing".
     #[test]
     fn a_ceiling_stops_the_drag_and_a_zero_one_does_not_exist() {
+        crate::on_test_cx(|| {
         let mut f = surface();
         f.max = dvec2(260.0, 0.0);
         let (pos, size) = f.resized(grip(false, true, false, true), dvec2(900.0, 900.0));
@@ -4222,6 +4310,7 @@ mod tests {
         f.max = dvec2(10.0, 10.0);
         let (_, size) = f.resized(grip(false, true, false, true), dvec2(900.0, 900.0));
         assert_eq!(size, dvec2(140.0, 96.0));
+        });
     }
 
     /// The hit test finds each edge and each corner where they are drawn,
@@ -4229,6 +4318,7 @@ mod tests {
     /// move the surface.
     #[test]
     fn the_hit_test_finds_each_edge_and_each_corner() {
+        crate::on_test_cx(|| {
         let f = surface();
         let grab = 8.0;
         assert_eq!(f.grip_at(dvec2(100.0, 175.0), grab), grip(true, false, false, false));
@@ -4241,6 +4331,7 @@ mod tests {
         assert_eq!(f.grip_at(dvec2(300.0, 250.0), grab), grip(false, true, false, true));
         assert!(f.grip_at(dvec2(200.0, 175.0), grab).is_empty(), "the body");
         assert!(f.grip_at(dvec2(500.0, 500.0), grab).is_empty(), "the page");
+        });
     }
 
     /// The band reaches both ways from the edge, so the unpainted bite a
@@ -4248,17 +4339,20 @@ mod tests {
     /// press further out than that belongs to the page.
     #[test]
     fn the_band_reaches_both_sides_of_an_edge_and_no_further() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(f.grip_at(dvec2(94.0, 175.0), 8.0), grip(true, false, false, false));
         assert_eq!(f.grip_at(dvec2(106.0, 175.0), 8.0), grip(true, false, false, false));
         assert!(f.grip_at(dvec2(91.0, 175.0), 8.0).is_empty());
         assert!(f.grip_at(dvec2(110.0, 175.0), 8.0).is_empty());
+        });
     }
 
     /// On a surface narrower than two bands the two overlap; one finger then
     /// gets one edge — the nearer — rather than both ends at once.
     #[test]
     fn overlapping_bands_give_the_nearer_edge_only() {
+        crate::on_test_cx(|| {
         let f = Frame {
             pos: dvec2(0.0, 0.0),
             size: dvec2(20.0, 20.0),
@@ -4267,6 +4361,7 @@ mod tests {
         };
         assert_eq!(f.grip_at(dvec2(9.0, 9.0), 12.0), grip(true, false, true, false));
         assert_eq!(f.grip_at(dvec2(11.0, 11.0), 12.0), grip(false, true, false, true));
+        });
     }
 
     /// A surface is pulled back inside the window, and cut down to it if it
@@ -4274,6 +4369,7 @@ mod tests {
     /// size left cannot be dragged anywhere at all.
     #[test]
     fn a_surface_is_settled_inside_the_window() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(
             f.settled(dvec2(1000.0, 800.0)),
@@ -4304,12 +4400,14 @@ mod tests {
             dvec2(140.0, 96.0),
             "a window smaller than the floor loses to the floor"
         );
+        });
     }
 
     /// The two diagonals are different pointers. A corner that shows the
     /// wrong one tells the hand it will do something it will not.
     #[test]
     fn each_corner_shows_its_own_diagonal_pointer() {
+        crate::on_test_cx(|| {
         assert_eq!(grip(true, false, true, false).cursor(), MouseCursor::NwseResize);
         assert_eq!(grip(false, true, false, true).cursor(), MouseCursor::NwseResize);
         assert_eq!(grip(false, true, true, false).cursor(), MouseCursor::NeswResize);
@@ -4317,6 +4415,7 @@ mod tests {
         assert_eq!(grip(true, false, false, false).cursor(), MouseCursor::EwResize);
         assert_eq!(grip(false, false, false, true).cursor(), MouseCursor::NsResize);
         assert_eq!(Grip::default().cursor(), MouseCursor::Arrow);
+        });
     }
 
     /// A mouse another control already holds is not the surface's to act
@@ -4331,6 +4430,7 @@ mod tests {
     /// slider's release will cancel.
     #[test]
     fn nothing_starts_while_another_control_holds_the_mouse() {
+        crate::on_test_cx(|| {
         let f = surface();
         let on_the_edge = dvec2(100.0, 175.0);
         let on_the_sheet = dvec2(200.0, 175.0);
@@ -4350,14 +4450,17 @@ mod tests {
         // gives the cursor back, so the control doing the dragging keeps
         // the say over what the pointer looks like.
         assert_ne!(press_on(f, on_the_sheet, 8.0, false, true, true, true), Press::Elsewhere);
+        });
     }
 
     /// A grab margin of zero leaves the edges exactly on the boundary rather
     /// than making the whole surface a grip or none of it one.
     #[test]
     fn a_zero_grab_margin_is_the_edge_itself() {
+        crate::on_test_cx(|| {
         let f = surface();
         assert_eq!(f.grip_at(dvec2(100.0, 175.0), 0.0), grip(true, false, false, false));
         assert!(f.grip_at(dvec2(101.0, 175.0), 0.0).is_empty());
+        });
     }
 }

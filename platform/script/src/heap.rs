@@ -1,6 +1,6 @@
 use crate::array::*;
 use crate::gc::*;
-use crate::gen_index::GenVec;
+use crate::gen_index::{GenSlot, GenVec};
 use crate::handle::*;
 use crate::makepad_live_id::*;
 use crate::object::*;
@@ -14,6 +14,7 @@ use crate::value::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::mem::size_of;
 use std::rc::Rc;
 
 /// Result of one execution-scoped script allocation budget.
@@ -41,6 +42,27 @@ impl ScriptAllocationBudget {
             exceeded: false,
             error: None,
         }
+    }
+
+    /// Charge logical payload bytes. Arithmetic is saturating so a hostile
+    /// sparse index cannot wrap into a small allocation request. `kind` names
+    /// the limit in the recorded diagnostic ("allocation" for a scoped run
+    /// budget, "heap allocation" for the persistent retained cap).
+    fn charge(&mut self, bytes: usize, operation: &'static str, kind: &'static str) -> bool {
+        if self.exceeded {
+            return false;
+        }
+        if bytes > self.remaining {
+            self.exceeded = true;
+            self.error = Some(format!(
+                "script {kind} limit exceeded while {operation}: requested {bytes} bytes, {} remaining",
+                self.remaining
+            ));
+            return false;
+        }
+        self.remaining -= bytes;
+        self.allocated = self.allocated.saturating_add(bytes);
+        true
     }
 }
 
@@ -94,15 +116,33 @@ pub struct ScriptHeap {
     /// observes the pending hard-limit error and bails at the next opcode.
     pub(crate) allocation_poison_object: ScriptObject,
     pub(crate) allocation_poison_array: ScriptArray,
+
+    /// Octoscript's aggregate retained-heap cap, expressed as a persistent
+    /// allocation budget that outlives any one `with_heap_allocation_limit`
+    /// scope. `None` preserves the inherited unrestricted VM behavior.
+    pub(crate) heap_cap: Option<ScriptAllocationBudget>,
+    pub(crate) max_heap_bytes: Option<usize>,
+    /// Retained-capacity estimate taken at the last reconcile; live accounting
+    /// adds the bytes charged to `heap_cap` since then.
+    pub(crate) heap_baseline_bytes: usize,
+    pub(crate) heap_limit_exceeded: bool,
+    /// Per-string construction ceiling (logical bytes of one script string).
+    pub(crate) max_string_bytes: Option<usize>,
+    pub(crate) string_limit_exceeded: bool,
+    /// A refusal raised by the per-string ceiling, surfaced through the same
+    /// `take_allocation_error` poll the VM uses for budget refusals.
+    pub(crate) pending_string_limit_error: Option<String>,
+    /// Set whenever a refusal is recorded (scoped budget, retained cap or
+    /// string ceiling). The interpreter asks `take_allocation_error` before
+    /// every instruction, so the no-error case must be one flag read.
+    pub(crate) allocation_error_pending: bool,
 }
 
 impl ScriptHeap {
-    pub(crate) fn begin_allocation_budget(
-        &mut self,
-        limit: usize,
-    ) -> Option<ScriptAllocationBudget> {
-        // Create the sentinels before the budget becomes active. They are
-        // static and frozen, so GC retains them and refused writes are inert.
+    /// Create the refused-allocation sentinels before any budget becomes
+    /// active. They are static and frozen, so GC retains them and refused
+    /// writes are inert.
+    fn ensure_allocation_poison(&mut self) {
         if self.allocation_poison_object == ScriptObject::ZERO {
             let object = self.new_object();
             self.objects[object].tag.set_static();
@@ -115,6 +155,13 @@ impl ScriptHeap {
             self.arrays[array].tag.freeze();
             self.allocation_poison_array = array;
         }
+    }
+
+    pub(crate) fn begin_allocation_budget(
+        &mut self,
+        limit: usize,
+    ) -> Option<ScriptAllocationBudget> {
+        self.ensure_allocation_poison();
         self.allocation_budget
             .replace(ScriptAllocationBudget::new(limit))
     }
@@ -134,48 +181,263 @@ impl ScriptHeap {
     }
 
     /// Charge logical payload bytes before a script-controlled container
-    /// grows. Arithmetic is saturating so a hostile sparse index cannot wrap
-    /// into a small allocation request.
+    /// grows. Both the scoped run budget and the persistent retained cap are
+    /// charged; either one can refuse. Arithmetic is saturating so a hostile
+    /// sparse index cannot wrap into a small allocation request.
+    #[inline]
     pub(crate) fn charge_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
-        let Some(budget) = self.allocation_budget.as_mut() else {
+        // Every container growth lands here; a VM with no budget and no cap
+        // (every Makepad host) pays this one check.
+        if self.allocation_budget.is_none() && self.heap_cap.is_none() {
             return true;
-        };
-        if budget.exceeded {
-            return false;
         }
-        if bytes > budget.remaining {
-            budget.exceeded = true;
-            budget.error = Some(format!(
-                "script allocation limit exceeded while {operation}: requested {bytes} bytes, {} remaining",
-                budget.remaining
-            ));
-            return false;
+        self.charge_limited_allocation(bytes, operation)
+    }
+
+    #[inline(never)]
+    fn charge_limited_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
+        if let Some(budget) = self.allocation_budget.as_mut() {
+            if !budget.charge(bytes, operation, "allocation") {
+                self.allocation_error_pending = true;
+                return false;
+            }
         }
-        budget.remaining -= bytes;
-        budget.allocated = budget.allocated.saturating_add(bytes);
+        if let Some(cap) = self.heap_cap.as_mut() {
+            if !cap.charge(bytes, operation, "heap allocation") {
+                self.heap_limit_exceeded = true;
+                self.allocation_error_pending = true;
+                return false;
+            }
+        }
         true
     }
 
     pub(crate) fn has_allocation_budget(&self) -> bool {
-        self.allocation_budget.is_some()
+        self.allocation_budget.is_some() || self.heap_cap.is_some()
     }
 
     pub(crate) fn allocation_remaining(&self) -> usize {
-        self.allocation_budget
+        let scoped = self
+            .allocation_budget
             .as_ref()
-            .map_or(usize::MAX, |budget| budget.remaining)
+            .map_or(usize::MAX, |budget| budget.remaining);
+        let cap = self
+            .heap_cap
+            .as_ref()
+            .map_or(usize::MAX, |budget| budget.remaining);
+        scoped.min(cap)
     }
 
     pub(crate) fn allocation_exceeded(&self) -> bool {
         self.allocation_budget
             .as_ref()
             .is_some_and(|budget| budget.exceeded)
+            || self.heap_cap.as_ref().is_some_and(|cap| cap.exceeded)
     }
 
+    /// The pending refusal the interpreter turns into an uncatchable bail
+    /// before the next opcode: a scoped-budget refusal, a retained-cap
+    /// refusal, or a per-string ceiling refusal, in that order.
+    #[inline(always)]
     pub(crate) fn take_allocation_error(&mut self) -> Option<String> {
-        self.allocation_budget
+        if !self.allocation_error_pending {
+            return None;
+        }
+        self.take_pending_allocation_error()
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn take_pending_allocation_error(&mut self) -> Option<String> {
+        let error = self.take_first_allocation_error();
+        self.allocation_error_pending = self
+            .allocation_budget
+            .as_ref()
+            .is_some_and(|budget| budget.error.is_some())
+            || self.heap_cap.as_ref().is_some_and(|cap| cap.error.is_some())
+            || self.pending_string_limit_error.is_some();
+        error
+    }
+
+    fn take_first_allocation_error(&mut self) -> Option<String> {
+        if let Some(error) = self
+            .allocation_budget
             .as_mut()
             .and_then(|budget| budget.error.take())
+        {
+            return Some(error);
+        }
+        if let Some(error) = self.heap_cap.as_mut().and_then(|cap| cap.error.take()) {
+            return Some(error);
+        }
+        self.pending_string_limit_error.take()
+    }
+
+    // Octoscript retained-heap cap.
+    //
+    // The inherited `with_heap_allocation_limit` budget is execution scoped:
+    // it meters one eval or tick and is discarded afterwards. Octoscript's
+    // runtime instead bounds the *retained* VM heap across evaluations. That
+    // contract is expressed here as a persistent budget whose headroom is
+    // `max_heap_bytes - estimated retained capacity`, re-derived by
+    // `reconcile_heap_bytes` at host boundaries (setup, GC, before an eval)
+    // and decremented by the same `charge_allocation` calls that feed the
+    // scoped budget. Both budgets coexist: a scoped run budget nested inside
+    // the cap is charged first, and the cap second.
+
+    /// Applies an aggregate cap to the retained VM heap. `None` removes it and
+    /// preserves the inherited Makepad VM behavior. The estimate tracks
+    /// retained capacity of script strings, arrays, objects, slots, and intern
+    /// tables; it intentionally cannot account for opaque host handles,
+    /// adapter-owned Rust allocations, or the process allocator's metadata.
+    pub fn set_max_heap_bytes(&mut self, maximum_bytes: Option<usize>) {
+        self.max_heap_bytes = maximum_bytes;
+        self.heap_limit_exceeded = false;
+        if maximum_bytes.is_some() {
+            self.ensure_allocation_poison();
+        } else {
+            self.heap_cap = None;
+        }
+        self.reconcile_heap_bytes();
+    }
+
+    /// Returns the configured aggregate retained-heap cap, if any.
+    pub fn max_heap_bytes(&self) -> Option<usize> {
+        self.max_heap_bytes
+    }
+
+    /// Returns the retained-capacity estimate at the last reconcile plus the
+    /// logical bytes charged against the cap since. Without a cap this is the
+    /// last reconciled estimate only.
+    pub fn accounted_heap_bytes(&self) -> usize {
+        let charged = self.heap_cap.as_ref().map_or(0, |cap| cap.allocated);
+        self.heap_baseline_bytes.saturating_add(charged)
+    }
+
+    /// Recomputes the retained-capacity estimate from the current heap state
+    /// and re-arms the cap's headroom from it. Appropriate after trusted raw
+    /// VM configuration, host-side value injection, or garbage collection.
+    /// Normal script allocation paths update the cached amount in constant
+    /// time instead of scanning the heap on every instruction.
+    pub fn reconcile_heap_bytes(&mut self) {
+        self.heap_baseline_bytes = self.estimated_heap_bytes();
+        let Some(maximum) = self.max_heap_bytes else {
+            return;
+        };
+        let mut cap = ScriptAllocationBudget::new(maximum.saturating_sub(self.heap_baseline_bytes));
+        if self.heap_baseline_bytes > maximum {
+            self.heap_limit_exceeded = true;
+            cap.exceeded = true;
+        }
+        self.heap_cap = Some(cap);
+    }
+
+    /// Recomputes accounting for uncommon allocation paths whose backing
+    /// storage is owned by a lower-level helper.
+    pub(crate) fn reconcile_heap_bytes_if_limited(&mut self) {
+        if self.max_heap_bytes.is_some() {
+            self.reconcile_heap_bytes();
+        }
+    }
+
+    /// Returns and clears an aggregate heap-cap failure raised by a script
+    /// allocation path. Clearing also re-opens the cap for later charges; a
+    /// host that wants the refusal to persist re-checks `accounted_heap_bytes`
+    /// against its limit before running more script.
+    pub fn take_heap_limit_exceeded(&mut self) -> bool {
+        let exceeded = std::mem::take(&mut self.heap_limit_exceeded);
+        if let Some(cap) = self.heap_cap.as_mut() {
+            cap.exceeded = false;
+            cap.error = None;
+        }
+        exceeded
+    }
+
+    fn estimated_heap_bytes(&self) -> usize {
+        fn bytes_for<T>(capacity: usize) -> usize {
+            capacity.saturating_mul(size_of::<T>())
+        }
+
+        fn map_bytes<K, V, S>(map: &HashMap<K, V, S>) -> usize {
+            // HashMap keeps bucket control data in addition to key/value
+            // payload. Charge two machine words plus one control byte per
+            // usable bucket to avoid treating map capacity as free.
+            let entry_bytes = size_of::<(K, V)>()
+                .saturating_add(size_of::<usize>().saturating_mul(2))
+                .saturating_add(1);
+            map.capacity().saturating_mul(entry_bytes)
+        }
+
+        let mut bytes = size_of::<Self>();
+
+        bytes = bytes.saturating_add(bytes_for::<ScriptGcMark>(self.mark_vec.capacity()));
+        bytes = bytes.saturating_add(map_bytes(&*self.root_objects.borrow()));
+        bytes = bytes.saturating_add(map_bytes(&*self.root_arrays.borrow()));
+        bytes = bytes.saturating_add(map_bytes(&*self.root_handles.borrow()));
+        bytes = bytes.saturating_add(map_bytes(&self.type_defaults));
+
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<ScriptObjectData>>(
+            self.objects.capacity(),
+        ));
+        bytes = bytes.saturating_add(bytes_for::<ScriptObject>(self.objects_free.capacity()));
+        for object in self.objects.iter() {
+            bytes = bytes.saturating_add(object.retained_bytes());
+        }
+
+        bytes = bytes.saturating_add(map_bytes(&self.string_intern));
+        bytes = bytes.saturating_add(bytes_for::<String>(self.strings_reuse.capacity()));
+        for string in &self.strings_reuse {
+            bytes = bytes.saturating_add(string.capacity());
+        }
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<Option<ScriptStringData>>>(
+            self.strings.capacity(),
+        ));
+        bytes = bytes.saturating_add(bytes_for::<ScriptString>(self.strings_free.capacity()));
+        for string in self.strings.iter().flatten() {
+            bytes = bytes.saturating_add(string.string.0.capacity());
+        }
+
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<ScriptArrayData>>(
+            self.arrays.capacity(),
+        ));
+        bytes = bytes.saturating_add(bytes_for::<ScriptArray>(self.arrays_free.capacity()));
+        for array in self.arrays.iter() {
+            bytes = bytes.saturating_add(array.storage.retained_bytes());
+        }
+
+        bytes = bytes.saturating_add(bytes_for::<ScriptPodTypeData>(self.pod_types.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<ScriptPodType>(self.pod_types_free.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<ScriptPodData>>(self.pods.capacity()));
+        bytes = bytes.saturating_add(bytes_for::<ScriptPod>(self.pods_free.capacity()));
+        for pod in self.pods.iter() {
+            bytes = bytes.saturating_add(bytes_for::<u32>(pod.data.capacity()));
+        }
+
+        bytes = bytes.saturating_add(bytes_for::<ScriptTypeCheck>(self.type_check.capacity()));
+        bytes = bytes.saturating_add(map_bytes(&self.type_index));
+
+        // Handle payloads are intentionally opaque Rust-owned allocations;
+        // count their slot bookkeeping but not the adapter's object graph.
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<Option<ScriptHandleData>>>(
+            self.handles.capacity(),
+        ));
+        bytes = bytes.saturating_add(bytes_for::<ScriptHandle>(self.handles_free.capacity()));
+
+        bytes = bytes.saturating_add(map_bytes(&self.regex_intern));
+        bytes = bytes.saturating_add(bytes_for::<GenSlot<Option<ScriptRegexData>>>(
+            self.regexes.capacity(),
+        ));
+        bytes = bytes.saturating_add(bytes_for::<ScriptRegex>(self.regexes_free.capacity()));
+        for regex in self.regexes.iter().flatten() {
+            // The compiled regex engine is opaque, but the pattern's retained
+            // bytes and all VM-level indexes are charged here.
+            bytes = bytes.saturating_add(regex.pattern.capacity());
+        }
+        for key in self.regex_intern.keys() {
+            bytes = bytes.saturating_add(key.pattern.capacity());
+        }
+
+        bytes
     }
 
     pub(crate) fn is_allocation_poison_object(&self, object: ScriptObject) -> bool {
@@ -225,6 +487,7 @@ impl ScriptHeap {
         self.pod_types_free.shrink_to_fit();
         self.handles_free.shrink_to_fit();
         self.regexes_free.shrink_to_fit();
+        self.reconcile_heap_bytes_if_limited();
     }
 
     pub fn empty() -> Self {
@@ -527,13 +790,21 @@ impl ScriptHeap {
         if let Some(v) = v.as_u40() {
             return v as _;
         }
-        if let Some(v) = v.as_string() {
-            let str = self.string(v);
-            if let Ok(v) = str.parse::<f64>() {
-                return v;
-            } else {
-                return 0.0;
-            }
+        // Numbers are the hot case (every arithmetic opcode lands here) and
+        // stay inlinable; everything else converts out of line.
+        self.cast_non_number_to_f64(v, ip)
+    }
+
+    #[inline(never)]
+    fn cast_non_number_to_f64(&self, v: ScriptValue, ip: ScriptIp) -> f64 {
+        // Inline and heap strings convert alike; text that is not a number
+        // is NaN rather than 0, so `"abc" * 2` cannot masquerade as zero.
+        if let Some(number) = self.string_with(v, |_, text| text.parse::<f64>()) {
+            return number.unwrap_or_else(|_| {
+                ScriptValue::from_f64_traced_nan(f64::NAN, ip)
+                    .as_f64()
+                    .unwrap()
+            });
         }
         if let Some(v) = v.as_bool() {
             return if v { 1.0 } else { 0.0 };
@@ -608,140 +879,6 @@ impl ScriptHeap {
     }
 
     // Debug and utility
-
-    pub fn deep_eq(&self, a: ScriptValue, b: ScriptValue) -> bool {
-        if a == b {
-            return true;
-        }
-        // strings are interned (inline or intern table), so string==string is
-        // exactly the bit-compare above — skip the type-check chain on the
-        // failed-compare path (hot in string-tag dispatch: a.kind == "...")
-        if a.is_string_like() && b.is_string_like() {
-            return false;
-        }
-        if let Some(a) = a.as_number() {
-            if let Some(b) = b.as_number() {
-                return a == b;
-            }
-            return false;
-        }
-        if a.is_object() {
-            let mut aw = a;
-            let mut bw = b;
-            loop {
-                if let Some(pa) = aw.as_object() {
-                    if let Some(pb) = bw.as_object() {
-                        let oa = &self.objects[pa];
-                        let ob = &self.objects[pb];
-                        if oa.vec.len() != ob.vec.len() {
-                            return false;
-                        }
-                        for (a, b) in oa.vec.iter().zip(ob.vec.iter()) {
-                            if !self.deep_eq(a.key, b.key) || !self.deep_eq(a.value, b.value) {
-                                return false;
-                            }
-                        }
-                        if oa.map_len() != ob.map_len() {
-                            return false;
-                        }
-                        if let Some(ret) = oa.map_iter_ret(|k, v1| {
-                            if let Some(v2) = ob.map_get(&k) {
-                                if !self.deep_eq(v1, v2) {
-                                    return Some(false);
-                                }
-                                return None;
-                            }
-                            // lets do the string keys shenanigans to make json ok
-                            else if k.is_id() && ob.tag.is_string_keys() {
-                                let id = k.as_id().unwrap();
-                                if let Some(v2) = id.as_string(|s| {
-                                    if let Some(s) = s {
-                                        if let Some(idx) = self.check_intern_string(s) {
-                                            ob.map_get(&idx)
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                }) {
-                                    if !self.deep_eq(v1, v2) {
-                                        return Some(false);
-                                    }
-                                    return None;
-                                }
-                            } else if k.is_string_like() && !ob.tag.is_string_keys() {
-                                let id = if let Some(s) = k.as_string() {
-                                    if let Some(s) = &self.strings[s] {
-                                        LiveId::from_str(&s.string.0)
-                                    } else {
-                                        LiveId(0)
-                                    }
-                                } else {
-                                    k.as_inline_string(|s| LiveId::from_str(s)).unwrap()
-                                };
-                                if let Some(v2) = ob.map_get(&id.into()) {
-                                    if !self.deep_eq(v1, v2) {
-                                        return Some(false);
-                                    }
-                                    return None;
-                                }
-                            }
-                            Some(false)
-                        }) {
-                            return ret;
-                        }
-                        aw = oa.proto;
-                        bw = ob.proto;
-                        if aw == bw {
-                            return true;
-                        }
-                    } else {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        } else if let Some(arr1) = a.as_array() {
-            if let Some(arr2) = b.as_array() {
-                match &self.arrays[arr1].storage {
-                    ScriptArrayStorage::ScriptValue(arr1) => match &self.arrays[arr2].storage {
-                        ScriptArrayStorage::ScriptValue(arr2) => {
-                            if arr1.len() != arr2.len() {
-                                return false;
-                            }
-                            for (a, b) in arr1.iter().zip(arr2.iter()) {
-                                if !self.deep_eq(*a, *b) {
-                                    return false;
-                                }
-                            }
-                            return true;
-                        }
-                        _ => return false,
-                    },
-                    ScriptArrayStorage::F32(arr1) => match &self.arrays[arr2].storage {
-                        ScriptArrayStorage::F32(arr2) => return arr1 == arr2,
-                        _ => return false,
-                    },
-                    ScriptArrayStorage::U32(arr1) => match &self.arrays[arr2].storage {
-                        ScriptArrayStorage::U32(arr2) => return arr1 == arr2,
-                        _ => return false,
-                    },
-                    ScriptArrayStorage::U16(arr1) => match &self.arrays[arr2].storage {
-                        ScriptArrayStorage::U16(arr2) => return arr1 == arr2,
-                        _ => return false,
-                    },
-                    ScriptArrayStorage::U8(arr1) => match &self.arrays[arr2].storage {
-                        ScriptArrayStorage::U8(arr2) => return arr1 == arr2,
-                        _ => return false,
-                    },
-                }
-            }
-            return false;
-        }
-        false
-    }
 
     pub fn println(&self, value: ScriptValue) {
         let mut out = String::new();
@@ -1214,5 +1351,380 @@ impl ScriptHeap {
             return self.arrays[arr].tag.as_apply_transform().is_some();
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::{ScriptMod, ScriptVm, ScriptVmBase, ScriptVmHost};
+
+    fn eval(vm: &mut ScriptVm, file: &str, code: &str) -> ScriptValue {
+        vm.eval(ScriptMod {
+            file: file.to_owned(),
+            code: format!("{code}\n;"),
+            ..Default::default()
+        })
+    }
+
+    fn string_of(vm: &ScriptVm, value: ScriptValue) -> Option<String> {
+        vm.bx.heap.string_with(value, |_, text| text.to_owned())
+    }
+
+    #[test]
+    fn numeric_string_conversion_handles_inline_and_heap_strings_and_yields_nan() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        let ip = ScriptIp::default();
+        let inline = vm.bx.heap.new_string_from_str("12.5");
+        assert!(inline.as_inline_string(|_| ()).is_some());
+        assert_eq!(vm.bx.heap.cast_to_f64(inline, ip), 12.5);
+
+        let heap = vm.bx.heap.new_string_from_str("1234567890123456.5");
+        assert!(heap.as_string().is_some());
+        assert_eq!(vm.bx.heap.cast_to_f64(heap, ip), 1234567890123456.5);
+
+        for text in ["abc", "", "12abc", "a very long string that is not a number"] {
+            let value = vm.bx.heap.new_string_from_str(text);
+            assert!(vm.bx.heap.cast_to_f64(value, ip).is_nan(), "{text:?} must be NaN");
+        }
+    }
+
+    #[test]
+    fn array_opcodes_reject_invalid_indexes_before_touching_storage() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.captured_errors = Some(Vec::new());
+        let array = vm.bx.heap.new_array();
+        for item in [1.0, 2.0, 3.0] {
+            vm.bx
+                .heap
+                .array_push(array, ScriptValue::from_f64(item), ScriptTrap::NoTrap);
+        }
+        vm.set_injected_global(id!(values), array.into());
+
+        for (file, code) in [
+            ("neg-write", "values[-1] = 9"),
+            ("frac-write", "values[1.5] = 9"),
+            ("nan-write", "values[0 / 0] = 9"),
+            ("inf-write", "values[1 / 0] = 9"),
+            ("huge-write", "values[1e30] = 9"),
+            ("string-write", "values[\"1\"] = 9"),
+            ("nil-write", "values[nil] = 9"),
+            ("neg-compound", "values[-1] += 9"),
+            ("neg-read", "values[-1]"),
+            ("frac-read", "values[0.5]"),
+            ("string-read", "values[\"0\"]"),
+            ("nan-read", "values[0 / 0]"),
+        ] {
+            let result = eval(&mut vm, &format!("{file}.octoscript"), code);
+            assert!(result.is_err(), "{file}: {code} must error, got {result:?}");
+            let _ = vm.take_errors();
+            let storage = vm.bx.heap.array_storage(array);
+            assert_eq!(storage.len(), 3, "{file}: storage length changed");
+            let items: Vec<_> = (0..3)
+                .map(|index| storage.index(index).and_then(|value| value.as_f64()))
+                .collect();
+            assert_eq!(items, vec![Some(1.0), Some(2.0), Some(3.0)], "{file}");
+        }
+
+        // Valid integral indexes, including float-typed integers, still work.
+        let result = eval(&mut vm, "valid-write.octoscript", "values[3.0] = 4\nvalues[3]");
+        assert_eq!(result.as_number(), Some(4.0), "{result:?} {:?}", vm.take_errors());
+        assert_eq!(vm.bx.heap.array_len(array), 4);
+    }
+
+    #[test]
+    fn updating_an_untracked_field_keeps_its_insertion_order() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        let result = eval(
+            &mut vm,
+            "insertion-order.octoscript",
+            "let o = {a: 1, b: 2, c: 3}\no.a = 10\no.b = 20\no.to_json()",
+        );
+        assert_eq!(
+            string_of(&vm, result).as_deref(),
+            Some(r#"{"a":10,"b":20,"c":3}"#)
+        );
+
+        // The raw storage path: re-inserting an existing key keeps its slot.
+        let mut object = ScriptObjectData::default();
+        assert!(!object.tag.is_tracked());
+        object.map_insert(id!(a).into(), ScriptValue::from_f64(1.0));
+        object.map_insert(id!(b).into(), ScriptValue::from_f64(2.0));
+        object.map_insert(id!(a).into(), ScriptValue::from_f64(3.0));
+        let mut keys = Vec::new();
+        object.map_iter_ordered(|key, value| keys.push((key, value)));
+        assert_eq!(
+            keys,
+            vec![
+                (id!(a).into(), ScriptValue::from_f64(3.0)),
+                (id!(b).into(), ScriptValue::from_f64(2.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_array_growth_past_the_heap_cap_bails_without_touching_storage() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.captured_errors = Some(Vec::new());
+        let array = vm.bx.heap.new_array();
+        vm.set_injected_global(id!(values), array.into());
+
+        vm.bx.heap.reconcile_heap_bytes();
+        let baseline = vm.bx.heap.accounted_heap_bytes();
+        vm.bx.heap.set_max_heap_bytes(Some(baseline + 256 * 1024));
+        assert_eq!(vm.bx.heap.accounted_heap_bytes(), baseline);
+
+        let result = eval(
+            &mut vm,
+            "heap-limit.octoscript",
+            "try { values[268435456] = 1 } { \"ok\" }",
+        );
+        assert!(result.is_err(), "the cap refusal is uncatchable: {result:?}");
+        assert!(vm.bx.threads.cur_ref().trap.err_is_empty());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script heap allocation limit exceeded")));
+        assert_eq!(vm.bx.heap.array_len(array), 0);
+        assert!(vm.bx.heap.take_heap_limit_exceeded());
+        assert!(!vm.bx.heap.take_heap_limit_exceeded());
+
+        // Once the flag is taken the cap re-opens for ordinary work.
+        let result = eval(&mut vm, "after-cap.octoscript", "values[2] = 1\nvalues.len()");
+        assert_eq!(result.as_number(), Some(3.0));
+        assert!(vm.bx.heap.accounted_heap_bytes() > baseline);
+        assert!(vm.bx.heap.accounted_heap_bytes() <= baseline + 256 * 1024);
+    }
+
+    #[test]
+    fn heap_cap_accounting_reconciles_and_reports_an_overfull_heap() {
+        let mut heap = ScriptHeap::empty();
+        heap.reconcile_heap_bytes();
+        let baseline = heap.accounted_heap_bytes();
+        assert!(baseline > 0);
+        assert_eq!(heap.max_heap_bytes(), None);
+
+        // An already-overfull heap reports immediately and refuses growth.
+        heap.set_max_heap_bytes(Some(baseline - 1));
+        assert!(heap.take_heap_limit_exceeded());
+        assert_eq!(heap.accounted_heap_bytes(), baseline);
+
+        // Removing the cap restores the unrestricted VM.
+        heap.set_max_heap_bytes(None);
+        assert!(!heap.has_allocation_budget());
+        assert!(!heap.take_heap_limit_exceeded());
+
+        // Charges accumulate on top of the reconciled baseline until the next
+        // reconcile re-derives the estimate from the actual retained state.
+        heap.set_max_heap_bytes(Some(usize::MAX));
+        let baseline = heap.accounted_heap_bytes();
+        let value = heap.new_string_from_str("a string long enough to live on the heap");
+        assert!(value.as_string().is_some());
+        assert!(heap.accounted_heap_bytes() > baseline);
+        heap.reconcile_heap_bytes();
+        assert!(heap.accounted_heap_bytes() > baseline);
+        assert!(!heap.take_heap_limit_exceeded());
+    }
+
+    #[test]
+    fn scoped_allocation_budgets_nest_inside_the_retained_cap() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.captured_errors = Some(Vec::new());
+        vm.bx.heap.set_max_heap_bytes(Some(usize::MAX));
+        let before = vm.bx.heap.accounted_heap_bytes();
+        let (_, report) = vm.with_heap_allocation_limit(64, |vm| {
+            eval(vm, "scoped.octoscript", "let values = []\nvalues[4096] = 1")
+        });
+        assert!(report.exceeded);
+        let _ = vm.take_errors();
+        // The scoped refusal is not a retained-cap refusal.
+        assert!(!vm.bx.heap.take_heap_limit_exceeded());
+        assert_eq!(vm.bx.heap.accounted_heap_bytes(), before);
+    }
+
+    #[test]
+    fn string_limit_bails_instead_of_entering_a_try_fallback() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.heap.set_max_string_bytes(Some(8));
+        vm.bx.captured_errors = Some(Vec::new());
+
+        let result = eval(
+            &mut vm,
+            "string-limit.octoscript",
+            "let payload = \"x\"\n\
+             let index = 0\n\
+             while (index < 3) {\n\
+                 payload += payload\n\
+                 index += 1\n\
+             }\n\
+             try { payload + payload } { \"ok\" }",
+        );
+
+        assert!(result.is_err());
+        assert!(vm.bx.threads.cur_ref().trap.err_is_empty());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script string allocation limit exceeded")));
+        assert!(vm.bx.heap.take_string_limit_exceeded());
+        assert!(!vm.bx.heap.take_string_limit_exceeded());
+    }
+
+    #[test]
+    fn byte_array_string_conversion_stops_at_the_string_limit() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.heap.set_max_string_bytes(Some(8));
+        vm.bx.captured_errors = Some(Vec::new());
+
+        let bytes = vm.bx.heap.new_array_from_vec_u8(vec![0xFF; 16]);
+        vm.set_injected_global(id!(bytes), bytes.into());
+
+        let result = eval(
+            &mut vm,
+            "byte-array-string-limit.octoscript",
+            "try { bytes.to_string() } { \"ok\" }",
+        );
+
+        assert!(result.is_err());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script string allocation limit exceeded")));
+    }
+
+    #[test]
+    fn byte_array_string_conversion_preserves_lossy_utf8_without_a_limit() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        let bytes = vm.bx.heap.new_array_from_vec_u8(vec![b'a', 0xFF, b'b']);
+        vm.set_injected_global(id!(bytes), bytes.into());
+
+        let result = eval(&mut vm, "byte-array-lossy-utf8.octoscript", "bytes.to_string()");
+        assert_eq!(string_of(&vm, result), Some("a\u{FFFD}b".to_owned()));
+    }
+
+    #[test]
+    fn bounded_string_helpers_preserve_their_normal_results() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.heap.set_max_string_bytes(Some(64));
+        vm.bx.heap.set_max_heap_bytes(Some(usize::MAX));
+
+        for (file, code, expected) in [
+            (
+                "string-replace.octoscript",
+                "\"abcd\".replace(\"b\", \"XX\")",
+                "aXXcd",
+            ),
+            (
+                "string-url-encode.octoscript",
+                "\"a b!\".url_encode()",
+                "a%20b%21",
+            ),
+            (
+                "string-url-decode.octoscript",
+                "\"a%20b%21\".url_decode()",
+                "a b!",
+            ),
+            (
+                "string-concat.octoscript",
+                "\"hello \" + \"world, this is a heap string\"",
+                "hello world, this is a heap string",
+            ),
+            (
+                "json-roundtrip.octoscript",
+                "{a: [1, 2, \"three\"], b: {c: true}}.to_json()",
+                r#"{"a":[1,2,"three"],"b":{"c":true}}"#,
+            ),
+        ] {
+            let result = eval(&mut vm, file, code);
+            assert_eq!(string_of(&vm, result), Some(expected.to_owned()), "{file}");
+        }
+        assert!(!vm.bx.heap.take_string_limit_exceeded());
+        assert!(!vm.bx.heap.take_heap_limit_exceeded());
+    }
+
+    #[test]
+    fn byte_array_json_input_stops_at_the_string_limit() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.heap.set_max_string_bytes(Some(8));
+        vm.bx.captured_errors = Some(Vec::new());
+
+        let bytes = vm
+            .bx
+            .heap
+            .new_array_from_vec_u8(br#"{"value": 12345}"#.to_vec());
+        vm.set_injected_global(id!(bytes), bytes.into());
+
+        let result = eval(
+            &mut vm,
+            "byte-array-json-limit.octoscript",
+            "try { bytes.parse_json() } { \"ok\" }",
+        );
+
+        assert!(result.is_err());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script string allocation limit exceeded")));
+    }
+
+    #[test]
+    fn byte_array_json_input_parses_within_the_string_limit() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.heap.set_max_string_bytes(Some(64));
+
+        let bytes = vm
+            .bx
+            .heap
+            .new_array_from_vec_u8(br#"{"value": 12345}"#.to_vec());
+        vm.set_injected_global(id!(bytes), bytes.into());
+
+        let result = eval(&mut vm, "byte-array-json.octoscript", "bytes.parse_json().value");
+        assert_eq!(result.as_number(), Some(12345.0));
+        assert!(!vm.bx.heap.take_string_limit_exceeded());
     }
 }

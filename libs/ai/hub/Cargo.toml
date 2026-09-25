@@ -93,9 +93,10 @@ makepad-micro-serde = { path = "../../micro_serde" }
 makepad-base64 = { path = "../../base64" }
 makepad-network = { path = "../../../platform/network" }
 makepad-strict-json = { path = "../../strict_json" }
-# Reuse-group UDP bind for the fleet beacon listener (several apps on one
-# machine listen at once); the client crate owns that socket helper.
-makepad-asset-client = { path = "../../asset/client" }
+# Streaming SHA-256 (download verification) and the reuse-group UDP bind for
+# the fleet beacon listener (several apps on one machine listen at once):
+# the shared zero-dependency implementations.
+makepad-core-util = { path = "../../core_util" }
 makepad-zune-core = { path = "../../zune/zune-core" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 # Vision-domain request images arrive as PNG or JPEG.
@@ -173,3 +174,8 @@ path = "src/bin/ocr_bench.rs"
 [[bin]]
 name = "speech-roundtrip"
 path = "src/bin/speech_roundtrip.rs"
+
+[[bin]]
+name = "hub-install"
+path = "src/bin/hub_install.rs"
+required-features = ["local"]

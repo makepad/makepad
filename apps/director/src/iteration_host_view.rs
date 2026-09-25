@@ -1,13 +1,13 @@
 // Shared-GPU child-process presentation, adapted from the current WM run view.
 // Process lifetime belongs to the iteration worker; textures and input belong to the UI.
 use crate::iteration_host::ClientId;
-use makepad_widgets::makepad_platform::studio::{
-    MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
-};
 use makepad_widgets::makepad_micro_serde::SerBin;
 use makepad_widgets::makepad_platform::shared_framebuf::{
     shared_swapchain_from_host_swapchain, HostSwapchain,
+};
+use makepad_widgets::makepad_platform::studio::{
+    MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
+    RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
 };
 use makepad_widgets::*;
 
@@ -42,10 +42,9 @@ script_mod! {
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
             host_dpi_factor: instance(1.0)
-            y_flip: instance(0.0)
             packed_header: instance(1.0)
             pixel: fn() {
-                let uv = vec2(self.pos.x, self.pos.y + self.y_flip - 2.0 * self.y_flip * self.pos.y)
+                let uv = self.pos
                 if self.packed_header < 0.5 {
                     return self.tex.sample(uv * self.tex_scale)
                 }
@@ -187,7 +186,10 @@ impl IterationRunView {
             return;
         }
         let msg_bin = StudioToAppVec(msgs).serialize_bin();
-        cx.widget_action(self.uid, IterationRunViewAction::ForwardToApp { client, msg_bin });
+        cx.widget_action(
+            self.uid,
+            IterationRunViewAction::ForwardToApp { client, msg_bin },
+        );
     }
 
     fn set_target(&mut self, cx: &mut Cx, target: Option<RunTarget>) {
@@ -197,7 +199,9 @@ impl IterationRunView {
         let had_target = self.current_target.is_some();
         self.current_target = target;
         cx.stop_timer(self.tick_timer);
-        if target.is_some() { self.tick_timer = cx.start_interval(1.0 / 60.0); }
+        if target.is_some() {
+            self.tick_timer = cx.start_interval(1.0 / 60.0);
+        }
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.swapchain = None;
@@ -237,9 +241,6 @@ impl IterationRunView {
             .set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
         self.draw_app
             .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
-        self.draw_app
-            .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         self.redraw(cx);
     }
@@ -259,7 +260,9 @@ impl IterationRunView {
         }
     }
 
-    pub fn clear_pointer_hover(&mut self) { self.is_hovered = false; }
+    pub fn clear_pointer_hover(&mut self) {
+        self.is_hovered = false;
+    }
 
     pub fn set_remote_cursor(&mut self, cx: &mut Cx, cursor: MouseCursor) {
         self.remote_cursor = cursor;
@@ -284,7 +287,12 @@ impl IterationRunView {
             return false;
         };
 
-        let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
+        let Some(texture) = drawn.texture_for_draw(
+            cx,
+            &presentable_draw,
+            swapchain.alloc_width,
+            swapchain.alloc_height,
+        ) else {
             return false;
         };
         draw_app.set_texture(0, &texture);
@@ -312,27 +320,15 @@ impl IterationRunView {
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[0.0f32]);
         #[cfg(not(target_os = "windows"))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
-        // Linux's software fallback is copied row-for-row from a top-left
-        // framebuffer and needs the historical shader flip. A GPU-shared
-        // DMA-BUF texture already has the orientation expected by the GL
-        // sampler; flipping that path turns every hosted app upside down.
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         draw_app.draw_vars.set_dyn_instance(
             cx,
-            id!(y_flip),
-            &[if drawn.software_buffer.is_some() {
+            id!(packed_header),
+            &[if presentable_draw.sequence == 0 {
                 1.0f32
             } else {
                 0.0f32
             }],
         );
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
 
         *redraw_countdown = (*redraw_countdown).max(20);
         true
@@ -375,9 +371,12 @@ impl IterationRunView {
         let studio_addr = format!("http://127.0.0.1:{}", hub_port);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         match cx.task_pool().submit(Lane::Heavy, move || {
-            let result = aux_chan::ExternalEndpointListener::new_for_studio(&studio_addr, &client.to_string())
-                .and_then(|listener| listener.accept_host_endpoint())
-                .map_err(|err| err.to_string());
+            let result = aux_chan::ExternalEndpointListener::new_for_studio(
+                &studio_addr,
+                &client.to_string(),
+            )
+            .and_then(|listener| listener.accept_host_endpoint())
+            .map_err(|err| err.to_string());
             let _ = tx.try_send(result);
         }) {
             Ok(task) => {
@@ -419,13 +418,21 @@ impl IterationRunView {
         dpi_factor: f64,
         target: RunTarget,
     ) {
-        if !rect.size.x.is_finite() || !rect.size.y.is_finite() || !dpi_factor.is_finite()
-            || dpi_factor <= 0.0 || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        if !rect.size.x.is_finite()
+            || !rect.size.y.is_finite()
+            || !dpi_factor.is_finite()
+            || dpi_factor <= 0.0
+            || rect.size.x <= 0.0
+            || rect.size.y <= 0.0
+        {
             return;
         }
         let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
         let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
-        if min_width > 8192 || min_height > 8192 || u64::from(min_width) * u64::from(min_height) > 16_777_216 {
+        if min_width > 8192
+            || min_height > 8192
+            || u64::from(min_width) * u64::from(min_height) > 16_777_216
+        {
             self.set_status_line(cx, "Hosted app surface exceeds the 16-megapixel limit");
             return;
         }
@@ -510,9 +517,13 @@ impl IterationRunView {
     }
 
     pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
-        if self.current_target.is_none_or(|target| target.window_id != presentable_draw.window_id) { return; }
+        if self
+            .current_target
+            .is_none_or(|target| target.window_id != presentable_draw.window_id)
+        {
+            return;
+        }
         if self.try_present_draw(cx, presentable_draw) {
-
             self.pending_draw = None;
             self.present_ok_count += 1;
             self.bootstrap_pending = false;
@@ -597,7 +608,9 @@ impl IterationRunView {
             return None;
         }
         let rect = self.area.rect(cx);
-        if rect.size.x <= 0.0 || rect.size.y <= 0.0 { return None; }
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
         Some(dvec2(
             (abs.x - rect.pos.x) * self.last_rect.size.x / rect.size.x,
             (abs.y - rect.pos.y) * self.last_rect.size.y / rect.size.y,
@@ -654,8 +667,16 @@ impl Widget for IterationRunView {
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
         if waiting_for_framebuffer {
-            self.no_fb_view.set_text(cx, if self.status_line.is_empty() { "Starting application…" } else { &self.status_line });
-            self.no_fb_view.draw_walk_all(cx, scope, Walk::abs_rect(rect));
+            self.no_fb_view.set_text(
+                cx,
+                if self.status_line.is_empty() {
+                    "Starting application…"
+                } else {
+                    &self.status_line
+                },
+            );
+            self.no_fb_view
+                .draw_walk_all(cx, scope, Walk::abs_rect(rect));
         }
         self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
@@ -672,9 +693,16 @@ impl Widget for IterationRunView {
             let (anchor, ime) = if let Some((anchor, transform)) = self.canvas_ime_anchor {
                 let screen = (rect.pos + ime) * transform.scale + transform.translation;
                 (anchor, screen - anchor.rect(cx).pos)
-            } else { (self.area, ime) };
+            } else {
+                (self.area, ime)
+            };
             cx.push_unique_platform_op(CxOsOp::ShowTextIME(
-                anchor, Rect{pos:ime,size:Vec2d::default()}, TextInputConfig::default(),
+                anchor,
+                Rect {
+                    pos: ime,
+                    size: Vec2d::default(),
+                },
+                TextInputConfig::default(),
             ));
         }
         DrawStep::done()
@@ -686,6 +714,27 @@ impl Widget for IterationRunView {
         if let Event::Timer(timer_event) = event {
             if self.tick_timer.is_timer(timer_event).is_some() {
                 if let Some(target) = target {
+                    // A view that was never drawn (its lane is off the shown
+                    // tree level, or its tab was never selected) still owes
+                    // its app a surface: the explicit target size at the main
+                    // window's scale. Once drawn, the draw rect takes over.
+                    if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
+                        if let Some(size) = self.target_size {
+                            let dpi_factor = cx.windows
+                                [makepad_widgets::makepad_platform::CxWindowPool::id_zero()]
+                            .window_geom
+                            .dpi_factor;
+                            self.ensure_swapchain_for_rect(
+                                cx,
+                                Rect {
+                                    pos: Vec2d::default(),
+                                    size,
+                                },
+                                dpi_factor,
+                                target,
+                            );
+                        }
+                    }
 
                     let mut msgs = Vec::new();
                     let should_bootstrap = self.present_ok_count == 0 || self.bootstrap_pending;
@@ -705,7 +754,9 @@ impl Widget for IterationRunView {
             return;
         };
 
-        if self.read_only { return; }
+        if self.read_only {
+            return;
+        }
 
         match event.hits(cx, self.area) {
             Hit::KeyFocus(_) => {
@@ -743,7 +794,6 @@ impl Widget for IterationRunView {
             }
             Hit::FingerMove(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-
                     self.emit_to_app(
                         cx,
                         target.client,

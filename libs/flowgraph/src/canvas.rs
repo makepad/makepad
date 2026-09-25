@@ -1,12 +1,11 @@
 //! `FlowCanvas`: the graph of one instance — rounded node cards around
 //! mounted faces, port circles with the port-type icon, bezier wires in one
 //! `DrawVector` batch, drag-to-move, drag-to-connect, a continuously zoomable
-//! camera (0.25×–3×) and a dark checkerboard behind it all.
+//! camera (0.25×–3× by default) and a dark checkerboard behind it all.
 //!
 //! How the zoom works (decision of 2026-09-03, replacing the three discrete
 //! sizes): everything the canvas and the faces draw is laid out ONCE in
-//! canvas units — the node at world `(x, y)` sits at local `(ORIGIN + x,
-//! ORIGIN + y)` inside the canvas's own draw list — and the camera is the
+//! canvas units inside the canvas's own draw list, and the camera is the
 //! draw list's `view_transform` (scale + translate), so text and pictures
 //! scale on the GPU and nothing re-flows. Two platform facts shape the code:
 //!
@@ -14,19 +13,23 @@
 //!   PRE-transform units and intersected with every ancestor, so a
 //!   transformed child list under a clipped window body could never show
 //!   content that lies outside the window in local units. The canvas draws
-//!   inside `begin_root_turtle` / `end_pass_sized_turtle` (the mechanism
+//!   inside an unclipped root turtle (the mechanism
 //!   popups use): its range gets a fresh clip context, and the one clip it
 //!   pushes is the inverse-transformed view rect, which after the transform is
-//!   exactly the view. `LOCAL_ORIGIN` keeps every local coordinate positive
-//!   inside that root.
+//!   exactly the supplied ancestor intersection. Nested canvas transforms are
+//!   finalized parent-first after drawing, preserving each absolute viewport.
 //! * `Event::hits` compares the raw pointer position with those local rects,
 //!   so the faces receive a cloned event whose positions went through the
 //!   inverse camera (the host uses [`Camera`] to remap face events); the canvas's own
 //!   hit tests (ports, cards) convert the other way. No platform change.
+//!
+//! Standalone cameras preserve the fixed LOCAL_ORIGIN mapping by default.
+//! Embedded canvases and expanded zoom ranges rebase near the visible world
+//! before the f32 GPU conversion. Hosts still bound visible depth and node work.
 
 use crate::model::{
-    CanvasStyles, CompatiblePorts, GraphView as Graph, NodeFacesScope, NodeStyle,
-    NodeView as Node, PortStyle, FIRST_AT, NODE_WIDTH,
+    CanvasStyles, CompatiblePorts, FacePort, FaceViewport, GraphView as Graph, NodeFacesScope, NodeStyle,
+    NodeView as Node, PortIconOverrides, PortStyle, NODE_WIDTH,
 };
 use crate::wire_route::{
     self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireMode, WireRoute,
@@ -42,8 +45,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-/// Local-space offset of the world origin: keeps every local coordinate
-/// positive inside the root turtle's `(0, 0)..ROOT_SIZE` clip.
+/// Legacy local-space offset, used when Camera::render_origin is None.
 pub const LOCAL_ORIGIN: f64 = 32768.0;
 const ROOT_SIZE: f64 = 65536.0;
 
@@ -82,6 +84,11 @@ const WIRE_FLOW_SPEED: f64 = 140.0;
 const DRAG_THRESHOLD: f64 = 3.0;
 const ZOOM_MIN: f64 = 0.25;
 const ZOOM_MAX: f64 = 3.0;
+/// Finite limits for the rebased renderer, not a promise of unlimited nesting.
+pub const CANVAS_SCALE_MIN: f64 = 1.0 / 4096.0;
+pub const CANVAS_SCALE_MAX: f64 = 4096.0;
+// Rebase only after substantial screen travel, so ordinary pan frames reuse routes.
+const REBASE_DISTANCE_PX: f64 = 4096.0;
 const GRID_CELL: f64 = 24.0;
 /// The checker never shows cells smaller than this on screen; past it the
 /// spacing doubles ("hops up a level").
@@ -165,7 +172,7 @@ fn card_content_rect(card: Rect, full_bleed: bool, port_rows: usize) -> CardCont
 
 fn min_card_height(full_bleed: bool, port_rows: usize) -> f64 {
     if full_bleed {
-        (CARD_RADIUS as f64 * 2.0).max(MIN_TEXT_LINE_H)
+        (CARD_RADIUS as f64 * 2.0).max(CARD_HEADER_H + port_rows as f64 * PORT_ROW_H + CARD_PAD)
     } else {
         CARD_HEADER_H + port_rows as f64 * PORT_ROW_H + CARD_PAD + MIN_TEXT_LINE_H
     }
@@ -440,9 +447,23 @@ pub enum CanvasEdit {
         to_node: String,
         to_port: String,
     },
+    /// Move one existing wire as a single graph revision. The old input and
+    /// ordered entry key identify exactly the cable picked up by the hand.
+    Reconnect {
+        from_node: String,
+        from_port: String,
+        old_to_node: String,
+        old_to_port: String,
+        old_key: Option<u64>,
+        to_node: String,
+        to_port: String,
+    },
     Disconnect {
         to_node: String,
         to_port: String,
+        /// The entry to drop on an ordered input; `None` clears a one
+        /// input (or every entry of an ordered one).
+        key: Option<u64>,
     },
     Delete {
         node: String,
@@ -461,6 +482,9 @@ pub enum Selection {
         from_port: String,
         to_node: String,
         to_port: String,
+        /// The entry key on an ordered input, so a selected wire is one
+        /// wire even where two share their ends.
+        key: Option<u64>,
     },
 }
 
@@ -494,6 +518,11 @@ pub enum FlowCanvasAction {
     /// Facing changes chosen by the router. The app coalesces these into one
     /// graph PUT on its 250 ms settle tick.
     AutoFlip(Vec<(String, bool)>),
+    /// A node was double-clicked: the app decides whether it opens (a
+    /// container's inner graph, say).
+    Open {
+        node: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -501,10 +530,13 @@ enum Drag {
     Pan {
         start: DVec2,
         origin: DVec2,
+        navigate: bool,
+        select: bool,
     },
     Node {
         index: usize,
         start: DVec2,
+        initial: (f64, f64),
         origin: (f64, f64),
         moved: bool,
     },
@@ -520,6 +552,9 @@ enum Drag {
         ty: String,
         pos: DVec2,
         target: Option<(usize, usize)>,
+        /// Kept in the graph until release; Escape or a graph replacement
+        /// cancels pickup without ever publishing a destructive edit.
+        picked_up: Option<EdgeIndex>,
     },
 }
 
@@ -557,12 +592,16 @@ impl NodeStatus {
 }
 
 /// The camera: pan in screen pixels, scale, and the view rect in window
-/// space. Local = canvas units offset by `LOCAL_ORIGIN`.
+/// space. Local units use `render_origin`, or the legacy LOCAL_ORIGIN offset.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub view: Rect,
     pub pan: DVec2,
     pub scale: f64,
+    /// World origin of render-local coordinates. `None` preserves the original
+    /// fixed LOCAL_ORIGIN mapping. Embedded/expanded-range canvases rebase this
+    /// near the visible world; pan and public graph geometry stay world-based.
+    pub render_origin: Option<DVec2>,
 }
 
 impl Default for Camera {
@@ -571,29 +610,59 @@ impl Default for Camera {
             view: Rect::default(),
             pan: dvec2(0.0, 0.0),
             scale: 1.0,
+            render_origin: None,
         }
     }
 }
 
 impl Camera {
     pub fn screen_to_local(&self, screen: DVec2) -> DVec2 {
-        dvec2(LOCAL_ORIGIN, LOCAL_ORIGIN) + (screen - self.view.pos - self.pan) / self.scale
+        let world = (screen - self.view.pos - self.pan) / self.scale;
+        world - self.origin()
     }
 
     pub fn local_to_screen(&self, local: DVec2) -> DVec2 {
-        self.view.pos + self.pan + (local - dvec2(LOCAL_ORIGIN, LOCAL_ORIGIN)) * self.scale
+        self.view.pos + self.pan + (local + self.origin()) * self.scale
     }
 
+    /// Legacy fixed-origin conversion; use world_to_render for an active camera.
     pub fn world_to_local(world: (f64, f64)) -> DVec2 {
         dvec2(LOCAL_ORIGIN + world.0, LOCAL_ORIGIN + world.1)
     }
 
+    /// Legacy fixed-origin conversion; use render_to_world for an active camera.
     pub fn local_to_world(local: DVec2) -> (f64, f64) {
         (local.x - LOCAL_ORIGIN, local.y - LOCAL_ORIGIN)
     }
 
     pub fn screen_to_world(&self, screen: DVec2) -> (f64, f64) {
-        Self::local_to_world(self.screen_to_local(screen))
+        let world = (screen - self.view.pos - self.pan) / self.scale;
+        (world.x, world.y)
+    }
+
+    fn origin(&self) -> DVec2 {
+        self.render_origin
+            .unwrap_or(dvec2(-LOCAL_ORIGIN, -LOCAL_ORIGIN))
+    }
+
+    /// Instance-aware conversion, including an optional render origin.
+    pub fn world_to_render(&self, world: (f64, f64)) -> DVec2 {
+        dvec2(world.0, world.1) - self.origin()
+    }
+
+    pub fn render_to_world(&self, local: DVec2) -> (f64, f64) {
+        let world = local + self.origin();
+        (world.x, world.y)
+    }
+
+    fn rebase_at(&mut self, screen: DVec2) {
+        let visible = (screen - self.view.pos - self.pan) / self.scale;
+        if self
+            .render_origin
+            .is_none_or(|origin| (visible - origin).length() * self.scale > REBASE_DISTANCE_PX)
+        {
+            self.render_origin = Some(visible);
+        }
     }
 
     /// The view rect in local units: what the clip and the background cover.
@@ -606,7 +675,7 @@ impl Camera {
 
     fn matrix(&self) -> Mat4f {
         let s = self.scale as f32;
-        let t = self.view.pos + self.pan - dvec2(LOCAL_ORIGIN, LOCAL_ORIGIN) * self.scale;
+        let t = self.view.pos + self.pan + self.origin() * self.scale;
         let mut m = Mat4f::default();
         m.v[0] = s;
         m.v[5] = s;
@@ -618,10 +687,204 @@ impl Camera {
     pub fn popup_anchor_transform(&self) -> PopupAnchorTransform {
         PopupAnchorTransform {
             scale: self.scale,
-            translation: self.view.pos + self.pan
-                - dvec2(LOCAL_ORIGIN, LOCAL_ORIGIN) * self.scale,
+            translation: self.view.pos + self.pan + self.origin() * self.scale,
         }
     }
+}
+
+/// Absolute window-space camera and ancestor clip for one canvas instance.
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasViewport {
+    pub camera: Camera,
+    pub clip: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasViewportError {
+    NonFinite,
+    ScaleOutOfRange,
+    InvalidRect,
+}
+
+impl CanvasViewport {
+    fn checked(self) -> Result<Self, CanvasViewportError> {
+        for rect in [self.camera.view, self.clip] {
+            if !finite_point(rect.pos)
+                || !finite_point(rect.size)
+                || !finite_point(rect.pos + rect.size)
+            {
+                return Err(CanvasViewportError::NonFinite);
+            }
+            if rect.size.x < 0.0 || rect.size.y < 0.0 {
+                return Err(CanvasViewportError::InvalidRect);
+            }
+        }
+        if !finite_point(self.camera.pan)
+            || !self.camera.scale.is_finite()
+            || self
+                .camera
+                .render_origin
+                .is_some_and(|origin| !finite_point(origin))
+        {
+            return Err(CanvasViewportError::NonFinite);
+        }
+        if !(CANVAS_SCALE_MIN..=CANVAS_SCALE_MAX).contains(&self.camera.scale) {
+            return Err(CanvasViewportError::ScaleOutOfRange);
+        }
+        Ok(Self {
+            clip: intersect_rect(self.camera.view, self.clip),
+            ..self
+        })
+    }
+}
+
+/// Measured geometry in graph-world units, independent of render rebasing.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeGeometry {
+    pub card: Rect,
+    pub content: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CanvasEventPolicy {
+    pub pointer: bool,
+    pub keyboard: bool,
+    pub navigation: bool,
+}
+
+impl CanvasEventPolicy {
+    pub const ALL: Self = Self {
+        pointer: true,
+        keyboard: true,
+        navigation: true,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasNodeRegion {
+    Header,
+    Content,
+    Body,
+    Resize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanvasPick {
+    Background,
+    Node {
+        node: String,
+        region: CanvasNodeRegion,
+    },
+    Port {
+        node: String,
+        port: String,
+        output: bool,
+    },
+    Wire(Selection),
+}
+
+/// A window-coordinate child, associated with the card that owns its body.
+/// Its id must be distinct from ordinary face roots. Do not also mount this
+/// widget beneath a face root, which would inverse-map its events twice.
+#[derive(Clone)]
+pub struct EmbeddedCanvasRoot {
+    pub id: LiveId,
+    pub node: String,
+    pub widget: WidgetRef,
+}
+
+/// A named viewport inlet/outlet continuing a parent port into a child graph.
+/// `outer` and `slot` are window coordinates. `node` and `port` name the
+/// child graph's boundary node and its one inner port; `output` is the
+/// *container's* direction, so the inner port faces the other way. When the
+/// node is a boundary node ([`FlowCanvas::set_boundary_nodes`]) the slot IS
+/// that node: no card is drawn for it and the graph's real wires end at the
+/// slot's inward socket.
+#[derive(Clone, Debug)]
+pub struct BoundaryLink {
+    pub node: String,
+    pub port: String,
+    pub output: bool,
+    pub on_right: bool,
+    pub label: String,
+    pub kind: String,
+    pub outer: DVec2,
+    pub slot: Rect,
+}
+
+/// Boundary links and boundary nodes one canvas takes. A host's component
+/// interface is bounded well below this.
+const MAX_BOUNDARY: usize = 256;
+
+/// Restrained accents that pair an interface port outside a group with its
+/// slot inside it. They sit beside the type colours, never instead of them:
+/// a cable keeps its type colour and its status, the accent marks only the
+/// boundary (the slot's edge and socket, the continuation, the outer
+/// connector, the last stretch of a wire at the slot).
+const BOUNDARY_ACCENTS: [[f32; 3]; 8] = [
+    [0.96, 0.69, 0.26],
+    [0.36, 0.78, 0.92],
+    [0.84, 0.50, 0.90],
+    [0.56, 0.86, 0.47],
+    [0.97, 0.49, 0.45],
+    [0.45, 0.62, 0.98],
+    [0.93, 0.85, 0.40],
+    [0.42, 0.85, 0.74],
+];
+
+/// The accent of every link, in order. A link's accent comes from its
+/// interface identity (the boundary's name and direction), so it is the same
+/// on every draw, in the child that draws the slot and in the parent that
+/// draws the continuation. Two neighbours on one rail never share one: the
+/// later of the two moves to the next accent.
+fn boundary_accents(links: &[BoundaryLink]) -> Vec<Vec4f> {
+    let mut indices: Vec<usize> = Vec::with_capacity(links.len());
+    for (at, link) in links.iter().enumerate() {
+        // FNV-1a: the same on every platform and toolchain.
+        let mut hash = 0x811c_9dc5u32;
+        for byte in link.node.bytes().chain([if link.output { b'>' } else { b'<' }]) {
+            hash = (hash ^ byte as u32).wrapping_mul(0x0100_0193);
+        }
+        let mut index = hash as usize % BOUNDARY_ACCENTS.len();
+        let neighbour = (0..at).rev().find(|before| links[*before].on_right == link.on_right).map(|before| indices[before]);
+        if neighbour == Some(index) {
+            index = (index + 1) % BOUNDARY_ACCENTS.len();
+        }
+        indices.push(index);
+    }
+    indices
+        .into_iter()
+        .map(|index| {
+            let [r, g, b] = BOUNDARY_ACCENTS[index];
+            vec4(r, g, b, 1.0)
+        })
+        .collect()
+}
+
+fn same_link(a: &BoundaryLink, b: &BoundaryLink) -> bool {
+    a.node == b.node && a.port == b.port && a.output == b.output && a.on_right == b.on_right
+        && a.label == b.label && a.kind == b.kind && a.outer == b.outer
+        && a.slot.pos == b.slot.pos && a.slot.size == b.slot.size
+}
+
+fn finite_point(point: DVec2) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn intersect_rect(a: Rect, b: Rect) -> Rect {
+    let pos = dvec2(a.pos.x.max(b.pos.x), a.pos.y.max(b.pos.y));
+    let end = dvec2(
+        (a.pos.x + a.size.x).min(b.pos.x + b.size.x),
+        (a.pos.y + a.size.y).min(b.pos.y + b.size.y),
+    );
+    Rect {
+        pos,
+        size: dvec2((end.x - pos.x).max(0.0), (end.y - pos.y).max(0.0)),
+    }
+}
+
+fn nonempty(rect: Rect) -> bool {
+    rect.size.x > 0.0 && rect.size.y > 0.0
 }
 
 #[derive(Clone, Copy)]
@@ -638,6 +901,7 @@ struct EdgeIndex {
     from_port: usize,
     to: usize,
     to_port: usize,
+    key: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -660,6 +924,40 @@ fn prioritize_canvas_hit(card: Option<usize>, wire: Option<usize>) -> CanvasHit 
 struct CachedWire {
     key: u64,
     route: WireRoute,
+}
+
+/// The cable just connected from a drag, by the names its edge will have:
+/// its preview route seeds the connected cable's cache in the next
+/// `set_graph`, so connecting cannot change the shape the preview had.
+struct PendingConnect {
+    from: String,
+    from_port: String,
+    to: String,
+    to_port: String,
+    route: WireRoute,
+}
+
+/// `MAKEPAD_FLOW_ROUTE_TRACE`, read once: print every change of a cached
+/// route or of the preview to stderr, for driving the canvas and comparing
+/// the shapes it chose. Nothing is printed when it is unset or `0`.
+fn route_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| {
+        std::env::var_os("MAKEPAD_FLOW_ROUTE_TRACE").is_some_and(|value| !value.is_empty() && value != "0")
+    })
+}
+
+/// What one routing asks for. A graph edge and the wire being dragged both
+/// build theirs through `route_request`, so a preview cannot take a shape
+/// the connected cable then abandons for no reason but a different
+/// obstacle set or corridor offset.
+struct RouteRequest {
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: Vec<Obstacle>,
+    offset: f64,
 }
 
 /// How a source node's progress shows on its outgoing cables.
@@ -784,6 +1082,15 @@ pub struct FlowCanvas {
     card_draw_lists: Vec<Option<DrawList2d>>,
     #[rust]
     camera: Camera,
+    /// Last completed draw, before a pending Fit changes the next frame.
+    #[rust]
+    drawn_viewport: Option<CanvasViewport>,
+    #[rust]
+    embedded: bool,
+    #[rust(0.25f64)]
+    zoom_min: f64,
+    #[rust(3.0f64)]
+    zoom_max: f64,
     /// Screen-space chrome that `Fit` leaves clear around the graph.
     #[rust]
     fit_insets: Inset,
@@ -802,6 +1109,10 @@ pub struct FlowCanvas {
     node_index: HashMap<String, usize>,
     #[rust]
     compatible_ports: CompatiblePorts,
+    /// Host port-style keys for the icons of exact sockets, keyed by node id,
+    /// port name and `true` for an output. Nothing but the socket icon reads it.
+    #[rust]
+    port_icon_overrides: PortIconOverrides,
     #[live]
     styles: CanvasStyles,
     /// Back-to-front card order; the back of this vector is screen-front.
@@ -829,6 +1140,15 @@ pub struct FlowCanvas {
     wire_cache: Vec<Option<CachedWire>>,
     #[rust]
     wire_cache_dirty: bool,
+    /// Preview geometry follows the same retained route policy as real wires.
+    #[rust]
+    preview_wire: Option<CachedWire>,
+    #[rust]
+    pending_connect: Option<PendingConnect>,
+    /// The edge the preview was last routed for, so a release seeds the
+    /// connected cable only from a preview drawn to that same target.
+    #[rust]
+    preview_edge: Option<EdgeIndex>,
     #[rust]
     wire_mode: WireMode,
     #[rust]
@@ -860,6 +1180,14 @@ pub struct FlowCanvas {
     cursor: DVec2,
     #[rust]
     face_roots: Vec<(LiveId, WidgetRef)>,
+    #[rust]
+    embedded_roots: Vec<EmbeddedCanvasRoot>,
+    #[rust]
+    boundary_links: Vec<BoundaryLink>,
+    /// Nodes of the graph that are this viewport's boundary: shown as their
+    /// slot, never as a card. Empty for an ordinary flat canvas.
+    #[rust]
+    boundary_nodes: HashSet<String>,
     /// A run attachment keeps the face visible beneath a subtle lock veil;
     /// the host separately disables the mounted controls.
     #[rust]
@@ -895,12 +1223,42 @@ impl WidgetNode for FlowCanvas {
     }
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         for (id, root) in &self.face_roots {
+            // A boundary node has no card, so its face is not drawn; the
+            // area it kept from when it was one must not take events.
+            if self.boundary_nodes.iter().any(|node| LiveId::from_str(node) == *id) {
+                continue;
+            }
             visit(*id, root.clone());
+        }
+        for root in &self.embedded_roots {
+            visit(root.id, root.widget.clone());
         }
     }
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
-        let local = self.camera.screen_to_local(point);
-        for (_, root) in &self.face_roots {
+        if !self.contains_point(point) || self.point_over_chrome(point) {
+            return;
+        }
+        let front = match self.pick(point) {
+            Some(CanvasPick::Node { node, region: CanvasNodeRegion::Content }) => Some(node),
+            _ => None,
+        };
+        for root in &self.embedded_roots {
+            if front.as_deref() == Some(root.node.as_str()) {
+                root.widget.find_widgets_from_point(cx, point, found);
+            }
+        }
+        let local = self.interaction_camera().screen_to_local(point);
+        for (id, root) in &self.face_roots {
+            // Named node roots use the same node-id convention as set_z_order.
+            // Unassociated host roots retain their previous discovery behavior.
+            if self.node_index.keys().any(|node| LiveId::from_str(node) == *id)
+                && front.as_ref().is_none_or(|node| LiveId::from_str(node) != *id)
+            {
+                continue;
+            }
+            if self.boundary_nodes.iter().any(|node| LiveId::from_str(node) == *id) {
+                continue;
+            }
             root.find_widgets_from_point(cx, local, found);
         }
     }
@@ -967,6 +1325,398 @@ fn routing_cost(subjects: &[usize], routes: &[WireRoute]) -> f64 {
 impl FlowCanvas {
     // -- the app's view of the canvas ------------------------------------------
 
+    /// The completed frame's viewport, including any render-origin adjustment.
+    pub fn viewport(&self) -> Option<CanvasViewport> {
+        self.drawn_viewport
+    }
+
+    fn interaction_camera(&self) -> Camera {
+        self.drawn_viewport.map_or(self.camera, |view| view.camera)
+    }
+
+    fn contains_point(&self, point: DVec2) -> bool {
+        let clip = self
+            .drawn_viewport
+            .map_or(self.camera.view, |view| view.clip);
+        nonempty(clip) && clip.contains(point)
+    }
+
+    pub fn has_canvas_drag(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Abandon a gesture without publishing an edit. The owner must still
+    /// deliver its eventual release so platform pointer capture can retire.
+    pub fn cancel_gesture(&mut self, cx: &mut Cx) {
+        self.drag = None;
+        self.preview_wire = None;
+        self.armed_type = None;
+        self.compatible.clear();
+        self.wire_cache_dirty = true;
+        self.redraw(cx);
+    }
+
+    /// Register only mounted embedded canvases, with unique ids. This does not
+    /// draw or route events to them; the host owns hierarchy and gesture routing.
+    pub fn set_embedded_roots(&mut self, cx: &mut Cx, roots: Vec<EmbeddedCanvasRoot>) {
+        self.embedded_roots = roots;
+        cx.widget_tree_mark_dirty(self.uid);
+        self.redraw(cx);
+    }
+
+    /// Expanded ranges opt into render rebasing. Defaults remain 0.25..3.
+    /// Limits bound numeric inputs, not a validated arbitrary nesting depth.
+    pub fn set_zoom_range(
+        &mut self,
+        cx: &mut Cx,
+        min: f64,
+        max: f64,
+    ) -> Result<(), CanvasViewportError> {
+        if !min.is_finite() || !max.is_finite() {
+            return Err(CanvasViewportError::NonFinite);
+        }
+        if min > max || min < CANVAS_SCALE_MIN || max > CANVAS_SCALE_MAX {
+            return Err(CanvasViewportError::ScaleOutOfRange);
+        }
+        self.zoom_min = min;
+        self.zoom_max = max;
+        self.target_scale = self.target_scale.clamp(min, max);
+        self.camera.scale = self.camera.scale.clamp(min, max);
+        self.redraw(cx);
+        Ok(())
+    }
+
+    pub fn node_geometry(&self, node: &str) -> Option<NodeGeometry> {
+        let graph = self.graph.as_ref()?;
+        let index = *self.node_index.get(node)?;
+        Some(self.geometry(graph, index))
+    }
+
+    /// Refresh only presentation, preserving the camera, selection, mounted
+    /// faces and any current pointer capture. The node order cannot change.
+    pub fn update_graph_layout(&mut self, cx: &mut Cx, next: &Graph) -> bool {
+        let Some(current) = self.graph.as_ref() else { return false; };
+        if current.nodes.len() != next.nodes.len() { return false; }
+        let mut projection = current.clone();
+        for (node, next) in projection.nodes.iter_mut().zip(&next.nodes) {
+            node.at = next.at;
+            node.size = next.size;
+            node.flip = next.flip;
+        }
+        if projection != *next { return false; }
+        for node in &next.nodes {
+            self.set_node_layout(cx, &node.id, node.at, node.size, node.flip);
+        }
+        true
+    }
+
+    /// Refresh one existing card without disturbing an ongoing gesture.
+    pub fn set_node_layout(&mut self, cx: &mut Cx, node: &str, at: (f64, f64), size: Option<(f64, f64)>, flip: bool) {
+        let Some(index) = self.node_index.get(node).copied() else { return; };
+        let Some(graph) = self.graph.as_mut() else { return; };
+        let node = &mut graph.nodes[index];
+        if node.at == at && node.size == size && node.flip == flip { return; }
+        node.at = at;
+        node.size = size;
+        node.flip = flip;
+        self.wire_cache_dirty = true;
+        self.auto_flip_pending = false;
+        self.next_frame = cx.new_next_frame();
+        self.redraw(cx);
+    }
+
+    /// Reconcile a move or resize without replacing the canvas's display facing.
+    pub fn set_node_geometry(&mut self, cx: &mut Cx, node: &str, at: (f64, f64), size: Option<(f64, f64)>) {
+        let Some(index) = self.node_index.get(node).copied() else { return; };
+        let Some(flip) = self.graph.as_ref().map(|graph| graph.nodes[index].flip) else { return; };
+        self.set_node_layout(cx, node, at, size, flip);
+    }
+
+    /// Host-owned inlet/outlet rails for an embedded viewport. Set before
+    /// draw_embedded; ordinary flat canvases leave this list empty.
+    pub fn set_boundary_links(&mut self, links: Vec<BoundaryLink>) {
+        let mut seen = HashSet::new();
+        let links: Vec<BoundaryLink> = links.into_iter().filter(|link| {
+            let Some(node) = self.graph.as_ref().and_then(|graph| {
+                graph.nodes.iter().find(|node| node.id == link.node)
+            }) else { return false; };
+            let ports = if link.output { &node.inputs } else { &node.outputs };
+            self.boundary_nodes.contains(&link.node)
+                && ports.iter().any(|port| port.name == link.port)
+                && finite_point(link.outer) && finite_point(link.slot.pos)
+                && finite_point(link.slot.size) && nonempty(link.slot)
+                && seen.insert((link.node.clone(), link.port.clone(), link.output))
+        }).take(MAX_BOUNDARY).collect();
+        // A slot is a wire endpoint: when one moves, appears, changes side or
+        // goes, the routes that end there are stale.
+        let same = links.len() == self.boundary_links.len()
+            && links.iter().zip(&self.boundary_links).all(|(a, b)| same_link(a, b));
+        if !same {
+            self.wire_cache_dirty = true;
+        }
+        self.boundary_links = links;
+    }
+
+    /// The nodes of the current graph that are this viewport's boundary: a
+    /// component's interface inputs and outputs. Call it after `set_graph`
+    /// and before reading `graph_bounds`; the links' geometry may follow
+    /// later. Such a node is represented by its slot alone: it has no card,
+    /// no face, no label, cannot be dragged or resized, is no obstacle, does
+    /// not count for bounds or fit and is never auto-flipped. It stays the
+    /// logical node it is: its real wires end at the slot's inward socket,
+    /// its real port is hit there, and pressing the slot selects it. With no
+    /// boundary nodes a canvas draws Input and Output cards as ever.
+    pub fn set_boundary_nodes(&mut self, cx: &mut Cx, nodes: Vec<String>) {
+        let nodes: HashSet<String> = nodes.into_iter().take(MAX_BOUNDARY).collect();
+        if nodes == self.boundary_nodes {
+            return;
+        }
+        // A gesture or a hover may hold the index of a card that is about
+        // to stop being one.
+        self.cancel_gesture(cx);
+        self.hover = None;
+        self.hover_wire = None;
+        self.boundary_nodes = nodes;
+        let links = std::mem::take(&mut self.boundary_links);
+        self.set_boundary_links(links);
+        if let Some(graph) = self.graph.as_ref() {
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if self.boundary_nodes.contains(&node.id) {
+                    // Its retained card list is not recorded again.
+                    if let Some(list) = self.card_draw_lists.get_mut(index) {
+                        *list = None;
+                    }
+                }
+            }
+        }
+        self.wire_cache.iter_mut().for_each(|cached| *cached = None);
+        self.wire_cache_dirty = true;
+        self.auto_flip_pending = self.graph.is_some();
+        cx.widget_tree_mark_dirty(self.uid);
+        self.redraw(cx);
+    }
+
+    fn is_boundary(&self, graph: &Graph, index: usize) -> bool {
+        !self.boundary_nodes.is_empty() && self.boundary_nodes.contains(&graph.nodes[index].id)
+    }
+
+    /// The link that stands for `port` of boundary node `index`, matched
+    /// exactly: node, port name, and the direction (a container input is the
+    /// inner node's output and the other way round).
+    fn boundary_link(&self, graph: &Graph, index: usize, port: usize, output: bool) -> Option<&BoundaryLink> {
+        if !self.is_boundary(graph, index) {
+            return None;
+        }
+        let node = &graph.nodes[index];
+        let name = if output { &node.outputs.get(port)?.name } else { &node.inputs.get(port)?.name };
+        self.boundary_links
+            .iter()
+            .find(|link| link.node == node.id && link.port == *name && link.output != output)
+    }
+
+    /// A slot's socket in this canvas's local units: the middle of the edge
+    /// that faces into the graph.
+    fn boundary_socket(&self, link: &BoundaryLink) -> DVec2 {
+        self.interaction_camera().screen_to_local(dvec2(
+            if link.on_right { link.slot.pos.x } else { link.slot.pos.x + link.slot.size.x },
+            link.slot.pos.y + link.slot.size.y * 0.5,
+        ))
+    }
+
+    /// Which way a port faces: a slot on the right rail faces left into the
+    /// graph and one on the left rail faces right, whatever the node's flip;
+    /// every other port follows its card.
+    fn side_at_flip(&self, graph: &Graph, index: usize, port: usize, output: bool, flip: f64) -> PortSide {
+        match self.boundary_link(graph, index, port, output) {
+            Some(link) if link.on_right => PortSide::Left,
+            Some(_) => PortSide::Right,
+            None => Self::port_side_at_flip(output, flip),
+        }
+    }
+
+    fn side_of(&self, graph: &Graph, index: usize, port: usize, output: bool) -> PortSide {
+        let flip = self
+            .flip_positions
+            .get(index)
+            .copied()
+            .unwrap_or(if graph.nodes[index].flip { 1.0 } else { 0.0 });
+        self.side_at_flip(graph, index, port, output, flip)
+    }
+
+    /// What a routed wire must go round, in this canvas's local units, with
+    /// the ordinary clearance: every card that is drawn, and every boundary
+    /// slot. A slot is a body on the rail like a card is on the canvas; a
+    /// wire that ends at its socket leaves through that socket under the
+    /// router's endpoint exemption, exactly as a wire leaves a card's port,
+    /// and never crosses the slot. Slots come in through the same camera as
+    /// their sockets, so obstacles and anchors agree. One collector for the
+    /// route cache, the auto-flip scoring and the drag preview, so the
+    /// three never drift apart.
+    ///
+    /// Slots stand in rows on a rail, often closer together than the
+    /// clearance. A slot's envelope is therefore inflated by the full
+    /// clearance sideways but above and below only by half the gap to the
+    /// nearest slot whose horizontal span overlaps its own (never less than
+    /// nothing, never more than the clearance). So the envelopes of two
+    /// slots that do not touch never contain each other's socket, and each
+    /// socket has exactly one owner; slots whose bodies really overlap stay
+    /// obstructed, with no exemption. Each slot keeps its raw body, so the
+    /// router's fixed deflations for its narrower tiers cannot open the
+    /// thin envelope into the slot itself. Cards are inflated as ever.
+    fn route_obstacles(&self, graph: &Graph) -> Vec<Obstacle> {
+        const CARD_CLEARANCE: f64 = 12.0;
+        let mut obstacles: Vec<Obstacle> = (0..graph.nodes.len())
+            .filter(|index| !self.is_boundary(graph, *index))
+            .map(|index| {
+                let rect = self.card_rect(graph, index);
+                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y).inflate(CARD_CLEARANCE)
+            })
+            .collect();
+        let camera = self.interaction_camera();
+        if !camera.scale.is_finite() || camera.scale <= 0.0 {
+            return obstacles;
+        }
+        let slots: Vec<Rect> = self
+            .boundary_links
+            .iter()
+            .map(|link| Rect { pos: camera.screen_to_local(link.slot.pos), size: link.slot.size / camera.scale })
+            .filter(|slot| finite_point(slot.pos) && finite_point(slot.size))
+            .collect();
+        for (at, slot) in slots.iter().enumerate() {
+            let (top, bottom) = (slot.pos.y, slot.pos.y + slot.size.y);
+            let gap = slots
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != at)
+                .filter(|(_, other)| other.pos.x < slot.pos.x + slot.size.x && slot.pos.x < other.pos.x + other.size.x)
+                .map(|(_, other)| {
+                    let (other_top, other_bottom) = (other.pos.y, other.pos.y + other.size.y);
+                    if other_top >= bottom { other_top - bottom } else if other_bottom <= top { top - other_bottom } else { 0.0 }
+                })
+                .fold(f64::INFINITY, f64::min);
+            let vertical = (gap * 0.5).clamp(0.0, CARD_CLEARANCE);
+            obstacles.push(
+                Obstacle::from_xywh(slot.pos.x, slot.pos.y, slot.size.x, slot.size.y)
+                    .with_body()
+                    .inflate_xy(CARD_CLEARANCE, vertical),
+            );
+        }
+        obstacles
+    }
+
+    /// An edge with a boundary end whose slot has no geometry (yet): it has
+    /// nowhere to go and is not routed or drawn.
+    fn edge_unplaced(&self, graph: &Graph, edge: EdgeIndex) -> bool {
+        (self.is_boundary(graph, edge.from) && self.boundary_link(graph, edge.from, edge.from_port, true).is_none())
+            || (self.is_boundary(graph, edge.to) && self.boundary_link(graph, edge.to, edge.to_port, false).is_none())
+    }
+
+    fn geometry(&self, graph: &Graph, index: usize) -> NodeGeometry {
+        let local = self.card_rect(graph, index);
+        let node = &graph.nodes[index];
+        let content = card_content_rect(local, Self::full_bleed(node), Self::port_rows(node)).rect;
+        let origin = self.camera.origin();
+        NodeGeometry {
+            card: Rect {
+                pos: local.pos + origin,
+                ..local
+            },
+            content: Rect {
+                pos: content.pos + origin,
+                ..content
+            },
+        }
+    }
+
+    /// Wire tip/notch in graph-world coordinates, including animated facing.
+    pub fn port_anchor(&self, node: &str, port: &str, output: bool) -> Option<DVec2> {
+        let graph = self.graph.as_ref()?;
+        let index = *self.node_index.get(node)?;
+        let ports = if output {
+            &graph.nodes[index].outputs
+        } else {
+            &graph.nodes[index].inputs
+        };
+        let port = ports.iter().position(|item| item.name == port)?;
+        Some(self.wire_anchor(graph, index, port, output) + self.camera.origin())
+    }
+
+    pub fn graph_bounds(&self) -> Option<Rect> {
+        let graph = self.graph.as_ref()?;
+        if graph.nodes.is_empty() {
+            return None;
+        }
+        // A group of nothing but its boundary (a pass-through) has no cards
+        // and so no bounds, like an empty graph.
+        if (0..graph.nodes.len()).all(|index| self.is_boundary(graph, index)) {
+            return None;
+        }
+        let mut min = dvec2(f64::MAX, f64::MAX);
+        let mut max = dvec2(f64::MIN, f64::MIN);
+        for index in 0..graph.nodes.len() {
+            if self.is_boundary(graph, index) {
+                continue;
+            }
+            let card = self.geometry(graph, index).card;
+            min.x = min.x.min(card.pos.x);
+            min.y = min.y.min(card.pos.y - LABEL_H);
+            max.x = max.x.max(card.pos.x + card.size.x);
+            max.y = max.y.max(card.pos.y + card.size.y);
+        }
+        Some(Rect {
+            pos: min,
+            size: max - min,
+        })
+    }
+
+    pub fn pick(&self, point: DVec2) -> Option<CanvasPick> {
+        if !self.contains_point(point) || self.point_over_chrome(point) {
+            return None;
+        }
+        let Some(graph) = &self.graph else {
+            return Some(CanvasPick::Background);
+        };
+        if let Some(hit) = self.port_at(point) {
+            let node = &graph.nodes[hit.node];
+            let ports = if hit.output {
+                &node.outputs
+            } else {
+                &node.inputs
+            };
+            return Some(CanvasPick::Port {
+                node: node.id.clone(),
+                port: ports[hit.port].name.clone(),
+                output: hit.output,
+            });
+        }
+        if let Some(index) = self.node_index_at(point) {
+            let geometry = self.geometry(graph, index);
+            let world = self.interaction_camera().screen_to_world(point);
+            let region = if self.resize_at(point) == Some(index) {
+                CanvasNodeRegion::Resize
+            } else if geometry.content.contains(dvec2(world.0, world.1)) {
+                CanvasNodeRegion::Content
+            } else if world.1 < geometry.card.pos.y + CARD_HEADER_H {
+                CanvasNodeRegion::Header
+            } else {
+                CanvasNodeRegion::Body
+            };
+            return Some(CanvasPick::Node {
+                node: graph.nodes[index].id.clone(),
+                region,
+            });
+        }
+        if let Some(node) = self.boundary_at(point) {
+            return Some(CanvasPick::Node { node: node.to_string(), region: CanvasNodeRegion::Body });
+        }
+        if let Some(selection) = self
+            .wire_index_at(point)
+            .and_then(|index| self.edge_selection(graph, index))
+        {
+            return Some(CanvasPick::Wire(selection));
+        }
+        Some(CanvasPick::Background)
+    }
     pub fn wire_mode(&self) -> WireMode {
         self.wire_mode
     }
@@ -976,6 +1726,7 @@ impl FlowCanvas {
             return;
         }
         self.wire_mode = mode;
+        self.preview_wire = None;
         self.wire_cache.iter_mut().for_each(|cached| *cached = None);
         self.wire_cache_dirty = true;
         self.auto_flip_pending = mode == WireMode::Routed && self.graph.is_some();
@@ -1000,6 +1751,19 @@ impl FlowCanvas {
         self.compatible_ports = compatible;
     }
 
+    /// Replaces the per-socket icon keys. A key names a port style; a socket
+    /// without a key, or whose style has no icon, keeps its kind's icon.
+    /// Keys for sockets absent from the current graph are dropped, and a
+    /// replacement graph drops those it no longer has.
+    pub fn set_port_icon_overrides(&mut self, cx: &mut Cx, overrides: PortIconOverrides) {
+        if self.port_icon_overrides == overrides {
+            return;
+        }
+        self.port_icon_overrides = overrides;
+        self.prune_port_icon_overrides();
+        self.redraw(cx);
+    }
+
     /// The face roots the app mounted for the bound instance; cleared before
     /// the app frees that isolate.
     pub fn set_face_roots(&mut self, cx: &mut Cx, roots: Vec<(LiveId, WidgetRef)>) {
@@ -1016,6 +1780,12 @@ impl FlowCanvas {
     }
 
     pub fn set_graph(&mut self, cx: &mut Cx, graph: Option<Graph>) {
+        // Drag indices belong to the previous projection and cannot survive
+        // a replacement, even when a same-named node moves to another index.
+        self.cancel_gesture(cx);
+        // Geometry belongs to the old projection; a host supplies the new
+        // slots before drawing the replacement graph.
+        self.boundary_links.clear();
         // Keep the measured heights of the nodes that survive.
         let old = self.graph.take();
         let old_edges = std::mem::take(&mut self.edges);
@@ -1078,6 +1848,7 @@ impl FlowCanvas {
                         from_port,
                         to,
                         to_port,
+                        key: edge.key,
                     });
                 }
             }
@@ -1089,26 +1860,58 @@ impl FlowCanvas {
                 self.z_order.push(node.id.clone());
             }
         }
-        let mut totals = HashMap::<(usize, usize), usize>::new();
-        for edge in &edges {
-            *totals.entry((edge.from, edge.to)).or_default() += 1;
-        }
-        let mut seen = HashMap::<(usize, usize), usize>::new();
-        let spacing = RouteStyle::default().cable_spacing;
         self.parallel_offsets = edges
             .iter()
-            .map(|edge| {
-                let pair = (edge.from, edge.to);
-                let position = seen.entry(pair).or_default();
-                let offset = (*position as f64 - (totals[&pair] as f64 - 1.0) * 0.5) * spacing;
-                *position += 1;
-                offset
-            })
+            .enumerate()
+            .map(|(index, edge)| Self::lane_offset(&edges, index, edge))
             .collect();
+        // A Connect's preview is consumed by whichever graph follows it,
+        // even one that did not take the edge: it never seeds a later,
+        // unrelated edit.
+        let mut pending = self.pending_connect.take();
         self.wire_cache = if edges == old_edges {
             old_wire_cache
         } else {
-            std::iter::repeat_with(|| None).take(edges.len()).collect()
+            // A cable that survives the edit keeps its cached route, by its
+            // full identity including an ordered input's entry key, so it
+            // is re-routed from the shape it had rather than from nothing.
+            // Only a genuinely new cable with no survivor of its own takes
+            // the preview it was connected from.
+            let identity = |graph: &Graph, edge: &EdgeIndex| {
+                let from = graph.nodes.get(edge.from)?;
+                let to = graph.nodes.get(edge.to)?;
+                Some((
+                    from.id.clone(),
+                    from.outputs.get(edge.from_port)?.name.clone(),
+                    to.id.clone(),
+                    to.inputs.get(edge.to_port)?.name.clone(),
+                    edge.key,
+                ))
+            };
+            let mut survivors: HashMap<(String, String, String, String, Option<u64>), CachedWire> = old
+                .as_ref()
+                .map(|old| {
+                    old_edges
+                        .iter()
+                        .zip(old_wire_cache)
+                        .filter_map(|(edge, cached)| Some((identity(old, edge)?, cached?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            edges
+                .iter()
+                .map(|edge| {
+                    let identity = graph.as_ref().and_then(|graph| identity(graph, edge))?;
+                    if let Some(cached) = survivors.remove(&identity) {
+                        return Some(cached);
+                    }
+                    let (from, from_port, to, to_port, _) = &identity;
+                    let seeds = pending.as_ref().is_some_and(|pending| {
+                        pending.from == *from && pending.from_port == *from_port && pending.to == *to && pending.to_port == *to_port
+                    });
+                    seeds.then(|| CachedWire { key: 0, route: pending.take().expect("checked just above").route })
+                })
+                .collect()
         };
         self.wire_cache_dirty = true;
         self.heights = heights;
@@ -1117,6 +1920,37 @@ impl FlowCanvas {
         self.card_draw_lists = card_draw_lists;
         self.node_index = node_index;
         self.graph = graph;
+        self.prune_port_icon_overrides();
+        if route_trace() {
+            let nodes = self.graph.as_ref().map_or(0, |graph| graph.nodes.len());
+            let full_bleed = self
+                .graph
+                .as_ref()
+                .map_or(0, |graph| graph.nodes.iter().filter(|node| Self::full_bleed(node)).count());
+            // Nodes that arrived, or whose full-bleed flag changed.
+            let changed: Vec<String> = self
+                .graph
+                .as_ref()
+                .map(|graph| {
+                    graph
+                        .nodes
+                        .iter()
+                        .filter(|node| {
+                            old_index
+                                .get(&node.id)
+                                .and_then(|index| old.as_ref()?.nodes.get(*index))
+                                .is_none_or(|before| Self::full_bleed(before) != Self::full_bleed(node))
+                        })
+                        .map(|node| format!("{}:{}", node.id, if Self::full_bleed(node) { "full" } else { "framed" }))
+                        .collect()
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "flow graph nodes {nodes} edges {} full_bleed {full_bleed} changed [{}]",
+                self.edges.len(),
+                changed.join(" "),
+            );
+        }
         self.flip_lock.retain(|id| self.node_index.contains_key(id));
         self.auto_flip_pending = self.graph.is_some();
         self.auto_flip_settle_until = if self.time > 0.0 {
@@ -1172,12 +2006,14 @@ impl FlowCanvas {
     /// before dispatching into a face so an interactive child both acts and
     /// selects its owning node.
     pub fn select_at(&mut self, cx: &mut Cx, abs: DVec2) {
+        if !self.contains_point(abs) || self.point_over_chrome(abs) { return; }
         let node = self.node_index_at(abs).and_then(|index| {
             self.graph
                 .as_ref()
                 .and_then(|graph| graph.nodes.get(index))
                 .map(|node| node.id.clone())
         });
+        let node = node.or_else(|| self.boundary_at(abs).map(str::to_string));
         let selection = node.clone().map(Selection::Node);
         if node.is_some() && self.selected != selection {
             self.raise_node(node.as_deref().unwrap());
@@ -1221,11 +2057,9 @@ impl FlowCanvas {
     /// Display-only face widgets deliberately do not block a card drag. The
     /// allowlist mirrors the controls that own presses inside a card face.
     fn interactive_face_widget_at(&self, cx: &Cx, abs: DVec2, handled: Area) -> bool {
-        let local = self.camera.screen_to_local(abs);
         let mut interactive = false;
         let mut handled_widget_found = handled.is_empty();
-        for (_, root) in &self.face_roots {
-            root.find_widgets_from_point(cx, local, &mut |widget| {
+        self.find_widgets_from_point(cx, abs, &mut |widget| {
                 handled_widget_found |= widget.area() == handled;
                 if !interactive
                     && widget
@@ -1234,11 +2068,7 @@ impl FlowCanvas {
                 {
                     interactive = true;
                 }
-            });
-            if interactive {
-                break;
-            }
-        }
+        });
         // Scroll bars are stored inside a View rather than as WidgetRefs. A
         // face-owned capture with no matching widget is therefore an opaque
         // interactive control and must keep the press.
@@ -1310,7 +2140,36 @@ impl FlowCanvas {
     }
 
     pub fn camera(&self) -> Camera {
-        self.camera
+        self.interaction_camera()
+    }
+
+    /// Put the view where `camera` says, at once: pan and scale, no ease,
+    /// no pending fit. The view rect stays the widget's own. An app that
+    /// keeps one camera per graph it shows restores it with this.
+    pub fn set_camera(&mut self, cx: &mut Cx, camera: Camera) {
+        if !finite_point(camera.pan) || !camera.scale.is_finite()
+            || !(CANVAS_SCALE_MIN..=CANVAS_SCALE_MAX).contains(&camera.scale)
+        { return; }
+        self.camera.pan = camera.pan;
+        self.camera.scale = camera.scale;
+        self.target_pan = camera.pan;
+        self.target_scale = camera.scale;
+        self.fit_pending = 0;
+        // The same notification a gesture ends with, so whatever mirrors
+        // the zoom follows a restored camera too.
+        cx.widget_action(self.uid, FlowCanvasAction::Camera { scale: camera.scale });
+        self.redraw(cx);
+    }
+
+    /// Select a node or a wire (or nothing) as if the user had: what an
+    /// app restores when it shows a graph again.
+    pub fn set_selection(&mut self, cx: &mut Cx, selection: Option<Selection>) {
+        if let Some(node) = selection.as_ref().and_then(Selection::node) {
+            let node = node.to_string();
+            self.raise_node(&node);
+        }
+        self.selected = selection;
+        self.redraw(cx);
     }
 
     pub fn zoom(&self) -> f64 {
@@ -1338,6 +2197,7 @@ impl FlowCanvas {
 
     /// Fit every node into the view.
     pub fn fit(&mut self, cx: &mut Cx) {
+        if self.embedded { return; }
         let Some(graph) = self.graph.as_ref() else {
             return;
         };
@@ -1349,7 +2209,8 @@ impl FlowCanvas {
                 (full_view.size.y - self.fit_insets.top - self.fit_insets.bottom).max(1.0),
             ),
         };
-        if graph.nodes.is_empty() || view.size.x <= 0.0 {
+        let cards = (0..graph.nodes.len()).filter(|index| !self.is_boundary(graph, *index)).count();
+        if cards == 0 || view.size.x <= 0.0 {
             self.target_pan = dvec2(0.0, 0.0);
             self.target_scale = 1.0;
             self.next_frame = cx.new_next_frame();
@@ -1358,6 +2219,9 @@ impl FlowCanvas {
         let mut min = dvec2(f64::MAX, f64::MAX);
         let mut max = dvec2(f64::MIN, f64::MIN);
         for (index, node) in graph.nodes.iter().enumerate() {
+            if self.is_boundary(graph, index) {
+                continue;
+            }
             let (x, y) = node.at;
             let size = self.node_size(graph, index);
             min.x = min.x.min(x);
@@ -1368,7 +2232,7 @@ impl FlowCanvas {
         let span = max - min;
         let scale = ((view.size.x - 2.0 * FIT_MARGIN) / span.x)
             .min((view.size.y - 2.0 * FIT_MARGIN) / span.y)
-            .clamp(ZOOM_MIN, 1.0);
+            .clamp(self.zoom_min, self.zoom_max.min(1.0).max(self.zoom_min));
         self.target_scale = scale;
         self.target_pan = view.pos - full_view.pos
             + dvec2(
@@ -1380,13 +2244,14 @@ impl FlowCanvas {
     }
 
     fn zoom_to(&mut self, cx: &mut Cx, anchor: DVec2, scale: f64) {
-        let scale = scale.clamp(ZOOM_MIN, ZOOM_MAX);
+        if self.embedded || !scale.is_finite() || !finite_point(anchor) { return; }
+        let scale = scale.clamp(self.zoom_min, self.zoom_max);
         // The world point under the anchor stays under it at the end of
         // the ease.
         let target = Camera {
-            view: self.camera.view,
             pan: self.target_pan,
             scale: self.target_scale,
+            ..self.camera
         };
         let world = target.screen_to_world(anchor);
         self.target_scale = scale;
@@ -1412,12 +2277,14 @@ impl FlowCanvas {
                 from_port,
                 to_node,
                 to_port,
+                key,
             } => self.graph.as_ref().is_some_and(|graph| {
                 graph.edges.iter().any(|edge| {
                     edge.from == *from_node
                         && edge.from_port == *from_port
                         && edge.to == *to_node
                         && edge.to_port == *to_port
+                        && edge.key == *key
                 })
             }),
         }
@@ -1444,7 +2311,7 @@ impl FlowCanvas {
     }
 
     fn card_rect(&self, graph: &Graph, index: usize) -> Rect {
-        let pos = Camera::world_to_local(self.node_at(graph, index));
+        let pos = self.camera.world_to_render(self.node_at(graph, index));
         Rect {
             pos,
             size: self.node_size(graph, index),
@@ -1488,17 +2355,17 @@ impl FlowCanvas {
     }
 
     fn resize_at(&self, abs: DVec2) -> Option<usize> {
+        if !self.contains_point(abs) { return None; }
         let graph = self.graph.as_ref()?;
-        let local = self.camera.screen_to_local(abs);
-        let grip = RESIZE_GRIP / self.camera.scale.min(1.0);
-        (0..graph.nodes.len()).rev().find(|index| {
-            let rect = self.card_rect(graph, *index);
-            Rect {
-                pos: rect.pos + rect.size - dvec2(grip, grip),
-                size: dvec2(grip, grip),
-            }
-            .contains(local)
-        })
+        let camera = self.interaction_camera();
+        let local = camera.screen_to_local(abs);
+        let grip = RESIZE_GRIP / camera.scale.min(1.0);
+        let index = self.node_index_at(abs)?;
+        let rect = self.card_rect(graph, index);
+        Rect {
+            pos: rect.pos + rect.size - dvec2(grip, grip),
+            size: dvec2(grip, grip),
+        }.contains(local).then_some(index)
     }
 
     fn full_bleed(node: &Node) -> bool {
@@ -1514,11 +2381,7 @@ impl FlowCanvas {
     }
 
     fn port_rows(node: &Node) -> usize {
-        if Self::full_bleed(node) {
-            0
-        } else {
-            node.inputs.len().max(node.outputs.len())
-        }
+        node.inputs.len().max(node.outputs.len())
     }
 
     fn port_local_at_flip(
@@ -1529,6 +2392,10 @@ impl FlowCanvas {
         output: bool,
         flip: f64,
     ) -> DVec2 {
+        // A boundary port is its slot's socket, not a row of a card.
+        if let Some(link) = self.boundary_link(graph, index, port, output) {
+            return self.boundary_socket(link);
+        }
         let rect = self.card_rect(graph, index);
         let y = rect.pos.y + CARD_HEADER_H + (port as f64 + 0.5) * PORT_ROW_H;
         let side = if output { 1.0 - flip } else { flip };
@@ -1547,6 +2414,10 @@ impl FlowCanvas {
         flip: f64,
     ) -> DVec2 {
         let p = self.port_local_at_flip(graph, index, port, output, flip);
+        // The socket has no disc to leave from: the wire meets it directly.
+        if self.boundary_link(graph, index, port, output).is_some() {
+            return p;
+        }
         let direction = if Self::port_side_at_flip(true, flip) == PortSide::Right {
             1.0
         } else {
@@ -1597,41 +2468,70 @@ impl FlowCanvas {
     }
 
     fn port_at(&self, abs: DVec2) -> Option<PortHit> {
+        if !self.contains_point(abs) || self.point_over_chrome(abs) { return None; }
         let graph = self.graph.as_ref()?;
-        let local = self.camera.screen_to_local(abs);
-        let r = PORT_HIT_R / self.camera.scale.min(1.0);
+        let camera = self.interaction_camera();
+        let local = camera.screen_to_local(abs);
+        let r = PORT_HIT_R / camera.scale.min(1.0);
+        let mut nearest: Option<(f64, PortHit)> = None;
         for id in self.z_order.iter().rev() {
             let index = *self.node_index.get(id)?;
             let node = &graph.nodes[index];
+            // Cards are drawn above the rails. A card covering a socket
+            // must win the hit even if the boundary node was raised.
+            if self.is_boundary(graph, index) { continue; }
             for port in 0..node.inputs.len() {
                 let pos = self.port_local(graph, index, port, false);
-                if (pos - local).length() <= r {
-                    return Some(PortHit {
+                let distance = (pos - local).length();
+                if distance <= r && nearest.as_ref().is_none_or(|(best, _)| distance < *best) {
+                    nearest = Some((distance, PortHit {
                         node: index,
                         port,
                         output: false,
-                    });
+                    }));
                 }
             }
             for port in 0..node.outputs.len() {
                 let pos = self.port_local(graph, index, port, true);
-                if (pos - local).length() <= r {
-                    return Some(PortHit {
+                let distance = (pos - local).length();
+                if distance <= r && nearest.as_ref().is_none_or(|(best, _)| distance < *best) {
+                    nearest = Some((distance, PortHit {
                         node: index,
                         port,
                         output: true,
-                    });
+                    }));
                 }
             }
+            let mut card = self.card_rect(graph, index);
+            card.pos.y -= LABEL_H;
+            card.size.y += LABEL_H;
+            // Overlapping padded hit areas choose the closest socket, with
+            // draw order breaking ties. The first actual card body still
+            // occludes every lower card and boundary socket at this point.
+            if card.contains(local) { return nearest.map(|(_, hit)| hit); }
         }
-        None
+        for link in self.boundary_links.iter().rev() {
+            let distance = (self.boundary_socket(link) - local).length();
+            if distance > r || nearest.as_ref().is_some_and(|(best, _)| distance >= *best) { continue; }
+            let index = *self.node_index.get(&link.node)?;
+            let node = &graph.nodes[index];
+            let output = !link.output;
+            let ports = if output { &node.outputs } else { &node.inputs };
+            let port = ports.iter().position(|port| port.name == link.port)?;
+            nearest = Some((distance, PortHit { node: index, port, output }));
+        }
+        nearest.map(|(_, hit)| hit)
     }
 
     fn node_index_at(&self, abs: DVec2) -> Option<usize> {
         let graph = self.graph.as_ref()?;
-        let local = self.camera.screen_to_local(abs);
+        let local = self.interaction_camera().screen_to_local(abs);
         self.z_order.iter().rev().find_map(|id| {
             let index = *self.node_index.get(id)?;
+            // No phantom hit area where a boundary node was authored.
+            if self.is_boundary(graph, index) {
+                return None;
+            }
             let mut rect = self.card_rect(graph, index);
             rect.pos.y -= LABEL_H;
             rect.size.y += LABEL_H;
@@ -1640,13 +2540,16 @@ impl FlowCanvas {
     }
 
     fn wire_index_at(&self, abs: DVec2) -> Option<usize> {
-        let local = self.camera.screen_to_local(abs);
+        let picked_up = match &self.drag { Some(Drag::Wire { picked_up, .. }) => *picked_up, _ => None };
+        let camera = self.interaction_camera();
+        let local = camera.screen_to_local(abs);
         let point = Self::route_point(local);
-        let threshold = WIRE_HIT_PX / self.camera.scale.max(0.01);
+        let threshold = WIRE_HIT_PX / camera.scale.max(0.01);
         self.wire_cache
             .iter()
             .enumerate()
             .filter_map(|(index, cached)| {
+                if picked_up.is_some_and(|edge| self.edges.get(index) == Some(&edge)) { return None; }
                 let distance = cached.as_ref()?.route.distance_to_point(point);
                 (distance <= threshold).then_some((index, distance))
             })
@@ -1666,6 +2569,7 @@ impl FlowCanvas {
             from_port: graph.nodes.get(edge.from)?.outputs.get(edge.from_port)?.name.clone(),
             to_node: graph.nodes.get(edge.to)?.id.clone(),
             to_port: graph.nodes.get(edge.to)?.inputs.get(edge.to_port)?.name.clone(),
+            key: edge.key,
         })
     }
 
@@ -1848,15 +2752,8 @@ impl FlowCanvas {
         );
     }
 
-    fn route_cache_key(
-        edge: EdgeIndex,
-        from: Point,
-        source_side: PortSide,
-        to: Point,
-        target_side: PortSide,
-        obstacles: &[Obstacle],
-        offset: f64,
-    ) -> u64 {
+    fn route_cache_key(edge: EdgeIndex, request: &RouteRequest) -> u64 {
+        let RouteRequest { from, source_side, to, target_side, obstacles, offset } = request;
         let mut hash = DefaultHasher::new();
         edge.from.hash(&mut hash);
         edge.from_port.hash(&mut hash);
@@ -1864,7 +2761,7 @@ impl FlowCanvas {
         edge.to_port.hash(&mut hash);
         source_side.hash(&mut hash);
         target_side.hash(&mut hash);
-        for value in [from.x, from.y, to.x, to.y, offset] {
+        for value in [from.x, from.y, to.x, to.y, *offset] {
             value.to_bits().hash(&mut hash);
         }
         for obstacle in obstacles {
@@ -1876,70 +2773,168 @@ impl FlowCanvas {
             ] {
                 value.to_bits().hash(&mut hash);
             }
+            // A body changes what a deflation may do: it is part of the key.
+            obstacle.body().is_some().hash(&mut hash);
+            if let Some((min, max)) = obstacle.body() {
+                for value in [min.x, min.y, max.x, max.y] {
+                    value.to_bits().hash(&mut hash);
+                }
+            }
         }
         hash.finish()
     }
 
+    /// The one routing policy: the cards near this cable, in local
+    /// coordinates, and its corridor offset. `all_obstacles` is
+    /// `route_obstacles`. The cards are those near the endpoints and near
+    /// the shape being retained: a retained detour can leave the endpoints'
+    /// box, and the cards it runs past belong in its request and its key.
+    #[allow(clippy::too_many_arguments)]
+    fn route_request(
+        &self,
+        from: Point,
+        source_side: PortSide,
+        to: Point,
+        target_side: PortSide,
+        all_obstacles: &[Obstacle],
+        offset: f64,
+        previous: Option<&WireRoute>,
+    ) -> RouteRequest {
+        let style = RouteStyle::default();
+        let obstacles = if self.wire_mode == WireMode::Routed {
+            let mut min = Point::new(from.x.min(to.x), from.y.min(to.y));
+            let mut max = Point::new(from.x.max(to.x), from.y.max(to.y));
+            if let Some((low, high)) = previous.map(WireRoute::bounds) {
+                min = Point::new(min.x.min(low.x), min.y.min(low.y));
+                max = Point::new(max.x.max(high.x), max.y.max(high.y));
+            }
+            wire_route::obstacles_in_corridor(
+                min,
+                max,
+                all_obstacles,
+                style.port_stub + style.corner_radius * 2.0 + offset.abs(),
+            )
+        } else {
+            Vec::new()
+        };
+        RouteRequest { from, source_side, to, target_side, obstacles, offset }
+    }
+
+    /// The corridor offset one cable of a bundle between two cards has: the
+    /// bundle is centred and its lanes are in port order, then an ordered
+    /// input's entry key, then the order the edges were listed. Not
+    /// insertion order alone, so the wire being dragged can know its lane.
+    fn lane_offset(edges: &[EdgeIndex], index: usize, edge: &EdgeIndex) -> f64 {
+        let bundle = edges
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| other.from == edge.from && other.to == edge.to);
+        let total = bundle.clone().count();
+        let position = bundle
+            .filter(|(other_index, other)| {
+                (other.from_port, other.to_port, other.key, *other_index) < (edge.from_port, edge.to_port, edge.key, index)
+            })
+            .count();
+        (position as f64 - (total as f64 - 1.0) * 0.5) * RouteStyle::default().cable_spacing
+    }
+
+    /// The lane the wire being dragged will have once it is an edge, by the
+    /// same order as `lane_offset`; a lone cable is at zero, as it will be.
+    /// A single input takes one cable, so connecting replaces the one it
+    /// has and that one leaves the bundle; an ordered input appends, and a
+    /// new entry's key sorts after the entries it has.
+    fn preview_offset(&self, graph: &Graph, from: usize, from_port: usize, to: usize, to_port: usize) -> f64 {
+        let many = graph.nodes[to].inputs.get(to_port).is_some_and(|port| port.many);
+        let bundle = self
+            .edges
+            .iter()
+            .filter(|edge| edge.from == from && edge.to == to && (many || edge.to_port != to_port));
+        let total = bundle.clone().count() + 1;
+        let position = bundle
+            .filter(|edge| (edge.from_port, edge.to_port) <= (from_port, to_port))
+            .count();
+        (position as f64 - (total as f64 - 1.0) * 0.5) * RouteStyle::default().cable_spacing
+    }
+
+    /// Route one request. A route that strays into a card outside the
+    /// request's local set is routed again against every card, so no shape
+    /// is ever kept over a card the corridor did not ask about.
+    fn route_wire(&self, request: &RouteRequest, previous: Option<&WireRoute>, all_obstacles: &[Obstacle]) -> WireRoute {
+        let route = self.route_with(request, &request.obstacles, previous);
+        if self.wire_mode != WireMode::Routed {
+            return route;
+        }
+        let strays: Vec<Obstacle> = all_obstacles
+            .iter()
+            .filter(|obstacle| !request.obstacles.contains(obstacle))
+            .copied()
+            .collect();
+        if route.crosses_obstacles(&strays) {
+            return self.route_with(request, all_obstacles, previous);
+        }
+        route
+    }
+
+    /// Keep routing's grid and retained spines in graph-world coordinates.
+    /// The camera's render origin is only an f32 drawing aid, not layout.
+    fn route_with(&self, request: &RouteRequest, obstacles: &[Obstacle], previous: Option<&WireRoute>) -> WireRoute {
+        let origin = Self::route_point(self.camera.origin());
+        let world = |point: Point| Point::new(point.x + origin.x, point.y + origin.y);
+        let obstacles: Vec<_> = obstacles.iter().map(|obstacle| obstacle.translated(origin)).collect();
+        let mut previous = previous.cloned();
+        if let Some(previous) = previous.as_mut() { previous.translate(origin); }
+        let mut route = wire_route::route_wire_sticky_in_mode(
+            self.wire_mode, world(request.from), request.source_side, world(request.to), request.target_side,
+            &obstacles, RouteStyle::default(), request.offset, previous.as_ref(),
+        );
+        route.translate(Point::new(-origin.x, -origin.y));
+        route
+    }
+
     fn ensure_wire_routes(&mut self, graph: &Graph) {
-        const CARD_CLEARANCE: f64 = 12.0;
+        // Slot and camera changes dirty this cache just like card movement.
         if !self.wire_cache_dirty && self.wire_cache.iter().all(Option::is_some) {
             return;
         }
-        let card_rects: Vec<Rect> = (0..graph.nodes.len())
-            .map(|index| self.card_rect(graph, index))
-            .collect();
-        let all_obstacles: Vec<Obstacle> = card_rects
-            .iter()
-            .map(|rect| {
-                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                    .inflate(CARD_CLEARANCE)
-            })
-            .collect();
+        let all_obstacles = self.route_obstacles(graph);
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
+            if self.edge_unplaced(graph, edge) {
+                self.wire_cache[index] = None;
+                continue;
+            }
             let from = Self::route_point(self.wire_anchor(graph, edge.from, edge.from_port, true));
             let to = Self::route_point(self.wire_anchor(graph, edge.to, edge.to_port, false));
-            let source_side = self.port_side(graph, edge.from, true);
-            let target_side = self.port_side(graph, edge.to, false);
+            let source_side = self.side_of(graph, edge.from, edge.from_port, true);
+            let target_side = self.side_of(graph, edge.to, edge.to_port, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
-            let style = RouteStyle::default();
-            let obstacles = if self.wire_mode == WireMode::Routed {
-                wire_route::obstacles_in_corridor(
-                    from,
-                    to,
-                    &all_obstacles,
-                    style.port_stub + style.corner_radius * 2.0 + offset.abs(),
-                )
-            } else {
-                Vec::new()
-            };
-            let key = Self::route_cache_key(
-                edge,
-                from,
-                source_side,
-                to,
-                target_side,
-                &obstacles,
-                offset,
-            );
+            let previous = self.wire_cache[index]
+                .as_ref()
+                .map(|cached| &cached.route);
+            let request = self.route_request(from, source_side, to, target_side, &all_obstacles, offset, previous);
+            let key = Self::route_cache_key(edge, &request);
             if self.wire_cache.get(index).and_then(Option::as_ref).is_some_and(|cached| cached.key == key)
             {
                 continue;
             }
-            let previous = self.wire_cache[index]
-                .as_ref()
-                .map(|cached| &cached.route);
-            let route = wire_route::route_wire_sticky_in_mode(
-                self.wire_mode,
-                from,
-                source_side,
-                to,
-                target_side,
-                &obstacles,
-                style,
-                offset,
-                previous,
-            );
+            let route = self.route_wire(&request, previous, &all_obstacles);
+            if route_trace() && previous != Some(&route) {
+                let (source, target) = (&graph.nodes[edge.from], &graph.nodes[edge.to]);
+                eprintln!(
+                    "flow route {}.{} -> {}.{} key {:?} from ({:.1}, {:.1}) to ({:.1}, {:.1}) lane {offset:.1} cards {}: {}",
+                    source.id,
+                    source.outputs[edge.from_port].name,
+                    target.id,
+                    target.inputs[edge.to_port].name,
+                    edge.key,
+                    from.x,
+                    from.y,
+                    to.x,
+                    to.y,
+                    request.obstacles.len(),
+                    route.describe(),
+                );
+            }
             self.wire_cache[index] = Some(CachedWire { key, route });
         }
         self.wire_cache_dirty = false;
@@ -1981,15 +2976,16 @@ impl FlowCanvas {
                     false,
                     to_flip,
                 ));
-                wire_route::route_wire(
+                let request = self.route_request(
                     from,
-                    Self::port_side_at_flip(true, from_flip),
+                    self.side_at_flip(graph, edge.from, edge.from_port, true, from_flip),
                     to,
-                    Self::port_side_at_flip(false, to_flip),
+                    self.side_at_flip(graph, edge.to, edge.to_port, false, to_flip),
                     obstacles,
-                    RouteStyle::default(),
                     self.parallel_offsets.get(edge_index).copied().unwrap_or(0.0),
-                )
+                    None,
+                );
+                self.route_wire(&request, None, obstacles)
             })
             .collect()
     }
@@ -2004,9 +3000,9 @@ impl FlowCanvas {
         let mut stubs = Vec::with_capacity(node.inputs.len() + node.outputs.len());
         let stub_length = RouteStyle::default().port_stub;
         for (output, count) in [(false, node.inputs.len()), (true, node.outputs.len())] {
-            let side = Self::port_side_at_flip(output, flip);
-            let direction = if side == PortSide::Right { 1.0 } else { -1.0 };
             for port in 0..count {
+                let side = self.side_at_flip(graph, node_index, port, output, flip);
+                let direction = if side == PortSide::Right { 1.0 } else { -1.0 };
                 let from = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     node_index,
@@ -2089,15 +3085,16 @@ impl FlowCanvas {
                 false,
                 to_flip,
             ));
-            candidate_routes[edge_index] = wire_route::route_wire(
+            let request = self.route_request(
                 from,
-                Self::port_side_at_flip(true, from_flip),
+                self.side_at_flip(graph, edge.from, edge.from_port, true, from_flip),
                 to,
-                Self::port_side_at_flip(false, to_flip),
+                self.side_at_flip(graph, edge.to, edge.to_port, false, to_flip),
                 obstacles,
-                RouteStyle::default(),
                 self.parallel_offsets.get(edge_index).copied().unwrap_or(0.0),
+                None,
             );
+            candidate_routes[edge_index] = self.route_wire(&request, None, obstacles);
         }
         let candidate_flip = if candidate_facings[node_index] { 1.0 } else { 0.0 };
         let candidate_subjects = self.scored_routes_for_card(
@@ -2123,26 +3120,22 @@ impl FlowCanvas {
             || self.time < self.auto_flip_settle_until
             || self.drag.is_some()
             || self.flip_animation_active(graph)
+            || self.edges.iter().any(|edge| self.edge_unplaced(graph, *edge))
         {
             return;
         }
-        const CARD_CLEARANCE: f64 = 12.0;
-        let card_rects: Vec<Rect> = (0..graph.nodes.len())
-            .map(|index| self.card_rect(graph, index))
-            .collect();
-        let obstacles: Vec<Obstacle> = card_rects
-            .iter()
-            .map(|rect| {
-                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                    .inflate(CARD_CLEARANCE)
-            })
-            .collect();
+        let obstacles = self.route_obstacles(graph);
         let original_facings: Vec<bool> = graph.nodes.iter().map(|node| node.flip).collect();
         let mut facings = original_facings.clone();
         for _ in 0..AUTO_FLIP_MAX_PASSES {
             let current_routes = self.routes_for_facings(graph, &facings, &obstacles);
             let mut pass_changes = Vec::new();
             for node_index in 0..graph.nodes.len() {
+                // A slot faces into the graph from its rail; it has no
+                // facing to choose.
+                if self.is_boundary(graph, node_index) {
+                    continue;
+                }
                 let locked = self.flip_lock.contains(&graph.nodes[node_index].id);
                 let (current, flipped, cables) = self.facing_costs(
                     graph,
@@ -2187,46 +3180,60 @@ impl FlowCanvas {
     }
 
     fn preview_route(
-        &self,
+        &mut self,
         graph: &Graph,
         from_index: usize,
         from_port: usize,
         pointer: DVec2,
         target: Option<(usize, usize)>,
     ) -> WireRoute {
-        const CARD_CLEARANCE: f64 = 12.0;
         let from = Self::route_point(self.wire_anchor(graph, from_index, from_port, true));
-        let source_side = self.port_side(graph, from_index, true);
+        let source_side = self.side_of(graph, from_index, from_port, true);
         let (to, target_side) = target.map_or(
             (Self::route_point(pointer), PortSide::Left),
             |(node, port)| {
                 (
                     Self::route_point(self.wire_anchor(graph, node, port, false)),
-                    self.port_side(graph, node, false),
+                    self.side_of(graph, node, port, false),
                 )
             },
         );
-        let obstacles: Vec<Obstacle> = if self.wire_mode == WireMode::Routed {
-            (0..graph.nodes.len())
-                .map(|index| {
-                    let rect = self.card_rect(graph, index);
-                    Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                        .inflate(CARD_CLEARANCE)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        wire_route::route_wire_in_mode(
-            self.wire_mode,
-            from,
-            source_side,
-            to,
-            target_side,
-            &obstacles,
-            RouteStyle::default(),
-            0.0,
-        )
+        // The same request a graph edge makes: with a target, the lane and
+        // the corridor the connected cable will have; a free pointer routes
+        // as a lone cable to where it is. The previous preview's shape is
+        // retained across the pointer's motion and into a target.
+        let all_obstacles = self.route_obstacles(graph);
+        let offset = target.map_or(0.0, |(node, port)| self.preview_offset(graph, from_index, from_port, node, port));
+        let previous = self.preview_wire.as_ref().map(|cached| &cached.route);
+        let request = self.route_request(from, source_side, to, target_side, &all_obstacles, offset, previous);
+        let (to_node, to_port) = target.unwrap_or((usize::MAX, usize::MAX));
+        let edge = EdgeIndex { from: from_index, from_port, to: to_node, to_port, key: None };
+        let key = Self::route_cache_key(edge, &request);
+        if let Some(cached) = self.preview_wire.as_ref().filter(|cached| cached.key == key) {
+            return cached.route.clone();
+        }
+        let route = self.route_wire(&request, previous, &all_obstacles);
+        if route_trace() && previous != Some(&route) {
+            let source = &graph.nodes[from_index];
+            let target = target.map_or_else(
+                || "pointer".to_string(),
+                |(node, port)| format!("{}.{}", graph.nodes[node].id, graph.nodes[node].inputs[port].name),
+            );
+            eprintln!(
+                "flow preview {}.{} -> {target} from ({:.1}, {:.1}) to ({:.1}, {:.1}) lane {offset:.1} cards {}: {}",
+                source.id,
+                source.outputs[from_port].name,
+                from.x,
+                from.y,
+                to.x,
+                to.y,
+                request.obstacles.len(),
+                route.describe(),
+            );
+        }
+        self.preview_wire = Some(CachedWire { key, route: route.clone() });
+        self.preview_edge = Some(edge);
+        route
     }
 
     fn text_width(&self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> f64 {
@@ -2245,23 +3252,164 @@ impl FlowCanvas {
             .ceil()
             .clamp(-2.0, 6.0);
         self.draw_bg.cell = (GRID_CELL * 2f64.powf(level)) as f32;
-        self.draw_bg.origin = vec2(LOCAL_ORIGIN as f32, LOCAL_ORIGIN as f32);
+        // Reduce the checker phase in f64 before sending it to the shader.
+        let period = 2.0 * self.draw_bg.cell as f64;
+        let origin = -self.camera.origin();
+        self.draw_bg.origin = vec2(origin.x.rem_euclid(period) as f32, origin.y.rem_euclid(period) as f32);
         self.draw_bg.draw_abs(cx, local_view);
     }
 
+    /// The boundary node whose slot is under `point`. A slot is the node:
+    /// pressing it selects the node. Its wires are the graph's real wires and
+    /// are hit as wires.
+    fn boundary_at(&self, point: DVec2) -> Option<&str> {
+        self.boundary_links.iter().find(|link| link.slot.contains(point)).map(|link| link.node.as_str())
+    }
+
+    /// Inlet/outlet slots sit below the wires and the node cards. A slot is
+    /// the whole picture of its boundary node: a plate on the rail with the
+    /// port's name and type, an edge in the accent it shares with the outer
+    /// connector, and one socket on the side that faces into the graph,
+    /// where the graph's own wires end. All geometry is reduced to this
+    /// canvas's rebased local space before f32.
+    fn draw_boundaries(&mut self, cx: &mut Cx2d, _graph: &Graph) {
+        if self.boundary_links.is_empty() { return; }
+        let links = self.boundary_links.clone();
+        let accents = boundary_accents(&links);
+        self.draw_vec.begin();
+        for (link, accent) in links.iter().zip(&accents) {
+            let selected = self.selected.as_ref().and_then(Selection::node) == Some(link.node.as_str());
+            let pos = self.camera.screen_to_local(link.slot.pos);
+            let size = link.slot.size / self.camera.scale;
+            let radius = (size.y * 0.2) as f32;
+            Self::set_color(&mut self.draw_vec, self.card_color, 1.0);
+            self.draw_vec.rounded_rect(pos.x as f32, pos.y as f32, size.x as f32, size.y as f32, radius);
+            self.draw_vec.fill();
+            Self::set_color(&mut self.draw_vec, if selected { self.accent_color } else { *accent }, if selected { 1.0 } else { 0.9 });
+            self.draw_vec.rounded_rect(pos.x as f32, pos.y as f32, size.x as f32, size.y as f32, radius);
+            self.draw_vec.stroke((size.y * if selected { 0.07 } else { 0.035 }).max(1.0) as f32);
+            // The socket: a filled accent bead on the inward edge, ringed in
+            // the port's type colour so the type still reads at the slot.
+            let socket = self.boundary_socket(link);
+            let bead = (size.y * 0.16).clamp(2.0, PORT_RX);
+            let kind_color = self.port_color(&link.kind);
+            Self::set_color(&mut self.draw_vec, kind_color, 1.0);
+            self.draw_vec.circle(socket.x as f32, socket.y as f32, (bead + 1.5) as f32);
+            self.draw_vec.fill();
+            Self::set_color(&mut self.draw_vec, *accent, 1.0);
+            self.draw_vec.circle(socket.x as f32, socket.y as f32, bead as f32);
+            self.draw_vec.fill();
+        }
+        self.draw_vec.end(cx);
+        let font_size = self.draw_port.text_style.font_size;
+        for link in &links {
+            if link.slot.size.y < 15.0 { continue; }
+            let pos = self.camera.screen_to_local(link.slot.pos);
+            let size = link.slot.size / self.camera.scale;
+            cx.push_clip_rect(Rect { pos, size });
+            self.draw_port.color = self.color_port_label_connected;
+            self.draw_port.text_style.font_size = (size.y * 0.25) as f32;
+            self.draw_port.draw_abs(cx, pos + dvec2(size.y * 0.18, size.y * 0.10), &link.label);
+            self.draw_port.color = self.port_color(&link.kind);
+            self.draw_port.text_style.font_size = (size.y * 0.20) as f32;
+            self.draw_port.draw_abs(cx, pos + dvec2(size.y * 0.18, size.y * 0.57), &link.kind);
+            cx.pop_clip_rect();
+        }
+        self.draw_port.text_style.font_size = font_size;
+    }
+
+    fn child_boundary_links(&self, node: &str) -> Vec<(BoundaryLink, Vec4f)> {
+        self.embedded_roots.iter()
+            .filter(|root| root.node == node)
+            .filter_map(|root| root.widget.borrow::<FlowCanvas>())
+            .filter(|child| child.drawn_viewport.is_some_and(|viewport| nonempty(viewport.clip)))
+            .flat_map(|child| {
+                // The child's own accents, so both sides of the rail agree.
+                let accents = boundary_accents(&child.boundary_links);
+                child.boundary_links.iter().cloned().zip(accents).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Continue each child rail to the outer connector in the parent's
+    /// retained card list. The child itself remains clipped to the content.
+    fn draw_boundary_continuations(&mut self, cx: &mut Cx2d, graph: &Graph, node: usize) {
+        let links = self.child_boundary_links(&graph.nodes[node].id);
+        if links.is_empty() { return; }
+        let card = self.card_rect(graph, node);
+        cx.push_clip_rect(Rect { pos: card.pos - dvec2(20.0, 0.0), size: card.size + dvec2(40.0, 0.0) });
+        self.draw_over.begin();
+        for (link, accent) in links {
+            let outer = self.camera.screen_to_local(link.outer);
+            let socket = self.camera.screen_to_local(dvec2(
+                if link.on_right { link.slot.pos.x + link.slot.size.x } else { link.slot.pos.x },
+                link.slot.pos.y + link.slot.size.y * 0.5,
+            ));
+            if !finite_point(outer) || !finite_point(socket) {
+                continue;
+            }
+            // A fixed part of the container, not an edge of a graph: one
+            // shape, decided by which rail the slot is on and which way the
+            // value flows, never by comparing two nearly equal positions
+            // (which tipped the router between equal-cost shapes while
+            // zooming). On the right rail the outer connector lies beyond
+            // the slot's outward edge, on the left rail before it.
+            let toward_outer = if link.on_right { PortSide::Right } else { PortSide::Left };
+            let toward_slot = if link.on_right { PortSide::Left } else { PortSide::Right };
+            let (from, source_side, to, target_side) = if link.output {
+                (socket, toward_outer, outer, toward_slot)
+            } else {
+                (outer, toward_slot, socket, toward_outer)
+            };
+            let route = wire_route::fixed_route_in_mode(self.wire_mode,
+                Self::route_point(from), source_side, Self::route_point(to), target_side,
+                RouteStyle::default());
+            // The cable keeps its type colour, with a thin matching accent.
+            // The port itself is accented in draw_overlays at its real centre.
+            let color = self.port_color(&link.kind);
+            Self::set_color(&mut self.draw_over, color, 0.85);
+            Self::draw_route(&mut self.draw_over, &route);
+            self.draw_over.stroke(2.5);
+            Self::set_color(&mut self.draw_over, accent, 0.95);
+            Self::draw_route(&mut self.draw_over, &route);
+            self.draw_over.stroke(1.0);
+        }
+        self.draw_over.end(cx);
+        cx.pop_clip_rect();
+    }
+
     /// Wires are one vector batch in the canvas list, below every card list.
-    fn draw_wires(&mut self, cx: &mut Cx2d, graph: &Graph) {
+    fn draw_wires(&mut self, cx: &mut Cx2d, scope: &mut Scope, graph: &Graph) {
         let dragging_wire = matches!(self.drag, Some(Drag::Wire { .. }));
+        let picked_up = match &self.drag { Some(Drag::Wire { picked_up, .. }) => *picked_up, _ => None };
         let time = self.time;
         self.ensure_wire_routes(graph);
         let selected_wire = self.selected_edge_index(graph);
+        // Host materials use precisely the path the canvas hit-tests. Drawing
+        // data cannot feed back into routing or card measurements. This pass
+        // sits under the thin centreline and selection affordances.
+        let mut observed = vec![false; self.edges.len()];
+        if let (Some(host), Some(viewport)) = (scope.data.get_mut::<NodeFacesScope>(), self.drawn_viewport) {
+            for (index, edge) in self.edges.iter().enumerate() {
+                if picked_up == Some(*edge) { continue; }
+                let Some(cached) = self.wire_cache[index].as_ref() else { continue };
+                let source = &graph.nodes[edge.from];
+                let target = &graph.nodes[edge.to];
+                let view = crate::model::EdgeView {
+                    from: source.id.clone(), from_port: source.outputs[edge.from_port].name.clone(),
+                    to: target.id.clone(), to_port: target.inputs[edge.to_port].name.clone(), key: edge.key,
+                };
+                observed[index] = host.faces().draw_wire(cx, &view, &cached.route, &viewport);
+            }
+        }
         self.draw_vec.begin();
         // Wires, under the cards.
         for (index, edge) in self.edges.iter().copied().enumerate() {
+            if picked_up == Some(edge) { continue; }
             let kind = &graph.nodes[edge.from].outputs[edge.from_port].kind;
             let color = self.port_color(kind);
             let node = &graph.nodes[edge.from].id;
-            let streaming = self.streaming.contains(node);
+            let streaming = self.streaming.contains(node) && !observed[index];
             let carrying = self.carrying.contains(node);
             let selected = selected_wire == Some(index);
             let hovered = self.hover_wire == Some(index);
@@ -2308,7 +3456,9 @@ impl FlowCanvas {
                 },
             );
             Self::draw_route(&mut self.draw_vec, route);
-            self.draw_vec.stroke(if selected {
+            self.draw_vec.stroke(if observed[index] {
+                if selected || hovered { 1.5 } else { 0.75 }
+            } else if selected {
                 5.0
             } else if hovered {
                 3.75
@@ -2329,7 +3479,7 @@ impl FlowCanvas {
                     self.draw_vec.stroke(4.5);
                 }
             }
-            if let Some((flow, flow_color)) = flow.filter(|_| !dragging_wire) {
+            if let Some((flow, flow_color)) = flow.filter(|_| !dragging_wire && !observed[index]) {
                 let length = route.length();
                 match flow {
                     WireFlow::Fill(fraction) => {
@@ -2384,7 +3534,7 @@ impl FlowCanvas {
                     }
                 }
             }
-            for pulse in self.pulses.iter().filter(|pulse| pulse.node == *node) {
+            for pulse in self.pulses.iter().filter(|pulse| pulse.node == *node && !observed[index]) {
                 let elapsed = pulse.started.map_or(0.0, |started| (time - started).max(0.0));
                 let centre = wire_route::pulse_progress(elapsed) * route.length();
                 Self::set_color(&mut self.draw_vec, color, 0.20);
@@ -2404,7 +3554,7 @@ impl FlowCanvas {
                 );
                 self.draw_vec.stroke(5.0);
             }
-            if self.camera.scale >= 0.5 {
+            if self.camera.scale >= 0.5 && !observed[index] {
                 let midpoint = route.length() * 0.5;
                 let pulse_brightness = self
                     .pulses
@@ -2432,6 +3582,34 @@ impl FlowCanvas {
                 self.draw_vec.stroke(1.5);
             }
         }
+        // A wire that ends at a slot wears the slot's accent on its last
+        // stretch: the cable's own type colour and status stay as they are.
+        if !self.boundary_links.is_empty() {
+            const ACCENT_LENGTH: f64 = 22.0;
+            let accents = boundary_accents(&self.boundary_links);
+            for (index, edge) in self.edges.iter().copied().enumerate() {
+                let Some(route) = self.wire_cache[index].as_ref().map(|cached| &cached.route) else {
+                    continue;
+                };
+                let length = route.length();
+                // Which link each end is, by position: no reference into
+                // `self` is held while the vector batch is written.
+                let link_at = |node: usize, port: usize, output: bool| {
+                    self.boundary_link(graph, node, port, output)
+                        .and_then(|link| self.boundary_links.iter().position(|other| std::ptr::eq(other, link)))
+                };
+                let ends = [
+                    (link_at(edge.from, edge.from_port, true), 0.0, ACCENT_LENGTH.min(length * 0.5)),
+                    (link_at(edge.to, edge.to_port, false), (length - ACCENT_LENGTH).max(length * 0.5), length),
+                ];
+                for (at, start, end) in ends {
+                    let Some(at) = at else { continue };
+                    Self::set_color(&mut self.draw_vec, accents[at], if dragging_wire { 0.35 } else { 1.0 });
+                    Self::draw_clamped_route_slice(&mut self.draw_vec, route, start, end);
+                    self.draw_vec.stroke(3.0);
+                }
+            }
+        }
         // The wire being dragged.
         if let Some(Drag::Wire {
             from,
@@ -2440,14 +3618,27 @@ impl FlowCanvas {
             pos,
             target,
             ..
-        }) = &self.drag
+        }) = self.drag.clone()
         {
-            let b = self.camera.screen_to_local(*pos);
-            let color = self.port_color(ty);
-            let route = self.preview_route(graph, *from, *from_port, b, *target);
+            let b = self.camera.screen_to_local(pos);
+            let color = self.port_color(&ty);
+            let route = self.preview_route(graph, from, from_port, b, target);
             Self::set_color(&mut self.draw_vec, color, 1.0);
             Self::draw_route(&mut self.draw_vec, &route);
             self.draw_vec.stroke(3.0);
+            // A slot's socket that can take the wire says so, as a card's
+            // input does: it has no card overlay to say it for it.
+            let sockets: Vec<DVec2> = self
+                .compatible
+                .iter()
+                .filter_map(|(node, port)| self.boundary_link(graph, *node, *port, false))
+                .map(|link| self.boundary_socket(link))
+                .collect();
+            for socket in sockets {
+                Self::set_color(&mut self.draw_vec, self.accent_color, 0.9);
+                self.draw_vec.circle(socket.x as f32, socket.y as f32, (PORT_RX + 3.0) as f32);
+                self.draw_vec.stroke(1.5);
+            }
         }
         self.draw_vec.end(cx);
     }
@@ -2506,6 +3697,37 @@ impl FlowCanvas {
 
     fn port_icon(&mut self, kind: &str) -> Option<&mut DrawSvg> {
         self.styles.port_icon(kind)
+    }
+
+    /// The icon inside one socket: the host's key for it when that style has
+    /// an icon, else the port kind's.
+    fn socket_icon(&mut self, node: &str, port: &str, output: bool, kind: &str) -> Option<&mut DrawSvg> {
+        let key = if self.port_icon_overrides.is_empty() {
+            None
+        } else {
+            self.port_icon_overrides
+                .get(&(node.to_string(), port.to_string(), output))
+                .filter(|key| self.styles.has_port_icon(key))
+                .cloned()
+        };
+        self.styles.port_icon(key.as_deref().unwrap_or(kind))
+    }
+
+    fn prune_port_icon_overrides(&mut self) {
+        let Some(graph) = self.graph.as_ref() else {
+            self.port_icon_overrides.clear();
+            return;
+        };
+        let node_index = &self.node_index;
+        self.port_icon_overrides.retain(|(node, port, output), _| {
+            node_index
+                .get(node)
+                .and_then(|index| graph.nodes.get(*index))
+                .is_some_and(|view| {
+                    let ports = if *output { &view.outputs } else { &view.inputs };
+                    ports.iter().any(|candidate| candidate.name == *port)
+                })
+        });
     }
 
     /// Labels above the cards, port names, error lines.
@@ -2613,16 +3835,17 @@ impl FlowCanvas {
         }
     }
 
-    /// The faces, each in a turtle at its card's content rect; measures the
-    /// card heights for the next frame.
+    /// The faces, each in a turtle at its card's content rect. Measurements
+    /// are applied after the complete frame, so cards, ports and wires all
+    /// consume the same geometry snapshot.
     fn draw_faces(
         &mut self,
         cx: &mut Cx2d,
         scope: &mut Scope,
         graph: &Graph,
         indices: &[usize],
-    ) -> bool {
-        let mut changed = false;
+    ) -> Vec<(usize, f64)> {
+        let mut measured = Vec::new();
         if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
             faces
                 .faces()
@@ -2665,8 +3888,26 @@ impl FlowCanvas {
                     ..Layout::default()
                 },
             );
+            let face_viewport = FaceViewport {
+                canvas: self.drawn_viewport.expect("canvas drawing has a viewport"),
+                geometry: self.geometry(graph, index),
+                content_clip: intersect_rect(
+                    self.drawn_viewport.unwrap().clip,
+                    Rect {
+                        pos: self.camera.local_to_screen(content.rect.pos),
+                        size: content.rect.size * self.camera.scale,
+                    },
+                ),
+                ports: node.inputs.iter().enumerate().map(|(port, input)| FacePort {
+                    name: input.name.clone(), kind: Self::input_kind(node, port).to_string(), output: false,
+                    anchor: self.camera.local_to_screen(self.wire_anchor(graph, index, port, false)),
+                }).chain(node.outputs.iter().enumerate().map(|(port, output)| FacePort {
+                    name: output.name.clone(), kind: output.kind.clone(), output: true,
+                    anchor: self.camera.local_to_screen(self.wire_anchor(graph, index, port, true)),
+                })).collect(),
+            };
             if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
-                faces.faces().draw_face(
+                faces.faces().draw_face_in_viewport(
                     cx,
                     &node.id,
                     if fixed_height.is_some() {
@@ -2675,21 +3916,26 @@ impl FlowCanvas {
                         Walk::fill_fit()
                     },
                     fixed_height.is_some(),
+                    &face_viewport,
                 );
             }
             let rect = cx.end_turtle();
+            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+                faces.faces().draw_node_overlay(cx, &node.id, &face_viewport);
+            }
             cx.pop_clip_rect();
             let mut height = rect.size.y + content.pad_top + content.pad_bottom;
             if has_error {
                 height += 20.0;
             }
             let height = height.max(min_card_height(full_bleed, Self::port_rows(node)));
-            if node.size.is_none() && (self.heights[index] - height).abs() > 0.5 {
-                self.heights[index] = height;
-                changed = true;
+            let pending_face = scope.data.get_mut::<NodeFacesScope>()
+                .is_some_and(|faces| faces.faces().face_measurement_pending(&node.id));
+            if !pending_face && node.size.is_none() && (self.heights[index] - height).abs() > 0.5 {
+                measured.push((index, height));
             }
         }
-        changed
+        measured
     }
 
     fn draw_locked_face_overlay(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
@@ -2730,6 +3976,7 @@ impl FlowCanvas {
         self.draw_over.begin();
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
+            let boundary_links = self.child_boundary_links(&node.id);
             let r = self.card_rect(graph, index);
             // Progress bar: the top strip of a running card.
             if let Some(status) = self.statuses.get(&node.id) {
@@ -2808,6 +4055,13 @@ impl FlowCanvas {
                 Self::set_color(&mut self.draw_over, color, if ok { 1.0 } else { 0.25 });
                 Self::shaped_port(&mut self.draw_over, centre, grow - 1.0, direction, true);
                 self.draw_over.stroke(if hot { 3.0 } else { 2.0 });
+                if let Some((_, accent)) = boundary_links.iter().find(|(link, _)| {
+                    !link.output && link.node == node.inputs[port].name
+                }) {
+                    Self::set_color(&mut self.draw_over, *accent, if ok { 1.0 } else { 0.25 });
+                    Self::shaped_port(&mut self.draw_over, centre, grow - 3.5, direction, true);
+                    self.draw_over.stroke(1.5);
+                }
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
@@ -2824,6 +4078,13 @@ impl FlowCanvas {
                 Self::set_color(&mut self.draw_over, color, 1.0);
                 Self::shaped_port(&mut self.draw_over, centre, -1.0, direction, false);
                 self.draw_over.stroke(2.0);
+                if let Some((_, accent)) = boundary_links.iter().find(|(link, _)| {
+                    link.output && link.node == output.name
+                }) {
+                    Self::set_color(&mut self.draw_over, *accent, 1.0);
+                    Self::shaped_port(&mut self.draw_over, centre, -3.5, direction, false);
+                    self.draw_over.stroke(1.5);
+                }
             }
         }
         self.draw_over.end(cx);
@@ -2841,7 +4102,8 @@ impl FlowCanvas {
                     pos: p + dvec2(-direction * PORT_ICON_SHIFT_IN - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
-                if let Some(icon) = self.port_icon(Self::input_kind(node, port)) {
+                let kind = Self::input_kind(node, port);
+                if let Some(icon) = self.socket_icon(&node.id, &node.inputs[port].name, false, kind) {
                     icon.draw_abs(cx, rect);
                 }
             }
@@ -2851,7 +4113,7 @@ impl FlowCanvas {
                     pos: p + dvec2(direction * PORT_ICON_SHIFT_OUT - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
-                if let Some(icon) = self.port_icon(&output.kind) {
+                if let Some(icon) = self.socket_icon(&node.id, &output.name, true, &output.kind) {
                     icon.draw_abs(cx, rect);
                 }
             }
@@ -2902,6 +4164,7 @@ impl FlowCanvas {
             ty,
             pos,
             target,
+            picked_up,
         } = drag
         else {
             return;
@@ -2910,20 +4173,59 @@ impl FlowCanvas {
             return;
         };
         let from_node = graph.nodes[from].id.clone();
+        let from_port_index = from_port;
         let from_port = graph.nodes[from].outputs[from_port].name.clone();
         if let Some((to, to_port)) = target {
+            if picked_up.is_some_and(|old| old.to == to && old.to_port == to_port) {
+                self.compatible.clear();
+                return;
+            }
+            let drawn = EdgeIndex { from, from_port: from_port_index, to, to_port, key: None };
             let to_node = graph.nodes[to].id.clone();
             let to_port = graph.nodes[to].inputs[to_port].name.clone();
-            cx.widget_action(
-                self.uid,
-                FlowCanvasAction::Edit(CanvasEdit::Connect {
+            // The preview was routed by the connected cable's own policy:
+            // it seeds that cable's route once the edit lands, if it was
+            // last drawn to this target rather than to an earlier one.
+            if let Some(preview) = self.preview_wire.take().filter(|_| self.preview_edge == Some(drawn)) {
+                self.pending_connect = Some(PendingConnect {
+                    from: from_node.clone(),
+                    from_port: from_port.clone(),
+                    to: to_node.clone(),
+                    to_port: to_port.clone(),
+                    route: preview.route,
+                });
+            }
+            let edit = if let Some(old) = picked_up {
+                CanvasEdit::Reconnect {
+                    from_node,
+                    from_port,
+                    old_to_node: graph.nodes[old.to].id.clone(),
+                    old_to_port: graph.nodes[old.to].inputs[old.to_port].name.clone(),
+                    old_key: old.key,
+                    to_node,
+                    to_port,
+                }
+            } else {
+                CanvasEdit::Connect {
                     from_node,
                     from_port,
                     to_node,
                     to_port,
-                }),
-            );
-        } else if self.node_index_at(pos).is_none() {
+                }
+            };
+            cx.widget_action(self.uid, FlowCanvasAction::Edit(edit));
+        } else if self.contains_point(pos) && !self.point_over_chrome(pos)
+            && self.node_index_at(pos).is_none()
+        {
+            if let Some(old) = picked_up {
+                cx.widget_action(self.uid, FlowCanvasAction::Edit(CanvasEdit::Disconnect {
+                    to_node: graph.nodes[old.to].id.clone(),
+                    to_port: graph.nodes[old.to].inputs[old.to_port].name.clone(),
+                    key: old.key,
+                }));
+                self.compatible.clear();
+                return;
+            }
             let at = self.camera.screen_to_world(pos);
             cx.widget_action(
                 self.uid,
@@ -2946,8 +4248,9 @@ impl FlowCanvas {
                 matches!(status.state.as_str(), "running" | "waiting" | "queued")
                     || (status.shown - status.target_fraction()).abs() > 1e-3
             })
-            || (self.camera.pan - self.target_pan).length() > 0.05
-            || (self.camera.scale - self.target_scale).abs() > 1e-4
+            || (!self.embedded && self.drag.is_none()
+                && ((self.camera.pan - self.target_pan).length() > 0.05
+                    || (self.camera.scale - self.target_scale).abs() > 1e-4))
             || self
                 .graph
                 .as_ref()
@@ -3170,73 +4473,166 @@ impl NodeStatus {
     }
 }
 
-impl Widget for FlowCanvas {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // Reserve the rect in the parent and keep the hit area in window
-        // space; everything else lives in the transformed child list.
-        let view = cx.walk_turtle(walk);
-        cx.add_rect_area(&mut self.area, view);
-        let first_layout = self.camera.view.size.x <= 0.0;
-        self.camera.view = view;
-        if first_layout {
-            self.target_pan = self.camera.pan;
-            self.target_scale = self.camera.scale;
+impl FlowCanvas {
+    /// Draw in an absolute window-space viewport while consuming one parent
+    /// walk. No fitting, easing or camera actions occur in embedded mode.
+    /// Keep the supplied viewport stable throughout a captured gesture.
+    pub fn draw_embedded(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        walk: Walk,
+        viewport: CanvasViewport,
+    ) -> Result<DrawStep, CanvasViewportError> {
+        let mut viewport = viewport.checked()?;
+        if viewport.camera.render_origin.is_none() && self.embedded {
+            viewport.camera.render_origin = self.camera.render_origin;
         }
+        // A projected group body can start far off screen at deep zoom.
+        // Rebase at the visible intersection, not at that distant body corner.
+        viewport.camera.rebase_at(viewport.clip.pos);
+        if !viewport
+            .camera
+            .matrix()
+            .v
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(CanvasViewportError::NonFinite);
+        }
+        cx.walk_turtle(walk);
+        // Area::Rect is window-space and does not inherit the draw matrix.
+        // Isolate its align range from the parent's graph-coordinate turtle.
+        cx.begin_unclipped_root_turtle(viewport.camera.view.size, Layout::flow_overlay());
+        cx.push_clip_rect(viewport.clip);
+        cx.add_rect_area(&mut self.area, viewport.clip);
+        cx.pop_clip_rect();
+        cx.end_pass_sized_turtle_no_clip();
+        self.embedded = true;
+        self.target_pan = viewport.camera.pan;
+        self.target_scale = viewport.camera.scale;
+        self.fit_pending = 0;
+        Ok(self.draw_viewport(cx, scope, viewport))
+    }
+
+    /// Restore absolute transforms in parent-before-child order after the
+    /// parent has recursively assigned its matrix. Registered direct canvas
+    /// roots are finalized recursively, including retained child draw lists.
+    /// Call after any external ancestor transform assignment as well.
+    pub fn finalize_draw_transform(&self, cx: &mut Cx) {
+        if let (Some(list), Some(viewport)) = (&self.draw_list, self.drawn_viewport) {
+            list.set_view_transform(cx, &viewport.camera.matrix());
+        }
+        for root in &self.embedded_roots {
+            if let Some(canvas) = root.widget.borrow::<FlowCanvas>() {
+                canvas.finalize_draw_transform(cx);
+            }
+        }
+    }
+
+    fn draw_viewport(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        viewport: CanvasViewport,
+    ) -> DrawStep {
+        let origin_shift = self.camera.origin() - viewport.camera.origin();
+        if origin_shift != dvec2(0.0, 0.0) {
+            let offset = Self::route_point(origin_shift);
+            for cached in self.wire_cache.iter_mut().flatten() {
+                cached.route.translate(offset);
+            }
+            if let Some(preview) = self.preview_wire.as_mut() { preview.route.translate(offset); }
+            if let Some(pending) = self.pending_connect.as_mut() { pending.route.translate(offset); }
+        }
+        if self.camera.render_origin != viewport.camera.render_origin
+            || (!self.boundary_nodes.is_empty()
+                && (self.camera.pan != viewport.camera.pan
+                    || self.camera.scale != viewport.camera.scale
+                    || self.camera.view.pos != viewport.camera.view.pos
+                    || self.camera.view.size != viewport.camera.view.size))
+        {
+            self.wire_cache_dirty = true;
+        }
+        self.camera = viewport.camera;
+        self.drawn_viewport = Some(viewport);
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
         let mut draw_list = self.draw_list.take().unwrap();
         draw_list.begin_always(cx);
-        cx.begin_root_turtle(dvec2(ROOT_SIZE, ROOT_SIZE), Layout::flow_overlay());
-        let local_view = self.camera.local_view();
-        cx.push_clip_rect(local_view);
-        self.draw_background(cx, local_view);
-        let mut heights_changed = false;
-        if let Some(mut graph) = self.graph.take() {
-            self.draw_wires(cx, &graph);
-            let z_order = std::mem::take(&mut self.z_order);
-            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
-                faces.faces().set_z_order(&z_order);
+        cx.begin_unclipped_root_turtle(dvec2(ROOT_SIZE, ROOT_SIZE), Layout::flow_overlay());
+        let local_clip = Rect {
+            pos: self.camera.screen_to_local(viewport.clip.pos),
+            size: viewport.clip.size / self.camera.scale,
+        };
+        cx.push_clip_rect(local_clip);
+        if nonempty(viewport.clip) {
+            self.draw_background(cx, self.camera.local_view());
+        }
+        let mut measured_heights = Vec::new();
+        if nonempty(viewport.clip) {
+            if let Some(mut graph) = self.graph.take() {
+                self.draw_boundaries(cx, &graph);
+                self.draw_wires(cx, scope, &graph);
+                let z_order = std::mem::take(&mut self.z_order);
+                if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+                    // A boundary node has no card and so no face to order.
+                    if self.boundary_nodes.is_empty() {
+                        faces.faces().set_z_order(&z_order);
+                    } else {
+                        let cards: Vec<String> = z_order.iter().filter(|id| !self.boundary_nodes.contains(*id)).cloned().collect();
+                        faces.faces().set_z_order(&cards);
+                    }
+                }
+                for id in &z_order {
+                    let Some(index) = self.node_index.get(id).copied() else {
+                        continue;
+                    };
+                    // Its slot, drawn with the boundaries above, is all of it.
+                    if self.is_boundary(&graph, index) {
+                        self.card_draw_lists[index] = None;
+                        continue;
+                    }
+                    let mut card_list = self.card_draw_lists[index]
+                        .take()
+                        .unwrap_or_else(|| DrawList2d::new(cx));
+                    card_list.begin_always(cx);
+                    let one = std::slice::from_ref(&index);
+                    // One retained list fixes the visual order per card. The
+                    // outline is part of the body shader, so face content and
+                    // then ports/icons/grip necessarily cover it; the label is
+                    // emitted last and remains above the complete card.
+                    self.draw_card(cx, &graph, one);
+                    measured_heights.extend(self.draw_faces(cx, scope, &graph, one));
+                    self.draw_boundary_continuations(cx, &graph, index);
+                    self.draw_locked_face_overlay(cx, &graph, one);
+                    self.draw_overlays(cx, &graph, one);
+                    self.draw_labels(cx, &graph, one);
+                    card_list.end(cx);
+                    self.card_draw_lists[index] = Some(card_list);
+                }
+                self.z_order = z_order;
+                self.draw_top_overlay(cx);
+                if measured_heights.is_empty() {
+                    self.maybe_auto_flip(cx, &mut graph);
+                }
+                self.graph = Some(graph);
             }
-            for id in &z_order {
-                let Some(index) = self.node_index.get(id).copied() else {
-                    continue;
-                };
-                let mut card_list = self.card_draw_lists[index]
-                    .take()
-                    .unwrap_or_else(|| DrawList2d::new(cx));
-                card_list.begin_always(cx);
-                let one = std::slice::from_ref(&index);
-                // One retained list fixes the visual order per card. The
-                // outline is part of the body shader, so face content and
-                // then ports/icons/grip necessarily cover it; the label is
-                // emitted last and remains above the complete card.
-                self.draw_card(cx, &graph, one);
-                heights_changed |= self.draw_faces(cx, scope, &graph, one);
-                self.draw_locked_face_overlay(cx, &graph, one);
-                self.draw_overlays(cx, &graph, one);
-                self.draw_labels(cx, &graph, one);
-                card_list.end(cx);
-                self.card_draw_lists[index] = Some(card_list);
-            }
-            self.z_order = z_order;
-            self.draw_top_overlay(cx);
-            if !heights_changed {
-                self.maybe_auto_flip(cx, &mut graph);
-            }
-            self.graph = Some(graph);
         }
         cx.pop_clip_rect();
-        cx.end_pass_sized_turtle();
+        cx.end_pass_sized_turtle_no_clip();
         draw_list.end(cx);
-        draw_list.set_view_transform(cx, &self.camera.matrix());
         self.draw_list = Some(draw_list);
+        self.finalize_draw_transform(cx);
+        let heights_changed = !measured_heights.is_empty();
         if heights_changed {
+            for (index, height) in measured_heights { self.heights[index] = height; }
             // Wires, ports and outlines were drawn against last frame's heights.
             self.wire_cache_dirty = true;
             self.area.redraw(cx);
         }
-        if self.fit_pending > 0 && !heights_changed {
+        if !self.embedded && self.fit_pending > 0 && !heights_changed {
             self.fit_pending -= 1;
             if self.fit_pending == 0 {
                 self.fit(cx);
@@ -3256,8 +4652,48 @@ impl Widget for FlowCanvas {
         }
         DrawStep::done()
     }
+}
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+impl Widget for FlowCanvas {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // Reserve the rect in the parent and keep the hit area in window
+        // space; everything else lives in the transformed child list.
+        let view = cx.walk_turtle(walk);
+        cx.add_rect_area(&mut self.area, view);
+        let first_layout = self.camera.view.size.x <= 0.0;
+        self.camera.view = view;
+        if first_layout {
+            self.target_pan = self.camera.pan;
+            self.target_scale = self.camera.scale;
+        }
+        self.embedded = false;
+        let mut camera = self.camera;
+        if self.zoom_min < ZOOM_MIN || self.zoom_max > ZOOM_MAX || camera.render_origin.is_some() {
+            camera.rebase_at(view.pos);
+        }
+        self.draw_viewport(cx, scope, CanvasViewport { camera, clip: view })
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let policy = scope.data.get_mut::<NodeFacesScope>()
+            .and_then(|faces| faces.policy_for(self.uid))
+            .unwrap_or(CanvasEventPolicy::ALL);
+        self.handle_event_routed(cx, event, scope, policy);
+    }
+}
+
+impl FlowCanvas {
+    /// Route each new pointer gesture to exactly one level. Suppressing input
+    /// does not suppress animation/status maintenance or release of our drag.
+    /// Navigation-only presses pan without selecting the container beneath.
+    pub fn handle_event_routed(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        _scope: &mut Scope,
+        policy: CanvasEventPolicy,
+    ) {
+        let navigation = policy.navigation && !self.embedded;
         // Popup scroll views run before the canvas and claim the axis they
         // consume. Scroll hits themselves do not consult those flags, so keep
         // the graph still whenever any popup has already taken the wheel.
@@ -3274,7 +4710,7 @@ impl Widget for FlowCanvas {
             }
             let moved = (self.camera.pan - self.target_pan).length() > 0.05
                 || (self.camera.scale - self.target_scale).abs() > 1e-4;
-            if moved {
+            if moved && !self.embedded && self.drag.is_none() {
                 self.camera.pan.x = ease(self.camera.pan.x, self.target_pan.x, dt);
                 self.camera.pan.y = ease(self.camera.pan.y, self.target_pan.y, dt);
                 self.camera.scale = ease(self.camera.scale, self.target_scale, dt);
@@ -3324,69 +4760,103 @@ impl Widget for FlowCanvas {
             self.area.redraw(cx);
         }
         // A palette type armed by a press elsewhere lands on release here.
-        if let Event::MouseUp(e) = event {
-            if let Some(type_name) = self.armed_type.take() {
-                if self.camera.view.contains(e.abs) && !self.point_over_chrome(e.abs) {
-                    let world = self.camera.screen_to_world(e.abs);
-                    cx.widget_action(
-                        self.uid,
-                        FlowCanvasAction::Edit(CanvasEdit::AddType {
-                            type_name,
-                            at: (world.0 - NODE_WIDTH * 0.5, world.1),
-                        }),
-                    );
-                }
-                self.area.redraw(cx);
-            }
-        }
-        if let Event::MouseMove(e) = event {
-            self.cursor = e.abs;
-            let over_chrome = self.point_over_chrome(e.abs);
-            if self.armed_type.is_some() && self.camera.view.contains(e.abs) && !over_chrome {
-                self.area.redraw(cx);
-            }
-            if self.drag.is_none() {
-                let hit = if self.camera.view.contains(e.abs) && !over_chrome {
-                    prioritize_canvas_hit(self.node_index_at(e.abs), self.wire_index_at(e.abs))
-                } else {
-                    CanvasHit::Empty
-                };
-                let (hover, hover_wire) = match hit {
-                    CanvasHit::Card(index) => (Some(index), None),
-                    CanvasHit::Wire(index) => (None, Some(index)),
-                    CanvasHit::Empty => (None, None),
-                };
-                cx.set_cursor(if hover_wire.is_some() {
-                    MouseCursor::Hand
-                } else {
-                    MouseCursor::Default
-                });
-                if hover != self.hover || hover_wire != self.hover_wire {
-                    self.hover = hover;
-                    self.hover_wire = hover_wire;
+        if policy.pointer {
+            if let Event::MouseUp(e) = event {
+                if let Some(type_name) = self.armed_type.take() {
+                    if self.contains_point(e.abs) && !self.point_over_chrome(e.abs) {
+                        let world = self.camera.screen_to_world(e.abs);
+                        cx.widget_action(
+                            self.uid,
+                            FlowCanvasAction::Edit(CanvasEdit::AddType {
+                                type_name,
+                                at: (world.0 - NODE_WIDTH * 0.5, world.1),
+                            }),
+                        );
+                    }
                     self.area.redraw(cx);
                 }
             }
+        }
+        if !policy.pointer && (self.hover.take().is_some() | self.hover_wire.take().is_some()) {
+            self.area.redraw(cx);
+        }
+        if policy.pointer {
+            if let Event::MouseMove(e) = event {
+                self.cursor = e.abs;
+                let over_chrome = self.point_over_chrome(e.abs);
+                if self.armed_type.is_some() && self.contains_point(e.abs) && !over_chrome {
+                    self.area.redraw(cx);
+                }
+                if self.drag.is_none() {
+                    let hit = if self.contains_point(e.abs) && !over_chrome {
+                        prioritize_canvas_hit(self.node_index_at(e.abs), self.wire_index_at(e.abs))
+                    } else {
+                        CanvasHit::Empty
+                    };
+                    let (hover, hover_wire) = match hit {
+                        CanvasHit::Card(index) => (Some(index), None),
+                        CanvasHit::Wire(index) => (None, Some(index)),
+                        CanvasHit::Empty => (None, None),
+                    };
+                    let boundary_hover = hover.is_none() && self.contains_point(e.abs)
+                        && !over_chrome && self.boundary_at(e.abs).is_some();
+                    cx.set_cursor(if hover_wire.is_some() || boundary_hover {
+                        MouseCursor::Hand
+                    } else {
+                        MouseCursor::Default
+                    });
+                    if hover != self.hover || hover_wire != self.hover_wire {
+                        self.hover = hover;
+                        self.hover_wire = hover_wire;
+                        self.area.redraw(cx);
+                    }
+                }
+            }
+        }
+        // Avoid calling hits at all for a suppressed press: even an ignored
+        // FingerDown result can acquire capture before the match below.
+        let accepts_hit = match event {
+            Event::MouseDown(_)
+            | Event::MouseMove(_)
+            | Event::MouseUp(_)
+            | Event::TouchUpdate(_) => policy.pointer || navigation || self.drag.is_some(),
+            Event::Scroll(_) => navigation && self.drag.is_none(),
+            Event::KeyDown(_) | Event::KeyUp(_) => policy.keyboard,
+            _ => false,
+        };
+        if !accepts_hit {
+            return;
+        }
+        if matches!(event, Event::MouseDown(press)
+            if !self.contains_point(press.abs) || self.point_over_chrome(press.abs))
+        {
+            return;
         }
         // Faces receive events first. Co-capture display-only face presses so
         // a click can still open a picture, then promote the canvas capture
         // once movement crosses the card-drag threshold. Interactive face
         // controls retain exclusive capture.
-        let capture_display_press = match event {
-            Event::MouseDown(event) => {
-                self.node_index_at(event.abs).is_some()
-                    && !self.interactive_face_widget_at(cx, event.abs, event.handled.get())
-            }
-            Event::TouchUpdate(event) => event.touches.iter().any(|touch| {
-                touch.state == TouchState::Start
-                    && self.node_index_at(touch.abs).is_some()
-                    && !self.interactive_face_widget_at(cx, touch.abs, touch.handled.get())
-            }),
-            _ => false,
-        };
+        let capture_display_press = policy.pointer
+            && match event {
+                Event::MouseDown(event) => {
+                    self.contains_point(event.abs)
+                        && self.node_index_at(event.abs).is_some()
+                        && !self.interactive_face_widget_at(cx, event.abs, event.handled.get())
+                }
+                Event::TouchUpdate(event) => event.touches.iter().any(|touch| {
+                    touch.state == TouchState::Start
+                        && self.contains_point(touch.abs)
+                        && self.node_index_at(touch.abs).is_some()
+                        && !self.interactive_face_widget_at(cx, touch.abs, touch.handled.get())
+                }),
+                _ => false,
+            };
         match event.hits_with_capture_overload(cx, self.area, capture_display_press) {
             Hit::FingerScroll(fs)
-                if !scroll_is_handled && !self.point_over_chrome(fs.abs) =>
+                if navigation
+                    && !scroll_is_handled
+                    && self.contains_point(fs.abs)
+                    && !self.point_over_chrome(fs.abs) =>
             {
                 // Wheel = zoom anchored at the cursor; a horizontal wheel pans.
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.5 {
@@ -3398,9 +4868,24 @@ impl Widget for FlowCanvas {
                     self.zoom_to(cx, fs.abs, self.target_scale * factor);
                 }
             }
-            Hit::FingerDown(fd) if !self.point_over_chrome(fd.abs) => {
-                cx.set_key_focus(self.area);
-                if let Some(hit) = self.port_at(fd.abs) {
+            Hit::FingerDown(fd)
+                if self.contains_point(fd.abs) && !self.point_over_chrome(fd.abs) =>
+            {
+                // Stop an outstanding camera ease at the displayed frame.
+                self.camera = self.interaction_camera();
+                self.target_pan = self.camera.pan;
+                self.target_scale = self.camera.scale;
+                if policy.keyboard {
+                    cx.set_key_focus(self.area);
+                }
+                if !policy.pointer {
+                    self.drag = Some(Drag::Pan {
+                        start: fd.abs,
+                        origin: self.camera.pan,
+                        navigate: navigation,
+                        select: false,
+                    });
+                } else if let Some(hit) = self.port_at(fd.abs) {
                     let graph = self.graph.as_ref().unwrap();
                     let node = &graph.nodes[hit.node];
                     let hit_id = node.id.clone();
@@ -3412,6 +4897,7 @@ impl Widget for FlowCanvas {
                             ty: node.outputs[hit.port].kind.clone(),
                             pos: fd.abs,
                             target: None,
+                            picked_up: None,
                         });
                         self.compatible = compatible;
                     } else {
@@ -3419,26 +4905,24 @@ impl Widget for FlowCanvas {
                         // its source; a bare one does nothing.
                         let input = &node.inputs[hit.port];
                         if input.connected {
+                            // On an ordered input the wire picked up is the
+                            // last entry (the newest, drawn on top).
                             let source = self
                                 .edges
                                 .iter()
-                                .find(|edge| edge.to == hit.node && edge.to_port == hit.port)
-                                .map(|edge| (edge.from, edge.from_port));
-                            if let Some((from, from_port)) = source {
+                                .filter(|edge| edge.to == hit.node && edge.to_port == hit.port)
+                                .last()
+                                .map(|edge| (edge.from, edge.from_port, edge.key));
+                            if let Some((from, from_port, key)) = source {
                                 let ty = graph.nodes[from].outputs[from_port].kind.clone();
                                 let compatible = self.compatible_for(graph, from, from_port);
-                                let to_node = node.id.clone();
-                                let to_port = input.name.clone();
-                                cx.widget_action(
-                                    self.uid,
-                                    FlowCanvasAction::Edit(CanvasEdit::Disconnect { to_node, to_port }),
-                                );
                                 self.drag = Some(Drag::Wire {
                                     from,
                                     from_port,
                                     ty,
                                     pos: fd.abs,
                                     target: None,
+                                    picked_up: Some(EdgeIndex { from, from_port, to: hit.node, to_port: hit.port, key }),
                                 });
                                 self.compatible = compatible;
                             }
@@ -3472,12 +4956,22 @@ impl Widget for FlowCanvas {
                         self.selected = Some(selection.clone());
                         cx.widget_action(self.uid, FlowCanvasAction::Select(Some(selection)));
                     }
+                    if fd.tap_count >= 2 {
+                        cx.widget_action(self.uid, FlowCanvasAction::Open { node: id.clone() });
+                    }
                     self.drag = Some(Drag::Node {
                         index,
                         start: fd.abs,
+                        initial: origin,
                         origin,
                         moved: false,
                     });
+                } else if let Some(node) = self.boundary_at(fd.abs).map(str::to_string) {
+                    let selection = Some(Selection::Node(node));
+                    if self.selected != selection {
+                        self.selected = selection.clone();
+                        cx.widget_action(self.uid, FlowCanvasAction::Select(selection));
+                    }
                 } else if let Some(index) = self.wire_index_at(fd.abs) {
                     if let Some(selection) = self
                         .graph
@@ -3496,21 +4990,33 @@ impl Widget for FlowCanvas {
                     self.drag = Some(Drag::Pan {
                         start: fd.abs,
                         origin: self.camera.pan,
+                        navigate: navigation,
+                        select: true,
                     });
-                    cx.set_cursor(MouseCursor::Grabbing);
+                    if navigation {
+                        cx.set_cursor(MouseCursor::Grabbing);
+                    }
                 }
                 self.area.redraw(cx);
             }
             Hit::FingerMove(fm) => {
                 let s = self.camera.scale;
                 match self.drag.clone() {
-                    Some(Drag::Pan { start, origin }) => {
-                        self.camera.pan = origin + (fm.abs - start);
-                        self.target_pan = self.camera.pan;
+                    Some(Drag::Pan {
+                        start,
+                        origin,
+                        navigate,
+                        ..
+                    }) => {
+                        if navigate {
+                            self.camera.pan = origin + (fm.abs - start);
+                            self.target_pan = self.camera.pan;
+                        }
                     }
                     Some(Drag::Node {
                         index,
                         start,
+                        initial,
                         origin,
                         moved,
                     }) => {
@@ -3519,20 +5025,15 @@ impl Widget for FlowCanvas {
                         if moved {
                             cx.promote_finger_capture_over(self.area);
                         }
-                        let graph_at = self
-                            .graph
-                            .as_ref()
-                            .and_then(|graph| graph.nodes.get(index))
-                            .map(|node| node.at)
-                            .unwrap_or(FIRST_AT);
                         let origin = if moved {
-                            (graph_at.0 + delta.x / s, graph_at.1 + delta.y / s)
+                            (initial.0 + delta.x / s, initial.1 + delta.y / s)
                         } else {
                             origin
                         };
                         self.drag = Some(Drag::Node {
                             index,
                             start,
+                            initial,
                             origin,
                             moved,
                         });
@@ -3568,6 +5069,7 @@ impl Widget for FlowCanvas {
                         from,
                         from_port,
                         ty,
+                        picked_up,
                         ..
                     }) => {
                         let target = self.port_at(fm.abs).and_then(|hit| {
@@ -3584,6 +5086,7 @@ impl Widget for FlowCanvas {
                             ty,
                             pos: fm.abs,
                             target,
+                            picked_up,
                         });
                     }
                     None => {}
@@ -3597,21 +5100,29 @@ impl Widget for FlowCanvas {
                     MouseCursor::Default
                 });
                 match self.drag.take() {
-                    Some(Drag::Pan { start, .. }) => {
-                        if (fu.abs - start).length() <= DRAG_THRESHOLD && self.selected.is_some() {
+                    Some(Drag::Pan { start, select, .. }) => {
+                        // A press taken away is no click: nothing deselects.
+                        if select
+                            && !fu.cancelled
+                            && (fu.abs - start).length() <= DRAG_THRESHOLD
+                            && self.selected.is_some()
+                        {
                             self.selected = None;
                             cx.widget_action(self.uid, FlowCanvasAction::Select(None));
                         }
                     }
                     Some(Drag::Node {
-                        index, origin, moved, ..
+                        index,
+                        origin,
+                        moved,
+                        ..
                     }) => {
                         if moved {
-                            if let Some(node) = self
-                                .graph
-                                .as_ref()
-                                .and_then(|graph| graph.nodes.get(index))
+                            if let Some(node) =
+                                self.graph.as_mut().and_then(|graph| graph.nodes.get_mut(index))
                             {
+                                node.at = origin;
+                                self.wire_cache_dirty = true;
                                 cx.widget_action(
                                     self.uid,
                                     FlowCanvasAction::Edit(CanvasEdit::Move {
@@ -3623,11 +5134,11 @@ impl Widget for FlowCanvas {
                         }
                     }
                     Some(Drag::Resize { index, size, .. }) => {
-                        if let Some(node) = self
-                            .graph
-                            .as_ref()
-                            .and_then(|graph| graph.nodes.get(index))
+                        if let Some(node) =
+                            self.graph.as_mut().and_then(|graph| graph.nodes.get_mut(index))
                         {
+                            node.size = Some(size);
+                            self.wire_cache_dirty = true;
                             cx.widget_action(
                                 self.uid,
                                 FlowCanvasAction::Edit(CanvasEdit::Resize {
@@ -3637,26 +5148,71 @@ impl Widget for FlowCanvas {
                             );
                         }
                     }
-                    Some(drag @ Drag::Wire { .. }) => self.finish_wire_drag(cx, drag),
+                    Some(Drag::Wire {
+                        from,
+                        from_port,
+                        ty,
+                        picked_up,
+                        ..
+                    }) if fu.cancelled => {
+                        // Taken away (a list or the host took the finger): no
+                        // connect, reconnect or disconnect — a picked-up wire
+                        // stays where it was, nothing was edited yet.
+                        let _ = (from, from_port, ty, picked_up);
+                        self.compatible.clear();
+                    }
+                    Some(Drag::Wire {
+                        from,
+                        from_port,
+                        ty,
+                        picked_up,
+                        ..
+                    }) => {
+                        // Release may arrive outside the clip without a final
+                        // move; never commit the last in-bounds hover target.
+                        let target = self.port_at(fu.abs).and_then(|hit| {
+                            (!hit.output && self.compatible.contains(&(hit.node, hit.port)))
+                                .then_some((hit.node, hit.port))
+                        });
+                        self.finish_wire_drag(
+                            cx,
+                            Drag::Wire {
+                                from,
+                                from_port,
+                                ty,
+                                pos: fu.abs,
+                                target,
+                                picked_up,
+                            },
+                        );
+                    }
                     None => {}
                 }
+                self.preview_wire = None;
                 self.area.redraw(cx);
             }
-            Hit::KeyDown(ke) => match ke.key_code {
+            Hit::KeyDown(ke) if policy.keyboard => match ke.key_code {
                 KeyCode::Delete | KeyCode::Backspace => {
                     if let Some(selection) = self.selected.take() {
                         let edit = match selection {
                             Selection::Node(node) => CanvasEdit::Delete { node },
                             Selection::Edge {
-                                to_node, to_port, ..
-                            } => CanvasEdit::Disconnect { to_node, to_port },
+                                to_node,
+                                to_port,
+                                key,
+                                ..
+                            } => CanvasEdit::Disconnect {
+                                to_node,
+                                to_port,
+                                key,
+                            },
                         };
                         cx.widget_action(self.uid, FlowCanvasAction::Edit(edit));
                         cx.widget_action(self.uid, FlowCanvasAction::Select(None));
                         self.area.redraw(cx);
                     }
                 }
-                KeyCode::Home => self.fit(cx),
+                KeyCode::Home if navigation && self.drag.is_none() => self.fit(cx),
                 KeyCode::Escape => {
                     self.drag = None;
                     self.armed_type = None;

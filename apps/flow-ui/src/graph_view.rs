@@ -92,6 +92,7 @@ pub fn view_of(graph: &Graph) -> GraphView {
                         name: input.port.clone(),
                         kind: input.ty.as_str().to_string(),
                         connected: matches!(input.value, NodeInputValue::Edge(_)),
+                        many: false,
                     })
                     .collect(),
                 outputs: node
@@ -102,6 +103,7 @@ pub fn view_of(graph: &Graph) -> GraphView {
                         kind: output.ty.as_str().to_string(),
                         connected: connected_outputs
                             .contains(&(node.id.as_str(), output.name.as_str())),
+                        many: false,
                     })
                     .collect(),
                 full_bleed: full_bleed(node),
@@ -125,6 +127,7 @@ pub fn view_of(graph: &Graph) -> GraphView {
                 from_port: edge.from_port.clone(),
                 to: edge.to_node.clone(),
                 to_port: edge.to_port.clone(),
+                key: None,
             })
             .collect(),
     }

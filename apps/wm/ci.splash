@@ -1,0 +1,83 @@
+// CI smoke test for the window manager. Run by tools/ci, which finds every
+// `ci.splash` in the checkout and runs it with the `ci` module in scope.
+//
+// The rule: this script decides every input. The vision model never chooses
+// what to send; `ci.accept(image, text)` hands it one grab and one acceptance
+// text, and it answers YES or NO with its reasons. Keep it basic: does the
+// WM come up, switch to macOS, and launch a terminal and a browser.
+
+use mod.std.*
+use mod.ci;
+
+// Said in every acceptance: hidden test instances draw this on every grab.
+let FRAME = "This is a screenshot of one application window taken from a Mac. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. "
+
+let VERDICT = " Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO"
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-wm"] targets: ci.host.targets})
+})
+
+// The WM starts its apps through cargo. Building them first makes that
+// launch instant, so the waits below measure the app, not the compiler.
+ci.step("build the apps the desk will open", fn(){
+    ci.build({package: "makepad-terminal" binary: "terminal"})
+    // The terminal starts its shell through this helper, next to it.
+    ci.build({package: "makepad-agents" binary: "agents"})
+    ci.build({package: "makepad-browser" binary: "browser"})
+})
+
+let wm = ci.launch({package: "makepad-wm" binary: "wm" cwd: "."})
+
+ci.step("desktop is up", fn(){
+    ci.sleep(3.0)
+    wm.no_errors()
+    let start = wm.grab("start")
+    ci.accept(start, FRAME + "The application is a desktop window manager: it draws a whole desktop inside its own window. A desktop is being shown when ALL of these are true: 1. The picture is not blank: it is not a single flat colour edge to edge. 2. There is a bar or panel along the top edge or the bottom edge, running most of the width, that contains small icons or text. 3. There is a large background region, a wallpaper or a flat desktop colour, taking most of the remaining area." + VERDICT)
+    ci.accept(start, FRAME + "Some failures paint text over the whole window: a red or black panel with words such as panic, error, thread, unwrap, failed, backtrace, or a long block of monospace text filling the screen. 1. Name the largest block of text you can see and where it is. 2. Say whether any of those words appear in it. YES means the window shows NO error panel and NO error words. NO means an error panel or those words are visible." + VERDICT)
+})
+
+ci.step("switch to the macOS style", fn(){
+    wm.key("Space", {cmd: true})
+    wm.type_text("macos")
+    wm.key("ReturnKey")
+    wm.wait_log("desktop style macos applied", 15.0)
+    // The log line lands while the menu is still up and the desktop is
+    // still tweening: settle before looking.
+    ci.sleep(2.5)
+    let mac = wm.grab("macos")
+    ci.accept(mac, FRAME + "The application is a desktop window manager that can imitate several desktop styles. A macOS-style desktop has these features: 1. A thin menu bar across the very top of the picture, light or dark, with small text or a small mark at its left end and small status icons such as wifi, sound and battery at its right end; a clock may sit in the middle or at the right. 2. A dock: a single row of many colourful square app icons with rounded corners along the bottom edge, sitting on a translucent rounded shelf that is wider than it is tall. 3. It does NOT have a Windows-style taskbar with a Start button at the bottom-left. YES means points 1, 2 and 3 are all satisfied." + VERDICT)
+    ci.accept(mac, FRAME + "Look only at the top edge of this macOS-style desktop. Describe in three bullet lines: the strip's height compared to the picture, what is at its left end, and what is at its right end. YES means a thin bar runs across the full top edge with something at both ends. NO means no such bar." + VERDICT)
+    ci.accept(mac, FRAME + "Look only at the bottom quarter of this macOS-style desktop. Describe in two bullet lines: whether there is a single row of app icons, and whether that row sits on a rounded shelf or panel near the bottom edge. The row may be short and centred or long and nearly as wide as the picture; both are fine. YES means a row of at least four icons on a shelf near the bottom edge. NO otherwise." + VERDICT)
+
+})
+
+ci.step("launch the terminal", fn(){
+    wm.key("Space", {cmd: true})
+    wm.type_text("terminal")
+    wm.key("ReturnKey")
+    // The menu says what Return did; a launcher that lost the keys or
+    // picked nothing fails here, by name, not at the frame wait below.
+    wm.wait_log("shell menu activate apps.terminal", 20.0)
+    // "launched" fires at spawn; the window is a compile placeholder until
+    // the app draws. The WM says when it has: wait for that line.
+    wm.wait_log("terminal client * first frame", 180.0)
+    ci.sleep(2.0)
+    let shot = wm.grab("terminal")
+    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. For each window you can see, say its rough position and what its content looks like. 2. Say whether at least one of them is a terminal as described. YES means at least one terminal window is open." + VERDICT)
+})
+
+ci.step("launch the browser", fn(){
+    wm.key("Space", {cmd: true})
+    wm.type_text("browser")
+    wm.key("ReturnKey")
+    wm.wait_log("shell menu activate apps.browser", 20.0)
+    wm.wait_log("browser client * first frame", 240.0)
+    ci.sleep(4.0)
+    let shot = wm.grab("browser")
+    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a web page below it with headings, paragraphs, images or a search box. 1. For each window you can see, say its rough position and whether it has an address bar near its top. 2. Say whether at least one of them is a web browser as described. YES means at least one browser window is open." + VERDICT)
+})
+
+wm.no_errors()
+wm.quit()
+nil

@@ -668,7 +668,7 @@ impl Widget for Avatar {
             Layout::flow_down(),
         );
         self.picture
-            .draw_walk(cx, scope, Walk::fixed(inner.size.x, inner.size.y));
+            .draw_walk(cx, scope, Walk::fixed(inner.size.x, inner.size.y))?;
         cx.end_turtle();
         self.picture.draw_bg.opacity = rest_opacity;
 
@@ -717,7 +717,7 @@ impl Widget for Avatar {
                     height: Size::Fixed(dot),
                     ..Default::default()
                 },
-            );
+            )?;
         }
         cx.end_turtle();
         DrawStep::done()
@@ -896,7 +896,7 @@ impl Widget for AvatarGroup {
                 Layout::flow_down(),
             );
             self.more
-                .draw_walk(cx, scope, Walk::fixed(self.plate, self.plate));
+                .draw_walk(cx, scope, Walk::fixed(self.plate, self.plate))?;
             cx.end_turtle();
         }
         DrawStep::done()

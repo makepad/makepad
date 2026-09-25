@@ -37,9 +37,77 @@ pub const fn processes_available() -> bool {
         target_arch = "wasm32",
         target_os = "ios",
         target_os = "tvos",
-        target_os = "android",
         target_env = "ohos"
     )))
+}
+
+/// Android: the APK's extracted native-library directory, where the child
+/// launcher (`libmakepad_launch.so`) and every hostable app's library
+/// (`libapp_<bin>.so`) live — the directory this library was loaded from.
+#[cfg(target_os = "android")]
+pub fn android_native_lib_dir() -> Option<std::path::PathBuf> {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    #[repr(C)]
+    struct DlInfo {
+        dli_fname: *const c_char,
+        dli_fbase: *mut c_void,
+        dli_sname: *const c_char,
+        dli_saddr: *mut c_void,
+    }
+    extern "C" {
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+    let mut info = DlInfo {
+        dli_fname: std::ptr::null(),
+        dli_fbase: std::ptr::null_mut(),
+        dli_sname: std::ptr::null(),
+        dli_saddr: std::ptr::null_mut(),
+    };
+    let found = unsafe { dladdr(android_native_lib_dir as *const c_void, &mut info) };
+    if found == 0 || info.dli_fname.is_null() {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned();
+    std::path::Path::new(&path).parent().map(|dir| dir.to_path_buf())
+}
+
+/// Android: the launcher and the library of the app whose binary name is
+/// `bin`, when the APK ships it.
+#[cfg(target_os = "android")]
+pub fn android_app_binary(bin: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = android_native_lib_dir()?;
+    let launcher = dir.join("libmakepad_launch.so");
+    let lib = dir.join(format!("libapp_{}.so", bin.replace('-', "_")));
+    (launcher.is_file() && lib.is_file()).then_some((launcher, lib))
+}
+
+/// Android: whether hosted apps are built on the phone before they run
+/// (`MAKEPAD_WM_ONDEVICE_BUILD`, set by the APK's entry from the
+/// `debug.makepad.wm.ondevice` property; clients.rs `launch_argv`).
+#[cfg(target_os = "android")]
+pub fn android_ondevice_builds() -> bool {
+    std::env::var("MAKEPAD_WM_ONDEVICE_BUILD").map(|v| v == "1").unwrap_or(false)
+}
+
+/// Android: what a hosted child needs from the WM's environment — the APK
+/// its assets are in, the app's data and cache directories, the density,
+/// and the socket its shared frames come from (os/linux/android/
+/// android_hosted.rs). Called once, before the first child starts.
+#[cfg(target_os = "android")]
+pub fn android_prepare_children(cx: &Cx) {
+    use makepad_widgets::makepad_platform::os::linux::android::android_hosted as hosted;
+    if let OsType::Android(params) = cx.os_type() {
+        set_child_env(hosted::DATA_PATH_ENV, params.data_path.as_ref());
+        set_child_env(hosted::CACHE_PATH_ENV, params.cache_path.as_ref());
+        set_child_env(hosted::DENSITY_ENV, params.density.to_string().as_ref());
+    }
+    // nativeLibraryDir is <app dir>/lib/<abi>; the APK is <app dir>/base.apk.
+    if let Some(apk) = android_native_lib_dir()
+        .and_then(|dir| dir.parent().and_then(|lib| lib.parent()).map(|app| app.join("base.apk")))
+    {
+        set_child_env(hosted::APK_ENV, apk.as_os_str());
+    }
+    hosted::start_frame_server();
 }
 
 /// Whether this build runs ON a phone: the OS draws the status bar, the
@@ -71,6 +139,9 @@ pub const THEME_KEY: &str = "theme";
 /// The key the home page's arranged icon order is kept under (mobile_tiles
 /// `HomeOrder::to_document`).
 pub const HOME_ORDER_KEY: &str = "home.order";
+/// The phone shell's look (`android-light|android-dark|ios-light|ios-dark`),
+/// set by the home screen's switcher.
+pub const SHELL_LOOK_KEY: &str = "shell.look";
 
 /// Remember the theme the person chose: the omarchy-style state file
 /// beside the themes natively (what the next start and every child reads),

@@ -295,7 +295,7 @@ impl Widget for ValueInput {
             Hit::FingerUp(fe) => {
                 let Some((_, _, moved)) = self.drag.take() else { return };
                 self.draw_bg.set_uniform(cx, id!(drag), &[0.0]);
-                if moved {
+                if moved || fe.cancelled {
                     self.draw_bg.redraw(cx);
                     return;
                 }

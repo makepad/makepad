@@ -250,7 +250,16 @@ impl TouchGesture {
                     _ => (),
                 }
             }
-            Hit::FingerUp(_e) => match &mut self.scroll_state {
+            Hit::FingerUp(e) => match &mut self.scroll_state {
+                // Taken away: stop where it is (settling any overscroll), no fling.
+                ScrollState::Drag { .. } if e.cancelled => {
+                    self.scroll_state = if self.needs_pulldown() {
+                        ScrollState::Pulldown { next_frame: cx.new_next_frame() }
+                    } else {
+                        ScrollState::Stopped
+                    };
+                    return TouchMotionChange::ScrollStateChanged;
+                }
                 ScrollState::Drag { samples } => match self.scroll_mode {
                     ScrollMode::Swipe => {
                         let mut last = None;

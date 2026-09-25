@@ -4,7 +4,7 @@ use crate::{
     rig::{read_clip, read_skeleton, write_clip, write_skeleton},
     AnimationClip, Material, Operation, OperationResult, Skeleton,
 };
-use makepad_asset_data::sha256;
+use makepad_core_util::sha256::sha256;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 

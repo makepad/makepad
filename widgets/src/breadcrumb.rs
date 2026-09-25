@@ -272,7 +272,7 @@ impl Widget for Breadcrumb {
 
         let mut x = strip.pos.x;
         let mut first = true;
-        let mut draw_one = |cx: &mut Cx2d, this: &mut Self, index: usize, x: &mut f64, first: &mut bool| {
+        let draw_one = |cx: &mut Cx2d, this: &mut Self, index: usize, x: &mut f64, first: &mut bool| {
             if !*first {
                 this.draw_text.draw_walk(cx, place(*x, sep_w), mid, &sep);
                 *x += sep_w;

@@ -363,6 +363,29 @@ script_mod! {
             border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
 
+            // THE MATERIAL, from the theme. Packed exactly as `ReliefView`
+            // packs its own, so the two read the same way and a stylesheet's
+            // tokens mean the same thing on both. Zero in every stock theme:
+            // at `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -387,6 +410,67 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
+                // THE MATERIAL. Behind a uniform, so a stock theme pays one
+                // compare per draw call and draws exactly what it always did.
+                // A raised rounded view is `ReliefView`'s raised face read
+                // from the theme: the cast shadow, contact and lip go UNDER
+                // the face (the `sdf.clear` idiom of `RoundedShadowView`),
+                // and the face itself is lit by `Material.face`. The shadow
+                // only has somewhere to land where the shape is inset from
+                // the quad -- makepad clips by default, so a material control
+                // buys its overhang out of `border_inset` rather than by
+                // growing its geometry -- and it fades out before the quad
+                // edge so it never ends on a straight line.
+                if self.material > 0.5 {
+                    let p = self.pos * self.rect_size
+                    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                    let lower = vec2(self.border_inset.x + self.border_size, self.border_inset.y + self.border_size)
+                    let upper = vec2(self.rect_size.x - (self.border_inset.z + self.border_size), self.rect_size.y - (self.border_inset.w + self.border_size))
+                    let c = (lower + upper) * 0.5
+                    let h = max((upper - lower) * 0.5, vec2(0.5, 0.5))
+                    // `sdf.box` draws a corner of TWICE its argument, clamped.
+                    let r = min(2.0 * max(1.0, self.border_radius), min(h.x, h.y))
+                    let d = sdf.shape
+                    let e = 0.5
+                    var g = vec2(
+                        Material.sd_box(p + vec2(e, 0.0), c, h, r) - Material.sd_box(p - vec2(e, 0.0), c, h, r),
+                        Material.sd_box(p + vec2(0.0, e), c, h, r) - Material.sd_box(p - vec2(0.0, e), c, h, r)
+                    )
+                    if length(g) > 0.00001 {
+                        g = normalize(g)
+                    } else {
+                        g = vec2(0.0, 1.0)
+                    }
+                    let raise = self.material_relief.z
+                    let off = Material.cast_offset(raise, self.material_light)
+                    let margin = min(min(self.border_inset.x, self.border_inset.y), min(self.border_inset.z, self.border_inset.w)) + self.border_size
+                    // A shadow wider than the margin it falls into would only
+                    // be cut off: its blur stays within reach of the quad's edge.
+                    let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(margin, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                    var under = Material.cast(
+                        d,
+                        Material.sd_box(p - off, c, h, r),
+                        Material.sd_box(p + off, c, h, r),
+                        g, px, raise, raise,
+                        self.material_light, sh, self.material_inner.z,
+                        self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                    )
+                    let qc = self.rect_size * 0.5
+                    let edge = -Material.sd_box(p, qc, qc, min(r + margin, min(qc.x, qc.y)))
+                    under = under * smoothstep(0.0, max(margin, 1.0), edge)
+                    // `clear` premultiplies what it is given.
+                    sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
+                    // Tier 1 is the relief alone: no rim, gloss or specular.
+                    let t2 = step(1.5, self.material)
+                    let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                    let rel = vec4(self.material_relief.x, self.material_relief.y, raise, self.material_relief.w * t2)
+                    let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                    fill_color = vec4(Material.face(
+                        fill_color.rgb, d, g, uv, raise, raise, 0.0, 0.0, 0.0,
+                        self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                        self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                    ), fill_color.a)
+                }
                 sdf.fill_keep(fill_color)
                 if self.border_size > 0.0 {
                     sdf.stroke(stroke_color self.border_size)
@@ -420,7 +504,57 @@ script_mod! {
                 }
                 let sdf = Sdf2d.viewport(p)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
-                sdf.fill(self.color)
+                // `sunken` flips the sign of the relief, and that is the
+                // whole difference between a panel standing off its ground
+                // and a well cut into it: the same material, lit from the
+                // other side, so the lit and shaded shoulders swap. A panel
+                // genuinely is inverted rather than merely lowered, so here
+                // depth and convexity move together -- unlike a pressed cap,
+                // which descends with its face still convex.
+                //
+                // A SURFACE IS SHALLOWER THAN A CONTROL: a panel is a step in
+                // the housing and a cap stands proud OF it, so the panel takes
+                // a fraction of the theme's elevation. Scaling it up instead
+                // makes a whole surface deeper than the buttons sitting on it.
+                //
+                // The panel's face fills its quad, so it has no ground of its
+                // own to throw a shadow on: only the face is lit here. A
+                // sunken one takes the surround's inner shadow, the real
+                // blurred coverage of this rect shifted down-light, the way
+                // `ReliefView` computes it -- a distance falloff would crease
+                // along the corner diagonals.
+                var fill = self.color
+                if self.material > 0.5 {
+                    let elev = mix(self.material_relief.z, -self.material_tune.w, self.sunken) * 0.55
+                    let c = self.rect_size * 0.5
+                    let h = max(c, vec2(0.5, 0.5))
+                    let r = min(2.0 * self.border_radius, min(h.x, h.y))
+                    let d = sdf.shape
+                    let e = 0.5
+                    var g = vec2(
+                        Material.sd_box(p + vec2(e, 0.0), c, h, r) - Material.sd_box(p - vec2(e, 0.0), c, h, r),
+                        Material.sd_box(p + vec2(0.0, e), c, h, r) - Material.sd_box(p - vec2(0.0, e), c, h, r)
+                    )
+                    if length(g) > 0.00001 {
+                        g = normalize(g)
+                    } else {
+                        g = vec2(0.0, 1.0)
+                    }
+                    var insh = 0.0
+                    if self.material_inner.x > 0.001 && elev < 0.0 {
+                        let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                        insh = 1.0 - Material.box_cov(ioff, self.rect_size + ioff, p, max(self.material_inner.y * 0.5, 0.35), r)
+                    }
+                    let t2 = step(1.5, self.material)
+                    let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                    let rel = vec4(self.material_relief.x, self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                    fill = vec4(Material.face(
+                        self.color.rgb, d, g, self.pos, elev, elev, 0.0, insh, 0.0,
+                        self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                        self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                    ), self.color.a)
+                }
+                sdf.fill(fill)
                 return sdf.result
             }
         }

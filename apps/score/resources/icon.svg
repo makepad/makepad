@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <g transform="translate(0 40)">
+  <!-- score: two beamed notes on a staff -->
+  <g fill="#e8eef6" fill-opacity="0.35">
+    <rect x="200" y="380" width="624" height="18" rx="9"/>
+    <rect x="200" y="470" width="624" height="18" rx="9"/>
+    <rect x="200" y="560" width="624" height="18" rx="9"/>
+    <rect x="200" y="650" width="624" height="18" rx="9"/>
+  </g>
+  <g fill="#a98bff">
+    <rect x="428" y="240" width="40" height="430"/>
+    <rect x="688" y="200" width="40" height="380"/>
+    <path d="M428 240 L728 200 L728 290 L428 330 Z"/>
+    <ellipse cx="380" cy="672" rx="92" ry="66" transform="rotate(-22 380 672)"/>
+    <ellipse cx="640" cy="582" rx="92" ry="66" transform="rotate(-22 640 582)"/>
+  </g>
+  </g>
+</svg>

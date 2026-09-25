@@ -1620,6 +1620,7 @@ mod tests {
     /// with motion off, or no time to take, it is there at once.
     #[test]
     fn the_panel_travels_on_every_theme_easing() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         for token in EASE_TOKENS {
             let ease = theme_ease(&mut cx, token);
@@ -1645,6 +1646,7 @@ mod tests {
         };
         assert!(widest(&theme_ease(&mut cx, "motion_ease_spring")) > 1.0, "a spring swings past its place");
         assert!(widest(&theme_ease(&mut cx, "motion_ease_bounce")) <= 1.0, "a bounce never does");
+        });
     }
 
     /// Short of its place the drawer's panel stands out past its edge at its
@@ -1652,6 +1654,7 @@ mod tests {
     /// still on the edge, so no gap opens along the window.
     #[test]
     fn the_drawer_panel_keeps_to_its_edge() {
+        crate::on_test_cx(|| {
         let pass = dvec2(800.0, 600.0);
         let rect = |x: f64, y: f64, w: f64, h: f64| Rect { pos: dvec2(x, y), size: dvec2(w, h) };
 
@@ -1683,23 +1686,27 @@ mod tests {
         assert_eq!(drawer_extent(PanelEdge::Left, DialogSize::Full, pass), 800.0);
         assert_eq!(drawer_extent(PanelEdge::Bottom, DialogSize::Full, pass), 600.0);
         assert_eq!(drawer_extent(PanelEdge::Right, DialogSize::Sm, pass), 260.0);
+        });
     }
 
     /// The drop panel grows away from the button, whichever side the popover
     /// hung it on, and never to less than nothing.
     #[test]
     fn the_drop_panel_grows_away_from_the_button() {
+        crate::on_test_cx(|| {
         assert_eq!(drop_panel_extent(120.0, 0.25, false), (0.0, 30.0));
         assert_eq!(drop_panel_extent(120.0, 0.25, true), (90.0, 30.0));
         assert_eq!(drop_panel_extent(120.0, 1.0, true), (0.0, 120.0));
         assert_eq!(drop_panel_extent(120.0, 1.1, false).1, 132.0);
         assert_eq!(drop_panel_extent(120.0, -0.2, true), (120.0, 0.0));
+        });
     }
 
     /// Resting on the line does not flicker: folded, the menu comes back out
     /// only past the band, and a menu that is out folds on the line itself.
     #[test]
     fn the_switch_has_a_band_so_it_does_not_flicker() {
+        crate::on_test_cx(|| {
         let at = |was, width| next_collapsed(HamburgerMode::Responsive, was, width, 640.0, 16.0);
         assert!(at(false, 639.0));
         assert!(!at(false, 640.0));
@@ -1715,25 +1722,30 @@ mod tests {
         // A negative band is read as none, so the menu never unfolds below
         // the width that folded it.
         assert!(next_collapsed(HamburgerMode::Responsive, true, 630.0, 640.0, -32.0));
+        });
     }
 
     /// Arrows choose as they move, so they must never put the panel away.
     #[test]
     fn arrows_never_close_the_panel() {
+        crate::on_test_cx(|| {
         assert!(!closes_on(true, PickSource::Arrow));
         assert!(closes_on(true, PickSource::Pointer));
         assert!(closes_on(true, PickSource::Confirm));
         for source in [PickSource::Pointer, PickSource::Arrow, PickSource::Confirm] {
             assert!(!closes_on(false, source));
         }
+        });
     }
 
     /// The drop panel is the popover's to open; under a drawer it must not
     /// open at all.
     #[test]
     fn the_drop_surface_lets_the_popover_open_itself() {
+        crate::on_test_cx(|| {
         assert_eq!(popover_trigger_for(HamburgerSurface::Drop), PopoverTrigger::Click);
         assert_eq!(popover_trigger_for(HamburgerSurface::Drawer), PopoverTrigger::Manual);
+        });
     }
 
     /// The three lists are handed equal vectors with the ids a nav list
@@ -1741,6 +1753,7 @@ mod tests {
     /// each list's "same list, no rebuild" short-circuit holds.
     #[test]
     fn three_lists_are_seeded_the_same() {
+        crate::on_test_cx(|| {
         let labels: Vec<String> = ["Home", "Library", "History"].iter().map(|s| s.to_string()).collect();
         let once = seed(&labels);
         let ids: Vec<LiveId> = once.iter().map(|d| d.id).collect();
@@ -1748,20 +1761,24 @@ mod tests {
         assert_eq!(once[1].label, "Library");
         assert_eq!(once, seed(&labels));
         assert!(seed(&[]).is_empty());
+        });
     }
 
     #[test]
     fn snapshot_value_spells_the_state() {
+        crate::on_test_cx(|| {
         assert_eq!(format_snapshot(false, None), "inline");
         assert_eq!(format_snapshot(true, None), "collapsed");
         assert_eq!(format_snapshot(true, Some(HamburgerSurface::Drawer)), "collapsed open drawer");
         assert_eq!(format_snapshot(true, Some(HamburgerSurface::Drop)), "collapsed open drop");
+        });
     }
 
     /// Composed of a drawer, which is a dialog on an edge, a popover and a
     /// nav list, so it must register after all three.
     #[test]
     fn it_registers_after_the_dialog() {
+        crate::on_test_cx(|| {
         let calls = crate::widgets_mod_source();
         let at = calls
             .find("crate::hamburger_menu::script_mod(vm);")
@@ -1771,12 +1788,14 @@ mod tests {
             let base_at = calls.find(&call).unwrap_or_else(|| panic!("{call} is not registered"));
             assert!(base_at < at, "{call} must register before the menu");
         }
+        });
     }
 
     /// Splatted, the variants would be exported bare, and `Drawer` and
     /// `Window` are already widgets.
     #[test]
     fn no_enum_is_splatted() {
+        crate::on_test_cx(|| {
         let source = include_str!("hamburger_menu.rs");
         for name in ["HamburgerSurface", "HamburgerMode", "HamburgerMeasure"] {
             // Built at run time, so this test's own text does not match.
@@ -1785,14 +1804,11 @@ mod tests {
             let registered = format!("mod.widgets.{name} = set_type_default() do #({name}::script_api(vm))");
             assert!(source.contains(&registered), "{name} is not registered");
         }
+        });
     }
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The drawer times its slide against the app clock.
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     fn menu(cx: &mut Cx, source: ScriptMod) -> WidgetRef {
@@ -1849,6 +1865,7 @@ mod tests {
     /// by, and that the defaults are the ones the markup documents.
     #[test]
     fn the_menu_builds_its_parts_under_the_names_it_looks_for() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1916,6 +1933,7 @@ mod tests {
         assert!(!sheet.widget(&cx, ids!(drop_nav)).is_empty());
         let sheet = sheet.borrow::<View>().expect("the drop panel is a view");
         assert!(!sheet.layout.clip_x && !sheet.layout.clip_y, "the drop panel clips its own shadow");
+        });
     }
 
     /// The transform carries the resting rect onto the drawn one, corner to
@@ -1923,6 +1941,7 @@ mod tests {
     /// very small rather than to a zero the text shaders divide by.
     #[test]
     fn a_panel_is_carried_from_where_it_rests_to_where_it_is_drawn() {
+        crate::on_test_cx(|| {
         let pass = dvec2(800.0, 600.0);
         let close = |a: Rect, b: Rect| (a.pos - b.pos).length() < 1e-3 && (a.size - b.size).length() < 1e-3;
         for side in [PanelEdge::Left, PanelEdge::Right, PanelEdge::Top, PanelEdge::Bottom] {
@@ -1947,6 +1966,7 @@ mod tests {
         let flat = rest_to_drawn(rest, Rect { pos: rest.pos, size: dvec2(rest.size.x, 0.0) });
         assert!((flat.v[5] as f64 - MIN_SCALE).abs() < 1e-9, "drawn to nothing, drawn very small: {}", flat.v[5]);
         assert!(flat.v.iter().all(|value| value.is_finite()));
+        });
     }
 
     /// A wide window shows the row and no button; a narrow one the button
@@ -1954,6 +1974,7 @@ mod tests {
     /// same destinations whichever is showing.
     #[test]
     fn the_width_decides_between_the_row_and_the_button() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -1984,12 +2005,14 @@ mod tests {
         assert!(burger.is_valid(&cx) && burger.rect(&cx).size.x > 0.0, "the button is drawn");
         assert!(!inner.part(live_id!(inline_nav)).area().is_valid(&cx), "the row is not");
         assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed"));
+        });
     }
 
     /// A pick in the drawer's list lights the row and the drop list too,
     /// and the menu reports it once, under its own name.
     #[test]
     fn a_pick_in_one_list_lights_the_other_two() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2012,12 +2035,14 @@ mod tests {
         let [row, _, drop] = inner.lists(&cx);
         assert_eq!(row.as_nav_list().selected(), Some(LiveId(3)));
         assert_eq!(drop.as_nav_list().selected(), Some(LiveId(3)));
+        });
     }
 
     /// Opening follows the surface and the cross follows the opening, both
     /// ways, with one report each.
     #[test]
     fn the_burger_turns_with_the_surface_it_opened() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2058,12 +2083,14 @@ mod tests {
         assert!(inner.part(live_id!(burger_pop)).as_popover().is_open());
         assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed open drop"));
         assert!(!inner.part(live_id!(drawer)).as_dialog().is_open(), "the drawer stayed shut");
+        });
     }
 
     /// A panel that is out when the window grows past the breakpoint goes
     /// away on the draw that unfolds the menu, and says so.
     #[test]
     fn unfolding_puts_an_open_panel_away() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2088,6 +2115,7 @@ mod tests {
         let inner = root.borrow::<HamburgerMenu>().unwrap();
         assert!(!inner.part(live_id!(drawer)).as_dialog().is_open());
         assert!(!inner.burger(&cx).as_button().open());
+        });
     }
 
     /// Moves the key focus the way the event loop does between events.
@@ -2215,6 +2243,7 @@ mod tests {
     /// where a press goes straight past it, and it is gone once it has left.
     #[test]
     fn the_drawer_panel_comes_and_goes_on_the_menus_easings() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2280,6 +2309,7 @@ mod tests {
         assert!(drawn(&cx, &sheet).is_none(), "gone once it has left");
         assert_eq!(turn(&root), 0.0, "bars");
         assert!(!root.borrow::<HamburgerMenu>().unwrap().burger(&cx).as_button().open());
+        });
     }
 
     /// The drop panel grows from the button to its resting height while the
@@ -2287,6 +2317,7 @@ mod tests {
     /// back on the menu's overlay after the popover has closed.
     #[test]
     fn the_drop_panel_grows_from_the_button_and_shrinks_back() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2346,12 +2377,14 @@ mod tests {
         finish_travel(&mut cx, &root);
         target.draw(&mut cx, &root, size);
         assert!(drawn(&cx, &sheet).is_none(), "gone once it has left");
+        });
     }
 
     /// Opened again on its way out, the panel turns round from where it had
     /// got to, and the drawer draws it again.
     #[test]
     fn a_panel_called_back_on_its_way_out_turns_round_where_it_is() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2382,6 +2415,7 @@ mod tests {
         let want = drawer_panel_rect(PanelEdge::Left, 260.0, size, out);
         let shown = carried(&motion_transform(&cx, &root, ids!(drawer_motion)), rect);
         assert!((shown.pos.x - want.pos.x).abs() < 0.5, "{shown:?} is not {want:?}");
+        });
     }
 
     /// While the panel is still coming out, a press where a row will rest
@@ -2390,6 +2424,7 @@ mod tests {
     /// last row has not grown into view yet.
     #[test]
     fn a_press_lands_on_the_row_where_it_rests_while_the_panel_comes_out() {
+        crate::on_test_cx(|| {
         for surface in [HamburgerSurface::Drawer, HamburgerSurface::Drop] {
             let mut cx = cx();
             let root = menu(&mut cx, script! {
@@ -2441,12 +2476,14 @@ mod tests {
             assert!(root.borrow::<HamburgerMenu>().unwrap().close_frame.is_some(), "{surface:?}: a pick on the list owes a close");
             assert!(menu.is_open(), "{surface:?}: not taken for a press outside");
         }
+        });
     }
 
     /// The drop panel hangs its 4 points below the button itself, not below
     /// the button's margin.
     #[test]
     fn the_drop_panel_hangs_four_points_below_the_button() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2467,6 +2504,7 @@ mod tests {
         assert!((gap - 4.0).abs() < 0.01, "the panel hangs {gap} points below the button");
         let wrapper = inner.part(live_id!(burger_pop)).area().rect(&cx);
         assert_eq!(wrapper, burger, "the popover's rect is the button's");
+        });
     }
 
     /// A panel brought out from the burger, by a press on it or by Return,
@@ -2474,6 +2512,7 @@ mod tests {
     /// page has been drawn again meanwhile, so Return brings it out again.
     #[test]
     fn the_keyboard_is_back_on_the_burger_after_the_panel_goes_away() {
+        crate::on_test_cx(|| {
         for surface in [HamburgerSurface::Drawer, HamburgerSurface::Drop] {
             let mut cx = cx();
             let root = menu(&mut cx, script! {
@@ -2521,6 +2560,7 @@ mod tests {
             let burger_now = root.borrow::<HamburgerMenu>().unwrap().burger(&cx).area();
             assert!(cx.has_key_focus(burger_now), "{surface:?}: opened with Return, the keyboard comes back too");
         }
+        });
     }
 
     /// A page rebuilt while its menu's drawer is out (a theme switch) takes
@@ -2528,6 +2568,7 @@ mod tests {
     /// back to the page that replaced it.
     #[test]
     fn a_menu_rebuilt_with_its_drawer_out_leaves_the_pointer_and_the_wheel_free() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let source = || script! {
             use mod.prelude.widgets.*
@@ -2549,12 +2590,14 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), None, "the drawer that went still holds the pointer");
         let burger = new.borrow::<HamburgerMenu>().unwrap().burger(&cx).area();
         assert!(cx.is_scrolling_allowed_within(&burger), "the drawer that went still blocks the wheel");
+        });
     }
 
     /// With motion reduced the panel and the bars land at once, on both
     /// surfaces, and nothing is left leaving after a close.
     #[test]
     fn reduced_motion_lands_the_panel_and_the_bars_at_once() {
+        crate::on_test_cx(|| {
         for surface in [HamburgerSurface::Drawer, HamburgerSurface::Drop] {
             let mut cx = cx();
             let root = menu(&mut cx, script! {
@@ -2598,6 +2641,7 @@ mod tests {
             assert!(drawn(&cx, &sheet).is_none(), "{surface:?}: nothing left leaving");
             assert_eq!(turn(&root), 0.0, "{surface:?}: bars at once");
         }
+        });
     }
 
     /// In the drawer the arrows reach the list at once, move the lit
@@ -2605,6 +2649,7 @@ mod tests {
     /// frame after, with the choice the arrows made kept.
     #[test]
     fn arrows_look_through_the_drawer_and_return_puts_it_away() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2647,12 +2692,14 @@ mod tests {
         deliver(&mut cx, &root, &key(KeyCode::ReturnKey));
         assert!(root.borrow::<HamburgerMenu>().unwrap().close_frame.is_none());
         assert!(menu.is_open());
+        });
     }
 
     /// A press and release on the drop panel's list chooses and puts the
     /// panel away on the frame after; a press outside puts it away at once.
     #[test]
     fn a_press_on_the_list_puts_the_drop_panel_away_after_the_choice() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2695,11 +2742,13 @@ mod tests {
         assert_eq!(reported, vec![HamburgerAction::Closed], "a press outside puts it away at once");
         assert!(!menu.is_open());
         assert!(root.borrow::<HamburgerMenu>().unwrap().close_frame.is_none());
+        });
     }
 
     /// While the row is showing there is no panel to open.
     #[test]
     fn a_menu_in_a_row_does_not_open() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = menu(&mut cx, script! {
             use mod.prelude.widgets.*
@@ -2711,6 +2760,7 @@ mod tests {
         let actions = cx.capture_actions(|cx| menu.open(cx));
         assert!(reports(&actions).is_empty());
         assert!(!menu.is_open());
+        });
     }
 
     /// Hidden while a panel is out, the menu puts the panel away at once. A
@@ -2718,6 +2768,7 @@ mod tests {
     /// panel left out would hold the pointer with nothing to dismiss it.
     #[test]
     fn hiding_an_open_menu_puts_its_panel_away() {
+        crate::on_test_cx(|| {
         for surface in [HamburgerSurface::Drawer, HamburgerSurface::Drop] {
             let mut cx = cx();
             let root = menu(&mut cx, script! {
@@ -2745,5 +2796,6 @@ mod tests {
             }
             assert_eq!(cx.sweep_lock_area(), None, "{surface:?}: nothing is left holding the pointer");
         }
+        });
     }
 }

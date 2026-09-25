@@ -807,6 +807,9 @@ pub struct WmDesk {
     #[find] #[live] phone_ui: PhoneSurface,
     #[live] draw_phone: DrawPhoneApp,
     #[rust] phone_frames: HashMap<ClientId, PhoneFrame>,
+    /// The simulated phone's finger: the client a primary mouse press in
+    /// the open app went to as a touch, until the button lifts.
+    #[rust] phone_finger: Option<phone::PhoneFinger>,
     #[rust] desktop_frames: HashMap<ClientId, WindowFrame>,
     #[rust] pub wallpaper: WidgetRef,
     #[rust] compositor: Option<BackdropCompositor>,

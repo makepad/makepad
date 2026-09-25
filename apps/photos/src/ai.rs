@@ -147,7 +147,9 @@ pub fn addable(path: &Path) -> Result<(), String> {
 /// photos lib is a web pilot and must stay light.
 pub fn allowed_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         roots.push(PathBuf::from(home).join("gen"));
     }
     if let Some(user_home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {

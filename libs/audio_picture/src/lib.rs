@@ -7,15 +7,18 @@
 //! the window and the band lived inside the importer, so a widget could only
 //! show a spectrogram somebody else had already baked.
 //!
-//! Zero dependencies: an iterative radix-2 FFT and a coverage rasteriser.
-//! That is what lets a widget crate and a headless importer share it without
+//! Zero dependencies: a radix-2 FFT ([`fft`], also what a live spectrum
+//! reads windows of played samples through) and a coverage rasteriser. That
+//! is what lets a widget crate and a headless importer share it without
 //! either dragging the other's world along.
 
 pub mod composite;
+pub mod fft;
 pub mod spectrogram;
 pub mod wave;
 
 pub use composite::{composite_rgba, CompositeRegions, WAVE_STRIP_FRACTION};
+pub use fft::{log_bands, Fft};
 pub use spectrogram::{ramp, spectrogram_rgba, HD_H, HD_W};
 pub use wave::{wave_rgba, WavePalette};
 

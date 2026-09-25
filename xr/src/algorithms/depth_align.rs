@@ -4143,6 +4143,15 @@ mod tests {
     #[test]
     fn timesliced_solver_matches_reference_dump_and_keeps_steps_bounded() {
         let dump_path = reference_dump_path();
+        for path in [&dump_path, &reference_manual_pose_path(&dump_path)] {
+            if !path.try_exists().expect("reference fixture path should be accessible") {
+                eprintln!(
+                    "skipping reference alignment test: missing local fixture {}",
+                    path.display()
+                );
+                return;
+            }
+        }
         let bytes = fs::read(&dump_path).expect("reference dump should exist");
         let pair = XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)
             .expect("reference dump should decode");

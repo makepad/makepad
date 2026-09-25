@@ -49,7 +49,7 @@ pub mod nav_api;
 pub mod overlays;
 pub mod provisioner;
 pub mod side_panel;
-#[cfg(feature = "bake")]
+#[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
 pub mod testmap;
 #[cfg(not(feature = "demo"))]
 pub mod tools;

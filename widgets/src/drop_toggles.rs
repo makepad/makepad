@@ -915,29 +915,37 @@ mod tests {
 
     #[test]
     fn a_press_on_a_row_works_it_and_is_spent() {
+        crate::on_test_cx(|| {
         assert_eq!(panel_press(true, false, false), PanelPress::Row);
+        });
     }
 
     #[test]
     fn a_press_in_the_panel_while_another_control_holds_the_mouse_works_no_row() {
+        crate::on_test_cx(|| {
         // The control that took the pointer keeps it until the release. The
         // press is still the popover's, so it is swallowed rather than
         // pressed through the panel into whatever is underneath.
         assert_eq!(panel_press(true, false, true), PanelPress::Swallow);
+        });
     }
 
     #[test]
     fn a_press_on_the_chip_is_left_to_the_chips_own_hit() {
+        crate::on_test_cx(|| {
         assert_eq!(panel_press(false, true, false), PanelPress::Chip);
         assert_eq!(panel_press(false, true, true), PanelPress::Chip);
+        });
     }
 
     #[test]
     fn a_press_outside_both_closes_the_popover_whatever_holds_the_mouse() {
+        crate::on_test_cx(|| {
         // Dismissal is not a drag and does not stand down: a popover left up
         // while a control elsewhere is being dragged must still be closable.
         assert_eq!(panel_press(false, false, false), PanelPress::Dismiss);
         assert_eq!(panel_press(false, false, true), PanelPress::Dismiss);
+        });
     }
 }
 
@@ -981,11 +989,8 @@ mod pointer_tests {
         }
     }
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A button to hold the pointer down on, and a chip with three switches
@@ -1058,6 +1063,7 @@ mod pointer_tests {
     /// release, and an open popover lights no row under it.
     #[test]
     fn no_row_lights_under_a_pointer_another_control_holds() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1072,6 +1078,7 @@ mod pointer_tests {
         let at = row_point(&mut cx, &root, &mut target);
         root.handle_event(&mut cx, &drag(at), &mut Scope::empty());
         assert_eq!(hovered(&cx, &root), None, "the row under the drag stays unlit");
+        });
     }
 
     /// And the other half: the chip's own press — the one that opened the
@@ -1079,6 +1086,7 @@ mod pointer_tests {
     /// the chip onto a row lights it.
     #[test]
     fn the_chips_own_press_still_lights_the_row_it_is_dragged_onto() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1091,5 +1099,6 @@ mod pointer_tests {
         let at = row_point(&mut cx, &root, &mut target);
         root.handle_event(&mut cx, &drag(at), &mut Scope::empty());
         assert_eq!(hovered(&cx, &root), Some(1), "its own press lights the row it reaches");
+        });
     }
 }

@@ -17,6 +17,7 @@
 //! Every adapter turns provider-specific tool-call shapes into one JSON
 //! object as text, which is what the engine core routes on.
 
+use crate::engine::cli_model::{CliKind, CliModel};
 use crate::engine::{Model, ModelEvent, ToolDefinition};
 use crate::state::{ProviderChoice, ProviderRow};
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderKind};
@@ -165,6 +166,11 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
         None
     };
     rows.push(ProviderRow { choice: ProviderChoice::Cloud("claude-api".into()), label: "Claude (API)".into(), unavailable: claude_unavailable });
+    // The person's own logged-in CLIs on this machine.
+    for kind in [CliKind::ClaudeCode, CliKind::Codex] {
+        let unavailable = if local_only { Some("Local AI only is on".into()) } else { kind.unavailable() };
+        rows.push(ProviderRow { choice: ProviderChoice::Cloud(kind.slug().into()), label: kind.label().into(), unavailable });
+    }
     rows.push(ProviderRow { choice: ProviderChoice::Cloud("none".into()), label: "No model (tools only)".into(), unavailable: None });
     rows
 }
@@ -201,7 +207,14 @@ pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn 
         ProviderChoice::Local => Ok(Box::new(LocalModel::new(local_model_path()))),
         ProviderChoice::Cloud(slug) if slug == "none" => Ok(Box::new(NoModel)),
         ProviderChoice::Cloud(_) if local_only => Err("Local AI only is on".into()),
-        ProviderChoice::Cloud(slug) if slug == "claude-api" || slug == "claude-cli" => {
+        ProviderChoice::Cloud(slug) if CliKind::from_slug(slug).is_some() => {
+            let kind = CliKind::from_slug(slug).unwrap();
+            match kind.unavailable() {
+                Some(reason) => Err(reason),
+                None => Ok(Box::new(CliModel::new(kind))),
+            }
+        }
+        ProviderChoice::Cloud(slug) if slug == "claude-api" => {
             let key = claude_key().ok_or_else(|| "no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN".to_string())?;
             Ok(Box::new(ClaudeModel::new(DEFAULT_CLAUDE_MODEL, key)))
         }
