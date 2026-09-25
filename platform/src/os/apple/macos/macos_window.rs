@@ -595,8 +595,12 @@ impl MacosWindow {
     }
 
     pub fn restore(&mut self) {
-        unsafe {
-            let () = msg_send![self.window, toggleFullScreen: nil];
+        // `toggleFullScreen:` is a toggle, so without the guard `RestoreWindow` on a
+        // window that was never fullscreen puts it *into* fullscreen.
+        if self.is_fullscreen {
+            unsafe {
+                let () = msg_send![self.window, toggleFullScreen: nil];
+            }
         }
     }
     pub fn hide(&mut self) {

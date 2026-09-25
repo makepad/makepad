@@ -16,6 +16,7 @@
 pub use makepad_widgets;
 use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskHandle};
 use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
+use makepad_widgets::tween::{ClockPolicy, LagSmoothing, TweenClock};
 use makepad_widgets::*;
 
 mod ai_bus;
@@ -216,6 +217,15 @@ script_mod! {
 /// Bar height when the platform reports no window-button rect (Linux,
 /// Windows, and macOS before the first geometry event).
 const BAR_HEIGHT_FALLBACK: f64 = 26.0;
+
+/// The theme crossfade's clock: frame deltas capped at 50 ms (a stall does
+/// not jump the fade), a first frame of 0, and the tween ticker's pause and
+/// time scale (a pause holds the fade; the draw after the resume re-arms it).
+const STYLE_CLOCK: ClockPolicy = ClockPolicy {
+    lag: Some(LagSmoothing::clamp(0.05)),
+    first_dt: 0.0,
+    follow_ticker: true,
+};
 
 /// The bar's height and the left padding its content starts at. macOS puts
 /// its traffic lights on the left; Linux and Windows put caption buttons on
@@ -648,8 +658,10 @@ pub struct App {
     /// from `Cx` when the app is made, before startup.
     #[rust]
     build: WmBuild,
-    #[rust] style_frame: NextFrame,
-    #[rust] style_time: f64,
+    /// Drives the theme crossfade (`WmState::style`): its own frames, deltas
+    /// capped at 50 ms, the first frame after a switch moving 0.
+    #[rust(TweenClock::new(STYLE_CLOCK))]
+    style_clock: TweenClock,
     #[rust] title_press: Option<(ClientId, f64, Vec2d)>,
     #[rust] stylesheet: Option<desktop_style::StyleSheet>,
     #[rust] phone_frame: NextFrame,
@@ -4944,12 +4956,21 @@ impl AppMain for App {
             self.home_order_response(cx, responses);
             self.shell_look_response(cx, responses);
         }
-        if let Some(ne) = self.style_frame.is_event(event) {
+        if let Some(dt) = self.style_clock.tick(cx, event) {
             if self.state.is_some() {
-                let dt=if self.style_time==0.0 {0.0}else{(ne.time-self.style_time).min(0.05)};
-                self.style_time=ne.time;
-                if self.state_mut().style.step(dt) {self.style_frame=cx.new_next_frame();}
+                let moving = self.state_mut().style.step(dt);
+                self.style_clock.finish_frame(cx, moving);
                 self.redraw_all(cx);
+            } else {
+                self.style_clock.stop();
+            }
+        }
+        // A tween ticker pause holds the crossfade where it is; the ticker's
+        // resume redraws everything, and the draw re-arms the fade.
+        if let Event::Draw(_) = event {
+            if self.style_clock.is_held() {
+                let moving = self.state.as_ref().is_some_and(|s| s.style.active());
+                self.style_clock.draw_check(cx, moving);
             }
         }
         if let Event::WindowGeomChange(ev) = event {

@@ -1,42 +1,55 @@
 pub use makepad_widgets::desktop_style::DesktopStyle;
+use makepad_widgets::tween::{Easing, QuickTo};
 use makepad_widgets::*;
 
+/// Seconds of a theme switch.
+const STYLE_SECS: f64 = 0.65;
+
+/// Weight 1 on `style`, 0 elsewhere.
+fn one_hot(style: usize) -> [f64; 8] {
+    let mut w = [0.0; 8];
+    if let Some(x) = w.get_mut(style) {
+        *x = 1.0;
+    }
+    w
+}
+
+/// The crossfade between desktop styles: one weight per `DesktopStyle`
+/// (indexed by its discriminant), moved together by one smoothstep tween
+/// (GSAP `quickTo` with a restart on every select).
 #[derive(Clone, Debug)]
 pub struct StyleTween {
     pub target: DesktopStyle,
     pub dark: bool,
     pub weights: [f64; 8],
-    from: [f64; 8],
-    elapsed: f64,
+    q: QuickTo<[f64; 8]>,
 }
 impl Default for StyleTween {
     fn default() -> Self {
         Self {
             target: DesktopStyle::Omarchy,
             dark: false,
-            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            elapsed: 1.0,
+            weights: one_hot(0),
+            q: QuickTo::at(one_hot(0)),
         }
     }
 }
 impl StyleTween {
+    /// Heads for `style` from the visible mix, over the full duration (even
+    /// when it is the current target: the appearance toggle restarts it).
     pub fn select(&mut self, style: DesktopStyle) {
-        self.from = self.weights;
         self.target = style;
-        self.elapsed = 0.0;
+        self.q
+            .restart(one_hot(style as usize), STYLE_SECS, Easing::SmoothStep);
     }
+    /// Advances by `dt` seconds; `false` once landed (exactly on the target).
     pub fn step(&mut self, dt: f64) -> bool {
-        self.elapsed = (self.elapsed + dt / 0.65).min(1.0);
-        let t = self.elapsed * self.elapsed * (3.0 - 2.0 * self.elapsed);
-        for i in 0..self.weights.len() {
-            self.weights[i] = self.from[i]
-                + ((if i == self.target as usize { 1.0 } else { 0.0 }) - self.from[i]) * t;
-        }
-        self.elapsed < 1.0
+        let moving = self.q.step(dt);
+        self.weights = self.q.value();
+        moving
     }
     pub fn active(&self) -> bool {
-        self.elapsed < 1.0
+        !self.q.is_settled()
     }
     // Desktop-only geometry arrays have no contribution in phone modes.
     pub fn value<const N: usize>(&self, values: [f64; N]) -> f64 {
@@ -50,12 +63,17 @@ impl StyleTween {
     }
     /// The same mix taken at the tween's start.
     pub fn from_value<const N: usize>(&self, values: [f64; N]) -> f64 {
-        self.from.iter().zip(values).map(|(w, v)| w * v).sum()
+        self.q
+            .from_value()
+            .iter()
+            .zip(values)
+            .map(|(w, v)| w * v)
+            .sum()
     }
     /// The eased progress of the running tween, 1 once settled: the
-    /// weights move from `from` to the target along this curve.
+    /// weights move from the start mix to the target along this curve.
     pub fn progress(&self) -> f64 {
-        self.elapsed * self.elapsed * (3.0 - 2.0 * self.elapsed)
+        Easing::SmoothStep.map(self.q.progress())
     }
     pub fn reserved_height(&self) -> f64 {
         self.target_value([0.0, 0.0, 54.0, 34.0, 0.0])

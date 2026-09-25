@@ -86,7 +86,9 @@ use crate::{
     makepad_draw::*,
     overlay_place::{claim_escape, orphan_sweep_locks, release_orphaned_sweep_locks, span_inboard},
     popover::FocusTrap,
+    tween::{tween_ticker_ref, ApplyCache, Stagger, StaggerFrom, ValueKind},
     widget::*,
+    widget_async::{CxSplashVmExt, MAIN_SPLASH_VM_ID},
     widget_tree::CxWidgetExt,
 };
 
@@ -1365,7 +1367,8 @@ pub fn enter_progress(i: usize, elapsed: f64, enter: f64, stagger: f64, ease: &E
         return 1.0;
     }
     // The leg a closed set gives its action `i` when it opens.
-    legs_to(&vec![0.0; i + 1], 1.0, enter, stagger)[i].value(elapsed, ease)
+    let delay = set_stagger(stagger, 1.0).delay(stagger_index(i), stagger_index(i + 1));
+    Leg { from: 0.0, to: 1.0, delay, secs: enter }.value(elapsed, ease)
 }
 
 /// How far action `i` of `n` still is from the button, `elapsed` seconds
@@ -1378,7 +1381,20 @@ pub fn exit_progress(i: usize, n: usize, elapsed: f64, exit: f64, stagger: f64, 
         return 0.0;
     }
     // The leg an open set gives its action `i` when it is put away.
-    legs_to(&vec![1.0; n.max(i + 1)], 0.0, exit, stagger)[i].value(elapsed, ease)
+    let delay = set_stagger(stagger, 0.0).delay(stagger_index(i), stagger_index(n.max(i + 1)));
+    Leg { from: 1.0, to: 0.0, delay, secs: exit }.value(elapsed, ease)
+}
+
+/// The stagger of a set setting off toward `to` (1 out, 0 back), `step`
+/// apart: out in the order the actions were declared, back the other way
+/// round (GSAP `stagger: {each: step, from: "start"}`, `from: "end"`).
+fn set_stagger(step: f64, to: f64) -> Stagger {
+    Stagger::each(step).from(if to > 0.5 { StaggerFrom::Index(0) } else { StaggerFrom::End })
+}
+
+/// An action index or count as a stagger target index.
+fn stagger_index(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 /// `ease` at `x`, exact at both ends: some easings only come near their end
@@ -1397,12 +1413,7 @@ fn eased(ease: &Ease, x: f64) -> f64 {
 /// the `stagger` asked for, shrunk when the whole set would otherwise take
 /// more than [`STAGGER_BUDGET`] longer to open than one action does.
 pub fn stagger_step(n: usize, stagger: f64) -> f64 {
-    let stagger = stagger.max(0.0);
-    if n < 2 {
-        stagger
-    } else {
-        stagger.min(STAGGER_BUDGET / (n - 1) as f64)
-    }
+    Stagger::each_within(stagger, STAGGER_BUDGET).step(stagger_index(n))
 }
 
 /// One stretch of an action's travel, or of the glyph's turn: from where it
@@ -1459,18 +1470,18 @@ impl Leg {
 /// `secs` its distance asks for, so an action nearly home does not crawl
 /// the last of the way and none waits in mid-air for its turn.
 pub fn legs_to(now: &[f64], to: f64, secs: f64, step: f64) -> Vec<Leg> {
-    let n = now.len();
+    let n = stagger_index(now.len());
     let origin = 1.0 - to;
     let fresh = now.iter().all(|v| (v - origin).abs() < 1e-9);
+    let stagger = set_stagger(step, to);
     now.iter()
         .enumerate()
         .map(|(i, &from)| {
             if fresh {
-                let order = if to > 0.5 { i } else { n - 1 - i };
                 Leg {
                     from,
                     to,
-                    delay: order as f64 * step,
+                    delay: stagger.delay(stagger_index(i), n),
                     secs,
                 }
             } else {
@@ -2068,6 +2079,14 @@ pub struct FloatingAction {
     /// The glyph value last written to the main face.
     #[rust]
     turn_written: f64,
+    /// `{draw_bg: {open: ..}}`, built once and rewritten in place for every
+    /// write of the glyph's turn.
+    #[rust]
+    turn_cache: ApplyCache,
+    /// Where each shown action is, kept between draws so a frame does not
+    /// allocate it.
+    #[rust]
+    placed: Vec<f64>,
     /// Where the shown actions rest, laid out by the last draw around
     /// `plan_centre`. Presses and arrow keys read this, never where an
     /// action happens to be mid-travel.
@@ -2325,17 +2344,22 @@ impl FloatingAction {
     /// shown set first: an action shown or hidden while the set is out joins
     /// it where the set is headed.
     fn positions(&mut self, now: f64) -> Vec<f64> {
-        let n = self.shown_items().len();
+        let mut out = Vec::new();
+        self.positions_into(now, &mut out);
+        out
+    }
+
+    /// [`Self::positions`] into `out`, which is cleared first.
+    fn positions_into(&mut self, now: f64, out: &mut Vec<f64>) {
+        let n = (0..self.items.len()).filter(|i| self.item_visible(*i)).count();
         if self.legs.len() != n {
             let rest = Leg::at_rest(if self.open { 1.0 } else { 0.0 });
             self.legs.resize(n, rest);
         }
         let elapsed = now - self.motion_started;
         let (enter, exit) = (self.enter_ease, self.exit_ease);
-        self.legs
-            .iter()
-            .map(|leg| leg.value(elapsed, if leg.to > 0.5 { &enter } else { &exit }))
-            .collect()
+        out.clear();
+        out.extend(self.legs.iter().map(|leg| leg.value(elapsed, if leg.to > 0.5 { &enter } else { &exit })));
     }
 
     fn turn_value(&self, now: f64) -> f64 {
@@ -2360,7 +2384,7 @@ impl FloatingAction {
         let now = cx.seconds_since_app_start();
         let positions = self.positions(now);
         let turn = self.turn_value(now);
-        if self.reduced_motion {
+        if self.reduced_motion || tween_ticker_ref(cx).reduced_motion {
             self.land(to);
         } else {
             let secs = if to > 0.5 { self.enter_secs } else { self.exit_secs };
@@ -2394,17 +2418,22 @@ impl FloatingAction {
         if !turning && (value - self.turn_written).abs() < 1e-9 {
             return;
         }
+        if cx.is_script_vm_held() {
+            // Written on a later draw, once the VM is free.
+            return;
+        }
         let Some(mut button) = self.main.borrow_mut::<Button>() else {
             return;
         };
-        self.turn_written = value;
-        cx.with_vm(|vm| {
-            let face = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(face, live_id!(open).into(), value.into());
-            let apply = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(apply, live_id!(draw_bg).into(), face.into());
-            button.script_apply(vm, &Apply::Animate, &mut Scope::empty(), apply.into());
-        });
+        if self.turn_cache.is_empty() {
+            let vm_id = cx.script_ref_vm_id(&self.source).unwrap_or(MAIN_SPLASH_VM_ID);
+            self.turn_cache = ApplyCache::with_vm_id(vm_id);
+            self.turn_cache.leaf(cx, &[live_id!(draw_bg), live_id!(open)], ValueKind::F64);
+        }
+        self.turn_cache.set(cx, 0, value.into());
+        if self.turn_cache.apply(cx, &mut *button) {
+            self.turn_written = value;
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -2919,7 +2948,8 @@ impl FloatingAction {
             centre,
             window,
         );
-        let positions = self.positions(now);
+        let mut positions = std::mem::take(&mut self.placed);
+        self.positions_into(now, &mut positions);
         let elapsed = now - self.motion_started;
         let inward = interior(self.anchor);
         let labels = labels_shown_in(self.labels, self.dial, plan.row_count());
@@ -2974,6 +3004,7 @@ impl FloatingAction {
                 }
             }
         }
+        self.placed = positions;
         self.plan = plan;
         self.plan_centre = centre;
         if self.moving(now) {
@@ -2996,7 +3027,8 @@ impl Widget for FloatingAction {
         // does this too; this is for a tree with no window above it.
         release_orphaned_sweep_locks(cx);
         // The clock is read only by the events that need it.
-        if self.next_frame.is_event(event).is_some() && (self.open || self.moving(cx.seconds_since_app_start())) {
+        let own_frame = matches!(event, Event::NextFrame(ne) if ne.set.contains(&self.next_frame));
+        if own_frame && (self.open || self.moving(cx.seconds_since_app_start())) {
             self.redraw(cx);
         }
         if self.check_frame.is_event(event).is_some() {

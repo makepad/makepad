@@ -3239,6 +3239,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        if self.script_data.std.host_io_only() { return; }
         // A hosted child has no JVM to start an Intent with: its WM does.
         if super::android_hosted::is_hosted() {
             Cx::send_studio_message(crate::studio::AppToStudio::Relay(

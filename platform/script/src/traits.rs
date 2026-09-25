@@ -612,6 +612,12 @@ pub trait ScriptApply {
     fn script_source(&self) -> ScriptObject {
         ScriptObject::ZERO
     }
+    /// The heap key (`ScriptObjectRef::heap_key`) of the object
+    /// [`ScriptApply::script_source`] names: which VM's heap it lives in. 0
+    /// when unknown (no `#[source]`, or not set yet).
+    fn script_source_heap_key(&self) -> usize {
+        0
+    }
 
     /// Evaluates a ScriptMod and applies the result to self.
     /// The ScriptMod is deduplicated by file/line/column so calling this repeatedly

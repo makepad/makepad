@@ -31,6 +31,7 @@ use crate::{
     menu_bar::{for_each_element, obj_bool, obj_field, obj_string},
     overlay_place::{claim_escape, orphan_sweep_locks, place_overlay, release_orphaned_sweep_locks, PlaceRequest, Placed, Side},
     popover::{PopoverPlacement, PopoverTrigger},
+    tween::{tween_ticker_ref, ClockPolicy, Lerp, QuickTo, Retime, TweenClock},
     widget::*,
 };
 
@@ -1191,15 +1192,15 @@ fn elide(dt: &DrawText, cx: &mut Cx, text: &str, max_w: f64) -> String {
 /// clock runs straight and the ease shapes what is read off it, so a spring
 /// or a bounce can carry the value past its end and back while the clock
 /// still says how much of the run is left.
+///
+/// A [`QuickTo`] (GSAP `quickTo`) retimed by distance, plus the furthest the
+/// value has come this run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnitTween {
-    from: f64,
-    to: f64,
-    /// 0 when the run starts, 1 once it is over.
-    t: f64,
-    secs: f64,
-    ease: Ease,
-    /// The furthest the value has come toward `to` this run, held to 0..1.
+    /// The run: where it started, where it ends, its clock (0 when the run
+    /// starts, 1 once it is over), its length and its ease.
+    q: QuickTo<f64>,
+    /// The furthest the value has come toward the target this run, held to 0..1.
     peak: f64,
 }
 
@@ -1209,10 +1210,13 @@ impl Default for UnitTween {
     }
 }
 
+/// A run from one end of 0..1 to the other takes the full time.
+const UNIT_RETIME: Retime = Retime::ByDistance { per_unit: 1.0 };
+
 impl UnitTween {
     /// At rest on `value`.
     pub fn at(value: f64) -> Self {
-        Self { from: value, to: value, t: 1.0, secs: 0.0, ease: Ease::Linear, peak: value.clamp(0.0, 1.0) }
+        Self { q: QuickTo::at(value), peak: value.clamp(0.0, 1.0) }
     }
 
     /// Head for `to` along `ease`. A run from one end to the other takes
@@ -1221,53 +1225,46 @@ impl UnitTween {
     /// way back is. Aiming where it already heads changes nothing, so a
     /// caller can aim on every frame.
     pub fn aim(&mut self, to: f64, secs: f64, ease: Ease) {
-        if to == self.to {
+        // Checked before the ease is converted, so aiming on every frame
+        // costs one comparison.
+        if to == self.q.target() {
             return;
         }
-        let now = self.value();
-        self.secs = secs.max(0.0) * (to - now).abs().min(1.0);
-        self.from = now;
-        self.to = to;
-        self.ease = ease;
+        let now = self.q.value();
+        if !self.q.aim(to, secs, (&ease).into(), UNIT_RETIME) {
+            return;
+        }
         self.peak = now.clamp(0.0, 1.0);
-        self.t = 0.0;
-        if self.secs <= 0.0 {
+        if self.q.duration() <= 0.0 {
             self.settle();
         }
     }
 
     /// Advance the clock by `dt` seconds. Answers whether the run goes on.
     pub fn step(&mut self, dt: f64) -> bool {
-        if self.t >= 1.0 {
+        if self.q.is_settled() {
             return false;
         }
-        if self.secs <= 0.0 {
+        if !self.q.step(dt) {
+            // The landing step answers false.
             self.settle();
             return false;
         }
-        self.t = (self.t + dt / self.secs).min(1.0);
-        if self.t >= 1.0 {
-            self.settle();
-            return false;
-        }
-        let now = self.value().clamp(0.0, 1.0);
-        self.peak = if self.to >= self.from { self.peak.max(now) } else { self.peak.min(now) };
+        let now = self.q.value().clamp(0.0, 1.0);
+        self.peak = if self.q.target() >= self.q.from_value() { self.peak.max(now) } else { self.peak.min(now) };
         true
     }
 
     /// End the run on its target now. For motion that has been switched off.
     pub fn settle(&mut self) {
-        *self = Self::at(self.to);
+        *self = Self::at(self.q.target());
     }
 
     /// Where the value is now, past either end while an overshooting ease
     /// carries it. Exactly the target once the run is over: a curve read at
     /// its last sample can land a hair off.
     pub fn value(&self) -> f64 {
-        if self.t >= 1.0 {
-            return self.to;
-        }
-        self.from + (self.to - self.from) * self.ease.map(self.t)
+        self.q.value()
     }
 
     /// The furthest the value has come this run, held to 0..1 and never going
@@ -1277,12 +1274,12 @@ impl UnitTween {
     }
 
     pub fn target(&self) -> f64 {
-        self.to
+        self.q.target()
     }
 
     /// Resting on `value`, with nothing of the run left.
     pub fn is_at(&self, value: f64) -> bool {
-        self.t >= 1.0 && self.to == value
+        self.q.is_settled() && self.q.target() == value
     }
 }
 
@@ -1291,20 +1288,25 @@ impl UnitTween {
 /// button group's sliding indicator does the same on a fixed curve; this one
 /// takes the curve as a property and lets an overshooting one carry the rect
 /// past where it is going.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// A [`QuickTo`] (GSAP `quickTo`) over `[x, y, w, h]` with the full time for
+/// every run.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EasedGlide {
-    from: Rect,
-    to: Rect,
-    /// 0 at the start of the glide, 1 once it has arrived.
-    t: f64,
-    secs: f64,
-    ease: Ease,
+    /// The glide over `[x, y, w, h]`: its clock is 0 at the start and 1 once
+    /// it has arrived.
+    q: QuickTo<[f64; 4]>,
+    /// Aimed with no time and not stepped since: it is drawn where the run
+    /// starts, with its clock at 0, until the next step lands it.
+    unstepped: bool,
 }
 
-impl Default for EasedGlide {
-    fn default() -> Self {
-        Self { from: Rect::default(), to: Rect::default(), t: 1.0, secs: 0.0, ease: Ease::Linear }
-    }
+fn rect_lanes(r: Rect) -> [f64; 4] {
+    [r.pos.x, r.pos.y, r.size.x, r.size.y]
+}
+
+fn lanes_rect(l: [f64; 4]) -> Rect {
+    Rect { pos: dvec2(l[0], l[1]), size: dvec2(l[2], l[3]) }
 }
 
 impl EasedGlide {
@@ -1312,66 +1314,70 @@ impl EasedGlide {
     /// to slide from; a new one starts from wherever the rect is drawn now,
     /// so a second aim mid-flight bends the path instead of jumping back.
     pub fn aim(&mut self, target: Rect, secs: f64, ease: Ease) {
-        if self.to == target {
+        let to = rect_lanes(target);
+        if self.q.target() == to {
             return;
         }
         if self.is_empty() {
-            self.from = target;
-            self.to = target;
-            self.t = 1.0;
+            self.q.retarget_from(to, to, secs, (&ease).into());
+            self.q.settle();
+            self.unstepped = false;
         } else {
-            self.from = self.current();
-            self.to = target;
-            self.t = 0.0;
+            self.q.retarget_from(rect_lanes(self.current()), to, secs, (&ease).into());
+            self.unstepped = self.q.is_settled();
         }
-        self.secs = secs.max(0.0);
-        self.ease = ease;
     }
 
     /// Advance the glide by `dt` seconds. Answers whether it is still
     /// moving, so a caller knows whether to ask for another frame.
     pub fn step(&mut self, dt: f64) -> bool {
-        if self.t >= 1.0 {
+        if self.unstepped {
+            self.unstepped = false;
             return false;
         }
-        if self.secs <= 0.0 {
-            self.t = 1.0;
-            return false;
-        }
-        self.t = (self.t + dt / self.secs).min(1.0);
-        self.t < 1.0
+        self.q.step(dt)
     }
 
     /// Where the rect is drawn now, past its target while an overshooting
     /// ease carries it, and never a negative size.
     pub fn current(&self) -> Rect {
-        if self.t >= 1.0 {
-            return self.to;
-        }
-        let rect = lerp_rect(self.from, self.to, self.ease.map(self.t));
+        let lanes = if self.unstepped {
+            <[f64; 4]>::lerp(self.q.from_value(), self.q.target(), self.q.ease().map(0.0))
+        } else if self.q.is_settled() {
+            return self.resting();
+        } else {
+            self.q.value()
+        };
+        let rect = lanes_rect(lanes);
         Rect { pos: rect.pos, size: dvec2(rect.size.x.max(0.0), rect.size.y.max(0.0)) }
     }
 
     /// Where the rect comes to rest.
     pub fn resting(&self) -> Rect {
-        self.to
+        lanes_rect(self.q.target())
     }
 
     /// True while it has never been aimed at anything.
     pub fn is_empty(&self) -> bool {
-        self.to.size.x == 0.0 && self.to.size.y == 0.0
+        let to = self.q.target();
+        to[2] == 0.0 && to[3] == 0.0
     }
 
     /// How far along the glide's clock is, 0 at its start and 1 once it has
     /// arrived. A fade timed against the glide reads this rather than a
     /// second clock that could drift from the first.
     pub fn progress(&self) -> f64 {
-        self.t
+        if self.unstepped {
+            0.0
+        } else {
+            self.q.progress()
+        }
     }
 
     /// Land on the target now. For motion that has been switched off.
     pub fn settle(&mut self) {
-        self.t = 1.0;
+        self.unstepped = false;
+        self.q.settle();
     }
 }
 
@@ -1661,10 +1667,17 @@ pub struct PillNav {
     panel_scroll_max: f64,
     #[rust]
     locked: bool,
+    /// The frame clock every motion steps by: the first frame after a stop
+    /// steps by 0, later ones by the time since the last, capped by the
+    /// tween ticker's lag smoothing (0.1 s unless the app changes it), so a
+    /// stall never makes a motion jump. The ticker's pause and time scale
+    /// apply too.
+    #[rust(TweenClock::new(ClockPolicy::default()))]
+    clock: TweenClock,
+    /// The app-wide reduced-motion switch (the tween ticker's), read on
+    /// every event and draw.
     #[rust]
-    frame: NextFrame,
-    #[rust]
-    last_time: f64,
+    ticker_reduced: bool,
     #[rust]
     timer: Timer,
     #[rust]
@@ -1705,7 +1718,7 @@ impl PillNav {
     // -- reading ----------------------------------------------------------
 
     fn instant(&self) -> bool {
-        self.reduced_motion
+        self.reduced_motion || self.ticker_reduced
     }
 
     fn bar_metrics(&self) -> BarMetrics {
@@ -1851,8 +1864,23 @@ impl PillNav {
 
     /// Something started to move: ask for a frame and a redraw.
     fn kick(&mut self, cx: &mut Cx) {
-        self.frame = cx.new_next_frame();
+        self.clock.arm(cx);
         self.repaint(cx);
+    }
+
+    /// Called while drawing something that still moves: asks for a frame
+    /// again when none is pending (a container that stopped forwarding
+    /// events swallowed it). The last frame time is kept, so the next step
+    /// catches up by the real gap, capped like every step. While the tween
+    /// ticker is paused nothing is asked for: `draw_walk` resumes a clock
+    /// the pause held once it is lifted.
+    fn keep_frames(&mut self, cx: &mut Cx) {
+        if tween_ticker_ref(cx).paused {
+            return;
+        }
+        if !self.clock.is_armed(cx) {
+            self.clock.arm(cx);
+        }
     }
 
     /// Advance every animation by `dt`. Answers whether anything still moves.
@@ -2385,7 +2413,7 @@ impl PillNav {
         }
         panel.aimed_item = Some(panel.item);
         if panel.glide.progress() < 1.0 {
-            self.frame = cx.new_next_frame();
+            self.keep_frames(cx);
         }
 
         // It grows out of its own item's pill, and shrinks back into wherever
@@ -2955,6 +2983,12 @@ fn menu_id() -> LiveId {
 
 impl Widget for PillNav {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.ticker_reduced = tween_ticker_ref(cx).reduced_motion;
+        if self.clock.is_held() {
+            // Stopped by a pause of the tween ticker mid-motion: go on once
+            // it is lifted.
+            self.clock.draw_check(cx, true);
+        }
         if !self.visible {
             self.draw_overlay(cx, Rect::default());
             return DrawStep::done();
@@ -3031,10 +3065,10 @@ impl Widget for PillNav {
         if let Some(target) = target {
             self.highlight.aim(target, self.glide_secs, self.glide_ease);
             if self.highlight.progress() < 1.0 || !self.highlight_fade.is_at(1.0) {
-                self.frame = cx.new_next_frame();
+                self.keep_frames(cx);
             }
         } else if !self.highlight_fade.is_at(0.0) {
-            self.frame = cx.new_next_frame();
+            self.keep_frames(cx);
         }
         // An opacity past 1 brightens what the pill is drawn over, so the
         // fade's swing is cut at both ends.
@@ -3140,16 +3174,12 @@ impl Widget for PillNav {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if let Some(ne) = self.frame.is_event(event) {
-            let dt = if self.last_time > 0.0 { (ne.time - self.last_time).clamp(0.0, 0.1) } else { 0.0 };
+        self.ticker_reduced = tween_ticker_ref(cx).reduced_motion;
+        if let Some(dt) = self.clock.tick(cx, event) {
             let moving = self.advance(dt);
+            // Repainted on every frame, the last one included.
             self.repaint(cx);
-            if moving {
-                self.last_time = ne.time;
-                self.frame = cx.new_next_frame();
-            } else {
-                self.last_time = 0.0;
-            }
+            self.clock.finish_frame(cx, moving);
         }
         if self.timer.is_event(event).is_some() {
             self.timer = Timer::empty();

@@ -1348,6 +1348,9 @@ impl Cx {
                 if with_macos_app(|app| app.all_windows_miniaturized()) {
                     self.ensure_timer0_stopped();
                 } else {
+                    // The links are only paused, not dropped, so the armed flag
+                    // would early-out before anything unpauses them.
+                    self.os.timer0_armed = false;
                     self.ensure_timer0_started();
                 }
             }
@@ -2558,6 +2561,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        if self.script_data.std.host_io_only() { return; }
         // Use the macOS `open` command to open URLs
         let _ = std::process::Command::new("open").arg(url).spawn();
     }

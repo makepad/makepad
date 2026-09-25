@@ -75,6 +75,13 @@ impl ScriptHeap {
         (pod_type, &pod_data.data)
     }
 
+    /// The data words of a pod value, writable in place: a host that keeps a
+    /// pod in an object it owns (a tween pushing a vec4 every frame) rewrites
+    /// it here instead of allocating a new pod per frame.
+    pub fn pod_data_mut(&mut self, pod: ScriptPod) -> &mut [u32] {
+        &mut self.pods[pod].data
+    }
+
     pub fn pod_type_name(&self, ty: ScriptPodType) -> Option<LiveId> {
         let ty = &self.pod_types[ty.index as usize];
         ty.name

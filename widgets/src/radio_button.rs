@@ -471,25 +471,34 @@ impl Widget for RadioButton {
                 if self.animator_in_state(cx, ids!(active.off)) {
                     self.animator_play(cx, ids!(hover.down));
                 }
-                self.set_key_focus(cx);
             }
             // A press taken away (a list scrolled under it) lets go and
             // selects nothing.
             Hit::FingerUp(fe) if fe.cancelled => {
                 self.animator_play(cx, ids!(hover.off));
             }
-            Hit::FingerUp(_fe) => {
-                self.animator_play(cx, ids!(hover.on));
-                if self.animator_in_state(cx, ids!(active.off)) {
-                    self.animator_play(cx, ids!(active.on));
-                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
-                } else if self.independent {
-                    // A boolean of its own: the second click turns it off and
-                    // still speaks, so the host can flip its state.
-                    self.animator_play(cx, ids!(active.off));
-                    cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+            Hit::FingerUp(fe) => {
+                // Touch never gets a hover-out, so only a hovering pointer stays hovered here.
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, ids!(hover.on));
+                } else {
+                    self.animator_play(cx, ids!(hover.off));
                 }
-                // A radio in a GROUP does not toggle off when clicked again.
+                if fe.is_over {
+                    // Taking focus here rather than on the press means a press dragged
+                    // off the button leaves no focus ring behind.
+                    self.set_key_focus(cx);
+                    if self.animator_in_state(cx, ids!(active.off)) {
+                        self.animator_play(cx, ids!(active.on));
+                        cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                    } else if self.independent {
+                        // A boolean of its own: the second click turns it off and
+                        // still speaks, so the host can flip its state.
+                        self.animator_play(cx, ids!(active.off));
+                        cx.widget_action_with_data(&self.action_data, uid, RadioButtonAction::Clicked);
+                    }
+                    // A radio in a GROUP does not toggle off when clicked again.
+                }
             }
             // A radio registers a tab stop and draws a focus ring, and until
             // now no key did anything once you were standing on it: Space,

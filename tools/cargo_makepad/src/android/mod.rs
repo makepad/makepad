@@ -442,10 +442,10 @@ impl HostOs {
 
     fn default_path(&self) -> &'static str {
         match self {
-            Self::WindowsX64 => "./android_33_windows_x64",
-            Self::MacosX64 => "./android_33_macos_x64",
-            Self::MacosAarch64 => "./android_33_macos_aarch64",
-            Self::LinuxX64 => "./android_33_linux_x64",
+            Self::WindowsX64 => "android_33_windows_x64",
+            Self::MacosX64 => "android_33_macos_x64",
+            Self::MacosAarch64 => "android_33_macos_aarch64",
+            Self::LinuxX64 => "android_33_linux_x64",
             Self::Unsupported => panic!(),
         }
     }
@@ -792,16 +792,45 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    if sdk_path.is_none() {
-        sdk_path = Some(format!(
-            "{}/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            host_os.default_path().to_string()
-        ));
-    }
-
     let cwd = std::env::current_dir().unwrap();
-    let sdk_dir = cwd.join(sdk_path.unwrap());
+    let sdk_dir = if let Some(sdk_path) = sdk_path {
+        cwd.join(sdk_path)
+    } else {
+        let dir_name = host_os.default_path();
+        let legacy_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir_name);
+        // Anchor the SDK outside the cargo-makepad source tree so every copy of the binary sees
+        // one NDK path; a compiler path that moves makes cmake wipe its cache and lose settings.
+        let stable_dir = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .filter(|home| !home.is_empty())
+            .map(|home| std::path::PathBuf::from(home).join(".makepad").join(dir_name));
+        match stable_dir {
+            Some(stable_dir) if !stable_dir.exists() && legacy_dir.exists() => {
+                if let Some(parent) = stable_dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::rename(&legacy_dir, &stable_dir) {
+                    Ok(()) => {
+                        println!("Moved the android SDK to {}", stable_dir.display());
+                        println!(
+                            "Its toolchain path changed, so run `cargo clean` if a cmake-based dependency now fails to configure"
+                        );
+                        stable_dir
+                    }
+                    Err(e) => {
+                        println!(
+                            "Couldn't move the android SDK to {} ({e}), using {} in place",
+                            stable_dir.display(),
+                            legacy_dir.display()
+                        );
+                        legacy_dir
+                    }
+                }
+            }
+            Some(stable_dir) => stable_dir,
+            None => legacy_dir,
+        }
+    };
     crate::utils::set_no_icon_requested(no_icon);
 
     match args[0].as_ref() {

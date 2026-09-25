@@ -3019,6 +3019,16 @@ impl Widget for Slider {
 }
 
 impl SliderRef {
+    /// Whether the value field holds the key focus: after any press on the
+    /// slider it does, and a value may be being typed into it. A host that
+    /// writes the value back every frame checks this before it does.
+    pub fn has_text_focus(&self, cx: &Cx) -> bool {
+        match self.borrow() {
+            Some(inner) => cx.has_key_focus(inner.text_input.area()),
+            None => false,
+        }
+    }
+
     pub fn value(&self) -> Option<f64> {
         if let Some(inner) = self.borrow() {
             return Some(inner.value());

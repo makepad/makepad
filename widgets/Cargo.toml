@@ -24,6 +24,7 @@ makepad-ai-hub = { path = "../libs/ai/hub", default-features = false, features =
 makepad-cef = { path = "../libs/cef", optional = true }
 
 makepad-html = { path = "../libs/html", version = "1.0.0" }
+makepad-tween = { path = "../libs/tween" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
 pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark", default-features = false, features = ["simd"] }
 makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0" }

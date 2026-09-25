@@ -227,6 +227,12 @@ impl Widget for ValueInput {
         DrawStep::done()
     }
 
+    /// The number as the field shows it (precision and suffix), so
+    /// `/snap` reads what a person reads.
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(self.format())
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 

@@ -145,7 +145,11 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
+    // Script tweens: the isolate's host (its rooted apply objects), its
+    // callback closures and its handle type go with it.
+    crate::tween_script::gc_vms(cx, &dead);
     crate::desktop_style::gc_heaps(cx,&dead_heaps);
+    crate::cached_widget::gc_heaps(cx, &dead_heaps);
     // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
     // frees that address for the next isolate, and a leftover entry would hand
     // the newcomer a dead heap's handle. See `CxScriptResources::gc_heaps`.
@@ -395,9 +399,22 @@ fn with_splash_budget<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm) -> R) 
     out
 }
 
+/// Runs `f` with a Splash budget if it's an isolate's work and no budget is running yet,
+/// e.g., an event handler dispatched while `with_isolate` has the isolate installed.
+fn with_isolate_budget<R>(vm: &mut ScriptVm, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+    if vm_id != MAIN_SPLASH_VM_ID && vm.bx.run_budget.is_none() {
+        with_splash_budget(vm, f)
+    } else {
+        f(vm)
+    }
+}
+
 pub trait CxSplashVmExt {
     fn alloc_splash_vm(&mut self) -> SplashVmId;
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
+    /// Allocate an isolate whose external I/O must use the host service bridge.
+    fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId;
+    fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId;
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
     fn with_script_vm_id_thread<R>(
         &mut self,
@@ -433,6 +450,17 @@ impl CxSplashVmExt for Cx {
     }
 
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId {
+        self.alloc_splash_vm_with_io(network_enabled, false)
+    }
+
+    fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId {
+        self.alloc_splash_vm_with_io(false, true)
+    }
+
+    fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId {
+        // A nested Splash cannot acquire authority its parent does not have.
+        let host_io_only = host_io_only || self.script_data.std.host_io_only();
+        let network_enabled = network_enabled && !host_io_only;
         ensure_widget_async_hooks_registered(self);
         // Reclaim isolates from dropped Splashes before growing, so the live count
         // tracks the number of live Splash widgets rather than accumulating.
@@ -473,7 +501,7 @@ impl CxSplashVmExt for Cx {
                 }
                 SplashTheme::Dark => {}
             }
-            crate::widgets_mod(&mut vm);
+            crate::widgets_mod_with_host_io(&mut vm, host_io_only);
             // Splash isolates run untrusted-ish mini-app script; strip the
             // ambient-authority modules from the isolate's namespace entirely:
             // filesystem access (`fs`), child processes (`run`), and the resource
@@ -511,7 +539,10 @@ impl CxSplashVmExt for Cx {
             }
             vm.bx
         };
-        let std = std::mem::replace(&mut self.script_data.std, outer_std);
+        let mut std = std::mem::replace(&mut self.script_data.std, outer_std);
+        if host_io_only {
+            std.restrict_to_host_io();
+        }
         self.script_vm = outer_vm;
 
         // Record this isolate's heap identity so any ref minted here (widget
@@ -543,7 +574,7 @@ impl CxSplashVmExt for Cx {
         // isolate's heap.
         let current = self.global::<CxWidgetAsync>().current_vm_id;
         if current == vm_id {
-            return self.with_vm(f);
+            return self.with_vm(|vm| with_isolate_budget(vm, vm_id, f));
         }
         if vm_id == MAIN_SPLASH_VM_ID {
             if current != MAIN_SPLASH_VM_ID {
@@ -569,7 +600,7 @@ impl CxSplashVmExt for Cx {
     ) -> R {
         let current = self.global::<CxWidgetAsync>().current_vm_id;
         if current == vm_id {
-            return self.with_vm_thread(thread_id, f);
+            return self.with_vm_thread(thread_id, |vm| with_isolate_budget(vm, vm_id, f));
         }
         if vm_id == MAIN_SPLASH_VM_ID {
             if current != MAIN_SPLASH_VM_ID {
@@ -634,6 +665,26 @@ impl CxSplashVmExt for Cx {
 /// The isolate (if any) that owns a heap, for host-bridge response routing.
 pub(crate) fn vm_for_heap(cx: &mut Cx, heap_key: usize) -> Option<SplashVmId> {
     cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()
+}
+
+/// Whether `vm_id` can be entered with `with_script_vm_id` right now: the
+/// main VM always, an isolate while it is allocated and parked in the table
+/// (one that is installed on `Cx` is out of the table and answers false).
+pub(crate) fn splash_vm_is_live(cx: &mut Cx, vm_id: SplashVmId) -> bool {
+    vm_id == MAIN_SPLASH_VM_ID
+        || cx
+            .global::<CxWidgetAsync>()
+            .isolated_vms
+            .vms
+            .contains_key(&vm_id)
+}
+
+/// The widget a script `ui` handle names (`ui`, `ui.card`): its uid, read
+/// exactly as the handle's own getter reads it. `None` for any other value.
+pub(crate) fn ui_handle_uid(vm: &ScriptVm, value: ScriptValue) -> Option<WidgetUid> {
+    let handle = value.as_handle()?;
+    vm.downcast_handle_gc::<CxWidgetHandleGc>(handle)
+        .map(|gc| gc.uid)
 }
 
 /// Deliver `Event::NetworkResponses` to a Splash isolate's script (resolving its
@@ -2152,5 +2203,136 @@ mod isolate_tests {
             drop(host);
             pump_widget_async(&mut cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod host_io_tests {
+    use super::*;
+    use crate::splash_host::{take_splash_host_requests, splash_host_respond, SplashRespondOutcome};
+
+    fn context() -> (Box<Cx>, SplashVmId) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let id = cx.alloc_splash_vm_with_host_io();
+        (Box::new(cx), id)
+    }
+
+    #[test]
+    fn host_io_blocks_native_http_sockets_listeners_and_resource_aliases() {
+        let (mut cx, id) = context();
+        // With a network runtime present, only the host I/O guards can refuse these calls.
+        with_isolate(&mut *cx, id, |cx| {
+            let net = cx.net.clone();
+            cx.script_data.std.net = Some(net);
+        });
+        let attempts = [
+            script! { mod.net.http_request(mod.net.HttpRequest{url: "http://127.0.0.1:9/private"}, mod.net.HttpEvents{}) },
+            script! { mod.net.socket_stream(mod.net.SocketStreamOptions{host: "127.0.0.1", port: "9"}) },
+            script! { mod.net.web_socket(mod.net.HttpRequest{url: "ws://127.0.0.1:9/private"}, mod.net.WebSocketEvents{}) },
+            script! { mod.net.http_server(mod.net.HttpServerOptions{listen: "127.0.0.1:0"}, mod.net.HttpServerEvents{}) },
+            script! { mod.prelude.widgets.http_resource("http://127.0.0.1:9/private") },
+            script! { mod.prelude.widgets.file_resource("/etc/passwd") },
+            script! { mod.prelude.widgets.crate_resource("self:../../private") },
+            script! { mod.prelude.widgets.load_all_resources() },
+        ];
+        for attempt in attempts {
+            cx.with_script_vm_id(id, |vm| {
+                vm.bx.captured_errors = Some(Vec::new());
+                let value = vm.eval(attempt);
+                let errors = vm.take_errors();
+                assert!(value.is_err(), "native I/O unexpectedly succeeded");
+                assert!(errors.iter().any(|error| error.contains("host request")), "unexpected errors: {errors:?}");
+            });
+        }
+        with_isolate(&mut *cx, id, |cx| {
+            assert!(cx.script_data.std.data.http_requests.is_empty());
+            assert!(cx.script_data.std.data.http_servers.is_empty());
+            assert!(cx.script_data.std.data.socket_streams.borrow().is_empty());
+        });
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn host_io_restriction_is_inherited_and_restored_after_unwind() {
+        let (mut cx, id) = context();
+        assert!(!cx.script_data.std.host_io_only());
+        let child = with_isolate(&mut *cx, id, |cx| cx.alloc_splash_vm_with_network(true));
+        with_isolate(&mut *cx, child, |cx| {
+            assert!(cx.script_data.std.host_io_only());
+            assert!(cx.script_data.std.net.is_none());
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_isolate(&mut *cx, id, |cx| {
+                assert!(cx.script_data.std.host_io_only());
+                panic!("test guest panic");
+            });
+        }));
+        assert!(result.is_err());
+        assert!(!cx.script_data.std.host_io_only());
+        cx.free_splash_vm(child);
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn host_io_does_not_register_widgets_with_ambient_io() {
+        let (mut cx, id) = context();
+        cx.with_script_vm_id(id, |vm| {
+            let widgets = vm.module(id!(widgets));
+            let mut keys = vec![
+                id!(Window), id!(WindowBase), id!(ScreenCap), id!(ScreenCapBase),
+                id!(WindowMenu), id!(WindowMenuBase), id!(CachedWidget),
+            ];
+            if cfg!(feature = "cef") {
+                keys.extend([id!(Browser), id!(BrowserBase)]);
+            }
+            if cfg!(feature = "maps") {
+                keys.extend([id!(MapView), id!(MapViewBase)]);
+            }
+            for key in keys {
+                let value = vm.bx.heap.value(widgets, key.into(), NoTrap);
+                assert!(value.is_nil() || value.is_err(), "unsafe widget {key:?} was registered");
+            }
+        });
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn installed_isolates_run_with_a_budget() {
+        let (mut cx, id) = context();
+        // E.g., an `on_change` handler dispatched while a restricted Splash has its isolate installed.
+        let is_budgeted = with_isolate(&mut *cx, id, |cx| {
+            cx.with_script_vm_id(id, |vm| vm.bx.run_budget.is_some())
+        });
+        assert!(is_budgeted);
+        cx.free_splash_vm(id);
+    }
+
+    #[test]
+    fn host_io_keeps_host_requests_and_exact_isolate_completion() {
+        let (mut cx, id) = context();
+        let heap = cx.with_script_vm_id(id, |vm| vm.bx.heap.heap_key());
+        crate::splash_host::set_tag_for_heap(heap, Some("trusted-host-tag".into()));
+        cx.with_script_vm_id(id, |vm| {
+            vm.eval(script! {
+                mod.observed = false
+                mod.host.request("network.http", {url: "https://example.invalid/"}, fn(result) {
+                    mod.observed = result.is_ok
+                })
+            });
+            assert!(vm.take_errors().is_empty());
+        });
+        let requests = take_splash_host_requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.app_tag, "trusted-host-tag");
+        assert_eq!(request.heap_key, heap);
+        assert_eq!(request.service, "network.http");
+        assert_eq!(splash_host_respond(&mut cx, heap, request.req_id, Ok("{}")), SplashRespondOutcome::Delivered);
+        cx.with_script_vm_id(id, |vm| {
+            assert_eq!(vm.eval(script! { mod.observed }), true.into());
+        });
+        assert_eq!(splash_host_respond(&mut cx, heap, request.req_id, Ok("{}")), SplashRespondOutcome::NoCallback);
+        cx.free_splash_vm(id);
     }
 }

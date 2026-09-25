@@ -304,9 +304,18 @@ fn derive_script_impl_inner(
                 .ident(&source_field.name)
                 .add(".as_object()");
             tb.add("    }");
+            tb.add("    fn script_source_heap_key(&self) -> usize {self.")
+                .ident(&source_field.name)
+                .add(".heap_key()");
+            tb.add("    }");
         } else if let Some(deref_field) = deref_field {
             tb.add("    fn script_source(&self) -> ScriptObject {")
                 .add("ScriptApply::script_source(&self.")
+                .ident(&deref_field.name)
+                .add(")");
+            tb.add("    }");
+            tb.add("    fn script_source_heap_key(&self) -> usize {")
+                .add("ScriptApply::script_source_heap_key(&self.")
                 .ident(&deref_field.name)
                 .add(")");
             tb.add("    }");

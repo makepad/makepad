@@ -9,6 +9,7 @@ pub use makepad_script::script_eval;
 pub use makepad_script::{ScriptValue, ScriptVm};
 
 pub use makepad_html;
+pub use makepad_tween;
 #[cfg(feature = "pdf")]
 pub use makepad_pdf_parse;
 
@@ -17,6 +18,8 @@ pub use makepad_draw::makepad_zune_png;
 
 // Core modules (used internally first)
 pub mod animator;
+pub mod tween;
+pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
 pub mod app_icon;
@@ -107,6 +110,7 @@ pub mod tip;
 pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
+pub mod ease_editor;
 pub mod fab_controls;
 pub mod menu_bar;
 
@@ -381,6 +385,7 @@ pub use crate::{
     scroll_shadow::*,
     slide_panel::*,
     number_field::*,
+    ease_editor::*,
     range_slider::*,
     slider::*,
     slides_view::*,
@@ -601,6 +606,8 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
     crate::animator::script_mod(vm);
+    // `mod.tween` (GSAP-style tweens from script), once per VM.
+    crate::tween_script::script_mod(vm);
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
@@ -669,6 +676,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             ..mod.animator.Play,
             ..mod.animator.Ease,
             draw:mod.draw,
+            tween:mod.tween,
             MouseCursor:mod.draw.MouseCursor
         }
     });
@@ -710,6 +718,11 @@ pub fn theme_mod(vm: &mut ScriptVm) {
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
+    let host_io_only = vm.cx().script_data.std.host_io_only();
+    widgets_mod_with_host_io(vm, host_io_only);
+}
+
+pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
     crate::desktop_style::apply_theme(vm);
     // ...and the person's own edits over everything -- base, sheet or mix.
     // (A global has already rebuilt the base in `theme_mod`; its pin here
@@ -766,7 +779,7 @@ true
     crate::alert::script_mod(vm);
     crate::divider::script_mod(vm);
     #[cfg(feature = "cef")]
-    crate::browser::script_mod(vm);
+    if !host_io_only { crate::browser::script_mod(vm); }
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
     crate::image::script_mod(vm);
@@ -786,16 +799,17 @@ true
             visible: false
         }
     });
-    crate::window_menu::script_mod(vm);
+    // A guest must not replace the app's own menu bar.
+    if !host_io_only { crate::window_menu::script_mod(vm); }
     crate::nav_control::script_mod(vm);
     crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
-    crate::screen_cap::script_mod(vm);
+    if !host_io_only { crate::screen_cap::script_mod(vm); }
     // The AI slot before the window: its DSL names `AiChatSlot`.
     crate::ai_slot::script_mod(vm);
     crate::app_icon::script_mod(vm);
     crate::cursor::script_mod(vm);
-    crate::window::script_mod(vm);
+    if !host_io_only { crate::window::script_mod(vm); }
 
     crate::popup_menu::script_mod(vm);
     crate::drop_down::script_mod(vm);
@@ -811,6 +825,7 @@ true
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
+    crate::ease_editor::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
@@ -908,7 +923,8 @@ true
     crate::text_flow::script_mod(vm);
     crate::log_list::script_mod(vm);
 
-    crate::cached_widget::script_mod(vm);
+    // Its singletons would let a guest reach widgets the host or other isolates cached.
+    if !host_io_only { crate::cached_widget::script_mod(vm); }
     crate::root::script_mod(vm);
 
     crate::tab_close_button::script_mod(vm);
@@ -952,7 +968,7 @@ true
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
     #[cfg(feature = "maps")]
-    crate::map::view::script_mod(vm);
+    if !host_io_only { crate::map::view::script_mod(vm); }
     crate::math_view::script_mod(vm);
 
     // The overlay layer host registers LAST, after every layer it owns
