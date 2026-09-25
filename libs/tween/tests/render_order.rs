@@ -282,10 +282,19 @@ fn golden_zero_duration_standalone() {
         "z2 totalTime(0)"
     );
     assert_eq!(val(&e, 2, X), 5.0);
+    // The paused tween stays addressable after completing (GSAP state).
+    assert_eq!(
+        e.anim_ref(z2).total_progress(),
+        1.0,
+        "z2 after totalTime(0)"
+    );
+    assert!(e.anim_ref(z2).paused());
     e.anim(z2).set_progress(1.0, Emit::Fire);
     assert_eq!(names.drain(&mut e).0, tr.ops[3].fired_all, "z2 progress(1)");
+    assert_eq!(e.anim_ref(z2).total_progress(), 1.0, "z2 progress(1)");
     e.anim(z2).restart(false, Emit::Suppress);
     assert_eq!(names.drain(&mut e).0, tr.ops[4].fired_all, "z2 restart");
+    assert!(!e.anim_ref(z2).paused(), "z2 restart un-pauses it");
     // z3: gsap.set with onComplete.
     let z3 = e.set(
         one(3),
@@ -1060,6 +1069,47 @@ fn label_events_are_opt_in_and_ordered() {
     assert_eq!(labels, [Tag(2), Tag(1), Tag(3)]);
     e.anim(tl).set_total_time(1.5, Emit::Suppress);
     assert!(names.raw(&mut e).is_empty());
+}
+
+/// Labels moved after they were added (re-added at a new time, or shifted
+/// by `shift_children`) are still reported in time order.
+#[test]
+fn moved_labels_are_reported_in_time_order() {
+    let mut e = TweenEngine::new();
+    let mut names = Names::new();
+    let tl = e.timeline(TimelineOpts::new().paused(true).watch_labels());
+    e.tl(tl)
+        .to(one(0), &[to(X, 1.0)], lin(8.0), Position::END)
+        .add_label(Tag(1), 1.0)
+        .add_label(Tag(2), 2.0)
+        .add_label(Tag(1), 3.0) // moves label 1 after label 2
+        .add_label(Tag(3), 0.5);
+    let crossed = |e: &mut TweenEngine, names: &mut Names| -> Vec<Tag> {
+        names
+            .raw(e)
+            .iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::Label(l) => Some(l),
+                _ => None,
+            })
+            .collect()
+    };
+    names.raw(&mut e);
+    e.anim(tl).set_total_time(3.5, Emit::Fire);
+    assert_eq!(crossed(&mut e, &mut names), [Tag(3), Tag(2), Tag(1)]);
+    // Labels from 1.0 on move by +2: label 3 (0.5) stays first.
+    e.tl(tl).shift_children(2.0, true, 1.0);
+    assert_eq!(e.anim_ref(tl).label_time(Tag(2)), Some(4.0));
+    e.anim(tl).set_total_time(0.0, Emit::Suppress);
+    names.raw(&mut e);
+    e.anim(tl).set_total_time(5.5, Emit::Fire);
+    assert_eq!(crossed(&mut e, &mut names), [Tag(3), Tag(2), Tag(1)]);
+    // A negative shift moves label 2 (4.0 -> 0.0) before label 3 (0.5);
+    // label 1 lands at 1.0. Travelling back to 0 reports them descending.
+    e.tl(tl).shift_children(-4.0, true, 1.0);
+    assert_eq!(e.anim_ref(tl).label_time(Tag(2)), Some(0.0));
+    e.anim(tl).set_total_time(0.0, Emit::Fire);
+    assert_eq!(crossed(&mut e, &mut names), [Tag(1), Tag(3), Tag(2)]);
 }
 
 #[test]

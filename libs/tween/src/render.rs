@@ -13,6 +13,21 @@ use crate::spec::EventMask;
 use crate::value::{decode, encode_pair, lerp_lanes, ColorSpace, Rgba, TweenValue, ValueKind};
 use crate::{animation_cycle, round7, TINY};
 
+/// One child walk: the parent's new and previous local times, its incoming
+/// total time (negative before its start), the render flags, a child to skip
+/// (the pause being stopped on) and the lending stagger group (see
+/// [`TweenEngine::render`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Walk {
+    pub time: f64,
+    pub prev_time: f64,
+    pub total: f64,
+    pub suppress: bool,
+    pub force: bool,
+    pub skip: u32,
+    pub yo: u32,
+}
+
 impl TweenEngine {
     /// Renders node `n` at its own total time `total` (GSAP `render()`).
     /// `yo` is the stagger group whose odd yoyo iteration lends its yoyo ease
@@ -121,26 +136,32 @@ impl TweenEngine {
         // needs no fmod.
         let rem = if tt < cycle { tt } else { tt % cycle };
         let mut time = round7(rem);
-        let mut it;
+        let it;
+        // The yoyo parity comes from the exact (f64) iteration: the u32
+        // count saturates on a repeat-forever animation sought very far.
+        let odd;
         if tt == h.tdur {
             it = if c.repeat > 0 {
                 c.repeat as u32
             } else {
                 animation_cycle(tt, cycle)
             };
+            odd = it & 1 == 1;
             time = dur;
         } else {
             let q = round7(quot);
-            let w = crate::floor_small(q);
-            it = w as u32;
+            let mut w = crate::floor_small(q);
             if w != 0.0 && w == q {
                 time = dur;
-                it = it.saturating_sub(1);
+                w -= 1.0;
             } else if time > dur {
                 time = dur;
             }
+            it = w as u32;
+            // Exact: w <= INFINITE / 1e-7 is far below 2^63.
+            odd = (w as u64) & 1 == 1;
         }
-        let yodd = h.flags & F_YOYO != 0 && it & 1 == 1;
+        let yodd = h.flags & F_YOYO != 0 && odd;
         if yodd {
             time = dur - time;
         }
@@ -343,18 +364,50 @@ impl TweenEngine {
             self.cold[g as usize].iztime = total;
             prev = 0.0;
         }
-        self.walk(g, tt, prev, total, suppress, force, NIL, yo);
+        let w = Walk {
+            time: tt,
+            prev_time: prev,
+            total,
+            suppress,
+            force,
+            skip: NIL,
+            yo,
+        };
+        self.walk(g, w);
+    }
+
+    /// GSAP `_parentPlayheadIsBeforeStart`: some linked, unpaused, initted,
+    /// unlocked ancestor's real playhead ([`Self::raw_time_pure`]) is before
+    /// its own start.
+    fn parent_playhead_before_start(&self, n: u32) -> bool {
+        let mut p = self.cold[n as usize].parent;
+        while p != NIL {
+            let h = &self.hot[p as usize];
+            if h.ts == 0.0 || h.flags & F_INITTED == 0 || h.flags & F_LOCK != 0 {
+                return false;
+            }
+            if self.raw_time_pure(p) < 0.0 {
+                return true;
+            }
+            p = self.cold[p as usize].parent;
+        }
+        false
     }
 
     /// GSAP `_renderZeroDurationTween` (5.9, reconciled): sets, calls, pauses
-    /// and zero-duration tweens. At exactly 0 the ratio is 0 only when the
-    /// node or its parent is reversed; `ztime` fires on arriving at or
-    /// leaving the exact spot, never both.
+    /// and zero-duration tweens. At exactly 0 the ratio is 0 when the node or
+    /// its parent is reversed, or when the node sits at its parent's start
+    /// while an ancestor's real playhead is before that ancestor's start (a
+    /// wrap sweep renders a nested timeline at exactly 0 although the outer
+    /// playhead is before it); `ztime` fires on arriving at or leaving the
+    /// exact spot, never both.
     pub(crate) fn render_zero(&mut self, n: u32, total: f64, suppress_in: bool, force: bool) {
         let h = self.hot[n as usize];
         let dp = self.cold[n as usize].dp;
         let reversed = h.ts < 0.0 || (dp != NIL && self.hot[dp as usize].ts < 0.0);
-        let ratio1 = !(total < 0.0 || (total == 0.0 && reversed));
+        let ratio1 = !(total < 0.0
+            || (total == 0.0
+                && (reversed || (h.start == 0.0 && self.parent_playhead_before_start(n)))));
         let prev1 = h.flags & F_RATIO1 != 0;
         let zt = self.cold[n as usize].ztime;
         if !(ratio1 != prev1 || force || zt == TINY || (total == 0.0 && zt != 0.0)) {
@@ -538,11 +591,14 @@ impl TweenEngine {
                 }
             }
             {
+                // GSAP `_act = !!timeScale`: a rendered, unpaused timeline
+                // stays active (every walk of its parent renders it, even
+                // before its start) until it completes or is removed.
                 let hm = &mut self.hot[n as usize];
                 hm.ttime = tt;
                 hm.time = time;
                 hm.iter = it;
-                if tt > 0.0 && tt < tdur {
+                if time_scale != 0.0 {
                     hm.flags |= F_ACT;
                 } else {
                     hm.flags &= !F_ACT;
@@ -559,7 +615,16 @@ impl TweenEngine {
             if !suppress && self.cold[n as usize].events.has(EventMask::LABELS) {
                 self.emit_labels(n, prev_time, time);
             }
-            self.walk(n, time, prev_time, total, suppress, force, pause, NIL);
+            let w = Walk {
+                time,
+                prev_time,
+                total,
+                suppress,
+                force,
+                skip: pause,
+                yo: NIL,
+            };
+            self.walk(n, w);
             if pause != NIL && !suppress {
                 // add_pause: the playhead stops exactly on it.
                 let forward = time >= prev_time;
@@ -585,8 +650,7 @@ impl TweenEngine {
             {
                 self.remove_from_parent(n, true);
             }
-            if !suppress
-                && !(total < 0.0 && prev_time == 0.0)
+            if !(suppress || (total < 0.0 && prev_time == 0.0))
                 && (tt != 0.0 || prev_time != 0.0 || tdur == 0.0)
             {
                 let kind = if tt == tdur && total >= 0.0 {
@@ -602,22 +666,25 @@ impl TweenEngine {
     /// The child walk shared by timelines and groups (5.11): forward in start
     /// order (stopping at the first child that has not started and is not in
     /// flight), backward from the last child.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn walk(
-        &mut self,
-        n: u32,
-        time: f64,
-        prev_time: f64,
-        total: f64,
-        suppress: bool,
-        force: bool,
-        skip: u32,
-        yo: u32,
-    ) {
+    pub(crate) fn walk(&mut self, n: u32, w: Walk) {
+        let Walk {
+            time,
+            prev_time,
+            total,
+            suppress,
+            force,
+            skip,
+            yo,
+        } = w;
+        // Whether a rendered child is left active with its start after the
+        // playhead (a nested timeline stays active once rendered, GSAP
+        // `_act = !!timeScale`): the next forward walk must then visit it.
+        let mut ahead = false;
         if time >= prev_time && total >= 0.0 {
             // GSAP visits every child (`_act || time >= _start`). Sorted by
-            // start, nothing after the first unstarted child has started,
-            // and only a control can leave one ACT ahead (F_ACT_AHEAD).
+            // start, nothing after the first unstarted child has started, and
+            // F_ACT_AHEAD marks a timeline that may hold an active child
+            // ahead of the playhead; only then does the walk go on past it.
             let full = self.has(n, F_ACT_AHEAD);
             let mut c = self.cold[n as usize].first;
             while c != NIL {
@@ -627,13 +694,17 @@ impl TweenEngine {
                     if h.flags & F_ACT != 0 || time >= h.start {
                         let ctt = self.child_time(time, c);
                         self.render(c, ctt, suppress, force, yo);
-                    } else if !full {
+                        // Only a child rendered ahead of the playhead can be
+                        // left active there (checked after its render).
+                        ahead |= h.start > time && self.has(c, F_ACT);
+                    } else if !full && h.start > time {
+                        // (A NaN start compares false: the walk goes on.)
                         break;
                     }
                 }
                 c = next;
             }
-            if full {
+            if full && !ahead {
                 self.hot[n as usize].flags &= !F_ACT_AHEAD;
             }
         } else {
@@ -649,9 +720,13 @@ impl TweenEngine {
                 {
                     let ctt = self.child_time(adj, c);
                     self.render(c, ctt, suppress, force, yo);
+                    ahead |= h.start > time && self.has(c, F_ACT);
                 }
                 c = prev;
             }
+        }
+        if ahead {
+            self.hot[n as usize].flags |= F_ACT_AHEAD;
         }
     }
 
@@ -681,63 +756,38 @@ impl TweenEngine {
     }
 
     /// Label events (non-GSAP, opt-in): every label crossed, in the order
-    /// of travel. No allocation: a selection scan over the label list.
+    /// of travel (labels at the same time in the order they were added).
+    /// The timeline's labels are a time-sorted range: two binary searches
+    /// find the crossed ones, O(log L + crossed), no allocation.
     fn emit_labels(&mut self, n: u32, prev: f64, time: f64) {
         if time == prev {
             return;
         }
-        let forward = time > prev;
-        // (time, index) of the last emitted label, lexicographic.
-        let mut last: Option<(f64, usize)> = None;
-        loop {
-            let mut best: Option<(f64, usize)> = None;
-            for (i, l) in self.labels.iter().enumerate() {
-                if l.tl != n {
-                    continue;
-                }
-                let inside = if forward {
-                    l.time > prev && l.time <= time
-                } else {
-                    l.time >= time && l.time < prev
-                };
-                if !inside {
-                    continue;
-                }
-                let key = (l.time, i);
-                let after_last = match last {
-                    None => true,
-                    Some(k) => {
-                        if forward {
-                            key.0 > k.0 || (key.0 == k.0 && key.1 > k.1)
-                        } else {
-                            key.0 < k.0 || (key.0 == k.0 && key.1 > k.1)
-                        }
-                    }
-                };
-                if !after_last {
-                    continue;
-                }
-                let better = match best {
-                    None => true,
-                    Some(b) => {
-                        if forward {
-                            key.0 < b.0 || (key.0 == b.0 && key.1 < b.1)
-                        } else {
-                            key.0 > b.0 || (key.0 == b.0 && key.1 < b.1)
-                        }
-                    }
-                };
-                if better {
-                    best = Some(key);
-                }
+        let (lo, hi) = self.label_range(n);
+        if time > prev {
+            // prev < t <= time, ascending.
+            let a = lo + self.labels[lo..hi].partition_point(|l| l.time <= prev);
+            let b = lo + self.labels[lo..hi].partition_point(|l| l.time <= time);
+            for i in a..b {
+                let tag = self.labels[i].tag;
+                self.emit(n, EventKind::Label(tag));
             }
-            match best {
-                Some(b) => {
-                    let tag = self.labels[b.1].tag;
-                    self.emit(n, EventKind::Label(tag));
-                    last = Some(b);
+        } else {
+            // time <= t < prev, descending by time; equal times keep their
+            // insertion order.
+            let a = lo + self.labels[lo..hi].partition_point(|l| l.time < time);
+            let mut b = lo + self.labels[lo..hi].partition_point(|l| l.time < prev);
+            while b > a {
+                let t = self.labels[b - 1].time;
+                let mut g = b - 1;
+                while g > a && self.labels[g - 1].time == t {
+                    g -= 1;
                 }
-                None => break,
+                for i in g..b {
+                    let tag = self.labels[i].tag;
+                    self.emit(n, EventKind::Label(tag));
+                }
+                b = g;
             }
         }
     }

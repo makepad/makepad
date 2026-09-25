@@ -30,6 +30,13 @@ impl TweenEngine {
             self.compact_tracks();
         }
         let r = self.root;
+        if self.cold[r as usize].first == NIL && self.hot[r as usize].ttime == 0.0 {
+            // Idle and already rebased: the root's clock stays at 0 (a
+            // detached kept animation's raw time then stands still, where
+            // GSAP's monotonic clock would keep moving it; only `pause()` of
+            // a reverse-completed animation with a delay can tell).
+            return;
+        }
         // Settle the root first: a negative child start shifts its playhead.
         self.total_duration(r);
         // Integrate unrounded; resync when something else moved the root.
@@ -44,7 +51,31 @@ impl TweenEngine {
         self.render_timeline(r, t, false, false);
         self.flush_reap();
         if self.cold[r as usize].first == NIL {
-            self.root_clock = 0.0;
+            self.rebase_root();
+        }
+    }
+
+    /// Rebases the idle root's clock to 0 (design 5.1: root time stays small
+    /// so round7 stays exact). Kept animations detached from the root (a
+    /// completed or reverse-completed `keep` timeline) still measure their
+    /// start against that clock (GSAP `rawTime()` folds through `_dp`, whose
+    /// clock is monotonic), so their starts move with it: `pause()` then
+    /// `resume()` on such a timeline stays where it stopped.
+    fn rebase_root(&mut self) {
+        let r = self.root;
+        let shift = self.hot[r as usize].time;
+        self.root_clock = 0.0;
+        if shift != 0.0 {
+            for n in 0..self.hot.len() {
+                let c = &self.cold[n];
+                if c.dp == r && c.parent == NIL && self.hot[n].flags & F_FREE == 0 {
+                    let h = &mut self.hot[n];
+                    h.start = round7(h.start - shift);
+                    self.cold[n].end = round7(self.cold[n].end - shift);
+                }
+            }
+        }
+        {
             let h = &mut self.hot[r as usize];
             h.time = 0.0;
             h.ttime = 0.0;
@@ -73,17 +104,22 @@ impl TweenEngine {
 
     /// Whether a linked, unpaused, unfinished tween animates target `t`
     /// (GSAP `gsap.isTweening`).
+    /// Visits only `t`'s own slots and their tracks (O(tracks on `t`)).
     pub fn is_tweening(&self, t: TargetId) -> bool {
-        for k in 0..self.tr_slot.len() {
-            if self.tr_meta[k].flags & T_ALIVE == 0 || self.sl_target[self.tr_slot[k] as usize] != t
-            {
-                continue;
+        let mut s = self.first_slot_of(t);
+        while s != NIL {
+            let mut k = self.sl_first_track[s as usize];
+            while k != NIL {
+                if self.tr_meta[k as usize].flags & T_ALIVE != 0 {
+                    let n = self.tr_node[k as usize];
+                    let h = &self.hot[n as usize];
+                    if self.attached(n) && self.no_paused_ancestors(n) && h.ttime < h.tdur {
+                        return true;
+                    }
+                }
+                k = self.tr_next_in_slot[k as usize];
             }
-            let n = self.tr_node[k];
-            let h = &self.hot[n as usize];
-            if self.attached(n) && self.no_paused_ancestors(n) && h.ttime < h.tdur {
-                return true;
-            }
+            s = self.sl_next_of_target[s as usize];
         }
         false
     }
@@ -451,7 +487,7 @@ impl TweenEngine {
     pub(crate) fn set_progress(&mut self, n: u32, p: f64, suppress: bool) {
         self.total_duration(n);
         let d = self.hot[n as usize].dur;
-        let even = self.iteration_of(n) % 2 == 0;
+        let even = self.iteration_of(n).is_multiple_of(2);
         let q = if self.has(n, F_YOYO) && even {
             1.0 - p
         } else {
@@ -765,11 +801,13 @@ impl<'a> TimelineMut<'a> {
         self.e.shift_children_raw(tl, amount, ignore_before);
         if adjust_labels {
             let a = round7(amount);
-            for l in self.e.labels.iter_mut().filter(|l| l.tl == tl) {
+            let (lo, hi) = self.e.label_range(tl);
+            for l in &mut self.e.labels[lo..hi] {
                 if l.time >= ignore_before {
                     l.time += a;
                 }
             }
+            self.e.resort_labels(tl);
         }
         self.e.uncache(tl);
         self

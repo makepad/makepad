@@ -18,7 +18,7 @@ use std::f64::consts::PI;
 /// into the eased ratio (which may leave 0..1 for overshooting eases).
 ///
 /// The default is [`Easing::OutQuad`], GSAP's default `"power1.out"`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum Easing {
     // --- parity family: bit-identical to animator::Ease::map ---
     /// Identity clamped to 0..1: GSAP `"none"` / `"linear"` / `"power0"`.
@@ -30,6 +30,7 @@ pub enum Easing {
     /// GSAP `power1.in` / `quad.in`.
     InQuad,
     /// GSAP `power1.out` / `quad.out`: the default ease.
+    #[default]
     OutQuad,
     /// GSAP `power1.inOut` / `quad.inOut`.
     InOutQuad,
@@ -290,12 +291,6 @@ impl PartialEq for Easing {
     }
 }
 
-impl Default for Easing {
-    fn default() -> Self {
-        Easing::OutQuad
-    }
-}
-
 /// GSAP `yoyoEase`: the ease used on the backward (odd) iterations of a
 /// yoyo tween.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -537,7 +532,14 @@ impl Easing {
             } => {
                 let p1 = amplitude.max(1.0);
                 let p2 = period / amplitude.min(1.0);
-                let p3 = p2 / (2.0 * PI) * (1.0 / p1).asin();
+                // asin(1 / p1) is exactly pi/2 for the usual amplitude <= 1:
+                // skip the (costly) asin call there, bit for bit the same.
+                let s = if p1 == 1.0 {
+                    std::f64::consts::FRAC_PI_2
+                } else {
+                    (1.0 / p1).asin()
+                };
+                let p3 = p2 / (2.0 * PI) * s;
                 let w = 2.0 * PI / p2;
                 let out = |p: f64| {
                     if p == 1.0 {

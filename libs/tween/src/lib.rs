@@ -27,6 +27,76 @@
 //! [`TweenEngine::advance`] and drain callbacks with
 //! [`TweenEngine::swap_events`].
 //!
+//! # Example
+//!
+//! A widget-style entrance and exit: five items fade and slide in one after
+//! another, then fade out from a label half a second after the entrance.
+//! The host seeds the current values, builds once, then per frame calls
+//! `advance`, drains the events and pushes the changed slots to its objects.
+//!
+//! ```
+//! use makepad_tween::*;
+//!
+//! const OPACITY: PropKey = PropKey(1);
+//! const SHIFT: PropKey = PropKey(2);
+//! const INTRO: Tag = Tag(1);
+//! const OUTRO: Tag = Tag(2);
+//! const ITEMS: Targets<'static> = Targets::Range { first: 0, count: 5 };
+//!
+//! let mut e = TweenEngine::new();
+//! for i in 0..5 {
+//!     // GSAP reads a target's current value when a tween starts; the host
+//!     // seeds it.
+//!     e.seed(TargetId(i), OPACITY, 0.0.into());
+//!     e.seed(TargetId(i), SHIFT, 20.0.into());
+//! }
+//! // gsap.timeline() with label events and onComplete.
+//! let tl = e.timeline(TimelineOpts::new().watch_labels().on_complete());
+//! e.tl(tl)
+//!     .add_label(INTRO, 0.0)
+//!     .to(
+//!         ITEMS,
+//!         &[PropTo::to_f64(OPACITY, 1.0), PropTo::to_f64(SHIFT, 0.0)],
+//!         TweenOpts::new().duration(0.4).stagger(Stagger::each(0.1)),
+//!         INTRO,
+//!     )
+//!     .add_label(OUTRO, Position::rel(0.5)) // "+=0.5"
+//!     .to(
+//!         ITEMS,
+//!         &[PropTo::to_f64(OPACITY, 0.0)],
+//!         TweenOpts::new().duration(0.3).ease(Easing::InQuad),
+//!         OUTRO,
+//!     );
+//! assert_eq!(e.anim_ref(tl).label_time(OUTRO), Some(1.3));
+//!
+//! // The frame loop (a host drives this from its frame event).
+//! let mut events = Vec::new();
+//! let (mut saw_outro, mut done) = (false, false);
+//! while e.is_active() {
+//!     e.advance(1.0 / 64.0);
+//!     e.swap_events(&mut events);
+//!     for ev in &events {
+//!         match ev.kind {
+//!             EventKind::Label(OUTRO) => saw_outro = true,
+//!             EventKind::Complete if ev.id == tl => done = true,
+//!             _ => {}
+//!         }
+//!     }
+//!     for &slot in e.changes() {
+//!         let (_target, _prop) = e.slot_key(slot);
+//!         let _value = e.value(slot); // push to the widget here
+//!     }
+//!     e.clear_changes();
+//! }
+//! assert!(saw_outro && done);
+//! assert_eq!(e.get_f64(TargetId(4), OPACITY), Some(0.0));
+//! assert_eq!(e.get_f64(TargetId(4), SHIFT), Some(0.0));
+//!
+//! // Timelines are kept: replay it.
+//! e.anim(tl).restart(false, Emit::Suppress);
+//! assert!(e.is_active());
+//! ```
+//!
 //! # Allocation
 //!
 //! Only building calls allocate (`to`, `timeline`, `tl(..).to(..)`, `seed`,
@@ -42,7 +112,8 @@
 //! first render; a paused timeline whose child starts before 0 keeps a
 //! finite start; `yoyo_ease` is a pure function of the local time; values
 //! are not rounded to 1e-6; zero-duration nodes ignore `repeat`; a killed
-//! or completed (not kept) animation's handle goes stale; non-finite numbers
+//! or completed (not kept, not paused) animation's handle goes stale; the
+//! root clock rests at 0 while nothing is on it; non-finite numbers
 //! count as unset (options), 0 (the root time scale) or are ignored
 //! (controls).
 #![forbid(unsafe_code)]

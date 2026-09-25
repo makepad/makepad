@@ -99,11 +99,15 @@ pub(crate) struct Hot {
 }
 
 const _: () = assert!(std::mem::size_of::<Hot>() == 64);
+const _: () = assert!(std::mem::offset_of!(Cold, events) == 64);
+const _: () = assert!(std::mem::size_of::<Cold>() == 256);
 
 /// Everything a node needs besides the walk data: touched by building,
 /// controls, callbacks and by nodes that actually render. The fields a
-/// render reads come first (one cache line for a plain tween).
-#[repr(C)]
+/// render reads come first: `ease` to `parent` fill exactly the first
+/// (aligned) cache line, `events` and `yoyo` open the second, so a
+/// rendering tween touches two lines of its 256 bytes.
+#[repr(C, align(64))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Cold {
     pub ease: Easing,
@@ -210,12 +214,28 @@ pub(crate) struct TrackSpec {
     pub land: [[f64; 4]; 2],
 }
 
-/// A timeline label.
+/// A timeline label. The engine keeps every label in one Vec sorted by
+/// `(tl, time, seq)`, so one timeline's labels are a contiguous range in time
+/// order (ties in the order they were added, like GSAP's `labels` object).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Label {
     pub tl: u32,
     pub tag: Tag,
     pub time: f64,
+    /// Insertion order (breaks ties between labels at the same time).
+    pub seq: u32,
+}
+
+impl Label {
+    /// The sort key of the engine's label list.
+    #[inline]
+    fn before(&self, o: &Label) -> bool {
+        self.tl
+            .cmp(&o.tl)
+            .then(self.time.total_cmp(&o.time))
+            .then(self.seq.cmp(&o.seq))
+            .is_lt()
+    }
 }
 
 /// Options resolved through the defaults chain (built-ins filled in).
@@ -240,6 +260,16 @@ pub(crate) struct Resolved {
     pub keep: bool,
     pub tag: Tag,
     pub events: EventMask,
+}
+
+/// One building call's site: what is built (targets and properties) and
+/// where it goes (the parent and the place in it).
+#[derive(Clone, Copy)]
+pub(crate) struct Site<'a> {
+    pub parent: u32,
+    pub t: Targets<'a>,
+    pub props: &'a [PropTo<'a>],
+    pub place: Place,
 }
 
 /// Where a new child goes.
@@ -286,8 +316,16 @@ pub struct TweenEngine {
     pub(crate) sl_stamp: Vec<u64>,
     pub(crate) sl_seeded: Vec<bool>,
     pub(crate) sl_index: Vec<u32>,
+    /// The next slot of the same target (a chain from `tg_index`).
+    pub(crate) sl_next_of_target: Vec<u32>,
+    /// Open-addressing index target -> its most recent slot (the head of
+    /// its `sl_next_of_target` chain), sized with `sl_index`.
+    pub(crate) tg_index: Vec<u32>,
     pub(crate) slot_gen: u32,
+    /// Every timeline's labels, sorted by `(tl, time, seq)`.
     pub(crate) labels: Vec<Label>,
+    /// The next label's insertion number.
+    pub(crate) label_seq: u32,
     pub(crate) tl_defaults: Vec<(u32, TweenOpts)>,
     pub(crate) changed: Vec<SlotId>,
     pub(crate) change_gen: u64,
@@ -349,8 +387,15 @@ impl TweenEngine {
             } else {
                 Vec::new()
             },
+            sl_next_of_target: Vec::with_capacity(slots),
+            tg_index: if slots > 0 {
+                vec![NIL; (slots * 2).next_power_of_two()]
+            } else {
+                Vec::new()
+            },
             slot_gen: 0,
             labels: Vec::new(),
+            label_seq: 0,
             tl_defaults: Vec::new(),
             changed: Vec::with_capacity(slots),
             change_gen: 1,
@@ -723,7 +768,13 @@ impl TweenEngine {
         if let Some(st) = o.stagger.or(r_stagger(self, parent, o)) {
             let n = t.len();
             if n > 0 {
-                if let Some(g) = self.build_stagger(parent, t, props, o, &r, st, place) {
+                let site = Site {
+                    parent,
+                    t,
+                    props,
+                    place,
+                };
+                if let Some(g) = self.build_stagger(site, o, &r, st) {
                     return g;
                 }
             }
@@ -732,7 +783,13 @@ impl TweenEngine {
             .iter()
             .any(|p| matches!(p.to, End::Keys(_) | End::Values(_)))
         {
-            return self.build_percent_keyframes(parent, t, props, o, &r, place);
+            let site = Site {
+                parent,
+                t,
+                props,
+                place,
+            };
+            return self.build_percent_keyframes_indexed(site, 0, o, &r);
         }
         self.build_leaf(parent, t, 0, props, &r, place)
     }
@@ -753,7 +810,13 @@ impl TweenEngine {
         let dur = r.duration;
         self.push_tracks(n, t, index_base, props, r.space);
         self.set_duration_raw(n, dur);
-        self.link_new_tween(parent, n, t, props, r, place, dur == 0.0);
+        let site = Site {
+            parent,
+            t,
+            props,
+            place,
+        };
+        self.link_new_tween(site, n, r, dur == 0.0);
         n
     }
 
@@ -784,17 +847,13 @@ impl TweenEngine {
 
     /// Links a freshly built tween or group, applies overwrite `All`,
     /// `reversed` / `paused`, and performs the immediate render.
-    #[allow(clippy::too_many_arguments)]
-    fn link_new_tween(
-        &mut self,
-        parent: u32,
-        n: u32,
-        t: Targets,
-        props: &[PropTo],
-        r: &Resolved,
-        place: Place,
-        zero: bool,
-    ) {
+    fn link_new_tween(&mut self, site: Site, n: u32, r: &Resolved, zero: bool) {
+        let Site {
+            parent,
+            t,
+            props,
+            place,
+        } = site;
         if r.overwrite == Overwrite::All {
             self.overwrite_all(n, t);
         }
@@ -937,17 +996,14 @@ impl TweenEngine {
     /// A staggered group (GSAP `stagger`): one child tween per target at its
     /// `distribute` delay. `None` when every delay and the duration are 0
     /// (GSAP then drops the inner timeline and builds a plain tween).
-    #[allow(clippy::too_many_arguments)]
     fn build_stagger(
         &mut self,
-        parent: u32,
-        t: Targets,
-        props: &[PropTo],
+        site: Site,
         o: &TweenOpts,
         r: &Resolved,
         st: crate::stagger::Stagger,
-        place: Place,
     ) -> Option<u32> {
+        let Site { t, props, .. } = site;
         let n = t.len();
         let mut delays = std::mem::take(&mut self.build_scratch);
         delays.clear();
@@ -1003,7 +1059,13 @@ impl TweenEngine {
             let one = Targets::One(t.get(i));
             let pos = Place::Pos(Position::at(delays[i as usize]));
             if has_keys {
-                self.build_percent_keyframes_indexed(g, one, i, props, &co, &cr, pos);
+                let child = Site {
+                    parent: g,
+                    t: one,
+                    props,
+                    place: pos,
+                };
+                self.build_percent_keyframes_indexed(child, i, &co, &cr);
             } else {
                 self.build_leaf(g, one, i, props, &cr, pos);
             }
@@ -1012,7 +1074,7 @@ impl TweenEngine {
         let inner = self.children_end(g);
         self.cold[g as usize].inner_dur = inner;
         self.set_duration_raw(g, inner);
-        self.link_new_tween(parent, g, t, props, &gr, place, false);
+        self.link_new_tween(site, g, &gr, false);
         Some(g)
     }
 
@@ -1030,32 +1092,17 @@ impl TweenEngine {
         max
     }
 
-    fn build_percent_keyframes(
-        &mut self,
-        parent: u32,
-        t: Targets,
-        props: &[PropTo],
-        o: &TweenOpts,
-        r: &Resolved,
-        place: Place,
-    ) -> u32 {
-        self.build_percent_keyframes_indexed(parent, t, 0, props, o, r, place)
-    }
-
     /// GSAP object keyframes (`{"0%": .., "50%": ..}`, `x: [..]`): per
     /// property, one child tween per key at `prev_at / 100 * duration`;
     /// ordinary props are the group's own tracks, eased by the outer ease.
-    #[allow(clippy::too_many_arguments)]
     fn build_percent_keyframes_indexed(
         &mut self,
-        parent: u32,
-        t: Targets,
+        site: Site,
         index_base: u32,
-        props: &[PropTo],
         o: &TweenOpts,
         r: &Resolved,
-        place: Place,
     ) -> u32 {
+        let Site { t, props, .. } = site;
         let g = self.alloc_node(K_GROUP);
         self.hot[g as usize].flags |= F_KEYFRAMES;
         let outer = o.ease.unwrap_or(Easing::Linear);
@@ -1137,7 +1184,7 @@ impl TweenEngine {
         let inner = self.children_end(g).max(dur);
         self.cold[g as usize].inner_dur = inner;
         self.set_duration_raw(g, dur);
-        self.link_new_tween(parent, g, t, props, &gr, place, false);
+        self.link_new_tween(site, g, &gr, false);
         g
     }
 
@@ -1174,7 +1221,13 @@ impl TweenEngine {
                 .iter()
                 .any(|p| matches!(p.to, End::Keys(_) | End::Values(_)));
             if has_keys {
-                self.build_percent_keyframes_indexed(g, t, 0, s.props, &so, &sr, pos);
+                let step = Site {
+                    parent: g,
+                    t,
+                    props: s.props,
+                    place: pos,
+                };
+                self.build_percent_keyframes_indexed(step, 0, &so, &sr);
             } else {
                 self.build_leaf(g, t, 0, s.props, &sr, pos);
             }
@@ -1183,7 +1236,13 @@ impl TweenEngine {
         self.cold[g as usize].inner_dur = inner;
         let dur = o.duration.unwrap_or(inner).max(0.0);
         self.set_duration_raw(g, dur);
-        self.link_new_tween(parent, g, t, &[], &gr, place, false);
+        let site = Site {
+            parent,
+            t,
+            props: &[],
+            place,
+        };
+        self.link_new_tween(site, g, &gr, false);
         g
     }
 
@@ -1415,11 +1474,7 @@ impl TweenEngine {
             Anchor::Label(l) => match self.label_time(tl, l) {
                 Some(t) => t,
                 None => {
-                    self.labels.push(Label {
-                        tl,
-                        tag: l,
-                        time: clipped,
-                    });
+                    self.insert_label(tl, l, clipped);
                     clipped
                 }
             },
@@ -1629,18 +1684,52 @@ impl TweenEngine {
     // Labels
     // ------------------------------------------------------------------
 
+    /// The index range of timeline `tl`'s labels (sorted by time).
+    #[inline]
+    pub(crate) fn label_range(&self, tl: u32) -> (usize, usize) {
+        let lo = self.labels.partition_point(|x| x.tl < tl);
+        let hi = lo + self.labels[lo..].partition_point(|x| x.tl == tl);
+        (lo, hi)
+    }
+
+    /// Timeline `tl`'s labels, in time order.
+    #[inline]
+    pub(crate) fn labels_of(&self, tl: u32) -> &[Label] {
+        let (lo, hi) = self.label_range(tl);
+        &self.labels[lo..hi]
+    }
+
+    /// Adds a new label, keeping the list sorted.
+    fn insert_label(&mut self, tl: u32, tag: Tag, time: f64) {
+        let seq = self.label_seq;
+        self.label_seq = self.label_seq.wrapping_add(1);
+        let l = Label { tl, tag, time, seq };
+        let at = self.labels.partition_point(|x| x.before(&l));
+        self.labels.insert(at, l);
+    }
+
+    /// Re-sorts timeline `tl`'s label range after its times changed (no
+    /// allocation: an unstable sort over unique keys).
+    pub(crate) fn resort_labels(&mut self, tl: u32) {
+        let (lo, hi) = self.label_range(tl);
+        self.labels[lo..hi]
+            .sort_unstable_by(|a, b| a.time.total_cmp(&b.time).then(a.seq.cmp(&b.seq)));
+    }
+
     pub(crate) fn label_time(&self, tl: u32, l: Tag) -> Option<f64> {
-        self.labels
+        self.labels_of(tl)
             .iter()
-            .find(|x| x.tl == tl && x.tag == l)
+            .find(|x| x.tag == l)
             .map(|x| x.time)
     }
 
     pub(crate) fn set_label(&mut self, tl: u32, l: Tag, time: f64) {
-        if let Some(x) = self.labels.iter_mut().find(|x| x.tl == tl && x.tag == l) {
+        let (lo, hi) = self.label_range(tl);
+        if let Some(x) = self.labels[lo..hi].iter_mut().find(|x| x.tag == l) {
             x.time = time;
+            self.resort_labels(tl);
         } else {
-            self.labels.push(Label { tl, tag: l, time });
+            self.insert_label(tl, l, time);
         }
     }
 
@@ -1649,7 +1738,7 @@ impl TweenEngine {
     pub(crate) fn label_in_direction(&self, tl: u32, from: f64, backward: bool) -> Option<Tag> {
         let mut min = BIG;
         let mut best = None;
-        for l in self.labels.iter().filter(|l| l.tl == tl) {
+        for l in self.labels_of(tl) {
             let d = l.time - from;
             if (d < 0.0) == backward && d != 0.0 && min > d.abs() {
                 min = d.abs();
@@ -1683,7 +1772,7 @@ impl TweenEngine {
             r += 1;
         }
         if m.has(EventMask::LABELS) {
-            r += self.labels.iter().filter(|l| l.tl == n).count() as u64;
+            r += self.labels_of(n).len() as u64;
         }
         r
     }
@@ -1787,7 +1876,11 @@ impl TweenEngine {
             if killed {
                 self.unlink(n);
             }
-            if killed || (!self.has(n, F_LINKED) && !self.has(n, F_KEEP)) {
+            // A paused node that completed (a paused zero-duration tween
+            // rendered by a control) stays addressable like in GSAP: it is
+            // reclaimed when it completes again after resuming.
+            let held = self.has(n, F_KEEP) || self.has(n, F_PAUSED);
+            if killed || (!self.has(n, F_LINKED) && !held) {
                 self.free_subtree(n);
             }
         }
@@ -1970,12 +2063,41 @@ impl TweenEngine {
 
     fn index_insert(&mut self, s: u32) {
         let mask = self.sl_index.len() - 1;
-        let mut i =
-            Self::slot_hash(self.sl_target[s as usize], self.sl_key[s as usize]) as usize & mask;
+        let t = self.sl_target[s as usize];
+        let mut i = Self::slot_hash(t, self.sl_key[s as usize]) as usize & mask;
         while self.sl_index[i] != NIL {
             i = (i + 1) & mask;
         }
         self.sl_index[i] = s;
+        // The target index: `s` becomes its target's head (slots are added
+        // in increasing order, so a rebuild finds the same heads).
+        let mask = self.tg_index.len() - 1;
+        let mut i = splitmix64(t.0 as u64) as usize & mask;
+        loop {
+            let h = self.tg_index[i];
+            if h == NIL || self.sl_target[h as usize] == t {
+                self.tg_index[i] = s;
+                return;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// The most recently created slot of target `t` (NIL when none); the
+    /// others follow through `sl_next_of_target`.
+    pub(crate) fn first_slot_of(&self, t: TargetId) -> u32 {
+        if self.tg_index.is_empty() {
+            return NIL;
+        }
+        let mask = self.tg_index.len() - 1;
+        let mut i = splitmix64(t.0 as u64) as usize & mask;
+        loop {
+            let h = self.tg_index[i];
+            if h == NIL || self.sl_target[h as usize] == t {
+                return h;
+            }
+            i = (i + 1) & mask;
+        }
     }
 
     /// The slot of (t, p), created (unseeded, of `kind`) when missing.
@@ -1991,6 +2113,8 @@ impl TweenEngine {
         self.sl_first_track.push(NIL);
         self.sl_stamp.push(0);
         self.sl_seeded.push(false);
+        let prev = self.first_slot_of(t);
+        self.sl_next_of_target.push(prev);
         self.slot_gen = self.slot_gen.wrapping_add(1);
         if self.changed.capacity() < self.sl_val.len() {
             self.changed.reserve(self.sl_val.len() - self.changed.len());
@@ -1999,6 +2123,8 @@ impl TweenEngine {
             let size = (self.sl_val.len() * 2).next_power_of_two().max(16);
             self.sl_index.clear();
             self.sl_index.resize(size, NIL);
+            self.tg_index.clear();
+            self.tg_index.resize(size, NIL);
             for i in 0..self.sl_val.len() as u32 {
                 self.index_insert(i);
             }
