@@ -175,11 +175,29 @@ fn scrolled_views(cx: &Cx, root: &WidgetRef) -> Vec<(Vec<LiveId>, DVec2)> {
     out
 }
 
+/// The widget at `path` of child ids under `root`, walked through the
+/// children directly (the widget tree may not have indexed a page that
+/// has not drawn yet).
+fn child_at(root: &WidgetRef, path: &[LiveId]) -> Option<WidgetRef> {
+    let mut cur = root.clone();
+    for id in path {
+        let mut next = None;
+        cur.children(&mut |child_id, child| {
+            if next.is_none() && child_id == *id {
+                next = Some(child.clone());
+            }
+        });
+        cur = next?;
+    }
+    Some(cur)
+}
+
 impl StoryCanvas {
     /// Show the template with this name. Switching stories forgets the
     /// previous story's edits and log.
     pub fn open(&mut self, cx: &mut Cx, dsl: &str) {
         if self.wanted.as_deref() != Some(dsl) {
+            self.restore_scroll.clear();
             self.wanted = Some(dsl.to_string());
             self.chunks.clear();
             self.log.clear();
@@ -224,6 +242,17 @@ impl StoryCanvas {
         cx.widget_tree_mark_dirty(self.uid);
         if let Some(dsl) = self.wanted.clone() {
             if let Some(page) = self.instantiate(cx, &dsl) {
+                // The first frame of the rebuilt story is drawn where the
+                // last one stood: anything that reads its layout before a
+                // second frame (a drag's target under the pointer) reads
+                // the page as it was, not scrolled back to the top.
+                for (path, pos) in &self.restore_scroll {
+                    if let Some(view) = child_at(&page, path) {
+                        if let Some(mut view) = view.borrow_mut::<View>() {
+                            view.set_scroll_pos_unclipped(cx, *pos);
+                        };
+                    }
+                }
                 self.shown = Some((dsl, page));
             }
         }
@@ -395,10 +424,12 @@ impl Widget for StoryCanvas {
         if !self.restore_scroll.is_empty() {
             let restore = std::mem::take(&mut self.restore_scroll);
             for (path, pos) in restore {
-                let target = if path.is_empty() { page.clone() } else { page.widget(cx, &path) };
-                if let Some(mut view) = target.borrow_mut::<View>() {
-                    view.set_scroll_pos(cx, pos);
-                };
+                // Clamped now that the content is measured.
+                if let Some(target) = child_at(&page, &path) {
+                    if let Some(mut view) = target.borrow_mut::<View>() {
+                        view.set_scroll_pos(cx, pos);
+                    };
+                }
             }
             page.redraw(cx);
         }

@@ -1727,6 +1727,17 @@ impl View {
         }
     }
 
+    /// Set the scroll offset without clamping it to the content: for a
+    /// view that has not drawn yet, whose extent is still unknown, so its
+    /// first frame is drawn at a position put back from before a rebuild.
+    pub fn set_scroll_pos_unclipped(&mut self, cx: &mut Cx, v: Vec2d) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.set_scroll_pos_no_clip(cx, v);
+        } else {
+            self.layout.scroll = v;
+        }
+    }
+
     /// Where this view is scrolled to and how far it can go. `None` for a
     /// view without scroll bars: its `layout.scroll` is an offset someone
     /// set, not a position a reader can move, so there is no extent to report.
