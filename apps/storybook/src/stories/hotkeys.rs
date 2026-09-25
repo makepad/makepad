@@ -31,7 +31,7 @@ script_mod! {
                     {id: @go_to_file label: "Go to file" chord: "Mod+P"}
                     {id: @print label: "Print" chord: "Mod+P"}
                     {id: @find label: "Find" chord: "Mod+F"}
-                    {id: @find_in_notes label: "Find in notes" chord: "Mod+F" scope: @notes}
+                    {id: @find_in_notes label: "Find in notes" chord: "Mod+F" focus_scope: @notes}
                     {id: @command_list label: "Command list" chord: "Mod+Shift+P"}
                     {id: @toggle_sidebar label: "Toggle sidebar" chord: "Mod+B"}
                     {id: @zoom_in label: "Zoom in" chord: "Mod+="}
@@ -59,6 +59,10 @@ script_mod! {
             }
         }
         StoryNote{text: "The keyboard lights the chord of the row under the pointer."}
+
+        // Declared last: the clash marks and the keys raise tips, and the
+        // storybook window has no tip host of its own.
+        tips := TipLayer{}
     }
 
     mod.stories.KeyboardMapOverview = StoryPage{
@@ -103,6 +107,10 @@ script_mod! {
                 unit: 28.
             }
         }
+
+        // Declared last: the keys raise tips, and the storybook window has
+        // no tip host of its own.
+        tips := TipLayer{}
     }
 }
 
@@ -121,7 +129,7 @@ fn editor_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     // The notes field is the `notes` focus scope; tying it to its area
     // every pass keeps the area current.
     let notes = root.widget(cx, ids!(notes)).area();
-    cx.global::<Hotkeys>().set_scope_area(live_id!(notes), notes);
+    Hotkeys::set_scope_area_in(cx, live_id!(notes), notes);
 
     if root.button(cx, ids!(bind_save)).clicked(actions) {
         editor.start_capture(cx, live_id!(save));
@@ -176,7 +184,7 @@ pub const STORIES: &[Story] = &[
         dsl: "HotkeyEditorOverview",
         added: "2026-09-25",
         tags: &["new", "keyboard", "hotkey", "shortcut", "keymap", "rebind", "chord", "conflict"],
-        doc: "# HotkeyEditor\n\nThe app's keymap as rows of command, current chord (drawn as key caps), default chord and Reset. The rows are the `Hotkeys` registry held on the `Cx` (`cx.global::<Hotkeys>()`), read on every draw, so a change made anywhere shows here.\n\n## Declaring commands\n\n```\nHotkeyEditor{\n    hotkeys: [\n        {id: @save label: \"Save\" chord: \"Mod+S\"}\n        {id: @find_in_notes label: \"Find in notes\" chord: \"Mod+F\" scope: @notes}\n    ]\n}\n```\n\nor from Rust with `Hotkeys::register`. `Mod` is Command on Apple and Control elsewhere; `Cmd` stands in for Control where there is no Command key; `Meta`/`Super`/`Win` name the logo key. Chords print as `Cmd+Shift+P` on Apple and `Ctrl+Shift+P` elsewhere.\n\n## Binding\n\nPress a chord cell and it listens for the next key combination. Escape cancels, Backspace or Delete clears, moving the focus away cancels. While it listens the registry resolves nothing. A clash is kept and marked on both rows; the mark's tip names the other command. Reset puts one row back, Reset all every row, and Undo takes back the last change (the registry keeps the replaced chord). Every change arrives as `HotkeyEditorAction::Changed(id, chord)`.\n\n## Routing\n\n`Hotkeys::resolve` decides what a key press means: a binding scoped to the focused part of the window beats a global one on the same chord, and while a text field has the caret the chords that type or edit text are the field's. Saving is `Hotkeys::save` / `load` through `cx.storage`, as `id=chord` lines of what the person changed.",
+        doc: "# HotkeyEditor\n\nThe app's keymap as rows of command, current chord (drawn as key caps), default chord and Reset. The rows are the `Hotkeys` registry held on the `Cx` (`cx.global::<Hotkeys>()`), read on every draw, so a change made anywhere shows here.\n\n## Declaring commands\n\n```\nHotkeyEditor{\n    hotkeys: [\n        {id: @save label: \"Save\" chord: \"Mod+S\"}\n        {id: @find_in_notes label: \"Find in notes\" chord: \"Mod+F\" focus_scope: @notes}\n    ]\n}\n```\n\nor from Rust with `Hotkeys::register`. `Mod` is Command on Apple and Control elsewhere; `Cmd` stands in for Control where there is no Command key; `Meta`/`Super`/`Win` name the logo key. Chords print as `Cmd+Shift+P` on Apple and `Ctrl+Shift+P` elsewhere.\n\n## Binding\n\nPress a chord cell and it listens for the next key combination. Escape cancels, Backspace or Delete clears, moving the focus away cancels. While it listens the registry resolves nothing. A clash is kept and marked on both rows; the mark's tip names the other command. Reset puts one row back, Reset all every row, and Undo takes back the last change (the registry keeps the replaced chord). Every change arrives as `HotkeyEditorAction::Changed(id, chord)`.\n\n## Routing\n\n`Hotkeys::resolve` decides what a key press means: a binding scoped to the focused part of the window beats a global one on the same chord, and while a text field has the caret the chords that type or edit text are the field's. Saving is `Hotkeys::save` / `load` through `cx.storage`, as `id=chord` lines of what the person changed.",
         subject: "subject",
         feature: None,
         controls: &[

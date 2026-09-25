@@ -28,7 +28,7 @@
 //! HotkeyEditor{
 //!     hotkeys: [
 //!         {id: @save label: "Save" chord: "Mod+S"}
-//!         {id: @find label: "Find" chord: "Mod+F" scope: @editor}
+//!         {id: @find label: "Find" chord: "Mod+F" focus_scope: @editor}
 //!     ]
 //! }
 //! ```
@@ -66,7 +66,7 @@ script_mod! {
     mod.widgets.HotkeyEditor = set_type_default() do mod.widgets.HotkeyEditorBase{
         width: Fill
         height: Fit
-        /** default bindings: {id: @save label: "Save" chord: "Mod+S" scope: @editor} */
+        /** default bindings: {id: @save label: "Save" chord: "Mod+S" focus_scope: @editor} */
         hotkeys: []
         /** the room inside the panel edge 0..40 step 1 */
         pad: 10.

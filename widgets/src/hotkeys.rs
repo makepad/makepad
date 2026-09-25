@@ -28,9 +28,12 @@
 //! ```text
 //! hotkeys: [
 //!     {id: @save label: "Save" chord: "Mod+S"}
-//!     {id: @find label: "Find" chord: "Mod+F" scope: @editor}
+//!     {id: @find label: "Find" chord: "Mod+F" focus_scope: @editor}
 //! ]
 //! ```
+//!
+//! The scope key is `focus_scope`, not `scope`: `scope` is a Splash keyword
+//! (the current scope object) and never arrives as a property.
 //!
 //! Registering an id that is already there updates its label and default and
 //! keeps a chord the person chose; a chord still at the old default follows
@@ -625,12 +628,36 @@ impl Hotkey {
     }
 }
 
+/// A focus scope and where it is on screen.
+#[derive(Clone, Copy, Debug)]
+struct ScopeArea {
+    scope: LiveId,
+    area: Area,
+    /// The area's rect when it was tied, for when the area has since been
+    /// redrawn: an area handle goes stale on every redraw of its draw list
+    /// (a caret blink is one), while the key focus is carried along.
+    rect: Option<Rect>,
+}
+
+/// Whether two areas are the same instance, redrawn or not.
+fn same_instance(a: Area, b: Area) -> bool {
+    match (a, b) {
+        (Area::Instance(a), Area::Instance(b)) => {
+            a.draw_list_id == b.draw_list_id
+                && a.draw_item_id == b.draw_item_id
+                && a.instance_offset == b.instance_offset
+        }
+        (Area::Rect(a), Area::Rect(b)) => a.draw_list_id == b.draw_list_id && a.rect_id == b.rect_id,
+        _ => a == b,
+    }
+}
+
 /// The app's keymap. See the module documentation.
 #[derive(Default)]
 pub struct Hotkeys {
     hotkeys: Vec<Hotkey>,
     /// Focus scopes and the areas they cover.
-    scope_areas: Vec<(LiveId, Area)>,
+    scope_areas: Vec<ScopeArea>,
     /// Undo groups: every rebinding in a group, with the chord it replaced.
     history: Vec<Vec<(LiveId, Option<KeyChord>)>>,
     capturing: bool,
@@ -696,9 +723,9 @@ impl Hotkeys {
         self.register(id, label, KeyChord::parse(chord), scope);
     }
 
-    /// Register every `{id: @x label: "..." chord: "..." scope: @y}` object
-    /// of a Splash array. Objects without an id are skipped; `scope` is
-    /// optional and leaves the command global.
+    /// Register every `{id: @x label: "..." chord: "..." focus_scope: @y}`
+    /// object of a Splash array. Objects without an id are skipped;
+    /// `focus_scope` is optional and leaves the command global when absent.
     pub fn register_script(vm: &mut ScriptVm, value: ScriptValue) {
         let mut defs: Vec<(LiveId, String, String, Option<LiveId>)> = Vec::new();
         for_each_element(vm, value, &mut |vm, item| {
@@ -710,7 +737,7 @@ impl Hotkeys {
             };
             let label = obj_string(vm, object, id!(label)).unwrap_or_default();
             let chord = obj_string(vm, object, id!(chord)).unwrap_or_default();
-            let scope = obj_field(vm, object, id!(scope))
+            let scope = obj_field(vm, object, id!(focus_scope))
                 .as_id()
                 .filter(|scope| !scope.is_empty());
             defs.push((id, label, chord, scope));
@@ -879,23 +906,48 @@ impl Hotkeys {
             .collect()
     }
 
-    /// Tie a focus scope to the area it covers. Call it where the scope's
-    /// widget draws, so the area stays current.
+    /// Tie a focus scope to the area it covers. Prefer
+    /// [`Self::set_scope_area_in`], which also remembers where the area is;
+    /// call either where the scope's widget draws or handles its actions,
+    /// so the area stays current.
     pub fn set_scope_area(&mut self, scope: LiveId, area: Area) {
-        if let Some(entry) = self.scope_areas.iter_mut().find(|(id, _)| *id == scope) {
-            entry.1 = area;
+        self.tie_scope(scope, area, None);
+    }
+
+    /// Tie a focus scope to an area on the registry held by `cx`, keeping
+    /// the area's rect so the scope is still found after the area has been
+    /// redrawn.
+    pub fn set_scope_area_in(cx: &mut Cx, scope: LiveId, area: Area) {
+        let rect = (!area.is_empty() && area.is_valid(cx)).then(|| area.rect(cx));
+        cx.global::<Hotkeys>().tie_scope(scope, area, rect);
+    }
+
+    fn tie_scope(&mut self, scope: LiveId, area: Area, rect: Option<Rect>) {
+        if let Some(slot) = self.scope_areas.iter_mut().find(|e| e.scope == scope) {
+            // The same instance tied again without a rect keeps the one it
+            // had.
+            let rect = rect.or(if same_instance(slot.area, area) {
+                slot.rect
+            } else {
+                None
+            });
+            *slot = ScopeArea { scope, area, rect };
         } else {
-            self.scope_areas.push((scope, area));
+            self.scope_areas.push(ScopeArea { scope, area, rect });
         }
     }
 
     pub fn clear_scope_area(&mut self, scope: LiveId) {
-        self.scope_areas.retain(|(id, _)| *id != scope);
+        self.scope_areas.retain(|e| e.scope != scope);
     }
 
     /// The focus scopes the key focus is in, innermost first: a scope whose
     /// own area has the focus, then the scopes whose areas contain the
     /// middle of the focused area, smallest first.
+    ///
+    /// The focus is carried from redraw to redraw and a tied area is not, so
+    /// "its own area" means the same area handle, the same instance redrawn,
+    /// or the same rect on screen.
     pub fn focused_scopes(&self, cx: &Cx) -> Vec<LiveId> {
         let focus = cx.key_focus();
         if focus.is_empty() || !focus.is_valid(cx) {
@@ -904,17 +956,27 @@ impl Hotkeys {
         let rect = focus.rect(cx);
         let middle = rect.pos + rect.size * 0.5;
         let mut hits: Vec<(f64, LiveId)> = Vec::new();
-        for (scope, area) in &self.scope_areas {
-            if area.is_empty() || !area.is_valid(cx) {
+        for entry in &self.scope_areas {
+            if entry.area.is_empty() {
                 continue;
             }
-            if *area == focus {
-                hits.push((-1.0, *scope));
+            let scope_rect = if entry.area.is_valid(cx) {
+                Some(entry.area.rect(cx))
+            } else {
+                entry.rect
+            };
+            let has_size = |r: &Rect| r.size.x > 0.0 && r.size.y > 0.0;
+            if entry.area == focus
+                || same_instance(entry.area, focus)
+                || scope_rect.is_some_and(|r| has_size(&r) && r == rect)
+            {
+                hits.push((-1.0, entry.scope));
                 continue;
             }
-            let scope_rect = area.rect(cx);
-            if scope_rect.contains(middle) {
-                hits.push((scope_rect.size.x * scope_rect.size.y, *scope));
+            if let Some(r) = scope_rect.filter(has_size) {
+                if r.contains(middle) {
+                    hits.push((r.size.x * r.size.y, entry.scope));
+                }
             }
         }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
