@@ -1660,6 +1660,17 @@ impl ScriptApply for WidgetRef {
             ScriptObject::ZERO
         }
     }
+
+    /// The heap the widget's `#[source]` lives in; 0 when unknown, empty or
+    /// borrowed right now (never panics, unlike `script_source`).
+    fn script_source_heap_key(&self) -> usize {
+        match self.0.try_borrow() {
+            Ok(inner) => inner
+                .as_ref()
+                .map_or(0, |inner| inner.widget.script_source_heap_key()),
+            Err(_) => 0,
+        }
+    }
 }
 
 impl ScriptNew for WidgetRef {

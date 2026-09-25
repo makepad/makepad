@@ -804,3 +804,79 @@ fn is_seeded_tells_a_known_value_from_an_unseeded_slot() {
     // An unknown slot id is not seeded.
     assert!(!e.is_seeded(SlotId(9999)));
 }
+
+#[test]
+fn forget_target_frees_the_slots_and_kills_what_animates_them() {
+    let mut e = TweenEngine::new();
+    for t in 0..3 {
+        e.seed(tg(t), X, TweenValue::F64(0.0));
+        e.seed(tg(t), Y, TweenValue::F64(0.0));
+    }
+    // A tween only on target 1 (reports Interrupt), a tween on 0 and 2, and
+    // a timeline with one child on 1 and one on 2.
+    let only = e.to(one(1), &[to(X, 100.0)], lin(1.0).events(CBS));
+    let list = [tg(0), tg(2)];
+    let both = e.to(Targets::List(&list), &[to(X, 100.0)], lin(1.0));
+    let tl = e.timeline(TimelineOpts::new());
+    e.tl(tl)
+        .to(one(1), &[to(Y, 50.0)], lin(1.0), Position::END)
+        .to(one(2), &[to(Y, 50.0)], lin(1.0), Position::END);
+    // A kept tween on 1 that completes and detaches from the root.
+    let kept = e.to(one(1), &[to(Y, 10.0)], lin(0.1).keep(true));
+    e.advance(0.5);
+    let mut buf = Vec::new();
+    e.swap_events(&mut buf);
+    let gen = e.slot_generation();
+    let slot_2y = e.slot(tg(2), Y).unwrap();
+
+    assert_eq!(e.forget_target(tg(1)), 2, "target 1 had two slots");
+    assert!(e.slot(tg(1), X).is_none() && e.slot(tg(1), Y).is_none());
+    assert_ne!(e.slot_generation(), gen, "slot ids were renumbered");
+    assert_ne!(e.slot(tg(2), Y).unwrap(), slot_2y);
+    assert!(!e.anim_ref(only).is_alive(), "nothing left to animate");
+    assert!(
+        !e.anim_ref(kept).is_alive(),
+        "a kept, detached tween dies too"
+    );
+    assert!(e.anim_ref(both).is_alive() && e.anim_ref(tl).is_alive());
+    e.swap_events(&mut buf);
+    assert!(
+        buf.iter()
+            .any(|ev| ev.id == only && ev.kind == EventKind::Interrupt),
+        "{buf:?}"
+    );
+    assert!(!e.is_tweening(tg(1)));
+    // Everything else runs on, on the renumbered slots.
+    e.advance(0.5);
+    close(val(&e, 0, X), 100.0, 1e-9, "0.x");
+    close(val(&e, 2, X), 100.0, 1e-9, "2.x");
+    e.advance(1.0);
+    close(
+        val(&e, 2, Y),
+        50.0,
+        1e-9,
+        "2.y after the timeline's second child",
+    );
+    assert_eq!(e.slot_key(e.slot(tg(2), Y).unwrap()), (tg(2), Y));
+    // The target can come back: a new slot, seeded afresh.
+    e.seed(tg(1), X, TweenValue::F64(7.0));
+    close(val(&e, 1, X), 7.0, 0.0, "1.x reseeded");
+    assert_eq!(e.forget_target(tg(9)), 0, "an unknown target is a no-op");
+}
+
+#[test]
+fn forget_props_clears_some_properties_only() {
+    let mut e = TweenEngine::new();
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    e.seed(tg(0), Y, TweenValue::F64(0.0));
+    let t = e.to(one(0), &[to(X, 100.0), to(Y, 100.0)], lin(1.0));
+    e.advance(0.25);
+    assert_eq!(e.forget_props(tg(0), &[X]), 1);
+    assert!(e.slot(tg(0), X).is_none());
+    assert!(e.anim_ref(t).is_alive(), "Y still animates");
+    e.advance(0.75);
+    close(val(&e, 0, Y), 100.0, 1e-9, "y");
+    assert!(e.get(tg(0), X).is_none());
+    // The changes list holds no forgotten slot.
+    assert!(e.changes().iter().all(|s| e.slot_key(*s) == (tg(0), Y)));
+}

@@ -2134,6 +2134,103 @@ impl TweenEngine {
         s
     }
 
+    /// Forgets target `t` entirely: every property track on it dies (in any
+    /// animation, playing, paused, kept or detached; an animation left with
+    /// nothing to animate is killed, reporting Interrupt below progress 1),
+    /// and its value slots are removed. A host calls this when the object
+    /// behind `t` is gone, so its slots stop costing memory and pushes.
+    ///
+    /// The remaining slots are renumbered and [`TweenEngine::slot_generation`]
+    /// bumps: look cached [`SlotId`]s up again. Returns how many slots went.
+    /// Not for the frame loop: O(slots + tracks) and one scratch allocation.
+    pub fn forget_target(&mut self, t: TargetId) -> usize {
+        self.forget_slots(t, None)
+    }
+
+    /// [`TweenEngine::forget_target`] for some properties of `t` only (GSAP
+    /// `clearProps`): their tracks die and their slots go; the other
+    /// properties of `t` are untouched.
+    pub fn forget_props(&mut self, t: TargetId, keys: &[PropKey]) -> usize {
+        self.forget_slots(t, Some(keys))
+    }
+
+    fn forget_slots(&mut self, t: TargetId, keys: Option<&[PropKey]>) -> usize {
+        let doomed = |e: &Self, s: usize| {
+            e.sl_target[s] == t && keys.map_or(true, |ks| ks.contains(&e.sl_key[s]))
+        };
+        let mut any = false;
+        let mut s = self.first_slot_of(t);
+        while s != NIL {
+            any |= doomed(self, s as usize);
+            s = self.sl_next_of_target[s as usize];
+        }
+        if !any {
+            return 0;
+        }
+        // 1. Kill every live track on a doomed slot, newest first (as the
+        // overwrite kills do), whatever state its animation is in.
+        for k in (0..self.tr_slot.len()).rev() {
+            if self.tr_meta[k].flags & T_ALIVE == 0 || !doomed(self, self.tr_slot[k] as usize) {
+                continue;
+            }
+            let m = self.tr_node[k];
+            self.kill_track(k as u32);
+            if self.hot[m as usize].flags & (F_KILLED | F_FREE) == 0 {
+                self.after_track_kill(m);
+            }
+        }
+        self.flush_reap();
+        // 2. Drop the dead tracks, so no track refers to a slot that goes.
+        self.compact_tracks();
+        // 3. Remove the slots, keeping the order of the others.
+        let n = self.sl_val.len();
+        let mut map = vec![NIL; n];
+        let mut w = 0usize;
+        for s in 0..n {
+            if doomed(self, s) {
+                continue;
+            }
+            map[s] = w as u32;
+            if w != s {
+                self.sl_val[w] = self.sl_val[s];
+                self.sl_kind[w] = self.sl_kind[s];
+                self.sl_target[w] = self.sl_target[s];
+                self.sl_key[w] = self.sl_key[s];
+                self.sl_first_track[w] = self.sl_first_track[s];
+                self.sl_stamp[w] = self.sl_stamp[s];
+                self.sl_seeded[w] = self.sl_seeded[s];
+            }
+            w += 1;
+        }
+        self.sl_val.truncate(w);
+        self.sl_kind.truncate(w);
+        self.sl_target.truncate(w);
+        self.sl_key.truncate(w);
+        self.sl_first_track.truncate(w);
+        self.sl_stamp.truncate(w);
+        self.sl_seeded.truncate(w);
+        self.sl_next_of_target.truncate(w);
+        for s in self.tr_slot.iter_mut() {
+            *s = map[*s as usize];
+        }
+        self.changed.retain_mut(|c| {
+            let m = map[c.0 as usize];
+            c.0 = m;
+            m != NIL
+        });
+        // 4. Rebuild both indexes and the per-target chains in slot order,
+        // as `slot_for` builds them.
+        self.sl_index.fill(NIL);
+        self.tg_index.fill(NIL);
+        for s in 0..w as u32 {
+            let prev = self.first_slot_of(self.sl_target[s as usize]);
+            self.sl_next_of_target[s as usize] = prev;
+            self.index_insert(s);
+        }
+        self.slot_gen = self.slot_gen.wrapping_add(1);
+        n - w
+    }
+
     /// Sets the current value of (t, p): GSAP reads a target's current value
     /// when a tween starts; here the host seeds it. Marks the slot changed.
     pub fn seed(&mut self, t: TargetId, p: PropKey, v: TweenValue) -> SlotId {
@@ -2194,7 +2291,8 @@ impl TweenEngine {
         self.sl_val.len() as u32
     }
 
-    /// Bumps whenever a slot is created, so cached slot lookups can rebuild.
+    /// Bumps whenever a slot is created, or slots are forgotten (which
+    /// renumbers the rest), so cached slot lookups can rebuild.
     pub fn slot_generation(&self) -> u32 {
         self.slot_gen
     }

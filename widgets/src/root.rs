@@ -119,7 +119,7 @@ impl Widget for Root {
             }
         }
         if let Event::Draw(e) = event {
-            crate::tween_script::draw_check(cx);
+            crate::tween_script::draw_check(cx, self.uid);
             let mut cx_draw = CxDraw::new(cx, e);
             let cx = &mut Cx2d::new(&mut cx_draw);
             self.draw_all(cx, scope);

@@ -44,7 +44,7 @@ script_mod! {
 
     // The page's script state: the timeline (built on first use) and the
     // last state line, so on_update writes the label only when it changes.
-    let st = {tl: nil, last: "", completes: 0}
+    let st = {tl: nil, go: nil, last: "", completes: 0}
 
     fn f2(x) {
         return "" + round(x * 100.0) / 100.0
@@ -95,9 +95,17 @@ script_mod! {
         return tl
     }
 
+    // The page's timeline, built on first use. A page instantiated again
+    // (a story switch and back, a style reload) has new widgets: the old
+    // timeline went with the old ones (is_alive() is false), so it is built
+    // again for this page's widgets.
     fn the_tl(ui) {
-        if st.tl == nil {
+        if st.tl == nil || !st.tl.is_alive() {
+            if st.tl != nil {
+                st.tl.kill()
+            }
             st.tl = build_tl(ui)
+            st.last = ""
         }
         return st.tl
     }
@@ -108,19 +116,29 @@ script_mod! {
         StoryHeading{text: "One call, one tween"}
         StoryRow{
             st_go := Button{text: "tween.to" on_click: || {
-                tween.to(ui.st_box, {
+                st.go = tween.to(ui.st_box, {
                     duration: theme.motion_extra_long_2
                     ease: theme.motion_ease_standard
                     margin: {left: 300.0}
                     draw_bg: {color: #x3fb8af}
                     on_complete: || ui.st_note.set_text("tween.to: on_complete")
+                    on_reverse_complete: || ui.st_note.set_text("tween.to: on_reverse_complete")
                 })
+            }}
+            // The tween.to handle outlives the tween's completion while the
+            // script holds it, as in GSAP: reverse() plays it back.
+            st_rev := Button{text: "h.reverse()" on_click: || {
+                if st.go != nil {
+                    st.go.reverse()
+                }
             }}
             st_back := Button{text: "back, power2.out" on_click: || {
                 tween.to(ui.st_box, {duration: 0.4 ease: "power2.out" margin: {left: 0.0} draw_bg: {color: #x5b6cff}})
             }}
             st_from := Button{text: "tween.from" on_click: || tween.from(ui.st_box, {width: 4.0 duration: 0.6 ease: "back.out(1.7)"})}
             st_grow := Button{text: "width +=20" on_click: || tween.to(ui.st_box, {width: "+=20" duration: 0.25})}
+        }
+        StoryRow{
             st_fromto := Button{text: "tween.from_to" on_click: || {
                 tween.from_to(ui.st_box, {margin: {left: 0.0}}, {margin: {left: 150.0} duration: 0.5 ease: "steps(5)"})
             }}
@@ -129,6 +147,10 @@ script_mod! {
                 ui.st_note.set_text("tween.set: applied")
             }}
             st_stop := Button{text: "kill_tweens_of" on_click: || tween.kill_tweens_of(ui.st_box)}
+            st_clear := Button{text: "clear_props" on_click: || {
+                tween.clear_props(ui.st_box)
+                ui.st_note.set_text("clear_props: DSL values back")
+            }}
         }
         Lane{st_box := TweenBox{}}
         st_note := Readout{text: "tween: -"}
@@ -248,7 +270,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "FoundationsMotionScriptTweens",
     added: "2026-09-25",
     tags: &["new", "tween", "timeline", "gsap", "script", "splash", "stagger", "ticker", "callbacks"],
-    doc: "# Script tweens\n\n`tween` (`mod.tween`) is the tween engine from Splash script, shaped like GSAP. Every widget script has it:\n\n```\ntween.to(ui.card, {duration: 0.4, ease: Ease.OutCubic, draw_bg: {color: #x3fb8af}})\nlet tl = tween.timeline({defaults: {duration: 0.3}, repeat: 1, yoyo: true, paused: true})\ntl.to(ui.a, {margin: {left: 100.0}}).to(ui.b, {width: 80.0}, \"+=0.2\").add_label(@shown)\n  .call(|| ui.status.set_text(\"shown\"), \"shown+=0.1\")\ntl.on_complete(|| ui.status.set_text(\"done\"))\ntl.play()\n```\n\n- **Targets** are `ui` handles (`ui`, `ui.name`) or an array of them, in stagger order.\n- **vars**: `duration, delay, ease, repeat, repeat_delay, yoyo, yoyo_ease, stagger, overwrite, paused, reversed, time_scale, color_space, id` and `on_start, on_update, on_repeat, on_complete, on_reverse_complete, on_interrupt` are options; every other key is a property, and a nested object is a path (`draw_bg: {color: ..}`). Values are numbers, colours, vec2/vec4 and `\"+=n\"` / `\"-=n\"`.\n- **Eases**: `Ease.OutCubic`, `theme.motion_ease_*`, a GSAP string (`\"power2.out\"`, `\"back.out(1.7)\"`, `\"steps(5)\"`, `\"cubic-bezier(.2,0,0,1)\"`) or a CSS preset name.\n- **Positions**: numbers, `@labels`, or GSAP strings (`\"<\"`, `\">\"`, `\"+=0.2\"`, `\"shown+=0.1\"`).\n- **Handles** from `tween.to` and `tween.timeline` answer `play, pause, resume, reverse, restart, seek, kill`, the getters/setters `time, total_time, progress, total_progress, time_scale, paused, reversed, duration` and `total_duration, iteration, is_active, current_label`, and `on_*(fn)`.\n- **Globals**: `tween.kill_tweens_of(targets, props?)`, `tween.is_tweening(target)`, `tween.ticker({time_scale, paused, reduced_motion})` (the app-wide ticker; `tween.ticker()` reads it).\n\nCallbacks run after the frame that fired them (GSAP runs them inside the render). A `to()` starts from the value the tween layer last wrote, else from the widget's DSL value at that path: a value the Animator changed is not seen, and a key the DSL never set needs `from_to`.\n\n## This page\n\nThe first row tweens one box; the timeline row plays a timeline built on first use and kept in a script variable; the last row staggers eight bars from the centre and toggles the ticker's time scale. The readouts (`st_state`, `st_call`, `st_done`, `st_note`, `st_wave_note`, `st_ticker`) are written by the script's callbacks, so `/snap?q=st_` reads them.",
+    doc: "# Script tweens\n\n`tween` (`mod.tween`) is the tween engine from Splash script, shaped like GSAP. Every widget script has it:\n\n```\ntween.to(ui.card, {duration: 0.4, ease: Ease.OutCubic, draw_bg: {color: #x3fb8af}})\nlet tl = tween.timeline({defaults: {duration: 0.3}, repeat: 1, yoyo: true, paused: true})\ntl.to(ui.a, {margin: {left: 100.0}}).to(ui.b, {width: 80.0}, \"+=0.2\").add_label(@shown)\n  .call(|| ui.status.set_text(\"shown\"), \"shown+=0.1\")\ntl.on_complete(|| ui.status.set_text(\"done\"))\ntl.play()\n```\n\n- **Targets** are `ui` handles (`ui`, `ui.name`) or an array of them, in stagger order.\n- **vars**: `duration, delay, ease, repeat, repeat_delay, yoyo, yoyo_ease, stagger, overwrite, paused, reversed, time_scale, color_space, id` and `on_start, on_update, on_repeat, on_complete, on_reverse_complete, on_interrupt` are options; every other key is a property, and a nested object is a path (`draw_bg: {color: ..}`). Values are numbers, colours, vec2/vec3/vec4 and `\"+=n\"` / `\"-=n\"`.\n- **Eases**: `Ease.OutCubic`, `theme.motion_ease_*`, a GSAP string (`\"power2.out\"`, `\"back.out(1.7)\"`, `\"steps(5)\"`, `\"cubic-bezier(.2,0,0,1)\"`) or a CSS preset name.\n- **Positions**: numbers, `@labels`, or GSAP strings (`\"<\"`, `\">\"`, `\"+=0.2\"`, `\"shown+=0.1\"`).\n- **Handles** from `tween.to` and `tween.timeline` answer `play, pause, resume, reverse, restart, seek, kill`, the getters/setters `time, total_time, progress, total_progress, time_scale, paused, reversed, duration` and `total_duration, iteration, is_active, current_label, is_alive`, and `on_*(fn)`. A root tween stays addressable after it completes while script holds its handle (`h.restart()` works); an animation whose widgets are all gone is killed with them.\n- **Globals**: `tween.kill_tweens_of(targets, props?)`, `tween.clear_props(targets, props?)` (forgets what the tween layer holds for those keys and puts the DSL values back), `tween.is_tweening(target)`, `tween.ticker({time_scale, paused, reduced_motion, lag_smoothing})` (the app-wide ticker, main VM only; `tween.ticker()` reads it; lag smoothing in seconds).\n\nCallbacks run after the frame that fired them (GSAP runs them inside the render). A `to()` starts from the value the tween layer last wrote, else from the widget's DSL value at that path: a value the Animator changed is not seen, and a key the DSL never set needs `from_to`.\n\n## This page\n\nThe first row tweens one box (`clear_props` puts its DSL values back); the timeline row plays a timeline built on first use and kept in a script variable, built again when the page was instantiated anew; the last row staggers eight bars from the centre and toggles the ticker's time scale. The readouts (`st_state`, `st_call`, `st_done`, `st_note`, `st_wave_note`, `st_ticker`) are written by the script's callbacks, so `/snap?q=st_` reads them.",
     subject: "",
     feature: None,
     controls: &[],

@@ -844,6 +844,16 @@ impl TweenHost {
         self.started(cx, id)
     }
 
+    /// A root-level tween of any mix of prop forms ([`PropTo::to`],
+    /// [`PropTo::by`], explicit starts): what [`TweenHost::to`] /
+    /// [`TweenHost::from_to`] build, without their checks on the forms (a
+    /// script `set` of `{x: 1, y: "+=2"}`). `overwrite: "auto"` by default.
+    pub fn tween(&mut self, cx: &mut Cx, t: Targets, props: &[PropTo], o: TweenOpts) -> TweenId {
+        let o = self.root_opts(o);
+        let id = self.engine.tween(t, props, o);
+        self.started(cx, id)
+    }
+
     /// GSAP `gsap.set(targets, vars)`: applies `props` at once (reported on
     /// the next frame).
     pub fn set(&mut self, cx: &mut Cx, t: Targets, props: &[PropTo]) -> TweenId {
@@ -922,6 +932,44 @@ impl TweenHost {
     pub fn kill_of(&mut self, cx: &mut Cx, t: Targets, keys: Option<&[PropKey]>) {
         self.engine.kill_tweens_of(t, keys);
         self.ensure_armed(cx);
+    }
+
+    /// Forgets target `t` (the object behind it is gone): the tracks on it
+    /// die (an animation left with nothing to animate is killed), and its
+    /// slots, apply object and path binds go (see
+    /// [`TweenEngine::forget_target`]). The other slots are renumbered, so
+    /// every apply object is rebuilt on its next push. Arms the clock like
+    /// [`TweenHost::kill`]. Not for the frame loop.
+    pub fn forget_target(&mut self, cx: &mut Cx, t: TargetId) {
+        self.engine.forget_target(t);
+        self.caches.retain(|(ct, _)| *ct != t);
+        self.binds.retain(|b| b.target != t);
+        self.after_forget(cx);
+    }
+
+    /// [`TweenHost::forget_target`] for some properties of `t` (GSAP
+    /// `clearProps`): their tracks, slots and binds go; the pushed object of
+    /// `t` no longer carries them.
+    pub fn forget_props(&mut self, cx: &mut Cx, t: TargetId, keys: &[PropKey]) {
+        self.engine.forget_props(t, keys);
+        self.binds
+            .retain(|b| !(b.target == t && keys.contains(&b.key)));
+        self.after_forget(cx);
+    }
+
+    fn after_forget(&mut self, cx: &mut Cx) {
+        // Slot ids were renumbered: rebuild every apply object on its next
+        // push (a rebuilt object rewrites all its leaves).
+        self.bind_gen = self.bind_gen.wrapping_add(1);
+        self.refresh_pending();
+        self.ensure_armed(cx);
+    }
+
+    /// Whether a push was deferred (the VM was held or the target borrowed)
+    /// and waits for the next frame: [`TweenHost::target_changed`] may then
+    /// be true for a target with no listed change.
+    pub fn has_deferred_push(&self) -> bool {
+        self.pending_push
     }
 
     /// Kills every animation of this host (values are kept). Arms the clock

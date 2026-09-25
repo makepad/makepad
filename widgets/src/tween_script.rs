@@ -21,37 +21,44 @@
 //!
 //! | Script | GSAP |
 //! |---|---|
-//! | `tween.to(targets, vars)` / `from` / `from_to(targets, from_vars, to_vars)` / `set` | `gsap.to` / `from` / `fromTo` / `set`; `overwrite: "auto"` by default |
-//! | `tween.timeline(vars)` | `gsap.timeline(vars)`: `defaults`, `repeat`, `yoyo`, `repeat_delay`, `delay`, `paused`, `reversed`, `time_scale`, `keep`, `on_*` |
+//! | `tween.to(targets, vars)` / `from` / `from_to(targets, from_vars, to_vars)` / `set` | `gsap.to` / `from` / `fromTo` / `set`. Unlike GSAP (`overwrite: false`), root tweens default to `overwrite: @auto` (a new tween of a key retargets the running one), as [`TweenHost`] does |
+//! | `tween.timeline(vars)` | `gsap.timeline(vars)`: `defaults`, `delay`, `repeat`, `repeat_delay`, `repeat_refresh`, `yoyo`, `paused`, `reversed`, `time_scale`, `smooth_child_timing`, `auto_remove_children`, `keep`, `reduce`, `id` / `tag`, `on_*` |
 //! | `tween.kill_tweens_of(targets, props?)` | `gsap.killTweensOf` (`props`: `"margin.left, width"` or an array of such strings / ids) |
+//! | `tween.clear_props(targets, props?)` | `clearProps`: kills the tweens of those keys, forgets them, and puts the widget's DSL values back (`props` as above; none, `true` or `"all"` for every key the tween layer holds) |
 //! | `tween.is_tweening(target)` | `gsap.isTweening` |
-//! | `tween.ticker({time_scale, paused, reduced_motion, lag_smoothing})`, `tween.ticker()` | `gsap.globalTimeline.timeScale()` / `pause()`, `gsap.ticker.lagSmoothing()`; returns `{time_scale, paused, reduced_motion}` |
+//! | `tween.ticker({time_scale, paused, reduced_motion, lag_smoothing})`, `tween.ticker()` | `gsap.globalTimeline.timeScale()` / `pause()`, `gsap.ticker.lagSmoothing()`; returns `{time_scale, paused, reduced_motion}`. App-wide: a Splash isolate may read it, not write it. `lag_smoothing` is in SECONDS (GSAP takes ms): a number caps every frame delta (0 turns it off), `[threshold, adjusted]` replaces deltas above `threshold` with `adjusted` |
 //! | `tl.to(targets, vars, position?)` / `from` / `from_to(targets, from, to, position?)` / `set` | `tl.to()` ...; return the timeline for chaining |
 //! | `tl.add_label(label, position?)`, `tl.call(fn, position?)`, `tl.add_pause(position?, fn?)` | `addLabel`, `call` (no params array: the closure captures what it needs), `addPause` |
 //! | `play(from?)`, `pause(at?)`, `resume()`, `reverse(from?)`, `restart(include_delay?, suppress_events?)`, `seek(position, suppress_events?)`, `kill()` | the `Animation` methods |
 //! | `time(t?)`, `total_time(t?)`, `progress(p?)`, `total_progress(p?)`, `time_scale(s?)`, `paused(b?)`, `reversed(b?)`, `duration(d?)` | getters without an argument, setters (returning the handle) with one |
-//! | `total_duration()`, `iteration()`, `is_active()`, `current_label()` | getters |
+//! | `total_duration()`, `iteration()`, `is_active()`, `current_label()`, `is_alive()` | getters; `is_alive()` (not GSAP) is false once the animation is gone: killed, completed and released, or all its widgets gone |
 //! | `on_start(fn)`, `on_update(fn)`, `on_repeat(fn)`, `on_complete(fn)`, `on_reverse_complete(fn)`, `on_interrupt(fn)` | `eventCallback`; also as `vars` keys; `nil` removes |
 //!
 //! `tween.to(..)` returns a handle with the same methods as a timeline
-//! handle (the builders answer an error on a tween). A handle whose
-//! animation is gone (completed and removed, killed) makes every method a
-//! no-op and every getter answer 0 / false / nil.
+//! handle (the builders answer an error on a tween). As in GSAP, a root
+//! tween stays addressable after it completes while script holds its
+//! handle (`h.restart()`, `h.reverse()` work; vars `keep: false` opts out);
+//! once the handle is collected it is freed. A handle whose animation is
+//! gone makes every method a no-op and every getter answer 0 / false / nil.
 //!
 //! Targets are `ui` handles (`ui`, `ui.name`, `ui.a.b`) or an array of them
-//! (in stagger order). In `vars`, the keys `duration, delay, ease,
-//! ease_each, repeat, repeat_delay, repeat_refresh, yoyo, yoyo_ease, stagger,
-//! overwrite, immediate_render, paused, reversed, time_scale, color_space,
-//! reduce, keep, inherit, id, tag` and `on_*` are options; every other key
-//! is a property, and a nested object is a path (`draw_bg: {color: #f00}`
+//! (in stagger order), built by the calling script's own VM: a widget whose
+//! DSL source lives in another VM's heap (a Splash isolate's widgets seen
+//! from the host, the host-built Splash widget seen from its isolate) is
+//! refused. In `vars`, the keys `duration, delay, ease, ease_each, repeat,
+//! repeat_delay, repeat_refresh, yoyo, yoyo_ease, stagger, overwrite,
+//! immediate_render, paused, reversed, time_scale, color_space, reduce,
+//! keep, inherit, id, tag` and `on_*` are options; every other key is a
+//! property, and a nested object is a path (`draw_bg: {color: #f00}`
 //! animates `draw_bg.color`, up to four ids deep). Values: numbers, colours,
-//! `vec2`/`vec3`/`vec4`, and `"+=n"` / `"-=n"` for relative ends. An ease is
-//! an `Ease` value (`Ease.OutCubic`, `theme.motion_ease_*`), a GSAP string
-//! (`"power2.out"`, `"back.out(1.7)"`, `"steps(5)"`,
-//! `"cubic-bezier(.2,0,0,1)"`) or a CSS preset name (`"ease_out_cubic"`). A
-//! stagger is a number (`each`) or `{each | amount, from: @start | @center
-//! | @edges | @end | @random | index | [x, y], grid: [rows, cols], axis: @x
-//! | @y, ease, repeat, yoyo, repeat_delay}`. Positions are numbers, `@labels`
+//! `vec2`/`vec3`/`vec4` (finite lanes), and `"+=n"` / `"-=n"` for relative
+//! numeric ends. An ease is an `Ease` value (`Ease.OutCubic`,
+//! `theme.motion_ease_*`), a GSAP string (`"power2.out"`, `"back.out(1.7)"`,
+//! `"steps(5)"`, `"cubic-bezier(.2,0,0,1)"`) or a CSS preset name
+//! (`"ease_out_cubic"`). A stagger is a number (`each`; negative staggers
+//! from the end, as in GSAP) or `{each | amount, from: @start | @center |
+//! @edges | @end | @random | index | [x, y], grid: [rows, cols], axis: @x |
+//! @y, ease, repeat, yoyo, repeat_delay}`. Positions are numbers, `@labels`
 //! or GSAP strings (`"<"`, `">-0.1"`, `"+=0.2"`, `"shown+=0.1"`).
 //!
 //! # How it runs
@@ -59,15 +66,26 @@
 //! Nothing runs inside the VM beyond building: a native turns its arguments
 //! into plain `TweenOpts` / `PropTo` data (walking `vars` once), builds into
 //! the calling VM's [`TweenHost`] and returns. The script-side driver, one
-//! `TweenHost` per VM in a `Cx` global, is stepped at the top of
-//! `Root::handle_event` on its `NextFrame` (and on `LiveEdit` /
+//! `TweenHost` per VM in a `Cx` global, is stepped by [`handle_event`] at the
+//! top of `Root::handle_event` on its `NextFrame` (and on `LiveEdit` /
 //! `ScriptReapply`, which re-push every value): it pushes each changed
 //! target with [`TweenHost::apply_to_ref`] and redraws it, then drains the
 //! engine's events and calls the script closures they name, each inside
 //! `contain_isolate_panic`, the VM that owns it and the widget instruction
-//! limit. A target is its widget's uid: the widget is looked up with
-//! `cx.widget_tree().widget(uid)` (a weak ref caches the last answer), and a
-//! target whose widget is gone is dropped with its tweens.
+//! limit. [`draw_check`], from the root's `Event::Draw`, pushes what a build
+//! changed since the last frame before anything draws (a `from()` or a
+//! `set()` never shows one frame late) and re-arms hosts a ticker pause held.
+//! Only `Root` calls the two: an app whose top widget is something else
+//! calls them itself, or its script tweens never move.
+//!
+//! A target is its widget's uid: the widget is looked up with
+//! `cx.widget_tree().widget(uid)` (a weak ref caches the last answer). A
+//! target whose widget is gone is forgotten (its tweens killed, its slots,
+//! apply object and binds freed) at the first of: its next push, any
+//! `tween` call of that VM, a `LiveEdit` / `ScriptReapply`. A script-built
+//! animation whose widgets are all gone is killed with them (a timeline left
+//! with only `call()`s included), so a page rebuilt with new widgets does
+//! not keep the old page's timelines and closures alive.
 //!
 //! # Limitations
 //!
@@ -79,15 +97,20 @@
 //!   target's DSL source object at that path (an `instance(..)` default
 //!   included). A value the Animator or Rust code changed since the widget
 //!   was applied is not seen, and a key the DSL never set has nothing to
-//!   start from (debug builds log it once): use `from_to`.
-//! - A key animated by the Animator and a tween at once flickers (the last
-//!   writer of a frame wins).
+//!   start from (debug builds log it once): use `from_to`. A relative end in
+//!   `set()` is resolved when the set is built.
+//! - Every value the tween layer holds for a widget is pushed with each push
+//!   of that widget (and again after a `LiveEdit` / `ScriptReapply`), until
+//!   `clear_props` forgets it. The driver pushes before the widgets handle
+//!   the frame, so a running Animator animating the same key writes after it
+//!   and wins every frame; an idle Animator leaves the tween's value.
 //! - Every pushed target is redrawn on each changed frame (layout fields
-//!   need it); a few hundred moving targets is the budget.
+//!   need it). A push enters the target's VM once per target (an isolate's
+//!   costs an install each); a few hundred moving targets is the budget.
 //! - An animation outlives its handle (GSAP): once the handle is collected it
-//!   plays on and is killed when it completes, or at once if it is paused.
+//!   plays on and is freed when it completes, or at once if it is paused.
 //!   A timeline whose own callbacks reference it stays alive until
-//!   `tl.kill()`: build it once and replay it, or kill the old one.
+//!   `tl.kill()` or until its widgets are gone.
 //! - Not supported: array keyframes, function-based values, `snap`, `"*="`,
 //!   `call()` params, targets other than `ui` handles, the root widget.
 
@@ -181,25 +204,57 @@ struct CallFn {
     f: ScriptFnRef,
 }
 
+/// A path a target's values land at, as it was tweened.
+#[derive(Clone, Copy)]
+struct KeyPath {
+    key: PropKey,
+    path: [LiveId; 4],
+    len: u8,
+}
+
+impl KeyPath {
+    fn path(&self) -> &[LiveId] {
+        &self.path[..self.len as usize]
+    }
+}
+
 /// One widget a VM animates.
 struct Target {
     uid: WidgetUid,
     tid: TargetId,
     /// The widget as last found; the uid lookup is the fallback.
     weak: WidgetWeakRef,
-    /// Multi-id paths already bound with `bind_path`.
-    bound: Vec<PropKey>,
-    dead: bool,
+    /// Every key the tween layer holds for this widget (multi-id paths are
+    /// bound with `bind_path` when first added).
+    keys: Vec<KeyPath>,
+    /// Marked by the push's pass over the change list.
+    dirty: bool,
+}
+
+/// A script-built root animation and the targets its tracks animate.
+struct RootAnim {
+    id: TweenId,
+    tids: Vec<TargetId>,
+}
+
+/// A `clear_props` waiting for the driver: the DSL values to put back.
+struct Restore {
+    uid: WidgetUid,
+    weak: WidgetWeakRef,
+    paths: Vec<KeyPath>,
 }
 
 /// Everything one script VM (the app's, or a Splash isolate's) animates.
 struct VmTweens {
     vm_id: SplashVmId,
     host: TweenHost,
+    /// Sorted by `tid` (TargetIds grow and are never reused).
     targets: Vec<Target>,
     next_tid: u32,
     callbacks: Vec<Callback>,
     calls: Vec<CallFn>,
+    roots: Vec<RootAnim>,
+    restores: Vec<Restore>,
     /// Animations whose script handle was collected.
     orphans: Vec<TweenId>,
     handle_type: Option<ScriptHandleType>,
@@ -219,6 +274,8 @@ impl VmTweens {
             next_tid: 0,
             callbacks: Vec::new(),
             calls: Vec::new(),
+            roots: Vec::new(),
+            restores: Vec::new(),
             orphans: Vec::new(),
             handle_type: None,
             warned: Vec::new(),
@@ -231,8 +288,7 @@ impl VmTweens {
     }
 
     /// The target of `uid`, created (with the widget `w` as its weak ref)
-    /// when missing. TargetIds are never reused: the engine keeps the slots
-    /// of a target that is gone.
+    /// when missing. TargetIds are never reused.
     fn target(&mut self, uid: WidgetUid, w: &WidgetRef) -> usize {
         if let Some(i) = self.target_ix(uid) {
             return i;
@@ -243,50 +299,151 @@ impl VmTweens {
             uid,
             tid,
             weak: w.downgrade(),
-            bound: Vec::new(),
-            dead: false,
+            keys: Vec::new(),
+            dirty: false,
         });
         self.targets.len() - 1
     }
 
-    /// Pushes every target the last frame changed onto its widget, and
-    /// drops the targets whose widget is gone (their tweens are killed).
+    /// The widget of target `ix` (empty when it is gone).
+    fn resolve(&mut self, cx: &Cx, ix: usize) -> WidgetRef {
+        let t = &mut self.targets[ix];
+        if let Some(w) = t.weak.upgrade() {
+            return w;
+        }
+        let w = cx.widget_tree().widget(t.uid);
+        if !w.is_empty() {
+            t.weak = w.downgrade();
+        }
+        w
+    }
+
+    /// Forgets every target whose widget is gone.
+    fn sweep(&mut self, cx: &mut Cx) {
+        let mut i = 0;
+        while i < self.targets.len() {
+            if self.resolve(cx, i).is_empty() {
+                self.forget(cx, i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Forgets target `ix`: its tweens' tracks, slots, apply object and
+    /// binds go, and a script-built animation left with no widget is killed.
+    fn forget(&mut self, cx: &mut Cx, ix: usize) {
+        let t = self.targets.remove(ix);
+        self.host.forget_target(cx, t.tid);
+        self.warned.retain(|(uid, _)| *uid != t.uid);
+        for r in self.roots.iter_mut() {
+            if let Some(p) = r.tids.iter().position(|x| *x == t.tid) {
+                r.tids.swap_remove(p);
+                if r.tids.is_empty() {
+                    self.host.kill(cx, r.id);
+                }
+            }
+        }
+        self.release(cx);
+    }
+
+    /// Adds the targets of a build to the root animation `id` (a new entry
+    /// for a root tween or timeline, the timeline's for a child).
+    fn add_root_targets(&mut self, id: TweenId, tids: &[TargetId]) {
+        let r = match self.roots.iter().position(|r| r.id == id) {
+            Some(i) => &mut self.roots[i],
+            None => {
+                self.roots.push(RootAnim {
+                    id,
+                    tids: Vec::new(),
+                });
+                self.roots.last_mut().unwrap()
+            }
+        };
+        for tid in tids {
+            if !r.tids.contains(tid) {
+                r.tids.push(*tid);
+            }
+        }
+    }
+
+    /// Whether `id` still exists, or has events waiting to be drained (a
+    /// completed or killed animation reports after it is gone).
+    fn reachable(&self, id: TweenId) -> bool {
+        self.host.engine.anim_ref(id).is_alive()
+            || self.host.engine.events().iter().any(|e| e.id == id)
+    }
+
+    /// Pushes every target with changed values onto its widget, and forgets
+    /// the targets whose widget is gone.
     fn push(&mut self, cx: &mut Cx, root_uid: WidgetUid) {
-        let mut any_dead = false;
-        for t in self.targets.iter_mut() {
-            if !self.host.target_changed(t.tid) {
+        // One pass over the change list marks the targets (sorted by tid);
+        // a deferred push can concern a target with no listed change.
+        let deferred = self.host.has_deferred_push();
+        for &s in self.host.engine.changes() {
+            let tid = self.host.engine.slot_key(s).0;
+            if let Ok(i) = self.targets.binary_search_by_key(&tid, |t| t.tid) {
+                self.targets[i].dirty = true;
+            }
+        }
+        let mut i = 0;
+        while i < self.targets.len() {
+            let t = &mut self.targets[i];
+            let due = std::mem::take(&mut t.dirty) || (deferred && self.host.target_changed(t.tid));
+            if !due {
+                i += 1;
                 continue;
             }
-            let w = match t.weak.upgrade() {
-                Some(w) => w,
-                None => {
-                    let w = cx.widget_tree().widget(t.uid);
-                    if !w.is_empty() {
-                        t.weak = w.downgrade();
-                    }
-                    w
-                }
-            };
+            let w = self.resolve(cx, i);
             // The root is borrowed while this runs: it could never be pushed.
-            if w.is_empty() || t.uid == root_uid {
-                if t.uid == root_uid {
+            if w.is_empty() || self.targets[i].uid == root_uid {
+                if !w.is_empty() {
                     log!("tween: the root widget cannot be tweened; its tweens are dropped");
                 }
-                t.dead = true;
-                any_dead = true;
+                self.forget(cx, i);
                 continue;
             }
-            if self.host.apply_to_ref(cx, t.tid, &w) && w.try_widget_uid().is_some() {
+            let tid = self.targets[i].tid;
+            if self.host.apply_to_ref(cx, tid, &w) && w.try_widget_uid().is_some() {
                 // Layout fields (width, margin) need a redraw; an instance
                 // patch alone would not need one, a redraw costs little.
                 w.redraw(cx);
             }
+            i += 1;
         }
-        if any_dead {
-            for t in self.targets.iter().filter(|t| t.dead) {
-                self.host.kill_of(cx, Targets::One(t.tid), None);
+    }
+
+    /// Puts the DSL values of `clear_props` keys back on their widgets.
+    fn restore(&mut self, cx: &mut Cx) {
+        if self.restores.is_empty() || cx.is_script_vm_held() {
+            return;
+        }
+        let vm_id = self.vm_id;
+        for r in std::mem::take(&mut self.restores) {
+            let w = r
+                .weak
+                .upgrade()
+                .unwrap_or_else(|| cx.widget_tree().widget(r.uid));
+            if w.is_empty() || w.try_widget_uid().is_none() {
+                continue;
             }
-            self.targets.retain(|t| !t.dead);
+            let applied = cx.with_script_vm_id(vm_id, |vm| {
+                let key = w.script_source_heap_key();
+                let src = w.script_source();
+                if key != vm.bx.heap.heap_key() || src == ScriptObject::ZERO {
+                    return false;
+                }
+                let obj = vm.bx.heap.new_object();
+                for p in &r.paths {
+                    if let Some(v) = source_raw(&vm.bx.heap, src, p.path()) {
+                        set_path(vm, obj, p.path(), v);
+                    }
+                }
+                w.script_apply_animate(vm, obj.into())
+            });
+            if applied {
+                w.redraw(cx);
+            }
         }
     }
 
@@ -318,15 +475,25 @@ impl VmTweens {
         }
     }
 
-    /// Releases the closures of animations that are gone, and kills the
-    /// orphans (their handle was collected) that finished or sit paused.
+    /// Releases the closures (and root records) of animations that are gone
+    /// and have nothing left to report, and kills the orphans (their handle
+    /// was collected) that finished or sit paused.
     fn release(&mut self, cx: &mut Cx) {
-        let engine = &self.host.engine;
         if !self.callbacks.is_empty() {
-            self.callbacks.retain(|c| engine.anim_ref(c.id).is_alive());
+            let mut callbacks = std::mem::take(&mut self.callbacks);
+            callbacks.retain(|c| self.reachable(c.id));
+            self.callbacks = callbacks;
         }
         if !self.calls.is_empty() {
-            self.calls.retain(|c| engine.anim_ref(c.owner).is_alive());
+            let engine = &self.host.engine;
+            self.calls.retain(|c| {
+                engine.anim_ref(c.owner).is_alive()
+                    || engine.events().iter().any(|e| e.tag == c.tag)
+            });
+        }
+        if !self.roots.is_empty() {
+            let engine = &self.host.engine;
+            self.roots.retain(|r| engine.anim_ref(r.id).is_alive());
         }
         let mut i = 0;
         while i < self.orphans.len() {
@@ -358,6 +525,10 @@ struct ScriptTweenDriver {
     pending: Vec<(SplashVmId, ScriptFnRef)>,
     /// Isolates reclaimed while the driver was out of the global.
     dead_vms: Vec<SplashVmId>,
+    /// Set on the placeholder left in the global while the driver is out:
+    /// a native reached then (from inside a widget apply) must not build
+    /// into the placeholder.
+    taken: bool,
 }
 
 impl ScriptTweenDriver {
@@ -372,9 +543,12 @@ impl ScriptTweenDriver {
     }
 }
 
-/// Takes the driver out of the global so its hosts can take `&mut Cx`.
+/// Takes the driver out of the global so its hosts can take `&mut Cx`,
+/// leaving a placeholder marked `taken`.
 fn take_driver(cx: &mut Cx) -> ScriptTweenDriver {
-    let mut d = std::mem::take(cx.global::<ScriptTweenDriver>());
+    let slot = cx.global::<ScriptTweenDriver>();
+    let mut d = std::mem::take(slot);
+    slot.taken = true;
     // Already applied by `gc_vms` while the driver was in place.
     d.dead_vms.clear();
     d
@@ -387,21 +561,33 @@ fn put_driver(cx: &mut Cx, mut d: ScriptTweenDriver) {
     for vm_id in slot.dead_vms.drain(..) {
         d.vms.retain(|v| v.vm_id != vm_id);
     }
+    d.taken = false;
     *slot = d;
 }
 
+/// Whether the driver is in the global (not out for a step).
+fn driver_in_place(cx: &mut Cx) -> bool {
+    !cx.global::<ScriptTweenDriver>().taken
+}
+
 /// Runs `f` with the calling VM's tweens and `Cx` (the driver taken out of
-/// the global meanwhile). No script may run inside `f`.
+/// the global meanwhile), after forgetting the targets whose widget is gone.
+/// No script may run inside `f`. `None` when the driver is out already (a
+/// native reached from inside the driver's own step).
 fn with_vm_tweens<R>(
     cx: &mut Cx,
     vm_id: SplashVmId,
     f: impl FnOnce(&mut Cx, &mut VmTweens) -> R,
-) -> R {
+) -> Option<R> {
+    if !driver_in_place(cx) {
+        return None;
+    }
     let mut d = take_driver(cx);
     let i = d.vm_ix(vm_id);
+    d.vms[i].sweep(cx);
     let r = f(cx, &mut d.vms[i]);
     put_driver(cx, d);
-    r
+    Some(r)
 }
 
 thread_local! {
@@ -428,19 +614,21 @@ impl ScriptHandleGc for TweenHandleGc {
 // The frame: stepped by Root
 // ---------------------------------------------------------------------------
 
-/// Steps every VM's script tweens: called first thing in
-/// `Root::handle_event` (the VM is free and no widget but the root is
-/// borrowed there). Acts on `NextFrame` (a host's own frame), `LiveEdit` and
-/// `ScriptReapply` (the tree was re-applied: every value is pushed again);
-/// any other event costs one match.
-pub(crate) fn handle_event(cx: &mut Cx, event: &Event, root_uid: WidgetUid) {
-    if !matches!(
-        event,
-        Event::NextFrame(_) | Event::LiveEdit | Event::ScriptReapply
-    ) {
+/// Steps every VM's script tweens. `Root::handle_event` calls it first (the
+/// VM is free and no widget but the root, `root_uid`, is borrowed there); a
+/// top widget other than `Root` must call it the same way. Acts on
+/// `NextFrame` (a host's own frame), `LiveEdit` and `ScriptReapply` (the
+/// tree was re-applied: gone widgets are forgotten and every value is pushed
+/// again); any other event costs one match.
+pub fn handle_event(cx: &mut Cx, event: &Event, root_uid: WidgetUid) {
+    let reapply = matches!(event, Event::LiveEdit | Event::ScriptReapply);
+    if !reapply && !matches!(event, Event::NextFrame(_)) {
         return;
     }
-    if !cx.has_global::<ScriptTweenDriver>() || current_splash_vm_id(cx) != MAIN_SPLASH_VM_ID {
+    if !cx.has_global::<ScriptTweenDriver>()
+        || current_splash_vm_id(cx) != MAIN_SPLASH_VM_ID
+        || !driver_in_place(cx)
+    {
         return;
     }
     let mut d = take_driver(cx);
@@ -468,6 +656,10 @@ pub(crate) fn handle_event(cx: &mut Cx, event: &Event, root_uid: WidgetUid) {
             gone = true;
             continue;
         }
+        if reapply {
+            vt.sweep(cx);
+        }
+        vt.restore(cx);
         let action = vt.host.handle_event(cx, event);
         if action.changed() {
             if vt.vm_id == MAIN_SPLASH_VM_ID {
@@ -496,16 +688,35 @@ pub(crate) fn handle_event(cx: &mut Cx, event: &Event, root_uid: WidgetUid) {
     cx.global::<ScriptTweenDriver>().pending = pending;
 }
 
-/// Re-arms hosts a ticker pause held (their frames stopped) once it is
-/// lifted: `set_tween_ticker` redraws everything. Called from the root's
-/// `Event::Draw`.
-pub(crate) fn draw_check(cx: &mut Cx) {
-    if !cx.has_global::<ScriptTweenDriver>() || current_splash_vm_id(cx) != MAIN_SPLASH_VM_ID {
+/// Called from the root's `Event::Draw`, before anything draws: pushes what
+/// a build or a control changed since the last frame (a `from()` renders
+/// its start at once, and a handler that shows a panel and tweens it in the
+/// same breath must not draw it one frame at its end state), without
+/// stepping time, and re-arms hosts a ticker pause held (`set_tween_ticker`
+/// redraws everything once the pause is lifted).
+pub fn draw_check(cx: &mut Cx, root_uid: WidgetUid) {
+    if !cx.has_global::<ScriptTweenDriver>()
+        || current_splash_vm_id(cx) != MAIN_SPLASH_VM_ID
+        || !driver_in_place(cx)
+    {
         return;
     }
     let mut d = take_driver(cx);
     for vt in d.vms.iter_mut() {
+        if !splash_vm_is_live(cx, vt.vm_id) {
+            continue;
+        }
         vt.host.draw_check(cx);
+        vt.restore(cx);
+        if vt.host.engine.changes().is_empty() && !vt.host.has_deferred_push() {
+            continue;
+        }
+        if vt.vm_id == MAIN_SPLASH_VM_ID {
+            vt.push(cx, root_uid);
+        } else {
+            contain_isolate_panic("tween push", || vt.push(cx, root_uid));
+        }
+        vt.host.clear_changes();
     }
     put_driver(cx, d);
 }
@@ -635,6 +846,11 @@ fn boolean(v: ScriptValue, what: LiveId) -> Parse<bool> {
     }
 }
 
+/// A `repeat` count: -1 (or less) repeats forever.
+fn repeat_count(v: ScriptValue, what: LiveId) -> Parse<i32> {
+    Ok(number(v, what)?.max(-1.0).min(i32::MAX as f64) as i32)
+}
+
 /// An id or a string, as a name (`@center`, `"center"`).
 fn name_of(vm: &ScriptVm, v: ScriptValue) -> Option<LiveId> {
     if let Some(s) = string_of(vm, v) {
@@ -654,12 +870,14 @@ fn tween_value(heap: &ScriptHeap, v: ScriptValue) -> Option<TweenValue> {
     let p = v.as_pod()?;
     let (ty, data) = heap.pod_data(p);
     let f = |i: usize| f32::from_bits(data[i]) as f64;
-    match ty.ty {
-        ScriptPodTy::Vec(ScriptPodVec::Vec2f) => Some(TweenValue::Vec2([f(0), f(1)])),
-        ScriptPodTy::Vec(ScriptPodVec::Vec3f) => Some(TweenValue::Vec3([f(0), f(1), f(2)])),
-        ScriptPodTy::Vec(ScriptPodVec::Vec4f) => Some(TweenValue::Vec4([f(0), f(1), f(2), f(3)])),
-        _ => None,
-    }
+    let (value, lanes) = match ty.ty {
+        ScriptPodTy::Vec(ScriptPodVec::Vec2f) => (TweenValue::Vec2([f(0), f(1)]), 2),
+        ScriptPodTy::Vec(ScriptPodVec::Vec3f) => (TweenValue::Vec3([f(0), f(1), f(2)]), 3),
+        ScriptPodTy::Vec(ScriptPodVec::Vec4f) => (TweenValue::Vec4([f(0), f(1), f(2), f(3)]), 4),
+        _ => return None,
+    };
+    // Like numbers: a NaN or infinite lane is not a value to animate.
+    (0..lanes).all(|i| f(i).is_finite()).then_some(value)
 }
 
 fn prop_value(vm: &ScriptVm, v: ScriptValue, path: &[LiveId]) -> Parse<PVal> {
@@ -754,8 +972,9 @@ fn parse_ease(vm: &mut ScriptVm, v: ScriptValue) -> Parse<Easing> {
 }
 
 fn parse_stagger(vm: &mut ScriptVm, v: ScriptValue) -> Parse<Stagger> {
+    // A negative each (or amount) staggers from the end, as in GSAP.
     if v.as_number().is_some() {
-        return Ok(Stagger::each(number(v, live_id!(stagger))?.max(0.0)));
+        return Ok(Stagger::each(number(v, live_id!(stagger))?));
     }
     let Some(obj) = v.as_object() else {
         return Err(
@@ -782,7 +1001,7 @@ fn parse_stagger(vm: &mut ScriptVm, v: ScriptValue) -> Parse<Stagger> {
                 })
             }
             live_id!(ease) => ease = Some(parse_ease(vm, v)?),
-            live_id!(repeat) => repeat = Some(number(v, key)? as i32),
+            live_id!(repeat) => repeat = Some(repeat_count(v, key)?),
             live_id!(yoyo) => yoyo = Some(boolean(v, key)?),
             live_id!(repeat_delay) => repeat_delay = Some(number(v, key)?),
             _ => return Err(format!("stagger has no option {key}")),
@@ -898,7 +1117,7 @@ fn tween_option(
                 None => YoyoEase::Ease(parse_ease(vm, v)?),
             })
         }
-        live_id!(repeat) => o.repeat = Some(number(v, key)?.max(-1.0) as i32),
+        live_id!(repeat) => o.repeat = Some(repeat_count(v, key)?),
         live_id!(repeat_delay) => o.repeat_delay = Some(number(v, key)?),
         live_id!(repeat_refresh) => o.repeat_refresh = Some(boolean(v, key)?),
         live_id!(yoyo) => o.yoyo = Some(boolean(v, key)?),
@@ -1007,7 +1226,7 @@ fn parse_timeline_vars(
                 o.defaults = d;
             }
             live_id!(delay) => o.delay = number(v, key)?,
-            live_id!(repeat) => o.repeat = number(v, key)?.max(-1.0) as i32,
+            live_id!(repeat) => o.repeat = repeat_count(v, key)?,
             live_id!(repeat_delay) => o.repeat_delay = number(v, key)?,
             live_id!(repeat_refresh) => o.repeat_refresh = boolean(v, key)?,
             live_id!(yoyo) => o.yoyo = boolean(v, key)?,
@@ -1120,17 +1339,11 @@ fn parse_keys(vm: &ScriptVm, v: ScriptValue) -> Parse<Option<Vec<PropKey>>> {
     Ok(Some(out))
 }
 
-/// The widget's applied value at `path`, read from its `#[source]` object:
-/// `instance(..)` / `uniform(..)` defaults are unwrapped, and a number at a
-/// prefix covers the rest of the path (`margin: 8` seeds `margin.left`).
-fn source_value(vm: &ScriptVm, w: &WidgetRef, path: &[LiveId]) -> Option<TweenValue> {
-    // Empty, or mutably borrowed right now (a View running its on_render).
-    w.try_widget_uid()?;
-    let src = w.script_source();
-    if src == ScriptObject::ZERO {
-        return None;
-    }
-    let heap = &vm.bx.heap;
+/// The value at `path` of a widget's `#[source]` object `src`, as the DSL
+/// wrote it: `instance(..)` / `uniform(..)` defaults are unwrapped, and a
+/// number at a prefix covers the rest of the path (`margin: 8` gives
+/// `margin.left`). `None` when the source does not set it.
+fn source_raw(heap: &ScriptHeap, src: ScriptObject, path: &[LiveId]) -> Option<ScriptValue> {
     let unwrap = |v: ScriptValue| -> ScriptValue {
         if let Some(o) = v.as_object() {
             let p = heap.proto(o);
@@ -1144,15 +1357,57 @@ fn source_value(vm: &ScriptVm, w: &WidgetRef, path: &[LiveId]) -> Option<TweenVa
     for (i, id) in path.iter().enumerate() {
         let Some(obj) = v.as_object() else {
             // A scalar that covers the rest of the path.
-            return if i > 0 && v.as_number().is_some() {
-                tween_value(heap, v)
-            } else {
-                None
-            };
+            return (i > 0 && v.as_number().is_some()).then_some(v);
         };
         v = unwrap(heap.value(obj, (*id).into(), NoTrap));
     }
-    tween_value(heap, v)
+    (v.is_color() || v.as_number().is_some() || v.as_pod().is_some()).then_some(v)
+}
+
+/// The widget's applied value at `path`, read from its `#[source]` object
+/// (see [`source_raw`]). `None` also when the widget is empty, borrowed
+/// right now (a View running its on_render), or its source lives in another
+/// heap than `vm`'s.
+fn source_value(vm: &ScriptVm, w: &WidgetRef, path: &[LiveId]) -> Option<TweenValue> {
+    w.try_widget_uid()?;
+    if w.script_source_heap_key() != vm.bx.heap.heap_key() {
+        return None;
+    }
+    let src = w.script_source();
+    if src == ScriptObject::ZERO {
+        return None;
+    }
+    let v = source_raw(&vm.bx.heap, src, path)?;
+    tween_value(&vm.bx.heap, v)
+}
+
+/// Writes `v` at `path` of `obj`, creating the intermediate objects.
+fn set_path(vm: &mut ScriptVm, obj: ScriptObject, path: &[LiveId], v: ScriptValue) {
+    let Some((last, prefix)) = path.split_last() else {
+        return;
+    };
+    let mut parent = obj;
+    for id in prefix {
+        parent = match vm.bx.heap.value(parent, (*id).into(), NoTrap).as_object() {
+            Some(child) => child,
+            None => {
+                let child = vm.bx.heap.new_object();
+                vm.bx.heap.set_value_def(parent, (*id).into(), child.into());
+                child
+            }
+        };
+    }
+    vm.bx.heap.set_value_def(parent, (*last).into(), v);
+}
+
+/// How many lanes a value of `kind` carries.
+fn lanes(kind: ValueKind) -> u8 {
+    match kind {
+        ValueKind::F64 | ValueKind::Int => 1,
+        ValueKind::Vec2 => 2,
+        ValueKind::Vec3 => 3,
+        ValueKind::Vec4 | ValueKind::Color => 4,
+    }
 }
 
 /// `v` as a value of `kind`: a number fills every lane (as `Apply` does),
@@ -1196,8 +1451,11 @@ fn build_tween(
     into: Option<(TweenId, ScriptValue)>,
 ) -> Parse<TweenId> {
     let vm_id = current_splash_vm_id(vm.cx_mut());
+    if !driver_in_place(vm.cx_mut()) {
+        return Err(REENTERED.into());
+    }
     let uids = parse_targets(vm, targets)?;
-    let spec = parse_tween_vars(vm, vars)?;
+    let mut spec = parse_tween_vars(vm, vars)?;
     let mut from = Vec::new();
     if verb == Verb::FromTo {
         let Some(obj) = from_vars.as_object() else {
@@ -1240,20 +1498,31 @@ fn build_tween(
         }
         starts.push(start);
     }
-    // Which (target, prop) need the widget's current value: to, set with a
-    // relative end, from (its end is the current value). A set with an
-    // absolute value reads it too when it can (a slot is best known), and
-    // is otherwise seeded with its own end, so it never counts as unseeded.
+    // Which props need the widget's current value: to, from (its end is the
+    // current value) and a relative set. An absolute set carries its value
+    // as an explicit start too (it renders when its time comes, and never
+    // counts as unseeded), a from_to its own start.
     let needs_current = |p: &PProp| match verb {
         Verb::To | Verb::From => true,
         Verb::Set => matches!(p.val, PVal::Rel(_)),
         Verb::FromTo => false,
     };
-    let reads_source = |p: &PProp| verb == Verb::Set || needs_current(p);
-    let widgets: Vec<WidgetRef> = uids
-        .iter()
-        .map(|uid| vm.cx().widget_tree().widget(*uid))
-        .collect();
+    // The widgets, each built by this VM: a source in another heap (a
+    // Splash isolate's widget seen from its host, the host-built Splash seen
+    // from its isolate) is not this script's to animate, nor to read.
+    let own_heap = vm.bx.heap.heap_key();
+    let mut widgets = Vec::with_capacity(uids.len());
+    for uid in &uids {
+        let w = vm.cx().widget_tree().widget(*uid);
+        let key = w.script_source_heap_key();
+        if key != 0 && key != own_heap {
+            return Err(format!(
+                "widget {uid:?} was built by another script VM (a Splash isolate and its host \
+                 animate only their own widgets)"
+            ));
+        }
+        widgets.push(w);
+    }
     // Known slots: (target, prop) -> the seeded slot's kind.
     let n = spec.props.len();
     let mut known: Vec<Option<ValueKind>> = vec![None; uids.len() * n];
@@ -1262,13 +1531,11 @@ fn build_tween(
         let i = d.vm_ix(vm_id);
         let vt = &mut d.vms[i];
         for (ti, uid) in uids.iter().enumerate() {
-            let ix = vt.target(*uid, &widgets[ti]);
-            let tid = vt.targets[ix].tid;
+            let tid = vt.target_ix(*uid).map(|ix| vt.targets[ix].tid);
             for (pi, p) in spec.props.iter().enumerate() {
-                if let Some(s) = vt.host.slot(tid, p.key()) {
-                    if vt.host.engine.is_seeded(s) {
-                        known[ti * n + pi] = Some(vt.host.value(s).kind());
-                    }
+                let slot = tid.and_then(|tid| vt.host.slot(tid, p.key()));
+                if let Some(s) = slot.filter(|s| vt.host.engine.is_seeded(*s)) {
+                    known[ti * n + pi] = Some(vt.host.value(s).kind());
                 }
             }
         }
@@ -1277,14 +1544,19 @@ fn build_tween(
     let mut seeds: Vec<Option<TweenValue>> = vec![None; uids.len() * n];
     for (ti, w) in widgets.iter().enumerate() {
         for (pi, p) in spec.props.iter().enumerate() {
-            if known[ti * n + pi].is_none() && reads_source(p) {
+            if known[ti * n + pi].is_none() && needs_current(p) {
                 seeds[ti * n + pi] = source_value(vm, w, p.path());
             }
         }
     }
+    if into.is_none() {
+        // GSAP keeps an animation while script holds it: `h.restart()` after
+        // it completed works. The orphan finaliser frees it once the handle
+        // is collected.
+        spec.opts.keep = spec.opts.keep.or(Some(true));
+    }
     let cx = vm.cx_mut();
-    let id = with_vm_tweens(cx, vm_id, |cx, vt| {
-        // Indices into vt.targets (created above; nothing removes one here).
+    let built = with_vm_tweens(cx, vm_id, |cx, vt| {
         let mut tix = Vec::with_capacity(uids.len());
         let mut tids = Vec::with_capacity(uids.len());
         for (ti, uid) in uids.iter().enumerate() {
@@ -1295,20 +1567,29 @@ fn build_tween(
         let mut props = Vec::with_capacity(n);
         for (pi, p) in spec.props.iter().enumerate() {
             let key = p.key();
-            // One kind per property: a slot's, else the value's own.
+            // One kind per property: a known slot's, unless the value has
+            // more lanes (a colour over a slot that held a number would be
+            // cut to grey), else the value's own.
             let own = match (p.val, starts[pi]) {
                 (_, Some(a)) => a.kind(),
                 (PVal::Abs(v), None) => v.kind(),
                 (PVal::Rel(_), None) => ValueKind::F64,
             };
-            let kind = (0..uids.len())
-                .find_map(|ti| known[ti * n + pi])
-                .unwrap_or(own);
+            let kind = match (0..uids.len()).find_map(|ti| known[ti * n + pi]) {
+                Some(k) if lanes(k) >= lanes(own) => k,
+                _ => own,
+            };
             for (ti, tid) in tids.iter().enumerate() {
                 let t = &mut vt.targets[tix[ti]];
-                if p.len > 1 && !t.bound.contains(&key) {
-                    vt.host.bind_path(*tid, key, p.path());
-                    t.bound.push(key);
+                if !t.keys.iter().any(|k| k.key == key) {
+                    t.keys.push(KeyPath {
+                        key,
+                        path: p.path,
+                        len: p.len,
+                    });
+                    if p.len > 1 {
+                        vt.host.bind_path(*tid, key, p.path());
+                    }
                 }
                 match known[ti * n + pi] {
                     Some(k) if k != kind => {
@@ -1320,11 +1601,7 @@ fn build_tween(
                     }
                     Some(_) => {}
                     None => {
-                        let seed = seeds[ti * n + pi].or(match (verb, p.val) {
-                            (Verb::Set, PVal::Abs(v)) => Some(v),
-                            _ => None,
-                        });
-                        if let Some(s) = seed {
+                        if let Some(s) = seeds[ti * n + pi] {
                             vt.host.seed(*tid, key, coerce(s, kind));
                         } else if needs_current(p) {
                             let uid = uids[ti];
@@ -1351,6 +1628,7 @@ fn build_tween(
                     snap: 0.0,
                 },
                 (Verb::From, PVal::Abs(v)) => PropTo::from(key, coerce(v, kind)),
+                (Verb::Set, PVal::Abs(v)) => PropTo::from_to(key, coerce(v, kind), coerce(v, kind)),
                 (_, PVal::Abs(v)) => PropTo::to(key, coerce(v, kind)),
                 (_, PVal::Rel(dv)) => PropTo::by(key, coerce(TweenValue::F64(dv), kind)),
             });
@@ -1362,8 +1640,16 @@ fn build_tween(
                 Verb::To => vt.host.to(cx, t, &props, o),
                 Verb::From => vt.host.from(cx, t, &props, o),
                 Verb::FromTo => vt.host.from_to(cx, t, &props, o),
-                // GSAP set: a zero-duration tween applied at once.
-                Verb::Set => vt.host.to(cx, t, &props, o.duration(0.0).repeat(0)),
+                // GSAP set: a zero-duration tween, applied at once unless it
+                // has a delay.
+                Verb::Set => {
+                    let at_once = o.delay.unwrap_or(0.0) <= 0.0;
+                    let o = TweenOpts {
+                        immediate_render: o.immediate_render.or(Some(at_once)),
+                        ..o
+                    };
+                    vt.host.tween(cx, t, &props, o.duration(0.0).repeat(0))
+                }
             },
             Some((tl, _)) => {
                 {
@@ -1381,13 +1667,24 @@ fn build_tween(
                 child
             }
         };
-        for (kind, f) in spec.cbs {
-            vt.callbacks.push(Callback { id, kind, f });
+        // The root animation these targets belong to (a timeline's for a
+        // child), so it can go with its widgets.
+        vt.add_root_targets(into.map_or(id, |(tl, _)| tl), &tids);
+        // A stale timeline builds nothing: no closure is kept for it.
+        if vt.reachable(id) {
+            for (kind, f) in spec.cbs {
+                vt.callbacks.push(Callback { id, kind, f });
+            }
         }
         id
     });
-    Ok(id)
+    built.ok_or_else(|| REENTERED.into())
 }
+
+/// The error of a native reached while the driver is out of the global
+/// (from inside the driver's own step).
+const REENTERED: &str =
+    "called from inside the tween driver's own step (a widget apply); nothing was done";
 
 /// The calling VM's handle type, registered on first use (never from
 /// `theme_mod`: `new_handle_type` is not idempotent and its slots are few).
@@ -1467,12 +1764,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 let id = vt.host.timeline(opts);
                 // GSAP timelines play at once unless paused: arm the frame.
                 let _ = vt.host.control(cx, id);
+                vt.add_root_targets(id, &[]);
                 for (kind, f) in cbs {
                     vt.callbacks.push(Callback { id, kind, f });
                 }
                 id
             });
-            mint(vm, id, true)
+            match id {
+                Some(id) => mint(vm, id, true),
+                None => err(vm, REENTERED.into()),
+            }
         },
     );
     vm.add_method(
@@ -1489,16 +1790,76 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 Err(e) => return err(vm, e),
             };
             let vm_id = current_splash_vm_id(vm.cx_mut());
-            with_vm_tweens(vm.cx_mut(), vm_id, |cx, vt| {
+            let done = with_vm_tweens(vm.cx_mut(), vm_id, |cx, vt| {
                 let tids: Vec<TargetId> = uids
                     .iter()
                     .filter_map(|uid| vt.target_ix(*uid).map(|i| vt.targets[i].tid))
                     .collect();
                 if !tids.is_empty() {
                     vt.host.kill_of(cx, Targets::List(&tids), keys.as_deref());
+                    vt.release(cx);
                 }
             });
-            NIL
+            match done {
+                Some(()) => NIL,
+                None => err(vm, REENTERED.into()),
+            }
+        },
+    );
+    vm.add_method(
+        tween,
+        id_lut!(clear_props),
+        script_args_def!(targets = NIL, props = NIL),
+        |vm, args| {
+            let targets = script_value!(vm, args.targets);
+            let props = script_value!(vm, args.props);
+            // nil, true or "all": every key the tween layer holds.
+            let all = props.is_nil()
+                || props.as_bool() == Some(true)
+                || string_of(vm, props).is_some_and(|s| s.trim() == "all");
+            let (uids, keys) = match parse_targets(vm, targets).and_then(|u| {
+                if all {
+                    Ok((u, None))
+                } else {
+                    parse_keys(vm, props).map(|k| (u, k))
+                }
+            }) {
+                Ok(v) => v,
+                Err(e) => return err(vm, e),
+            };
+            let vm_id = current_splash_vm_id(vm.cx_mut());
+            let done = with_vm_tweens(vm.cx_mut(), vm_id, |cx, vt| {
+                for uid in &uids {
+                    let Some(ix) = vt.target_ix(*uid) else {
+                        continue;
+                    };
+                    let t = &mut vt.targets[ix];
+                    let cleared: Vec<KeyPath> = t
+                        .keys
+                        .iter()
+                        .filter(|k| keys.as_ref().map_or(true, |ks| ks.contains(&k.key)))
+                        .copied()
+                        .collect();
+                    if cleared.is_empty() {
+                        continue;
+                    }
+                    t.keys.retain(|k| !cleared.iter().any(|c| c.key == k.key));
+                    let (tid, weak) = (t.tid, t.weak.clone());
+                    let ks: Vec<PropKey> = cleared.iter().map(|k| k.key).collect();
+                    vt.host.forget_props(cx, tid, &ks);
+                    vt.warned.retain(|(u, k)| !(u == uid && ks.contains(k)));
+                    vt.restores.push(Restore {
+                        uid: *uid,
+                        weak,
+                        paths: cleared,
+                    });
+                }
+                vt.release(cx);
+            });
+            match done {
+                Some(()) => NIL,
+                None => err(vm, REENTERED.into()),
+            }
         },
     );
     vm.add_method(
@@ -1527,41 +1888,54 @@ pub fn script_mod(vm: &mut ScriptVm) {
         |vm, args| {
             let vars = script_value!(vm, args.vars);
             if let Some(obj) = vars.as_object() {
-                let (mut scale, mut paused, mut reduced, mut lag) = (None, None, None, None);
-                for (key, v) in own_entries(vm, obj) {
-                    let r = match key {
-                        live_id!(time_scale) => number(v, key).map(|n| scale = Some(n)),
-                        live_id!(paused) => boolean(v, key).map(|b| paused = Some(b)),
-                        live_id!(reduced_motion) => boolean(v, key).map(|b| reduced = Some(b)),
-                        live_id!(lag_smoothing) => number(v, key).map(|n| lag = Some(n)),
-                        _ => Err(format!(
-                            "ticker takes time_scale, paused, reduced_motion, lag_smoothing; not {key}"
-                        )),
-                    };
-                    if let Err(e) = r {
-                        return err(vm, e);
+                let entries = own_entries(vm, obj);
+                if !entries.is_empty() {
+                    // The ticker is app-wide: a mini-app must not pause, slow
+                    // or reduce the motion of its host.
+                    if current_splash_vm_id(vm.cx_mut()) != MAIN_SPLASH_VM_ID {
+                        return err(
+                            vm,
+                            "the ticker is app-wide: a Splash isolate may read tween.ticker(), not change it"
+                                .into(),
+                        );
                     }
-                }
-                set_tween_ticker(vm.cx_mut(), |t| {
-                    if let Some(s) = scale {
-                        t.time_scale = s.max(0.0);
-                    }
-                    if let Some(p) = paused {
-                        t.paused = p;
-                    }
-                    if let Some(r) = reduced {
-                        t.reduced_motion = r;
-                    }
-                    if let Some(l) = lag {
-                        t.lag = if l > 0.0 {
-                            LagSmoothing::clamp(l)
-                        } else {
-                            LagSmoothing::OFF
+                    let (mut scale, mut paused, mut reduced, mut lag) = (None, None, None, None);
+                    for (key, v) in entries {
+                        let r = match key {
+                            live_id!(time_scale) => number(v, key).map(|n| scale = Some(n)),
+                            live_id!(paused) => boolean(v, key).map(|b| paused = Some(b)),
+                            live_id!(reduced_motion) => {
+                                boolean(v, key).map(|b| reduced = Some(b))
+                            }
+                            live_id!(lag_smoothing) => parse_lag(vm, v).map(|l| lag = Some(l)),
+                            _ => Err(format!(
+                                "ticker takes time_scale, paused, reduced_motion, lag_smoothing; {key} is not one"
+                            )),
                         };
+                        if let Err(e) = r {
+                            return err(vm, e);
+                        }
                     }
-                });
+                    set_tween_ticker(vm.cx_mut(), |t| {
+                        if let Some(s) = scale {
+                            t.time_scale = s.max(0.0);
+                        }
+                        if let Some(p) = paused {
+                            t.paused = p;
+                        }
+                        if let Some(r) = reduced {
+                            t.reduced_motion = r;
+                        }
+                        if let Some(l) = lag {
+                            t.lag = l;
+                        }
+                    });
+                }
             } else if !vars.is_nil() {
-                return err(vm, "ticker takes {time_scale, paused, reduced_motion}".into());
+                return err(
+                    vm,
+                    "ticker takes {time_scale, paused, reduced_motion, lag_smoothing}".into(),
+                );
             }
             let t = tween_ticker(vm.cx_mut());
             let obj = vm.bx.heap.new_object();
@@ -1577,6 +1951,29 @@ pub fn script_mod(vm: &mut ScriptVm) {
             obj.into()
         },
     );
+}
+
+/// `lag_smoothing`, in seconds (GSAP takes milliseconds): a number caps
+/// every frame delta (0 or less turns smoothing off); `[threshold,
+/// adjusted]` replaces a delta above `threshold` with `adjusted`.
+fn parse_lag(vm: &ScriptVm, v: ScriptValue) -> Parse<LagSmoothing> {
+    if v.as_array().is_some() {
+        let (threshold, adjusted) = pair(
+            vm,
+            v,
+            "lag_smoothing takes seconds, or [threshold, adjusted] in seconds",
+        )?;
+        return Ok(LagSmoothing {
+            threshold: threshold.max(0.0),
+            adjusted: adjusted.max(0.0),
+        });
+    }
+    let s = number(v, live_id!(lag_smoothing))?;
+    Ok(if s > 0.0 {
+        LagSmoothing::clamp(s)
+    } else {
+        LagSmoothing::OFF
+    })
 }
 
 fn root_build(vm: &mut ScriptVm, args: ScriptObject, verb: Verb) -> ScriptValue {
@@ -1632,8 +2029,10 @@ fn control(
     let Some(r) = recv(vm, args) else {
         return bad_handle(vm);
     };
-    with_vm_tweens(vm.cx_mut(), r.vm_id, |cx, vt| f(cx, &mut vt.host, r.id));
-    this(vm, args)
+    match with_vm_tweens(vm.cx_mut(), r.vm_id, |cx, vt| f(cx, &mut vt.host, r.id)) {
+        Some(()) => this(vm, args),
+        None => err(vm, REENTERED.into()),
+    }
 }
 
 /// Reads the receiver (0 / false / nil answers for a stale handle).
@@ -1646,13 +2045,22 @@ fn getter(
         return bad_handle(vm);
     };
     let d = vm.cx_mut().global::<ScriptTweenDriver>();
-    let i = d.vm_ix(r.vm_id);
-    f(&d.vms[i].host, r.id)
+    match d.vms.iter().find(|v| v.vm_id == r.vm_id) {
+        Some(vt) => f(&vt.host, r.id),
+        // The placeholder of a driver that is out: answer as for a stale
+        // handle (a fresh host).
+        None => f(&TweenHost::new(), r.id),
+    }
 }
 
-/// `suppress_events` arguments: GSAP's per-method default when nil.
+/// `suppress_events` arguments (a bool, or a number as `boolean` reads
+/// it): GSAP's per-method default when nil.
 fn emit(v: ScriptValue, suppress_by_default: bool) -> Emit {
-    let suppress = v.as_bool().unwrap_or(suppress_by_default);
+    let suppress = if v.is_nil() {
+        suppress_by_default
+    } else {
+        boolean(v, live_id!(suppress_events)).unwrap_or(suppress_by_default)
+    };
     if suppress {
         Emit::Suppress
     } else {
@@ -1727,7 +2135,7 @@ fn set_callback(vm: &mut ScriptVm, args: ScriptObject, kind: CbKind) -> ScriptVa
         Ok(f) => f,
         Err(e) => return err(vm, e),
     };
-    with_vm_tweens(vm.cx_mut(), r.vm_id, |_, vt| {
+    let done = with_vm_tweens(vm.cx_mut(), r.vm_id, |_, vt| {
         vt.callbacks.retain(|c| !(c.id == r.id && c.kind == kind));
         let engine = &mut vt.host.engine;
         let m = engine.anim_ref(r.id).events();
@@ -1743,7 +2151,10 @@ fn set_callback(vm: &mut ScriptVm, args: ScriptObject, kind: CbKind) -> ScriptVa
             }
         }
     });
-    this(vm, args)
+    match done {
+        Some(()) => this(vm, args),
+        None => err(vm, REENTERED.into()),
+    }
 }
 
 /// A number getter/setter pair (`tl.time()`, `tl.time(1.5)`), with the
@@ -1849,10 +2260,12 @@ fn register_handle_type(vm: &mut ScriptVm) -> ScriptHandleType {
                 Ok(v) => v,
                 Err(e) => return err(vm, e),
             };
-            with_vm_tweens(vm.cx_mut(), r.vm_id, |_, vt| {
+            match with_vm_tweens(vm.cx_mut(), r.vm_id, |_, vt| {
                 vt.host.tl(r.id).add_label(tag, pos);
-            });
-            this(vm, args)
+            }) {
+                Some(()) => this(vm, args),
+                None => err(vm, REENTERED.into()),
+            }
         },
     );
     // call(fn, position) and add_pause(position, fn?): the closure is found
@@ -1971,7 +2384,30 @@ fn register_handle_type(vm: &mut ScriptVm) -> ScriptHandleType {
         },
     );
     vm.add_handle_method(ty, id_lut!(kill), script_args_def!(), |vm, args| {
-        control(vm, args, |cx, host, id| host.kill(cx, id))
+        let Some(r) = recv(vm, args) else {
+            return bad_handle(vm);
+        };
+        // Kill, then release what the animation roots at once (an
+        // Interrupt it queued keeps its closure until it is drained).
+        match with_vm_tweens(vm.cx_mut(), r.vm_id, |cx, vt| {
+            vt.host.kill(cx, r.id);
+            vt.release(cx);
+        }) {
+            Some(()) => this(vm, args),
+            None => err(vm, REENTERED.into()),
+        }
+    });
+    vm.add_handle_method(ty, id_lut!(is_alive), script_args_def!(), |vm, args| {
+        let Some(r) = recv(vm, args) else {
+            return bad_handle(vm);
+        };
+        // After forgetting the widgets that are gone: an animation whose
+        // widgets all went is gone too.
+        with_vm_tweens(vm.cx_mut(), r.vm_id, |_, vt| {
+            vt.host.engine.anim_ref(r.id).is_alive()
+        })
+        .unwrap_or(false)
+        .into()
     });
 
     // Getters and setters (GSAP: no argument reads, one argument writes).
@@ -2105,14 +2541,15 @@ fn add_marker(
         Ok(p) => p,
         Err(e) => return err(vm, e),
     };
-    with_vm_tweens(vm.cx_mut(), r.vm_id, |cx, vt| {
+    let done = with_vm_tweens(vm.cx_mut(), r.vm_id, |cx, vt| {
         let tag = if f.is_some() { call_tag() } else { Tag::NONE };
         if pause {
             vt.host.tl(r.id).add_pause(pos, tag);
         } else {
             vt.host.tl(r.id).call(tag, pos);
         }
-        if let Some(f) = f {
+        // A stale timeline adds no marker: keep no closure for it.
+        if let Some(f) = f.filter(|_| vt.host.engine.anim_ref(r.id).is_alive()) {
             vt.calls.push(CallFn {
                 owner: r.id,
                 tag,
@@ -2121,5 +2558,8 @@ fn add_marker(
         }
         let _ = vt.host.control(cx, r.id);
     });
-    this(vm, args)
+    match done {
+        Some(()) => this(vm, args),
+        None => err(vm, REENTERED.into()),
+    }
 }
