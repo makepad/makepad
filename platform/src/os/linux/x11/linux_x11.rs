@@ -245,6 +245,13 @@ impl X11Cx {
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
             }
+            XlibEvent::MouseLeave(mut e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
+                cx.call_event_handler(&Event::MouseLeave(e));
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.fingers.switch_captures();
+            }
             XlibEvent::Scroll(mut e) => {
                 let mut cx = self.cx.borrow_mut();
                 cx.dpi_override_scale(&mut e.abs, e.window_id);
@@ -628,6 +635,24 @@ impl X11Cx {
                     if let Some(window) =
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
+                        // Drop both, same as the Wayland arm: `is_fullscreen()` is the
+                        // union, so a caller restoring off it means "make it small again".
+                        window.xlib_window.normal();
+                        window.xlib_window.restore();
+                    }
+                }
+                CxOsOp::FullscreenWindow(window_id) => {
+                    if let Some(window) =
+                        opengl_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.xlib_window.fullscreen();
+                    }
+                }
+                CxOsOp::NormalizeWindow(window_id) => {
+                    if let Some(window) =
+                        opengl_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.xlib_window.normal();
                         window.xlib_window.restore();
                     }
                 }

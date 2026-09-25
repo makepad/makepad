@@ -61,8 +61,8 @@ impl App {
             theme::load_theme_source(&self.state_mut().theme_name)
         } else { String::new() };
         self.refresh_warm_browser_appearance(cx, browser_appearance(style, dark, &omarchy_source));
-        self.style_time = 0.0;
-        self.style_frame = cx.new_next_frame();
+        self.style_clock.stop();
+        self.style_clock.arm(cx);
         if let Some(mut menu) = self
             .ui
             .widget(cx, ids!(shell_menu))
