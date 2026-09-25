@@ -1353,6 +1353,9 @@ fn selection_ring(rect: Rect) -> Rect {
 /// same click — the gesture that climbs to the parent. A hand does not put
 /// the pointer back on the same pixel.
 const CLIMB_SLOP: f64 = 3.0;
+/// How far a press on the pinned widget travels before it lifts the
+/// widget off the canvas.
+const LIFT_SLOP: f64 = 4.0;
 
 /// A complete current design delta. Empty entries mean all edits were undone.
 /// No source files are written by the tweaker or this export.
@@ -2353,7 +2356,7 @@ pub fn window_intercept(
             .map(|(_, widget)| widget.clone());
         if let (Some(body), Some(tweaker)) = (body, tweaker) {
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
-                if tw.design.is_some() && tw.palette_drag.is_some() {
+                if tw.design.is_some() && (tw.palette_drag.is_some() || tw.move_drag.is_some()) {
                     tw.handle_palette_drag(cx, event, &body);
                     return true;
                 }
@@ -2773,6 +2776,124 @@ pub fn window_intercept(
         }
     }
 
+    // The edge handles: the selection's width and height, dragged. And the
+    // lift: with a design session open a press on the pinned widget may be
+    // the start of a move, so the click it would be waits for the release.
+    if !annotate && !cx.sploded_transformed() {
+        match kind {
+            PointerKind::Down => {
+                let pinned = session().lock().unwrap().pinned.clone();
+                if let Some(pin) = pinned.filter(|p| p.window_id == window_id.id()) {
+                    if let Some(handle) = Tweaker::size_handle_at(pin.rect, abs) {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.size_drag = Some((handle, pin.rect, abs));
+                        }
+                        {
+                            let mut s = session().lock().unwrap();
+                            s.down_consumed = true;
+                            s.edit_hold = true;
+                        }
+                        redraw_tweaker(cx, &tweaker);
+                        return true;
+                    }
+                }
+                // Any widget can be lifted: the selection when the press is
+                // inside it (a container reached by climbing is moved as a
+                // whole), else the widget under the pointer.
+                let held = session().lock().unwrap().edit_hold;
+                let design_open = tweaker.borrow::<Tweaker>().is_some_and(|tw| tw.design.is_some());
+                if design_open && !held {
+                    let pinned = session().lock().unwrap().pinned.clone();
+                    let lift = match pinned.filter(|p| p.window_id == window_id.id() && p.rect.contains(abs)) {
+                        Some(pin) => Some(pin),
+                        None => resolve_pick(cx, &body, abs, window_id.id()),
+                    };
+                    if let Some(pick) = lift {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.move_press = Some((pick, abs));
+                        }
+                    }
+                }
+            }
+            PointerKind::Move => {
+                let drag = tweaker.borrow::<Tweaker>().and_then(|tw| tw.size_drag);
+                if let Some((handle, start, from)) = drag {
+                    let w = (start.size.x + abs.x - from.x).round().max(1.0);
+                    let h = (start.size.y + abs.y - from.y).round().max(1.0);
+                    let chunk = match handle {
+                        0 => format!("width: {}", fmt_f64(w)),
+                        1 => format!("height: {}", fmt_f64(h)),
+                        _ => format!("width: {} height: {}", fmt_f64(w), fmt_f64(h)),
+                    };
+                    let sel = session().lock().unwrap().pinned.clone();
+                    if let Some(sel) = sel {
+                        let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+                        if !widget.is_empty() {
+                            if let Err(error) =
+                                apply_splash_chunk(cx, &widget, &sel.path, &chunk, "handle")
+                            {
+                                log!("TWEAK handle apply failed: {error}");
+                            }
+                        }
+                    }
+                    cx.set_cursor(Tweaker::size_handle_cursor(handle));
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                let press = tweaker.borrow::<Tweaker>().and_then(|tw| tw.move_press.clone());
+                if let Some((pick, from)) = press {
+                    let travelled = (abs.x - from.x).abs() > LIFT_SLOP || (abs.y - from.y).abs() > LIFT_SLOP;
+                    if travelled {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.lift(cx, &pick, from);
+                        }
+                        session().lock().unwrap().press_pick = None;
+                    }
+                    // Held, not yet lifted: the pointer's wander inside the
+                    // slop is not a hover pick.
+                    return true;
+                }
+                // Over a handle the cursor says what a press would do, and
+                // the hover outline stands aside for the selection's edge.
+                let pinned = session().lock().unwrap().pinned.clone();
+                if let Some(pin) = pinned.filter(|p| p.window_id == window_id.id()) {
+                    if let Some(handle) = Tweaker::size_handle_at(pin.rect, abs) {
+                        cx.set_cursor(Tweaker::size_handle_cursor(handle));
+                        let stale = session().lock().unwrap().hover.take().is_some();
+                        if stale {
+                            redraw_tweaker(cx, &tweaker);
+                        }
+                        return true;
+                    }
+                }
+            }
+            PointerKind::Up => {
+                let was_sizing = tweaker
+                    .borrow::<Tweaker>()
+                    .is_some_and(|tw| tw.size_drag.is_some());
+                if was_sizing {
+                    if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                        tw.size_drag = None;
+                        tw.rows_uid = 0;
+                    }
+                    {
+                        let mut s = session().lock().unwrap();
+                        s.down_consumed = false;
+                        s.edit_hold = false;
+                    }
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                // A release in place: the held press is a click, and the
+                // pick arm below takes it.
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    tw.move_press = None;
+                }
+            }
+            PointerKind::Scroll => {}
+        }
+    }
+
     match kind {
         PointerKind::Move => {
             // The colour popover overhangs the body: a move inside it is
@@ -2973,7 +3094,11 @@ pub fn window_intercept(
                 // be the first pixel of an ORBIT, and an orbit is a change of
                 // viewpoint, not of selection. Hold the pick for the release
                 // and take it only if the pointer stayed where it was put.
-                if cx.sploded_active() {
+                // A press on the pinned widget with a design session open
+                // is held the same way: it may be the start of a lift, and
+                // a lift is a move, not a click (nor a climb).
+                let may_lift = tweaker.borrow::<Tweaker>().is_some_and(|tw| tw.move_press.is_some());
+                if cx.sploded_active() || may_lift {
                     session().lock().unwrap().press_pick = Some(abs);
                 } else {
                     commit_pick(cx, &tweaker, abs, window_id.id(), pick.clone());
@@ -2982,9 +3107,13 @@ pub fn window_intercept(
                 // tab / fold / dropdown as well, and so will its release.
                 if let Some(pick) = &pick {
                     if is_navigation_pick(cx, WidgetUid(pick.uid)) {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.move_press = None;
+                        }
                         let mut s = session().lock().unwrap();
                         s.down_consumed = false;
                         s.pass_up = true;
+                        s.press_pick = None;
                         return false;
                     }
                 }
@@ -9158,6 +9287,22 @@ pub struct Tweaker {
     /// the drop or the end), so the chip follows the pointer anywhere.
     #[rust]
     tree_drag: bool,
+    /// A press on the canvas with a design session open: the widget it
+    /// would lift (the selection when the press is inside it, else the
+    /// widget under the pointer) and where it was pressed. A move past the
+    /// slop lifts it; a release in place is the click it would otherwise
+    /// have been.
+    #[rust]
+    move_press: Option<(TweakPick, DVec2)>,
+    /// The widget lifted off the canvas: the path that finds it in the
+    /// tree while no ghost stands (the provisional moves act on it), and
+    /// the label its chip carries.
+    #[rust]
+    move_drag: Option<(String, String)>,
+    /// An in-flight edge-handle drag: (handle 0 right, 1 bottom, 2 corner;
+    /// the selection's rect at the press; the press position).
+    #[rust]
+    size_drag: Option<(usize, Rect, DVec2)>,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     #[rust]
@@ -19816,7 +19961,7 @@ impl Widget for Tweaker {
         // pinned outline yields to a faint hairline stipple so the widget is
         // judged exactly as it renders.
         let now = cx.seconds_since_app_start();
-        let quiet = edit_hold || now < suppress_until || self.radius_drag.is_some();
+        let quiet = edit_hold || now < suppress_until || self.radius_drag.is_some() || self.size_drag.is_some();
         if now < suppress_until {
             // Re-check when the linger expires.
             self.next_frame = cx.new_next_frame();
@@ -20010,6 +20155,20 @@ impl Widget for Tweaker {
                     });
                     if near {
                         self.draw_radius_handles(cx, pick.rect);
+                    }
+                }
+                // The edge handles, revealed the same way, and held up
+                // through their own drag.
+                if !cx.sploded_transformed() {
+                    let pointer = session().lock().unwrap().pointer_abs;
+                    let near = self.size_drag.is_some()
+                        || Self::size_handle_centers(pick.rect).iter().any(|c| {
+                            let dx = pointer.x - c.x;
+                            let dy = pointer.y - c.y;
+                            dx * dx + dy * dy <= 28.0 * 28.0
+                        });
+                    if near {
+                        self.draw_size_handles(cx, pick.rect);
                     }
                 }
             }
@@ -24688,6 +24847,11 @@ impl Tweaker {
         if self.pick_is_ghost(cx, pick.uid) {
             return self.design_drop.clone();
         }
+        // The lifted widget is no target: it cannot be moved next to or
+        // into itself.
+        if self.pick_is_lifted(cx, pick.uid) {
+            return None;
+        }
         let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
         let container = crate::designer::is_container(cx, &widget);
         // The pointer on a container's own space, between or beside its
@@ -24699,6 +24863,9 @@ impl Tweaker {
                 if let Some(child_pick) = pick_of_widget(cx, &child, abs, window_id) {
                     if self.pick_is_ghost(cx, child_pick.uid) {
                         return self.design_drop.clone();
+                    }
+                    if self.pick_is_lifted(cx, child_pick.uid) {
+                        return None;
                     }
                     return Some((child_pick, place));
                 }
@@ -24717,15 +24884,16 @@ impl Tweaker {
         Some((pick, place))
     }
 
-    /// A dragged palette entry over the canvas: the widget under the pointer
-    /// and the zone of it the pointer is in decide where the entry lands;
-    /// the drop inserts it there. Over the panel the drop means the
-    /// selection, like a click on the row.
+    /// A dragged palette entry, or a widget lifted off the canvas, over
+    /// the canvas: the widget under the pointer and the zone of it the
+    /// pointer is in decide where it lands; the drop inserts or moves it
+    /// there. Over the panel a palette drop means the selection, like a
+    /// click on the row.
     fn handle_palette_drag(&mut self, cx: &mut Cx, event: &Event, body: &WidgetRef) {
         let is_palette = |items: &[DragItem]| {
-            items
-                .iter()
-                .any(|item| matches!(item, DragItem::String { value, .. } if value == "design-palette"))
+            items.iter().any(|item| {
+                matches!(item, DragItem::String { value, .. } if value == "design-palette" || value == "design-move")
+            })
         };
         match event {
             Event::Drag(e) => {
@@ -24733,12 +24901,16 @@ impl Tweaker {
                     return;
                 }
                 // The entry rides the pointer: the row itself, held where
-                // it was taken hold of.
-                let label = self
-                    .palette_drag
-                    .and_then(|index| self.palette_entries.get(index))
-                    .map(|entry| entry.name.clone())
-                    .unwrap_or_default();
+                // it was taken hold of. A lifted widget rides as its own
+                // rect, held where it was pressed.
+                let label = match &self.move_drag {
+                    Some((_, label)) => label.clone(),
+                    None => self
+                        .palette_drag
+                        .and_then(|index| self.palette_entries.get(index))
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_default(),
+                };
                 if self.drag_grab.is_none() {
                     let row = self
                         .palette_drag
@@ -24777,9 +24949,11 @@ impl Tweaker {
                 if !is_palette(&e.items) {
                     return;
                 }
-                let Some(index) = self.palette_drag.take() else {
+                let index = self.palette_drag.take();
+                let lifted = self.move_drag.take();
+                if index.is_none() && lifted.is_none() {
                     return;
-                };
+                }
                 self.drag_chip = None;
                 self.drag_grab = None;
                 // The target is read from the drop itself: the pointer-up
@@ -24791,12 +24965,9 @@ impl Tweaker {
                 session().lock().unwrap().hover = None;
                 self.redraw_overlay(cx);
                 self.redraw_sidebar(cx);
-                let Some(entry) = self.palette_entries.get(index).cloned() else {
-                    self.ghost_retract(cx);
-                    return;
-                };
-                // The ghost already IS the insert when the drop lands on
-                // the target it was made for: keep it, and the drop is done.
+                // The ghost already IS the insert (or the move) when the
+                // drop lands on the target it was made for: keep it, and
+                // the drop is done.
                 if let Some((ghost_uid, ghost_place, _)) = self.design_ghost.clone() {
                     let same = matches!(&drop, Some((pick, place)) if pick.uid == ghost_uid && *place == ghost_place);
                     if same {
@@ -24812,15 +24983,12 @@ impl Tweaker {
                             self.design_say(cx, "the target is gone");
                             return;
                         }
-                        let result = self
-                            .design
-                            .as_mut()
-                            .map(|s| s.insert(cx, &target, place, &entry.name, &entry.body));
+                        let result = self.design_drag_apply(cx, index, lifted.as_ref(), &target, place);
                         self.design_after(cx, result);
                     }
                     None => {
                         let on_panel = self.band.size.x > 0.0 && e.abs.x >= self.band.pos.x;
-                        if on_panel {
+                        if let (true, Some(index)) = (on_panel, index) {
                             self.build_insert(cx, index);
                         }
                     }
@@ -24841,8 +25009,134 @@ impl Tweaker {
                 // longer in hand. A click on the row still follows on its
                 // own through the row's own press and release.
                 self.palette_drag = None;
+                self.move_drag = None;
             }
             _ => {}
+        }
+    }
+
+    /// Insert the dragged palette entry, or move the lifted widget, at
+    /// `target`/`place`: the one operation a design drag stands for, run
+    /// for the ghost and again for the drop.
+    fn design_drag_apply(
+        &mut self,
+        cx: &mut Cx,
+        index: Option<usize>,
+        lifted: Option<&(String, String)>,
+        target: &WidgetRef,
+        place: DesignPlace,
+    ) -> Option<Result<(), String>> {
+        if let Some((path, _)) = lifted {
+            let node = match resolve_widget_by_path(cx, path) {
+                Ok(node) if !node.is_empty() => node,
+                _ => return Some(Err("the lifted widget is gone".to_string())),
+            };
+            return self.design.as_mut().map(|s| s.move_relative(cx, &node, target, place));
+        }
+        let entry = index.and_then(|i| self.palette_entries.get(i)).cloned()?;
+        self.design.as_mut().map(|s| s.insert(cx, target, place, &entry.name, &entry.body))
+    }
+
+    /// Whether `uid` is the lifted widget or lies inside it, while it still
+    /// stands at its own place (with a ghost up it is the ghost, and the
+    /// ghost check answers first).
+    fn pick_is_lifted(&self, cx: &mut Cx, uid: u64) -> bool {
+        if self.design_ghost.is_some() {
+            return false;
+        }
+        let Some((path, _)) = &self.move_drag else {
+            return false;
+        };
+        let Ok(node) = resolve_widget_by_path(cx, path) else {
+            return false;
+        };
+        let Some(node_uid) = node.try_widget_uid() else {
+            return false;
+        };
+        uid == node_uid.0 || is_ancestor_of(cx, node_uid.0, uid)
+    }
+
+    /// Lift a widget off the canvas: from here to the drop it rides the
+    /// pointer as its own rect, held where it was pressed, and the canvas
+    /// shows where it would land.
+    fn lift(&mut self, cx: &mut Cx, pick: &TweakPick, from: DVec2) {
+        self.move_press = None;
+        let uid = pick.uid;
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        let path = indexed_path(cx, uid);
+        let label = pick
+            .path
+            .rsplit('.')
+            .next()
+            .filter(|name| !name.is_empty() && !name.starts_with('['))
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| pick.ty.clone());
+        self.drag_grab = Some((from - pick.rect.pos, pick.rect.size));
+        self.drag_chip = Some((label.clone(), from));
+        self.move_drag = Some((path.clone(), label));
+        cx.start_dragging(vec![DragItem::String {
+            value: "design-move".to_string(),
+            internal_id: Some(LiveId(uid)),
+        }]);
+        log!("DESIGN lift {path}");
+        self.redraw_sidebar(cx);
+    }
+
+    /// The three edge-handle centres for the pinned rect: right edge,
+    /// bottom edge, bottom-right corner, each just outside the rect so
+    /// they hide none of it.
+    fn size_handle_centers(rect: Rect) -> [DVec2; 3] {
+        const OUT: f64 = 5.0;
+        [
+            dvec2(rect.pos.x + rect.size.x + OUT, rect.pos.y + rect.size.y * 0.5),
+            dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y + OUT),
+            dvec2(rect.pos.x + rect.size.x + OUT, rect.pos.y + rect.size.y + OUT),
+        ]
+    }
+
+    /// The edge handle under `abs`, if any (0 right, 1 bottom, 2 corner).
+    fn size_handle_at(rect: Rect, abs: DVec2) -> Option<usize> {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        // The corner first: it overlaps the two edges' reach.
+        let centers = Self::size_handle_centers(rect);
+        [2usize, 0, 1].into_iter().find(|&i| {
+            let dx = abs.x - centers[i].x;
+            let dy = abs.y - centers[i].y;
+            dx * dx + dy * dy <= 49.0
+        })
+    }
+
+    fn size_handle_cursor(handle: usize) -> MouseCursor {
+        match handle {
+            0 => MouseCursor::EwResize,
+            1 => MouseCursor::NsResize,
+            _ => MouseCursor::NwseResize,
+        }
+    }
+
+    /// The edge handles: squares on the selection's right edge, bottom
+    /// edge and corner, in the corner dots' style.
+    fn draw_size_handles(&mut self, cx: &mut Cx2d, rect: Rect) {
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        for center in Self::size_handle_centers(rect) {
+            if center.x + 4.0 > max_x {
+                continue;
+            }
+            self.draw_stroke.stroke_color = vec4(0.04, 0.04, 0.04, 0.9);
+            self.draw_stroke.draw_abs(
+                cx,
+                Rect { pos: dvec2(center.x - 4.0, center.y - 4.0), size: dvec2(8.0, 8.0) },
+            );
+            self.draw_stroke.stroke_color = vec4(1.0, 0.72, 0.2, 1.0);
+            self.draw_stroke.draw_abs(
+                cx,
+                Rect { pos: dvec2(center.x - 3.0, center.y - 3.0), size: dvec2(6.0, 6.0) },
+            );
         }
     }
 
@@ -24902,18 +25196,17 @@ impl Tweaker {
         if self.design_ghost_failed.contains(&(pick.uid, place)) {
             return;
         }
-        let Some(entry) = self.palette_drag.and_then(|i| self.palette_entries.get(i)).cloned() else {
+        let index = self.palette_drag;
+        let lifted = self.move_drag.clone();
+        if index.is_none() && lifted.is_none() {
             return;
-        };
+        }
         let target = cx.widget_tree().widget(WidgetUid(pick.uid));
         if target.is_empty() {
             return;
         }
         self.design_ghost_pending = true;
-        let result = self
-            .design
-            .as_mut()
-            .map(|s| s.insert(cx, &target, place, &entry.name, &entry.body));
+        let result = self.design_drag_apply(cx, index, lifted.as_ref(), &target, place);
         match result {
             Some(Ok(())) => {
                 self.design_ghost = Some((pick.uid, place, None));

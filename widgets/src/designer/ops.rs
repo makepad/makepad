@@ -33,7 +33,9 @@ pub enum DesignOp {
     Delete { node: NodeSpan },
     /// Move a child literal to another parent and place. The placement
     /// indexes the parent's children as they are once the node is taken out.
-    Move { node: NodeSpan, parent: NodeSpan, placement: Placement },
+    /// `name` gives a nameless node a name on the way (`name := Type{`),
+    /// in the same hunk, so the moved node can be found afterwards.
+    Move { node: NodeSpan, parent: NodeSpan, placement: Placement, name: Option<String> },
     /// Copy a child literal right after itself; a named node's copy is
     /// renamed `<name>_2` (or the next free suffix).
     Duplicate { node: NodeSpan },
@@ -87,7 +89,7 @@ impl DesignOp {
                 let range = text::statement_range(doc.text(), &node.node);
                 doc.edit(range.start, range.end, "", &label)
             }
-            DesignOp::Move { node, parent, placement } => {
+            DesignOp::Move { node, parent, placement, name } => {
                 check_span(doc, node)?;
                 check_span(doc, parent)?;
                 must_be_child(&node.node)?;
@@ -95,7 +97,10 @@ impl DesignOp {
                     return Err("a node cannot be moved into itself".to_string());
                 }
                 let text = doc.text();
-                let body = text[node.node.range()].to_string();
+                let body = match (name, node.node.name()) {
+                    (Some(name), None) => format!("{} := {}", name, &text[node.node.range()]),
+                    _ => text[node.node.range()].to_string(),
+                };
                 let range = text::statement_range(text, &node.node);
                 let removed = range.end - range.start;
                 // The insertion point is found in the text WITHOUT the node,

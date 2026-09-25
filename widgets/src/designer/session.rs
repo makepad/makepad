@@ -269,14 +269,14 @@ impl DesignSession {
                     Structural::Down if index + 1 < count => Placement::After(index),
                     _ => return Err("already at that end".to_string()),
                 };
-                DesignOp::Move { node: span, parent, placement }.apply(&mut self.doc)?;
+                DesignOp::Move { node: span, parent, placement, name: None }.apply(&mut self.doc)?;
                 Some(path)
             }
             Structural::Out => {
                 let (parent, _) = Self::parent_of(&span)?;
                 let (grand, parent_index) = Self::parent_of(&parent)?;
                 let name = span.node.name().map(|n| n.to_string());
-                DesignOp::Move { node: span, parent: grand, placement: Placement::After(parent_index) }
+                DesignOp::Move { node: span, parent: grand, placement: Placement::After(parent_index), name: None }
                     .apply(&mut self.doc)?;
                 let grand_path = parent_path(&parent_path(&path));
                 Some(match name {
@@ -304,7 +304,14 @@ impl DesignSession {
         if span.node.open == target_span.node.open {
             return Err("a node cannot be moved next to itself".to_string());
         }
-        let name = span.node.name().map(|n| n.to_string());
+        // A nameless node is named on the way: the moved node is selected
+        // (and, mid-drag, ghosted) by its path, and a path needs a name.
+        let name = Some(
+            span.node
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| fresh_name(self.doc.text(), &span.node.ty)),
+        );
         let (parent, placement, parent_path) = match place {
             Place::Inside => {
                 if !is_container(cx, target) {
@@ -329,7 +336,7 @@ impl DesignSession {
                 (parent, placement, parent_path(&path_of(cx, target)))
             }
         };
-        DesignOp::Move { node: span, parent, placement }.apply(&mut self.doc)?;
+        DesignOp::Move { node: span, parent, placement, name: name.clone() }.apply(&mut self.doc)?;
         let select = match name {
             Some(name) if !parent_path.is_empty() => format!("{}.{}", parent_path, name),
             Some(name) => name,
