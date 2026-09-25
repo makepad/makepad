@@ -5513,12 +5513,11 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
 }
 
 /// A panel tab up or down. Up wears the body's face with a hairline
-/// edge and bright ink; down is a bare word (transparent face and edge)
-/// in dimmer ink, lit a little under the pointer. Literals, for the same
-/// reason `set_button_fill` uses them.
+/// edge and bright ink; down sits on a darker face, as the dock's tabs
+/// do, in dimmer ink, lit a little under the pointer. Literals, for the
+/// same reason `set_button_fill` uses them.
 fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
-    let none: Vec4f = vec4(0.0, 0.0, 0.0, 0.0);
     let (base, hover, down, border, ink): (Vec4f, Vec4f, Vec4f, Vec4f, Vec4f) = if selected {
         (
             vec4(0.20, 0.20, 0.21, 1.0),
@@ -5529,10 +5528,10 @@ fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
         )
     } else {
         (
-            none,
-            vec4(0.15, 0.15, 0.16, 1.0),
             vec4(0.12, 0.12, 0.13, 1.0),
-            none,
+            vec4(0.15, 0.15, 0.16, 1.0),
+            vec4(0.10, 0.10, 0.11, 1.0),
+            vec4(0.09, 0.09, 0.10, 1.0),
             vec4(0.64, 0.64, 0.66, 1.0),
         )
     };
@@ -7582,8 +7581,19 @@ script_mod! {
     mod.widgets.Tweaker = set_type_default() do mod.widgets.TweakerBase{
         width: 0
         height: 0
+        // The panel's own face, declared here and not taken from the draw
+        // crate's default: an app that ships only the fonts it declares
+        // leaves that default out, and a label on it draws nothing.
         draw_label +: {
-            text_style +: {
+            text_style: mod.text.TextStyle{
+                font_family: mod.text.FontFamily{
+                    latin := mod.text.FontMember{
+                        res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                        asc: -0.1
+                        desc: 0.0
+                    }
+                }
+                line_spacing: 1.2
                 font_size: 7.5
             }
             color: #xffffff
@@ -9059,10 +9069,20 @@ pub struct Tweaker {
     /// The next landing names the ghost, not a selection to make.
     #[rust]
     design_ghost_pending: bool,
-    /// A ghost target asked for while a preview was still landing; taken
-    /// when it lands.
+    /// A ghost target asked for while a preview was still landing, or
+    /// while the pointer's dwell on it is still running; taken when the
+    /// landing or the dwell is over.
     #[rust]
     design_ghost_want: Option<Option<(TweakPick, DesignPlace)>>,
+    /// When the dwell on the wanted target is over (app seconds): a target
+    /// is only inserted once the pointer has rested on it a beat, so a
+    /// drag across the canvas does not preview every widget it crosses.
+    #[rust]
+    design_ghost_due: Option<f64>,
+    /// Targets this drag could not ghost (a widget from another file, the
+    /// page root): not tried again, not logged again, until the drag ends.
+    #[rust]
+    design_ghost_failed: Vec<(u64, DesignPlace)>,
     /// The chip that rides the pointer through a palette or tree drag: its
     /// text and where the pointer is.
     #[rust]
@@ -9608,7 +9628,7 @@ impl Tweaker {
                     width: Fit
                     height: 20
                     margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                    padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                    padding: Inset{left: 5 right: 5 top: 2 bottom: 2}
                     spacing: 0
                     draw_text +: { text_style +: { font_size: 8.0 } }
                     draw_bg +: {
@@ -9987,7 +10007,7 @@ impl Tweaker {
                     head := View {
                         width: Fill
                         height: Fit
-                        flow: Right{wrap: true}
+                        flow: Right
                         spacing: 6
                         align: Align{x: 0.0 y: 0.5}
                         ic_app := View { width: Fit height: Fit visible: false
@@ -10154,7 +10174,7 @@ impl Tweaker {
                         w_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_axis := PanelLabelSmall { width: 12 text: "W" }
@@ -10192,7 +10212,7 @@ impl Tweaker {
                         w_basis := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             w_basis_label := PanelLabelSmall { width: Fit text: "basis" }
@@ -10201,7 +10221,7 @@ impl Tweaker {
                         h_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_axis := PanelLabelSmall { width: 12 text: "H" }
@@ -10239,7 +10259,7 @@ impl Tweaker {
                         h_basis := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             h_basis_label := PanelLabelSmall { width: Fit text: "basis" }
@@ -10268,7 +10288,7 @@ impl Tweaker {
                 let IdentityRowT = View {
                     width: Fill
                     height: Fit
-                    flow: Right{wrap: true}
+                    flow: Right
                     spacing: 6
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 8 top: 3 bottom: 5}
@@ -10296,7 +10316,7 @@ impl Tweaker {
                 let MeasuredRowT = View {
                     width: Fill
                     height: Fit
-                    flow: Right{wrap: true}
+                    flow: Right
                     padding: Inset{left: 8 right: 8 top: 1 bottom: 3}
                     measured := PanelLabelSmall {
                         width: Fill
@@ -10322,7 +10342,7 @@ impl Tweaker {
                         mid_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.5 y: 0.5}
                             leg_left := FabValueInput { width: 64 height: 16 }
@@ -10471,7 +10491,7 @@ impl Tweaker {
                         // column is too narrow for it beside the box, and a
                         // Fill label wraps where a Fit one runs off the panel.
                         dock_hint := PanelLabelSmall { width: Fill text: "" }
-                        name_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        name_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             ctr_label := PanelLabelSmall { width: Fit text: "named" }
                             ctr_name := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10506,11 +10526,11 @@ impl Tweaker {
                         height: Fit
                         flow: Down
                         spacing: 2
-                        cols_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        cols_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             cols_label := PanelLabelSmall { width: 40 text: "columns" }
                             cols_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
-                        rows_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        rows_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             rows_label := PanelLabelSmall { width: 40 text: "rows" }
                             rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10528,7 +10548,7 @@ impl Tweaker {
                                 f_cols := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
                         }
-                        areas_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        areas_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             areas_label := PanelLabelSmall { width: 40 text: "areas" }
                             areas_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10556,7 +10576,7 @@ impl Tweaker {
                             by_label := PanelLabelSmall { width: Fit text: "\u{00d7}" }
                             cell_rs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
                         }
-                        area_row := View { width: Fill height: Fit flow: Right{wrap: true} spacing: 4 align: Align{x: 0.0 y: 0.5}
+                        area_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
                             area_label := PanelLabelSmall { width: Fit text: "area" }
                             cell_area := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
                         }
@@ -10675,7 +10695,7 @@ impl Tweaker {
                     filter_row := View {
                         width: Fill
                         height: Fit
-                        flow: Right{wrap: true}
+                        flow: Right
                         spacing: 4
                         align: Align{x: 0.0 y: 0.5}
                         search := FabSearch {}
@@ -10738,7 +10758,7 @@ impl Tweaker {
                         flow: Right
                         spacing: 1
                         align: Align{x: 0.0 y: 1.0}
-                        padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
+                        padding: Inset{left: 2 right: 2 top: 0 bottom: 0}
                         tab_props := PanelTabButton { text: "Props" }
                         tab_props_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_list.svg") } }
                         tab_shader := PanelTabButton { text: "Shader" }
@@ -10782,7 +10802,7 @@ impl Tweaker {
                         theme_pick_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 3
                             align: Align{x: 0.0 y: 0.5}
                             theme_pick := PanelDropDown {
@@ -10910,7 +10930,7 @@ impl Tweaker {
                         theme_save_row := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 3
                             align: Align{x: 0.0 y: 0.5}
                             theme_name := PanelInput {
@@ -11098,7 +11118,7 @@ impl Tweaker {
                         notes_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             align: Align{x: 0.0 y: 0.5}
                             notes_label := FabHeaderLabel {
                                 width: Fill
@@ -11138,7 +11158,7 @@ impl Tweaker {
                         rules_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             align: Align{x: 0.0 y: 0.5}
                             rules_label := FabHeaderLabel {
                                 width: Fill
@@ -11171,7 +11191,7 @@ impl Tweaker {
                         app_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             align: Align{x: 0.0 y: 0.5}
                             app_label := FabHeaderLabel {
                                 width: Fill
@@ -11209,7 +11229,7 @@ impl Tweaker {
                         tree_head := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
@@ -11422,7 +11442,7 @@ impl Tweaker {
                         prompt_bar := View {
                             width: Fill
                             height: Fit
-                            flow: Right{wrap: true}
+                            flow: Right
                             align: Align{x: 0.0 y: 0.5}
                             target_wrap := View {
                                 width: Fill
@@ -13928,14 +13948,15 @@ impl Tweaker {
             ];
             // The words while the row can hold every one of them, the
             // icons when the band is too narrow: measured, not guessed.
-            let mut need = 8.0 + 5.0;
+            let mut need = 4.0 + 5.0;
             for (_, _, _, label) in &tabs {
                 let word = self
                     .draw_label
                     .prepare_single_line_run(cx, label)
                     .map(|run| run.width_in_lpxs as f64)
                     .unwrap_or_else(|| label.chars().count() as f64 * 5.4);
-                need += word * 1.1 + 16.0;
+                // The label is measured at 7.5 pt; the tab word is 8 pt.
+                need += word * (8.0 / 7.5) + 10.0;
             }
             let narrow = need > self.band.size.x - SPLITTER_WIDTH;
             for (i, (id, icon_id, t, _)) in tabs.into_iter().enumerate() {
@@ -19050,6 +19071,20 @@ impl Widget for Tweaker {
         if self.swatch_refresh && self.next_frame.is_event(event).is_some() {
             self.swatch_refresh = false;
             self.redraw_sidebar(cx);
+        }
+        // The dwell on a drag target is over: make the ghost there.
+        if self.next_frame.is_event(event).is_some() {
+            if let Some(due) = self.design_ghost_due {
+                let now = cx.seconds_since_app_start();
+                if now >= due {
+                    self.design_ghost_due = None;
+                    if let Some(want) = self.design_ghost_want.take() {
+                        self.ghost_retarget(cx, want);
+                    }
+                } else {
+                    self.next_frame = cx.new_next_frame();
+                }
+            }
         }
         // The suppression window expired: bring the solid outline back.
         if self.next_frame.is_event(event).is_some() {
@@ -24248,9 +24283,12 @@ impl Tweaker {
         self.design_baked = None;
         self.redraw_sidebar(cx);
         self.redraw_overlay(cx);
-        // A target the drag asked for while this was landing.
-        if let Some(want) = self.design_ghost_want.take() {
-            self.ghost_retarget(cx, want);
+        // A target the drag asked for while this was landing (one still
+        // in its dwell waits for the dwell).
+        if self.design_ghost_due.is_none() {
+            if let Some(want) = self.design_ghost_want.take() {
+                self.ghost_retarget(cx, want);
+            }
         }
     }
 
@@ -24637,7 +24675,10 @@ impl Tweaker {
                     // The canvas shows the drop before it happens: the entry
                     // is inserted at the target for real and the siblings
                     // make room; a ghost marks it until the drop or the leave.
-                    self.ghost_retarget(cx, next);
+                    // After a beat on the target, not on the way across.
+                    self.design_ghost_want = Some(next);
+                    self.design_ghost_due = Some(cx.seconds_since_app_start() + 0.12);
+                    self.next_frame = cx.new_next_frame();
                 }
             }
             Event::Drop(e) => {
@@ -24699,9 +24740,13 @@ impl Tweaker {
                     session().lock().unwrap().hover = None;
                     self.redraw_overlay(cx);
                 }
+                self.design_ghost_due = None;
                 self.ghost_retract(cx);
-                // A click on the row follows on its own; a drag that ended
-                // elsewhere is over.
+                self.design_ghost_failed.clear();
+                // A drag called off (Escape) never drops: the entry is no
+                // longer in hand. A click on the row still follows on its
+                // own through the row's own press and release.
+                self.palette_drag = None;
             }
             _ => {}
         }
@@ -24752,6 +24797,9 @@ impl Tweaker {
         let Some((pick, place)) = next else {
             return;
         };
+        if self.design_ghost_failed.contains(&(pick.uid, place)) {
+            return;
+        }
         let Some(entry) = self.palette_drag.and_then(|i| self.palette_entries.get(i)).cloned() else {
             return;
         };
@@ -24773,8 +24821,10 @@ impl Tweaker {
             }
             Some(Err(err)) => {
                 // Nothing to show for this target (a non-container asked
-                // for Inside, a widget from another file): the bar stands.
+                // for Inside, a widget from another file): the bar stands,
+                // and this target is not asked again during this drag.
                 self.design_ghost_pending = false;
+                self.design_ghost_failed.push((pick.uid, place));
                 log!("DESIGN ghost: {err}");
             }
             None => self.design_ghost_pending = false,
