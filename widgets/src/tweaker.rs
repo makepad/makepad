@@ -1593,6 +1593,47 @@ fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
 }
 
 
+/// The gap among a container's drawn children that a pointer on the
+/// container's own space falls in: before the first child past the
+/// pointer along the container's flow, else after the last. None when
+/// the container has no drawn child (the drop goes inside it).
+fn gap_target(cx: &Cx, container: &WidgetRef, abs: DVec2) -> Option<(WidgetRef, DesignPlace)> {
+    use crate::makepad_draw::Flow;
+    let mut children: Vec<(WidgetRef, Rect)> = Vec::new();
+    container.children(&mut |_, child| {
+        let rect = child.area().clipped_rect_union(cx);
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            children.push((child.clone(), rect));
+        }
+    });
+    if children.is_empty() {
+        return None;
+    }
+    let horizontal = match container.borrow::<View>().map(|view| view.layout.flow) {
+        Some(Flow::Right { .. }) => true,
+        Some(Flow::Down) => false,
+        _ => children.windows(2).any(|pair| {
+            let (a, b) = (pair[0].1, pair[1].1);
+            let share_y = a.pos.y < b.pos.y + b.size.y && b.pos.y < a.pos.y + a.size.y;
+            let apart_x = a.pos.x + a.size.x <= b.pos.x + 0.5 || b.pos.x + b.size.x <= a.pos.x + 0.5;
+            share_y && apart_x
+        }),
+    };
+    let centre = |rect: &Rect| {
+        if horizontal {
+            rect.pos.x + rect.size.x * 0.5
+        } else {
+            rect.pos.y + rect.size.y * 0.5
+        }
+    };
+    let at = if horizontal { abs.x } else { abs.y };
+    children.sort_by(|a, b| centre(&a.1).partial_cmp(&centre(&b.1)).unwrap_or(std::cmp::Ordering::Equal));
+    match children.iter().find(|(_, rect)| centre(rect) > at) {
+        Some((child, _)) => Some((child.clone(), DesignPlace::Before)),
+        None => children.last().map(|(child, _)| (child.clone(), DesignPlace::After)),
+    }
+}
+
 /// Where a row was taken hold of: the pointer's offset inside the row and
 /// the row's size, for the chip that carries it. A row with no rect is
 /// held near its left end.
@@ -24647,11 +24688,25 @@ impl Tweaker {
         if self.pick_is_ghost(cx, pick.uid) {
             return self.design_drop.clone();
         }
+        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
+        let container = crate::designer::is_container(cx, &widget);
+        // The pointer on a container's own space, between or beside its
+        // children: the drop goes into the nearest gap between them, which
+        // is where the eye puts it, not before or after the container.
+        if container {
+            if let Some((child, place)) = gap_target(cx, &widget, abs) {
+                let window_id = self.my_window.unwrap_or(0);
+                if let Some(child_pick) = pick_of_widget(cx, &child, abs, window_id) {
+                    if self.pick_is_ghost(cx, child_pick.uid) {
+                        return self.design_drop.clone();
+                    }
+                    return Some((child_pick, place));
+                }
+            }
+        }
         let r = pick.rect;
         let fx = ((abs.x - r.pos.x) / r.size.x.max(1.0)).clamp(0.0, 1.0);
         let fy = ((abs.y - r.pos.y) / r.size.y.max(1.0)).clamp(0.0, 1.0);
-        let widget = cx.widget_tree().widget(WidgetUid(pick.uid));
-        let container = crate::designer::is_container(cx, &widget);
         let place = if container && (0.25..0.75).contains(&fx) && (0.25..0.75).contains(&fy) {
             DesignPlace::Inside
         } else if fy < 0.5 {
