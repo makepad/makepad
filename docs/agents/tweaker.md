@@ -43,9 +43,44 @@ Sidebar edits emit `TWEAK sidebar <path> <prop> <old> -> <new>` in the app
 log. Listen through `/log?since=N`; do not poll `/tweak/state` for changes.
 Read state when inspecting a selection or verifying an applied value.
 
+## Structural edits: the designer
+
+The Build tab's design session edits the Splash source of the file that
+declares a widget: insert, move, delete, wrap, rename and set properties.
+Each edit is a byte-range hunk inside the `script_mod!` body, previewed
+live in the running app. The app never writes the file; the agent applies
+the patch. The same session is reachable over HTTP, and a person's Build
+tab edits and an agent's routes share one undo history.
+
+| Route | Result |
+|---|---|
+| `/design/open?path=P` | Start a session on the file declaring `P` (default: the pinned widget) |
+| `/design/state` | File, edit count, status, `can_undo`/`can_redo`, `landing`, hunk labels |
+| `/design/palette` | Insertable types with their default bodies |
+| `/design/insert?path=P&place=before\|after\|inside&type=T&body=B` | Insert `T` (body defaults to the palette's); answers the new widget's path in `select` |
+| `/design/move?path=P&to=Q&place=...` | Move `P` next to or into `Q` |
+| `/design/delete`, `duplicate`, `wrap`, `up`, `down`, `out` `?path=P` | Structural edits of `P` |
+| `/design/rename?path=P&name=N` | Name, rename or (empty `name`) unname a literal |
+| `/design/set?path=P&key=K&value=V` | Write a property into the literal (`+:` for a new typed property) |
+| `/design/bake` | Write every value-ledger tweak on this file's widgets into the source |
+| `/design/undo`, `redo`, `reset` | Step the source edits |
+| `/design/patch`, `/design/commit` | The unified diff; `commit` adds `base_hash`, `new_hash`, `base_matches_disk` and the hunks |
+| `/design/verify` | Every drawn widget of the file and whether its literal is found |
+| `/design/close` | End the session; writes `local/design/<file>.patch` |
+
+Edits answer after the frame that shows them, so a `/g` right after sees
+the change; send `if_user_seq` like any other mutation. An edit whose
+preview the runtime rejects is rolled back and reported in `status`. An op
+on a `#(...)` placeholder is refused (it needs a rebuild), and so is an
+edit to a widget declared in another file. To persist: read
+`/design/commit`, check `base_matches_disk`, apply `diff` to the file, then
+rebuild, relaunch and verify as below.
+
 ## Persist the result
 
-The overlay never writes source. At the end of a styling session:
+The overlay never writes source. With a design session open,
+`/design/bake` turns the value tweaks into hunks and `/design/commit`
+returns the patch; without one, at the end of a styling session:
 
 1. Read `/tweak/final`. If annotations produced a `png`, inspect it; the
    strokes are part of the user's feedback.

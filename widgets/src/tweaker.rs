@@ -6999,12 +6999,50 @@ fn coalesce_diff(entries: &[TweakDiffEntry]) -> Vec<TweakDiffEntry> {
     out
 }
 
+/// The panel a `/design/*` op talks to: the one with a design session
+/// open, else the one in the pinned widget's window, else the first.
+fn design_tweaker(cx: &Cx) -> Option<WidgetRef> {
+    let pinned_window = session().lock().unwrap().pinned.as_ref().map(|p| p.window_id);
+    let mut in_window = None;
+    let mut first = None;
+    for row in cx.widget_tree().flat_tree(cx).into_iter().filter(|row| row.inspector) {
+        let widget = cx.widget_tree().widget(WidgetUid(row.uid));
+        let (designing, window) = match widget.borrow::<Tweaker>() {
+            Some(tw) => (tw.design.is_some(), tw.my_window),
+            None => continue,
+        };
+        if designing {
+            return Some(widget);
+        }
+        if in_window.is_none() && window.is_some() && window == pinned_window {
+            in_window = Some(widget.clone());
+        }
+        if first.is_none() {
+            first = Some(widget);
+        }
+    }
+    in_window.or(first)
+}
+
+/// `/design/<op>`: the designer's remote surface, answered by the panel
+/// that holds (or will hold) the session.
+fn design_remote(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, String> {
+    let tweaker = design_tweaker(cx).ok_or_else(|| "no tweaker in this app".to_string())?;
+    let mut tw = tweaker
+        .borrow_mut::<Tweaker>()
+        .ok_or_else(|| "the tweaker is busy; try again".to_string())?;
+    tw.design_remote(cx, op, args)
+}
+
 /// The `Cx::tweak_callback` the widgets crate registers in `set_ui_root`.
 pub fn tweak_callback(
     cx: &mut Cx,
     op: &str,
     args: &[(String, String)],
 ) -> Result<String, String> {
+    if let Some(design_op) = op.strip_prefix("design_") {
+        return design_remote(cx, design_op, args);
+    }
     match op {
         "toggle" => {
             let on = match arg(args, &["on"]) {
@@ -24386,6 +24424,396 @@ impl Tweaker {
             return None;
         }
         Some((pinned, widget))
+    }
+
+    /// One `/design/*` op. Edits go through the same session calls and the
+    /// same undo bookkeeping as the Build tab, so a person and an agent
+    /// share one history; the app never writes the file.
+    fn design_remote(&mut self, cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, String> {
+        use crate::designer::{DesignSession, Place, Structural};
+        let place_of = |text: Option<&str>, default: Place| -> Result<Place, String> {
+            match text.map(|t| t.trim().to_ascii_lowercase()) {
+                None => Ok(default),
+                Some(t) if t.is_empty() => Ok(default),
+                Some(t) => match t.as_str() {
+                    "before" | "b" => Ok(Place::Before),
+                    "after" | "a" => Ok(Place::After),
+                    "inside" | "in" | "i" => Ok(Place::Inside),
+                    _ => Err(format!("place={t}: want before, after or inside")),
+                },
+            }
+        };
+        let need_session = |tw: &Self| -> Result<(), String> {
+            if tw.design.is_some() {
+                Ok(())
+            } else {
+                Err("no design session: /design/open first".to_string())
+            }
+        };
+        match op {
+            "open" => {
+                if let Some(s) = &self.design {
+                    return Err(format!("a session is open on {}; /design/close first", s.file()));
+                }
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let session = DesignSession::open(cx, &widget)?;
+                self.design_msg.clear();
+                self.design_baked = None;
+                self.design_patch_shown = usize::MAX;
+                self.design = Some(session);
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+                Ok(self.design_state_json(cx, None))
+            }
+            "close" => {
+                let Some(mut session) = self.design.take() else {
+                    return Err("no design session".to_string());
+                };
+                let written = session.write_patch();
+                let msg = match &written {
+                    Ok(path) => format!("stopped; patch written to {path}"),
+                    Err(err) => format!("stopped; {err}"),
+                };
+                self.design_patch_shown = usize::MAX;
+                self.design_say(cx, msg);
+                self.redraw_overlay(cx);
+                Ok(match written {
+                    Ok(path) => format!("{{\"closed\":1,\"patch\":{}}}", json_str(&path)),
+                    Err(err) => format!("{{\"closed\":1,\"patch\":null,\"note\":{}}}", json_str(&err)),
+                })
+            }
+            "state" => Ok(self.design_state_json(cx, None)),
+            "palette" => {
+                let mut out = String::from("{\"palette\":[");
+                for (index, entry) in crate::designer::palette(cx).iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!(
+                        "{{\"name\":{},\"group\":{},\"body\":{}}}",
+                        json_str(&entry.name),
+                        json_str(entry.group),
+                        json_str(&entry.body)
+                    ));
+                }
+                out.push_str("]}");
+                Ok(out)
+            }
+            "insert" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let ty = arg(args, &["type", "ty"]).ok_or_else(|| "need type= (a palette name)".to_string())?;
+                let body = match arg(args, &["body"]) {
+                    Some(body) => body.to_string(),
+                    None => crate::designer::palette(cx)
+                        .into_iter()
+                        .find(|entry| entry.name == ty)
+                        .map(|entry| entry.body)
+                        .unwrap_or_else(|| "{}".to_string()),
+                };
+                let default = if crate::designer::is_container(cx, &widget) { Place::Inside } else { Place::After };
+                let place = place_of(arg(args, &["place"]), default)?;
+                let result = self.design.as_mut().map(|s| s.insert(cx, &widget, place, ty, &body));
+                self.design_remote_after(cx, result)
+            }
+            "move" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let to = arg(args, &["to"]).ok_or_else(|| "need to= (the target's path)".to_string())?;
+                let target = resolve_widget_by_path(cx, to)?;
+                let place = place_of(arg(args, &["place"]), Place::After)?;
+                let result = self.design.as_mut().map(|s| s.move_relative(cx, &widget, &target, place));
+                self.design_remote_after(cx, result)
+            }
+            "delete" | "duplicate" | "wrap" | "up" | "down" | "out" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let structural = match op {
+                    "delete" => Structural::Delete,
+                    "duplicate" => Structural::Duplicate,
+                    "wrap" => Structural::Wrap,
+                    "up" => Structural::Up,
+                    "down" => Structural::Down,
+                    _ => Structural::Out,
+                };
+                let result = self.design.as_mut().map(|s| s.structural(cx, &widget, structural));
+                self.design_remote_after(cx, result)
+            }
+            "rename" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let name = arg(args, &["name"]).map(str::trim).filter(|n| !n.is_empty());
+                let result = self.design.as_mut().map(|s| s.rename(cx, &widget, name));
+                self.design_remote_after(cx, result)
+            }
+            "set" => {
+                need_session(self)?;
+                let widget = self.remote_widget(cx, args, &["path", "p"])?;
+                let key = arg(args, &["key", "prop"]).ok_or_else(|| "need key=".to_string())?;
+                let value = arg(args, &["value", "v"]).ok_or_else(|| "need value=".to_string())?;
+                let result = self.design.as_mut().map(|s| s.set_prop(cx, &widget, key, value));
+                self.design_remote_after(cx, result)
+            }
+            "undo" | "redo" | "reset" => {
+                need_session(self)?;
+                let keep = session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone());
+                let result = self.design.as_mut().map(|s| match op {
+                    "undo" => s.undo(cx, keep),
+                    "redo" => s.redo(cx, keep),
+                    _ => s.reset(cx, keep),
+                });
+                if let Some(Err(err)) = &result {
+                    return Err(err.clone());
+                }
+                // The panel's shared history follows: the source step moves
+                // between the undo and redo stacks as a Cmd+Z would move it.
+                {
+                    let mut s = session().lock().unwrap();
+                    match op {
+                        "undo" => {
+                            if let Some(i) = s.undo.iter().rposition(|step| matches!(step, UndoStep::Source { .. })) {
+                                let step = s.undo.remove(i);
+                                s.redo.push(step);
+                            }
+                        }
+                        "redo" => {
+                            if let Some(i) = s.redo.iter().rposition(|step| matches!(step, UndoStep::Source { .. })) {
+                                let step = s.redo.remove(i);
+                                s.undo.push(step);
+                            }
+                        }
+                        _ => {
+                            s.undo.retain(|step| !matches!(step, UndoStep::Source { .. }));
+                            s.redo.clear();
+                        }
+                    }
+                    s.undo_open = false;
+                }
+                self.design_msg.clear();
+                self.design_settle(cx);
+                self.rows_uid = 0;
+                self.redraw_sidebar(cx);
+                self.redraw_overlay(cx);
+                Ok(self.design_state_json(cx, None))
+            }
+            "patch" => {
+                need_session(self)?;
+                let diff = self.design.as_ref().map(|s| s.doc().unified_diff()).unwrap_or_default();
+                Ok(format!("{{\"diff\":{}}}", json_str(&diff)))
+            }
+            "commit" => {
+                need_session(self)?;
+                let s = self.design.as_ref().unwrap();
+                let doc = s.doc();
+                let mut hunks = String::from("[");
+                for (index, hunk) in doc.hunks().iter().enumerate() {
+                    if index > 0 {
+                        hunks.push(',');
+                    }
+                    hunks.push_str(&format!(
+                        "{{\"label\":{},\"start\":{},\"end\":{},\"removed\":{},\"replacement\":{}}}",
+                        json_str(&hunk.label),
+                        hunk.start,
+                        hunk.end,
+                        json_str(&hunk.removed),
+                        json_str(&hunk.replacement)
+                    ));
+                }
+                hunks.push(']');
+                Ok(format!(
+                    "{{\"file\":{},\"base_hash\":\"{:016x}\",\"new_hash\":\"{:016x}\",\"base_matches_disk\":{},\"dirty\":{},\"hunks\":{},\"diff\":{}}}",
+                    json_str(s.file()),
+                    doc.base_hash(),
+                    doc.text_hash(),
+                    doc.base_matches_disk() as u8,
+                    doc.is_dirty() as u8,
+                    hunks,
+                    json_str(&doc.unified_diff())
+                ))
+            }
+            "bake" => {
+                need_session(self)?;
+                self.design_remote_bake(cx)
+            }
+            "verify" => {
+                need_session(self)?;
+                self.design_remote_verify(cx)
+            }
+            other => Err(format!("unknown design op {other:?}")),
+        }
+    }
+
+    /// The widget an op acts on: `path=` when given, else the pinned one.
+    fn remote_widget(&self, cx: &Cx, args: &[(String, String)], keys: &[&str]) -> Result<WidgetRef, String> {
+        match arg(args, keys).map(str::trim).filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let widget = resolve_widget_by_path(cx, path)?;
+                if widget.is_empty() {
+                    return Err(format!("no widget at path {path:?}"));
+                }
+                Ok(widget)
+            }
+            None => self
+                .design_target(cx)
+                .map(|(_, widget)| widget)
+                .ok_or_else(|| "name a widget with path= or pin one".to_string()),
+        }
+    }
+
+    /// The tail of a remote edit: the Build tab's own tail (undo history,
+    /// landing, panel line), then the answer: an error, or the state with
+    /// the path the edit selects.
+    fn design_remote_after(&mut self, cx: &mut Cx, result: Option<Result<(), String>>) -> Result<String, String> {
+        let outcome = match &result {
+            None => Err("no design session: /design/open first".to_string()),
+            Some(Err(err)) => Err(err.clone()),
+            Some(Ok(())) => Ok(()),
+        };
+        let note = self.design.as_ref().and_then(|s| s.note.clone());
+        self.design_after(cx, result);
+        outcome?;
+        let select = self
+            .design_reselect
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .or_else(|| self.design.as_ref().and_then(|s| s.landing_select()));
+        let mut out = self.design_state_json(cx, select.as_deref());
+        if let Some(note) = note {
+            out.pop();
+            out.push_str(&format!(",\"note\":{}}}", json_str(&note)));
+        }
+        Ok(out)
+    }
+
+    /// The session as one JSON object.
+    fn design_state_json(&self, _cx: &Cx, select: Option<&str>) -> String {
+        let Some(s) = &self.design else {
+            return "{\"open\":0}".to_string();
+        };
+        let doc = s.doc();
+        let mut hunks = String::from("[");
+        for (index, hunk) in doc.hunks().iter().enumerate() {
+            if index > 0 {
+                hunks.push(',');
+            }
+            hunks.push_str(&json_str(&hunk.label));
+        }
+        hunks.push(']');
+        let mut out = format!(
+            "{{\"open\":1,\"file\":{},\"edits\":{},\"dirty\":{},\"status\":{},\"can_undo\":{},\"can_redo\":{},\"landing\":{},\"hunks\":{}",
+            json_str(s.file()),
+            doc.hunks().len(),
+            doc.is_dirty() as u8,
+            json_str(&s.status),
+            s.can_undo() as u8,
+            s.can_redo() as u8,
+            s.is_landing() as u8,
+            hunks
+        );
+        if let Some(select) = select {
+            out.push_str(&format!(",\"select\":{}", json_str(select)));
+        }
+        if !self.design_msg.is_empty() {
+            out.push_str(&format!(",\"msg\":{}", json_str(&self.design_msg)));
+        }
+        out.push('}');
+        out
+    }
+
+    /// `/design/bake`: every tweak in the value ledger on a widget of the
+    /// file under design becomes a property in its literal, and leaves the
+    /// ledger. Tweaks on widgets of other files stay value tweaks. An app
+    /// that lands its previews later stops after the first bake: call
+    /// again once it has landed.
+    fn design_remote_bake(&mut self, cx: &mut Cx) -> Result<String, String> {
+        let entries = coalesce_diff(&session().lock().unwrap().diff);
+        let file = self.design.as_ref().map(|s| s.file().to_string()).unwrap_or_default();
+        let mut baked: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        let mut remaining = 0usize;
+        for entry in entries {
+            if entry.path == "theme" || entry.prop.starts_with("const:") {
+                continue;
+            }
+            if self.design.as_ref().is_some_and(|s| s.is_landing()) {
+                remaining += 1;
+                continue;
+            }
+            let Ok(widget) = resolve_widget_for_history(cx, &entry.path) else {
+                skipped.push(format!("{}.{}: gone", entry.path, entry.prop));
+                continue;
+            };
+            let mine = crate::designer::widget_source_file(cx, &widget).map(|f| f == file).unwrap_or(false);
+            if !mine {
+                skipped.push(format!("{}.{}: another file", entry.path, entry.prop));
+                continue;
+            }
+            let result = self.design.as_mut().map(|s| s.set_prop(cx, &widget, &entry.prop, &entry.new));
+            match result {
+                Some(Ok(())) => {
+                    {
+                        let mut s = session().lock().unwrap();
+                        s.diff.retain(|e| !(e.path == entry.path && e.prop == entry.prop));
+                    }
+                    baked.push(format!("{}.{}", entry.path, entry.prop));
+                    self.design_after(cx, Some(Ok(())));
+                }
+                Some(Err(err)) => skipped.push(format!("{}.{}: {}", entry.path, entry.prop, err)),
+                None => break,
+            }
+        }
+        let list = |items: &[String]| {
+            let inner: Vec<String> = items.iter().map(|i| json_str(i)).collect();
+            format!("[{}]", inner.join(","))
+        };
+        let mut out = self.design_state_json(cx, None);
+        out.pop();
+        out.push_str(&format!(
+            ",\"baked\":{},\"skipped\":{},\"remaining\":{}}}",
+            list(&baked),
+            list(&skipped),
+            remaining
+        ));
+        Ok(out)
+    }
+
+    /// `/design/verify`: every widget on screen declared in the file under
+    /// design, and whether the locator finds its literal in the working
+    /// text. A miss is an edit the designer would refuse.
+    fn design_remote_verify(&mut self, cx: &mut Cx) -> Result<String, String> {
+        let file = self.design.as_ref().map(|s| s.file().to_string()).unwrap_or_default();
+        let rows = rows_without_inspectors(cx.widget_tree().flat_tree(cx), 0, 0);
+        let mut checked = 0usize;
+        let mut mapped = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for row in rows {
+            let widget = cx.widget_tree().widget(WidgetUid(row.uid));
+            if widget.is_empty() {
+                continue;
+            }
+            let mine = crate::designer::widget_source_file(cx, &widget).map(|f| f == file).unwrap_or(false);
+            if !mine {
+                continue;
+            }
+            checked += 1;
+            match self.design.as_ref().map(|s| s.locate_check(cx, &widget)) {
+                Some(Ok(())) => mapped += 1,
+                Some(Err(err)) => {
+                    if failed.len() < 20 {
+                        failed.push(format!("{}: {}", indexed_path(cx, row.uid), err));
+                    }
+                }
+                None => break,
+            }
+        }
+        let inner: Vec<String> = failed.iter().map(|f| json_str(f)).collect();
+        Ok(format!(
+            "{{\"file\":{},\"checked\":{},\"mapped\":{},\"failed\":[{}]}}",
+            json_str(&file),
+            checked,
+            mapped,
+            inner.join(",")
+        ))
     }
 
     /// What the Build tab answers, beside the session's own line.

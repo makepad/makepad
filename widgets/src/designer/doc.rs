@@ -97,6 +97,12 @@ impl DesignDoc {
         fnv1a(&self.base)
     }
 
+    /// The same fingerprint of the working text: what the file holds once
+    /// the patch is applied.
+    pub fn text_hash(&self) -> u64 {
+        fnv1a(&self.text)
+    }
+
     /// Whether the file on disk still equals the base.
     pub fn base_matches_disk(&self) -> bool {
         std::fs::read_to_string(&self.file)

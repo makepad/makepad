@@ -167,6 +167,18 @@ impl DesignSession {
         )
     }
 
+    /// Whether `widget` can be found in the working text: the check an
+    /// edit makes first, without making the edit.
+    pub fn locate_check(&self, cx: &mut Cx, widget: &WidgetRef) -> Result<(), String> {
+        self.locate(cx, widget).map(|_| ())
+    }
+
+    /// The path the pending preview will select once it lands, if one is
+    /// still landing.
+    pub fn landing_select(&self) -> Option<String> {
+        self.landing.as_ref().and_then(|l| l.select.clone())
+    }
+
     fn locate(&self, cx: &mut Cx, widget: &WidgetRef) -> Result<NodeSpan, String> {
         let file = widget_source_file(cx, widget)?;
         if file != self.doc.file {

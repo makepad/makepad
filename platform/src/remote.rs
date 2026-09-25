@@ -419,7 +419,20 @@ mod imp {
                 Self::Input { tx, .. } | Self::Close { tx, .. }
                 | Self::Quit(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
                 Self::Tweak { op, tx, .. }
-                    if !matches!(op.as_str(), "state" | "diff" | "final") => Some(tx),
+                    if !matches!(
+                        op.as_str(),
+                        "state"
+                            | "diff"
+                            | "final"
+                            | "design_state"
+                            | "design_palette"
+                            | "design_patch"
+                            | "design_commit"
+                            | "design_verify"
+                    ) =>
+                {
+                    Some(tx)
+                }
                 Self::Ai { op, tx, .. } if op != "transcript" => Some(tx),
                 _ => None,
             }
@@ -2033,6 +2046,10 @@ mod imp {
                 Some(op) => route_tweak(&op.to_string(), p, false),
                 None => err("need op="),
             },
+            // The designer: structural edits to the Splash source under
+            // design, previewed live, never written by the app. The route
+            // only names the op; the tweaker answers it.
+            design if design.starts_with("/design/") => route_design(&design["/design/".len()..], p),
             // The window PNG with the overlay's outlines/annotations in it:
             // the overlay draws inside the window's own pass, so the ordinary
             // grab pipeline already composites it.
@@ -2182,6 +2199,14 @@ mod imp {
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
              /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
              /tweak/grab       window grab with the overlay composited (same as /g while tweaking)\n\
+             /design/open?path=  start a design session on the file that declares path (default: the pinned widget)\n\
+             /design/state     session: file, edits, status, can_undo/redo, landing, hunks; /design/palette the insertable types\n\
+             /design/insert?path=&place=before|after|inside&type=Button[&body={{text: \"Hi\"}}]  add a widget; answers the new path in \"select\"\n\
+             /design/move?path=&to=&place=  move path next to / into to.  /design/delete|duplicate|wrap|up|down|out?path=\n\
+             /design/rename?path=&name=  (empty name drops it)   /design/set?path=&key=&value=  write a property into the literal\n\
+             /design/bake      write the value ledger's tweaks into the source; /design/undo|redo|reset step the source edits\n\
+             /design/patch     the unified diff; /design/commit {{file,base_hash,new_hash,base_matches_disk,hunks,diff}} (the app never writes)\n\
+             /design/verify    every widget of the file under design: found in the source or not; /design/close writes local/design/<file>.patch\n\
              /shader/consts    the compiled shaders' hot-patchable constants (annotated literals): {{\"shaders\":[{{\"id\",\"consts\":[{{\"i\",\"name\",\"value\",\"min\",\"max\",\"step\",\"file\",\"line\"}}]}}]}}; shader=ID for one\n\
              /shader/const     ?shader=ID&i=N&v=VALUE patches one constant on the GPU (no recompile, source untouched); reset=1 puts the literal back\n\
              /close?w=ID       close one window the normal way\n\
@@ -2219,6 +2244,16 @@ mod imp {
         let args = p.0.clone();
         let timeout = if wait { 6 } else { 4 };
         reply_to_out(ask(move |tx| Cmd::Ai { op, args, wait, tx }, timeout))
+    }
+
+    /// `/design/<op>`: reads answer at once; edits answer after the frame
+    /// that shows them, so a grab right after sees the change.
+    fn route_design(op: &str, p: &Params) -> Out {
+        if op.is_empty() || !op.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+            return Out::Json(404, "{\"err\":\"unknown design op\"}".to_string());
+        }
+        let read = matches!(op, "state" | "palette" | "patch" | "commit" | "verify");
+        route_tweak(&format!("design_{op}"), p, !read)
     }
 
     fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
