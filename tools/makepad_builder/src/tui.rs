@@ -581,9 +581,7 @@ impl Setup {
     /// continues with the open source experiments.
     fn log_in_screen(&mut self) -> Result<(), String> {
         let mut rows = vec![Row::Note(Vec::new())];
-        rows.extend(wrap("Enter the email address you bought a Makepad app with, such as Scope or Amp, or that has beta access. It shows your licenses and stays in this folder only.", 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
-        rows.push(Row::Note(Vec::new()));
-        rows.extend(wrap("Leave it empty to continue with the open source experiments; you can log in later from the menu.", 74).into_iter().map(|line| Row::Note(text(line, DIM))));
+        rows.extend(wrap("Enter the email address you bought your Makepad product with, or have beta access for. Leave it empty for the free apps.", 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
         let mut hint = Vec::new();
         let mut typed = String::new();
         loop {

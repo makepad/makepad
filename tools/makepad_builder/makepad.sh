@@ -2164,9 +2164,7 @@ wrap() {
 }
 signin_rows() {
     printf 'note|\n'
-    wrap '' 'Enter the email address you bought a Makepad app with, such as Scope or Amp, or that has beta access. It shows your licenses and stays in this folder only.'
-    printf 'note|\n'
-    wrap "$dim" 'Leave it empty to continue with the open source experiments; you can log in later from the menu.'
+    wrap '' 'Enter the email address you bought your Makepad product with, or have beta access for. Leave it empty for the free apps.'
 }
 folder_rows() {
     printf 'note|\n'
