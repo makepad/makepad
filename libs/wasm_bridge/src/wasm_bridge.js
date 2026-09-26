@@ -139,8 +139,8 @@ export function init_env(env) {
 }
 
 export class WasmBridge {
-    static SPLIT_DATA_VERSION = 2;
-    static SPLIT_SLOT_EXPORT_PREFIX = "$s";
+    static get SPLIT_DATA_VERSION() { return 2; }
+    static get SPLIT_SLOT_EXPORT_PREFIX() { return "$s"; }
 
     constructor(wasm, dispatch) {
         this.wasm = wasm;
