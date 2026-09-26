@@ -205,6 +205,21 @@ where
     }
 
     #[inline]
+    /// Bytes retained by the backing storage (compact vector capacity plus
+    /// spilled hash-table capacity with a per-bucket control allowance).
+    pub fn retained_bytes(&self) -> usize {
+        let entry = std::mem::size_of::<(K, V)>();
+        let vec_bytes = self.vec.capacity().saturating_mul(entry);
+        let spill_bytes = self.spill.as_ref().map_or(0, |spill| {
+            spill.capacity().saturating_mul(
+                entry
+                    .saturating_add(std::mem::size_of::<usize>().saturating_mul(2))
+                    .saturating_add(1),
+            )
+        });
+        vec_bytes.saturating_add(spill_bytes)
+    }
+
     pub fn len(&self) -> usize {
         if let Some(spill) = &self.spill {
             return spill.len();
