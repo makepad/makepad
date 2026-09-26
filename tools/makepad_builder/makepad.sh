@@ -2131,9 +2131,17 @@ work_add() {
     put "$steps_dir/$step_key" next
     [ "$screen" != work ] || draw
 }
+# Keys pressed and trackpad scrolls (arrow keys in a terminal) during work
+# are not answers: throw away what is waiting, so the menu keeps its row.
+drain_keys() {
+    stty min 0 time 0 <&3 2>/dev/null || return 0
+    dd bs=256 count=64 <&3 >/dev/null 2>&1 || :
+    stty min 1 time 0 <&3 2>/dev/null || :
+}
 # work_end ok|failed MESSAGE: a failure stays on the page, marked on its
 # step, until Return or Escape.
 work_end() {
+    drain_keys
     if [ "$1" != ok ]; then
         footer_override='⏎ back'
         draw
@@ -2172,7 +2180,7 @@ folder_rows() {
     printf 'note|\n'
     wrap "$dim" 'A folder the Builder used before is reused as it is: its email, apps and choices stay.'
 }
-gpu_notice='Makepad heavily relies on your GPU to draw its UI and implement AI functionality. Old hardware and broken drivers can cause your computer to reboot unexpectedly.'
+gpu_notice='Makepad relies on your GPU to draw its UI and implement AI functionality just like a videogame does. Old hardware and broken drivers can cause your computer to reboot unexpectedly.'
 gpu_rows() {
     printf 'note|\n'
     wrap '' "$gpu_notice"
@@ -2385,6 +2393,13 @@ state_texts() { # state_texts STATE BYTES -> st_text st_act (menu.txt)
     esac
 }
 main_rows() {
+    # Update sits above everything; the menu still opens on the first app.
+    printf 'note|\n'
+    case "$checked" in
+        '') printf 'item|updates|Update||%scheck for updates%s|=\n' "$dim" "$r0" ;;
+        0*) printf 'item|updates|Update||%s✓%s up to date · %s|check again\n' "$ok" "$r0" "${checked#* }" ;;
+        *) printf 'item|updates|Update||updates downloaded · %s|check again\n' "${checked#* }" ;;
+    esac
     printf 'head|YOUR APPS\n'
     if [ -z "$email" ]; then printf 'item|login|Log in with your email address|||to see your licenses\n'
     else
@@ -2423,11 +2438,6 @@ main_rows() {
     else
         printf 'item|disk|Disk||%smeasuring…%s|\n' "$dim" "$r0"
     fi
-    case "$checked" in
-        '') printf 'item|updates|Update||%scheck for updates%s|=\n' "$dim" "$r0" ;;
-        0*) printf 'item|updates|Update||%s✓%s up to date · %s|check again\n' "$ok" "$r0" "${checked#* }" ;;
-        *) printf 'item|updates|Update||updates downloaded · %s|check again\n' "${checked#* }" ;;
-    esac
 }
 free_rows() {
     printf 'note|\n'
@@ -2440,8 +2450,11 @@ select_id() {
     si_n=$(screen_rows | grep '^item|' | grep -n "^item|$1|" | head -n 1 | cut -d: -f1)
     [ -z "$si_n" ] || sel=$((si_n - 1))
 }
-# YOUR APPS is the first section: the menu starts on its first row.
-first_license_row() { sel=0; }
+# The menu starts on the first row of YOUR APPS. awk reads all of main_rows'
+# output (a reader that stops early would break its pipe).
+first_license_row() {
+    sel=$(main_rows | awk '/^head\|YOUR APPS/ { found = 1 } !found && /^item\|/ { n++ } END { print n + 0 }')
+}
 measure_disk() {
     rm -f "$scratch/disk"
     (
@@ -3068,7 +3081,7 @@ draw
 # Build tools are set up when an app is first built, not at the start.
 # Start on the first licensed app, or on logging in.
 sel=0
-if [ -z "$email" ] || [ -n "$m_license_rows" ]; then first_license_row; fi
+first_license_row
 
 while :; do
     polling=0; [ -f "$scratch/disk" ] || polling=1
