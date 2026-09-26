@@ -20,6 +20,9 @@
 //! - [`event`]: callback events (GSAP onStart, onComplete, ...).
 //! - [`quick`]: `QuickTo`, the engine-free retargetable tween (GSAP `quickTo`).
 //! - [`ticker`]: the app-wide clock policy (GSAP `ticker`, lag smoothing).
+//! - [`sequencer_model`]: the data behind a timeline editor: a timeline as
+//!   tracks of bars ([`SequencerModel::from_engine`]), its edits mapped back
+//!   onto the timeline ([`apply_sequencer_edit`]) and the drags' snapping.
 //! - [`path`]: motion paths (GSAP `MotionPathPlugin`): SVG path data, curves
 //!   through points, an arc-length table, allocation-free sampling. A tween
 //!   follows one with [`PropTo::path`] after [`TweenEngine::add_path`].
@@ -134,6 +137,7 @@ pub mod ids;
 mod overwrite;
 pub mod path;
 pub mod quick;
+pub mod sequencer_model;
 mod render;
 pub mod spec;
 pub mod stagger;
@@ -147,6 +151,7 @@ pub use event::*;
 pub use ids::*;
 pub use path::*;
 pub use quick::*;
+pub use sequencer_model::*;
 pub use spec::*;
 pub use stagger::*;
 pub use ticker::*;

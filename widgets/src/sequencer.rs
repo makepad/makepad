@@ -20,9 +20,11 @@
 //!   [`SequencerAction::Scrub`], [`SequencerAction::ScrubEnd`]); Home / End
 //!   scrub to either end;
 //! * drag a bar to move it, an edge to resize it: snapped (within 6 px) to
-//!   0, the end, the playhead, the labels and every other item's start and
-//!   end, Alt held to place freely, Escape to put it back; the bar itself
-//!   rides the pointer with a time tag, and a guide line shows the snap;
+//!   0, the end, the playhead, the labels and the start and end of every
+//!   item outside the dragged one's subtree, all taken when the drag starts
+//!   (so a parent or last bar never snaps to itself), Alt held to place
+//!   freely, Escape to put it back; the bar itself rides the pointer with a
+//!   time tag, and a guide line shows the snap;
 //! * drag a label flag to move the label;
 //! * Left / Right nudge the selected item by one minor tick (Shift: one
 //!   major tick);
@@ -57,20 +59,30 @@
 //! [`SequencerRef::set_playhead`] moves the playhead quad in place
 //! (`update_abs`: no redraw, no layout) unless it pans the view.
 //!
+//! The model ([`SequencerModel`] and its parts), the engine mapping
+//! ([`SequencerModel::from_engine`], [`apply_sequencer_edit`]) and the drag
+//! maths ([`SequencerModel::item_snap_targets`], [`SequencerModel::drag_move`],
+//! [`snap_time`], ...) are plain data and pure functions in
+//! `makepad_tween::sequencer_model`, re-exported here.
+//!
 //! Limits: model time is the root's local time (the first iteration of
 //! every nested animation is placed; later iterations are drawn on the
-//! parent's bar); nested timelines' own labels are not shown; the children
-//! of stagger and keyframes groups are read-only rows (moving one would
-//! desync the group's cached content duration), and keyframes steps under a
-//! non-linear group ease are placed linearly.
-use crate::{
-    badge::measure,
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    tween::{AnimKind, AnimRef, Position, Tag, TweenEngine, TweenId, BIG},
-    widget::*,
-};
+//! parent's bar; a child of a reversed timeline is placed where it plays,
+//! mirrored, and its bar's ramp runs backwards); nested timelines' own
+//! labels are not shown; the children of stagger and keyframes groups are
+//! read-only rows (moving one would desync the group's cached content
+//! duration), and keyframes steps under a non-linear group ease are placed
+//! linearly.
+use crate::{badge::measure, makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::fmt::Write;
+
+/// The model, its engine mapping and the drag maths live in the tween
+/// engine (`makepad_tween::sequencer_model`, plain data and pure functions);
+/// they are re-exported here for hosts of the widget.
+pub use crate::tween::{
+    apply_sequencer_edit, snap_nearest, snap_time, SequencerAction, SequencerDrag, SequencerItem,
+    SequencerKind, SequencerLabel, SequencerModel, SequencerTrack,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -288,411 +300,6 @@ script_mod! {
             text_style: theme.font_code{font_size: theme.font_size_p}
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// The model
-// ---------------------------------------------------------------------------
-
-/// What a track shows (the colour of its bars when it has none of its own).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SequencerKind {
-    #[default]
-    Tween,
-    Timeline,
-    /// A stagger or keyframes group.
-    Group,
-    Call,
-    Pause,
-}
-
-impl SequencerKind {
-    /// "tween", "timeline", "group", "call" or "pause".
-    pub fn name(self) -> &'static str {
-        match self {
-            SequencerKind::Tween => "tween",
-            SequencerKind::Timeline => "timeline",
-            SequencerKind::Group => "group",
-            SequencerKind::Call => "call",
-            SequencerKind::Pause => "pause",
-        }
-    }
-}
-
-/// One bar (or marker) on a track, in model time (seconds).
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SequencerItem {
-    /// The host's id (engine models: [`TweenId::to_bits`]).
-    pub id: u64,
-    /// Where the first iteration starts (the delay has already passed).
-    pub start: f64,
-    /// Drawn hatched before `start`.
-    pub delay: f64,
-    /// One iteration; 0 = a marker (a diamond).
-    pub duration: f64,
-    /// Extra iterations; -1 forever (segments drawn to the visible edge,
-    /// at most 512).
-    pub repeat: i32,
-    pub repeat_delay: f64,
-    /// Every other iteration runs backwards (its ramp is mirrored).
-    pub yoyo: bool,
-    /// The caption: a marker's name, a tween's ease.
-    pub label: String,
-    /// No move or resize (selection and the tooltip still work).
-    pub locked: bool,
-}
-
-impl SequencerItem {
-    /// From `start` to the end of the last iteration: infinite for
-    /// `repeat < 0`.
-    pub fn active_len(&self) -> f64 {
-        if self.repeat < 0 {
-            f64::INFINITY
-        } else {
-            let k = self.repeat as f64;
-            self.duration * (k + 1.0) + self.repeat_delay * k
-        }
-    }
-}
-
-/// One row. Tracks are a pre-order flattened tree: `depth` nests a track
-/// under the nearest earlier track of a smaller depth, and a track is shown
-/// while every ancestor is expanded.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SequencerTrack {
-    pub id: u64,
-    pub name: String,
-    /// `None`: the kind's theme colour.
-    pub color: Option<Vec4f>,
-    pub kind: SequencerKind,
-    pub depth: u32,
-    /// Shown unfolded until the user folds it (the widget keeps its own fold
-    /// state per track id across `set_model`).
-    pub expanded: bool,
-    pub has_children: bool,
-    pub items: Vec<SequencerItem>,
-}
-
-/// A named time on the ruler (a timeline label).
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SequencerLabel {
-    /// The host's id (engine models: the label's [`Tag`] value), so a
-    /// [`SequencerAction::LabelMoved`] needs no string.
-    pub id: u64,
-    pub name: String,
-    pub time: f64,
-}
-
-/// What a [`Sequencer`] shows: plain data any timeline source can fill.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct SequencerModel {
-    /// The extent of the time axis (seconds).
-    pub duration: f64,
-    pub playhead: f64,
-    pub tracks: Vec<SequencerTrack>,
-    pub labels: Vec<SequencerLabel>,
-}
-
-impl SequencerModel {
-    /// The (track, item) indices of item `id`.
-    pub fn find(&self, item: u64) -> Option<(usize, usize)> {
-        self.tracks
-            .iter()
-            .enumerate()
-            .find_map(|(ti, t)| t.items.iter().position(|i| i.id == item).map(|ii| (ti, ii)))
-    }
-
-    /// Item `id`.
-    pub fn item(&self, item: u64) -> Option<&SequencerItem> {
-        self.find(item).map(|(t, i)| &self.tracks[t].items[i])
-    }
-
-    /// The tree under timeline `root` of a tween engine: row 0 is `root`
-    /// (locked, at 0), then every child in start order, depth first; stagger
-    /// and keyframes groups and nested timelines are foldable rows whose
-    /// children follow them (group children locked, groups folded at first).
-    /// Model time is `root`'s local time; a nested animation's first
-    /// iteration is placed through every parent's start and time scale.
-    /// `name_of(id, tag)` names each row (and, with `TweenId::NONE`, each
-    /// label); a call or pause row's caption is its name, a tween's its ease.
-    /// A stale `root` gives the empty model. Allocates (build it when the
-    /// timeline changes, not per frame).
-    pub fn from_engine(
-        e: &TweenEngine,
-        root: TweenId,
-        mut name_of: impl FnMut(TweenId, Tag) -> String,
-    ) -> SequencerModel {
-        let r = e.anim_ref(root);
-        if !r.is_alive() {
-            return SequencerModel::default();
-        }
-        let tdur = r.total_duration();
-        let finite = tdur < BIG;
-        let labels = r
-            .labels()
-            .map(|(tag, time)| SequencerLabel {
-                id: tag.0,
-                name: name_of(TweenId::NONE, tag),
-                time,
-            })
-            .collect();
-        let mut m = SequencerModel {
-            duration: if finite { tdur } else { r.duration() },
-            playhead: if finite { r.total_time() } else { r.time() },
-            tracks: Vec::new(),
-            labels,
-        };
-        let at = RowAt {
-            depth: 0,
-            origin: 0.0,
-            k: 1.0,
-            locked: true,
-            root: true,
-        };
-        engine_rows(e, root, at, &mut m.tracks, &mut name_of);
-        m
-    }
-}
-
-/// Where [`engine_rows`] places a node: its depth, its parent's start in
-/// model time, the parent's model seconds per local second.
-#[derive(Clone, Copy)]
-struct RowAt {
-    depth: u32,
-    origin: f64,
-    k: f64,
-    locked: bool,
-    root: bool,
-}
-
-/// A node's own time scale as a divisor: |time scale|, 1 when paused or 0.
-fn time_scale_div(a: &AnimRef) -> f64 {
-    let ts = a.time_scale().abs();
-    if ts > 0.0 && ts.is_finite() {
-        ts
-    } else {
-        1.0
-    }
-}
-
-fn kind_of(k: AnimKind) -> SequencerKind {
-    match k {
-        AnimKind::Tween => SequencerKind::Tween,
-        AnimKind::Timeline => SequencerKind::Timeline,
-        AnimKind::Stagger | AnimKind::Keyframes => SequencerKind::Group,
-        AnimKind::Call => SequencerKind::Call,
-        AnimKind::Pause => SequencerKind::Pause,
-    }
-}
-
-/// The scale a group applies to its children: its duration over its
-/// content (1 unless the group was stretched), 1 for timelines.
-fn group_scale(a: &AnimRef, kind: AnimKind) -> f64 {
-    let inner = a.inner_duration();
-    if matches!(kind, AnimKind::Stagger | AnimKind::Keyframes) && inner > 0.0 {
-        a.duration() / inner
-    } else {
-        1.0
-    }
-}
-
-fn engine_rows(
-    e: &TweenEngine,
-    id: TweenId,
-    at: RowAt,
-    out: &mut Vec<SequencerTrack>,
-    name_of: &mut impl FnMut(TweenId, Tag) -> String,
-) {
-    let a = e.anim_ref(id);
-    let Some(kind) = a.kind() else {
-        return;
-    };
-    // The root's own time scale is not applied: model time is its local time.
-    let kk = if at.root {
-        1.0
-    } else {
-        at.k / time_scale_div(&a)
-    };
-    let start = if at.root {
-        0.0
-    } else {
-        at.origin + a.start_time() * at.k
-    };
-    let delay = if at.root { 0.0 } else { a.delay() * at.k };
-    let label = match kind {
-        AnimKind::Tween => {
-            let mut s = format!("{:?}", a.ease());
-            if let Some((cut, _)) = s.char_indices().nth(24) {
-                s.truncate(cut);
-            }
-            s
-        }
-        AnimKind::Stagger => format!("stagger x{}", a.child_count()),
-        AnimKind::Keyframes => "keyframes".to_string(),
-        AnimKind::Timeline => String::new(),
-        AnimKind::Call | AnimKind::Pause => name_of(id, a.tag()),
-    };
-    let skind = kind_of(kind);
-    out.push(SequencerTrack {
-        id: id.to_bits(),
-        name: name_of(id, a.tag()),
-        color: None,
-        kind: skind,
-        depth: at.depth,
-        expanded: skind != SequencerKind::Group,
-        has_children: a.child_count() > 0,
-        items: vec![SequencerItem {
-            id: id.to_bits(),
-            start,
-            delay,
-            duration: a.duration() * kk,
-            repeat: a.repeat(),
-            repeat_delay: a.repeat_delay() * kk,
-            yoyo: a.yoyo(),
-            label,
-            locked: at.locked,
-        }],
-    });
-    if matches!(
-        kind,
-        AnimKind::Timeline | AnimKind::Stagger | AnimKind::Keyframes
-    ) {
-        let group = kind != AnimKind::Timeline;
-        let child = RowAt {
-            depth: at.depth + 1,
-            origin: start,
-            k: kk * group_scale(&a, kind),
-            locked: (at.locked && !at.root) || group,
-            root: false,
-        };
-        for c in a.children() {
-            engine_rows(e, c, child, out, name_of);
-        }
-    }
-}
-
-/// The model-time frame of the children of `p` under `root`: (the start of
-/// `p`'s first iteration, model seconds per local second of `p`).
-fn edit_frame(e: &TweenEngine, root: TweenId, p: TweenId, depth: u32) -> Option<(f64, f64)> {
-    if p == root {
-        return Some((0.0, 1.0));
-    }
-    if depth > 256 {
-        return None;
-    }
-    let a = e.anim_ref(p);
-    let kind = a.kind()?;
-    let (o, k) = edit_frame(e, root, a.parent()?, depth + 1)?;
-    Some((
-        o + a.start_time() * k,
-        k / time_scale_div(&a) * group_scale(&a, kind),
-    ))
-}
-
-/// The parent frame of an editable node `n` of `root`: `None` for `root`
-/// itself, a stale id, a node outside `root`, or a group's child (read-only).
-fn editable_frame(e: &TweenEngine, root: TweenId, n: TweenId) -> Option<(f64, f64)> {
-    if n == root || !e.anim_ref(n).is_alive() {
-        return None;
-    }
-    let p = e.anim_ref(n).parent()?;
-    if e.anim_ref(p).kind()? != AnimKind::Timeline {
-        return None;
-    }
-    let (o, k) = edit_frame(e, root, p, 0)?;
-    (k > 0.0 && k.is_finite()).then_some((o, k))
-}
-
-/// Applies a Sequencer edit to the timeline `root` of an engine model made
-/// by [`SequencerModel::from_engine`]: `ItemMoved` sets the start
-/// (`set_start_time`, GSAP `startTime()`), `ItemResized` the duration (GSAP
-/// `duration()`: a tween keeps its progress, a timeline is time-scaled to
-/// fit), `LabelMoved` re-adds the label at its new time; then `root` is
-/// refreshed so the values at the playhead follow. Every other action, a
-/// stale or foreign id and a group's child answer `false` and change
-/// nothing. The host calls it (the widget never sees the engine) and then
-/// rebuilds the model.
-pub fn apply_sequencer_edit(e: &mut TweenEngine, root: TweenId, a: SequencerAction) -> bool {
-    let done = match a {
-        SequencerAction::ItemMoved { id, start } => {
-            let n = TweenId::from_bits(id);
-            match editable_frame(e, root, n) {
-                Some((o, k)) if start.is_finite() => {
-                    e.anim(n).set_start_time((start - o) / k);
-                    true
-                }
-                _ => false,
-            }
-        }
-        SequencerAction::ItemResized { id, duration } => {
-            let n = TweenId::from_bits(id);
-            match editable_frame(e, root, n) {
-                Some((_, k)) if duration.is_finite() && duration > 0.0 => {
-                    let a = e.anim_ref(n);
-                    let local = if a.kind() == Some(AnimKind::Timeline) {
-                        duration / k
-                    } else {
-                        duration / k * time_scale_div(&a)
-                    };
-                    e.anim(n).set_duration(local);
-                    true
-                }
-                _ => false,
-            }
-        }
-        SequencerAction::LabelMoved { id, time } => {
-            let r = e.anim_ref(root);
-            if time.is_finite() && r.label_time(Tag(id)).is_some() {
-                e.tl(root).add_label(Tag(id), Position::at(time));
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
-    };
-    if done {
-        e.anim(root).refresh();
-    }
-    done
-}
-
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
-
-/// What a [`Sequencer`] reports. Every action is emitted when something
-/// changed (pointer rate at most, never per frame).
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum SequencerAction {
-    /// A scrub began (a press on the ruler, Home / End).
-    ScrubStart,
-    /// The playhead was dragged to this model time.
-    Scrub(f64),
-    ScrubEnd,
-    /// An item's first iteration now starts here (model time).
-    ItemMoved {
-        id: u64,
-        start: f64,
-    },
-    /// An item's iteration now lasts this long (model seconds).
-    ItemResized {
-        id: u64,
-        duration: f64,
-    },
-    LabelMoved {
-        id: u64,
-        time: f64,
-    },
-    /// A drag or nudge that emitted edits ended.
-    EditEnd,
-    /// The selection changed (on press).
-    Selected(Option<u64>),
-    /// The user zoomed or panned: pixels per second, the time at the left
-    /// edge of the track area.
-    Zoom(f64, f64),
-    #[default]
-    None,
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,9 +625,10 @@ pub struct Sequencer {
     /// Bumped by every `set_model`.
     #[rust]
     generation: u64,
-    /// The generation `rows` were laid out for.
+    /// `rows` no longer match the model or the folds (set by `set_model`
+    /// and every fold, cleared by the layout).
     #[rust]
-    laid_out: u64,
+    rows_dirty: bool,
     #[rust]
     rows: Vec<Row>,
     #[rust]
@@ -1047,6 +655,10 @@ pub struct Sequencer {
     /// The time a drag snapped to (drawn as a guide line).
     #[rust]
     snap_guide: Option<f64>,
+    /// What the current drag snaps to, taken once at the press
+    /// ([`SequencerModel::item_snap_targets`]).
+    #[rust]
+    snap_targets: Vec<f64>,
     /// The corner buttons, local pixels.
     #[rust]
     buttons: [Rect; 3],
@@ -1092,6 +704,11 @@ impl Sequencer {
     pub fn set_model(&mut self, cx: &mut Cx, m: SequencerModel) {
         self.model = m;
         self.generation = self.generation.wrapping_add(1);
+        self.rows_dirty = true;
+        // Fold state of tracks that are gone would only pile up.
+        let tracks = &self.model.tracks;
+        self.open
+            .retain(|(id, _)| tracks.iter().any(|t| t.id == *id));
         self.playhead = finite_or(self.model.playhead, 0.0);
         if let Some(id) = self.selected {
             if self.model.find(id).is_none() {
@@ -1121,14 +738,14 @@ impl Sequencer {
     }
 
     fn ensure_rows(&mut self) {
-        if self.laid_out != self.generation {
-            self.laid_out = self.generation;
+        if self.rows_dirty {
+            self.rows_dirty = false;
             lay_rows(&mut self.rows, &self.model.tracks, &self.open);
         }
     }
 
     fn relayout(&mut self) {
-        self.laid_out = self.generation.wrapping_add(1);
+        self.rows_dirty = true;
     }
 
     /// Folds or unfolds track `track` (its children rows). Emits nothing.
@@ -1153,21 +770,6 @@ impl Sequencer {
             .iter()
             .find(|(id, _)| *id == track.id)
             .map_or(track.expanded, |(_, o)| *o)
-    }
-
-    /// The start of the parent row's first item (0 at depth 0): a move never
-    /// places an item before its parent.
-    fn parent_start(&self, ti: usize) -> f64 {
-        let d = self.model.tracks[ti].depth;
-        if d == 0 {
-            return 0.0;
-        }
-        self.model.tracks[..ti]
-            .iter()
-            .rev()
-            .find(|t| t.depth < d)
-            .and_then(|t| t.items.first())
-            .map_or(0.0, |i| i.start)
     }
 
     fn duration(&self) -> f64 {
@@ -1468,16 +1070,24 @@ impl Sequencer {
             if p.x < h.x0 - e || p.x > h.x1 + e {
                 continue;
             }
+            // The edge bands inside the bar shrink with it before the move
+            // zone does: `e` each on a bar 3e wide or more, nothing on a bar
+            // narrower than e (whose edges are then grabbed just outside it).
+            let band = if h.locked {
+                0.0
+            } else {
+                ((h.x1 - h.x0 - e) * 0.5).clamp(0.0, e)
+            };
+            if p.x >= h.x0 + band && p.x <= h.x1 - band {
+                return Hover::Item(h.id, Zone::Body);
+            }
             if !h.locked {
-                if (p.x - h.x1).abs() <= e {
+                if p.x > h.x1 - band {
                     return Hover::Item(h.id, Zone::Right);
                 }
-                if h.x1 - h.x0 > 2.0 * e && (p.x - h.x0).abs() <= e {
+                if p.x < h.x0 + band {
                     return Hover::Item(h.id, Zone::Left);
                 }
-            }
-            if p.x >= h.x0 && p.x <= h.x1 {
-                return Hover::Item(h.id, Zone::Body);
             }
         }
         Hover::Empty
@@ -1490,69 +1100,21 @@ impl Sequencer {
             | Hover::Label(_)
             | Hover::Ruler
             | Hover::Fold(_)
-            | Hover::Button(_) => MouseCursor::Hand,
+            | Hover::Button(_)
+            // Empty track space pans when dragged.
+            | Hover::Empty => MouseCursor::Hand,
             _ => MouseCursor::Default,
         }
     }
 
     // ---- snapping ------------------------------------------------------------
 
-    /// Snaps `t` (and, with `len`, `t + len`) to the nearest candidate within
-    /// `snap_px`: 0, the duration, the playhead, every label but `skip_label`
-    /// and every other item's start and end. Sets or clears the guide.
-    fn snap(
-        &mut self,
-        t: f64,
-        len: Option<f64>,
-        skip_item: u64,
-        skip_label: Option<u64>,
-        alt: bool,
-    ) -> f64 {
-        self.snap_guide = None;
-        if alt || self.snap_px <= 0.0 || self.view.zoom <= 0.0 {
-            return t;
-        }
-        let tol = self.snap_px / self.view.zoom;
-        let len = len.filter(|l| l.is_finite());
-        let mut best: Option<(f64, f64)> = None;
-        let mut consider = |c: f64| {
-            if !c.is_finite() {
-                return;
-            }
-            let mut one = |edge: f64| {
-                let d = c - edge;
-                if best.map_or(true, |(bd, _)| d.abs() < bd.abs()) {
-                    best = Some((d, c));
-                }
-            };
-            one(t);
-            if let Some(l) = len {
-                one(t + l);
-            }
-        };
-        consider(0.0);
-        consider(self.duration());
-        consider(self.playhead);
-        for l in &self.model.labels {
-            if Some(l.id) != skip_label {
-                consider(l.time);
-            }
-        }
-        for tr in &self.model.tracks {
-            for it in &tr.items {
-                if it.id == skip_item {
-                    continue;
-                }
-                consider(it.start);
-                consider(it.start + it.active_len());
-            }
-        }
-        match best {
-            Some((d, c)) if d.abs() <= tol => {
-                self.snap_guide = Some(c);
-                t + d
-            }
-            _ => t,
+    /// The snap radius in seconds: `snap_px` at the current zoom.
+    fn snap_radius(&self) -> f64 {
+        if self.snap_px > 0.0 && self.view.zoom > 0.0 {
+            self.snap_px / self.view.zoom
+        } else {
+            0.0
         }
     }
 
@@ -1589,6 +1151,7 @@ impl Sequencer {
         };
         match h {
             Hover::Button(i) => {
+                let before = (self.view.zoom, self.view.offset);
                 let mid = self.view.x0 + self.view.w * 0.5;
                 match i {
                     0 => self.zoom_about(mid, 1.0 / ZOOM_STEP),
@@ -1598,8 +1161,12 @@ impl Sequencer {
                         self.fitted = true;
                     }
                 }
-                self.emit(cx, SequencerAction::Zoom(self.view.zoom, self.view.offset));
-                self.draw_bg.redraw(cx);
+                // Clamped at min_zoom / max_zoom (or already fitted): nothing
+                // changed, nothing to report.
+                if (self.view.zoom, self.view.offset) != before {
+                    self.emit(cx, SequencerAction::Zoom(self.view.zoom, self.view.offset));
+                    self.draw_bg.redraw(cx);
+                }
             }
             Hover::Label(id) => {
                 let time = self
@@ -1608,6 +1175,8 @@ impl Sequencer {
                     .iter()
                     .find(|l| l.id == id)
                     .map_or(0.0, |l| l.time);
+                self.model
+                    .label_snap_targets(id, self.playhead, &mut self.snap_targets);
                 self.drag = Some(Drag {
                     kind: DragKind::Label,
                     id,
@@ -1658,6 +1227,9 @@ impl Sequencer {
                         dur0: it.duration,
                         ..blank
                     });
+                    // The targets are taken now, once: see item_snap_targets.
+                    self.model
+                        .item_snap_targets(id, self.playhead, &mut self.snap_targets);
                     self.draw_bg.redraw(cx);
                 }
             }
@@ -1694,10 +1266,12 @@ impl Sequencer {
                 }
             }
             DragKind::Label => {
+                let radius = self.snap_radius();
+                let targets: &[f64] = if alt { &[] } else { &self.snap_targets };
                 let raw = t - d.grab_dt;
-                let time = self
-                    .snap(raw, None, u64::MAX, Some(d.id), alt)
-                    .clamp(0.0, self.duration());
+                let snap = snap_nearest(targets, &[raw], radius);
+                self.snap_guide = snap.map(|s| s.1);
+                let time = (raw + snap.map_or(0.0, |s| s.0)).clamp(0.0, self.duration());
                 if let Some(l) = self.model.labels.iter_mut().find(|l| l.id == d.id) {
                     if l.time != time {
                         l.time = time;
@@ -1708,69 +1282,63 @@ impl Sequencer {
                 self.draw_bg.redraw(cx);
             }
             DragKind::Move | DragKind::ResizeLeft | DragKind::ResizeRight => {
-                let Some((ti, ii)) = self.model.find(d.id) else {
+                let Some(it) = self.model.item(d.id) else {
                     self.drag = None;
                     return;
                 };
-                let floor = self.parent_start(ti) + self.model.tracks[ti].items[ii].delay;
-                let (start, duration, len) = {
-                    let it = &self.model.tracks[ti].items[ii];
-                    (it.start, it.duration, it.active_len())
-                };
-                match d.kind {
-                    DragKind::Move => {
-                        let s = self
-                            .snap(t - d.grab_dt, Some(len), d.id, None, alt)
-                            .max(floor);
-                        if s != start {
-                            self.model.tracks[ti].items[ii].start = s;
-                            d.edited = true;
-                            cx.widget_action(
-                                uid,
-                                SequencerAction::ItemMoved { id: d.id, start: s },
-                            );
-                        }
-                    }
+                let (start, duration) = (it.start, it.duration);
+                // The model's pure drag maths against the targets taken at
+                // the press (Alt: none).
+                let radius = self.snap_radius();
+                let targets: &[f64] = if alt { &[] } else { &self.snap_targets };
+                let raw = t - d.grab_dt;
+                let m = &self.model;
+                let r = match d.kind {
+                    DragKind::Move => m.drag_move(d.id, raw, targets, radius),
                     DragKind::ResizeRight => {
-                        let end = self.snap(t - d.grab_dt, None, d.id, None, alt);
-                        let dur = (end - start).max(MIN_DURATION);
-                        if dur != duration {
-                            self.model.tracks[ti].items[ii].duration = dur;
-                            d.edited = true;
-                            cx.widget_action(
-                                uid,
-                                SequencerAction::ItemResized {
-                                    id: d.id,
-                                    duration: dur,
-                                },
-                            );
-                        }
+                        m.drag_resize_end(d.id, raw, targets, radius, MIN_DURATION)
                     }
-                    _ => {
-                        // The end stays where it was at the press.
-                        let end = d.start0 + d.dur0;
-                        let s = self
-                            .snap(t - d.grab_dt, None, d.id, None, alt)
-                            .max(floor)
-                            .min(end - MIN_DURATION);
-                        if s != start {
-                            let dur = end - s;
-                            let item = &mut self.model.tracks[ti].items[ii];
-                            item.start = s;
-                            item.duration = dur;
-                            d.edited = true;
-                            cx.widget_action(
-                                uid,
-                                SequencerAction::ItemMoved { id: d.id, start: s },
-                            );
-                            cx.widget_action(
-                                uid,
-                                SequencerAction::ItemResized {
-                                    id: d.id,
-                                    duration: dur,
-                                },
-                            );
-                        }
+                    // The end stays where it was at the press.
+                    _ => m.drag_resize_start(
+                        d.id,
+                        raw,
+                        d.start0 + d.dur0,
+                        targets,
+                        radius,
+                        MIN_DURATION,
+                    ),
+                };
+                let Some(r) = r else {
+                    self.drag = None;
+                    return;
+                };
+                self.snap_guide = r.guide;
+                let moved = r.start != start;
+                let resized = r.duration != duration;
+                if moved || resized {
+                    if let Some((ti, ii)) = self.model.find(d.id) {
+                        let item = &mut self.model.tracks[ti].items[ii];
+                        item.start = r.start;
+                        item.duration = r.duration;
+                    }
+                    d.edited = true;
+                    if moved {
+                        cx.widget_action(
+                            uid,
+                            SequencerAction::ItemMoved {
+                                id: d.id,
+                                start: r.start,
+                            },
+                        );
+                    }
+                    if resized {
+                        cx.widget_action(
+                            uid,
+                            SequencerAction::ItemResized {
+                                id: d.id,
+                                duration: r.duration,
+                            },
+                        );
                     }
                 }
                 self.tip_for = None;
@@ -1875,7 +1443,7 @@ impl Sequencer {
         self.ensure_view();
         let (maj, min, _) = ticks_for(self.view.zoom);
         let step = if major { maj } else { min };
-        let floor = self.parent_start(ti) + self.model.tracks[ti].items[ii].delay;
+        let floor = self.model.min_start(id).unwrap_or(0.0);
         let it = &mut self.model.tracks[ti].items[ii];
         let s = (it.start + dir * step).max(floor);
         if s != it.start {
@@ -1891,12 +1459,15 @@ impl Sequencer {
     // ---- drawing -------------------------------------------------------------
 
     fn kind_color(&self, t: &SequencerTrack) -> Vec4f {
-        t.color.unwrap_or(match t.kind {
-            SequencerKind::Tween => self.color_tween,
-            SequencerKind::Timeline => self.color_timeline,
-            SequencerKind::Group => self.color_group,
-            SequencerKind::Call | SequencerKind::Pause => self.color_marker,
-        })
+        match t.color {
+            Some([r, g, b, a]) => vec4(r, g, b, a),
+            None => match t.kind {
+                SequencerKind::Tween => self.color_tween,
+                SequencerKind::Timeline => self.color_timeline,
+                SequencerKind::Group => self.color_group,
+                SequencerKind::Call | SequencerKind::Pause => self.color_marker,
+            },
+        }
     }
 
     fn item_state(&self, id: u64) -> f32 {
@@ -1968,7 +1539,8 @@ impl Sequencer {
                 let it = &self.model.tracks[ti].items[ii];
                 let (id, start, delay, dur, locked) =
                     (it.id, it.start, it.delay, it.duration, it.locked);
-                let (repeat, rdelay, yoyo) = (it.repeat, it.repeat_delay, it.yoyo);
+                let (repeat, rdelay, yoyo, rev) =
+                    (it.repeat, it.repeat_delay, it.yoyo, it.reversed);
                 let state = self.item_state(id);
                 if !(dur > 0.0) {
                     // A marker: a diamond with its caption to the right.
@@ -2036,7 +1608,10 @@ impl Sequencer {
                         c.w *= 0.65;
                     }
                     self.draw_bar.color = c;
-                    self.draw_bar.mirror = if yoyo && k % 2 == 1 { 1.0 } else { 0.0 };
+                    // A yoyo pass and a backwards item both run the ramp
+                    // the other way (both: forwards again).
+                    let back = (yoyo && k % 2 == 1) != rev;
+                    self.draw_bar.mirror = if back { 1.0 } else { 0.0 };
                     self.draw_bar.state = if k == 0 { state } else { 0.0 };
                     self.draw_bar.open = editable;
                     self.draw_bar.draw_abs(
@@ -2311,6 +1886,9 @@ impl Widget for Sequencer {
         let r = self.draw_bg.area().rect(cx);
         self.set_width(r.size.x);
         self.ensure_view();
+        // A model or a fold may have arrived since the last draw: the rows
+        // the hit test reads must describe the current model.
+        self.ensure_rows();
         match hit {
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
                 let p = fe.abs - r.pos;
@@ -2335,7 +1913,6 @@ impl Widget for Sequencer {
                 if let Some(d) = self.drag {
                     cx.set_cursor(match d.kind {
                         DragKind::ResizeLeft | DragKind::ResizeRight => MouseCursor::EwResize,
-                        DragKind::Pan => MouseCursor::Default,
                         _ => MouseCursor::Hand,
                     });
                 }

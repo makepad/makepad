@@ -93,7 +93,7 @@ script_mod! {
     }
 
     mod.stories.FoundationsMotionSequencer = StoryPage{
-        StoryNote{text: "One timeline, as GSAP builds one, in a Sequencer: a title fades in, eight dots pop in with a stagger from the label `intro`, a nested timeline slides three cards in, a call fires at 1.4 s, an arrow follows a motion path from the label `travel` and a swatch changes colour. Press Play, or press and drag on the ruler to scrub. Drag a bar to move it and an edge to resize it (snapped to labels, the playhead and other bars; Alt places freely, Escape puts it back), drag a label flag to move the label: the timeline is edited and the stage follows. Ctrl + wheel (Cmd on macOS) zooms, Shift + wheel pans, the arrows fold rows, Left / Right nudge the selected bar."}
+        StoryNote{text: "One timeline, as GSAP builds one, in a Sequencer: a title fades in, eight dots pop in with a stagger from the label `intro`, a nested timeline slides three cards in (twice: it repeats after a 0.2 s gap), a call fires at 1.4 s, an arrow follows a motion path from the label `travel` and a swatch changes colour. Press Play, or press and drag on the ruler to scrub. Drag a bar to move it and an edge to resize it (snapped to labels, the playhead and other bars; Alt places freely, Escape puts it back), drag a label flag to move the label: the timeline is edited and the stage follows. Ctrl + wheel (Cmd on macOS) zooms, Shift + wheel pans, the arrows fold rows, Left / Right nudge the selected bar."}
         StoryHeading{text: "A timeline in a Sequencer"}
         stage := mod.storybook.StorySeqStage{}
     }
@@ -446,6 +446,10 @@ pub struct StorySeqStage {
     /// no action) changes it, and the draw that follows asks for a refresh.
     #[rust]
     rows_shown: usize,
+    /// `Zoom` actions seen (the view line's proof that a clamped zoom
+    /// reports nothing).
+    #[rust]
+    zoom_actions: u64,
 }
 
 impl StorySeqStage {
@@ -455,18 +459,15 @@ impl StorySeqStage {
             return false;
         }
         self.build();
-        self.sync_model(cx);
-        // The stagger group opens: its eight dots are rows too.
+        let m = self.engine_model();
+        // The stagger group opens (its eight dots are rows too), BEFORE the
+        // model arrives: a host restoring folds and then showing a model,
+        // with no draw in between, must get rows for the new model.
         let seq = self.view.sequencer(cx, ids!(seq));
-        let dots = seq.with_model(|m| {
-            m.tracks
-                .iter()
-                .find(|t| t.kind == SequencerKind::Group)
-                .map(|t| t.id)
-        });
-        if let Some(Some(id)) = dots {
-            seq.set_expanded(cx, id, true);
+        if let Some(t) = m.tracks.iter().find(|t| t.kind == SequencerKind::Group) {
+            seq.set_expanded(cx, t.id, true);
         }
+        seq.set_model(cx, m);
         true
     }
 
@@ -521,8 +522,9 @@ impl StorySeqStage {
                     .tag(T_DOTS),
                 Position::label_rel(INTRO, 0.3),
             );
-        // A nested timeline: three cards one after another.
-        let cards = h.timeline(TimelineOpts::new().tag(T_CARDS));
+        // A nested timeline: three cards one after another, twice (it
+        // repeats once after a 0.2 s gap).
+        let cards = h.timeline(TimelineOpts::new().tag(T_CARDS).repeat(1).repeat_delay(0.2));
         for (i, t) in T_CARD.iter().enumerate() {
             h.tl(cards).from_to(
                 TargetId(CARD0 + i as u32).into(),
@@ -563,14 +565,21 @@ impl StorySeqStage {
     /// Rebuilds the sequencer's model from the engine (after the build and
     /// after every applied edit; never per frame).
     fn sync_model(&mut self, cx: &mut Cx) {
+        let m = self.engine_model();
+        self.view.sequencer(cx, ids!(seq)).set_model(cx, m);
+    }
+
+    /// The sequencer's model of the timeline, the path row coloured.
+    fn engine_model(&self) -> SequencerModel {
         let e = &self.motion.engine;
         let mut m = SequencerModel::from_engine(e, self.tl, |id, t| name_for(e, id, t));
         for t in m.tracks.iter_mut() {
             if e.anim_ref(TweenId::from_bits(t.id)).has_path() {
-                t.color = Some(self.path_color);
+                let c = self.path_color;
+                t.color = Some([c.x, c.y, c.z, c.w]);
             }
         }
-        self.view.sequencer(cx, ids!(seq)).set_model(cx, m);
+        m
     }
 
     /// Pulls the current values into the canvas (draw time).
@@ -636,13 +645,14 @@ impl StorySeqStage {
                         let it = &t.items[ii];
                         let _ = write!(
                             s,
-                            "selected {} ({}): start {:.3} s, dur {:.3} s, delay {:.3}, repeat {}, yoyo {}",
+                            "selected {} ({}): start {:.3} s, dur {:.3} s, delay {:.3}, repeat {}, gap {:.3}, yoyo {}",
                             t.name,
                             t.kind.name(),
                             clean(it.start),
                             clean(it.duration),
                             clean(it.delay),
                             it.repeat,
+                            clean(it.repeat_delay),
                             yes_no(it.yoyo)
                         );
                     }
@@ -650,9 +660,10 @@ impl StorySeqStage {
                 let n = e.anim_ref(TweenId::from_bits(id));
                 let _ = write!(
                     s,
-                    " | engine start {:.3} dur {:.3}",
+                    " | engine start {:.3} dur {:.3} ts {:.3}",
                     clean(n.start_time()),
-                    clean(n.duration())
+                    clean(n.duration()),
+                    n.time_scale()
                 );
             }
             None => s.push_str("selected -"),
@@ -664,10 +675,11 @@ impl StorySeqStage {
         self.rows_shown = seq.visible_rows();
         let _ = write!(
             s,
-            "zoom {:.1} px/s offset {:.3} s  rows {} visible",
+            "zoom {:.1} px/s offset {:.3} s  rows {} visible  zoom actions {}",
             zoom,
             clean(offset),
-            self.rows_shown
+            self.rows_shown,
+            self.zoom_actions
         );
         self.view.label(cx, ids!(seq_readout_view)).set_text(cx, &s);
 
@@ -793,9 +805,11 @@ impl StorySeqStage {
                         edited = true;
                     }
                 }
-                SequencerAction::Selected(_)
-                | SequencerAction::Zoom(..)
-                | SequencerAction::EditEnd => acted = true,
+                SequencerAction::Zoom(..) => {
+                    self.zoom_actions += 1;
+                    acted = true;
+                }
+                SequencerAction::Selected(_) | SequencerAction::EditEnd => acted = true,
                 _ => {}
             }
         }
@@ -864,7 +878,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "FoundationsMotionSequencer",
     added: "2026-09-25",
     tags: &["new", "tween", "timeline", "sequencer", "timeline editor", "scrub", "gsap", "motion path"],
-    doc: "# Sequencer\n\n`Sequencer` is a timeline editor (the idea of ImSequencer and GSAP's GSDevTools, rebuilt): rows of bars under a time ruler, with a name column, foldable rows, labels on the ruler and a draggable playhead. It shows a `SequencerModel`, plain data any timeline source can fill: tracks (a pre-order tree by `depth`) of items with a start, a delay, a duration, repeats, a repeat delay and yoyo, and named labels. `SequencerModel::from_engine(&engine, timeline, name_of)` fills it from a `makepad_tween` timeline: the timeline itself on the first row, then every child in start order, stagger and keyframes groups and nested timelines as foldable rows.\n\n- **Scrub**: press or drag on the ruler (`ScrubStart`, `Scrub(t)`, `ScrubEnd`); Home / End jump to either end.\n- **Edit**: drag a bar to move it, an edge to resize it, a label flag to move the label (`ItemMoved`, `ItemResized`, `LabelMoved`, then `EditEnd`). Edits snap within 6 px to 0, the end, the playhead, the labels and every other bar's start and end; Alt places freely; Escape puts the bar back. Left / Right nudge the selected bar by one minor tick (Shift: a major one). A stagger group's members are locked rows.\n- **View**: Ctrl + wheel (Cmd on macOS) zooms about the pointer, Shift + wheel, a horizontal wheel or a drag on empty space pans, and the corner's -, + and Fit buttons zoom (`Zoom(px_per_s, offset)`).\n\nThe widget only emits actions; the host applies them. For a tween timeline `apply_sequencer_edit(&mut engine, timeline, action)` maps an edit to GSAP's `startTime()`, `duration()` and `addLabel()` and refreshes the timeline so the values at the playhead follow; the host then rebuilds the model. `set_playhead` moves the playhead in place every frame without a redraw.\n\n## This page\n\nOne paused timeline: a title (from_to), a stagger of eight dots from the label `intro` + 0.3 (its group is open, the dots locked), a nested timeline of three cards, a call at 1.4 s, a tween along a motion path from the label `travel` (the coloured row) and a colour tween in OKLCH. Play, Pause, Reverse (toggles the direction) and Restart are the transport; scrubbing pauses it and seeks with events suppressed.\n\n## The readout\n\n`/snap?q=seq_readout` reads `seq_readout_time` (playhead, total, state, current and next label), `seq_readout_sel` (the selected item as the widget has it, and its start and duration read back from the engine), `seq_readout_view` (zoom, offset, visible rows), `seq_readout_edit` (the last applied edit) and `seq_readout_values` (the follower's x, y and angle, the title, the tint). `/snap?q=seq` gives the widget's geometry: `t= dur= zoom= off= name_w= ruler_h= row_h= sel= rows=[name@start+duration, ..] labels=[..]`.",
+    doc: "# Sequencer\n\n`Sequencer` is a timeline editor (the idea of ImSequencer and GSAP's GSDevTools, rebuilt): rows of bars under a time ruler, with a name column, foldable rows, labels on the ruler and a draggable playhead. It shows a `SequencerModel`, plain data any timeline source can fill: tracks (a pre-order tree by `depth`) of items with a start, a delay, a duration, repeats, a repeat delay and yoyo, and named labels. `SequencerModel::from_engine(&engine, timeline, name_of)` fills it from a `makepad_tween` timeline: the timeline itself on the first row, then every child in start order, stagger and keyframes groups and nested timelines as foldable rows.\n\n- **Scrub**: press or drag on the ruler (`ScrubStart`, `Scrub(t)`, `ScrubEnd`); Home / End jump to either end.\n- **Edit**: drag a bar to move it, an edge to resize it, a label flag to move the label (`ItemMoved`, `ItemResized`, `LabelMoved`, then `EditEnd`). Edits snap within 6 px to 0, the end, the playhead, the labels and the start and end of every bar outside the dragged one's subtree, taken when the drag starts (a nested timeline or the last bar never snaps to itself); Alt places freely; Escape puts the bar back. Left / Right nudge the selected bar by one minor tick (Shift: a major one). A stagger group's members are locked rows.\n- **View**: Ctrl + wheel (Cmd on macOS) zooms about the pointer, Shift + wheel, a horizontal wheel or a drag on empty space pans, and the corner's -, + and Fit buttons zoom (`Zoom(px_per_s, offset)`).\n\nThe widget only emits actions; the host applies them. For a tween timeline `apply_sequencer_edit(&mut engine, timeline, action)` maps an edit to GSAP's `startTime()`, `duration()` and `addLabel()` and refreshes the timeline so the values at the playhead follow; the host then rebuilds the model. `set_playhead` moves the playhead quad in place (no redraw of its own) while the view holds still. On this page the readout lines change every playback frame and redraw the page, so the sequencer is drawn every frame here anyway; it allocates nothing when it is.\n\n## This page\n\nOne paused timeline: a title (from_to), a stagger of eight dots from the label `intro` + 0.3 (its group is open, the dots locked), a nested timeline of three cards that repeats once after a 0.2 s gap (resizing its bar rescales it, gap included), a call at 1.4 s, a tween along a motion path from the label `travel` (the coloured row) and a colour tween in OKLCH. Play, Pause, Reverse (toggles the direction) and Restart are the transport; scrubbing pauses it and seeks with events suppressed.\n\n## The readout\n\n`/snap?q=seq_readout` reads `seq_readout_time` (playhead, total, state, current and next label), `seq_readout_sel` (the selected item as the widget has it, and its start, duration and time scale read back from the engine), `seq_readout_view` (zoom, offset, visible rows, how many `Zoom` actions arrived), `seq_readout_edit` (the last applied edit) and `seq_readout_values` (the follower's x, y and angle, the title, the tint). `/snap?q=seq` gives the widget's geometry: `t= dur= zoom= off= name_w= ruler_h= row_h= sel= rows=[name@start+duration, ..] labels=[..]`.",
     subject: "stage",
     feature: None,
     controls: &[
