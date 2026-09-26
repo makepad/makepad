@@ -52,7 +52,11 @@ script_mod! {
 const PAD: f64 = 6.0;
 const ROW: f64 = 16.0;
 const LANE: f64 = 15.0;
+/// The thinnest lane when there are more lanes than room.
+const LANE_MIN: f64 = 7.0;
 const RULER: f64 = 18.0;
+/// One row of label names under the ruler (there are two).
+const LABEL_ROW: f64 = 11.0;
 const NAME_W: f64 = 118.0;
 /// The most animations listed in the picker before "+N more".
 const PICKER_ROWS: usize = 8;
@@ -209,6 +213,23 @@ impl TweenInspector {
         self.draw_text.draw_abs(cx, at, text);
     }
 
+    /// `text` cut to `width` with an ellipsis.
+    fn fit(&self, cx: &mut Cx2d, text: &str, width: f64) -> String {
+        if crate::badge::measure(&self.draw_text, cx, text) <= width {
+            return text.to_string();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut n = chars.len();
+        while n > 0 {
+            n -= 1;
+            let cut: String = chars[..n].iter().collect::<String>() + "\u{2026}";
+            if crate::badge::measure(&self.draw_text, cx, &cut) <= width {
+                return cut;
+            }
+        }
+        String::new()
+    }
+
     fn command(&self, cx: &mut Cx, host: u64, cmd: InspectCommand) {
         cx.global::<TweenInspectRegistry>().command(host, cmd);
         // The host applies it on its next event: make sure one comes.
@@ -254,8 +275,11 @@ impl Widget for TweenInspector {
                     return;
                 };
                 let paused = self.lanes.first().is_none_or(|n| n.paused);
+                // A completed (detached) animation plays again from the start.
+                let done = self.lanes.first().is_some_and(|n| !n.linked);
                 if let Some((_, chip)) = self.chips.iter().find(|(r, _)| r.contains(fe.abs)) {
                     let cmd = match *chip {
+                        Chip::PlayPause if done => InspectCommand::Restart(id),
                         Chip::PlayPause if paused => InspectCommand::Resume(id),
                         Chip::PlayPause => InspectCommand::Pause(id),
                         Chip::Restart => InspectCommand::Restart(id),
@@ -265,7 +289,7 @@ impl Widget for TweenInspector {
                     return;
                 }
                 if self.track_rect.contains(fe.abs) {
-                    self.scrub = Some(Scrub { host, id, was_playing: !paused });
+                    self.scrub = Some(Scrub { host, id, was_playing: !paused && !done });
                     self.scrub_to(cx, fe.abs.x);
                 }
             }
@@ -320,7 +344,13 @@ impl Widget for TweenInspector {
                         continue;
                     }
                     let (len, _) = view_of(root);
-                    let state = if root.paused { "paused" } else { "playing" };
+                    let state = if !root.linked {
+                        "done"
+                    } else if root.paused {
+                        "paused"
+                    } else {
+                        "playing"
+                    };
                     rows.push(PickRow {
                         host: h.id,
                         id: root.id,
@@ -355,12 +385,8 @@ impl Widget for TweenInspector {
         self.track_rect = Rect::default();
         if rows.is_empty() {
             self.text(cx, dvec2(x0, y), "No tweens are running.", ink);
-            self.text(
-                cx,
-                dvec2(x0, y + ROW),
-                "A TweenHost shows up here while its widget handles events.",
-                meta,
-            );
+            let hint = self.fit(cx, "Hosts appear while their widget gets events.", w);
+            self.text(cx, dvec2(x0, y + ROW), &hint, meta);
             return DrawStep::done();
         }
 
@@ -369,7 +395,8 @@ impl Widget for TweenInspector {
             let r = Rect { pos: dvec2(x0, y), size: dvec2(w, ROW - 1.0) };
             let on = self.selected == Some((row.host, row.id));
             self.rect(cx, r, if on { face_on } else { face });
-            self.text(cx, dvec2(x0 + 4.0, y + 2.0), &row.text, ink);
+            let text = self.fit(cx, &row.text, w - 8.0);
+            self.text(cx, dvec2(x0 + 4.0, y + 2.0), &text, ink);
             self.picker.push((r, row));
             y += ROW;
         }
@@ -387,7 +414,7 @@ impl Widget for TweenInspector {
         // Transport.
         let mut cx_x = x0;
         let chips: [(Chip, String); 6] = [
-            (Chip::PlayPause, if root.paused { "Play".into() } else { "Pause".into() }),
+            (Chip::PlayPause, if root.paused || !root.linked { "Play".into() } else { "Pause".into() }),
             (Chip::Restart, "Restart".into()),
             (Chip::Speed(0), "0.25x".into()),
             (Chip::Speed(1), "0.5x".into()),
@@ -419,31 +446,59 @@ impl Widget for TweenInspector {
         self.rect(cx, Rect { pos: dvec2(bx0, y), size: dvec2(bx1 - bx0, RULER) }, self.color_ruler);
         let step = nice_step(len, bx1 - bx0);
         let mut t = 0.0;
+        let mut tick_end = f64::NEG_INFINITY;
         while t <= len + 1e-9 {
             let x = to_x(t);
             self.rect(cx, Rect { pos: dvec2(x, y + RULER - 5.0), size: dvec2(1.0, 5.0) }, meta);
-            self.text(cx, dvec2(x + 2.0, y + 1.0), &format!("{:.2}", t), meta);
+            let text = format!("{:.2}", t);
+            let tw = crate::badge::measure(&self.draw_text, cx, &text);
+            // Inside the ruler, never over the previous number.
+            let tx = (x + 2.0).min(bx1 - tw);
+            if tx > tick_end + 4.0 {
+                self.text(cx, dvec2(tx, y + 1.0), &text, meta);
+                tick_end = tx + tw;
+            }
             t += step;
         }
+        // The labels: a mark on the ruler, the name on one of two rows
+        // under it (the first row it fits on without touching a name
+        // already there, kept inside the timeline; no room, no name).
+        let mut row_end = [f64::NEG_INFINITY; 2];
+        let names_y = y + RULER;
         for (tag, at) in self.labels.clone() {
             let x = to_x(at);
-            self.rect(cx, Rect { pos: dvec2(x - 1.0, y), size: dvec2(2.0, RULER) }, label_ink);
+            self.rect(cx, Rect { pos: dvec2(x - 1.0, y), size: dvec2(2.0, RULER + LABEL_ROW * 2.0) }, label_ink);
             let name = crate::widget_tree::live_id_token(LiveId(tag.0));
-            self.text(cx, dvec2(x + 3.0, y + RULER - 11.0), &name, label_ink);
+            let tw = crate::badge::measure(&self.draw_text, cx, &name);
+            let tx = (x + 3.0).min(bx1 - tw).max(bx0);
+            if let Some(r) = (0..2).find(|&r| tx > row_end[r] + 4.0) {
+                self.text(cx, dvec2(tx, names_y + LABEL_ROW * r as f64), &name, label_ink);
+                row_end[r] = tx + tw;
+            }
         }
-        y += RULER + 2.0;
+        y += RULER + LABEL_ROW * 2.0 + 2.0;
 
         let bottom = rect.pos.y + rect.size.y - PAD;
         let lanes = self.lanes.clone();
+        // Thinner lanes (names hidden below a readable height) before any
+        // is left out.
+        let room = (bottom - y).max(0.0);
+        let count = lanes.len().max(1) as f64;
+        // The "+N more" line takes a row only when lanes are left out.
+        let reserve = if count * LANE_MIN > room { ROW } else { 0.0 };
+        let lane = ((room - reserve) / count).clamp(LANE_MIN, LANE);
+        let named = lane >= 11.0;
         let mut hidden = 0usize;
         for n in &lanes {
-            if y + LANE > bottom {
+            if y + lane > bottom - reserve {
                 hidden += 1;
                 continue;
             }
-            let indent = 8.0 * n.depth as f64;
-            let name = node_name(n);
-            self.text(cx, dvec2(x0 + indent, y + 2.0), &name, if n.depth == 0 { ink } else { meta });
+            let indent = (8.0 * n.depth as f64).min(NAME_W - 24.0);
+            if named {
+                let name = self.fit(cx, &node_name(n), NAME_W - indent - 4.0);
+                self.text(cx, dvec2(x0 + indent, y + (lane - 11.0) * 0.5), &name, if n.depth == 0 { ink } else { meta });
+            }
             let base = kind_color(n.kind);
             let start = n.local_start;
             let one = n.duration.max(0.0);
@@ -451,7 +506,7 @@ impl Widget for TweenInspector {
             if one <= 1e-9 {
                 // A zero-length node (a call, a pause, a set): a tick.
                 let x = to_x(start);
-                self.rect(cx, Rect { pos: dvec2(x - 1.0, y + 2.0), size: dvec2(3.0, LANE - 4.0) }, base);
+                self.rect(cx, Rect { pos: dvec2(x - 1.0, y + 1.0), size: dvec2(3.0, (lane - 2.0).max(1.0)) }, base);
             } else {
                 // One bar per iteration (repeat delays show as gaps).
                 let cycle = if n.repeat != 0 && n.total_duration < BIG && n.repeat > 0 {
@@ -469,13 +524,14 @@ impl Widget for TweenInspector {
                         if k > 0 {
                             c.w = 0.55;
                         }
-                        self.rect(cx, Rect { pos: dvec2(xa, y + 3.0), size: dvec2((xb - xa).max(1.0), LANE - 6.0) }, c);
+                        let inset = (lane * 0.2).min(3.0);
+                        self.rect(cx, Rect { pos: dvec2(xa, y + inset), size: dvec2((xb - xa).max(1.0), lane - inset * 2.0) }, c);
                     }
                     s += cycle.max(one);
                     k += 1;
                 }
             }
-            y += LANE;
+            y += lane;
         }
         if hidden > 0 {
             self.text(cx, dvec2(x0, y + 1.0), &format!("+{hidden} more lanes"), meta);

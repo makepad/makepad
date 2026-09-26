@@ -99,7 +99,9 @@ script_mod! {
         /** extra iterations, -1 forever -1..5 step 1 */
         repeat: 0.0
 
+        // Wraps when the column narrows (the tweaker panel open beside it).
         StoryRow{
+            flow: Right{wrap: true}
             play := Button{text: "Play"}
             pause := Button{text: "Pause"}
             resume := Button{text: "Resume"}
@@ -539,10 +541,17 @@ pub struct StoryTweenStage {
     yoyo: bool,
     #[live(0.0)]
     repeat: f64,
-    #[rust(TweenHost::new().inspect_named("Story: Tween & Timeline"))]
+    #[rust(TweenHost::new()
+        .inspect_named("Story: Tween & Timeline")
+        .inspect_tags(&["tl", "intro", "grid", "outro", "grid_done", "grid_pause"]))]
     motion: TweenHost,
     #[rust]
     tl: TweenId,
+    /// The Time scale knob as last applied to `tl` (`None`: apply on the
+    /// next draw). Applied only when it changes, so a speed set from
+    /// outside (the tween inspector) holds.
+    #[rust]
+    applied_time_scale: Option<f64>,
     #[rust]
     built_from: Option<Knobs>,
     #[rust]
@@ -655,6 +664,7 @@ impl StoryTweenStage {
             }
             self.build(&k);
             self.built_from = Some(k);
+            self.applied_time_scale = None;
             self.builds += 1;
             self.setup_dirty = true;
             let tl = self.tl;
@@ -681,7 +691,8 @@ impl StoryTweenStage {
         // magnitude and keep the direction.
         let ts = self.time_scale.max(0.01);
         let a = self.motion.engine.anim_ref(self.tl);
-        if (a.time_scale().abs() - ts).abs() > 1e-9 {
+        if self.applied_time_scale != Some(ts) {
+            self.applied_time_scale = Some(ts);
             let signed = if a.reversed() { -ts } else { ts };
             let tl = self.tl;
             self.motion.control(cx, tl).set_time_scale(signed);

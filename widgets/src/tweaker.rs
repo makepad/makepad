@@ -6931,12 +6931,13 @@ fn motion_remote(cx: &mut Cx, args: &[(String, String)]) -> Result<String, Strin
                 .map(|l| format!("[{},{:.4}]", json_str(&crate::widget_tree::live_id_token(LiveId(l.1 .0))), l.2))
                 .collect();
             out.push_str(&format!(
-                "{{\"name\":{},\"kind\":\"{:?}\",\"len\":{:.4},\"time\":{:.4},\"paused\":{},\"scale\":{},\"lanes\":{},\"labels\":[{}]}}",
+                "{{\"name\":{},\"kind\":\"{:?}\",\"len\":{:.4},\"time\":{:.4},\"paused\":{},\"linked\":{},\"scale\":{},\"lanes\":{},\"labels\":[{}]}}",
                 json_str(&node_name(root)),
                 root.kind,
                 len,
                 head,
                 root.paused as u8,
+                root.linked as u8,
                 root.time_scale,
                 h.subtree(root.id).len(),
                 labels.join(",")

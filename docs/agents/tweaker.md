@@ -88,7 +88,7 @@ the speed. Hosts publish only while the tab is up.
 
 `/tweak/op?op=motion` answers the same data as JSON: `open`, and per host
 `id`, `name`, `age` and `roots` (`name`, `kind`, `len`, `time`, `paused`,
-`scale`, `lanes`, `labels`). Add `host=<id>&root=<k>` with one of
+`linked` (0 once a kept animation completed), `scale`, `lanes`, `labels`). Add `host=<id>&root=<k>` with one of
 `seek=<seconds>`, `pause=1`, `resume=1`, `restart=1` or `scale=<x>` to
 control the k-th top-level animation of that host; the host applies it on
 its next event, so read again after a frame. `open=1` publishes without

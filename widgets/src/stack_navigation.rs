@@ -193,7 +193,9 @@ pub struct StackNavigationView {
     animator: Animator,
 
     /// Plays the slide into `offset` and reports its ends as events.
-    #[rust(TweenHost::with_clock(SLIDE_CLOCK).inspect_named("StackNavigation slide"))]
+    #[rust(TweenHost::with_clock(SLIDE_CLOCK)
+        .inspect_named("StackNavigation slide")
+        .inspect_tags(&["slide_show", "slide_hide"]))]
     slide: TweenHost,
 
     /// The slide host's drained events (reused every frame).

@@ -9,7 +9,8 @@
 //! the caller's list growing.
 
 use crate::engine::{
-    TweenEngine, F_CALL, F_FREE, F_KILLED, F_PAUSE_NODE, K_GROUP, K_MASK, K_TIMELINE, NIL,
+    TweenEngine, F_CALL, F_FREE, F_KEEP, F_KILLED, F_LINKED, F_PAUSED, F_PAUSE_NODE, F_ROOT,
+    K_GROUP, K_MASK, K_TIMELINE, NIL,
 };
 use crate::ids::{PropKey, Tag, TargetId, TweenId};
 
@@ -59,6 +60,10 @@ pub struct InspectNode {
     pub yoyo: bool,
     pub paused: bool,
     pub reversed: bool,
+    /// Whether it is on its parent's timeline. A kept animation that
+    /// completed (or was removed) is detached: it is listed as top-level,
+    /// after the linked ones, and plays again on a restart.
+    pub linked: bool,
     /// Requested time scale (sign dropped; see `reversed`).
     pub time_scale: f64,
     /// How many property tracks it animates (a tween's own, not its children's).
@@ -68,18 +73,27 @@ pub struct InspectNode {
 }
 
 impl TweenEngine {
-    /// Every linked animation, depth-first from the root in start order
-    /// (a parent before its children), into `out` (cleared first).
-    /// Read-only; allocates only when `out` grows.
+    /// Every live animation, depth-first in start order (a parent before its
+    /// children), into `out` (cleared first): the root's children first,
+    /// then each kept (or paused) animation that is detached from any
+    /// parent (a completed `keep` timeline), as a top-level entry.
+    /// Read-only; allocates only when `out` grows. O(live nodes) plus one
+    /// pass over the node slots for the detached ones.
     pub fn inspect(&self, out: &mut Vec<InspectNode>) {
         out.clear();
-        if self.root == NIL || self.root as usize >= self.cold.len() {
-            return;
+        if self.root != NIL && (self.root as usize) < self.cold.len() {
+            let mut c = self.cold[self.root as usize].first;
+            while c != NIL {
+                self.inspect_node(c, TweenId::NONE, 0, 0.0, true, out);
+                c = self.hot[c as usize].next;
+            }
         }
-        let mut c = self.cold[self.root as usize].first;
-        while c != NIL {
-            self.inspect_node(c, TweenId::NONE, 0, 0.0, true, out);
-            c = self.hot[c as usize].next;
+        for n in 0..self.hot.len() as u32 {
+            let f = self.hot[n as usize].flags;
+            let held = f & (F_KEEP | F_PAUSED) != 0;
+            if held && f & (F_LINKED | F_FREE | F_KILLED | F_ROOT) == 0 && n != self.root {
+                self.inspect_node(n, TweenId::NONE, 0, 0.0, true, out);
+            }
         }
     }
 
@@ -128,6 +142,7 @@ impl TweenEngine {
             yoyo: c.yoyo.is_some() || h.flags & crate::engine::F_YOYO != 0,
             paused: h.flags & crate::engine::F_PAUSED != 0,
             reversed: c.rts < 0.0,
+            linked: h.flags & F_LINKED != 0,
             time_scale: c.rts.abs(),
             tracks: c.n_tracks,
             first_track,

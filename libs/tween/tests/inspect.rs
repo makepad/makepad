@@ -87,3 +87,35 @@ fn inspect_reports_a_stale_handle_as_nothing() {
     e.inspect(&mut nodes);
     assert!(nodes.is_empty());
 }
+
+#[test]
+fn inspect_keeps_listing_a_completed_kept_timeline() {
+    let mut e = TweenEngine::new();
+    e.seed(TargetId(0), OPACITY, 0.0.into());
+    let tl = e.timeline(TimelineOpts::new().keep(true));
+    e.tl(tl).to(
+        TargetId(0).into(),
+        &[PropTo::to_f64(OPACITY, 1.0)],
+        TweenOpts::new().duration(0.25),
+        0.0,
+    );
+    let mut nodes = Vec::new();
+    e.inspect(&mut nodes);
+    assert!(nodes[0].linked);
+
+    while e.is_active() {
+        e.advance(1.0 / 60.0);
+        e.clear_events();
+    }
+    e.inspect(&mut nodes);
+    assert_eq!(nodes.len(), 2, "the completed timeline and its tween");
+    assert_eq!((nodes[0].id, nodes[0].depth), (tl, 0));
+    assert!(!nodes[0].linked, "detached from the root once complete");
+    assert!(nodes[1].linked, "still on its own timeline");
+    assert!((nodes[0].total_time - 0.25).abs() < 1e-9);
+
+    e.anim(tl).restart(false, Emit::Suppress);
+    e.inspect(&mut nodes);
+    assert_eq!(nodes.len(), 2, "listed once after a restart");
+    assert!(nodes[0].linked);
+}

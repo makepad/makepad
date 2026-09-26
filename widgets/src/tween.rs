@@ -730,6 +730,10 @@ pub struct TweenHost {
     inspect_id: u64,
     /// The name the inspector lists it under.
     inspect_name: Option<String>,
+    /// The names of the tags this host's owner uses, registered with the
+    /// id interner when the inspector first sees the host (so the inspector
+    /// shows `intro`, not a hash). Nothing is registered while it is closed.
+    inspect_tags: &'static [&'static str],
     /// When it last published to the inspector (app seconds).
     inspect_at: f64,
 }
@@ -765,6 +769,7 @@ impl TweenHost {
             warned_unplaced: false,
             inspect_id: 0,
             inspect_name: None,
+            inspect_tags: &[],
             inspect_at: f64::NEG_INFINITY,
         }
     }
@@ -781,6 +786,14 @@ impl TweenHost {
         self
     }
 
+    /// The names behind the owner's tags (labels, animation ids), for the
+    /// inspector: a tag built with the const `live_id!` carries only its
+    /// hash. Registered when the inspector first opens on this host.
+    pub fn inspect_tags(mut self, names: &'static [&'static str]) -> Self {
+        self.inspect_tags = names;
+        self
+    }
+
     /// While the inspector is open: applies the commands it queued for this
     /// host and republishes what plays. True when a command changed the
     /// playhead (the caller reports the new values).
@@ -788,6 +801,10 @@ impl TweenHost {
         use crate::tween_inspect::{InspectCommand, TweenInspectRegistry, REPUBLISH_SECS};
         if self.inspect_id == 0 {
             self.inspect_id = crate::tween_inspect::next_host_id();
+            for name in self.inspect_tags {
+                // A name another id already holds keeps that id's name.
+                let _ = LiveId::from_str_with_lut(name);
+            }
         }
         let now = crate::makepad_platform::CxOsApi::seconds_since_app_start(cx);
         let mut applied = false;
