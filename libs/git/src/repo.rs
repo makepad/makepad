@@ -914,6 +914,18 @@ impl Repository {
         &mut self,
         options: worktree::StatusOptions,
     ) -> Result<worktree::Status, GitError> {
+        self.status_cancellable(options, &|| false)
+    }
+
+    /// [`Repository::status_with_options`] that stops with
+    /// [`GitError::Cancelled`] as soon as `cancel` returns true (polled per
+    /// file and per folder). Read-only: the index is never refreshed or
+    /// written, like `git status` under `GIT_OPTIONAL_LOCKS=0`.
+    pub fn status_cancellable(
+        &mut self,
+        options: worktree::StatusOptions,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<worktree::Status, GitError> {
         self.ensure_object_sources()?;
         let index = self.read_index()?;
 
@@ -937,22 +949,26 @@ impl Repository {
         })() {
             Ok(head_files) => head_files,
             Err(GitError::ObjectNotFound(_)) => {
-                return worktree::compute_status_worktree_only_with_options(
+                return worktree::compute_status_worktree_only_cancellable(
                     &index,
                     &self.workdir,
                     options,
+                    cancel,
                 );
             }
             Err(e) => return Err(e),
         };
 
-        match worktree::compute_status_with_options(&head_files, &index, &self.workdir, options) {
+        if cancel() {
+            return Err(GitError::Cancelled);
+        }
+        match worktree::compute_status_cancellable(&head_files, &index, &self.workdir, options, cancel) {
             Ok(status) => Ok(status),
             // Some repos (e.g. partial clones) may miss HEAD objects locally.
             // Fall back to index/worktree comparison so modified/untracked files
             // still show up.
             Err(GitError::ObjectNotFound(_)) => {
-                worktree::compute_status_worktree_only_with_options(&index, &self.workdir, options)
+                worktree::compute_status_worktree_only_cancellable(&index, &self.workdir, options, cancel)
             }
             Err(e) => Err(e),
         }
@@ -1165,10 +1181,12 @@ impl Repository {
             }
         }
         // Refuse before touching anything: every path we would replace or
-        // delete must still hold its old content.
+        // delete must be a safe worktree path (no "..", ".git", separators
+        // in a name, or symlinked parent folder) and must still hold its
+        // old content.
         for path in removed.iter().copied().chain(written.iter().map(|(p, _, _)| *p)) {
+            let file = worktree::checked_worktree_path(&self.workdir, path)?;
             if let Some((old_oid, _)) = old_files.get(path) {
-                let file = self.workdir.join(path);
                 if file.is_file() && worktree::hash_file_blob(&file)? != *old_oid {
                     return Err(GitError::InvalidObject(format!(
                         "{path} was modified locally; the update would overwrite it"
@@ -1180,7 +1198,7 @@ impl Repository {
         written.sort_by(|a, b| a.0.cmp(b.0));
         let mut index = self.read_index()?;
         for path in &removed {
-            let file = self.workdir.join(path);
+            let file = worktree::checked_worktree_path(&self.workdir, path)?;
             if file.is_file() {
                 fs::remove_file(&file)?;
             }
@@ -1357,10 +1375,11 @@ impl Repository {
                 TreeMergeEntry::Resolved { path, oid, mode } => {
                     // Write blob to worktree
                     let data = self.read_blob(oid)?;
-                    let file_path = self.workdir.join(path);
+                    let file_path = worktree::checked_worktree_path(&self.workdir, path)?;
                     if let Some(parent) = file_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
+                    worktree::unlink_if_symlink(&file_path)?;
                     std::fs::write(&file_path, &data)?;
 
                     index.entries.push(make_index_entry(path, *oid, *mode));
@@ -1382,10 +1401,11 @@ impl Repository {
 
                     let merge_result = merge::merge3_text(&base_text, &ours_text, &theirs_text);
 
-                    let file_path = self.workdir.join(path);
+                    let file_path = worktree::checked_worktree_path(&self.workdir, path)?;
                     if let Some(parent) = file_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
+                    worktree::unlink_if_symlink(&file_path)?;
                     std::fs::write(&file_path, merge_result.content())?;
 
                     if merge_result.has_conflict() {

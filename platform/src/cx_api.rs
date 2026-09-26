@@ -1409,6 +1409,15 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
+    /// Whether keys go to a text field now: the widget with the key focus
+    /// is the one that raised the text IME (every text input does on
+    /// focus). An app's bare-key shortcuts (Space, arrows, letters) stand
+    /// down while it is true.
+    pub fn text_input_has_focus(&self) -> bool {
+        let focus = self.key_focus();
+        !focus.is_empty() && focus == self.ime_area
+    }
+
     pub fn text_ime_was_dismissed(&mut self) {
         self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.set_text_ime_dismissed();

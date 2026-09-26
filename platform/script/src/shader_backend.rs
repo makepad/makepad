@@ -161,6 +161,30 @@ mod typed_vertex_tests {
                 .contains("cannot contain nested structs, arrays, matrices")
         );
     }
+
+    // `if a { f() } else { g() }` as a statement leaves its phi as a value
+    // nothing uses. WGSL rejects `_phi_1;` (naga: "expected assignment or
+    // increment/decrement"); the other backends accept a bare expression.
+    #[test]
+    fn discarded_values_are_phony_assigned_in_wgsl() {
+        let mut wgsl = String::new();
+        ShaderBackend::Wgsl.write_discarded_expr(&mut wgsl, "_phi_353", false);
+        ShaderBackend::Wgsl.write_discarded_expr(&mut wgsl, "mix(a, b, t)", false);
+        ShaderBackend::Wgsl.write_discarded_expr(&mut wgsl, "Sdf2d_box(&l_sdf, 1.0)", true);
+        ShaderBackend::Wgsl.write_discarded_expr(&mut wgsl, "", false);
+        assert_eq!(wgsl, "_ = _phi_353;\n_ = mix(a, b, t);\nSdf2d_box(&l_sdf, 1.0);\n");
+
+        for backend in [
+            ShaderBackend::Metal,
+            ShaderBackend::Glsl,
+            ShaderBackend::Hlsl,
+            ShaderBackend::Rust,
+        ] {
+            let mut out = String::new();
+            backend.write_discarded_expr(&mut out, "_phi_353", false);
+            assert_eq!(out, "_phi_353;\n", "{backend:?}");
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1019,6 +1043,21 @@ impl ShaderBackend {
                 write!(out, "let mut {}: {} = {};\n", var_name, ty_name, zero).ok();
             }
         }
+    }
+
+    /// Writes `expr` as a statement whose value nothing uses. WGSL accepts
+    /// only a call, an assignment or an increment/decrement as a statement,
+    /// so a bare value (`_phi_12;`, `(a + b);`, `mix(a, b, t);` — `mix` is
+    /// `@must_use`) goes through the phony assignment `_ = expr;`. A void call
+    /// cannot be phony-assigned, so `is_void` keeps it bare everywhere.
+    pub fn write_discarded_expr(&self, out: &mut String, expr: &str, is_void: bool) {
+        if expr.is_empty() {
+            return;
+        }
+        match self {
+            Self::Wgsl if !is_void => write!(out, "_ = {};\n", expr).ok(),
+            _ => write!(out, "{};\n", expr).ok(),
+        };
     }
 
     /// Returns the zero literal for a given backend type name.

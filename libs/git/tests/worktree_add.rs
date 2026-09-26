@@ -30,16 +30,7 @@ fn commit(
     parents: Vec<ObjectId>,
     message: &str,
 ) -> (ObjectId, ObjectId) {
-    let mut entries: Vec<TreeEntry> = files
-        .iter()
-        .map(|(name, content)| TreeEntry {
-            mode: 0o100644,
-            name: name.to_string(),
-            oid: repo.write_blob(content.as_bytes()).unwrap(),
-        })
-        .collect();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let tree = repo.write_tree(&Tree { entries }).unwrap();
+    let tree = write_nested_tree(repo, files);
     let commit = repo
         .write_commit(&Commit {
             tree,
@@ -50,6 +41,32 @@ fn commit(
         })
         .unwrap();
     (commit, tree)
+}
+
+/// Write `files` as git does: "dir/inner.txt" becomes a `dir` subtree
+/// holding `inner.txt` (a tree entry name never contains '/').
+fn write_nested_tree(repo: &mut Repository, files: &[(&str, &str)]) -> ObjectId {
+    let mut entries = Vec::new();
+    let mut dirs: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    for (path, content) in files {
+        match path.split_once('/') {
+            Some((dir, rest)) => match dirs.iter_mut().find(|(name, _)| *name == dir) {
+                Some((_, children)) => children.push((rest, content)),
+                None => dirs.push((dir, vec![(rest, content)])),
+            },
+            None => entries.push(TreeEntry {
+                mode: 0o100644,
+                name: path.to_string(),
+                oid: repo.write_blob(content.as_bytes()).unwrap(),
+            }),
+        }
+    }
+    for (dir, children) in dirs {
+        let oid = write_nested_tree(repo, &children);
+        entries.push(TreeEntry { mode: 0o040000, name: dir.to_string(), oid });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    repo.write_tree(&Tree { entries }).unwrap()
 }
 
 /// `main` with one commit on `main`, plus the path where `wt` will go.

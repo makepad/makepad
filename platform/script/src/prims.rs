@@ -1270,6 +1270,68 @@ where
     }
 }
 
+// Box: the same component as T, stored on the heap. A #[live] field of a
+// large T (a set of draw shaders) boxes it so the struct that holds it, and
+// every constructor frame that builds that struct by value, stays small; a
+// 1 MB Windows main stack does not fit several nested copies of it.
+
+impl<T> ScriptHook for Box<T> where T: ScriptApply + ScriptNew + 'static {}
+impl<T> ScriptNew for Box<T>
+where
+    T: ScriptApply + ScriptNew + 'static,
+{
+    fn script_type_name() -> Option<LiveId> {
+        T::script_type_name()
+    }
+    fn script_type_id_static() -> ScriptTypeId {
+        T::script_type_id_static()
+    }
+    fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
+        T::script_type_check(heap, value)
+    }
+    fn script_default(vm: &mut ScriptVm) -> ScriptValue {
+        T::script_default(vm)
+    }
+    fn script_reload_default(vm: &mut ScriptVm) -> ScriptValue {
+        T::script_reload_default(vm)
+    }
+    fn script_new(vm: &mut ScriptVm) -> Self {
+        Box::new(T::script_new(vm))
+    }
+    fn script_new_with_default(vm: &mut ScriptVm) -> Self {
+        Box::new(T::script_new_with_default(vm))
+    }
+    fn script_proto(vm: &mut ScriptVm) -> ScriptValue {
+        T::script_proto(vm)
+    }
+    fn script_proto_props(vm: &mut ScriptVm, object: ScriptObject, props: &mut ScriptTypeProps) {
+        T::script_proto_props(vm, object, props)
+    }
+}
+impl<T> ScriptApply for Box<T>
+where
+    T: ScriptApply + ScriptNew + 'static,
+{
+    fn script_type_id(&self) -> ScriptTypeId {
+        (**self).script_type_id()
+    }
+    fn script_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        (**self).script_apply(vm, apply, scope, value)
+    }
+    fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
+        (**self).script_to_value(vm)
+    }
+    fn script_source(&self) -> ScriptObject {
+        (**self).script_source()
+    }
+}
+
 #[cfg(test)]
 mod compact_primitive_tests {
     use super::*;
