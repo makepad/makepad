@@ -101,6 +101,10 @@ impl Root {
 
 impl Widget for Root {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Script tweens (`mod.tween`) step here, before any child: the VM is
+        // free and no widget but this one is borrowed. Pushes and callbacks
+        // of the frame run now; other events cost one match.
+        crate::tween_script::handle_event(cx, event, self.uid);
         if let Event::Startup = event {
             if !self.started {
                 self.started = true;
@@ -115,6 +119,7 @@ impl Widget for Root {
             }
         }
         if let Event::Draw(e) = event {
+            crate::tween_script::draw_check(cx, self.uid);
             let mut cx_draw = CxDraw::new(cx, e);
             let cx = &mut Cx2d::new(&mut cx_draw);
             self.draw_all(cx, scope);

@@ -39,6 +39,9 @@ pub struct TweakerHooks {
     /// The design delta since `after_generation`, for the chat's Studio
     /// feedback; `None` while nothing changed.
     pub feedback_snapshot: fn(u64) -> Option<TweakFeedbackSnapshot>,
+    /// The width the docked panel takes off the window's body, 0 while it
+    /// floats or is off.
+    pub docked_band_width: fn() -> f64,
 }
 
 /// The AI chat slot (`makepad-widgets-ai`).

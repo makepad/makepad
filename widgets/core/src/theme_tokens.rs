@@ -33,6 +33,13 @@
 //! light and are not generated into the files; the generator still produces
 //! those two bases so an override path can use them.
 //!
+//! Those numbers are the house's and not the rule's. `RoleTuning` carries the
+//! brand saturation and both schemes' lightness targets, `Harmony` carries
+//! the two rotations, and `SeedColors::neutral` says how far the grounds lean
+//! toward a colour (`ground_tint`). `roles_from_seed` is the rule at the house
+//! values of all of them, which is what the theme files hold; a theme built
+//! from somebody's favourite colour goes through `roles_from_seed_tuned`.
+//!
 //! The generator is a trait (`RoleGenerator`) so a colour-science generator
 //! can replace `BuiltinRoles` later without any caller changing.
 //!
@@ -41,10 +48,12 @@
 //! points `mod.theme` at it; `theme_source_with_globals` and
 //! `export_theme_source` produce whole theme files. Never assign into
 //! `mod.theme.x` directly: `mod.theme` is the shared base object, and such a
-//! write mutates it for every widget that was built from it.
+//! write mutates it for every widget that was built from it. A style sheet is
+//! the one thing that does, and `export_sheet_source`, which writes one, says
+//! what makes it the exception.
 
 use crate::desktop_style::DesktopStyle;
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm};
+use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
 use crate::script_eval;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -87,6 +96,8 @@ pub enum TokenGroup {
     Size,
     Radius,
     Elevation,
+    /// The moulded-surface material: its light, relief and finish.
+    Material,
     Motion,
     State,
     Type,
@@ -241,6 +252,43 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color("color_elevation_4", TokenGroup::Elevation, "Shadow colour of a dragged item.", ALL),
     color("color_elevation_5", TokenGroup::Elevation, "Shadow colour of a dialog.", ALL),
     color("color_elevation_shadow", TokenGroup::Elevation, "The opaque colour the elevation shadows are tints of.", ALL),
+
+    // Material. Zero in every shipped theme: the stylesheets turn it on.
+    spec("material_level", TokenGroup::Material, TokenKind::Factor, "Surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular.", 0.0, 2.0, 1.0, ALL),
+    spec("material_light_x", TokenGroup::Material, TokenKind::Factor, "Key light direction, x to the right of the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_y", TokenGroup::Material, TokenKind::Factor, "Key light direction, y down the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_z", TokenGroup::Material, TokenKind::Factor, "Key light direction, z out of the screen toward the viewer.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_intensity", TokenGroup::Material, TokenKind::Factor, "Strength of the key light every surface shares.", 0.0, 2.0, 0.05, ALL),
+    length("material_led_radius", TokenGroup::Material, "Falloff radius of an indicator light, in points.", 0.0, 64.0, 1.0),
+    spec("material_led_intensity", TokenGroup::Material, TokenKind::Factor, "Brightness of an indicator light.", 0.0, 4.0, 0.05, ALL),
+    length("material_bevel_width", TokenGroup::Material, "Width of the moulded shoulder, in points.", 0.0, 24.0, 0.5),
+    spec("material_bevel_curve", TokenGroup::Material, TokenKind::Factor, "Shoulder profile: 0 a soft pillow, 1 a round moulded edge.", 0.0, 1.0, 0.05, ALL),
+    spec("material_specular", TokenGroup::Material, TokenKind::Factor, "Strength of the specular highlight on a shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_roughness", TokenGroup::Material, TokenKind::Factor, "How broad that highlight is; higher is rougher and duller.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao", TokenGroup::Material, TokenKind::Opacity, "Contact darkening that hugs the inside edge of a surface.", 0.0, 1.0, 0.01, ALL),
+    spec("material_rim", TokenGroup::Material, TokenKind::Opacity, "Brightness of the lit edge band of a raised face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_gloss", TokenGroup::Material, TokenKind::Opacity, "Strength of the sweep across the top of a glossy face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_glow", TokenGroup::Material, TokenKind::Opacity, "Strength of the emissive halo a lit surface throws.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_glow", TokenGroup::Material, TokenKind::Opacity, "How far a label or icon lifts toward the glow colour when lit.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_lift", TokenGroup::Material, TokenKind::Factor, "How far past full brightness lit ink is pushed before it clips.", 1.0, 4.0, 0.05, ALL),
+    spec("material_face_gradient", TokenGroup::Material, TokenKind::Opacity, "Broad light-to-dark gradient across a whole face, separate from its shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_hairline", TokenGroup::Material, TokenKind::Opacity, "Hard thin lit and shaded line right on the boundary, separate from the soft shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao_reach", TokenGroup::Material, TokenKind::Factor, "How far the self-occlusion reaches inside, in units of the shoulder width.", 0.25, 3.0, 0.05, ALL),
+    spec("material_inner_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a surround throws across a sunken or pressed face.", 0.0, 1.0, 0.01, ALL),
+    length("material_inner_radius", TokenGroup::Material, "Blur of the inner shadow along a shaded edge, in points.", 0.0, 32.0, 0.5),
+    spec("material_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a raised surface casts on its ground.", 0.0, 1.0, 0.01, ALL),
+    length("material_shadow_blur", TokenGroup::Material, "Softness of that cast shadow, in points.", 0.5, 40.0, 0.5),
+    spec("material_shadow_falloff", TokenGroup::Material, TokenKind::Factor, "How a cast shadow or a glow dies away: 0 linear, gone at three blur lengths; 1 exponential.", 0.0, 1.0, 0.05, ALL),
+    spec("material_contact_ao", TokenGroup::Material, TokenKind::Opacity, "Tight darkening on the ground where a raised surface meets it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ground_lip", TokenGroup::Material, TokenKind::Opacity, "Light-side counter-shadow, for surfaces EXTRUDED FROM the page rather than resting on it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_press_invert", TokenGroup::Material, TokenKind::Factor, "How far a held face dishes as well as descends: 0 stays convex, 1 fully inverts.", 0.0, 1.0, 0.01, ALL),
+    length("material_raise", TokenGroup::Material, "How far a raised surface stands off its ground, in points.", 0.0, 24.0, 0.5),
+    length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
+    length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
+    length("material_margin", TokenGroup::Material, "The margin a material control keeps between its quad and its face, where its cast shadow and glow fall, in points.", 0.0, 32.0, 0.5),
+    color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
+    color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
+    color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -372,8 +420,97 @@ pub fn token_spec(name: &str) -> Option<&'static TokenSpec> {
     THEME_TOKENS.iter().find(|t| t.name == name)
 }
 
+/// How the secondary and tertiary families stand to the primary on the hue
+/// circle: two offsets in degrees, and nothing else.
+///
+/// A harmony is not a second rule. The rule takes one hue per family and
+/// brings its own saturation and lightness, so a colour scheme out of a book
+/// comes down to where the other two hues sit, and the families that come out
+/// are as readable as the house ones because they ARE the house ones, turned.
+///
+/// There is no tetradic. Four hues want four brand families and `ColorRoles`
+/// has three; a tetrad with one corner left out is a split scheme that does
+/// not say so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Harmony {
+    /// The library's own: the secondary a step round from the primary and the
+    /// tertiary most of the way across, +30 and -150. It is a neighbour and a
+    /// near opposite, which is no scheme a book names, and it is the default
+    /// because it is what every theme file was generated with.
+    #[default]
+    House,
+    /// One hue for all three. The families still differ, by the share of the
+    /// saturation each keeps.
+    Single,
+    /// A neighbour on either side: +30 and -30.
+    Analogous,
+    /// The opposite hue, +180, for the tertiary, which is the family a theme
+    /// uses for contrast. The secondary stays on the primary's hue: a
+    /// complementary scheme has two hues in it, and the quieter accent is a
+    /// quieter version of the first rather than a third colour from nowhere.
+    Complementary,
+    /// Either side of the opposite: +150 and -150.
+    Split,
+    /// Three hues evenly round the circle: +120 and -120.
+    Triadic,
+}
+
+impl Harmony {
+    pub const ALL: [Harmony; 6] = [
+        Harmony::House,
+        Harmony::Single,
+        Harmony::Analogous,
+        Harmony::Complementary,
+        Harmony::Split,
+        Harmony::Triadic,
+    ];
+
+    /// What a picker shows.
+    ///
+    /// [`Harmony::House`] is shown as "Default" and not under its own name: a
+    /// person reading a list of schemes wants to know which one they get for
+    /// doing nothing, and "house" is a word about where the offsets came from
+    /// rather than about what the entry does. The variant keeps its name,
+    /// because inside the library that is still what it is.
+    pub fn label(self) -> &'static str {
+        match self {
+            Harmony::House => "Default",
+            Harmony::Single => "Single hue",
+            Harmony::Analogous => "Analogous",
+            Harmony::Complementary => "Complementary",
+            Harmony::Split => "Split",
+            Harmony::Triadic => "Triadic",
+        }
+    }
+
+    /// How far the secondary and the tertiary hue sit from the primary, in
+    /// degrees. Either may leave 0..360; `hsl_to_rgb` wraps it.
+    pub fn offsets(self) -> (f64, f64) {
+        match self {
+            Harmony::House => (30.0, -150.0),
+            Harmony::Single => (0.0, 0.0),
+            Harmony::Analogous => (30.0, -30.0),
+            Harmony::Complementary => (0.0, 180.0),
+            Harmony::Split => (150.0, -150.0),
+            Harmony::Triadic => (120.0, -120.0),
+        }
+    }
+}
+
 /// The colours a palette is grown from. Only `primary` is required; every
 /// other seed defaults to a rotation of it or a fixed intent hue.
+///
+/// `harmony` says which rotation. It is a field and not a pair of seed
+/// colours worked out ahead of time, because a colour cannot carry a hue
+/// exactly: eight bits a channel put the nearest colour to a hue up to an
+/// eighth of a degree off it, and a triad that is 119.9 degrees on one side
+/// is a different palette from the one that was asked for, by a step on some
+/// channel somewhere. A seed named outright still wins over the harmony, as
+/// it won over the fixed rotation before there was a choice.
+///
+/// `neutral` is what the grounds lean toward, and it says how far by how much
+/// colour it has in it: a grey, or none, leaves the page as the theme file
+/// has it. See `ground_tint`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeedColors {
     pub primary: u32,
@@ -381,6 +518,7 @@ pub struct SeedColors {
     pub tertiary: Option<u32>,
     pub neutral: Option<u32>,
     pub error: Option<u32>,
+    pub harmony: Harmony,
 }
 
 impl SeedColors {
@@ -391,7 +529,23 @@ impl SeedColors {
         tertiary: None,
         neutral: None,
         error: None,
+        harmony: Harmony::House,
     };
+
+    /// A seed from the one colour somebody likes and the scheme the other two
+    /// families are to stand to it in. The alpha is dropped: a seed is read
+    /// for its hue, and a role is drawn solid.
+    ///
+    /// The house colour in the house harmony is `HOUSE`, field for field, so
+    /// a builder that starts there starts on the theme the library ships.
+    pub fn from_favourite(favourite: u32, harmony: Harmony) -> SeedColors {
+        SeedColors { primary: favourite | 0xFF, harmony, ..SeedColors::HOUSE }
+    }
+
+    /// The same seed with its grounds leaning toward `neutral`.
+    pub fn with_neutral(self, neutral: Option<u32>) -> SeedColors {
+        SeedColors { neutral, ..self }
+    }
 }
 
 /// One accent family: the colour, what is drawn on it, its container tint
@@ -531,7 +685,118 @@ struct FamilyInput {
     intent: bool,
 }
 
-fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
+/// The lightness a scheme draws a family at: its base, its container, and
+/// the ink the rule reaches for first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FamilyTargets {
+    pub base: f64,
+    pub container: f64,
+    pub ink: f64,
+}
+
+/// The numbers the rule is run with, which were constants in it until
+/// somebody wanted a palette that was not the house one.
+///
+/// Three of them. `brand` is how much colour the primary family carries; the
+/// secondary keeps 55 percent of it and the tertiary 80, as they always did.
+/// `light` and `dark` are where each scheme puts a family's base, its
+/// container and its ink on the lightness axis. A scheme needs the other
+/// one's numbers too and not only its own: `color_inverse_primary` is the
+/// other scheme's base, and the pale colour the dark rule draws on a
+/// container is the light rule's container.
+///
+/// None of them can make a family unreadable, whatever they are set to. The
+/// rule never trusts its own targets for what is drawn ON a colour: every ink
+/// goes through `readable_on`, which keeps the choice where it reads and
+/// falls to black or white where it does not, and one of those two clears
+/// 4.5:1 on any ground there is. So a tuning moves how a palette LOOKS and is
+/// free to be wrong about it.
+///
+/// The skeleton takes none of this. Its brand families are greys at lightness
+/// targets of their own and its intents are fixed, because a placeholder page
+/// has no brand to tune.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoleTuning {
+    /// Saturation of the primary family, 0..1.
+    pub brand: f64,
+    pub light: FamilyTargets,
+    pub dark: FamilyTargets,
+}
+
+impl RoleTuning {
+    /// The numbers every theme file was generated with. `roles_from_seed` is
+    /// `roles_from_seed_tuned` with these, and
+    /// `the_house_roles_did_not_move` pins what comes out to what came out
+    /// before there was a tuning at all.
+    pub const HOUSE: RoleTuning = RoleTuning {
+        brand: 0.62,
+        light: FamilyTargets { base: 0.40, container: 0.90, ink: 0.12 },
+        dark: FamilyTargets { base: 0.74, container: 0.30, ink: 0.18 },
+    };
+}
+
+impl Default for RoleTuning {
+    fn default() -> Self {
+        RoleTuning::HOUSE
+    }
+}
+
+/// How much of the grounds' colour a fully saturated `neutral` may ask for,
+/// as the theme's `color_tint_amount`.
+///
+/// The theme builder no longer goes this way. A multiply over the file's
+/// page can only cast a colour over the page's own grey, never make the page
+/// a colour at a lightness somebody chose, so the builder writes the page
+/// itself (`theme_builder::page_of`). This stays the rule for a seed that
+/// names a neutral and nothing else.
+///
+/// Two numbers because the tint is a MULTIPLY. The theme files take the
+/// page's grey and multiply it by a colour mixed this far from white, so a
+/// light page -- which is nearly white -- comes out nearly that colour, and a
+/// dark page comes out a dark grey with a cast. The same amount that gives a
+/// dark theme a navy undertone turns a light one periwinkle from edge to
+/// edge, and a page is not an accent.
+pub const GROUND_TINT_DARK: f64 = 0.30;
+pub const GROUND_TINT_LIGHT: f64 = 0.12;
+
+/// The two globals that lean a theme's grounds toward a colour, as a seed
+/// asks for them: `(color_tint, color_tint_amount)`. `None` where the seed
+/// asks for nothing, which leaves the theme file's own -- an amount of
+/// nought -- and the page exactly as it ships.
+///
+/// This is what `SeedColors::neutral` is for. The tint is the neutral's HUE
+/// at full strength, and the amount is the neutral's SATURATION scaled into
+/// what the scheme can take (`GROUND_TINT_DARK`, `GROUND_TINT_LIGHT`): the
+/// theme files mix the tint in by an amount, so the strength of the colour
+/// and the amount of it are one quantity said twice, and saying it once keeps
+/// a washed-out neutral from also being mixed in weakly. A neutral with no
+/// colour in it has no hue to lean toward, and the skeleton has no tint knob
+/// at all.
+///
+/// The bar for "no colour" is a hundredth, far under the 0.08 the brand
+/// families use, and it can be: a nearly grey neutral reports a hue that is
+/// mostly rounding, but it asks for an amount in proportion, so the wrong hue
+/// arrives too faint to see. A brand family has no such governor -- it brings
+/// its own saturation -- which is why that bar is where it is and this one
+/// is not. A slider run down toward grey fades out instead of stopping short.
+///
+/// The grounds are not roles and this rule does not write them. They are
+/// expressions of these two globals in the theme files, so the answer goes
+/// in through `theme_source_with_globals` and the whole ladder moves.
+pub fn ground_tint(seed: &SeedColors, scheme: Scheme) -> Option<(u32, f64)> {
+    let most = match scheme {
+        Scheme::Dark => GROUND_TINT_DARK,
+        Scheme::Light => GROUND_TINT_LIGHT,
+        Scheme::Skeleton => return None,
+    };
+    let (hue, sat, _) = rgb_to_hsl(seed.neutral?);
+    if sat < 0.01 {
+        return None;
+    }
+    Some((hsl_to_rgb(hue, 1.0, 0.5), sat * most))
+}
+
+fn family_inputs(seed: &SeedColors, tuning: &RoleTuning) -> [FamilyInput; 7] {
     let hue_of = |rgba: u32| rgb_to_hsl(rgba).0;
     let primary = hue_of(seed.primary);
     // A seed with no colour in it has no hue either, and the number it
@@ -539,11 +804,12 @@ fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
     // got a family of reds. The rule takes only the hue from a seed and
     // brings its own saturation, so it has to be told when there is no hue
     // to take, and then the three brand families are greys.
-    let brand = if rgb_to_hsl(seed.primary).1 < 0.08 { 0.0 } else { 0.62 };
+    let brand = if rgb_to_hsl(seed.primary).1 < 0.08 { 0.0 } else { tuning.brand.clamp(0.0, 1.0) };
+    let (second, third) = seed.harmony.offsets();
     [
         FamilyInput { hue: primary, sat: brand, intent: false },
-        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + 30.0), sat: brand * 0.55, intent: false },
-        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary - 150.0), sat: brand * 0.8, intent: false },
+        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + second), sat: brand * 0.55, intent: false },
+        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary + third), sat: brand * 0.8, intent: false },
         FamilyInput { hue: seed.error.map(hue_of).unwrap_or(0.0), sat: 0.72, intent: true },
         FamilyInput { hue: 42.0, sat: 0.85, intent: true },
         FamilyInput { hue: 140.0, sat: 0.55, intent: true },
@@ -594,6 +860,186 @@ pub fn reads_on(ground: u32, ink: u32) -> f64 {
     contrast(ground | 0xFF, over(ground | 0xFF, ink))
 }
 
+/// The four families that mean something, and the accent, each with the
+/// ink meant to be drawn on it.
+pub(crate) const MEANING: &[(&str, &str)] = &[
+    ("color_success", "color_on_success"),
+    ("color_warning", "color_on_warning"),
+    ("color_error", "color_on_error"),
+    ("color_info", "color_on_info"),
+    ("color_primary", "color_on_primary"),
+];
+
+/// Every rung of the surface ladder, against the body ink.
+pub(crate) const SURFACES: &[(&str, &str)] = &[
+    ("color_surface", "color_on_surface"),
+    ("color_surface_container", "color_on_surface"),
+    ("color_surface_container_low", "color_on_surface"),
+    ("color_surface_container_high", "color_on_surface"),
+    ("color_surface_container_highest", "color_on_surface"),
+    ("color_surface_dim", "color_on_surface"),
+    ("color_surface_bright", "color_on_surface"),
+];
+
+/// The same rungs against the second voice, which is held to `LEGIBLE`.
+pub(crate) const VARIANTS: &[(&str, &str)] = &[
+    ("color_surface", "color_on_surface_variant"),
+    ("color_surface_container", "color_on_surface_variant"),
+    ("color_surface_container_high", "color_on_surface_variant"),
+    ("color_surface_container_highest", "color_on_surface_variant"),
+];
+
+/// The page of the opposite scheme, with the only ink there is for it.
+/// A tooltip and a snackbar are the whole of it, and both carry words,
+/// so it answers to the body rule like any other page. It is also the
+/// one pair neither the ladder nor the derivation looks at: the ink is
+/// not re-derived on a blend, so nothing but this has ever asked whether
+/// the two still stand apart.
+pub(crate) const INVERSE: &[(&str, &str)] =
+    &[("color_inverse_surface", "color_inverse_on_surface")];
+
+/// The loading block, on the grounds it is laid on. Nobody reads a
+/// placeholder -- it is the shape of text that has not arrived -- so the
+/// bar is `LEGIBLE`, the same one the library holds a graphic to, and
+/// not `READABLE`.
+///
+/// Seven grounds and not the five rungs of the ladder. A block goes
+/// wherever content is about to go, which includes the two surfaces that
+/// are not rungs: `color_surface_bright`, and the lowest container, which
+/// is the page a code block, a column picker and both transfer lists are
+/// drawn on. They were left out of this table once and the numbers said
+/// nothing about them for it -- wrongly, since the block is under the bar
+/// on both in all fifteen themes, the worst showing of the seven. A ground
+/// left out of this table is not a ground that passes, it is one nobody
+/// has a number for.
+///
+/// The lowest container fails for a reason of its own on twelve of those
+/// fifteen, and not for the ink's. `GROUPS` below splits the rows.
+pub(crate) const PLACEHOLDERS: &[(&str, &str)] = &[
+    ("color_surface", "color_placeholder"),
+    ("color_surface_container", "color_placeholder"),
+    ("color_surface_container_low", "color_placeholder"),
+    ("color_surface_container_high", "color_placeholder"),
+    ("color_surface_container_highest", "color_placeholder"),
+    ("color_surface_bright", "color_placeholder"),
+    ("color_surface_container_lowest", "color_placeholder"),
+];
+
+/// Whether the themes the library ships reach a group's bar today, or
+/// whether the audit only prints how far off they are.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Held {
+    Yes,
+    NotYet,
+}
+
+/// Every table above with the bar its pairs answer to. The audit, the
+/// blend sweep and the panel's own reading all read this, so a pair added
+/// once is measured by all three and a pair only one of them knew about
+/// cannot happen again.
+///
+/// The loading block is measured and not held. Its bar is `LEGIBLE`,
+/// because nobody READS a placeholder -- it is the shape of text that has
+/// not arrived, a graphic standing where words will be -- and not the body
+/// rule. It does not reach that bar: 83 of the 105 pairs are under it, and
+/// not one theme of the fifteen clears all seven grounds.
+///
+/// Two faults, and the 83 divide between them. 71 of the rows are the
+/// INK's: the six grounds a sheet regrows, in all fifteen themes, and the
+/// lowest container in the three BASE themes, where that token is the
+/// theme's own value and the ground is exactly what the theme meant.
+/// `color_placeholder` is `color_opaque_u_1` / `d_1`, the same source the
+/// ladder rungs are mixed from and never put to the ladder the way the
+/// surface inks now are, so it lands on a ground of its own colour once in
+/// every base theme: the dark theme draws a #737373 block on a #737373
+/// `color_surface_container_highest`, at 1.00, and there is nothing there
+/// to see. The three base themes fail all seven of their rows this way.
+///
+/// The other 12 -- the lowest container under each of the twelve SHEETS --
+/// are the GROUND's, and are a second defect that used to sit inside the
+/// first one's tally. `color_surface_container_lowest` is not in
+/// `DERIVED_ROLES`, so unlike the six it is never regrown from a sheet's
+/// own `color_bg_app`: the audit reads #FFFFFF for it under every
+/// light-based sheet, whose pages are #D4D0C8 (windows-2000), #F2F2F7
+/// (ios) and #FEF7FF (android), and #4D4D4D under every dark-based one.
+/// Under android-dark the six regrown grounds run #141218 to #3C3A3F and
+/// this one stays at the dark base theme's #4D4D4D -- a pale slab on a
+/// near-black page, and a code block (`code_block.rs`), the column picker
+/// (`column_picker.rs`) and the transfer lists (`transfer.rs`) are all
+/// drawn on it. No ink repairs that, and those twelve rows go on failing
+/// whatever is done to `color_placeholder`.
+///
+/// The ground is left alone here on purpose: a row added to
+/// `DERIVED_ROLES` moves shipped themes, which this change has stopped
+/// doing. It is written down so that the next person starts where this
+/// one finished, and so the 83 are never again read as one token's tally.
+///
+/// The ink is the token's to fix, in the theme files, and the bar stays
+/// where a graphic's bar belongs until it is. Three things have to be
+/// settled before it can be. A repair that settled none of them was
+/// written here and taken out again, so they are written down instead.
+///
+/// One name, two roles. `Placeholder` draws this token as INK; `Media`
+/// fills its frame, and the bars beside a picture that does not fit it,
+/// with the same token as a GROUND. So the block `Media` shows while a
+/// picture is on its way is drawn at exactly the colour of the box behind
+/// it, at 1.00, in every theme -- a pair this table cannot hold, because
+/// both halves of it are the one role. Split the ink from the ground
+/// before moving either, and put the answer to `Media`: it draws both
+/// halves at once, and a change made for the ink repaints its frame
+/// whether or not that was the intent.
+///
+/// Bounded at BOTH ends. The seven grounds of a single theme are not one
+/// colour -- the dark theme's run from #4C4C4C to #767676 -- so an ink
+/// carried just far enough to clear the bar on the worst of them is well
+/// past it on the page: 5.46 on the dark theme's `color_surface`, 6.52 on
+/// the light theme's. `color_on_surface_variant`, the second voice, which
+/// carries real words, reads 4.82 and 5.15 on those same two pages. A
+/// block that out-reads the text it stands in for has stopped standing in
+/// for anything.
+///
+/// And measured on the themes, not on a copy of them. Every number above
+/// comes out of the audit below, which reads the sheets the library ships;
+/// a bound held against literals pasted into a test holds for the paste.
+pub(crate) const GROUPS: &[(&[(&str, &str)], f64, Held)] = &[
+    (MEANING, READABLE, Held::Yes),
+    (SURFACES, READABLE, Held::Yes),
+    (VARIANTS, LEGIBLE, Held::Yes),
+    (INVERSE, READABLE, Held::Yes),
+    (PLACEHOLDERS, LEGIBLE, Held::NotYet),
+];
+
+/// Every pair the library HOLDS its own themes and sheets to, flattened, each
+/// with the bar it answers to. What a mix is measured against.
+///
+/// The same table the audit walks and not a copy of it, which is what makes
+/// the number comparable: a mix that passes here is as readable as a shipped
+/// theme, and no more. A group the library only MEASURES stays out -- the
+/// loading block is one of those today -- because a mix failed on it would be
+/// failed for something every shipped theme fails too.
+///
+/// The panel kept a copy of this once. The library's audit gained the inverse
+/// page a tooltip and a snackbar are drawn on, the copy gained nothing, and
+/// the panel went on measuring sixteen pairs under a comment claiming
+/// seventeen -- passing a mix the library would have failed, on the one pair
+/// nothing else in the library ever re-derives. A test read this file's TEXT
+/// to catch that happening again. There is nothing to catch now: there is one
+/// table, and it is this one.
+pub fn held_pairs() -> &'static [(&'static str, &'static str, f64)] {
+    static HELD: std::sync::OnceLock<Vec<(&'static str, &'static str, f64)>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        GROUPS
+            .iter()
+            .filter(|(_, _, held)| matches!(held, Held::Yes))
+            .flat_map(|(pairs, need, _)| {
+                let need = *need;
+                pairs.iter().map(move |(ground, ink)| (*ground, *ink, need))
+            })
+            .collect()
+    })
+}
+
 /// The ink to draw on a ground: the one asked for where it reaches `need`,
 /// and the plainer end where it does not.
 pub fn ink_for(ground: u32, ink: u32, need: f64) -> u32 {
@@ -628,10 +1074,11 @@ pub fn readable_on(ground: u32, first: u32, other: u32) -> u32 {
     }
 }
 
-fn light_family(hue: f64, sat: f64) -> RoleFamily {
-    let base = hsl_to_rgb(hue, sat, 0.40);
-    let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
-    let ink = hsl_to_rgb(hue, sat, 0.12);
+fn light_family(hue: f64, sat: f64, tuning: &RoleTuning) -> RoleFamily {
+    let at = tuning.light;
+    let base = hsl_to_rgb(hue, sat, at.base);
+    let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), at.container);
+    let ink = hsl_to_rgb(hue, sat, at.ink);
     RoleFamily {
         base,
         on_base: readable_on(base, WHITE, ink),
@@ -640,11 +1087,15 @@ fn light_family(hue: f64, sat: f64) -> RoleFamily {
     }
 }
 
-fn dark_family(hue: f64, sat: f64) -> RoleFamily {
-    let base = hsl_to_rgb(hue, sat, 0.74);
-    let container = hsl_to_rgb(hue, sat * 0.7, 0.30);
-    let ink = hsl_to_rgb(hue, sat, 0.18);
-    let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
+fn dark_family(hue: f64, sat: f64, tuning: &RoleTuning) -> RoleFamily {
+    let at = tuning.dark;
+    let base = hsl_to_rgb(hue, sat, at.base);
+    let container = hsl_to_rgb(hue, sat * 0.7, at.container);
+    let ink = hsl_to_rgb(hue, sat, at.ink);
+    // The pale end is the light rule's container, borrowed: the same colour
+    // at the same lightness, which is why a dark container's text and a
+    // light container's fill are one literal in the theme files.
+    let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
     RoleFamily {
         base,
         on_base: readable_on(base, ink, pale),
@@ -655,7 +1106,8 @@ fn dark_family(hue: f64, sat: f64) -> RoleFamily {
 
 fn skeleton_family(hue: f64, intent: bool) -> RoleFamily {
     if intent {
-        light_family(hue, 0.45)
+        // At the house targets whatever the tuning is: see `RoleTuning`.
+        light_family(hue, 0.45, &RoleTuning::HOUSE)
     } else {
         RoleFamily {
             base: hsl_to_rgb(0.0, 0.0, 0.35),
@@ -666,22 +1118,38 @@ fn skeleton_family(hue: f64, intent: bool) -> RoleFamily {
     }
 }
 
-fn family_for(scheme: Scheme, input: &FamilyInput) -> RoleFamily {
+fn family_for(scheme: Scheme, input: &FamilyInput, tuning: &RoleTuning) -> RoleFamily {
     match scheme {
-        Scheme::Light => light_family(input.hue, input.sat),
-        Scheme::Dark => dark_family(input.hue, input.sat),
+        Scheme::Light => light_family(input.hue, input.sat, tuning),
+        Scheme::Dark => dark_family(input.hue, input.sat, tuning),
         Scheme::Skeleton => skeleton_family(input.hue, input.intent),
     }
 }
 
 /// The accent roles of a scheme grown from a seed, by the rule in the module
-/// doc. `roles_for` is this with the house seed.
+/// doc. `roles_for` is this with the house seed, and this is
+/// `roles_from_seed_tuned` with the house numbers.
 pub fn roles_from_seed(seed: &SeedColors, scheme: Scheme) -> ColorRoles {
-    let inputs = family_inputs(seed);
-    let f = |i: usize| family_for(scheme, &inputs[i]);
+    roles_from_seed_tuned(seed, scheme, &RoleTuning::HOUSE)
+}
+
+/// The accent roles of a scheme grown from a seed, with the rule's own
+/// numbers handed in rather than taken as read: how much colour the brand
+/// families carry, and where each scheme puts a family on the lightness axis.
+/// See `RoleTuning` for why no setting of them can cost a palette its text.
+///
+/// All seven families follow the lightness targets, the four intents too: a
+/// palette made brighter is brighter throughout, and a success green left at
+/// the house lightness beside a primary that has moved reads as a colour from
+/// another theme. Only the brand families follow `brand`. An intent keeps its
+/// own saturation, because how loudly a theme says "error" is not a matter of
+/// how much the person likes their favourite colour.
+pub fn roles_from_seed_tuned(seed: &SeedColors, scheme: Scheme, tuning: &RoleTuning) -> ColorRoles {
+    let inputs = family_inputs(seed, tuning);
+    let f = |i: usize| family_for(scheme, &inputs[i], tuning);
     let inverse_primary = match scheme {
-        Scheme::Light => dark_family(inputs[0].hue, inputs[0].sat).base,
-        Scheme::Dark => light_family(inputs[0].hue, inputs[0].sat).base,
+        Scheme::Light => dark_family(inputs[0].hue, inputs[0].sat, tuning).base,
+        Scheme::Dark => light_family(inputs[0].hue, inputs[0].sat, tuning).base,
         Scheme::Skeleton => 0xBBBBBBFF,
     };
     // Error and warning are not drawn on the colours this rule makes for
@@ -702,6 +1170,88 @@ pub fn roles_from_seed(seed: &SeedColors, scheme: Scheme) -> ColorRoles {
         success: f(5),
         info: f(6),
         inverse_primary,
+    }
+}
+
+/// One brand family grown from a colour somebody named, rather than from a
+/// hue the rule brings its own saturation and lightness to.
+///
+/// The colour IS the base, byte for byte. Nothing here moves it -- not to
+/// make it stand off a page, not for any other reason: a person who picked a
+/// colour and got a different one back has been told their choice was a
+/// suggestion.
+///
+/// It used to move. A base that did not stand `LEGIBLE` off `page` was
+/// carried along the lightness axis away from the page until it did, hue and
+/// saturation untouched, which meant that a colour picked close to the page
+/// came back CHANGED -- and the closer somebody's taste ran to the page they
+/// had chosen, the further their colour was walked from them. What has to
+/// give when a colour cannot be told from the page is the PAGE, which is
+/// derived anyway, and the theme builder moves it (`theme_builder::page_of`).
+/// Nothing in a palette is derived from the page, so the walk left nothing
+/// behind when it went.
+///
+/// `page` is now only what the inks are settled against, and is kept in the
+/// signature because that is what it was always for as well: one of black and
+/// white clears `READABLE` on any ground there is, and `readable_on` falls to
+/// it.
+///
+/// The container and the inks follow from the base the way the rule's own
+/// families do: the container at the scheme's house container lightness in
+/// the base's hue, and every ink put through `readable_on`, so a family made
+/// here reads exactly as well as one the rule grew. Those may move; only the
+/// base is fixed.
+pub fn family_from_color(scheme: Scheme, color: u32, _page: u32) -> RoleFamily {
+    let color = color | 0xFF;
+    let (hue, sat, _) = rgb_to_hsl(color);
+    let base = color;
+    let tuning = RoleTuning::HOUSE;
+    match scheme {
+        Scheme::Light => {
+            let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
+            let ink = hsl_to_rgb(hue, sat, tuning.light.ink);
+            RoleFamily {
+                base,
+                on_base: readable_on(base, WHITE, ink),
+                container,
+                on_container: readable_on(container, ink, WHITE),
+            }
+        }
+        _ => {
+            let container = hsl_to_rgb(hue, sat * 0.7, tuning.dark.container);
+            let ink = hsl_to_rgb(hue, sat, tuning.dark.ink);
+            let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
+            RoleFamily {
+                base,
+                on_base: readable_on(base, ink, pale),
+                container,
+                on_container: readable_on(container, pale, ink),
+            }
+        }
+    }
+}
+
+/// The accent roles of a scheme whose three brand families are colours
+/// somebody named: each through [`family_from_color`], standing off `page`,
+/// and the four intents exactly as the house rule grows them. How loudly a
+/// theme says "error" is not a matter of which colours a person likes.
+///
+/// `color_inverse_primary` is the primary drawn for the OTHER scheme's page,
+/// as the rule's own is: the named colour at the other scheme's house base
+/// lightness, in its own hue and saturation.
+pub fn roles_from_colors(colors: [u32; 3], scheme: Scheme, page: u32) -> ColorRoles {
+    let house = roles_for(scheme);
+    let (hue, sat, _) = rgb_to_hsl(colors[0] | 0xFF);
+    let inverse_primary = match scheme {
+        Scheme::Light => hsl_to_rgb(hue, sat, RoleTuning::HOUSE.dark.base),
+        _ => hsl_to_rgb(hue, sat, RoleTuning::HOUSE.light.base),
+    };
+    ColorRoles {
+        primary: family_from_color(scheme, colors[0], page),
+        secondary: family_from_color(scheme, colors[1], page),
+        tertiary: family_from_color(scheme, colors[2], page),
+        inverse_primary,
+        ..house
     }
 }
 
@@ -966,6 +1516,19 @@ impl RoleGenerator for BuiltinRoles {
     }
 }
 
+/// The same HSL rule with its numbers set by the caller: `BuiltinRoles` is
+/// this at `RoleTuning::HOUSE`. It ignores `contrast` for the same reason --
+/// the lightness targets are whatever the tuning says, and a second knob
+/// pulling at them would be two answers to one question.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TunedRoles(pub RoleTuning);
+
+impl RoleGenerator for TunedRoles {
+    fn generate(&self, seed: &SeedColors, scheme: Scheme, _contrast: f32) -> ColorRoles {
+        roles_from_seed_tuned(seed, scheme, &self.0)
+    }
+}
+
 /// A token value on its way into a script: a colour, a number, or any other
 /// expression written out as the script would read it.
 #[derive(Clone, Debug, PartialEq)]
@@ -989,13 +1552,29 @@ impl TokenValue {
 }
 
 /// A script that derives a theme from an existing one and makes it current:
-/// `mod.themes.<name> = mod.themes.<base>{ k: v ... }` followed by
-/// `mod.theme = mod.themes.<name>`. Run it between `theme_mod` and
-/// `widgets_mod`, or through a live edit, the way the catalogue switches
-/// themes. This is the only sanctioned override path: assigning into
-/// `mod.theme.k` mutates the shared base object for every widget built from
-/// it. Overriding a derived token pins it; the tokens derived from it keep
-/// their old values, since derivation happens once when the base is built.
+/// `mod.themes.<name> = mod.themes.<base>{ k: v ... }`, then
+/// `mod.theme = mod.themes.<name>`, then a bare `true`. Run it between
+/// `theme_mod` and `widgets_mod`, or through a live edit, the way the
+/// catalogue switches themes. This is the only sanctioned override path:
+/// assigning into `mod.theme.k` mutates the shared base object for every
+/// widget built from it. Overriding a derived token pins it; the tokens
+/// derived from it keep their old values, since derivation happens once when
+/// the base is built.
+///
+/// The `true` is the script's own and not the caller's to remember. The last
+/// statement of a body the VM parses from TEXT never runs -- it is taken for
+/// the body's trailing expression and dropped -- and the last statement here
+/// is the assignment that wears the theme. With nothing after it to be
+/// dropped in its place, this script pins every token into a theme under
+/// `mod.themes` and then leaves it sitting there unworn, without an error and
+/// without a line in the log, which is what a saved theme did every time one
+/// was picked. Two callers added a `true` of their own and were right to; the
+/// third evaluated the script as it was written. Every caller gets one now,
+/// and a second changes nothing -- the second is the one that gets dropped.
+/// A `script_eval!` body is no guide to any of this and is exempt: the macro
+/// ends the code it reconstructs with a `;`, so its last statement is a
+/// statement. `a_theme_module_script_wears_the_theme_it_builds` drives the VM
+/// over both shapes and fails if this `true` goes.
 pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenValue)]) -> String {
     let mut out = format!("mod.themes.{name} = mod.themes.{base}{{");
     for (key, value) in overrides {
@@ -1004,7 +1583,7 @@ pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenVa
         out.push_str(": ");
         out.push_str(&value.render());
     }
-    out.push_str(&format!(" }}\nmod.theme = mod.themes.{name}\n"));
+    out.push_str(&format!(" }}\nmod.theme = mod.themes.{name}\ntrue\n"));
     out
 }
 
@@ -1049,6 +1628,45 @@ pub fn theme_source_with_globals(name: &str, base_file_body: &str, globals: &[(S
         out.push('\n');
     }
     out
+}
+
+/// Whether a key is one of the globals the rest of a theme derives from.
+pub fn is_global_key(name: &str) -> bool {
+    GLOBAL_KEYS.contains(&name)
+}
+
+/// The script inside a theme file's `script_mod! { ... }`, as text the VM
+/// can be handed back: the `use` lines and the theme itself, nothing of the
+/// Rust around them.
+pub fn theme_script_body(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut inside = false;
+    for line in source.lines() {
+        if !inside {
+            inside = line.starts_with("script_mod! {");
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// A base theme built again from its own source with a person's globals in
+/// place of the file's, under the base's own name -- so the module's
+/// `mod.theme` and a sheet's first line both land on the re-derived one.
+/// Every rung is an expression of the globals, so a step in `space_factor`
+/// or `font_size_base` moves the whole ladder; a pin on the one token,
+/// which is all an override script can do, left every rung where it was.
+pub fn theme_rederived_script(scheme: Scheme, globals: &[(String, TokenValue)]) -> String {
+    let source = theme_source_with_globals(scheme.theme_name(), scheme.source(), globals);
+    let mut code = theme_script_body(&source);
+    // The last statement of a script is swallowed; `true` takes the fall.
+    code.push_str("true\n");
+    code
 }
 
 /// The eight keys everything else derives from.
@@ -1103,6 +1721,391 @@ pub fn export_theme_source(name: &str, values: &[(String, TokenValue)]) -> Strin
     out
 }
 
+/// A style sheet from a flat list of values, in the shape of the ones under
+/// `widgets/themes`: a first line that points `mod.theme` at the base theme
+/// the sheet is written against, then one `mod.theme.<key> = <value>` a line
+/// in the order given, then the bare `true` every shipped sheet ends on so
+/// that the last assignment is not the statement the VM drops.
+///
+/// A sheet is the one place that assigns into `mod.theme` token by token, and
+/// it may because of when it runs: `desktop_style::apply_theme` evaluates it
+/// inside a module run, after the base themes are built and before a widget
+/// template has read one of them, so there is nothing yet for the write to be
+/// shared with. The same text evaluated at any other moment is the mutation
+/// the module doc warns about.
+///
+/// Like `export_theme_source` it is a snapshot: every value is a literal and
+/// nothing in it re-derives. A sheet that sets `space_factor` and stops has
+/// moved one token, so a caller that means "this spacing" hands in every rung
+/// the spacing came to. `assigned_keys` reads the result back.
+pub fn export_sheet_source(base: Scheme, values: &[(String, TokenValue)]) -> String {
+    let mut out = format!("mod.theme = mod.themes.{}\n", base.theme_name());
+    for (key, value) in values {
+        out.push_str(&format!("mod.theme.{key} = {}\n", value.render()));
+    }
+    out.push_str("true\n");
+    out
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    /// What `roles_for` returned, entry for entry, on the tree as it stood
+    /// before the rule had a tuning, a harmony or a neutral: printed from
+    /// that tree by a throwaway test and pasted here. The generator's own
+    /// drift test compares it to the theme files, which would move with it
+    /// if both were regenerated; this one compares it to the past.
+    const BEFORE: [(Scheme, [u32; 29]); 3] = [
+        (
+            Scheme::Dark,
+            [
+                0xE6A294FF, 0x4A1C11FF, 0x6E372BFF, 0xF7DAD4FF, 0xD3C5A6FF, 0x3E331EFF, 0x5F533AFF, 0xEFE9DCFF,
+                0x9CB1DEFF, 0x172645FF, 0x324367FF, 0xD8E1F3FF, 0xEC8D8DFF, 0xFFFFFFFF, 0x732626FF, 0xFAD1D1FF,
+                0xF5D384FF, 0x553E07FF, 0x7A5F1FFF, 0xFDEFCEFF, 0x98E1B1FF, 0x154725FF, 0x2F6A43FF, 0xD6F5E0FF,
+                0x8EBAEBFF, 0x0E2C4EFF, 0x274A72FF, 0xD2E4F9FF, 0xA53D27FF,
+            ],
+        ),
+        (
+            Scheme::Light,
+            [
+                0xA53D27FF, 0xFFFFFFFF, 0xF7DAD4FF, 0x32120CFF, 0x897243FF, 0xFFFFFFFF, 0xEFE9DCFF, 0x292214FF,
+                0x335499FF, 0xFFFFFFFF, 0xD8E1F3FF, 0x0F192EFF, 0xAF1D1DFF, 0xFFFFFFFF, 0xFAD1D1FF, 0x350909FF,
+                0xBD890FFF, 0x392905FF, 0xFDEFCEFF, 0x392905FF, 0x2E9E53FF, 0x000000FF, 0xD6F5E0FF, 0x0E2F19FF,
+                0x1F61ADFF, 0xFFFFFFFF, 0xD2E4F9FF, 0x091D34FF, 0xE6A294FF,
+            ],
+        ),
+        (
+            Scheme::Skeleton,
+            [
+                0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF, 0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF,
+                0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF, 0x943838FF, 0xFFFFFFFF, 0xF2D9D9FF, 0x2C1111FF,
+                0x947838FF, 0x000000FF, 0xF2EBD9FF, 0x2C2411FF, 0x389457FF, 0x000000FF, 0xD9F2E1FF, 0x112C1AFF,
+                0x386394FF, 0xFFFFFFFF, 0xD9E5F2FF, 0x111E2CFF, 0xBBBBBBFF,
+            ],
+        ),
+    ];
+
+    /// Making the rule's constants into parameters is only free if the
+    /// parameters' defaults ARE the constants. Every way into the rule that
+    /// names no tuning is held to the old answer here, byte for byte: the
+    /// house seed, the house seed spelled out, the favourite-colour
+    /// constructor at the house colour, and both generators.
+    #[test]
+    fn the_house_roles_did_not_move() {
+        for (scheme, before) in BEFORE {
+            let name = scheme.theme_name();
+            let want: Vec<u32> = before.to_vec();
+            let got = |roles: ColorRoles| roles.entries().iter().map(|(_, rgba)| *rgba).collect::<Vec<u32>>();
+            assert_eq!(got(roles_for(scheme)), want, "roles_for({name})");
+            assert_eq!(got(roles_from_seed(&SeedColors::HOUSE, scheme)), want, "roles_from_seed({name})");
+            assert_eq!(
+                got(roles_from_seed_tuned(&SeedColors::HOUSE, scheme, &RoleTuning::default())),
+                want,
+                "the default tuning in {name}"
+            );
+            let favourite = SeedColors::from_favourite(0xFF5C39FF, Harmony::default());
+            assert_eq!(favourite, SeedColors::HOUSE, "the house colour in the house harmony is the house seed");
+            assert_eq!(got(roles_from_seed(&favourite, scheme)), want, "from_favourite in {name}");
+            assert_eq!(got(BuiltinRoles.generate(&SeedColors::HOUSE, scheme, 1.0)), want, "BuiltinRoles in {name}");
+            assert_eq!(
+                got(TunedRoles::default().generate(&SeedColors::HOUSE, scheme, 1.0)),
+                want,
+                "TunedRoles at its default in {name}"
+            );
+            // The order the numbers above are in is the order of the keys.
+            assert_eq!(roles_for(scheme).entries()[0].0, "color_primary");
+            assert_eq!(roles_for(scheme).entries()[28].0, "color_inverse_primary");
+        }
+        // And the grounds: a seed that names no neutral asks for no tint.
+        for scheme in Scheme::ALL {
+            assert_eq!(ground_tint(&SeedColors::HOUSE, scheme), None);
+        }
+    }
+
+    /// How far apart two hues are, the short way round.
+    fn apart(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    /// A harmony is two offsets, and the families have to land on them. Read
+    /// off the colours that come out rather than off `offsets()`, which would
+    /// be the table agreeing with itself. To within four degrees and no
+    /// closer: the secondary keeps about a third of full saturation, so its
+    /// channels are some forty steps apart and eight bits blur its hue by a
+    /// degree or two. The nearest two harmonies differ by thirty.
+    #[test]
+    fn each_harmony_puts_its_hues_where_it_says() {
+        let want: [(Harmony, f64, f64); 6] = [
+            (Harmony::House, 30.0, -150.0),
+            (Harmony::Single, 0.0, 0.0),
+            (Harmony::Analogous, 30.0, -30.0),
+            (Harmony::Complementary, 0.0, 180.0),
+            (Harmony::Split, 150.0, -150.0),
+            (Harmony::Triadic, 120.0, -120.0),
+        ];
+        assert_eq!(want.len(), Harmony::ALL.len(), "a harmony was added and not put to this test");
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for favourite_hue in [0.0, 47.0, 200.0, 333.0] {
+                let favourite = hsl_to_rgb(favourite_hue, 0.9, 0.5);
+                let first = rgb_to_hsl(favourite).0;
+                for (harmony, second, third) in want {
+                    let roles = roles_from_seed(&SeedColors::from_favourite(favourite, harmony), scheme);
+                    let hue = |family: RoleFamily| rgb_to_hsl(family.base).0;
+                    let at = format!("{harmony:?} from hue {favourite_hue} in {}", scheme.theme_name());
+                    assert!(apart(hue(roles.primary), first) < 4.0, "{at}: primary at {}", hue(roles.primary));
+                    assert!(
+                        apart(hue(roles.secondary), first + second) < 4.0,
+                        "{at}: secondary at {}, wanted {}",
+                        hue(roles.secondary),
+                        first + second
+                    );
+                    assert!(
+                        apart(hue(roles.tertiary), first + third) < 4.0,
+                        "{at}: tertiary at {}, wanted {}",
+                        hue(roles.tertiary),
+                        first + third
+                    );
+                }
+            }
+        }
+    }
+
+    /// A seed named outright is somebody's decision and a harmony is a
+    /// default, so the seed wins -- as it won over the fixed rotation before
+    /// there was a harmony to lose to.
+    #[test]
+    fn a_seed_named_outright_beats_the_harmony() {
+        let green = hsl_to_rgb(120.0, 0.9, 0.5);
+        let seed = SeedColors { secondary: Some(green), ..SeedColors::from_favourite(0xFF5C39FF, Harmony::Triadic) };
+        let roles = roles_from_seed(&seed, Scheme::Light);
+        assert!(apart(rgb_to_hsl(roles.secondary.base).0, 120.0) < 4.0);
+        // The tertiary named nothing and still follows the triad.
+        assert!(apart(rgb_to_hsl(roles.tertiary.base).0, seed_hue() - 120.0) < 4.0);
+    }
+
+    /// `brand` is the primary's saturation and the other two keep their
+    /// shares of it; the intents do not move with it at all.
+    #[test]
+    fn brand_moves_the_brand_families_and_leaves_the_intents() {
+        let house = roles_for(Scheme::Light);
+        let sat = |rgba: u32| rgb_to_hsl(rgba).1;
+        let mut last = -1.0;
+        for brand in [0.0, 0.3, 0.62, 0.9, 1.0] {
+            let tuning = RoleTuning { brand, ..RoleTuning::HOUSE };
+            let roles = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &tuning);
+            assert!((sat(roles.primary.base) - brand).abs() < 0.02, "primary at brand {brand}: {}", sat(roles.primary.base));
+            assert!((sat(roles.secondary.base) - brand * 0.55).abs() < 0.02, "secondary at brand {brand}");
+            assert!((sat(roles.tertiary.base) - brand * 0.8).abs() < 0.02, "tertiary at brand {brand}");
+            assert!(sat(roles.primary.base) > last, "more brand is more colour");
+            last = sat(roles.primary.base);
+            for (mine, theirs) in [
+                (roles.error, house.error),
+                (roles.warning, house.warning),
+                (roles.success, house.success),
+                (roles.info, house.info),
+            ] {
+                assert_eq!(mine, theirs, "an intent moved with the brand at {brand}");
+            }
+        }
+        // Out of range is clamped rather than handed to the colour maths.
+        let over = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &RoleTuning { brand: 7.0, ..RoleTuning::HOUSE });
+        let full = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &RoleTuning { brand: 1.0, ..RoleTuning::HOUSE });
+        assert_eq!(over, full);
+    }
+
+    /// The lightness targets are where the colours land, in the scheme they
+    /// belong to, and the other scheme's base is this one's inverse primary.
+    #[test]
+    fn the_lightness_targets_are_where_the_families_land() {
+        let tuning = RoleTuning {
+            brand: 0.62,
+            light: FamilyTargets { base: 0.33, container: 0.86, ink: 0.10 },
+            dark: FamilyTargets { base: 0.81, container: 0.24, ink: 0.15 },
+        };
+        let light = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &tuning);
+        let dark = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Dark, &tuning);
+        let l = |rgba: u32| rgb_to_hsl(rgba).2;
+        for family in [light.primary, light.secondary, light.tertiary, light.success, light.info] {
+            assert!((l(family.base) - 0.33).abs() < 0.01, "{:08X}", family.base);
+            assert!((l(family.container) - 0.86).abs() < 0.01, "{:08X}", family.container);
+        }
+        for family in [dark.primary, dark.secondary, dark.tertiary, dark.success, dark.info] {
+            assert!((l(family.base) - 0.81).abs() < 0.01, "{:08X}", family.base);
+            assert!((l(family.container) - 0.24).abs() < 0.01, "{:08X}", family.container);
+        }
+        assert_eq!(light.inverse_primary, dark.primary.base);
+        assert_eq!(dark.inverse_primary, light.primary.base);
+        // The skeleton has no brand to tune and takes none of it.
+        assert_eq!(roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Skeleton, &tuning), roles_for(Scheme::Skeleton));
+    }
+
+    /// The ground every ink of a family is really drawn on: the family's own
+    /// colours, but for error and warning, whose base every theme keeps as
+    /// the older red and amber.
+    fn unreadable(roles: &ColorRoles) -> Vec<String> {
+        let mut out = Vec::new();
+        for quad in roles.entries().chunks(4).take(7) {
+            let (on_key, on_base) = quad[1];
+            let base = match on_key {
+                "color_on_error" => KEPT_ERROR,
+                "color_on_warning" => KEPT_WARNING,
+                _ => quad[0].1,
+            };
+            for (key, ink, ground) in [(on_key, on_base, base), (quad[3].0, quad[3].1, quad[2].1)] {
+                let ratio = contrast(ink, ground);
+                if ratio < READABLE {
+                    out.push(format!("{key} {ink:08X} on {ground:08X} is {ratio:.2}:1"));
+                }
+            }
+        }
+        out
+    }
+
+    /// No tuning, harmony or hue can cost a family its text, because no ink
+    /// is ever taken on trust: the targets only say what the rule reaches for
+    /// FIRST. Swept well past anything a slider offers -- a base at mid grey,
+    /// where neither black nor white is comfortable, a container as dark as
+    /// its ink, the two ends swapped over -- since a guarantee that holds
+    /// only over the sensible settings is a guarantee about the settings.
+    #[test]
+    fn no_tuning_can_make_a_family_unreadable() {
+        let targets = [
+            RoleTuning::HOUSE.light,
+            RoleTuning::HOUSE.dark,
+            FamilyTargets { base: 0.5, container: 0.5, ink: 0.5 },
+            FamilyTargets { base: 0.18, container: 0.18, ink: 0.18 },
+            FamilyTargets { base: 0.0, container: 1.0, ink: 0.0 },
+            FamilyTargets { base: 1.0, container: 0.0, ink: 1.0 },
+            FamilyTargets { base: 0.62, container: 0.41, ink: 0.55 },
+        ];
+        let mut checked = 0;
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for harmony in Harmony::ALL {
+                for step in 0..36 {
+                    let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
+                    let seed = SeedColors::from_favourite(favourite, harmony);
+                    for brand in [0.0, 0.31, 0.62, 1.0] {
+                        for light in targets {
+                            for dark in targets {
+                                let tuning = RoleTuning { brand, light, dark };
+                                let bad = unreadable(&roles_from_seed_tuned(&seed, scheme, &tuning));
+                                assert!(
+                                    bad.is_empty(),
+                                    "{} {harmony:?} hue {} {tuning:?}: {bad:#?}",
+                                    scheme.theme_name(),
+                                    step * 10
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 6 * 36 * 4 * 7 * 7);
+    }
+
+
+    /// A family grown from a colour somebody named is that colour, byte for
+    /// byte, whatever page it is put to -- including a page it cannot be told
+    /// from, which is the case this used to walk the colour out of. Its inks
+    /// read on it and on its container whatever the colour, and the intents
+    /// are the house rule's.
+    #[test]
+    fn a_named_colour_is_the_family_base_and_nothing_moves_it() {
+        let dark_page = 0x4C4C4CFF;
+        let light_page = 0xD8D8D8FF;
+        let mut checked = 0;
+        for (scheme, page) in [(Scheme::Dark, dark_page), (Scheme::Light, light_page)] {
+            for step in 0..36 {
+                for (sat, light) in [(0.9, 0.5), (0.5, 0.2), (0.4, 0.85), (0.0, 0.5), (1.0, 0.05), (1.0, 0.97)] {
+                    let color = hsl_to_rgb(step as f64 * 10.0, sat, light);
+                    let family = family_from_color(scheme, color, page);
+                    assert_eq!(family.base, color, "{color:08X} in {}", scheme.theme_name());
+                    // And on the page it is nearest of all, its own: still
+                    // itself, where the old rule walked it furthest.
+                    assert_eq!(family_from_color(scheme, color, color).base, color, "{color:08X} on itself");
+                    assert!(contrast(family.on_base, family.base) >= READABLE);
+                    assert!(contrast(family.on_container, family.container) >= READABLE);
+                    checked += 1;
+                }
+            }
+            let roles = roles_from_colors([0x2060E0FF, 0x20A040FF, 0xC03080FF], scheme, page);
+            let house = roles_for(scheme);
+            assert_eq!((roles.error, roles.warning, roles.success, roles.info), (house.error, house.warning, house.success, house.info));
+            assert!(unreadable(&roles).is_empty(), "{:?}", unreadable(&roles));
+        }
+        assert_eq!(checked, 2 * 36 * 6);
+    }
+
+    /// The neutral is a hue to lean toward and its saturation is how far,
+    /// scaled into what each scheme's page can take.
+    #[test]
+    fn a_neutral_leans_the_grounds_by_how_much_colour_it_has() {
+        let seed = |neutral: u32| SeedColors::HOUSE.with_neutral(Some(neutral));
+        let blue = hsl_to_rgb(220.0, 1.0, 0.5);
+        let (tint, amount) = ground_tint(&seed(blue), Scheme::Dark).unwrap();
+        assert_eq!(tint, blue, "the tint is the neutral's hue at full strength");
+        assert!((amount - GROUND_TINT_DARK).abs() < 1e-9, "{amount}");
+        let (_, amount) = ground_tint(&seed(blue), Scheme::Light).unwrap();
+        assert!((amount - GROUND_TINT_LIGHT).abs() < 1e-9, "{amount}");
+        // Half the colour is half the lean, toward the same full-strength tint.
+        let (tint, amount) = ground_tint(&seed(hsl_to_rgb(220.0, 0.5, 0.5)), Scheme::Dark).unwrap();
+        assert!(apart(rgb_to_hsl(tint).0, 220.0) < 1.0 && rgb_to_hsl(tint).1 > 0.99);
+        assert!((amount - GROUND_TINT_DARK * 0.5).abs() < 0.005, "{amount}");
+        // A grey has no hue to lean toward, and the skeleton has no knob.
+        assert_eq!(ground_tint(&seed(0x808080FF), Scheme::Dark), None);
+        assert_eq!(ground_tint(&seed(blue), Scheme::Skeleton), None);
+        // The roles never read it: the grounds are the theme file's business.
+        assert_eq!(roles_from_seed(&seed(blue), Scheme::Dark), roles_for(Scheme::Dark));
+    }
+
+    /// The two tint globals are keys `theme_source_with_globals` replaces, in
+    /// both themes that have a tint at all -- which is the whole of how a
+    /// neutral reaches the page.
+    #[test]
+    fn the_ground_tint_goes_in_as_globals() {
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let (tint, amount) = ground_tint(&SeedColors::HOUSE.with_neutral(Some(0x0044FFFF)), scheme).unwrap();
+            let globals = [
+                ("color_tint".to_string(), TokenValue::Color(tint)),
+                ("color_tint_amount".to_string(), TokenValue::Num(amount)),
+            ];
+            assert!(globals.iter().all(|(key, _)| is_global_key(key)));
+            let out = theme_source_with_globals("tinted", scheme.source(), &globals);
+            assert!(out.contains(&format!("\n        color_tint: #x{tint:08X}\n")), "{}", scheme.theme_name());
+            assert!(out.contains(&format!("\n        color_tint_amount: {amount:?}\n")), "{}", scheme.theme_name());
+            assert!(out.contains("theme.color_w * mix(#ffffff, theme.color_tint, theme.color_tint_amount)"));
+        }
+    }
+
+    #[test]
+    fn a_sheet_is_a_base_line_then_assignments_then_true() {
+        let values = [
+            ("corner_radius".to_string(), TokenValue::Num(6.0)),
+            ("color_primary".to_string(), TokenValue::Color(0xA53D27FF)),
+            ("mspace_1".to_string(), TokenValue::Raw("mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}".to_string())),
+        ];
+        let sheet = export_sheet_source(Scheme::Light, &values);
+        assert_eq!(
+            sheet,
+            "mod.theme = mod.themes.light\n\
+             mod.theme.corner_radius = 6.0\n\
+             mod.theme.color_primary = #xA53D27FF\n\
+             mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}\n\
+             true\n"
+        );
+        assert_eq!(assigned_keys(&sheet), vec!["corner_radius", "color_primary", "mspace_1"]);
+        // The first line is the one the library reads a sheet's appearance
+        // off, and the shipped sheets open the same way.
+        let shipped = include_str!("../../themes/macos-dark/theme.splash");
+        assert_eq!(shipped.lines().next(), export_sheet_source(Scheme::Dark, &[]).lines().next());
+        assert_eq!(shipped.lines().last().map(str::trim), Some("true"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The theme equalizer: several themes mixed together by weight.
 // ---------------------------------------------------------------------------
@@ -1141,6 +2144,10 @@ impl Appearance {
 const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
     (DesktopStyle::Omarchy, false, Scheme::Dark),
     (DesktopStyle::BlackOrange, false, Scheme::Dark),
+    (DesktopStyle::Neumorphic, false, Scheme::Light),
+    (DesktopStyle::Molded, false, Scheme::Light),
+    (DesktopStyle::Glossy, false, Scheme::Dark),
+    (DesktopStyle::Milled, false, Scheme::Dark),
     (DesktopStyle::Macos, false, Scheme::Light),
     (DesktopStyle::Macos, true, Scheme::Dark),
     (DesktopStyle::Windows, false, Scheme::Light),
@@ -1341,33 +2348,62 @@ pub fn to_relative(weights: &[f64], anchor: usize) -> Vec<f64> {
     weights.iter().map(|w| w.max(0.0) / total * RELATIVE_TOTAL).collect()
 }
 
+/// What a group has to hold between its members before it counts as holding
+/// anything. Under this it is rounding, and rounding is not a ratio to share
+/// a slider's worth of weight out by.
+const HELD_NOTHING: f64 = 1e-9;
+
 /// Take up to `amount` from `group` in proportion to what each member holds,
 /// and report what was actually taken.
+///
+/// A group asked for everything it holds is left at nought exactly, and not
+/// at `w - w / held * held`, which is nought give or take an ulp and as often
+/// under as over. That ulp is not harmless. A theme a hair above nought is
+/// still IN the mix as far as a blend can tell, and lends it whole every
+/// token it alone carries; and a handful of them, some a hair under, are
+/// what `give_proportionally` would next be asked to share by.
 fn take_proportionally(weights: &mut [f64], group: &[usize], amount: f64) -> f64 {
-    let held: f64 = group.iter().map(|i| weights[*i]).sum();
+    let held: f64 = group.iter().map(|i| weights[*i].max(0.0)).sum();
     if amount <= 0.0 || held <= 0.0 {
         return 0.0;
     }
-    let take = amount.min(held);
-    for i in group {
-        weights[*i] -= weights[*i] / held * take;
+    // "Everything" to within rounding: a slider run to the top asks for a
+    // hundred less what it has, which is what the others hold only on paper.
+    if held - amount <= HELD_NOTHING {
+        for i in group {
+            weights[*i] = 0.0;
+        }
+        return held;
     }
-    take
+    for i in group {
+        let has = weights[*i].max(0.0);
+        weights[*i] = (has - has / held * amount).max(0.0);
+    }
+    amount
 }
 
 /// Hand `amount` to `group` in proportion to what each member holds, or
-/// evenly when the group holds nothing at all.
+/// evenly when the group holds nothing to speak of.
+///
+/// "To speak of", because a group of spent members may hold a few ulps of
+/// somebody's rounding, of either sign, and a share worked out from those
+/// is a share of nineteen parts in the ratio of six rounding errors: it
+/// once came to 4.75 for five themes and -4.75 for the sixth, with the total
+/// exactly right. Nothing held under nought is counted, and a member found
+/// there is brought back to nought on the way past.
 fn give_proportionally(weights: &mut [f64], group: &[usize], amount: f64) {
     if group.is_empty() || amount <= 0.0 {
         return;
     }
-    let held: f64 = group.iter().map(|i| weights[*i]).sum();
+    let held: f64 = group.iter().map(|i| weights[*i].max(0.0)).sum();
     for i in group {
-        weights[*i] += if held > 0.0 {
-            weights[*i] / held * amount
-        } else {
-            amount / group.len() as f64
-        };
+        let has = weights[*i].max(0.0);
+        weights[*i] = has
+            + if held > HELD_NOTHING {
+                has / held * amount
+            } else {
+                amount / group.len() as f64
+            };
     }
 }
 
@@ -1667,6 +2703,9 @@ impl BlendCache {
                 None => crate::desktop_style::uninstall(vm),
             }
             vm.with_reload(crate::script_mod);
+            // Fifteen resolves are fifteen module rebuilds, each leaving the
+            // last behind; collect once here rather than carry them all.
+            vm.gc();
         }
     }
 
@@ -1875,6 +2914,14 @@ pub fn assigned_keys(sheet_theme: &str) -> Vec<&str> {
 /// into the base theme OBJECT, so a theme read after another one had its sheet
 /// on would be wearing half of it.
 pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
+    // A standing mix comes off for the duration. `theme_mod` re-emits one on
+    // every run now, and a theme resolved with the mix over the top of it
+    // would be filed in the cache as that theme -- wrong for the rest of the
+    // run, and wrong in a way that blends a mix back into itself.
+    let mix = crate::theme_mix(vm.cx_mut());
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), None);
+    }
     let sheet = match theme {
         BlendTheme::Base(_) => {
             crate::desktop_style::uninstall(vm);
@@ -1887,20 +2934,36 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         }
     };
     vm.with_reload(crate::script_mod);
-    // A reload leaves `mod.theme` on the dark theme; a sheet has already moved
-    // it to its own base.
+    // `theme_mod` ends a reload by pointing `mod.theme` at whichever base the
+    // Cx is set to, which is the app's choice and has nothing to do with the
+    // theme being asked for here. So every base says which one it is outright
+    // rather than reading back what the reload happened to leave: the answer
+    // is filed in a cache under the name that was asked for, and an entry
+    // taken from the wrong theme stays wrong for the rest of the run. The
+    // match is over `Scheme` and not over `BlendTheme` so that a fourth base
+    // theme is a compile error here instead of a silent ambient answer.
     match theme {
-        BlendTheme::Base(Scheme::Light) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.light
-            });
-        }
-        BlendTheme::Base(Scheme::Skeleton) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.skeleton
-            });
-        }
-        _ => {}
+        BlendTheme::Base(scheme) => match scheme {
+            Scheme::Dark => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.dark
+                });
+            }
+            Scheme::Light => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.light
+                });
+            }
+            Scheme::Skeleton => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.skeleton
+                });
+            }
+        },
+        // A sheet's own first line moves `mod.theme` to the base it is
+        // written against, and the rest of it assigns into that object, so
+        // moving it again here would throw the sheet away.
+        BlendTheme::Sheet(..) => {}
     }
     let mut keys: Vec<String> = base_theme_keys().iter().map(|k| k.to_string()).collect();
     if let Some(sheet) = &sheet {
@@ -1919,6 +2982,12 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         } else if let Some(number) = value.as_number() {
             values.insert(key, BlendValue::Num(number));
         }
+    }
+    // The mix goes back on the Cx. Not evaluated again here: the caller
+    // that filled a cache reloads once at the end, and that reload re-emits
+    // it. See `BlendCache::fill`.
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), mix);
     }
     ThemeValues { theme, values }
 }
@@ -2162,7 +3231,7 @@ mod.theme.color_surface=#123456
     /// and the `color_` roles.
     fn is_new_prefix(key: &str) -> bool {
         const PLAIN: &[&str] = &[
-            "radius_", "elevation_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
+            "radius_", "elevation_", "material_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
             "font_label_",
         ];
         if PLAIN.iter().any(|p| key.starts_with(p)) {
@@ -2177,7 +3246,7 @@ mod.theme.color_surface=#123456
         if let Some(rest) = key.strip_prefix("color_") {
             const ROLES: &[&str] = &[
                 "on_", "primary", "secondary", "tertiary", "error_", "warning_", "success", "info", "surface",
-                "outline", "inverse", "scrim", "elevation", "presence", "placeholder",
+                "outline", "inverse", "scrim", "elevation", "material", "presence", "placeholder",
             ];
             return ROLES.iter().any(|p| rest.starts_with(p));
         }
@@ -2267,8 +3336,68 @@ mod.theme.color_surface=#123456
         ];
         assert_eq!(
             theme_module_script("mine", "dark", &overrides),
-            "mod.themes.mine = mod.themes.dark{ color_primary: #xFF5C39FF radius_m: 6.0 motion_ease_standard: Ease.Linear }\nmod.theme = mod.themes.mine\n"
+            "mod.themes.mine = mod.themes.dark{ color_primary: #xFF5C39FF radius_m: 6.0 motion_ease_standard: Ease.Linear }\nmod.theme = mod.themes.mine\ntrue\n"
         );
+    }
+
+    /// The line before the `true` is the assignment that wears the theme, and
+    /// the VM drops the last statement of a body it parsed from text, so the
+    /// script ends on something it can afford to lose.
+    ///
+    /// Driven the way the panel drives a saved theme -- one `vm.eval` of the
+    /// text, nothing added to it -- because that is the caller the terminator
+    /// was missing for. The second half runs the same script with the
+    /// terminator taken off again: it goes in without an error, files its
+    /// theme, and leaves the first one on the screen. That is what the first
+    /// half is worth, and it is what taking the `true` out would look like.
+    #[test]
+    fn a_theme_module_script_wears_the_theme_it_builds() {
+        use crate::makepad_platform::Cx;
+        const WORN: u32 = 0x1B2B3B4B;
+        const UNWORN: u32 = 0x5C6C7C8C;
+
+        fn run(vm: &mut ScriptVm, name: &str, code: &str) {
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.eval(ScriptMod {
+                cargo_manifest_path: crate::widgets_dir().into(),
+                module_path: format!("theme_tokens_test_{name}"),
+                file: format!("{name}.splash"),
+                line: 0,
+                column: 0,
+                code: code.to_string(),
+                values: vec![],
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{name}: {errors:?}");
+        }
+        fn worn_page(vm: &mut ScriptVm) -> Option<u32> {
+            let theme = vm.module(LiveId::from_str("theme"));
+            vm.bx.heap.value(theme, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+        }
+        fn filed_page(vm: &mut ScriptVm, name: &str) -> Option<u32> {
+            let themes = vm.module(LiveId::from_str("themes"));
+            let one = vm.bx.heap.value(themes, LiveId::from_str(name).into(), NoTrap).as_object()?;
+            vm.bx.heap.value(one, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+        }
+        let page = |rgba| vec![("color_bg_app".to_string(), TokenValue::Color(rgba))];
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let script = theme_module_script("worn", "light", &page(WORN));
+            run(vm, "worn", &script);
+            assert_eq!(worn_page(vm), Some(WORN), "the theme was pinned and never put on:\n{script}");
+
+            let stripped = theme_module_script("unworn", "light", &page(UNWORN));
+            let stripped = stripped.strip_suffix("true\n").expect("the terminator is what this is about");
+            run(vm, "unworn", stripped);
+            assert_eq!(filed_page(vm, "unworn"), Some(UNWORN), "the derived theme was never built at all");
+            assert_eq!(
+                worn_page(vm),
+                Some(WORN),
+                "the VM ran the last statement after all: read `theme_module_script` before taking its `true` out"
+            );
+        });
     }
 
     #[test]
@@ -2287,6 +3416,17 @@ mod.theme.color_surface=#123456
         assert!(out.contains("\n        space_2: 1.0 * theme.space_factor\n"));
         assert!(out.contains("\n        font_label: TextStyle{\n"));
         assert_eq!(out.lines().count(), Scheme::Dark.source().lines().count() - 3);
+    }
+
+    #[test]
+    fn a_rederived_script_is_the_theme_under_its_own_name_and_ends_in_true() {
+        let globals = [("space_factor".to_string(), TokenValue::Raw("12.0".to_string()))];
+        let code = theme_rederived_script(Scheme::Dark, &globals);
+        assert!(code.starts_with("    use mod.math.*\n"), "the use lines were lost");
+        assert!(code.contains("\n    mod.themes.dark = {\n"), "the base was renamed");
+        assert!(code.contains("\n        space_factor: 12.0\n"));
+        assert!(!code.contains("script_mod!") && !code.contains("#[cfg(test)]"), "Rust leaked into the script");
+        assert!(code.ends_with("    }\ntrue\n"), "the script does not end in the statement it can afford to lose");
     }
 
     #[test]
@@ -2330,6 +3470,10 @@ mod sheet_contrast_tests {
     pub(super) const SHEETS: &[(DesktopStyle, bool)] = &[
         (DesktopStyle::Omarchy, false),
         (DesktopStyle::BlackOrange, false),
+        (DesktopStyle::Neumorphic, false),
+        (DesktopStyle::Molded, false),
+        (DesktopStyle::Glossy, false),
+        (DesktopStyle::Milled, false),
         (DesktopStyle::Macos, false),
         (DesktopStyle::Macos, true),
         (DesktopStyle::Windows, false),
@@ -2340,35 +3484,6 @@ mod sheet_contrast_tests {
         (DesktopStyle::Ios, true),
         (DesktopStyle::Android, false),
         (DesktopStyle::Android, true),
-    ];
-
-    /// The four families that mean something, and the accent, each with the
-    /// ink meant to be drawn on it.
-    pub(super) const MEANING: &[(&str, &str)] = &[
-        ("color_success", "color_on_success"),
-        ("color_warning", "color_on_warning"),
-        ("color_error", "color_on_error"),
-        ("color_info", "color_on_info"),
-        ("color_primary", "color_on_primary"),
-    ];
-
-    /// Every rung of the surface ladder, against the body ink.
-    pub(super) const SURFACES: &[(&str, &str)] = &[
-        ("color_surface", "color_on_surface"),
-        ("color_surface_container", "color_on_surface"),
-        ("color_surface_container_low", "color_on_surface"),
-        ("color_surface_container_high", "color_on_surface"),
-        ("color_surface_container_highest", "color_on_surface"),
-        ("color_surface_dim", "color_on_surface"),
-        ("color_surface_bright", "color_on_surface"),
-    ];
-
-    /// The same rungs against the second voice, which is held to `LEGIBLE`.
-    pub(super) const VARIANTS: &[(&str, &str)] = &[
-        ("color_surface", "color_on_surface_variant"),
-        ("color_surface_container", "color_on_surface_variant"),
-        ("color_surface_container_high", "color_on_surface_variant"),
-        ("color_surface_container_highest", "color_on_surface_variant"),
     ];
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
@@ -2388,7 +3503,7 @@ mod sheet_contrast_tests {
         colors: Vec<(&'static str, Option<u32>)>,
     }
 
-    /// One walk of every base theme and every sheet. The two contrast tests
+    /// One walk of every base theme and every sheet. The three contrast tests
     /// read the same reloads; building the library twelve times per test was
     /// the whole cost (about 0.25 s each).
     fn snaps() -> &'static [ThemeSnap] {
@@ -2396,7 +3511,7 @@ mod sheet_contrast_tests {
         static SNAPS: OnceLock<Vec<ThemeSnap>> = OnceLock::new();
         SNAPS.get_or_init(|| {
             let mut keys = Vec::new();
-            for pairs in [MEANING, SURFACES, VARIANTS] {
+            for pairs in [MEANING, SURFACES, VARIANTS, INVERSE] {
                 for (ground, ink) in pairs {
                     if !keys.contains(ground) {
                         keys.push(*ground);
@@ -2507,37 +3622,60 @@ mod sheet_contrast_tests {
 "));
     }
 
-    /// Every ground a widget draws text on, in every theme and every sheet,
-    /// with the ink that goes on it. Not an assertion: the surface ladder
-    /// does not pass yet, and the numbers are the input to fixing it.
+    /// A tooltip and a snackbar are a page of the opposite scheme, and the
+    /// only ink there is for that page is `color_inverse_on_surface`. Neither
+    /// the ladder derivation nor the blend re-derives the pair, and a sheet
+    /// that sets one of the two and not the other gets the base theme's other
+    /// half, so nothing else in the library has ever asked whether the two
+    /// still stand apart.
+    #[test]
+    fn the_inverse_page_carries_its_own_ink_under_every_sheet() {
+        let bad = snap_failures(INVERSE, READABLE);
+        assert!(bad.is_empty(), "ink that does not hold on the inverse page:
+{}", bad.join("
+"));
+    }
+
+    /// Every ground a widget lays something on, in every theme and every
+    /// sheet, with what goes on it. Not an assertion: it prints the whole of
+    /// `GROUPS`, including the pairs no test holds the library to yet, and
+    /// those numbers are the input to fixing them.
     /// `cargo test -p makepad-widgets contrast_audit -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn contrast_audit() {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<(Held, String)> = Vec::new();
         walk(&mut |vm, label| {
-            let bar = |pairs: &[(&str, &str)]| {
-                if std::ptr::eq(pairs.as_ptr(), VARIANTS.as_ptr()) { LEGIBLE } else { READABLE }
-            };
-            for pairs in [MEANING, SURFACES, VARIANTS] {
-                let need = bar(pairs);
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
                         let c = reads(g | 0xFF, i);
-                        lines.push(format!(
+                        lines.push((*held, format!(
                             "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2} (needs {need}){}",
                             i >> 8,
                             g >> 8,
                             if c < need { "  FAIL" } else { "" }
-                        ));
+                        )));
                     }
                 }
             }
         });
-        let failed = lines.iter().filter(|l| l.ends_with("FAIL")).count();
-        println!("{}", lines.join("
+        let failed = |held: Held| lines.iter().filter(|(h, l)| *h == held && l.ends_with("FAIL")).count();
+        let loose = lines.iter().filter(|(h, _)| *h == Held::NotYet).count();
+        println!("{}", lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("
 "));
-        println!("{failed} of {} pairs below the bar for their kind", lines.len());
+        println!(
+            "{} of {} pairs below the bar for their kind",
+            failed(Held::Yes) + failed(Held::NotYet),
+            lines.len()
+        );
+        println!(
+            "{} of those are held by a test and {} of them fail; {loose} are measured only and {} of them fail",
+            lines.len() - loose,
+            failed(Held::Yes),
+            failed(Held::NotYet)
+        );
     }
 }
 
@@ -2547,7 +3685,6 @@ mod equalizer_tests {
     fn test_cx() -> crate::PooledCx {
         crate::checkout_test_cx()
     }
-    use super::sheet_contrast_tests::{MEANING, SURFACES, VARIANTS};
     use super::*;
     use crate::desktop_style::StyleSheet;
     use std::collections::BTreeMap;
@@ -2708,11 +3845,11 @@ mod equalizer_tests {
         let blend = cache.blend(&[(NEAR_BLACK, 50.0), (CHARCOAL, 50.0)]).unwrap();
         let script = blend.script("equalized");
         assert!(script.starts_with("mod.themes.equalized = mod.themes.dark{ "), "{script}");
-        assert!(script.ends_with(" }\nmod.theme = mod.themes.equalized\n"), "{script}");
+        assert!(script.ends_with(" }\nmod.theme = mod.themes.equalized\ntrue\n"), "{script}");
         assert!(!script.contains("mod.theme."), "a mix must not assign into the shared theme: {script}");
         assert!(script.contains("color_bg_app: #x202020FF"), "{script}");
         assert!(script.contains("space_factor: 9.0"), "{script}");
-        assert_eq!(script.lines().count(), 2, "{script}");
+        assert_eq!(script.lines().count(), 3, "{script}");
     }
 
     /// Nothing to divide by, and a theme nobody resolved, are both said out
@@ -2743,8 +3880,8 @@ mod equalizer_tests {
         let pale = BlendTheme::group(Appearance::Light);
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
-        assert_eq!(dark.len(), 7, "{dark:?}");
-        assert_eq!(pale.len(), 8, "{pale:?}");
+        assert_eq!(dark.len(), 9, "{dark:?}");
+        assert_eq!(pale.len(), 10, "{pale:?}");
     }
 
     /// The weights of a relative mix are a hundred parts shared out, so
@@ -2868,7 +4005,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 557, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 592, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
@@ -2944,6 +4081,54 @@ mod equalizer_tests {
         }
     }
 
+    /// A base theme has to resolve to ITSELF, whatever base the app is set
+    /// to. `theme_mod` ends a reload by pointing `mod.theme` at the Cx's own
+    /// base, so a resolve that trusts what the reload leaves behind reads the
+    /// APP's theme and files it under the name it was asked for. One cache
+    /// entry is then wrong for the rest of the run, and `blend` cannot catch
+    /// it: appearance is read off the enum and not off the values, so a dark
+    /// entry holding light tokens mixes happily with a real dark theme and
+    /// lands on the mid-grey page the appearance split exists to prevent.
+    /// `resolved()` above cannot see any of this: a fresh `Cx` is Dark, which
+    /// is the one base the ambient answer agreed with.
+    #[test]
+    fn a_base_theme_resolves_to_itself_under_another_app_base() {
+        fn resolve_all(vm: &mut ScriptVm, base: crate::BaseTheme) -> Vec<ThemeValues> {
+            use crate::makepad_draw::ScriptVmCx;
+            crate::set_base_theme(vm.cx_mut(), base);
+            vm.with_reload(crate::script_mod);
+            Scheme::ALL.iter().map(|s| resolve_theme(vm, BlendTheme::Base(*s))).collect()
+        }
+        // Its own context, not the pooled one: it reloads the library.
+        let mut cx = crate::makepad_platform::Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let under_light = resolve_all(vm, crate::BaseTheme::Light);
+            // A named token, so a failure reads as the thing it is rather
+            // than as a map that differs somewhere. The dark theme's page is
+            // near black and the light theme's near white; there is nothing
+            // in between for this to be wrong about.
+            let page = |scheme: Scheme| {
+                under_light
+                    .iter()
+                    .find(|v| v.theme == BlendTheme::Base(scheme))
+                    .and_then(|v| v.color("color_bg_app"))
+                    .unwrap_or_else(|| panic!("{} resolved no page at all", scheme.theme_name()))
+                    | 0xFF
+            };
+            let (dark, light) = (page(Scheme::Dark), page(Scheme::Light));
+            assert!(
+                contrast(dark, WHITE) > contrast(dark, BLACK),
+                "the dark theme resolved a {dark:08X} page under a light app"
+            );
+            assert!(contrast(light, BLACK) > contrast(light, WHITE), "the light theme gave {light:08X}");
+            assert!(contrast(dark, light) > READABLE, "{dark:08X} and {light:08X} are the same page");
+            // And not that one token alone: all three themes, all five
+            // hundred values, resolved again under the other base.
+            assert_eq!(under_light, resolve_all(vm, crate::BaseTheme::Dark));
+        });
+    }
+
     /// The case the whole re-derivation is there for. The light theme draws
     /// BLACK on its green and macOS draws WHITE on its own, so half of one
     /// and half of the other meets at a mid grey, and a mid grey stands at
@@ -2992,13 +4177,19 @@ mod equalizer_tests {
         let mut bad: Vec<String> = Vec::new();
         let mut checked = 0usize;
         let mut measured = 0usize;
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
         let mut tightest = (f64::MAX, String::new());
         let mut check = |blend: &ThemeBlend, label: &str, bad: &mut Vec<String>| {
-            for (pairs, need) in [(SURFACES, READABLE), (VARIANTS, LEGIBLE), (MEANING, READABLE)] {
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                if *held == Held::NotYet {
+                    continue;
+                }
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (blend.color(ground), blend.color(ink)) {
                         let c = reads_on(g | 0xFF, i);
                         measured += 1;
+                        seen.insert((*ground, *ink));
                         if c - need < tightest.0 {
                             tightest = (c - need, format!("{label}: {ink} on {ground} = {c:.2}, needs {need}"));
                         }
@@ -3037,8 +4228,74 @@ mod equalizer_tests {
         }
         assert!(checked > 200, "only {checked} mixes were tried");
         // A pair that is never found is a pair that is never checked, and a
-        // test that checks nothing passes beautifully.
+        // test that checks nothing passes beautifully. Counting the total is
+        // not enough for that: a pair a blend simply does not carry drops out
+        // silently and the other sixteen make the number up. So every named
+        // pair has to have been reached at least once.
         assert!(measured > 3000, "only {measured} pairs were actually measured");
+        let want: BTreeSet<(&str, &str)> = GROUPS
+            .iter()
+            .filter(|(_, _, held)| *held == Held::Yes)
+            .flat_map(|(pairs, _, _)| pairs.iter().copied())
+            .collect();
+        assert_eq!(seen, want, "a pair the table names was never found in a blend");
         assert!(bad.is_empty(), "{} of {checked} mixes carry ink that does not hold (the tightest pair overall was {}):\n{}", bad.len(), tightest.1, bad.join("\n"));
+    }
+
+    /// A weight that has been spent is nought, and not the ulp or two that
+    /// taking in proportion leaves behind. The difference is not cosmetic.
+    /// Whatever is handed back is shared out in proportion to what each
+    /// theme HOLDS, so six spent themes holding a few ulps of rounding each
+    /// -- some of them under nought -- were handed nineteen parts in the
+    /// ratio of their rounding errors: five of them got 4.75 and the sixth
+    /// got -4.75, which a panel then drew as a slider at less than nothing.
+    /// The total was right throughout, which is why a test of the total
+    /// never saw it. It takes a few hundred moves of a slider to land on,
+    /// which is what the loop below is for.
+    #[test]
+    fn a_spent_weight_is_nought_and_not_a_residue_to_be_shared_out() {
+        let mut moves = 0;
+        for seed in 0..40u64 {
+            for n in [2usize, 3, 5, 7, 8] {
+                let anchor = seed as usize % n;
+                let mut weights = to_relative(&random_weights(seed, n), anchor);
+                let mut state = seed ^ 0xABCD;
+                for step in 0..400 {
+                    let index = (next_u64(&mut state) % n as u64) as usize;
+                    // The two ends as often as anything between them: the
+                    // ends are what spends a weight outright, and what a
+                    // click on a theme's name sends.
+                    let value = match next_u64(&mut state) % 4 {
+                        0 => 0.0,
+                        1 => RELATIVE_TOTAL,
+                        _ => (next_u64(&mut state) % 101) as f64,
+                    };
+                    relative_set(&mut weights, anchor, index, value);
+                    moves += 1;
+                    let total: f64 = weights.iter().sum();
+                    assert!((total - RELATIVE_TOTAL).abs() < 1e-9, "seed {seed} of {n}, step {step}: {weights:?}");
+                    assert!(
+                        weights.iter().all(|w| *w >= 0.0 && *w <= RELATIVE_TOTAL + 1e-9),
+                        "seed {seed} of {n}, step {step}: a weight left the slider: {weights:?}"
+                    );
+                }
+            }
+        }
+        assert!(moves > 50_000);
+        // The case itself, handed in as it was found: the anchor lowered over
+        // six spent themes that hold nothing but rounding. They hold nothing
+        // to speak of, so what comes back is shared evenly.
+        let ulp = 1e-15;
+        let mut weights = vec![RELATIVE_TOTAL, ulp, ulp, ulp, ulp, ulp, -ulp];
+        relative_set(&mut weights, 0, 0, 81.0);
+        assert!((weights[0] - 81.0).abs() < 1e-9, "{weights:?}");
+        for weight in &weights[1..] {
+            assert!((weight - 19.0 / 6.0).abs() < 1e-9, "{weights:?}");
+        }
+        // And a weight spent outright is nought to the bit, so that the blend
+        // does not find a theme still in the mix at a share of an ulp.
+        let mut weights = to_relative(&[1.0, 3.1666666666666665, 0.7, 2.2], 0);
+        relative_set(&mut weights, 0, 3, RELATIVE_TOTAL);
+        assert_eq!(weights, vec![0.0, 0.0, 0.0, RELATIVE_TOTAL]);
     }
 }

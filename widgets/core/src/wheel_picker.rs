@@ -134,8 +134,15 @@ script_mod! {
 
         /** ink of a row away from the band */
         color_item: theme.color_label_outer_off
+        // The row in the band is the chosen row, so it is written in the ink
+        // a chosen row in a menu or a file tree is written in, on the ground
+        // those rows are drawn on (the band, below). Every theme settles that
+        // ink against that ground; the body ink it used to be was never
+        // settled against any fill at all.
         /** ink of the row in the band */
-        color_selected: theme.color_label_outer
+        color_selected: theme.color_label_inner_active
+        /** ink of the row in the band while the picker is disabled */
+        color_selected_disabled: theme.color_label_inner
 
         draw_text +: {
             text_style: theme.font_regular{font_size: theme.font_size_p}
@@ -168,11 +175,37 @@ script_mod! {
             border_color_drag: uniform(theme.color_bevel_outset_2)
             border_color_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
-            band_color: uniform(theme.color_val)
-            band_color_hover: uniform(theme.color_val_hover)
-            band_color_focus: uniform(theme.color_val_focus)
-            band_color_drag: uniform(theme.color_val_drag)
-            band_color_disabled: uniform(theme.color_val_disabled)
+            // The band marks the chosen row, which is what a selected row
+            // in a list, a menu or a tree marks, so it is drawn in their
+            // ground and not in a slider's value fill: nothing is ever
+            // written on a fill, so no theme holds an ink to one, and a
+            // palette that pushed the fill dark left the digits in the band
+            // dark on dark, and the darker hover fill darker still.
+            //
+            // The pointer and a spin move the band to the other end of a
+            // chosen row, the rung a menu row's gradient runs to. In the
+            // dark theme that is the dimmer wash, which the light digits
+            // stand further off; in the light one a hair deeper, still well
+            // clear. Its louder neighbour would have been the obvious step
+            // and it is the wrong one: on the dark theme it pales the band
+            // toward the digits until they barely read. A built palette
+            // gives every chosen-row rung the same colour and settles the
+            // ink against each of them, so there the band holds still.
+            //
+            // Focus keeps the resting ground and says which column the
+            // arrows turn with a ring, since a lighter slice under the
+            // digits is one more ground for them to fail on. Disabled drops
+            // the band to the disabled face, and the digits to the label a
+            // control wears at rest, which every theme settles against a
+            // ground that close to the page: the colour going out of the
+            // band is what says the picker is off.
+            band_color: uniform(theme.color_outset_active)
+            band_color_hover: uniform(theme.color_outset_2_active)
+            band_color_focus: uniform(theme.color_outset_active)
+            band_color_drag: uniform(theme.color_outset_2_active)
+            band_color_disabled: uniform(theme.color_outset_disabled)
+            /** ring round the column the arrow keys turn */
+            band_ring_color: uniform(theme.color_bevel_focus)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -222,8 +255,11 @@ script_mod! {
 
                     // The column the keyboard is on, so a picker with
                     // several of them says which one the arrows will turn.
-                    sdf.rect(self.band_x, mid_y, self.band_w, self.row_px)
-                    sdf.fill(band + vec4(0.06, 0.06, 0.06, 0.0) * self.focus)
+                    // A ring and not a brighter slice: the digits sit on
+                    // the band, and a slice lighter than it is a ground
+                    // no theme settled their ink against.
+                    sdf.rect(self.band_x + 0.5, mid_y + 0.5, self.band_w - 1.0, self.row_px - 1.0)
+                    sdf.stroke(self.band_ring_color * self.focus, 1.0)
                 }
                 else {
                     sdf.box(
@@ -237,8 +273,8 @@ script_mod! {
 
                     // Lying down the lit slice runs across the travel too,
                     // so `band_x` and `band_w` are read down the page.
-                    sdf.rect(mid_x, self.band_x, self.row_px, self.band_w)
-                    sdf.fill(band + vec4(0.06, 0.06, 0.06, 0.0) * self.focus)
+                    sdf.rect(mid_x + 0.5, self.band_x + 0.5, self.row_px - 1.0, self.band_w - 1.0)
+                    sdf.stroke(self.band_ring_color * self.focus, 1.0)
                 }
 
                 return sdf.result
@@ -945,6 +981,12 @@ pub struct WheelPicker {
     pub color_item: Vec4f,
     #[live]
     pub color_selected: Vec4f,
+    /// The in-band ink while disabled. The band goes to the disabled face
+    /// then, which is nearly the page, so this is an ink settled against
+    /// the page and not the faint disabled one, which no theme holds to
+    /// anything and which reads at about one and a half to one there.
+    #[live]
+    pub color_selected_disabled: Vec4f,
 
     #[rust]
     spins: Vec<Spin>,
@@ -1472,6 +1514,11 @@ impl Widget for WheelPicker {
         let half = rows as f64 * 0.5;
         let reach = half + 0.5;
         let base_font = self.draw_text.text_style.font_size;
+        let chosen_ink = if self.animator_in_state(cx, ids!(disabled.on)) {
+            self.color_selected_disabled
+        } else {
+            self.color_selected
+        };
 
         self.spans.clear();
         for col in 0..self.columns.len() {
@@ -1499,7 +1546,7 @@ impl Widget for WheelPicker {
                 // The row in the band keeps the strong ink and its
                 // neighbours hand theirs over as they leave, mixed rather
                 // than switched so nothing pops as the drum turns.
-                let mut ink = self.color_selected.mix(self.color_item, (d.abs() as f32).min(1.0));
+                let mut ink = chosen_ink.mix(self.color_item, (d.abs() as f32).min(1.0));
                 ink.w *= ink_left as f32;
                 // Where this row's own cell starts along the travel, and
                 // where its column starts across it.

@@ -1273,7 +1273,9 @@ impl HamburgerMenu {
     }
 
     /// The width the breakpoint is compared with.
-    fn measure_width(&self, cx: &Cx2d, walk: Walk) -> f64 {
+    /// How much room this menu has to fill -- not how wide it would like to
+    /// be, which is what `Widget::measure_width` answers.
+    fn available_width(&self, cx: &Cx2d, walk: Walk) -> f64 {
         match self.measure {
             HamburgerMeasure::Window => cx.current_pass_size().x,
             HamburgerMeasure::Parent => cx
@@ -1327,7 +1329,7 @@ impl HamburgerMenu {
 impl Widget for HamburgerMenu {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ensure_seeded(cx.cx.cx);
-        let width = self.measure_width(cx, walk);
+        let width = self.available_width(cx, walk);
         self.decide(cx.cx.cx, width);
         let visible = self.view.visible;
         // A panel left out over a menu that has unfolded, or been switched

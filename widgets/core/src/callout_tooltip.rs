@@ -48,6 +48,8 @@ script_mod! {
                     // The box and its triangle are ONE shape, filled once. Two
                     // fills overlap along the triangle's base, and a colour
                     // with any transparency shows that overlap as a darker bar.
+                    // The tip stays clear of the rounded corners, and the
+                    // triangle's base sits 2.0 inside the box.
                     let mut vertex1 = vec2(0.0, 0.0);
                     let mut vertex2 = vec2(0.0, 0.0);
                     let mut vertex3 = vec2(0.0, 0.0);
@@ -58,7 +60,8 @@ script_mod! {
                         vertex2 = vec2(tip, 2.0);
                         vertex3 = vec2(tip + triangle_height, triangle_height + 2.0);
                     } else if self.callout_position == 90.0 {
-                        // Point rightwards
+                        // Point rightwards, at the target's middle (callout_offset),
+                        // clamped to the tooltip's own edges like the other sides.
                         let tip = min(max(self.callout_offset, triangle_height * 2.0 + 2.0), rect_size.y - triangle_height * 2.0 - 2.0);
                         vertex1 = vec2(rect_size.x - 2.0, tip);
                         vertex2 = vec2(vertex1.x - triangle_height, tip + triangle_height);
