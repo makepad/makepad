@@ -18,6 +18,13 @@ const makepad_abort_controller = typeof AbortController !== "undefined"
         }
     };
 
+// CHROME63: queueMicrotask only exists from Chrome 71. A resolved promise is the
+// same microtask checkpoint and exists everywhere, so the UI-wake coalescing
+// below keeps its ordering guarantee on older engines.
+const makepad_queue_microtask = typeof queueMicrotask !== "undefined"
+    ? queueMicrotask
+    : (callback) => { Promise.resolve().then(callback); };
+
 function makepad_positive_number(value, fallback) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : fallback;
@@ -616,7 +623,7 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.ui_wake_queued = true;
-        queueMicrotask(() => {
+        makepad_queue_microtask(() => {
             this.ui_wake_queued = false;
             if (this.webgl_context_lost) {
                 return;
