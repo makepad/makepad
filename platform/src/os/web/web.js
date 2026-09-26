@@ -1743,7 +1743,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmAudioDeviceList({ devices });
             this.do_wasm_pump();
         };
-        const query = navigator.mediaDevices?.enumerateDevices();
+        const query = navigator.mediaDevices ? navigator.mediaDevices.enumerateDevices() : null;
         if (!query) {
             console.warn("web audio: device enumeration unavailable; using browser default");
             publish_devices([]);
@@ -2864,7 +2864,7 @@ export class WasmWebBrowser extends WasmBridge {
                             request_id: args.request_id,
                             status: hasDevice ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
                         });
-                    } catch {
+                    } catch (error) {
                         if (this.webgl_context_lost) {
                             return;
                         }
