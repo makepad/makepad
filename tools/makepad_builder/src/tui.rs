@@ -1813,7 +1813,7 @@ impl Setup {
             return Ok(());
         }
         let question = if cfg!(windows) { "Delete the build data in target\\?" } else { "Delete the build data in target/?" };
-        if view::choose(question, "your apps keep working; the next compile starts from scratch", &["keep", "delete"], 0)?.as_deref() != Some("delete") {
+        if view::choose(question, "your apps keep working; the next compile starts from scratch", &["keep", "delete"], 1)?.as_deref() != Some("delete") {
             return Ok(());
         }
         // target/ holds only Cargo output (one CARGO_TARGET_DIR per source
