@@ -66,8 +66,8 @@ pub(crate) const F_IN_REAP: u32 = 1 << 25;
 /// A keyframes group: its first init renders the inner timeline to the end
 /// (GSAP `_initTween`), so every step captures from the previous step's end.
 pub(crate) const F_KEYFRAMES: u32 = 1 << 26;
-/// The node owns path binds (`PropTo::path` tracks): freeing it releases
-/// them. Bits 28..31 are free.
+/// The node has `PropTo::path` tracks (a bind is released when the last of
+/// its tracks dies, see `kill_track`). Bits 28..31 are free.
 pub(crate) const F_PATH: u32 = 1 << 27;
 
 // ---- track flags (TrackMeta::flags) ----
@@ -244,11 +244,13 @@ pub(crate) struct PathEntry {
 }
 
 /// What one (tween, target) needs to sample its path: the span, the
-/// offsets and the per-lane offset resolved at capture time.
+/// offsets and the per-lane offset resolved at capture time. It lives while
+/// any of its tracks does: the last one to die releases it (O(1), no scan).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PathBind {
     pub path: u32,
-    pub node: u32,
+    /// Its tracks still alive.
+    pub lanes: u8,
     /// GSAP `start` / `end`.
     pub span: [f64; 2],
     pub offset: [f64; 3],
@@ -1094,7 +1096,7 @@ impl TweenEngine {
         };
         let bind = PathBind {
             path: pix,
-            node: n,
+            lanes: 0,
             span: [finite_or(o.start, 0.0), finite_or(o.end, 1.0)],
             offset: o.offset.map(|v| finite_or(v, 0.0)),
             align: o.align,
@@ -1136,6 +1138,12 @@ impl TweenEngine {
             let Some(key) = key else {
                 continue;
             };
+            // `snap` is a position increment: the rotation is never rounded.
+            let flags = if lane == LANE_ROT {
+                flags & !T_SNAP
+            } else {
+                flags
+            };
             let slot = self.slot_for(target, key, ValueKind::F64);
             let k = self.tr_slot.len() as u32;
             self.tr_from.push([0.0; 4]);
@@ -1162,6 +1170,7 @@ impl TweenEngine {
             self.sl_first_track[slot as usize] = k;
             count += 1;
         }
+        self.pbinds[b as usize].lanes = count as u8;
         count
     }
 
@@ -2018,15 +2027,25 @@ impl TweenEngine {
         }
     }
 
-    /// Marks one track dead.
+    /// Marks one track dead. The last live track of a path bind releases
+    /// the bind (and the path, when nothing else holds it).
     pub(crate) fn kill_track(&mut self, k: u32) {
         let m = &mut self.tr_meta[k as usize];
         if m.flags & T_ALIVE != 0 {
             m.flags &= !T_ALIVE;
+            let path = m.flags & T_PATH != 0;
             self.dead_tracks += 1;
             let n = self.tr_node[k as usize];
             let c = &mut self.cold[n as usize];
             c.live_tracks = c.live_tracks.saturating_sub(1);
+            if path {
+                let b = self.tr_spec[k as usize].bind;
+                let pb = &mut self.pbinds[b as usize];
+                pb.lanes = pb.lanes.saturating_sub(1);
+                if pb.lanes == 0 && pb.live {
+                    self.release_bind(b);
+                }
+            }
         }
     }
 
@@ -2070,10 +2089,8 @@ impl TweenEngine {
         if self.has(n, F_LINKED) {
             self.unlink_raw(n);
         }
+        // Killing the tracks also releases their path binds.
         self.kill_tracks_of(n);
-        if self.has(n, F_PATH) {
-            self.release_binds_of(n);
-        }
         if self.kind(n) == K_TIMELINE {
             self.labels.retain(|l| l.tl != n);
             self.tl_defaults.retain(|d| d.0 != n);
@@ -2092,25 +2109,21 @@ impl TweenEngine {
         self.stats.live_nodes = self.stats.live_nodes.saturating_sub(1);
     }
 
-    /// Releases every path bind of node `n` (only path nodes pay this scan):
-    /// a path left with no bind and no caller hold dies (its geometry is
-    /// dropped by the next building call). Allocation-free.
-    fn release_binds_of(&mut self, n: u32) {
-        for b in 0..self.pbinds.len() {
-            let pb = &mut self.pbinds[b];
-            if !pb.live || pb.node != n {
-                continue;
-            }
-            pb.live = false;
-            let pix = pb.path;
-            self.pb_free.push(b as u32);
-            self.stats.path_binds = self.stats.path_binds.saturating_sub(1);
-            let e = &mut self.paths[pix as usize];
-            e.users = e.users.saturating_sub(1);
-            if e.users == 0 && !e.held {
-                self.kill_path(pix);
-                self.path_dead.push(pix);
-            }
+    /// Releases path bind `b` (its last track died): a path left with no
+    /// bind and no caller hold dies, and its geometry is dropped by the
+    /// next building call. Allocation-free (`pb_free` and `path_dead` keep
+    /// room for every bind and path).
+    fn release_bind(&mut self, b: u32) {
+        let pb = &mut self.pbinds[b as usize];
+        pb.live = false;
+        let pix = pb.path;
+        self.pb_free.push(b);
+        self.stats.path_binds = self.stats.path_binds.saturating_sub(1);
+        let e = &mut self.paths[pix as usize];
+        e.users = e.users.saturating_sub(1);
+        if e.users == 0 && !e.held {
+            self.kill_path(pix);
+            self.path_dead.push(pix);
         }
     }
 

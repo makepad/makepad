@@ -635,7 +635,13 @@ impl PathBuilder {
         let num = rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p;
         let den = rx2 * y1p * y1p + ry2 * x1p * x1p;
         let sign = if large == sweep { -1.0 } else { 1.0 };
-        let q = sign * (num / den).max(0.0).sqrt();
+        // Radii scaled up to the chord put the centre on it: q is 0 exactly
+        // (the formula would leave a roundoff residue of about 1e-8).
+        let q = if lam >= 1.0 {
+            0.0
+        } else {
+            sign * (num / den).max(0.0).sqrt()
+        };
         let cxp = q * rx * y1p / ry;
         let cyp = -q * ry * x1p / rx;
         let cx = c * cxp - s * cyp + (x1 + x) / 2.0;
@@ -768,6 +774,9 @@ pub struct MotionPath {
     subpaths: u32,
     closed: bool,
     turn: f64,
+    /// What each extra lap adds to the heading: `turn` plus the corner at
+    /// the seam (a whole number of turns on a closed path).
+    lap: f64,
 }
 
 impl MotionPath {
@@ -814,7 +823,12 @@ impl MotionPath {
             sp.ang0 = ang0;
             last = Some(ang0 + wrap180(raw1 - ang0));
         }
-        let turn = last.unwrap_or(0.0) - spans.first().map_or(0.0, |sp| sp.ang0);
+        let first = spans.first().map_or(0.0, |sp| sp.ang0);
+        let end = last.unwrap_or(0.0);
+        let turn = end - first;
+        // A lap continues from the end heading into the start heading: the
+        // turn plus the seam's corner (0 when the path is smooth there).
+        let lap = turn + wrap180(first - end);
         let mut bounds = PathBounds {
             min: segs[0].p[0],
             max: segs[0].p[0],
@@ -830,6 +844,7 @@ impl MotionPath {
             subpaths,
             closed,
             turn,
+            lap,
         }
     }
 
@@ -843,7 +858,8 @@ impl MotionPath {
     /// A smooth curve through `points` (GSAP `type: "thru"`), z = 0.
     /// `curviness` 0 draws straight lines, 1 a natural curve, 2 a loose one.
     /// Consecutive duplicates are dropped; a last point within
-    /// [`THRU_CLOSE_EPS`] of the first closes the path.
+    /// [`THRU_CLOSE_EPS`] of the first closes the path when at least three
+    /// distinct points remain (an out-and-back of two points stays open).
     pub fn through(points: &[[f64; 2]], curviness: f64) -> Result<MotionPath, PathError> {
         let p: Vec<[f64; 3]> = points.iter().map(|p| [p[0], p[1], 0.0]).collect();
         Self::through3(&p, curviness)
@@ -868,15 +884,28 @@ impl MotionPath {
             }
             q.push(p);
         }
-        let closed = q.len() >= 3 && {
+        let dup = |a: V3, b: V3| (0..3).all(|i| (a[i] - b[i]).abs() <= 1e-9 * (1.0 + a[i].abs()));
+        let mut closed = q.len() >= 3 && {
             let (f, l) = (q[0], q[q.len() - 1]);
             (0..3).all(|i| (l[i] - f[i]).abs() <= THRU_CLOSE_EPS)
         };
         if closed {
-            q.pop();
+            // The loop drops the closing point, and any point left equal to
+            // the first across the seam. Fewer than three distinct points
+            // make no loop: an out-and-back stays an open path.
+            let mut ring = q.clone();
+            ring.pop();
+            while ring.len() > 1 && dup(ring[ring.len() - 1], ring[0]) {
+                ring.pop();
+            }
+            if ring.len() >= 3 {
+                q = ring;
+            } else {
+                closed = false;
+            }
         }
         let n = q.len();
-        if n < 2 || (closed && n < 3) {
+        if n < 2 {
             return Err(PathError::Empty);
         }
         if k == 0.0 {
@@ -1022,9 +1051,19 @@ impl MotionPath {
     }
 
     /// The unwrapped heading at the end minus the one at the start: 360 for
-    /// one clockwise lap of a circle in y-down coordinates.
+    /// one clockwise lap of a circle in y-down coordinates, 270 for a square
+    /// (its fourth corner is at the seam, see [`MotionPath::lap_turn`]).
     pub fn total_turn(&self) -> f64 {
         self.turn
+    }
+
+    /// What each extra lap of a closed path adds to the heading
+    /// ([`MotionPath::sample`] at `u + 1`): [`MotionPath::total_turn`] plus
+    /// the corner at the seam, so a whole number of turns (360 for the
+    /// circle and for the square). Meaningless for an open path, which does
+    /// not wrap.
+    pub fn lap_turn(&self) -> f64 {
+        self.lap
     }
 
     /// Moves the path by (dx, dy, 0).
@@ -1047,7 +1086,7 @@ impl MotionPath {
 
     /// The point at fraction `u` of the arc length: exactly the start point
     /// at 0 and the end point at 1. A closed path wraps (`u` 1.25 is 0.25
-    /// one lap on, its angle 360 degrees further); an open one clamps. A
+    /// one lap on, its angle [`MotionPath::lap_turn`] further); an open one clamps. A
     /// non-finite `u` counts as 0. Allocation-free.
     pub fn sample(&self, u: f64) -> PathPoint {
         if self.segs.is_empty() {
@@ -1190,7 +1229,7 @@ impl MotionPath {
         PathPoint {
             pos,
             tangent,
-            angle_deg: angle + laps * self.turn,
+            angle_deg: angle + laps * self.lap,
             seg: sp.seg,
             t,
         }

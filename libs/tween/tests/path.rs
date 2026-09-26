@@ -737,6 +737,45 @@ fn a_2d_path_built_in_3d_samples_bitwise_the_same() {
     }
 }
 
+#[test]
+fn a_lap_adds_whole_turns_also_across_a_corner_seam() {
+    let square = svg("M0,0 L10,0 L10,10 L0,10 Z");
+    close(square.total_turn(), 270.0, 1e-9, "square turn");
+    close(square.lap_turn(), 360.0, 1e-9, "square lap");
+    close(
+        square.sample(1.125).angle_deg,
+        360.0,
+        1e-9,
+        "second lap, first edge",
+    );
+    close(square.sample(-0.875).angle_deg, -360.0, 1e-9, "lap before");
+    close(circle().lap_turn(), 360.0, 1e-9, "circle lap");
+    let s = svg("M20,160 C120,-20 220,220 320,100 S520,0 580,160 A60,60 0 0,1 460,160 L400,120 Q340,60 300,140 T160,160 Z");
+    let lap = s.lap_turn();
+    close(
+        lap - 360.0 * (lap / 360.0).round(),
+        0.0,
+        1e-9,
+        "svg lap is whole turns",
+    );
+    // The seam corner shows as a step between u = 1 and just past it.
+    let (a, b) = (s.sample(1.0), s.sample(1.0 + 1e-12));
+    let corner = b.angle_deg - a.angle_deg;
+    let want = s.sample(0.0).angle_deg + lap - a.angle_deg;
+    close(corner, want, 1e-6, "the corner at the seam");
+}
+
+#[test]
+fn an_arc_scaled_to_its_chord_has_its_centre_on_it() {
+    // Radii too small for the chord: the half-arc join is exact, not off by
+    // the 1e-8 roundoff of the unscaled centre formula.
+    let p = svg("M0,0 a1 1 0 00 2 2");
+    assert_eq!(p.segment_count(), 2);
+    let j = p.segment(0).end();
+    close(j[0], 0.0, 1e-12, "join x");
+    close(j[1], 2.0, 1e-12, "join y");
+}
+
 // ---------------------------------------------------------------------------
 // Path tweens
 // ---------------------------------------------------------------------------
@@ -1103,7 +1142,7 @@ fn repeat_refresh_realigns_each_iteration() {
 }
 
 #[test]
-fn a_3d_path_writes_z_and_snap_rounds_every_lane() {
+fn a_3d_path_writes_z_and_snap_rounds_the_positions_not_the_rotation() {
     let mut e = TweenEngine::new();
     let p =
         e.add_path(MotionPath::polyline3(&[[0.0, 0.0, 0.0], [10.0, 20.0, 30.0]], false).unwrap());
@@ -1131,10 +1170,58 @@ fn a_3d_path_writes_z_and_snap_rounds_every_lane() {
     assert_eq!(val(&e, 1, X), 7.0);
     assert_eq!(val(&e, 1, Y), 14.0);
     assert_eq!(val(&e, 1, Z), 21.0);
-    assert_eq!(val(&e, 1, R), 64.0); // atan2(20, 10) = 63.43 deg, + 0.3, snapped
+    // The rotation is not snapped: atan2(20, 10) = 63.43 deg, + 0.3.
+    close(
+        val(&e, 1, R),
+        20f64.atan2(10.0).to_degrees() + 0.3,
+        1e-9,
+        "rotation",
+    );
     e.advance(1.0);
     assert_eq!(val(&e, 0, Z), 31.0);
     assert_eq!(e.path_count(), 0);
+}
+
+#[test]
+fn a_bind_goes_with_its_last_live_track() {
+    let mut e = TweenEngine::new();
+    for i in 0..2 {
+        e.seed(tg(i), K, 0.0.into());
+    }
+    let p = e.add_path(wave());
+    let id = e.to(
+        Targets::List(&[tg(0), tg(1)]),
+        &[
+            PropTo::path(X, Y, p, PathOpts::new().auto_rotate(R, 0.0)),
+            to(K, 1.0),
+        ],
+        lin(1.0).keep(true),
+    );
+    e.release_path(p);
+    e.advance(0.25);
+    assert_eq!((e.stats().path_binds, e.path_count()), (2, 1));
+    // x and y of target 0 die: its rotation still follows the path.
+    e.kill_tweens_of(one(0), Some(&[X, Y]));
+    assert_eq!(e.stats().path_binds, 2);
+    e.kill_tweens_of(one(0), Some(&[R]));
+    assert_eq!(e.stats().path_binds, 1);
+    // Target 1's lanes go: the path goes with them, the tween (K) stays.
+    e.kill_tweens_of(one(1), Some(&[X, Y, R]));
+    assert_eq!((e.stats().path_binds, e.path_count()), (0, 0));
+    assert!(e.path(p).is_none());
+    assert!(e.anim_ref(id).is_alive());
+    e.advance(1.0);
+    assert_eq!(val(&e, 1, K), 1.0);
+    // Killing the node afterwards releases nothing twice.
+    e.anim(id).kill();
+    assert_eq!((e.stats().path_binds, e.path_count()), (0, 0));
+    // The freed bind slot is reused by the next path tween.
+    let q = e.add_path(wave());
+    e.to(one(2), &[PropTo::path(X, Y, q, PathOpts::new())], lin(0.5));
+    e.release_path(q);
+    assert_eq!((e.stats().path_binds, e.path_count()), (1, 1));
+    e.advance(1.0);
+    assert_eq!((e.stats().path_binds, e.path_count()), (0, 0));
 }
 
 #[test]

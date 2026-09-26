@@ -314,7 +314,8 @@ impl<'a> PropTo<'a> {
     /// at `opts.end`; the tween's eased ratio is clamped to 0..1 on the path
     /// (an overshooting ease rests at the ends). The start is the path's,
     /// not the target's current value (unless `opts.align` is
-    /// [`PathAlign::Start`]). `snap` rounds every lane the path writes.
+    /// [`PathAlign::Start`]). `snap` rounds the positions (x, y, z), never
+    /// the rotation.
     pub const fn path(x: PropKey, y: PropKey, path: PathId, opts: PathOpts) -> Self {
         Self {
             key: x,
