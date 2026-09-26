@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chromium 63 uniform-block crash repro</title>
+</head>
+<body>
+<!--
+  Minimal, app-independent reproduction for the Chromium 63 GPU-process crash
+  that stops makepad's web renderer. No makepad code involved: this is ~40
+  lines of plain WebGL2 and it is enough to kill the browser.
+
+  Crash signature (Chromium 63.0.3220.0, reproduced headless and windowed, on
+  SwiftShader and on a real driver via --device /dev/dri):
+
+      Received signal 11 SEGV_MAPERR 000000000000
+      #6 gpu::gles2::Program::ClearUniforms()
+      #7 gpu::gles2::GLES2DecoderImpl::HandleUseProgram()
+      #8 gpu::GLES2DecoderImpl::DoCommandsImpl<>()
+      #9 gpu::CommandBufferService::Flush()
+
+  The renderer dies mid-frame, the page receives `webglcontextlost`, and the
+  browser process is left with a dead GPU process. There is no JS-level error:
+  nothing appears in the console, which is why this is easy to misdiagnose as
+  an application fault.
+
+  Why makepad hits it: every generated draw shader declares std140 uniform
+  blocks (passUniforms / draw_listUniforms / draw_callUniforms, plus
+  userUniforms / liveUniforms when the shader uses those IO kinds). Switching
+  the current program between those programs is what triggers the fault.
+
+  Run it:
+      ?ubo=1   programs use a uniform block  -> crashes after a few useProgram
+      ?ubo=0   identical programs, plain uniforms instead -> no crash
+      ?n=<k>   number of programs to build (default 8)
+
+  The only difference between the two modes is the uniform block, which is the
+  whole point: it isolates the trigger to std140 uniform blocks under
+  useProgram on Chromium 63.
+-->
+<canvas id="c" width="320" height="320"></canvas>
+<script>
+const params = new URLSearchParams(location.search);
+const useUbo = params.get("ubo") === "1";
+const COUNT = Number(params.get("n") || 8);
+
+// The block lives in the vertex stage only. Declaring the same block in both
+// stages requires byte-identical std140 layouts, and ANGLE in Chromium 63
+// rejects several reasonable spellings with
+// "Interface blocks with the same name but different fields/layout".
+const vsUbo = `#version 300 es
+in vec2 a_pos;
+uniform draw_call {
+  vec4 tint;
+  vec4 pad0;
+  vec4 pad1;
+  vec4 pad2;
+};
+out vec4 v_tint;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_tint = tint;
+}`;
+
+const vsPlain = `#version 300 es
+in vec2 a_pos;
+uniform vec4 tint;
+out vec4 v_tint;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_tint = tint;
+}`;
+
+const fs = `#version 300 es
+precision mediump float;
+in vec4 v_tint;
+out vec4 fragColor;
+void main() { fragColor = v_tint; }`;
+
+function say(s) { console.log(s); }
+
+const gl = document.getElementById("c").getContext("webgl2");
+if (!gl) {
+  say("NO WEBGL2");
+} else {
+  const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+  say("mode=" + (useUbo ? "ubo" : "plain") + " count=" + COUNT);
+  say("RENDERER=" + (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+                        : gl.getParameter(gl.RENDERER)));
+
+  const programs = [];
+  for (let i = 0; i < COUNT; i++) {
+    const v = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(v, useUbo ? vsUbo : vsPlain);
+    gl.compileShader(v);
+    if (!gl.getShaderParameter(v, gl.COMPILE_STATUS)) {
+      say("VS FAIL " + gl.getShaderInfoLog(v));
+    }
+    const f = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(f, fs);
+    gl.compileShader(f);
+    if (!gl.getShaderParameter(f, gl.COMPILE_STATUS)) {
+      say("FS FAIL " + gl.getShaderInfoLog(f));
+    }
+    const p = gl.createProgram();
+    gl.attachShader(p, v);
+    gl.attachShader(p, f);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      say("LINK FAIL " + gl.getProgramInfoLog(p));
+    }
+    programs.push(p);
+  }
+  say("built " + programs.length + " programs");
+
+  // The crash needs several DISTINCT programs in play, because Chromium 63's
+  // gles2 only faults while switching the current program.
+  for (let i = 0; i < programs.length; i++) {
+    gl.useProgram(programs[i]);
+    say("useProgram " + i + " ok uniforms=" +
+        gl.getProgramParameter(programs[i], gl.ACTIVE_UNIFORMS));
+
+    if (useUbo) {
+      const idx = gl.getUniformBlockIndex(programs[i], "draw_call");
+      if (idx !== 0xffffffff && idx !== -1) {
+        gl.uniformBlockBinding(programs[i], idx, 0);
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.UNIFORM_BUFFER, buf);
+        gl.bufferData(gl.UNIFORM_BUFFER, 64, gl.DYNAMIC_DRAW);
+        const m = new Float32Array(16);
+        m[0] = 0.2; m[1] = 0.4; m[2] = 0.6; m[3] = 1.0;
+        gl.bufferSubData(gl.UNIFORM_BUFFER, 0, m);
+        gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, buf);
+      }
+    } else {
+      gl.uniform4f(gl.getUniformLocation(programs[i], "tint"), 0.2, 0.4, 0.6, 1.0);
+    }
+
+    gl.clearColor(0.1, 0.15, 0.2, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  say("DONE no crash");
+}
+</script>
+</body>
+</html>
