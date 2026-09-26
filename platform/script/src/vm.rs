@@ -1591,6 +1591,9 @@ impl<'a> ScriptVm<'a> {
             }
         }
         let i = bodies.len();
+        // A body id past the packing would alias another body's functions
+        // (see `ScriptIp::BODY_BITS`): stop here rather than run the wrong code.
+        assert!(i < ScriptIp::MAX_BODIES, "script body limit reached: {} bodies fit in ScriptIp", ScriptIp::MAX_BODIES);
         bodies.push(new_body);
         i as u16
     }

@@ -39,6 +39,12 @@ impl NetworkRuntime {
         self.sink.set_wake_fn(wake_fn);
     }
 
+    /// Events of `socket_id` are delivered without waking or signaling the
+    /// UI thread: its loop blocks on this runtime and reads them itself.
+    pub fn set_quiet_socket(&self, socket_id: Option<LiveId>) {
+        self.sink.set_quiet_socket(socket_id);
+    }
+
     pub fn http_start(&self, request_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
         self.backend
             .http_start(request_id, request, self.sink.clone())

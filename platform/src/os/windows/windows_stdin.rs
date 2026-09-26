@@ -133,6 +133,8 @@ impl Cx {
         self.set_physical_keyboard_state(true);
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
+        // What this child's pointer input understands (see HostedPointerCaps).
+        Self::stdin_send_to_host(AppToStudio::Custom(crate::ime::HostedPointerCaps::current().to_json()));
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -237,7 +239,7 @@ impl Cx {
                 };
                 self.call_event_handler(&Event::TweakRay(tweak_ray));
             }
-            StudioToApp::MouseUp(ref e) => {
+            StudioToApp::MouseUp(ref e) | StudioToApp::MouseCancel(ref e) => {
                 let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
                 {
                     (window_id, self.windows[window_id].window_geom.position)

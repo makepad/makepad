@@ -702,14 +702,24 @@ impl IosApp {
     }
 
     pub fn send_touch_update() {
+        Self::send_touches(false);
+    }
+
+    /// The touches the system cancelled: dispatched as a cancellation.
+    pub fn send_touch_cancel() {
+        Self::send_touches(true);
+    }
+
+    fn send_touches(cancel: bool) {
         let time_now = with_ios_app(|app| app.time_now());
         let touches = with_ios_app(|app| app.touches.clone());
-        IosApp::do_callback(IosEvent::TouchUpdate(TouchUpdateEvent {
+        let event = TouchUpdateEvent {
             time: time_now,
             window_id: CxWindowPool::id_zero(),
             modifiers: KeyModifiers::default(),
             touches,
-        }));
+        };
+        IosApp::do_callback(if cancel { IosEvent::TouchCancel(event) } else { IosEvent::TouchUpdate(event) });
         // remove the stopped touches
         with_ios_app(|app| {
             app.touches.retain(|v| {

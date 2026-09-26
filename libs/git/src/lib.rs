@@ -2,6 +2,7 @@ pub mod attribution;
 pub mod blob_read;
 pub mod clone;
 mod bounded_read;
+mod clock;
 pub mod commit;
 pub mod diff;
 pub mod error;

@@ -395,6 +395,7 @@ impl Cx {
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
+        target_os = "android",
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
@@ -406,6 +407,7 @@ impl Cx {
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
+        target_os = "android",
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
@@ -416,6 +418,7 @@ impl Cx {
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
+        target_os = "android",
         all(target_os = "linux", not(target_env = "ohos")),
     ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]

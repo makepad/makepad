@@ -7,11 +7,13 @@ pub use makepad_error_log::LogLevel;
 pub use mouse::{KeyModifiers, MouseButton};
 pub use shared_framebuf::*;
 pub use studio::*;
+pub use relay::*;
 
 pub mod cursor;
 pub mod gpu;
 pub mod hub_protocol;
 pub mod keyboard;
 pub mod mouse;
+pub mod relay;
 pub mod shared_framebuf;
 pub mod studio;

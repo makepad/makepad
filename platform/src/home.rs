@@ -22,3 +22,28 @@ pub fn makepad_home() -> PathBuf {
 pub fn storage_dir() -> PathBuf {
     makepad_home().join("storage")
 }
+
+/// Where an app keeps its own per-user files: `~/Library/Application
+/// Support/Makepad/<app>` on macOS, `%APPDATA%\Makepad\<app>` on Windows,
+/// `$XDG_DATA_HOME/makepad/<app>` (or `~/.local/share/makepad/<app>`)
+/// elsewhere. `None` when the platform names no such base as an absolute
+/// path. The directory may not exist yet.
+///
+/// Overrides for isolated runs (`MUSIC_DATA_DIR` and the like) are the
+/// caller's: an app checks its own variable and falls back to this.
+pub fn app_data_dir(app: &str) -> Option<PathBuf> {
+    let absolute = |var: &str| std::env::var_os(var).map(PathBuf::from).filter(|path| path.is_absolute());
+    #[cfg(target_os = "macos")]
+    {
+        Some(absolute("HOME")?.join("Library").join("Application Support").join("Makepad").join(app))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(absolute("APPDATA")?.join("Makepad").join(app))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let base = absolute("XDG_DATA_HOME").or_else(|| absolute("HOME").map(|home| home.join(".local").join("share")))?;
+        Some(base.join("makepad").join(app))
+    }
+}

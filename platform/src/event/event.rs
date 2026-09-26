@@ -196,6 +196,12 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead, use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     TouchUpdate(TouchUpdateEvent),
+    /// A press taken away before it lifted (see [`FingerCancelEvent`]):
+    /// dispatched by the owner of a claimed gesture to its children, or by
+    /// a host that cancels a finger. Handle it through `hits()`, which
+    /// turns it into the capture's terminal `Hit::FingerUp` with
+    /// `cancelled: true`.
+    FingerCancel(FingerCancelEvent),
     /// The raw event that occurs when the user finishes a long press touch/click.
     ///
     /// Do not match upon or handle this event directly; instead, use the family of
@@ -323,6 +329,7 @@ impl Event {
             59 => "TweakRay",
             22 => "MouseUp",
             23 => "TouchUpdate",
+            75 => "FingerCancel",
             24 => "LongPress",
             25 => "Scroll",
             74 => "Pinch",
@@ -416,6 +423,7 @@ impl Event {
             Self::TweakRay(_) => 59,
             Self::MouseUp(_) => 22,
             Self::TouchUpdate(_) => 23,
+            Self::FingerCancel(_) => 75,
             Self::LongPress(_) => 24,
             Self::Scroll(_) => 25,
             Self::Pinch(_) => 74,
