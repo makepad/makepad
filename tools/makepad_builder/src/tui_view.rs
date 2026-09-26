@@ -104,6 +104,8 @@ pub(super) struct Background {
     pub batch: usize,
     /// The update check and its progress.
     pub update: Option<Doing>,
+    /// Local AI's components installing, on its SETUP row.
+    pub setup: Option<Doing>,
 }
 #[derive(Clone)]
 pub(super) struct Building {
@@ -575,6 +577,9 @@ fn live_status(id: &str) -> Option<Text> {
         let b = b.borrow();
         if id == "updates" {
             return b.update.as_ref().map(doing_text);
+        }
+        if id == "localai" {
+            return b.setup.as_ref().map(doing_text);
         }
         if let Some(building) = b.building.as_ref().filter(|x| x.id == id) {
             if building.stopping {
