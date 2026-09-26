@@ -243,12 +243,16 @@ impl<'a> ScriptVm<'a> {
                     return;
                 }
                 let start_ip = lf.start_ip;
-                let bases_scope = lf.bases.scope;
+                let bases = lf.bases;
+                let bases_scope = bases.scope;
                 let value_id = values.value_id;
                 let key_id = values.key_id;
                 let index_id = values.index_id;
                 let index = values.index;
                 self.bx.threads.cur().trap.goto(start_ip);
+                // Discard iteration-local try frames, operand values and
+                // call-builder state before the next iteration (matches break).
+                self.bx.threads.cur().truncate_loop_iteration_bases(bases);
                 if !self.reset_iteration_scope(bases_scope) {
                     self.bail("scopes empty after pop in end_for_loop/number");
                     return;
@@ -307,10 +311,14 @@ impl<'a> ScriptVm<'a> {
                         return;
                     }
                     let start_ip = lf.start_ip;
-                    let bases_scope = lf.bases.scope;
+                    let bases = lf.bases;
+                    let bases_scope = bases.scope;
                     let value_id = values.value_id;
                     let key_id = values.key_id;
                     let index = values.index;
+                    // Discard iteration-local try frames, operand values and
+                    // call-builder state before the next iteration (matches break).
+                    self.bx.threads.cur().truncate_loop_iteration_bases(bases);
                     if !self.reset_iteration_scope(bases_scope) {
                         self.bail("scopes empty after pop in end_for_loop/range");
                         return;
@@ -362,12 +370,16 @@ impl<'a> ScriptVm<'a> {
                         return;
                     };
                     let start_ip = lf.start_ip;
-                    let bases_scope = lf.bases.scope;
+                    let bases = lf.bases;
+                    let bases_scope = bases.scope;
                     let value_id = values.value_id;
                     let index_id = values.index_id;
                     let key_id = values.key_id;
                     let index = values.index;
 
+                    // Discard iteration-local try frames, operand values and
+                    // call-builder state before the next iteration (matches break).
+                    self.bx.threads.cur().truncate_loop_iteration_bases(bases);
                     if !self.reset_iteration_scope(bases_scope) {
                         self.bail("scopes empty after pop in end_for_loop/object");
                         return;
@@ -410,12 +422,16 @@ impl<'a> ScriptVm<'a> {
                     return;
                 };
                 let start_ip = lf.start_ip;
-                let bases_scope = lf.bases.scope;
+                let bases = lf.bases;
+                let bases_scope = bases.scope;
                 let value_id = values.value_id;
                 let index_id = values.index_id;
                 let key_id = values.key_id;
                 let index = values.index;
 
+                // Discard iteration-local try frames, operand values and
+                // call-builder state before the next iteration (matches break).
+                self.bx.threads.cur().truncate_loop_iteration_bases(bases);
                 if !self.reset_iteration_scope(bases_scope) {
                     self.bail("scopes empty after pop in end_for_loop/array");
                     return;
@@ -446,11 +462,22 @@ impl<'a> ScriptVm<'a> {
                 return;
             };
             let start_ip = lf.start_ip;
+            let mut bases = lf.bases;
+            // Plain `loop`/`while` keeps its iteration scope across back-edges.
+            // Only nested scopes and iteration-local interpreter state (try
+            // frames, operand values, call-builder state) are reset, so an
+            // abandoned `try` from this iteration cannot catch a later
+            // iteration's error.
+            bases.scope += 1;
+            self.bx.threads.cur().truncate_loop_iteration_bases(bases);
+            self.bx
+                .threads
+                .cur()
+                .free_unreffed_scopes(&bases, &mut self.bx.heap);
             self.bx.threads.cur().trap.goto(start_ip);
             return;
         }
-        println!("For end unknown state");
-        self.bx.threads.cur().trap.goto_next();
+        self.bail("unknown loop state");
     }
 
     pub fn break_for_loop(&mut self) {

@@ -348,4 +348,47 @@ mod tests {
         ));
         assert_eq!(heap.array_len(reused), 0);
     }
+
+    #[test]
+    fn capped_sparse_array_growth_is_refused_before_mutation() {
+        let mut heap = ScriptHeap::empty();
+        let array = heap.new_array();
+        heap.set_max_heap_bytes(Some(usize::MAX));
+        let baseline = heap.accounted_heap_bytes();
+        heap.set_max_heap_bytes(Some(baseline + 1024));
+
+        let trap = ScriptTrap::NoTrap;
+        let before = heap.arrays[array].storage.retained_bytes();
+        heap.set_array_index(array, 1 << 20, NIL, trap.pass());
+        assert!(heap.take_heap_limit_exceeded());
+        assert_eq!(heap.array_len(array), 0);
+        assert_eq!(heap.arrays[array].storage.retained_bytes(), before);
+
+        // A write that fits is accepted and charged.
+        let accounted = heap.accounted_heap_bytes();
+        heap.set_array_index(array, 3, NIL, trap.pass());
+        assert!(!heap.take_heap_limit_exceeded());
+        assert_eq!(heap.array_len(array), 4);
+        assert!(heap.accounted_heap_bytes() > accounted);
+    }
+
+    #[test]
+    fn numeric_storage_variants_report_retained_capacity() {
+        let mut heap = ScriptHeap::empty();
+        let bytes = heap.new_array_from_vec_u8(vec![1, 2, 3, 4]);
+        assert!(heap.arrays[bytes].storage.retained_bytes() >= 4);
+        let text = heap.new_string_from_str("héllo wörld");
+        let chars = heap.string_to_chars_array(text);
+        assert!(matches!(heap.arrays[chars].storage, ScriptArrayStorage::U32(_)));
+        assert!(heap.arrays[chars].storage.retained_bytes() >= 11 * 4);
+        let generic = heap.new_array();
+        let trap = ScriptTrap::NoTrap;
+        for index in 0..8 {
+            heap.array_push(generic, ScriptValue::from_f64(index as f64), trap.pass());
+        }
+        assert!(
+            heap.arrays[generic].storage.retained_bytes()
+                >= 8 * std::mem::size_of::<ScriptValue>()
+        );
+    }
 }

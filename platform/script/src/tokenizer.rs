@@ -403,7 +403,9 @@ impl ScriptTokenizer {
         } else {
             0
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::RustValue(number));
     }
@@ -412,7 +414,9 @@ impl ScriptTokenizer {
         // Measure before clearing: a float token's position was taken from
         // an already-emptied `temp`, so it pointed one past its terminator —
         // a float ending a line resolved to the NEXT line, column 0.
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         let number = if let Ok(v) = self.temp.parse::<f64>() {
             // allow the shader compiler to recognise the difference btween 1 and 1.
             if !(self.temp.contains('.') || self.temp.contains('e') || self.temp.contains('E'))
@@ -432,7 +436,9 @@ impl ScriptTokenizer {
     }
 
     fn emit_f32(&mut self) {
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         let number = if let Ok(v) = self.temp.parse::<f32>() {
             self.temp.clear();
             v
@@ -450,13 +456,17 @@ impl ScriptTokenizer {
         } else {
             0
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::U32(number));
     }
 
     fn emit_i32(&mut self) {
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         let number = if let Ok(v) = self.temp.parse::<i32>() {
             self.temp.clear();
             v
@@ -468,7 +478,9 @@ impl ScriptTokenizer {
     }
 
     fn emit_f16(&mut self) {
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         let number = if let Ok(v) = self.temp.parse::<f32>() {
             self.temp.clear();
             v
@@ -490,7 +502,9 @@ impl ScriptTokenizer {
             }
             Ok(id) => id,
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::Identifier(id));
     }
@@ -509,7 +523,9 @@ impl ScriptTokenizer {
             }
             Ok(id) => id,
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::Operator(id));
     }
@@ -529,7 +545,9 @@ impl ScriptTokenizer {
             }
             Ok(id) => id,
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::Separator(id));
     }
@@ -539,7 +557,9 @@ impl ScriptTokenizer {
             Err(()) => 0xff00ffff,
             Ok(color) => color,
         };
-        let len = self.temp.len();
+        // `pos` counts chars (token_index_to_row_col iterates chars), so the
+        // token length must too or a multibyte identifier underflows.
+        let len = self.temp.chars().count();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::Color(color));
     }
@@ -1029,8 +1049,11 @@ impl ScriptTokenizer {
                         self.emit_f16();
                         self.state = State::Whitespace
                     } else if c == '_' {
-                        // skip these
-                        self.state = State::Whitespace
+                        // Numeric separators stay in the literal (parse::<f64>
+                        // ignores nothing, so they are simply not pushed).
+                        // Moving to Whitespace here left `temp` stale and let a
+                        // later separator reach emit_separator and panic.
+                        continue;
                     } else if c == '$' || c.is_alphabetic() {
                         self.emit_f64();
                         self.state = State::Identifier;
@@ -1120,5 +1143,70 @@ impl ScriptTokenizer {
             }
         }
         &self.tokens[start..self.tokens.len()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_identifier_does_not_underflow_its_token_position() {
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+
+        tokenizer.tokenize("\u{540d} ", &mut heap);
+
+        assert_eq!(tokenizer.tokens.len(), 1);
+        // Same position convention as an ASCII identifier of the same length.
+        let mut ascii = ScriptTokenizer::default();
+        ascii.tokenize("a ", &mut heap);
+        assert_eq!(
+            tokenizer.token_index_to_row_col(0),
+            ascii.token_index_to_row_col(0)
+        );
+    }
+
+    #[test]
+    fn numeric_underscores_stay_in_the_pending_number_until_a_separator() {
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+
+        tokenizer.tokenize("0_;1_000;1.5_;1e2_;", &mut heap);
+
+        assert_eq!(tokenizer.tokens.len(), 8);
+        assert_eq!(tokenizer.tokens[0].token.as_u40(), Some(0));
+        assert_eq!(tokenizer.tokens[2].token.as_u40(), Some(1_000));
+        assert_eq!(tokenizer.tokens[4].token.as_f64(), Some(1.5));
+        assert_eq!(tokenizer.tokens[6].token.as_f64(), Some(100.0));
+        for separator in [1, 3, 5, 7] {
+            assert!(matches!(
+                tokenizer.tokens[separator].token,
+                ScriptToken::Separator(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn numeric_underscore_before_whitespace_flushes_through_the_number_path() {
+        // The old tokenizer moved to Whitespace on `_` while keeping the
+        // buffered digits; the terminal preflight marker `\n;` then reached
+        // emit_separator with stale text and panicked.
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+
+        tokenizer.tokenize("1_000", &mut heap);
+        tokenizer.tokenize("\n;", &mut heap);
+
+        assert_eq!(tokenizer.tokens.len(), 2);
+        assert_eq!(tokenizer.tokens[0].token.as_u40(), Some(1_000));
+        assert!(matches!(tokenizer.tokens[1].token, ScriptToken::Separator(_)));
+
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize("1_ 2;", &mut heap);
+        assert_eq!(tokenizer.tokens.len(), 3);
+        assert_eq!(tokenizer.tokens[0].token.as_u40(), Some(1));
+        assert_eq!(tokenizer.tokens[1].token.as_u40(), Some(2));
+        assert!(matches!(tokenizer.tokens[2].token, ScriptToken::Separator(_)));
     }
 }

@@ -20,6 +20,7 @@ macro_rules! script_eval {
 pub mod colorhex;
 mod clock;
 pub mod docs;
+pub mod equality;
 pub mod gen_index;
 pub mod heap;
 pub mod mod_gc;
@@ -94,6 +95,7 @@ pub use makepad_live_id::*;
 pub use makepad_script_derive::*;
 pub use object::*;
 pub use string::*;
+pub use string_heap::*;
 pub use thread::*;
 pub use traits::*;
 pub use trap::*;
