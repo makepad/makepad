@@ -2268,6 +2268,11 @@ impl WidgetNode for FloatingAction {
     }
 }
 
+/// The keys that press the set's button, as they press any button.
+fn is_activation_key(key_code: KeyCode) -> bool {
+    matches!(key_code, KeyCode::Space | KeyCode::ReturnKey | KeyCode::NumpadEnter)
+}
+
 impl FloatingAction {
     fn sort_children(&mut self) {
         self.main = WidgetRef::default();
@@ -2795,7 +2800,7 @@ impl FloatingAction {
     }
 
     fn key_down(&mut self, cx: &mut Cx, event: &Event, ke: &KeyEvent, on_top: bool) {
-        let activate = matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::Space);
+        let activate = is_activation_key(ke.key_code);
         let main_area = self.main.area();
         let main_focused = !main_area.is_empty() && cx.has_key_focus(main_area);
         if !self.open {
@@ -3027,7 +3032,13 @@ impl Widget for FloatingAction {
             Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_) | Event::MouseLeave(_) | Event::TouchUpdate(_) | Event::LongPress(_)
         );
         let shielded = pointer && (self.pressed_item.is_some() || self.travelling(cx.seconds_since_app_start()));
-        self.main.handle_event(cx, event, scope);
+        // The set answers Return and Space on its button itself (key_down),
+        // so the button does not also activate from them: its press would
+        // shut the set the key just opened.
+        let keyed = matches!(event, Event::KeyDown(ke) | Event::KeyUp(ke) if is_activation_key(ke.key_code));
+        if !keyed {
+            self.main.handle_event(cx, event, scope);
+        }
         if !shielded {
             for (_, item) in &self.items {
                 item.handle_event(cx, event, scope);
