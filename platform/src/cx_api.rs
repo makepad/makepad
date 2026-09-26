@@ -693,6 +693,36 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Arm the VM's captured-error sink for the live-edit re-run that
+    /// follows, so a hot-reloaded block that fails to run is reported to
+    /// the caller as well as the log. Called by the `app_main!` expansion,
+    /// which is why it is public.
+    pub fn live_edit_capture_begin(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        self.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+    }
+
+    /// Take the errors the re-run raised: log them, and keep them for
+    /// `take_live_edit_errors`. Public for the `app_main!` expansion.
+    pub fn live_edit_capture_end(&mut self) {
+        if self.script_vm.is_none() {
+            return;
+        }
+        let errors = self.with_vm(|vm| vm.take_errors());
+        for error in &errors {
+            crate::error!("live edit: {}", error);
+        }
+        self.live_edit_errors = errors;
+    }
+
+    /// The script errors raised by the most recent live-edit re-run, if any.
+    /// Taking them clears the record.
+    pub fn take_live_edit_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.live_edit_errors)
+    }
+
     /// The `Apply` variant the currently dispatching `Event::LiveEdit` should
     /// be re-applied with — `Reload` for a file-change hot reload, `Rebake`
     /// for a `request_live_edit()` re-bake. `app_main!` reads this; app code
@@ -1570,11 +1600,21 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::HideSelectionHandles);
     }
 
+    /// Start a drag of `items` inside the app. Items that are not files
+    /// (strings, and anything with an `internal_id`) are the app's own
+    /// data, so they are dragged by the platform-independent path on every
+    /// backend: the pointer's moves become `Event::Drag`, its release
+    /// `Event::Drop` then `Event::DragEnd`. Files alone go to the OS drag
+    /// where a backend has one, since a file may leave the app.
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         if self.script_data.std.host_io_only() { return; }
-        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-        {
+        let files_only = items
+            .iter()
+            .all(|item| matches!(item, DragItem::FilePath { internal_id: None, .. }));
+        let os_drag = cfg!(not(any(target_arch = "wasm32", target_os = "linux", test))) && files_only;
+        if !os_drag {
             self.drag_drop.start_internal_drag(items);
+            return;
         }
         #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
         {
@@ -2706,6 +2746,37 @@ mod tests {
         assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
         assert!(platform_ops.is_empty());
     }
+    #[test]
+    fn nested_overlay_locks_unwind_one_level_at_a_time() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        let list = cx.draw_lists.alloc();
+        let area = |rect_id| {
+            Area::Rect(crate::area::RectArea {
+                draw_list_id: list.id(),
+                rect_id,
+                redraw_id: 0,
+            })
+        };
+        let (dialog, popover) = (area(0), area(1));
+
+        cx.sweep_lock(dialog);
+        cx.block_scrolling_except_within(dialog);
+        cx.sweep_lock(popover);
+        cx.block_scrolling_except_within(popover);
+        assert_eq!(cx.sweep_lock_area(), Some(popover));
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), Some(popover));
+
+        cx.sweep_unlock(popover);
+        cx.unblock_scrolling_within_area(popover);
+        assert_eq!(cx.sweep_lock_area(), Some(dialog));
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), Some(dialog));
+
+        cx.sweep_unlock(dialog);
+        cx.unblock_scrolling();
+        assert_eq!(cx.sweep_lock_area(), None);
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), None);
+    }
+
 }
 
 impl Cx {
@@ -2884,6 +2955,30 @@ impl Cx {
                 )
             },
         )
+    }
+
+}
+
+#[cfg(test)]
+mod host_io_tests {
+    use super::*;
+
+    #[test]
+    fn host_io_native_widget_paths_do_not_enqueue_external_operations() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.script_data.std.restrict_to_host_io();
+        let before = cx.platform_ops.len();
+        cx.copy_to_clipboard("private");
+        cx.set_primary_selection("private");
+        cx.open_system_savefile_dialog();
+        cx.open_system_openfile_dialog();
+        cx.open_system_openfolder_dialog();
+        cx.open_system_savefolder_dialog();
+        cx.system_browser(LiveId::unique()).spawn("https://example.invalid/private");
+        cx.system_browser(LiveId::unique()).set_url("https://example.invalid/private", false);
+        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Network("https://example.invalid/private".into()), false, false);
+        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Filesystem("/etc/passwd".into()), false, false);
+        assert_eq!(cx.platform_ops.len(), before);
     }
 }
 

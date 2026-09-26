@@ -253,8 +253,9 @@ fn write_log_record(
     #[cfg(target_os = "android")]
     android_logcat_write(file_name, line_start, column_start, &message, level);
 
-    // `--remote` keeps a ring buffer of log lines so an agent can read errors
-    // over `GET /log` without owning the app's stdout.
+    // Every line, always: the app's own console reads this ring, and so does
+    // the remote surface's /log route. It costs a lock and a small
+    // allocation, well under the `println!` below.
     crate::log_ring::push(
         level,
         format!(
@@ -266,16 +267,6 @@ fn write_log_record(
             message
         ),
     );
-    if crate::remote::is_active() {
-        crate::remote::push_log_line(format!(
-            "{} {}:{}:{} - {}",
-            log_level_prefix(level),
-            file_name,
-            line_start + 1,
-            column_start + 1,
-            message
-        ));
-    }
 
     let studio_enabled = Cx::has_studio_web_socket();
     let studio_connected = Cx::has_studio_web_socket_connected();

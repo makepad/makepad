@@ -334,6 +334,7 @@ macro_rules! _app_main_event_closure {
                     } else {
                         cx.live_edit_apply()
                     };
+                    cx.live_edit_capture_begin();
                     cx.with_vm(|vm| {
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
@@ -346,7 +347,16 @@ macro_rules! _app_main_event_closure {
                             &mut $crate::Scope::empty(),
                             value,
                         );
+                        // A module run leaves the whole previous module tree
+                        // behind it, and the collector is paced by growth, so
+                        // one rebuild is never enough to make it run: the
+                        // garbage sat until the heap had doubled. A rebuild is
+                        // the one allocation spike whose size is known in
+                        // advance; collect on the way out, now that the app
+                        // value is held and the tree has been applied.
+                        vm.gc();
                     });
+                    cx.live_edit_capture_end();
                 }
             }
             if let Event::ScriptReapply = event {

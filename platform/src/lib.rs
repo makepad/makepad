@@ -32,6 +32,7 @@ pub mod present_trace;
 
 pub mod audio;
 pub mod midi;
+pub mod midi_inject;
 pub mod script;
 pub mod thread;
 pub mod storage;
@@ -82,7 +83,7 @@ mod geometry;
 mod gpu_info;
 mod id_pool;
 pub mod ime;
-mod live_reload;
+pub mod live_reload;
 mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;
@@ -145,7 +146,6 @@ pub fn monotonic_seconds() -> f64 {
         START.get_or_init(Instant::now).elapsed().as_secs_f64()
     }
 }
-pub mod midi_inject;
 pub mod audio_output_fence;
 pub mod shader_error;
 pub use crate::app_main::{
@@ -316,7 +316,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
-        screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
+        screen::{fit_window_rect_to_screens, screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,

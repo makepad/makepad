@@ -435,12 +435,7 @@ impl Cx {
                 if d3d11_cx.device_lost.get() {
                     return EventFlow::Wait;
                 }
-                if self.any_passes_dirty()
-                    || self.need_redrawing()
-                    || self.new_next_frames.len() != 0
-                    || !self.screenshot_requests.is_empty()
-                    || self.os.video_players.values().any(|p| p.keep_polling())
-                {
+                if self.has_frame_work() {
                     return EventFlow::Poll;
                 }
                 return EventFlow::Wait;
@@ -462,18 +457,59 @@ impl Cx {
         if d3d11_cx.device_lost.get() {
             return EventFlow::Wait;
         }
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-            // A pending screenshot must never be left asleep in `GetMessageW`:
-            // nothing else would wake the loop to render the frame it needs.
-            || !self.screenshot_requests.is_empty()
-            || self.os.video_players.values().any(|p| p.keep_polling())
-        {
+        if self.has_frame_work() {
             EventFlow::Poll
         } else {
             EventFlow::Wait
         }
+    }
+
+    /// Whether there is work a paint tick has to do, so the loop keeps
+    /// ticking (`Poll`) instead of sleeping in `GetMessageW` (`Wait`): a dirty
+    /// pass, a redraw, a queued NextFrame, a pending screenshot, a video that
+    /// is preparing or playing.
+    ///
+    /// A pending screenshot must never be left asleep: nothing else would
+    /// wake the loop to render the frame it needs.
+    pub(crate) fn has_frame_work(&self) -> bool {
+        self.any_passes_dirty()
+            || self.need_redrawing()
+            || self.new_next_frames.len() != 0
+            || !self.screenshot_requests.is_empty()
+            || self.os.video_players.values().any(|p| p.keep_polling())
+    }
+
+    /// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: once a second, the numbers an upload
+    /// refusal would come from — resident bytes against the limit, the
+    /// records carrying them, the serials the collector waits on, and what
+    /// it freed since the last line. Enough to tell a completion poll that
+    /// never ran from a producer the collector cannot keep up with.
+    fn upload_budget_line(&mut self) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_SECOND: AtomicU64 = AtomicU64::new(u64::MAX);
+        let second = self.seconds_since_app_start() as u64;
+        if LAST_SECOND.swap(second, Ordering::Relaxed) == second {
+            return;
+        }
+        let serials = &self.textures.1.serials;
+        let submitted = serials.submitted.load(Ordering::Acquire);
+        let completed = serials.completed.load(Ordering::Acquire);
+        let allocations = &mut self.draw_lists.1.allocations;
+        let (freed, inline_drops) = allocations.take_collection_counts();
+        let (bytes, limit) = (allocations.bytes(), allocations.limit());
+        crate::log!(
+            "upload-budget t={}s bytes={}/{} ({:.2}%) records={} refusals={} submitted={} completed={} freed={} inline_drops={}",
+            second,
+            bytes,
+            limit,
+            bytes as f64 * 100.0 / limit.max(1) as f64,
+            allocations.record_count(),
+            allocations.refusals(),
+            submitted,
+            completed,
+            freed,
+            inline_drops,
+        );
     }
 
     /// One paint tick: advance the frame, redraw what is dirty, and present.
@@ -588,7 +624,23 @@ impl Cx {
         }
         // ok here we send out to all our childprocesses
 
+        // Frame completion is polled by this loop, not by the application.
+        // The collector in `render_view` frees a draw item's previous buffer
+        // only once the event query says the GPU is past its last draw, so a
+        // serial that never completes turns the allocation budget into a
+        // count of every upload ever made (measured: `completed=0` for the
+        // whole session, every record pending, the limit reached after a few
+        // minutes of animation, every upload refused from then on — the
+        // window painting nothing but its clear colour). Once before the
+        // repaint, so this frame's collection sees the last frame's
+        // completion; once after, so this frame's query is opened and
+        // flushed at once, whether or not anything presented.
+        self.poll_texture_lifetimes();
         let presented = self.handle_repaint(d3d11_windows, d3d11_cx);
+        self.poll_texture_lifetimes();
+        if upload_budget_debug() {
+            self.upload_budget_line();
+        }
         // A presenting pass blocks in the frame-latency wait or Present, pacing
         // the Poll loop to the display. A pass that presents nothing has no
         // blocking call at all, so a NextFrame listener that re-arms without
@@ -1373,6 +1425,15 @@ fn windows_window_vsync() -> bool {
     *V.get_or_init(|| std::env::var_os("MAKEPAD_NO_VSYNC").is_none())
 }
 
+/// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: the paint tick logs the upload budget
+/// once a second (`Cx::upload_budget_line`). One flag read per tick is all
+/// the loop pays for it.
+fn upload_budget_debug() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("MAKEPAD_DEBUG_UPLOAD_BUDGET").is_some_and(|v| v == "1"))
+}
+
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
         if self.in_makepad_studio {
@@ -1473,4 +1534,26 @@ pub struct CxOs {
     pub(crate) d3d11_test_loss_next: Option<Instant>,
     /// Recreate the device even though it reports itself alive. Set only by fault injection.
     pub(crate) d3d11_force_recreate: bool,
+}
+
+#[cfg(test)]
+mod frame_work_tests {
+    use crate::cx::Cx;
+
+    /// A shader a draw queued keeps the loop ticking after that draw, with
+    /// nothing else to do, so the calls it held back are drawn once it is
+    /// ready instead of at the next input.
+    #[test]
+    fn a_shader_on_its_way_to_the_gpu_keeps_the_loop_ticking() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(!cx.has_frame_work(), "an idle app sleeps");
+
+        cx.draw_shaders.compile_set.insert(0);
+        assert!(cx.hlsl_compiles_waiting());
+        assert!(cx.has_frame_work(), "a queued shader is work for the next tick");
+
+        cx.draw_shaders.compile_set.clear();
+        assert!(!cx.hlsl_compiles_waiting());
+        assert!(!cx.has_frame_work());
+    }
 }
