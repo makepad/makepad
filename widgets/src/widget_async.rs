@@ -116,6 +116,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
     crate::splash_host::gc_bridge(&dead_heaps);
+    crate::splash_policy::gc_policies(&dead_heaps);
     crate::desktop_style::gc_heaps(cx,&dead_heaps);
     crate::cached_widget::gc_heaps(cx, &dead_heaps);
     // And the resource cache, which is keyed by heap ADDRESS: dropping a heap

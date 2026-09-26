@@ -26,6 +26,7 @@ pub mod theme_desktop_skeleton;
 pub mod widget;
 pub mod widget_async;
 pub mod splash_host;
+pub mod splash_policy;
 pub mod splash_storage;
 pub mod widget_match_event;
 pub mod widget_tree;

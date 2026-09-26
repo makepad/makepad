@@ -846,6 +846,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
             let request = HttpRequest::script_from_value(vm, request);
             let events = HttpEvents::script_from_value(vm, events);
+            // The host's per-isolate allowlist, when one is installed: a
+            // network grant that only opened this module would otherwise
+            // reach every host on the internet.
+            let heap_key = vm.bx.heap.heap_key();
+            if !crate::gate::script_url_allowed(heap_key, &request.url) {
+                return script_err_io!(vm.trap(), "this app may not reach {}", request.url);
+            }
 
             let std = vm.std_mut::<ScriptStd>();
             let Some(runtime) = std.net.as_ref() else {
