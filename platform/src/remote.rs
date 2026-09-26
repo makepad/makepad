@@ -62,7 +62,7 @@ mod imp {
     pub(crate) use activity::RemoteActivity;
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
-    use crate::makepad_math::dvec2;
+    use crate::makepad_math::{dvec2, Vec2d};
     use crate::texture::{
         ReadbackChannelOrder, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback,
     };
@@ -90,6 +90,9 @@ mod imp {
     /// recent, so a person watching a scripted run can see that the pointer
     /// and the keyboard are spoken for and keep their hands off.
     static INJECTED_AT_MS: AtomicU64 = AtomicU64::new(0);
+    /// `/handsoff?on=1` holds the marker up regardless of recency, for a run
+    /// that thinks between its inputs; `?on=0` lets it go.
+    static HANDS_OFF: AtomicBool = AtomicBool::new(false);
     /// How long hands-off stays true after the last injected input.
     const HANDS_OFF_LINGER_MS: u64 = 3000;
 
@@ -120,6 +123,9 @@ mod imp {
         if *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()) {
             return false;
         }
+        if HANDS_OFF.load(Ordering::Relaxed) {
+            return true;
+        }
         let at = INJECTED_AT_MS.load(Ordering::Relaxed);
         at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
     }
@@ -141,7 +147,6 @@ mod imp {
     const MAX_LIVE_CONNS: usize = 24;
     const MAX_HEAD_BYTES: usize = 32 * 1024;
     const MAX_BODY_BYTES: usize = 1 << 20;
-    const LOG_RING_CAP: usize = 4000;
     const GRABS_KEPT_PER_WINDOW: usize = 64;
     const MAX_PENDING_GRABS: usize = 64;
     const MAX_GRAB_BYTES: usize = 64 * 1024 * 1024;
@@ -163,10 +168,6 @@ mod imp {
         G.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    fn log_ring() -> &'static Mutex<LogRing> {
-        static L: OnceLock<Mutex<LogRing>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(LogRing::default()))
-    }
 
     fn grab_dir() -> &'static Mutex<PathBuf> {
         static D: OnceLock<Mutex<PathBuf>> = OnceLock::new();
@@ -207,11 +208,6 @@ mod imp {
         y: f64,
     }
 
-    #[derive(Default)]
-    struct LogRing {
-        next_seq: u64,
-        lines: std::collections::VecDeque<(u64, String)>,
-    }
 
     struct GrabSink {
         window: Option<usize>,
@@ -383,6 +379,14 @@ mod imp {
             window: Option<usize>,
             tx: Sender<Reply>,
         },
+        /// Give a window a new inner size, in layout points, the way a
+        /// person dragging its edge would. Answered after the frame that
+        /// follows, so a grab right after sees the new layout.
+        Resize {
+            window: Option<usize>,
+            size: Vec2d,
+            tx: Sender<Reply>,
+        },
         /// A tweaker-overlay operation. The route only parses; the whole
         /// answer comes from `Cx::tweak_callback` (registered by the widgets
         /// crate), so platform stays below widgets in the dependency order.
@@ -425,7 +429,20 @@ mod imp {
                 Self::Input { tx, .. } | Self::Close { tx, .. }
                 | Self::Quit(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
                 Self::Tweak { op, tx, .. }
-                    if !matches!(op.as_str(), "state" | "diff" | "final") => Some(tx),
+                    if !matches!(
+                        op.as_str(),
+                        "state"
+                            | "diff"
+                            | "final"
+                            | "design_state"
+                            | "design_palette"
+                            | "design_patch"
+                            | "design_commit"
+                            | "design_verify"
+                    ) =>
+                {
+                    Some(tx)
+                }
                 Self::Ai { op, tx, .. } if op != "transcript" => Some(tx),
                 _ => None,
             }
@@ -783,19 +800,10 @@ mod imp {
     // log ring (filled from log.rs)
     // ------------------------------------------------------------------
 
+    /// The remote surface's own notes — a window the human closed, an HTTP
+    /// request — go in the same ring as everything the app logs.
     pub fn push_log_line(line: String) {
-        if !ACTIVE.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(mut ring) = log_ring().lock() else {
-            return;
-        };
-        let seq = ring.next_seq + 1;
-        ring.next_seq = seq;
-        ring.lines.push_back((seq, line));
-        while ring.lines.len() > LOG_RING_CAP {
-            ring.lines.pop_front();
-        }
+        crate::log_ring::push(crate::log::LogLevel::Log, line);
     }
 
     // ------------------------------------------------------------------
@@ -1721,6 +1729,26 @@ mod imp {
                 let _ = tx.send(Reply::Ok);
                 cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
             }
+            Cmd::Resize { window, size, tx } => {
+                let window_id = match resolve_window(cx, window) {
+                    Ok(window_id) => window_id,
+                    Err(err) => {
+                        let _ = tx.send(Reply::Err(err));
+                        return;
+                    }
+                };
+                cx.push_unique_platform_op(crate::cx_api::CxOsOp::ResizeWindow(window_id, size));
+                // The window's own size event paints once; the reply goes
+                // out with that frame and carries what was asked, the
+                // following `/s` what is.
+                FRAME_WAITERS.with_borrow_mut(|waiters| waiters.push((
+                    cx.repaint_id + 1,
+                    tx,
+                    Some(format!("{{\"resize\":[{},{}]}}", size.x, size.y)),
+                    user_seq,
+                )));
+                cx.redraw_all();
+            }
             Cmd::Tweak { op, args, wait, tx } => {
                 let result = match cx.tweak_callback {
                     Some(callback) => callback(cx, &op, &args),
@@ -1994,6 +2022,19 @@ mod imp {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
             }
+            // A responsive layout is checked by resizing, so the bridge can:
+            // `/resize?w=&h=[&window=]` in layout points, answered after the
+            // frame that shows it; a following `/s` reports the size taken.
+            "/resize" => {
+                // `w` is the width here, so the window goes by `window=`.
+                let window = p.get(&["window"]).and_then(|v| v.parse::<usize>().ok());
+                let (w, h) = (p.f64(&["w"], 0.0), p.f64(&["h"], 0.0));
+                let sane = |v: f64| v.is_finite() && (1.0..=16384.0).contains(&v);
+                if !sane(w) || !sane(h) {
+                    return Out::Text(400, "give w= and h= in layout points, 1 to 16384".to_string());
+                }
+                reply_to_out(ask(move |tx| Cmd::Resize { window, size: dvec2(w, h), tx }, 6))
+            }
             // `/w?k=maximize`: the window's own maximise, answered after the
             // next drawn frame with `wait` (the maximise/occlusion proof).
             "/w" | "/window" => match p.get(&["k", "kind"]) {
@@ -2024,6 +2065,14 @@ mod imp {
                 true,
             ),
             "/ai/transcript" => route_ai("transcript", p, false),
+            // The red hands-off frame, held up or let go by hand. It lights
+            // by itself for a few seconds after any injected input, and
+            // shows from the next frame the app draws.
+            "/handsoff" => {
+                let on = p.get(&["on"]).map(|v| v.to_string()).unwrap_or_else(|| "1".to_string()) != "0";
+                HANDS_OFF.store(on, Ordering::Relaxed);
+                Out::Json(200, format!("{{\"handsoff\":{}}}", on as u8))
+            }
             "/tweak" => route_tweak("toggle", p, true),
             "/tweak/state" => route_tweak("state", p, false),
             "/tweak/apply" => route_tweak("apply", p, true),
@@ -2036,6 +2085,10 @@ mod imp {
                 Some(op) => route_tweak(&op.to_string(), p, false),
                 None => err("need op="),
             },
+            // The designer: structural edits to the Splash source under
+            // design, previewed live, never written by the app. The route
+            // only names the op; the tweaker answers it.
+            design if design.starts_with("/design/") => route_design(&design["/design/".len()..], p),
             // The window PNG with the overlay's outlines/annotations in it:
             // the overlay draws inside the window's own pass, so the ordinary
             // grab pipeline already composites it.
@@ -2162,6 +2215,9 @@ mod imp {
              /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll|pinch  b=0 left,1 right,2 middle  scroll: dx=,dy=  pinch: scale= (relative to the previous step), phase=begin|update|end\n\
                                time= stamps the event in app-clock seconds (default: now) so drag samples carry their own timing\n\
                                add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
+                               shift=1 ctrl=1 alt=1 cmd=1 hold modifiers down for the press: a\n\
+                               gesture that only exists under a modifier cannot be driven\n\
+                               without them\n\
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
@@ -2176,14 +2232,24 @@ mod imp {
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
              /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
-             /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
+             /handsoff?on=1|0  a red frame round the window: the bridge is driving, hands off. it lights by itself for 3s after any /m /k /t\n\
+             /tweak/state      selection + its editable properties + diff log + annotations + asks waiting on the source (renames; converts: grid, flex, dock with its \"do\"), one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
              /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
              /tweak/grab       window grab with the overlay composited (same as /g while tweaking)\n\
+             /design/open?path=  start a design session on the file that declares path (default: the pinned widget)\n\
+             /design/state     session: file, edits, status, can_undo/redo, landing, hunks; /design/palette the insertable types\n\
+             /design/insert?path=&place=before|after|inside&type=Button[&body={{text: \"Hi\"}}]  add a widget; answers the new path in \"select\"\n\
+             /design/move?path=&to=&place=  move path next to / into to.  /design/delete|duplicate|wrap|up|down|out?path=\n\
+             /design/rename?path=&name=  (empty name drops it)   /design/set?path=&key=&value=  write a property into the literal\n\
+             /design/bake      write the value ledger's tweaks into the source; /design/undo|redo|reset step the source edits\n\
+             /design/patch     the unified diff; /design/commit {{file,base_hash,new_hash,base_matches_disk,hunks,diff}} (the app never writes)\n\
+             /design/verify    every widget of the file under design: found in the source or not; /design/close writes local/design/<file>.patch\n\
              /shader/consts    the compiled shaders' hot-patchable constants (annotated literals): {{\"shaders\":[{{\"id\",\"consts\":[{{\"i\",\"name\",\"value\",\"min\",\"max\",\"step\",\"file\",\"line\"}}]}}]}}; shader=ID for one\n\
              /shader/const     ?shader=ID&i=N&v=VALUE patches one constant on the GPU (no recompile, source untouched); reset=1 puts the literal back\n\
              /close?w=ID       close one window the normal way\n\
+             /resize?w=&h=     give the window a new inner size, in layout points (like dragging its edge); answers after the frame that shows it\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
              finish owned tests with /gq (or /quit); a conflict invalidates the sequence evidence, not authorization for the active workflow\n\
@@ -2217,6 +2283,16 @@ mod imp {
         let args = p.0.clone();
         let timeout = if wait { 6 } else { 4 };
         reply_to_out(ask(move |tx| Cmd::Ai { op, args, wait, tx }, timeout))
+    }
+
+    /// `/design/<op>`: reads answer at once; edits answer after the frame
+    /// that shows them, so a grab right after sees the change.
+    fn route_design(op: &str, p: &Params) -> Out {
+        if op.is_empty() || !op.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+            return Out::Json(404, "{\"err\":\"unknown design op\"}".to_string());
+        }
+        let read = matches!(op, "state" | "palette" | "patch" | "commit" | "verify");
+        route_tweak(&format!("design_{op}"), p, !read)
     }
 
     fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
@@ -2329,6 +2405,7 @@ mod imp {
     }
 
     fn route_mouse(p: &Params, force_kind: Option<&str>) -> Out {
+        note_injected_input();
         let window = p.window();
         let kind = force_kind
             .map(str::to_string)
@@ -2499,6 +2576,7 @@ mod imp {
     }
 
     fn route_key(p: &Params) -> Out {
+        note_injected_input();
         let window = p.window();
         let mods = p.mods();
         if let Some(text) = p.get(&["t", "text"]) {
@@ -2544,6 +2622,7 @@ mod imp {
     }
 
     fn route_text(p: &Params) -> Out {
+        note_injected_input();
         let Some(text) = p.get(&["t", "text"]) else {
             return err("need t=");
         };
@@ -2644,7 +2723,8 @@ mod imp {
     }
 
     // The recorder exercises the same /log serialization without binding a
-    // socket or starting an app. Only this gpusim process's ring is enabled.
+    // socket or starting an app. The ring itself is always on; the flag is
+    // what the rest of the bridge reads.
     #[cfg(gpusim)]
     pub fn gpusim_start_log_capture() {
         ACTIVE.store(true, Ordering::Relaxed);
@@ -2656,29 +2736,24 @@ mod imp {
     }
 
     fn log_json(p: &Params, pool: &str) -> String {
-        let ring = log_ring().lock().unwrap();
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
             .get(&["n", "count", "tail"])
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(50);
-        let mut selected: Vec<&(u64, String)> = match since {
-            Some(since) => ring.lines.iter().filter(|(seq, _)| *seq > since).collect(),
-            None => ring.lines.iter().collect(),
+        // The ring already tails and already carries the newest sequence,
+        // so the count is applied by the read rather than by trimming a
+        // vector afterwards.
+        let (newest, lines) = match since {
+            Some(since) => crate::log_ring::read_since(since, usize::MAX),
+            None => crate::log_ring::read_since(0, count),
         };
-        if since.is_none() && selected.len() > count {
-            selected = selected.split_off(selected.len() - count);
-        }
-        let mut out = format!(
-            "{{\"n\":{},\"pool\":{},\"l\":[",
-            ring.next_seq,
-            json_str(pool)
-        );
-        for (index, (_, line)) in selected.iter().enumerate() {
+        let mut out = format!("{{\"n\":{newest},\"pool\":{},\"l\":[", json_str(pool));
+        for (index, line) in lines.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }
-            out.push_str(&json_str(line));
+            out.push_str(&json_str(&line.text));
         }
         out.push_str("]}");
         out

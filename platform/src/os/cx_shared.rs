@@ -1359,7 +1359,6 @@ impl Cx {
             return;
         }
         crate::remote::note_user_event(self, event);
-        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
         if let Some(drag) = self.drag_drop.internal_drag_event(event) {
             // The pointer event goes out first and the drag one is appended, the
             // way every other backend orders it: a widget that ends its gesture on
@@ -1375,6 +1374,10 @@ impl Cx {
                 crate::event::InternalDragEvent::Drop(event) => {
                     self.call_event_handler(&Event::Drop(event));
                     self.drag_drop.cycle_drag();
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+                crate::event::InternalDragEvent::End => {
                     self.call_event_handler(&Event::DragEnd);
                     self.drag_drop.cycle_drag();
                 }
