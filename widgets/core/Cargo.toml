@@ -1,0 +1,26 @@
+[package]
+name = "makepad-widgets-core"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: the core library behind makepad-widgets"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+
+makepad-derive-widget = {path = "../derive_widget", version="2.0.0"}
+unicode-segmentation = { version = "1.12.0", path = "../../libs/unicode/unicode-segmentation" }
+ttf-parser = { path = "../../libs/ttf-parser" }
+
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+# No widget families here: each is a crate of its own (widgets/families),
+# picked by the features of `makepad-widgets`, so this crate compiles once
+# whatever mix an app takes.
+
+## Enables certain public-facing types to derive serde serialization traits.
+serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]

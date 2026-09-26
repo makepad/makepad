@@ -60,7 +60,7 @@ The terminal opts into `Window.body.keyboard_resize: true`; this KeyboardView
 mode reflows content above the animated keyboard instead of panning the whole
 terminal out of view. Its grid and PTY resize with the available space.
 
-`widgets/src/backdrop.rs` supplies ordered compositor checkpoints. Windows are
+`widgets/core/src/backdrop.rs` supplies ordered compositor checkpoints. Windows are
 composited from back to front, and a glass surface samples a checkpoint below it.
 Disjoint sampling footprints share a Gaussian stack, including the kernel's
 support outside the visible surface. Intervening opaque or translucent content

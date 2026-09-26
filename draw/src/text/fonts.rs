@@ -72,6 +72,12 @@ pub struct Fonts {
     slug_built_glyphs_this_redraw: usize,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
+    /// Fonts whose resource this process could not read (see
+    /// [`Self::note_font_unavailable`]); their families render without them
+    /// until the resource registry moves on (`unavailable_generation`).
+    unavailable_fonts: FxHashSet<FontId>,
+    /// The `Cx::script_resource_generation` the set was built under.
+    unavailable_generation: u64,
 }
 
 impl Fonts {
@@ -137,6 +143,8 @@ impl Fonts {
             slug_built_glyphs_this_redraw: 0,
             msdf_job_sender,
             msdf_result_receiver,
+            unavailable_fonts: FxHashSet::default(),
+            unavailable_generation: 0,
         }
     }
 
@@ -282,6 +290,27 @@ impl Fonts {
                     && def.font_ids.len() == expected_member_count
             })
             .unwrap_or(false)
+    }
+
+    /// Records that `id`'s resource could not be read; true the first time,
+    /// so the caller can say so once. The family drops the member instead
+    /// of asking for it again every frame.
+    pub fn note_font_unavailable(&mut self, id: FontId) -> bool {
+        self.unavailable_fonts.insert(id)
+    }
+
+    /// A resource was registered or loaded since the unavailable set was
+    /// built: forget it, so the missing members are asked for once more
+    /// (a font file provisioned later, a resource registered again).
+    pub fn sync_unavailable_fonts(&mut self, resource_generation: u64) {
+        if self.unavailable_generation != resource_generation {
+            self.unavailable_generation = resource_generation;
+            self.unavailable_fonts.clear();
+        }
+    }
+
+    pub fn is_font_unavailable(&self, id: FontId) -> bool {
+        self.unavailable_fonts.contains(&id)
     }
 
     pub fn is_font_known(&self, id: FontId) -> bool {

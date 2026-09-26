@@ -11,6 +11,9 @@ use {
 #[derive(Default)]
 pub struct CxNavTree {
     nav_lists: Vec<CxNavList>,
+    /// Draw lists that keep Tab inside themselves while they are drawn (an
+    /// open modal): the last one reachable from the root holds the focus.
+    traps: Vec<DrawListId>,
 }
 
 #[derive(Clone)]
@@ -125,6 +128,55 @@ impl<'a> CxDraw<'a> {
         }
         iterate_nav_stops(cx, &mut scroll_stack, nav_tree, root, &mut callback)
             .map(|area| (area, scroll_stack))
+    }
+
+    /// Keep Tab inside `draw_list_id` (and what it contains) while `on`.
+    pub fn set_nav_trap(cx: &mut Cx, draw_list_id: DrawListId, on: bool) {
+        Self::lazy_construct_nav_tree(cx);
+        let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
+        let mut nav_tree = nav_tree_rc.0.borrow_mut();
+        nav_tree.traps.retain(|id| *id != draw_list_id);
+        if on {
+            nav_tree.traps.push(draw_list_id);
+        }
+    }
+
+    /// The tab stops Tab moves through, in order: those under the innermost
+    /// trap reachable from `root` (an open modal), else all under `root`.
+    pub fn nav_scope_stops(cx: &mut Cx, root: DrawListId) -> Vec<Area> {
+        Self::lazy_construct_nav_tree(cx);
+        let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
+        let nav_tree = &*nav_tree_rc.0.borrow();
+        fn reachable(nav_tree: &CxNavTree, id: DrawListId, found: &mut Option<DrawListId>, depth: usize) {
+            if depth > 64 || id.index() >= nav_tree.nav_lists.len() {
+                return;
+            }
+            if nav_tree.traps.contains(&id) {
+                *found = Some(id);
+            }
+            for item in &nav_tree[id].nav_list {
+                if let NavItem::Child(child) = item {
+                    reachable(nav_tree, *child, found, depth + 1);
+                }
+            }
+        }
+        fn collect(nav_tree: &CxNavTree, id: DrawListId, out: &mut Vec<Area>, depth: usize) {
+            if depth > 64 || id.index() >= nav_tree.nav_lists.len() {
+                return;
+            }
+            for item in &nav_tree[id].nav_list {
+                match item {
+                    NavItem::Child(child) => collect(nav_tree, *child, out, depth + 1),
+                    NavItem::Stop(stop) if !stop.area.is_empty() => out.push(stop.area),
+                    _ => {}
+                }
+            }
+        }
+        let mut trap = None;
+        reachable(nav_tree, root, &mut trap, 0);
+        let mut out = Vec::new();
+        collect(nav_tree, trap.unwrap_or(root), &mut out, 0);
+        out
     }
 
     pub fn nav_list_clear(&mut self, draw_list_id: DrawListId) {

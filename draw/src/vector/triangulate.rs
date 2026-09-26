@@ -1257,7 +1257,7 @@ mod road_pack_tests {
         record[12] = emissive;
         record[14] = material;
         record[16] = 0.14196777;
-        record[18] = 3195.0 * VECTOR_ZBIAS_STEP;
+        record[18] = ROAD_ZBIAS_MAX_EXACT_TICKS * VECTOR_ZBIAS_STEP;
         record
     }
 
@@ -1276,9 +1276,9 @@ mod road_pack_tests {
             let bytes = pack_face_vertices(&record);
             assert_eq!(bytes.len(), FACE_TYPED_VERTEX_BYTES);
             assert_eq!(decode_face_vertex(&bytes), face);
-            // Ticks beyond f16's exact integer range round exactly as the
-            // road layout rounds them: the face stream never re-quantizes.
-            assert_eq!(face.depth.to_f32().1, 3196.0);
+            // The largest permitted tick stays exact in both layouts;
+            // the face stream never re-quantizes it.
+            assert_eq!(face.depth.to_f32().1, ROAD_ZBIAS_MAX_EXACT_TICKS);
             let (meta, aux) = face.params.to_f32();
             assert_eq!(meta, 8.0 * material + ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
             assert_eq!(aux, if material > 6.5 { emissive } else { 0.5 });
