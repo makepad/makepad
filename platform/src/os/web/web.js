@@ -4,6 +4,20 @@ export const MAKEPAD_WEBGL_PIXEL_BUDGET = 2 * 1024 * 1024;
 export const MAKEPAD_WEBGL_DPR_CEILING = 1.5;
 export const MAKEPAD_WEBGL_PHONE_DPR_CEILING = 1.0;
 
+// CHROME63: AbortController only exists from Chrome 66. Without the shim every
+// fetch throws `AbortController is not defined`, which kills the network stack
+// at the first request. The shim keeps request cancellation callable but inert,
+// and `signal: undefined` simply means "no signal" to fetch.
+const makepad_abort_controller = typeof AbortController !== "undefined"
+    ? AbortController
+    : class {
+        constructor() {
+            this.signal = undefined;
+        }
+        abort() {
+        }
+    };
+
 function makepad_positive_number(value, fallback) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : fallback;
@@ -2266,7 +2280,7 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         entry.state = "active";
-        entry.controller = new AbortController();
+        entry.controller = new makepad_abort_controller();
         entry.started_at = performance.now();
         if (entry.is_archive_range) {
             let host = this.network_http_hosts.get(entry.host_key);
