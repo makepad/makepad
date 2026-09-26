@@ -60,7 +60,7 @@ pub fn windows_chain(root: &Path) -> WindowsChain {
         _ if crate::msvc::ready(&root.join("toolchain/msvc")) => WindowsChain::Msvc,
         // Nobody is asked at the start: Rust's GNU toolchain (already there,
         // makepad-builder.bat downloaded it) until the person picks
-        // Microsoft's tools on the Build tools row, for CUDA.
+        // Microsoft's tools for local AI when building an app with CUDA.
         _ => WindowsChain::Gnu,
     }
 }
