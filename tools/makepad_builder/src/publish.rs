@@ -86,7 +86,8 @@ fn pack(repo: &Path, name: &str, path: &str, out: &Path, snapshot: bool) -> Resu
             Some(format!("Builder source snapshot of {base}\n").as_bytes()),
             None,
         )?)?;
-        let _ = fs::remove_file(index);
+        // The temporary index this command wrote in its own output folder.
+        let _ = crate::remove_inside(out, &index);
         commit
     } else {
         base.clone()
@@ -165,10 +166,21 @@ pub fn main() -> Result<(), String> {
         &dest,
         snapshot,
     )?;
+    // The app's private repository is checked out at makepad/apps/<name>,
+    // inside the one Makepad workspace. Several apps can come from one
+    // repository (Stage holds Stage and Amp): `--repository` names it when it
+    // is not the app ID, and `--workspace` the app's package directory when
+    // it is not the repository's root.
+    let repository = fields.get("--repository").cloned().unwrap_or_else(|| app.clone());
+    if !catalog::identifier(&repository) || repository == "makepad" {
+        return Err("Invalid repository name".into());
+    }
+    let repository_path = format!("makepad/apps/{repository}");
+    let workspace = fields.get("--workspace").cloned().unwrap_or_else(|| repository_path.clone());
     let app_repo = pack(
         Path::new(&get("--app-repo")?),
-        &app,
-        &format!("makepad/apps/{app}"),
+        &repository,
+        &repository_path,
         &dest,
         snapshot,
     )?;
@@ -187,7 +199,7 @@ pub fn main() -> Result<(), String> {
         ),
         ("package", json::s(get("--package")?)),
         ("binary", json::s(get("--binary")?)),
-        ("workspace", json::s(format!("makepad/apps/{app}"))),
+        ("workspace", json::s(workspace)),
         (
             "platforms",
             Value::Arr(

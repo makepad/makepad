@@ -7,7 +7,6 @@ use std::{
 use std::path::Path;
 
 use crate::extract;
-use crate::http;
 
 pub const DEFAULT_VERSION: &str = "1.98.0";
 /// Prefix used internally to keep a transient Windows executable lock
@@ -22,7 +21,39 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
     install_version(cache, dest, DEFAULT_VERSION)
 }
 
+/// `makepad-builder rust --root DIR [--version X.Y.Z]`: the private Rust
+/// exactly as setup installs it, into DIR/toolchain/rust/<version>-<triple>,
+/// with its progress and timing on stdout.
+pub fn cli_install() -> Result<(), String> {
+    let mut root = None;
+    let mut version = DEFAULT_VERSION.to_string();
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => root = Some(std::path::PathBuf::from(args.next().ok_or("--root needs a directory")?)),
+            "--version" => version = args.next().ok_or("--version needs X.Y.Z")?,
+            _ => return Err(format!("unknown rust option {arg}")),
+        }
+    }
+    let root = crate::validate_install_root(&root.ok_or("rust requires --root DIR")?)?;
+    let (cache, dest) = (root.join("cache"), crate::runtime::rust_dir(&root, &version));
+    crate::timing::reset();
+    let result = crate::progress::scope(crate::progress::printer(), || {
+        crate::jobs::run(vec![crate::jobs::Job::new("Rust", || install_version(&cache, &dest, &version))])
+    });
+    for line in crate::timing::report() {
+        println!("{line}");
+    }
+    result
+}
+
 pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), String> {
+    install_version_for(cache, dest, version, crate::catalog::platform())
+}
+
+/// [`install_version`] for `triple`: on Windows also Rust's GNU toolchain,
+/// which adds rust-mingw (MinGW's runtime and import libraries).
+pub fn install_version_for(cache: &Path, dest: &Path, version: &str, triple: &str) -> Result<(), String> {
     if version.split('.').count() != 3
         || !version
             .split('.')
@@ -30,8 +61,8 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     {
         return Err("A pinned Rust version is required".into());
     }
+    let _timing = crate::timing::component("Rust");
     crate::progress::package("Rust", "Read toolchain manifest", 0, 0);
-    let triple = crate::catalog::platform();
     let stamp = format!("{version} {triple}");
     if fs::read_to_string(dest.join(".toolchain-version")).is_ok_and(|s| s == stamp)
         && dest
@@ -55,39 +86,63 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     }
     let channel = format!("https://static.rust-lang.org/dist/channel-rust-{version}.toml");
     crate::setup_note!("rust: fetching {stamp}");
-    let toml = String::from_utf8(http::fetch_bytes(&channel)?)
+    let toml = String::from_utf8(crate::fetch::bytes(&channel)?)
         .map_err(|_| "Rust manifest is not UTF-8")?;
     let rustc = pkg_target(&toml, "rustc", triple)?;
     let std = pkg_target(&toml, "rust-std", triple)?;
     let cargo = pkg_target(&toml, "cargo", triple)?;
-    crate::progress::package("Rust downloads", "rustc", 1, 3);
-    let rustc_path = http::cached_file(cache, &rustc.1, &file_name(&rustc.1), Some(&rustc.2))?;
-    crate::progress::package("Rust downloads", "rust-std", 2, 3);
-    let std_path = http::cached_file(cache, &std.1, &file_name(&std.1), Some(&std.2))?;
-    crate::progress::package("Rust downloads", "cargo", 3, 3);
-    let cargo_path = http::cached_file(cache, &cargo.1, &file_name(&cargo.1), Some(&cargo.2))?;
+    // One bar for Rust: the three archives' sizes (cached, or the server's
+    // Content-Length), each downloaded then unpacked.
+    let mut parts = vec![rustc, cargo, std];
+    if triple.ends_with("-windows-gnu") {
+        parts.push(pkg_target(&toml, "rust-mingw", triple)?);
+    }
+    let sizes = crate::fetch::sizes(cache, &parts.iter().map(|p| (p.1.clone(), file_name(&p.1))).collect::<Vec<_>>());
+    let _total = crate::progress::total("Rust", sizes.iter().sum());
+    unpack_rust(cache, dest, version, &stamp, triple, parts, &sizes)
+}
 
+/// rustc, cargo and rust-std download side by side (each over several
+/// connections) and each unpacks on the pool as soon as it has arrived,
+/// straight into the staged toolchain: the part of each archive under its
+/// component directory, exactly what merging the unpacked components gave.
+fn unpack_rust(cache: &Path, dest: &Path, version: &str, stamp: &str, triple: &str, parts: Vec<(String, String, String)>, sizes: &[u64]) -> Result<(), String> {
+    // Unpacked and verified beside the destination, then moved into place.
+    // An unpack left by an interrupted run starts over from the cached archives.
     let tmp = dest.with_extension("unpack");
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-
-    crate::progress::package("Install Rust", "rustc", 1, 3);
-    extract::extract_tar_gz(&rustc_path, &tmp.join("rustc"))?;
-    crate::progress::package("Install Rust", "rust-std", 2, 3);
-    extract::extract_tar_gz(&std_path, &tmp.join("std"))?;
-    crate::progress::package("Install Rust", "cargo", 3, 3);
-    extract::extract_tar_gz(&cargo_path, &tmp.join("cargo"))?;
-
+    let toolchains = dest.parent().ok_or("Rust destination has no parent")?;
+    crate::remove_inside(toolchains, &tmp)?;
     let staged = tmp.join("ready");
     fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
-    merge_component(&tmp.join("rustc"), &staged, "rustc")?;
-    merge_component(&tmp.join("cargo"), &staged, "cargo")?;
-    merge_std(&tmp.join("std"), &staged)?;
+    let pending: Vec<_> = parts
+        .into_iter()
+        .zip(sizes)
+        .enumerate()
+        .map(|(order, ((name, url, hash), &size))| {
+            let staged = staged.clone();
+            let inner = if name == "rust-std" { format!("rust-std-{triple}") } else { name.clone() };
+            crate::fetch::file_then(cache, &url, &file_name(&url), Some(&hash), size, move |gz| {
+                crate::jobs::check_cancelled()?;
+                crate::progress::package("Rust", &name, 0, 0);
+                let tar = {
+                    let _unpacking = crate::progress::activity(crate::progress::Activity::Unpack);
+                    crate::progress::stage("Decompressing", &name, 0.0);
+                    std::sync::Arc::new(extract::gunzip(&gz).map_err(|e| format!("gzip {name}: {e}"))?)
+                };
+                drop(gz);
+                let entries = extract::tar_entries(&tar)?;
+                let prefix = component_prefix(&entries, &inner);
+                extract::write_tar_parallel(tar, entries, &staged, &prefix, order as u64, size)?;
+                Ok(())
+            })
+        })
+        .collect();
+    crate::jobs::wait_all(pending)?;
     prepare_host_tools(&staged)?;
     check_rustc(&staged, version)?;
     fs::write(staged.join(".toolchain-version"), stamp).map_err(|e| e.to_string())?;
     move_staged(&staged, dest)?;
-    let _ = fs::remove_dir_all(&tmp);
+    let _ = crate::remove_inside(toolchains, &tmp);
     if !dest
         .join("bin")
         .join(crate::runtime::exe("rustc"))
@@ -97,6 +152,18 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     }
     crate::progress::stage("Ready", "Rust installed and verified", 1.0);
     Ok(())
+}
+
+/// A dist archive holds `<top>/<component>/…` plus installer files; only
+/// the component directory is installed (`<top>` alone when it has none).
+fn component_prefix(entries: &[extract::TarEntry], inner: &str) -> String {
+    let top = entries.iter().find_map(|e| e.name.split('/').next().filter(|t| !t.is_empty())).unwrap_or_default();
+    let nested = format!("{top}/{inner}/");
+    if entries.iter().any(|e| e.name.starts_with(&nested)) {
+        format!("{top}/{inner}")
+    } else {
+        top.to_string()
+    }
 }
 
 /// Re-check a compiler whose first post-extraction launch was blocked by
@@ -118,11 +185,13 @@ pub fn retry_staged(dest: &Path, version: &str) -> Result<(), String> {
     check_rustc(&staged, version)?;
     fs::write(
         staged.join(".toolchain-version"),
-        format!("{version} {}", crate::catalog::platform()),
+        format!("{version} {}", crate::runtime::rust_triple(dest.ancestors().nth(3).unwrap_or(dest))),
     )
     .map_err(|e| e.to_string())?;
     move_staged(&staged, dest)?;
-    let _ = fs::remove_dir_all(dest.with_extension("unpack"));
+    if let Some(toolchains) = dest.parent() {
+        let _ = crate::remove_inside(toolchains, &dest.with_extension("unpack"));
+    }
     crate::progress::stage("Ready", "Rust installed and verified", 1.0);
     Ok(())
 }
@@ -150,6 +219,7 @@ pub(crate) fn prepare_host_tools(_dest: &Path) -> Result<(), String> {
 }
 
 fn check_rustc(staged: &Path, version: &str) -> Result<(), String> {
+    let _span = crate::timing::span(crate::timing::Phase::Check);
     crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
     let mut check = Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
     crate::runtime::hide_console(&mut check);
@@ -177,14 +247,29 @@ fn check_rustc(staged: &Path, version: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Waits for Windows security software to let go of fresh Rust files:
+/// about 30 seconds in all.
+const SCAN_WAITS_MS: [u64; 14] = [100, 250, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_000, 3_000, 3_000, 3_000, 3_000, 3_000];
+
+/// A scanner that just looked at rustc.exe still holds files in the folder,
+/// and Windows refuses to rename a folder with open files. Try again with
+/// the same bounded waits before asking the person to retry.
 fn move_staged(staged: &Path, dest: &Path) -> Result<(), String> {
-    fs::rename(staged, dest).map_err(|error| {
-        if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied {
-            format!("{RETRY_COMPILER_CHECK}Rust files are still locked by Windows security software: {error}")
-        } else {
-            error.to_string()
+    let _span = crate::timing::span(crate::timing::Phase::Check);
+    let mut waits = SCAN_WAITS_MS.iter();
+    loop {
+        match fs::rename(staged, dest) {
+            Ok(()) => return Ok(()),
+            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied => match waits.next() {
+                Some(ms) => {
+                    crate::progress::stage("Checking compiler", "Waiting for Windows security to finish scanning Rust", 0.0);
+                    std::thread::sleep(std::time::Duration::from_millis(*ms));
+                }
+                None => return Err(format!("{RETRY_COMPILER_CHECK}Rust files are still locked by Windows security software: {error}")),
+            },
+            Err(error) => return Err(error.to_string()),
         }
-    })
+    }
 }
 
 /// Windows security scanners can briefly deny access to a freshly unpacked
@@ -194,9 +279,9 @@ fn move_staged(staged: &Path, dest: &Path) -> Result<(), String> {
 fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
     #[cfg(windows)] {
         // Defender and other endpoint scanners can hold a newly unpacked
-        // executable for several seconds. Eight bounded waits total about
-        // 7.85 seconds, with the delay capped so the UI remains responsive.
-        const RETRY_DELAYS_MS: [u64; 8] = [100, 250, 500, 1_000, 1_500, 1_500, 1_500, 1_500];
+        // executable for many seconds. The bounded waits total about 30
+        // seconds, with the delay capped so the UI remains responsive.
+        const RETRY_DELAYS_MS: [u64; 14] = SCAN_WAITS_MS;
         const ATTEMPTS: usize = RETRY_DELAYS_MS.len() + 1;
         for attempt in 0..ATTEMPTS {
             match command.output() {
@@ -260,32 +345,6 @@ fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
         let _ = (tool, Duration::from_millis(0));
         command.output()
     }
-}
-
-fn merge_component(unpacked: &Path, dest: &Path, inner: &str) -> Result<(), String> {
-    let root = extract::single_child_dir(unpacked).unwrap_or_else(|| unpacked.to_path_buf());
-    let from = if root.join(inner).is_dir() {
-        root.join(inner)
-    } else {
-        root
-    };
-    extract::merge_dir(&from, dest)
-}
-
-fn merge_std(unpacked: &Path, dest: &Path) -> Result<(), String> {
-    let root = extract::single_child_dir(unpacked).unwrap_or_else(|| unpacked.to_path_buf());
-    let std_dir = root
-        .read_dir()
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with("rust-std-"))
-                .unwrap_or(false)
-        })
-        .unwrap_or(root);
-    extract::merge_dir(&std_dir, dest)
 }
 
 fn pkg_target(toml: &str, pkg: &str, triple: &str) -> Result<(String, String, String), String> {

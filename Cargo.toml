@@ -5,6 +5,8 @@ workspace.members = [
     "apps/wm",
     "apps/wm-all",
     "apps/wm-dyn",
+    "apps/wm-android",
+    "apps/wm-android/launch",
     "apps/wm-dyn/engine",
     "apps/aichat",
     "apps/finance",
@@ -32,27 +34,37 @@ workspace.members = [
     "libs/code_language",
     "libs/search",
     "libs/tar",
+    "libs/lz4",
+    "libs/rmeta",
     "apps/route",
-    "apps/asset-ui",
-    "apps/asset-server",
-    "apps/flow-server",
-    "libs/media_view",
+    "libs/flowgraph",
     "apps/ai-hub",
-    "apps/vj",
     "apps/mixer",
-    "libs/asset/importer",
+    "apps/storybook",
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",
     "libs/texcomp",
-    "libs/asset/data",
-    "libs/asset/client",
-    "libs/asset/widgets",
-    "libs/asset/store",
-    "libs/asset/chat",
-    "libs/chat_ui",
     "libs/ai/hub_ui",
     "libs/ai/services",
-    "libs/asset/annotate",
+    # The AI stack: loader (disk), cuda/metal (kernel and residency stores),
+    # job (the one cross-model contract), llm and models/* (per-family model
+    # crates), the generate hub and the live pipe.
+    "libs/ai/loader",
+    "libs/ai/cuda",
+    "libs/ai/metal",
+    "libs/ai/job",
+    "libs/ai/llm",
+    "libs/ai/models/*",
+    "libs/ai/hub",
+    "libs/ai/livepipe",
+    # Constructive solid geometry.
+    "libs/csg/csg",
+    "libs/csg/csg_boolean",
+    "libs/csg/csg_exact",
+    "libs/csg/csg_math",
+    "libs/csg/csg_mesh",
+    "libs/csg/csg_primitives",
+    "libs/csg/csg_sdf",
     "libs/render",
     "libs/raytrace",
     "libs/fab",
@@ -61,9 +73,9 @@ workspace.members = [
     "libs/scene",
     "libs/soft_body",
     "libs/show_control",
-    "libs/asset/creator",
     "libs/bounded_http",
-    "libs/flow",
+    # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
+    "libs/core_util",
     "libs/strict_json",
     "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
@@ -102,6 +114,7 @@ workspace.members = [
     "examples/windows_blur",
     "examples/floating_panel",
     "examples/glass",
+    "examples/skeuomorph",
     "examples/bugfix",
     "examples/move_after_draw",
     "examples/xr",
@@ -128,7 +141,6 @@ workspace.members = [
     "libs/score_render",
     "libs/score_view",
     "libs/score_view/tests/embed_app",
-    "libs/score_ai",
     "libs/score_import",
     "libs/score_pdf",
     "libs/score_ui",
@@ -143,14 +155,11 @@ workspace.members = [
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
     "libs/audio_encode",
-    # === shared karaoke alignment core + lyrics schema ===
-    "libs/audio_lyrics",
-    # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
-    "libs/audio_sidechannels",
-    "libs/vj_analysis",
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
+    # === per-application audio tap, mixer input for a host equalizer ===
+    "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
     "libs/video_flow",
@@ -170,45 +179,60 @@ workspace.members = [
     "platform/video",
     "tools/cargo_makepad",
     "tools/makepad_builder",
+    "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
-    "tools/screen",
-    "tools/dj_pack",
+    "tools/agents",
+    "tools/ci",
     "libs/system_speech",
+    # Send feedback: caption icon + panel (Amp, Scope)
+    "widgets/feedback",
     # === tests ===
     "platform/script/test",
+    # === makepad-widgets: the core and its family crates (widgets/ is the
+    # front, a member through its dependents) ===
+    "widgets/core",
+    "widgets/families/tweaker",
+    "widgets/families/data",
+    "widgets/families/rich_text",
+    "widgets/families/menus",
+    "widgets/families/extras",
+    "widgets/families/maps",
+    "widgets/families/pdf",
+    "widgets/families/voice",
+    "widgets/families/cef",
+    "widgets/families/ai",
+    # === private app repositories ===
+    # Every app directory with a `src/`: the public apps above, and a private
+    # app repository cloned into apps/<name> whose root Cargo.toml is a
+    # package (Scope, Source Library) or a members package (Stage) naming its
+    # crates as path dependencies, which makes them members too. Its crates then compile in this workspace and share its
+    # target/, profiles and patches. Cargo fails on a member path that does
+    # not exist and on a glob that matches nothing; this glob always matches
+    # the public apps, so a tree without the private repositories loads as
+    # before. Directories without a `src/` (local data) are not matched.
+    "apps/*/src/..",
 ]
 
 workspace.exclude = [
-    # Private Scope (the Architecture map) and its code-intelligence crates.
-    # Clone into apps/scope; path deps stay ../../ like a subdirectory. Not a
-    # required member so a clean makepad tree still loads.
-    "apps/scope",
-    # Private Arcade frontend. Clone into apps/sandbox; path deps stay ../../
-    # like a subdirectory. Not a required member so a clean makepad tree
-    # still loads.
+    # Private app repositories cloned into apps/<name> are members through
+    # apps/*/src/.. above: Scope (its deps/* come with it as path
+    # dependencies), Source Library, and Stage (a members package at its
+    # root).
+    # Private Arcade frontend (apps/sandbox) keeps its own workspace for now:
+    # its libs/* reuse the package names of Stage's libs/game/* crates
+    # (makepad-game-sim, -math, ...), which one workspace cannot hold twice.
     "apps/sandbox",
-    # Private Source Library picture wall. Same shape as sandbox: clone into
-    # apps/source-library; path deps stay ../../.
-    "apps/source-library",
-    # Private Stage performance app. Own workspace with ../../ path deps.
-    "apps/stage",
+    # Stage's donors are preserved sources, not built.
+    "apps/stage/donors",
     "libs/terminal_core",
-    # standalone GPU generate service (own workspace, like diffusion)
-    "libs/ai/hub",
     "libs/diffusion",
-    # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
-    "libs/ai",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
-    "libs/csg/csg",
-    "libs/csg/csg_boolean",
-    "libs/csg/csg_exact",
-    "libs/csg/csg_primitives",
     # vendored third-party libs (tests require external dev-deps)
     "libs/ab_glyph_rasterizer",
     "libs/i_float",
@@ -304,8 +328,27 @@ bitflags = { path = "libs/bitflags" }
 smallvec = { path = "libs/smallvec" }
 windows-link = { path = "libs/windows/windows-link" }
 
+# Build profiles, for every member, the private apps' crates included.
+#
+# dev: line tables are enough for backtraces and printf debugging (nobody
+# attaches a debugger); full debuginfo cost a quarter of a clean dev build
+# and doubled the Windows PDB and link time.
+[profile.dev]
+debug = "line-tables-only"
+
+# release: agents build release all the time, so an edited crate recompiles
+# incrementally (widgets edit 30 s -> 11 s on Mac, 45 s -> 16 s on Windows;
+# a clean build is ~6% slower). cargo-makepad's packaging commands (android,
+# apple, wasm, ohos, desktop build) set CARGO_PROFILE_RELEASE_INCREMENTAL=false,
+# so shipped binaries are still built whole. lto = "off" drops the default
+# thin-local LTO pass (release clean 63 s -> 52 s for amp, edit loop faster).
+[profile.release]
+incremental = true
+lto = "off"
+
 [profile.small]
 inherits = "release"
+incremental = false
 #debug = true
 opt-level = 'z'   # Optimize for size
 lto = true        # Enable link-time optimization
