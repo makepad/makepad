@@ -1074,6 +1074,7 @@ impl MacosApp {
             if *window == native_window {
                 unsafe {
                     let () = msg_send![*link, invalidate];
+                    let () = msg_send![*link, release];
                 }
                 false
             } else {
@@ -1390,6 +1391,7 @@ impl MacosApp {
                     true
                 } else {
                     let () = msg_send![*link, invalidate];
+                    let () = msg_send![*link, release];
                     false
                 }
             });
@@ -1442,6 +1444,11 @@ impl MacosApp {
                 if link == nil {
                     continue;
                 }
+                // Our own reference, released after `invalidate`: the view's
+                // is gone once AppKit closes the window, which happens before
+                // the deferred WindowClosed retires it (macOS 15 aborted on
+                // the freed link's lock when the last window closed).
+                let () = msg_send![link, retain];
                 let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
                 let () = msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
                 if self.display_links_paused {

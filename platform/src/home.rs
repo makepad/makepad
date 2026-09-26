@@ -2,13 +2,15 @@ use std::path::PathBuf;
 
 /// Returns Makepad's shared per-user state directory.
 ///
-/// `MAKEPAD_HOME` overrides the default. Otherwise the default is `.makepad`
+/// A non-empty `MAKEPAD_HOME` overrides the default. Otherwise the default is `.makepad`
 /// below the user's home directory, with the process temporary directory used
 /// only when the platform exposes no home directory. The AI hub has an older
 /// copy of this rule and should call this helper when its dependency direction
 /// permits it.
 pub fn makepad_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         return PathBuf::from(home);
     }
     std::env::var_os("USERPROFILE")

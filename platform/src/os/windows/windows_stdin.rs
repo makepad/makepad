@@ -341,6 +341,7 @@ impl Cx {
                     self.call_next_frame_event(time_now);
                 }
 
+                self.hlsl_adopt_shaders(d3d11_cx);
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
                     self.hlsl_compile_shaders(d3d11_cx);

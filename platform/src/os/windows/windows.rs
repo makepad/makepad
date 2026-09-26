@@ -234,47 +234,43 @@ impl Cx {
                     return EventFlow::Exit;
                 }
             }
-            Win32Event::Beat {
-                window_id,
-                time,
-                primary,
-            } => {
+            Win32Event::Beat { window_id, time } => {
                 // One window's frame-latency waitable fired: the compositor retired
                 // a present and is ready for that window's next frame. Aim the tick
                 // at the flip it will actually be shown on, not at "now" — that is
                 // what makes animation advance in even steps instead of by however
                 // long this particular tick happened to take.
-                let flip_time = d3d11_windows
+                let (flip_time, period) = d3d11_windows
                     .iter_mut()
                     .find(|w| w.window_id == window_id)
-                    .map(|w| w.target_present_time(time))
-                    .unwrap_or(time);
-                // The primary window owns the app clock. If it can no longer beat
-                // (minimized, occluded, device lost) its tick would simply never
-                // run, and every animation would freeze while a secondary window
-                // keeps flipping — so hand the full tick to whoever is still
-                // beating.
-                let primary_window =
-                    with_win32_app(|app| app.beat_handles.first().map(|b| b.window_id));
-                let primary_alive = primary_window.is_some_and(|pid| {
-                    pid == window_id
-                        || d3d11_windows.iter().any(|w| {
-                            w.window_id == pid
-                                && !w.device_lost
-                                && w.occluded_since.is_none()
-                                && !w.win32_window.is_iconic()
-                        })
-                });
-                let primary = primary || !primary_alive;
+                    .map(|w| (w.target_present_time(time), w.refresh_period))
+                    .unwrap_or((time, 1.0 / 60.0));
+                // The app clock steps once per display flip, on whichever window's
+                // beat reaches that flip first; a later beat aimed at the same flip
+                // (a second window on the same display) paints its own pass tree
+                // only, or every animation would run N× fast with N windows. This
+                // used to belong to one "primary" window, and any time that window
+                // had no beat coming — it held its credit because it had nothing
+                // new to show, it was occluded, or a live move/resize had moved it
+                // to the back of the registration list — no beat stepped the clock
+                // at all: every animation froze while the other window kept
+                // flipping, and moved only while a modal move loop ran unscoped
+                // ticks. The wall-clock arm keeps the clock going if a flip estimate
+                // ever lands far ahead.
+                let full = match self.os.clock_step {
+                    Some((last_flip, last_wake)) => {
+                        flip_time >= last_flip + period * 0.5
+                            || time >= last_wake + period * 1.5
+                    }
+                    None => true,
+                };
+                if full {
+                    self.os.clock_step = Some((flip_time, time));
+                }
                 with_win32_app(|app| app.frame_trace.flip_lead(time, flip_time));
                 self.os.link_scope = Some(window_id);
                 self.os.link_flip_time = Some(flip_time);
-                // The primary window's beat drives the WHOLE tick (video, next
-                // frames, draw, paint) — the same work as the unscoped Paint, just
-                // clocked by the flip. A secondary window's beat paints only its own
-                // pass tree: advancing the animation clock once per window per
-                // refresh would double-step every animation in a multi-window app.
-                self.paint_tick(flip_time, primary, d3d11_cx, d3d11_windows);
+                self.paint_tick(flip_time, full, d3d11_cx, d3d11_windows);
                 self.os.link_scope = None;
                 self.os.link_flip_time = None;
                 // If nothing was painted for this window (its pass was clean, or it
@@ -384,6 +380,12 @@ impl Cx {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                // A shader compile finishing on the pool raises the internal signal. Its
+                // redraw has to start here: a window at rest has no frame of its own to
+                // pick the shader up, and what it holds back stays missing until input.
+                if internal_signal {
+                    self.hlsl_adopt_shaders(d3d11_cx);
                 }
                 if ui_signal {
                     self.call_event_handler(&Event::Signal);
@@ -579,6 +581,7 @@ impl Cx {
                 self.new_next_frame();
             }
         }
+        self.hlsl_adopt_shaders(&d3d11_cx);
         if self.need_redrawing() {
             self.call_draw_event(time_now);
             self.hlsl_compile_shaders(&d3d11_cx);
@@ -773,6 +776,20 @@ impl Cx {
     ) -> bool {
         let mut presented = false;
         let mut passes_todo = Vec::new();
+        // Each pass's paint state before the repaint order is worked out, for
+        // the passes a scoped beat holds back (below).
+        let held_state: Vec<(bool, bool)> = if self.os.link_scope.is_some() {
+            let mut state = Vec::new();
+            for id in self.passes.id_iter() {
+                if state.len() <= id.0 {
+                    state.resize(id.0 + 1, (false, false));
+                }
+                state[id.0] = (self.passes[id].paint_dirty, self.passes[id].repaint_requested);
+            }
+            state
+        } else {
+            Vec::new()
+        };
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         // ONE timestamp for the whole frame: the flip this beat is aimed at, or
@@ -784,12 +801,19 @@ impl Cx {
             .link_flip_time
             .unwrap_or_else(|| with_win32_app(|app| app.time_now())) as f32;
         let scope = self.os.link_scope;
-        // Which windows have a beat of their own. Only those are held back during
-        // someone else's beat — a popup (no frame-latency waitable) or a window in
-        // a live resize has no beat coming, so holding its pass back would freeze
-        // it for as long as another window keeps flipping.
-        let paced: Vec<WindowId> = if scope.is_some() {
-            with_win32_app(|app| app.beat_handles.iter().map(|b| b.window_id).collect())
+        // Which windows have a beat of their own coming. Only those are held back
+        // during someone else's beat — a popup (no frame-latency waitable), a window
+        // in a live resize, or a window already holding a credit (its compositor is
+        // ready and it is out of the wait) has no beat coming, so holding its pass
+        // back would freeze it for as long as another window keeps flipping.
+        let awaiting: Vec<WindowId> = if scope.is_some() {
+            with_win32_app(|app| {
+                app.beat_handles
+                    .iter()
+                    .filter(|b| !b.credit_held)
+                    .map(|b| b.window_id)
+                    .collect()
+            })
         } else {
             Vec::new()
         };
@@ -803,10 +827,20 @@ impl Cx {
                     // retired), and holding the pass back while another window
                     // keeps flipping would leave the grab unanswered forever.
                     if window_id != scope
-                        && paced.contains(&window_id)
+                        && awaiting.contains(&window_id)
                         && !self.has_pending_window_screenshot(window_id)
                     {
-                        self.repaint_pass(*draw_pass_id);
+                        // Leave it exactly as it was before this tick worked out
+                        // its repaint order. That pass marks every time-animated
+                        // pass dirty and propagates dirtiness to parents; kept on a
+                        // pass that is not painted here, that dirt reads as "never
+                        // painted" to a producer that waits for its last frame to
+                        // paint before recording the next (feedback effects), which
+                        // then stalls whenever another window beats in between.
+                        // The owner's own beat works the order out again.
+                        let (dirty, requested) = held_state[draw_pass_id.0];
+                        self.passes[*draw_pass_id].paint_dirty = dirty;
+                        self.passes[*draw_pass_id].repaint_requested = requested;
                         continue;
                     }
                 }
@@ -1419,6 +1453,9 @@ pub struct CxOs {
     /// everything, stamp wall-now. Twin of the macOS backend's link_scope.
     pub(crate) link_scope: Option<WindowId>,
     pub(crate) link_flip_time: Option<f64>,
+    /// The flip the app clock last stepped for and the app-time of the beat
+    /// that stepped it (see `Win32Event::Beat`).
+    pub(crate) clock_step: Option<(f64, f64)>,
     pub(crate) start_time: Option<Instant>,
     pub(crate) media: CxWindowsMedia,
     pub(crate) d3d11_device: Option<ID3D11Device>,

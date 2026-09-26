@@ -234,6 +234,9 @@ pub struct Cx {
     /// Draws skipped because their pipeline was still compiling: in all,
     /// and the repaint that last skipped one (`window_snapshot.rs`).
     pub(crate) pipeline_skips: u64,
+    /// The same by reason: instances not yet presentable, no compiled
+    /// shader, pipeline still compiling.
+    pub(crate) skip_reasons: [u64; 3],
     #[cfg(target_vendor = "apple")]
     pub(crate) pipeline_skip_repaint: Option<u64>,
     /// Until then (seconds since start), a window frame with a draw skipped
@@ -280,6 +283,14 @@ pub struct Cx {
     pub ai_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
+    /// A hosted child's host messages that the network drain took off the
+    /// shared queue: its event loop reads the host socket itself (from the
+    /// first read on this is `Some`), and a Tick also drains `net` for HTTP
+    /// and script sockets. A host batch landing in that drain went through
+    /// `dispatch_studio_msg`, which drops the loop's own messages (geometry,
+    /// swapchain, Tick): the child then kept drawing at the old size. The
+    /// drain parks them here and the loop's next read takes them first.
+    pub(crate) studio_backlog: Option<std::collections::VecDeque<crate::makepad_network::NetworkResponse>>,
 }
 
 #[derive(Clone)]
@@ -989,6 +1000,7 @@ impl Cx {
             screenshot_requests: Default::default(),
             window_snapshots: Vec::new(),
             pipeline_skips: 0,
+            skip_reasons: [0; 3],
             #[cfg(target_vendor = "apple")]
             pipeline_skip_repaint: None,
             whole_frames_until: 0.0,
@@ -1046,6 +1058,7 @@ impl Cx {
             tweak_callback: None,
             ai_callback: None,
             net,
+            studio_backlog: None,
 
             script_data: CxScriptData {
                 std: script_std,

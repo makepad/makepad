@@ -83,10 +83,29 @@ impl Cx {
         }
     }
 
+    /// Shaders whose GPU pipelines are still compiling (0 where the
+    /// backend compiles synchronously).
+    pub fn pipelines_pending(&self) -> usize {
+        #[cfg(target_vendor = "apple")]
+        {
+            self.metal_pipelines_pending()
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            0
+        }
+    }
+
     /// Draws left out of frames so far because they were not ready (their
     /// pipeline compiling, their instances not yet on the GPU).
     pub fn pipeline_skips(&self) -> u64 {
         self.pipeline_skips
+    }
+
+    /// Those draws by reason: [instances not presentable yet, no compiled
+    /// shader, pipeline still compiling].
+    pub fn draw_skip_reasons(&self) -> [u64; 3] {
+        self.skip_reasons
     }
 
     /// Whether a paint of window `index` should copy its frame.

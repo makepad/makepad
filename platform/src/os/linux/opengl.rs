@@ -154,7 +154,9 @@ impl DrawVars {
                             static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
                             const MAX_ERROR_LOGS: usize = 2;
                             let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-                            if index < MAX_ERROR_LOGS {
+                            // Tracing the WGSL asks for every failure, not the first two.
+                            let tracing = crate::makepad_error_log::trace_enabled("shader.wgsl");
+                            if index < MAX_ERROR_LOGS || tracing {
                                 let variant_name = if xr_multiview { "xr" } else { "window" };
                                 crate::error!(
                                     "Vulkan WGSL/SPIR-V compilation failed for {} variant: {}",

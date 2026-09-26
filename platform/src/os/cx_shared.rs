@@ -281,6 +281,12 @@ impl Cx {
 
         let mut responses = Vec::new();
         while let Some(response) = self.net.try_recv() {
+            if let Some(backlog) = self.studio_backlog.as_mut() {
+                if crate::web_socket::is_studio_socket_response(&response) {
+                    backlog.push_back(response);
+                    continue;
+                }
+            }
             if let Some(msgs) = crate::web_socket::consume_studio_socket_response(&response) {
                 let window_id = CxWindowPool::id_zero();
                 let pos = dvec2(0.0, 0.0);
