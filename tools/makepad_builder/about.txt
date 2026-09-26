@@ -1,1 +1,1 @@
-Makepad apps ship as source, so your own coding agent can customize them.
+Shipped as source code, so your coding agent can customize everything.
