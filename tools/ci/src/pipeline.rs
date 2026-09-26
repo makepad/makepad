@@ -180,12 +180,18 @@ fn sync(run: &mut Run, base: &Path, config: &Config, i: usize) -> Result<()> {
             run.log(&format!("apps/{name}: not present"));
             continue;
         }
-        let out = run.command("git", &strings(&["pull", "--ff-only"]), &dir, &[], 300)?;
-        if out.code != 0 {
-            return Err(format!(
-                "apps/{name}: {}",
-                crate::process::error_lines(&out.out)
-            ));
+        // The app checkout lives inside the CI-owned checkout: it is the
+        // CI's, and it takes its branch's tip as it is. A pull stopped for
+        // good at a lockfile a build had regenerated there (every run went
+        // red at sync from then on); a fetch and a hard reset cannot.
+        for args in [["fetch", "--prune", "origin"].as_slice(), ["reset", "--hard", "@{upstream}"].as_slice()] {
+            let out = run.command("git", &strings(args), &dir, &[], 300)?;
+            if out.code != 0 {
+                return Err(format!(
+                    "apps/{name}: {}",
+                    crate::process::error_lines(&out.out)
+                ));
+            }
         }
         let out = run.command("git", &strings(&["rev-parse", "HEAD"]), &dir, &[], 30)?;
         if out.code != 0 {
