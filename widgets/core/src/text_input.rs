@@ -1,0 +1,4846 @@
+use {
+    crate::{
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+        makepad_derive_widget::*,
+        makepad_draw::{
+            event::finger::TouchState,
+            event::keyboard::CharOffset,
+            ime::{
+                AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
+                TextInputConfig, TextInputContentType,
+            },
+            text::{
+                geom::Point,
+                layouter::{LaidoutText, SelectionRect},
+                selection::{Cursor, CursorPosition, Selection},
+            },
+            *,
+        },
+        makepad_script::{ScriptFnRef, ScriptRefOptionExt},
+        scroll_bar::{ScrollAxis, ScrollBar},
+        widget::*,
+        widget_async::{CxSplashVmExt, ScriptAsyncResult},
+    },
+    std::{ops::Range, rc::Rc},
+    unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
+};
+
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    let TextMarkKind = set_type_default() do #(TextMarkKind::script_api(vm))
+    mod.widgets.TextMarkKind = TextMarkKind
+
+    /** The marked-span decoration: a wave, or a dotted rule, drawn under the
+     * words of a marked range rather than round the whole control.
+     *
+     * Every knob is in pixels - amplitude, wavelength, thickness, and the gap
+     * below the baseline - so the same word marked in a heading and in a
+     * caption gets the same wave, and a long run does not blur. */
+    mod.widgets.DrawTextMark = set_type_default() do #(DrawTextMark::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+
+        mark_kind: instance(TextMarkKind.Error)
+        color_error: theme.color_error
+        color_warning: theme.color_warning
+        color_note: theme.color_info
+
+        /** wave height above and below its centre line, in pixels 0..4 step 0.1 */
+        amplitude: 1.3
+        /** one full period of the wave, in pixels 2..20 step 0.5 */
+        wavelength: 5.0
+        /** stroke width, in pixels 0.5..4 step 0.1 */
+        thickness: 1.1
+        /** distance from the text baseline down to the top of the wave, in pixels 0..8 step 0.5 */
+        gap: 1.0
+
+        pixel: fn() {
+            var color = self.color_error
+            var dotted = 0.0
+            match self.mark_kind {
+                TextMarkKind.Error => {
+                    color = self.color_error
+                }
+                TextMarkKind.Warning => {
+                    color = self.color_warning
+                }
+                TextMarkKind.Note => {
+                    color = self.color_note
+                    dotted = 1.0
+                }
+            }
+            let p = self.pos * self.rect_size
+            // The quad hangs from the baseline, so the centre line sits a gap
+            // plus one amplitude below the top of it.
+            let center_y = self.gap + self.amplitude + self.thickness * 0.5
+            var offset = sin(p.x * 6.2831853 / self.wavelength) * self.amplitude
+            if dotted > 0.5 {
+                offset = 0.0
+            }
+            // Shear the sample point instead of stroking a curve: one straight
+            // line through a displaced viewport is one SDF, and the wave keeps
+            // the stroke's antialiasing.
+            let sdf = Sdf2d.viewport(vec2(p.x, p.y - offset))
+            sdf.move_to(0.0, center_y)
+            sdf.line_to(self.rect_size.x, center_y)
+            let stroked = sdf.stroke(color, self.thickness)
+            if dotted > 0.5 {
+                if modf(p.x, self.wavelength) > self.wavelength * 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            return stroked
+        }
+    }
+
+    mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
+
+    /** The flat text field: an inset well with text, selection band and caret layers. */
+    mod.widgets.TextInputFlat = set_type_default() do mod.widgets.TextInputBase{
+        width: Fill
+        height: Fit
+        padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}
+        margin: theme.mspace_v_1
+        flow: Right {wrap: true}
+        is_password: false
+        is_read_only: false
+        is_numeric_only: false
+        empty_text: "Your text here"
+        scroll_bar: mod.widgets.ScrollBar {
+            bar_size: 8.0
+            bar_side_margin: 2.0
+            min_handle_size: 20.0
+            drag_scrolling: true
+        }
+
+        /** The field well: an inset SDF box with a bevel stroke and optional gradient fill. */
+        draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
+            hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
+            down: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
+            empty: instance(0.0)
+
+            /** corner rounding radius 0..24 step 0.5 */
+            border_radius: uniform(theme.corner_radius)
+            /** bevel border thickness in pixels 0..4 step 0.5 */
+            border_size: uniform(theme.beveling)
+
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
+            gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
+            gradient_fill_horizontal: uniform(0.0)
+
+            /** dither the gradient fill to hide banding 0..1 step 1 */
+            color_dither: uniform(1.0)
+
+            color: theme.color_inset
+            color_hover: uniform(theme.color_inset_hover)
+            color_focus: uniform(theme.color_inset_focus)
+            color_down: uniform(theme.color_inset_down)
+            color_empty: uniform(theme.color_inset_empty)
+            color_disabled: uniform(theme.color_inset_disabled)
+
+            /** fill gradient end stop; negative alpha means flat fill */
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_inset_2_hover)
+            color_2_focus: uniform(theme.color_inset_2_focus)
+            color_2_down: uniform(theme.color_inset_2_down)
+            color_2_empty: uniform(theme.color_inset_2_empty)
+            color_2_disabled: uniform(theme.color_inset_2_disabled)
+
+            border_color: uniform(theme.color_bevel)
+            border_color_hover: uniform(theme.color_bevel_hover)
+            border_color_focus: uniform(theme.color_bevel_focus)
+            border_color_down: uniform(theme.color_bevel_down)
+            border_color_empty: uniform(theme.color_bevel_empty)
+            border_color_disabled: uniform(theme.color_bevel_disabled)
+
+            /** bevel gradient end stop; negative alpha means flat stroke */
+            border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            border_color_2_hover: uniform(theme.color_bevel_inset_2_hover)
+            border_color_2_focus: uniform(theme.color_bevel_inset_2_focus)
+            border_color_2_down: uniform(theme.color_bevel_inset_2_down)
+            border_color_2_empty: uniform(theme.color_bevel_inset_2_empty)
+            border_color_2_disabled: uniform(theme.color_bevel_inset_2_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                let border_sz_uv = vec2(
+                    self.border_size / self.rect_size.x
+                    self.border_size / self.rect_size.y
+                )
+
+                let sz_inner_px = vec2(
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                )
+
+                let scale_factor_fill = vec2(
+                    self.rect_size.x / sz_inner_px.x
+                    self.rect_size.y / sz_inner_px.y
+                )
+
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
+                    let gradient_fill = vec2(
+                        self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
+                        self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
+                    )
+                    let dir = if self.gradient_fill_horizontal > 0.5 gradient_fill.x else gradient_fill.y
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let mut color_stroke = self.border_color
+                let mut color_stroke_hover = self.border_color_hover
+                let mut color_stroke_focus = self.border_color_focus
+                let mut color_stroke_down = self.border_color_down
+                let mut color_stroke_empty = self.border_color_empty
+                let mut color_stroke_disabled = self.border_color_disabled
+
+                if self.border_color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
+                    let gradient_border = vec2(
+                        self.pos.x + dither
+                        self.pos.y + dither
+                    )
+                    let dir = if self.gradient_border_horizontal > 0.5 gradient_border.x else gradient_border.y
+                    color_stroke = mix(self.border_color, self.border_color_2, dir)
+                    color_stroke_hover = mix(self.border_color_hover, self.border_color_2_hover, dir)
+                    color_stroke_focus = mix(self.border_color_focus, self.border_color_2_focus, dir)
+                    color_stroke_down = mix(self.border_color_down, self.border_color_2_down, dir)
+                    color_stroke_empty = mix(self.border_color_empty, self.border_color_2_empty, dir)
+                    color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                let stroke = color_stroke
+                    .mix(color_stroke_empty, self.empty)
+                    .mix(color_stroke_focus, self.focus)
+                    .mix(color_stroke_hover.mix(color_stroke_down, self.down), self.hover)
+                    .mix(color_stroke_disabled, self.disabled)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
+
+                return sdf.result
+            }
+        }
+
+        /** The field ink: the typed text, or the placeholder while empty. */
+        draw_text +: {
+            /** pointer-hover mix 0..1 step 0.01 */
+            hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
+            down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
+            empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+
+            color: theme.color_text
+            color_hover: uniform(theme.color_text_hover)
+            color_focus: uniform(theme.color_text_focus)
+            color_down: uniform(theme.color_text_down)
+            color_disabled: uniform(theme.color_text_disabled)
+            color_empty: uniform(theme.color_text_placeholder)
+            color_empty_hover: uniform(theme.color_text_placeholder_hover)
+            color_empty_focus: uniform(theme.color_text_focus)
+
+            text_style: theme.font_regular{
+                line_spacing: theme.font_wdgt_line_spacing
+                font_size: theme.font_size_p
+            }
+
+            get_color: fn() {
+                return self.color
+                    .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
+                    .mix(
+                        self.color_empty
+                            .mix(self.color_empty_hover, self.hover)
+                            .mix(self.color_empty_focus, self.focus),
+                        self.empty
+                    )
+                    .mix(self.color_focus, self.focus * (1.0 - self.empty))
+                    .mix(self.color_disabled, self.disabled)
+            }
+        }
+
+        /** The selection band: one rounded quad per selected run, drawn behind the ink. */
+        draw_selection +: {
+            /** pointer-hover mix 0..1 step 0.01 */
+            hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
+            down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
+            empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+
+            /** dither the gradient fill to hide banding 0..1 step 1 */
+            color_dither: uniform(1.0)
+            /** selection band corner rounding 0..8 step 0.5 */
+            border_radius: uniform(theme.textselection_corner_radius)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
+            gradient_fill_horizontal: uniform(0.0)
+
+            color: uniform(theme.color_selection)
+            color_hover: uniform(theme.color_selection_hover)
+            color_focus: uniform(theme.color_selection_focus)
+            color_down: uniform(theme.color_selection_down)
+            color_empty: uniform(theme.color_selection_empty)
+            color_disabled: uniform(theme.color_selection_disabled)
+
+            /** fill gradient end stop; negative alpha means flat fill */
+            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            color_2_hover: uniform(theme.color_selection_hover)
+            color_2_focus: uniform(theme.color_selection_focus)
+            color_2_down: uniform(theme.color_selection_down)
+            color_2_empty: uniform(theme.color_selection_empty)
+            color_2_disabled: uniform(theme.color_selection_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                sdf.box(
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
+                    self.border_radius
+                )
+
+                let mut color_fill = self.color
+                let mut color_fill_hover = self.color_hover
+                let mut color_fill_focus = self.color_focus
+                let mut color_fill_down = self.color_down
+                let mut color_fill_empty = self.color_empty
+                let mut color_fill_disabled = self.color_disabled
+
+                if self.color_2.x > -0.5 {
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
+                    let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x + dither else self.pos.y + dither
+                    color_fill = mix(self.color, self.color_2, dir)
+                    color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
+                    color_fill_focus = mix(self.color_focus, self.color_2_focus, dir)
+                    color_fill_down = mix(self.color_down, self.color_2_down, dir)
+                    color_fill_empty = mix(self.color_empty, self.color_2_empty, dir)
+                    color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
+                }
+
+                let fill = color_fill
+                    .mix(color_fill_empty, self.empty)
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover.mix(color_fill_down, self.down), self.hover)
+                    .mix(color_fill_disabled, self.disabled)
+
+                sdf.fill(fill)
+                return sdf.result
+            }
+        }
+
+        /** The caret: a rounded bar, visible only while focused and between blinks. */
+        draw_cursor +: {
+            /** keyboard-focus mix 0..1 step 0.01 */
+            focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
+            down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
+            empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
+            disabled: instance(0.0)
+            /** blink phase; 1 hides the caret 0..1 step 0.01 */
+            blink: instance(0.0)
+
+            /** caret corner rounding 0..4 step 0.25 */
+            border_radius: uniform(0.5)
+
+            color: uniform(theme.color_text_cursor)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    0.0
+                    0.0
+                    self.rect_size.x
+                    self.rect_size.y
+                    self.border_radius
+                )
+                sdf.fill(
+                    mix(theme.color_u_hidden, self.color, (1.0 - self.blink) * self.focus)
+                )
+                return sdf.result
+            }
+        }
+
+        /** The IME composition underline: a flat bar under uncommitted text. */
+        draw_composition_underline +: {
+            color: uniform(#8)
+
+            pixel: fn() {
+                return self.color
+            }
+        }
+
+        /** The marked-span squiggle: drawn under the words, not round the well. */
+        draw_mark +: {
+            color_error: theme.color_error
+            color_warning: theme.color_warning
+            color_note: theme.color_info
+        }
+
+        animator: Animator{
+            empty: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {empty: 0.0}
+                        draw_text: {empty: 0.0}
+                        draw_selection: {empty: 0.0}
+                        draw_cursor: {empty: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {empty: 1.0}
+                        draw_text: {empty: 1.0}
+                        draw_selection: {empty: 1.0}
+                        draw_cursor: {empty: 1.0}
+                    }
+                }
+            }
+            blink: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.05}}
+                    apply: {
+                        draw_cursor: {blink: 1.0}
+                    }
+                }
+            }
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {down: 0.0, hover: 0.0}
+                        draw_text: {down: 0.0, hover: 0.0}
+                    }
+                }
+
+                on: AnimatorState{
+                    from: {
+                        all: Forward {duration: 0.1}
+                        down: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {down: 0.0, hover: snap(1.0)}
+                        draw_text: {down: 0.0, hover: snap(1.0)}
+                    }
+                }
+
+                down: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {down: snap(1.0), hover: 1.0}
+                        draw_text: {down: snap(1.0), hover: 1.0}
+                    }
+                }
+            }
+            disabled: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {disabled: 0.0}
+                        draw_text: {disabled: 0.0}
+                        draw_selection: {disabled: 0.0}
+                        draw_cursor: {disabled: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {disabled: 1.0}
+                        draw_text: {disabled: 1.0}
+                        draw_selection: {disabled: 1.0}
+                        draw_cursor: {disabled: 1.0}
+                    }
+                }
+            }
+            focus: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.25}}
+                    apply: {
+                        draw_bg: {focus: 0.0}
+                        draw_text: {focus: 0.0}
+                        draw_cursor: {focus: 0.0}
+                        draw_selection: {focus: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {focus: 1.0}
+                        draw_text: {focus: 1.0}
+                        draw_cursor: {focus: 1.0}
+                        draw_selection: {focus: 1.0}
+                    }
+                }
+            }
+        }
+    }
+
+    /** The standard text field: the flat well plus the theme's inset bevel. */
+    mod.widgets.TextInput = mod.widgets.TextInputFlat{
+        draw_bg +: {
+            border_color: theme.color_bevel_inset_1
+            border_color_hover: theme.color_bevel_inset_1_hover
+            border_color_focus: theme.color_bevel_inset_1_focus
+            border_color_down: theme.color_bevel_inset_1_down
+            border_color_empty: theme.color_bevel_inset_1_empty
+            border_color_disabled: theme.color_bevel_inset_1_disabled
+
+            border_color_2: theme.color_bevel_inset_1
+        }
+    }
+
+    mod.widgets.TextInputGradientX = mod.widgets.TextInput{
+        draw_bg +: {
+            gradient_border_horizontal: 1.0
+            gradient_fill_horizontal: 1.0
+
+            color: theme.color_inset_1
+            color_hover: theme.color_inset_1_hover
+            color_focus: theme.color_inset_1_focus
+            color_down: theme.color_inset_1_down
+            color_empty: theme.color_inset_1_empty
+            color_disabled: theme.color_inset_1_disabled
+
+            color_2: theme.color_inset_2
+        }
+
+        draw_selection +: {
+            gradient_fill_horizontal: 1.0
+
+            color: theme.color_selection
+            color_hover: theme.color_selection_hover
+            color_focus: theme.color_selection_focus
+            color_down: theme.color_selection_down
+            color_empty: theme.color_selection_empty
+            color_disabled: theme.color_selection_disabled
+
+            color_2: theme.color_selection
+            color_2_hover: theme.color_selection_hover
+            color_2_focus: theme.color_selection_focus
+            color_2_down: theme.color_selection_down
+            color_2_empty: theme.color_selection_empty
+            color_2_disabled: theme.color_selection_disabled
+        }
+    }
+
+
+    mod.widgets.TextInputGradientY = mod.widgets.TextInputGradientX{
+        draw_bg +: {
+            gradient_border_horizontal: 0.0
+            gradient_fill_horizontal: 0.0
+        }
+
+        draw_selection +: {
+            gradient_fill_horizontal: 0.0
+        }
+    }
+}
+
+
+/// What a marked span means.
+///
+/// The flavour picks the colour and the shape; nothing else about a mark
+/// changes. Error and warning are the two a form needs - this value will not
+/// do, and this value is doubtful - and note is the third thing a marked span
+/// is ever for: a term with something behind it, a tracked change, a hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Script, ScriptHook)]
+#[repr(u32)]
+pub enum TextMarkKind {
+    /// Wrong: a misspelling, a value the form will not accept.
+    #[pick]
+    Error = 1,
+    /// Doubtful: a lint, a weak password, a date in the past.
+    Warning = 2,
+    /// Noteworthy: a defined term, a tracked change, a hint.
+    Note = 3,
+}
+
+/// A stretch of text marked as wrong, doubtful or noteworthy.
+///
+/// `start` and `end` are byte offsets into the marked widget's own text, half
+/// open, so a mark is `text[start..end]`. They are plain offsets into one
+/// string on purpose: every text widget in this library lays out one string,
+/// and a line-and-column position would have to be converted at every call.
+///
+/// Marks may overlap, and overlapping marks all draw. A misspelt word inside a
+/// sentence flagged as too long is two facts, not one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextMark {
+    /// First byte of the marked text.
+    pub start: usize,
+    /// One past the last byte of the marked text.
+    pub end: usize,
+    /// What the mark means.
+    pub kind: TextMarkKind,
+}
+
+impl TextMark {
+    /// A mark over `start..end`. The two ends may arrive either way round.
+    pub fn new(start: usize, end: usize, kind: TextMarkKind) -> Self {
+        Self {
+            start: start.min(end),
+            end: start.max(end),
+            kind,
+        }
+    }
+
+    /// A mark saying this text is wrong.
+    pub fn error(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Error)
+    }
+
+    /// A mark saying this text is doubtful.
+    pub fn warning(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Warning)
+    }
+
+    /// A mark saying this text is worth noticing.
+    pub fn note(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Note)
+    }
+
+    /// Whether the mark covers no text at all. An empty mark draws nothing.
+    pub fn is_empty(&self) -> bool {
+        self.start >= self.end
+    }
+
+    /// The part of this mark that falls inside a `window_len`-byte window
+    /// starting at `window_start`, as a range local to that window, or `None`
+    /// when the mark misses the window entirely.
+    ///
+    /// This is the first half of turning a mark into rects: a text flow lays
+    /// out one run at a time, each run holding a slice of the flow's text, and
+    /// a mark given against the whole flow has to be cut down to the piece of
+    /// it that each run actually contains before that run's layout can be
+    /// asked where the glyphs are.
+    pub fn clip_to(&self, window_start: usize, window_len: usize) -> Option<std::ops::Range<usize>> {
+        let start = self.start.max(window_start);
+        let end = self.end.min(window_start + window_len);
+        if start >= end {
+            return None;
+        }
+        Some(start - window_start..end - window_start)
+    }
+}
+
+/// The marks a text widget is currently showing.
+///
+/// A plain list in the order the host gave it, with no merging and no overlap
+/// rule: a set that silently drops a mark because another one touches it
+/// cannot report two things about one word, which is the case marks exist for.
+#[derive(Clone, Debug, Default)]
+pub struct TextMarkSet {
+    marks: Vec<TextMark>,
+}
+
+impl TextMarkSet {
+    /// Whether there is nothing to draw.
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty()
+    }
+
+    /// How many marks are set.
+    pub fn len(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// The marks, in the order they were given.
+    pub fn as_slice(&self) -> &[TextMark] {
+        &self.marks
+    }
+
+    /// Walk the marks in the order they were given.
+    pub fn iter(&self) -> std::slice::Iter<'_, TextMark> {
+        self.marks.iter()
+    }
+
+    /// Replace every mark. Empty marks are dropped on the way in, since they
+    /// would draw nothing and only cost a rect walk per frame.
+    pub fn set(&mut self, marks: impl IntoIterator<Item = TextMark>) {
+        self.marks.clear();
+        self.marks.extend(marks.into_iter().filter(|m| !m.is_empty()));
+    }
+
+    /// Add one mark, keeping the ones already there.
+    pub fn push(&mut self, mark: TextMark) {
+        if !mark.is_empty() {
+            self.marks.push(mark);
+        }
+    }
+
+    /// Drop every mark.
+    pub fn clear(&mut self) {
+        self.marks.clear();
+    }
+
+    /// Drop every mark because the text changed underneath them, returning
+    /// whether anything was actually dropped.
+    ///
+    /// The library deliberately does no edit algebra. An offset that was right
+    /// before an edit is a guess after it, and a squiggle under the wrong word
+    /// is worse than no squiggle at all; the host has just changed the text, so
+    /// it is about to re-validate it anyway and can mark it again. One line,
+    /// correct, and no edit arithmetic enters the library.
+    pub fn clear_on_edit(&mut self) -> bool {
+        if self.marks.is_empty() {
+            return false;
+        }
+        self.marks.clear();
+        true
+    }
+}
+
+/// Place a mark's band under one row of laid-out text.
+///
+/// `row_origin` and `row_width` are one row's piece of the mark in layout
+/// pixels relative to `text_origin`, and `row_ascender` is that row's ascender,
+/// so `row_origin.y + row_ascender` is that row's baseline. The band hangs from
+/// the baseline down and is `band_height` tall whatever the row is: the wave is
+/// measured in pixels, not in fractions of a row.
+///
+/// A mark crossing a wrap arrives here once per row it touches, each piece
+/// carrying its own row's ascender, so every piece hangs from the baseline of
+/// the row it is actually on rather than from the first row's.
+pub fn mark_band_rect(
+    text_origin: DVec2,
+    row_origin: DVec2,
+    row_width: f64,
+    row_ascender: f64,
+    font_scale: f64,
+    band_height: f64,
+) -> Rect {
+    Rect {
+        pos: dvec2(
+            text_origin.x + row_origin.x * font_scale,
+            text_origin.y + (row_origin.y + row_ascender) * font_scale,
+        ),
+        size: dvec2((row_width * font_scale).max(0.0), band_height),
+    }
+}
+
+/// The squiggle drawn under a marked span.
+///
+/// The shape comes from the terminal's underline shader rather than the code
+/// editor's decoration: the editor takes its amplitude as a fraction of the
+/// row height, so the same word gets a different wave in a heading than in the
+/// prose under it, and a wide run blurs. Here every uniform is in pixels.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTextMark {
+    #[deref]
+    draw_super: DrawQuad,
+    /// Colour of an [`TextMarkKind::Error`] mark.
+    #[live]
+    pub color_error: Vec4f,
+    /// Colour of a [`TextMarkKind::Warning`] mark.
+    #[live]
+    pub color_warning: Vec4f,
+    /// Colour of a [`TextMarkKind::Note`] mark.
+    #[live]
+    pub color_note: Vec4f,
+    /// Which flavour this instance draws.
+    #[live]
+    pub mark_kind: TextMarkKind,
+    /// Wave height above and below its centre line, in pixels.
+    #[live]
+    pub amplitude: f32,
+    /// One full period of the wave, in pixels.
+    #[live]
+    pub wavelength: f32,
+    /// Stroke width, in pixels.
+    #[live]
+    pub thickness: f32,
+    /// Distance from the text baseline down to the top of the wave, in pixels.
+    #[live]
+    pub gap: f32,
+}
+
+impl DrawTextMark {
+    /// How tall a band this shader needs under the baseline, in pixels.
+    ///
+    /// The widget hands `draw_abs` a rect this tall, so the wave is never
+    /// clipped and never scaled to fit a row. The last pixel is headroom for
+    /// the stroke's antialiasing.
+    pub fn band_height(&self) -> f64 {
+        (self.gap + 2.0 * self.amplitude + self.thickness + 1.0) as f64
+    }
+}
+
+#[derive(Script, Widget, Animator)]
+pub struct TextInput {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[apply_default]
+    animator: Animator,
+
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_selection: DrawQuad,
+    #[live]
+    draw_cursor: DrawQuad,
+    #[live]
+    draw_composition_underline: DrawQuad,
+    #[live]
+    draw_mark: DrawTextMark,
+
+    /// The marked spans this field is showing. Dropped on every edit; the host
+    /// re-validates and marks again.
+    #[rust]
+    marks: TextMarkSet,
+
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    label_align: Align,
+
+    #[live]
+    is_password: bool,
+    #[live]
+    is_read_only: bool,
+    #[live]
+    is_numeric_only: bool,
+    #[live]
+    input_mode: InputMode,
+    #[live]
+    content_type: TextInputContentType,
+    #[live]
+    autocapitalize: AutoCapitalize,
+    #[live]
+    autocorrect: AutoCorrect,
+    #[live]
+    return_key_type: ReturnKeyType,
+    #[live(false)]
+    is_multiline: bool,
+    /// When `is_multiline` is true, controls whether plain Enter inserts a
+    /// newline or emits the `Returned` action.
+    ///
+    /// * `false` (default): plain Enter inserts a newline; the `Returned`
+    ///   action is emitted for Primary modifier + Enter (Cmd on macOS,
+    ///   Ctrl on other platforms).
+    /// * `true`: plain Enter emits `Returned`; Shift+Enter inserts a newline.
+    ///
+    /// Regardless of this setting, Primary modifier + Enter always emits
+    /// `Returned`, and Shift+Enter always inserts a newline.
+    ///
+    /// Ignored when `is_multiline` is false (single-line inputs always emit
+    /// `Returned` on Enter).
+    #[live(false)]
+    submit_on_enter: bool,
+    #[live]
+    scroll_bar: ScrollBar,
+    /// Space between the vertical scroll bar and the input's top, right and bottom edges,
+    /// e.g. to keep it clear of a button overlaid in a corner.
+    #[live]
+    scroll_bar_inset: Inset,
+    #[live]
+    scroll_y: f64,
+    /// Horizontal scroll offset for single-line mode (in logical pixels).
+    #[rust]
+    scroll_x: f64,
+    #[live]
+    empty_text: String,
+    #[live]
+    text: String,
+    #[live(0.5)]
+    blink_speed: f64,
+
+    #[rust]
+    password_text: String,
+    #[rust]
+    laidout_text: Option<Rc<LaidoutText>>,
+    #[rust]
+    laidout_width: Option<f32>,
+    /// `draw_text.max_lines` as of the cached layout. Part of the cache key:
+    /// clamping a field to one row is a runtime change (collapse/expand), and
+    /// without this the cached multi-row layout survives it.
+    #[rust]
+    laidout_max_lines: usize,
+    #[rust]
+    text_area: Area,
+    #[rust]
+    selection: Selection,
+    #[rust]
+    history: History,
+    #[rust]
+    blink_timer: Timer,
+    #[rust]
+    preserved_selection_cursor: Option<Cursor>,
+    /// When true, the next draw will scroll to keep the cursor visible.
+    /// Set when the cursor/selection changes; cleared after scroll_to_cursor runs.
+    #[rust(true)]
+    needs_scroll_to_cursor: bool,
+    /// Cached maximum vertical scroll offset from the last draw pass. Used during event
+    /// handling to ensure boundary checks match exactly (avoiding floating-point
+    /// mismatch between draw-time and event-time computations).
+    #[rust]
+    cached_max_scroll_y: f64,
+    /// Cached maximum horizontal scroll offset from the last draw pass.
+    #[rust]
+    cached_max_scroll_x: f64,
+    /// Caret rect relative to the draw_bg box, cached each draw. This offset is
+    /// stable across draw-list spaces, so we add the box's window position later.
+    #[rust]
+    cached_caret_offset: DVec2,
+    #[rust]
+    cached_caret_size: DVec2,
+    /// Skip finger move after long press to prevent selection changes
+    #[rust]
+    ignore_next_move: bool,
+    /// Touch that started outside this input while focused and may blur on release.
+    #[rust]
+    pending_outside_focus_loss_touch: Option<u64>,
+    /// IME composition tracking - byte index where composition starts
+    #[rust]
+    composition_start: usize,
+    /// IME composition tracking - byte index where composition ends
+    #[rust]
+    composition_end: usize,
+    /// Frame ID when IME input was last received (echo prevention)
+    #[rust]
+    ime_update_frame: u64,
+    /// Cached text last sent to platform IME (echo prevention)
+    #[rust]
+    last_sent_ime_text: String,
+    /// Cached selection start (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_start: usize,
+    /// Cached selection end (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_end: usize,
+
+    #[live]
+    on_change: Option<ScriptFnRef>,
+    #[live]
+    on_return: Option<ScriptFnRef>,
+}
+
+impl ScriptHook for TextInput {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            self.check_text_is_empty(cx);
+        });
+    }
+}
+
+impl TextInput {
+    fn emit_change(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
+        if let Some(handler) = self.on_change.as_object() {
+            let text = self.text.clone();
+            // Nothing to call into if the isolate that minted this input is
+            // already gone.
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
+            cx.with_script_vm_id(vm_id, |vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
+            });
+        }
+    }
+
+    fn emit_return(&mut self, cx: &mut Cx, uid: WidgetUid, mods: KeyModifiers) {
+        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+        if let Some(handler) = self.on_return.as_object() {
+            let text = self.text.clone();
+            // Nothing to call into if the isolate that minted this input is
+            // already gone.
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
+            cx.with_script_vm_id(vm_id, |vm| {
+                let str_val = vm.bx.heap.new_string_from_str(&text);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
+            });
+        }
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        self.is_multiline
+    }
+
+    /// Returns whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See the [`TextInput::submit_on_enter`] field for details.
+    pub fn submit_on_enter(&self) -> bool {
+        self.submit_on_enter
+    }
+
+    /// Sets whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See the [`TextInput::submit_on_enter`] field for details.
+    pub fn set_submit_on_enter(&mut self, submit_on_enter: bool) {
+        self.submit_on_enter = submit_on_enter;
+    }
+
+    pub fn set_is_multiline(&mut self, cx: &mut Cx, is_multiline: bool) {
+        self.is_multiline = is_multiline;
+        if !is_multiline {
+            self.scroll_y = 0.0;
+            self.cached_max_scroll_y = 0.0;
+        }
+        self.scroll_x = 0.0;
+        self.cached_max_scroll_x = 0.0;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Clamps how many rows the field lays out; 0 means unlimited.
+    ///
+    /// Rows made by hard newlines count too, so this genuinely folds a
+    /// multi-line draft to one line rather than only disabling soft wrap —
+    /// which is what makes it usable for a composer that collapses when it
+    /// loses focus. Pair with `draw_text.text_overflow = Ellipsis` to mark the
+    /// truncation.
+    ///
+    /// Exists so callers don't have to reach for a script apply to change one
+    /// number: applying script to a TextInput resets its `#[live]` fields, and
+    /// `text` is one of them — so doing this the scripted way silently emptied
+    /// the field.
+    pub fn set_max_lines(&mut self, cx: &mut Cx, max_lines: usize) {
+        if self.draw_text.max_lines == max_lines {
+            return;
+        }
+        self.draw_text.max_lines = max_lines;
+        // Deliberately does NOT clear `laidout_text`. `max_lines` is part of
+        // the layout cache key, so the next draw re-lays out anyway — whereas
+        // dropping the layout HERE leaves the field with none for the rest of
+        // the event batch, and every cursor operation in that window fails
+        // ("can't move cursor because layout was invalidated by an earlier
+        // event") and silently returns. Since this is called from focus and
+        // blur handling, that window is exactly when the user is clicking into
+        // the field, so the click would place no caret at all.
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.draw_text.max_lines
+    }
+
+    /// Takes key focus AND turns the caret on.
+    ///
+    /// Use this instead of the bare `Widget::set_key_focus` whenever the app
+    /// hands focus to a field itself. The caret is drawn as
+    /// `(1.0 - blink) * focus`, and both come from the `focus`/`blink`
+    /// animators, which only move when the widget is dealt a `Hit::KeyFocus`.
+    /// Setting key focus on a field that ALREADY holds it is a no-op at the
+    /// platform level — no hit is dispatched — so a field that was focused,
+    /// then hidden (hiding doesn't clear `Cx`'s key focus) and shown again
+    /// comes back typable but with no caret and no selection highlight, its
+    /// animators still parked where the last focus-lost left them.
+    pub fn take_key_focus(&mut self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+        // Unconditional, not gated on the focus actually changing: the whole
+        // point is to repair the visuals when it did NOT.
+        self.animator_play(cx, ids!(focus.on));
+        self.reset_blink_timer(cx);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Overrides the height this field asks its parent for.
+    ///
+    /// For a composer that folds to one line when it loses focus. Pinning the
+    /// HEIGHT is the safe way to do that — unlike clamping `max_lines`, it
+    /// leaves the laid-out text alone, and the laid-out text is what maps a
+    /// click to a caret position. Fold by re-layout and the press that
+    /// re-focuses the field resolves against the folded layout while the
+    /// expanded one is on screen, putting the caret and any drag-selection on
+    /// the wrong text. Overflow is clipped, so pick a whole number of lines or
+    /// the last one is sliced through the middle of its glyphs.
+    pub fn set_height(&mut self, cx: &mut Cx, height: Size) {
+        self.walk.height = height;
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Scrolls back to the very start of the text.
+    ///
+    /// For a field that folds down to a fixed height when it loses focus: the
+    /// scroll offset survives the blur, so a draft last edited near its end
+    /// would fold showing whichever line the caret had scrolled to rather than
+    /// its first. Deliberately leaves `laidout_text` alone — scrolling doesn't
+    /// change the layout, and dropping it here would break every cursor
+    /// operation for the rest of the event batch (see `set_max_lines`).
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        if self.scroll_x == 0.0 && self.scroll_y == 0.0 {
+            return;
+        }
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn is_password(&self) -> bool {
+        self.is_password
+    }
+
+    pub fn set_is_password(&mut self, cx: &mut Cx, is_password: bool) {
+        self.is_password = is_password;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn toggle_is_password(&mut self, cx: &mut Cx) {
+        self.set_is_password(cx, !self.is_password);
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.is_read_only
+    }
+
+    pub fn set_is_read_only(&mut self, cx: &mut Cx, is_read_only: bool) {
+        self.is_read_only = is_read_only;
+        // Flipped to read-only while focused: drop the keyboard now, since the draw
+        // path no longer re-shows it (gated on !is_read_only). Guard against Area::Empty
+        // (a never-drawn/reapplied field) so we don't false-match an Empty key focus.
+        let area = self.draw_bg.area();
+        if is_read_only && !area.is_empty() && cx.has_key_focus(area) {
+            cx.hide_text_ime();
+        }
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn toggle_is_read_only(&mut self, cx: &mut Cx) {
+        self.set_is_read_only(cx, !self.is_read_only);
+    }
+
+    pub fn is_numeric_only(&self) -> bool {
+        self.is_numeric_only
+    }
+
+    pub fn set_is_numeric_only(&mut self, cx: &mut Cx, is_numeric_only: bool) {
+        self.is_numeric_only = is_numeric_only;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn toggle_is_numeric_only(&mut self, cx: &mut Cx) {
+        self.set_is_numeric_only(cx, !self.is_numeric_only);
+    }
+
+    pub fn empty_text(&self) -> &str {
+        &self.empty_text
+    }
+
+    pub fn set_empty_text(&mut self, cx: &mut Cx, empty_text: String) {
+        self.empty_text = empty_text;
+        if self.text.is_empty() {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
+
+    pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
+        self.selection = Selection {
+            anchor: Cursor {
+                index: floor_grapheme_boundary(&self.text, selection.anchor.index),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: floor_grapheme_boundary(&self.text, selection.cursor.index),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
+        self.needs_scroll_to_cursor = true;
+        self.clear_composition();
+        self.history.force_new_edit_group();
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        self.selection.cursor
+    }
+
+    pub fn set_cursor(&mut self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: if keep_selection {
+                    self.selection.anchor
+                } else {
+                    cursor
+                },
+                cursor,
+            },
+        );
+    }
+
+    pub fn selected_text(&self) -> &str {
+        &self.text[self.selection.start().index..self.selection.end().index]
+    }
+
+    pub fn reset_blink_timer(&mut self, cx: &mut Cx) {
+        self.animator_cut(cx, ids!(blink.off));
+        if !self.is_read_only {
+            cx.stop_timer(self.blink_timer);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
+    }
+
+    fn cursor_to_position(&self, cursor: Cursor) -> Result<CursorPosition, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
+        let position = laidout_text.cursor_to_position(self.cursor_to_password_cursor(cursor));
+        Ok(CursorPosition {
+            row_index: position.row_index,
+            x_in_lpxs: position.x_in_lpxs * self.draw_text.font_scale,
+        })
+    }
+
+    fn point_in_lpxs_to_cursor(&self, point_in_lpxs: Point<f32>) -> Result<Cursor, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
+        let cursor =
+            laidout_text.point_in_lpxs_to_cursor(point_in_lpxs / self.draw_text.font_scale);
+        Ok(self.password_cursor_to_cursor(cursor))
+    }
+
+    fn position_to_cursor(&self, position: CursorPosition) -> Result<Cursor, ()> {
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return Err(());
+        };
+        let cursor = laidout_text.position_to_cursor(CursorPosition {
+            row_index: position.row_index,
+            x_in_lpxs: position.x_in_lpxs / self.draw_text.font_scale,
+        });
+        Ok(self.password_cursor_to_cursor(cursor))
+    }
+
+    fn selection_to_password_selection(&self, selection: Selection) -> Selection {
+        Selection {
+            cursor: self.cursor_to_password_cursor(selection.cursor),
+            anchor: self.cursor_to_password_cursor(selection.anchor),
+        }
+    }
+
+    fn cursor_to_password_cursor(&self, cursor: Cursor) -> Cursor {
+        Cursor {
+            index: self.index_to_password_index(cursor.index),
+            prefer_next_row: cursor.prefer_next_row,
+        }
+    }
+
+    fn password_cursor_to_cursor(&self, password_cursor: Cursor) -> Cursor {
+        Cursor {
+            index: self.password_index_to_index(password_cursor.index),
+            prefer_next_row: password_cursor.prefer_next_row,
+        }
+    }
+
+    fn index_to_password_index(&self, index: usize) -> usize {
+        if !self.is_password {
+            return index;
+        }
+        let grapheme_index = self.text[..index].graphemes(true).count();
+        self.password_text
+            .grapheme_indices(true)
+            .nth(grapheme_index)
+            .map_or(self.password_text.len(), |(index, _)| index)
+    }
+
+    fn password_index_to_index(&self, password_index: usize) -> usize {
+        if !self.is_password {
+            return password_index;
+        }
+        let grapheme_index = self.password_text[..password_index].graphemes(true).count();
+        self.text
+            .grapheme_indices(true)
+            .nth(grapheme_index)
+            .map_or(self.text.len(), |(index, _)| index)
+    }
+
+    fn inner_walk(&self) -> Walk {
+        if self.walk.width.is_fit() {
+            Walk::fit()
+        } else {
+            Walk::fill_fit()
+        }
+    }
+
+    fn layout_text(&mut self, cx: &mut Cx2d) {
+        let turtle_rect = cx.turtle().inner_rect();
+        // For single-line mode, don't constrain the max width so the text lays out
+        // at its natural width. This allows us to detect overflow and scroll horizontally.
+        // For multiline mode, constrain to the available width for proper wrapping.
+        let max_width_in_lpxs = if self.is_multiline && !turtle_rect.size.x.is_nan() {
+            Some(turtle_rect.size.x as f32)
+        } else {
+            None
+        };
+        if self.laidout_text.is_some()
+            && self.laidout_width == max_width_in_lpxs
+            && self.laidout_max_lines == self.draw_text.max_lines
+        {
+            return;
+        }
+        let text = if self.is_password {
+            self.password_text.clear();
+            for grapheme in self.text.graphemes(true) {
+                self.password_text
+                    .push(if grapheme == "\n" { '\n' } else { '•' });
+            }
+            &self.password_text
+        } else {
+            &self.text
+        };
+
+        let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
+        self.laidout_width = max_width_in_lpxs;
+        self.laidout_max_lines = self.draw_text.max_lines;
+        self.laidout_text = Some(self.draw_text.layout(
+            cx,
+            0.0,
+            0.0,
+            max_width_in_lpxs,
+            wrap,
+            self.label_align,
+            text,
+        ));
+    }
+
+    fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
+        let inner_walk = self.inner_walk();
+        let text_rect = if self.text.is_empty() {
+            self.draw_text
+                .draw_walk(cx, inner_walk, self.label_align, &self.empty_text)
+        } else {
+            let laidout_text = self.laidout_text.as_ref().unwrap();
+            self.draw_text
+                .draw_walk_laidout(cx, inner_walk, laidout_text)
+        };
+        cx.add_aligned_rect_area(&mut self.text_area, text_rect);
+        text_rect
+    }
+
+    /// The caret's rect (top-left + size, line height included) in window coords:
+    /// the draw_bg box's window position plus the cached box-relative offset. Query
+    /// during events, not draw, or the box position is draw-local. None before first draw.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        if self.cached_caret_size.y <= 0.0 {
+            return None;
+        }
+        Some(Rect {
+            pos: self.draw_bg.area().rect(cx).pos + self.cached_caret_offset,
+            size: self.cached_caret_size,
+        })
+    }
+
+    fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Rect {
+        let CursorPosition {
+            row_index,
+            x_in_lpxs,
+        } = self
+            .cursor_to_position(self.selection.cursor)
+            .ok()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        // For multiline, clamp cursor x to viewport width to prevent it from
+        // extending past the right edge. For single-line, don't clamp because
+        // the text may be scrolled horizontally, and the clip rect handles overflow.
+        let x_in_lpxs = if self.is_multiline {
+            x_in_lpxs.min(cx.turtle().inner_rect().size.x as f32 - 2.0)
+        } else {
+            x_in_lpxs
+        };
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        let row = &laidout_text.rows[row_index];
+        let cursor_rect = rect(
+            (x_in_lpxs - 1.0 * self.draw_text.font_scale) as f64,
+            ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64,
+            (2.0 * self.draw_text.font_scale) as f64,
+            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64,
+        );
+        self.draw_cursor
+            .draw_abs(cx, cursor_rect.translate(text_rect.pos));
+        cursor_rect
+    }
+
+    // The caret/composition-line rectangle (top-left + size, line height included)
+    // in IME-area-relative coordinates. Backends forward this to the OS so the
+    // candidate window anchors directly above/below the line near the cursor.
+    fn ime_position_rect(&self, cx: &Cx, text_rect: Rect, position: CursorPosition) -> Rect {
+        let area_rect = self.draw_bg.area().rect(cx);
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        let row = &laidout_text.rows[position.row_index];
+        let line_top =
+            ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let line_height =
+            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let top_left = text_rect.pos - area_rect.pos
+            + dvec2(position.x_in_lpxs as f64, line_top)
+            - dvec2(self.scroll_x, self.scroll_y);
+        Rect {
+            pos: top_left,
+            size: dvec2((2.0 * self.draw_text.font_scale) as f64, line_height),
+        }
+    }
+
+    fn ime_cursor_rect(&self, cx: &Cx, text_rect: Rect, cursor_rect: Rect) -> Rect {
+        if !self.has_composition() && self.selection.cursor.index > 0 {
+            let previous_index = prev_grapheme_boundary(&self.text, self.selection.cursor.index);
+            let previous_cursor = Cursor {
+                index: previous_index,
+                prefer_next_row: false,
+            };
+            let end_cursor = Cursor {
+                index: self.selection.cursor.index,
+                prefer_next_row: false,
+            };
+            if let (Ok(previous_position), Ok(end_position)) = (
+                self.cursor_to_position(previous_cursor),
+                self.cursor_to_position(end_cursor),
+            ) {
+                let anchor_position = if previous_position.row_index == end_position.row_index {
+                    CursorPosition {
+                        row_index: previous_position.row_index,
+                        x_in_lpxs: (previous_position.x_in_lpxs + end_position.x_in_lpxs) * 0.5,
+                    }
+                } else {
+                    previous_position
+                };
+                return self.ime_position_rect(cx, text_rect, anchor_position);
+            }
+        }
+
+        let area_rect = self.draw_bg.area().rect(cx);
+        Rect {
+            pos: text_rect.pos - area_rect.pos + cursor_rect.pos
+                - dvec2(self.scroll_x, self.scroll_y),
+            size: cursor_rect.size,
+        }
+    }
+
+    fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+
+        self.draw_selection.begin_many_instances(cx);
+        for SelectionRect { rect_in_lpxs, .. } in
+            laidout_text.selection_rects(self.selection_to_password_selection(self.selection))
+        {
+            self.draw_selection.draw_abs(
+                cx,
+                rect(
+                    text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64,
+                    text_rect.pos.y + (rect_in_lpxs.origin.y * self.draw_text.font_scale) as f64,
+                    (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64,
+                    (rect_in_lpxs.size.height * self.draw_text.font_scale) as f64,
+                ),
+            );
+        }
+        self.draw_selection.end_many_instances(cx);
+    }
+
+    /// Calculate the bounding rectangle of the current text selection in screen coordinates
+    /// We use the draw_bg area which should give us the actual drawn position
+    fn get_selection_rect(&self, cx: &Cx) -> Rect {
+        let widget_rect = self.draw_bg.area().rect(cx);
+
+        // If no layout yet, return a small rect below the widget
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return rect(
+                widget_rect.pos.x,
+                widget_rect.pos.y + widget_rect.size.y,
+                10.0,
+                20.0,
+            );
+        };
+
+        // Get all selection rectangles
+        let selection_rects =
+            laidout_text.selection_rects(self.selection_to_password_selection(self.selection));
+
+        if selection_rects.is_empty() {
+            // No selection, return position below the widget
+            return rect(
+                widget_rect.pos.x,
+                widget_rect.pos.y + widget_rect.size.y,
+                10.0,
+                20.0,
+            );
+        }
+
+        // Calculate bounding box of all selection rects
+        let first = &selection_rects[0].rect_in_lpxs;
+        let mut min_x = first.origin.x;
+        let mut min_y = first.origin.y;
+        let mut max_x = first.origin.x + first.size.width;
+        let mut max_y = first.origin.y + first.size.height;
+
+        for SelectionRect { rect_in_lpxs, .. } in selection_rects.iter().skip(1) {
+            min_x = min_x.min(rect_in_lpxs.origin.x);
+            min_y = min_y.min(rect_in_lpxs.origin.y);
+            max_x = max_x.max(rect_in_lpxs.origin.x + rect_in_lpxs.size.width);
+            max_y = max_y.max(rect_in_lpxs.origin.y + rect_in_lpxs.size.height);
+        }
+
+        // Convert to screen coordinates using widget position as base
+        let text_offset_x = widget_rect.pos.x + self.layout.padding.left as f64;
+        let text_offset_y = widget_rect.pos.y + self.layout.padding.top as f64;
+
+        let sel_x = text_offset_x + (min_x * self.draw_text.font_scale) as f64 - self.scroll_x;
+        let sel_y = text_offset_y + (min_y * self.draw_text.font_scale) as f64 - self.scroll_y;
+        let sel_width = ((max_x - min_x) * self.draw_text.font_scale) as f64;
+        let sel_height = ((max_y - min_y) * self.draw_text.font_scale) as f64;
+
+        rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
+    }
+
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize) {
+        // Compute the final size of the turtle, and obtain its inner dimensions.
+        // For multiline inputs, also clamp to the tightest ancestor max height,
+        // so that scrolling kicks in even when the TextInput's own walk height
+        // is unbounded Fit (relying on ancestors for the constraint).
+        cx.compute_final_size();
+        if self.is_multiline {
+            let ancestor_max = cx.compute_max_height_from_ancestors();
+            if ancestor_max < f64::MAX {
+                let turtle = cx.turtle_mut();
+                if turtle.height() > ancestor_max {
+                    turtle.set_height(ancestor_max);
+                }
+            }
+        }
+        // For single-line inputs with Fit width, clamp to the tightest ancestor
+        // max width so that horizontal scrolling kicks in when the text overflows
+        // the available space (e.g., parent has a fixed width).
+        if !self.is_multiline && self.walk.width.is_fit() {
+            let ancestor_max = cx.compute_max_width_from_ancestors();
+            if ancestor_max < f64::MAX {
+                let turtle = cx.turtle_mut();
+                if turtle.width() > ancestor_max {
+                    turtle.set_width(ancestor_max);
+                }
+            }
+        }
+        let inner_rect = cx.turtle().inner_rect();
+        let height = inner_rect.size.y;
+        let width = inner_rect.size.x;
+
+        // Only auto-scroll to keep the cursor visible when the cursor has actually
+        // moved (typing, arrow keys, clicking). Don't do this on every redraw, as
+        // that would fight with user-initiated mouse wheel scrolling.
+        if self.needs_scroll_to_cursor {
+            self.needs_scroll_to_cursor = false;
+
+            let laidout_text = self.laidout_text.as_ref().unwrap();
+
+            if self.is_multiline {
+                let position = self.cursor_to_position(self.cursor()).unwrap();
+                let laidout_row = &laidout_text.rows[position.row_index];
+                let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+                let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+                // If the min y of the row is less than the scroll position, scroll up so
+                // that the top of the row appears at the top.
+                if y_min < self.scroll_y {
+                    self.scroll_y = y_min;
+                }
+
+                // If the max y of the row is greater than the scroll position, scroll
+                // down so that the bottom of the row appears at the bottom.
+                if y_max > self.scroll_y + height {
+                    self.scroll_y = y_max - height;
+                }
+            } else {
+                // Single-line: auto-scroll horizontally to keep the cursor visible.
+                let password_cursor = self.cursor_to_password_cursor(self.cursor());
+                let cursor_pos = laidout_text.cursor_to_position(password_cursor);
+                let cursor_x = cursor_pos.x_in_lpxs as f64;
+
+                // If the cursor is to the left of the visible area, scroll left.
+                if cursor_x < self.scroll_x {
+                    self.scroll_x = cursor_x;
+                }
+
+                // If the cursor is to the right of the visible area, scroll right.
+                if cursor_x > self.scroll_x + width {
+                    self.scroll_x = cursor_x - width;
+                }
+            }
+        }
+
+        // Always clamp the scroll positions to valid bounds, and cache
+        // the max values so the event handler uses the exact same values
+        // (avoiding floating-point mismatch with relative Fit bounds).
+        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
+        if self.is_multiline {
+            let max_scroll_y = (laidout_text_height - height).max(0.0);
+            self.cached_max_scroll_y = max_scroll_y;
+            self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+        } else {
+            // Single-line: nothing scrolls vertically, so the offset centres the
+            // line box in the inner rect instead. Pinning to padding.top would
+            // ride high in tall fields and, because a font's line box is taller
+            // than its point size suggests, clip descenders in tight ones. Going
+            // through scroll_y keeps every downstream coordinate (hit test, IME,
+            // selection rects) consistent, since they all compensate for it.
+            let text_height =
+                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
+            let centering = (text_height - height) * 0.5;
+            self.cached_max_scroll_y = 0.0;
+            // Guard NaN (an unresolved turtle size), which the old clamp
+            // sanitized implicitly and which would poison the align shift.
+            self.scroll_y = if centering.is_finite() { centering } else { 0.0 };
+        }
+
+        let laidout_text_width = laidout_text.size_in_lpxs.width as f64;
+        let max_scroll_x = (laidout_text_width - width).max(0.0);
+        self.cached_max_scroll_x = max_scroll_x;
+        self.scroll_x = self.scroll_x.max(0.0).min(max_scroll_x);
+
+        // Shift the align range of the turtle with the scroll position, but do not include the
+        // begin entry, since that would also scroll the background.
+        let align_range: TurtleAlignRange = cx.get_turtle_align_range();
+        cx.shift_align_range(
+            &TurtleAlignRange {
+                start: align_range.start + 1,
+                end: align_range.end,
+            },
+            dvec2(-self.scroll_x, -self.scroll_y),
+        );
+
+        // Update the content clip rect AFTER shift_align_range, because the shift
+        // also moves BeginClip entries. By setting the clip here, we override
+        // whatever shift was applied, keeping the clip at the correct absolute
+        // position. Multiline clips to the inner rect (scrolled content must not
+        // bleed into the padding); single-line clips vertically to the whole
+        // padded box, because the centred line box may legitimately overhang the
+        // padding (descenders) and should only be cut by the background box.
+        let content_clip = if self.is_multiline {
+            inner_rect
+        } else {
+            let outer_rect = cx.turtle().rect();
+            rect(
+                inner_rect.pos.x,
+                outer_rect.pos.y,
+                inner_rect.size.x,
+                outer_rect.size.y,
+            )
+        };
+        cx.update_clip_rect_at(content_clip_index, content_clip);
+    }
+
+    /// Draws the vertical scrollbar when the text content overflows the visible area.
+    fn draw_scroll_bar(&mut self, cx: &mut Cx2d) {
+        if !self.is_multiline {
+            return;
+        }
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return;
+        };
+        let view_rect = cx.turtle().inner_rect();
+        let view_total = dvec2(view_rect.size.x, laidout_text.size_in_lpxs.height as f64);
+        // The bar runs down the input's right edge, in its padding rather than over the text.
+        let size = cx.turtle().rect().size;
+        let inset = self.scroll_bar_inset;
+        let track = Rect {
+            pos: dvec2(0.0, inset.top),
+            size: dvec2(size.x - inset.right, size.y - inset.top - inset.bottom),
+        };
+        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar,
+        // after the new text height, so a scroll into newly added text isn't clamped away.
+        self.scroll_bar.set_scroll_view_total(cx, view_total.y);
+        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
+        self.scroll_bar
+            .draw_scroll_bar_along(cx, ScrollAxis::Vertical, track, view_rect.size, view_total);
+    }
+
+    /// Moves the cursor one column to the left.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        if !keep_selection && self.selection.cursor != self.selection.anchor {
+            self.set_cursor(cx, self.selection.start(), false);
+            return !initial.index_eq(self.selection);
+        }
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: prev_grapheme_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: true,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    /// Moves the cursor one column to the right.
+    ///
+    /// Returns `true` if the cursor/selection actually changed.
+    pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        if !keep_selection && self.selection.cursor != self.selection.anchor {
+            self.set_cursor(cx, self.selection.end(), false);
+            return !initial.index_eq(self.selection);
+        }
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_word_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: prev_word_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: true,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_word_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: next_word_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_line_start(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            laidout_text.rows[position.row_index].text.start_in_parent()
+        };
+        let cursor = self.password_cursor_to_cursor(Cursor {
+            index,
+            prefer_next_row: true,
+        });
+        self.set_cursor(cx, cursor, keep_selection);
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_line_end(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            laidout_text.rows[position.row_index].text.end_in_parent()
+        };
+        let cursor = self.password_cursor_to_cursor(Cursor {
+            index,
+            prefer_next_row: false,
+        });
+        self.set_cursor(cx, cursor, keep_selection);
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_text_start(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: 0,
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_text_end(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: self.text.len(),
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    /// Moves the cursor one line (row) up.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the top-most row.
+    /// * Returns `Err` if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_up(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: if position.row_index == 0 {
+                    0
+                } else {
+                    position.row_index - 1
+                },
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    /// Moves the cursor one line (row) down.
+    ///
+    /// * Returns Ok(`true`) if the cursor/selection actually changed.
+    /// * Returns Ok(`false`) if the cursor/selection movement was properly handled but did not change,
+    ///   e.g., if the cursor was already at the bottom-most row.
+    /// * Returns Err(`()`) if the cursor/selection failed to be calculated due to a prior layout invalidation.
+    pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
+        let initial = self.selection;
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: if position.row_index == laidout_text.rows.len() - 1 {
+                    laidout_text.rows.len() - 1
+                } else {
+                    position.row_index + 1
+                },
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_page_up(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        if !self.is_multiline {
+            return Ok(self.move_cursor_text_start(cx, keep_selection));
+        }
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let target_row_index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            let view_height = self.page_height_in_lpxs(cx);
+            let target_y = laidout_text.rows[position.row_index].origin_in_lpxs.y - view_height;
+            let mut target_row_index = position.row_index;
+            while target_row_index > 0
+                && laidout_text.rows[target_row_index - 1].origin_in_lpxs.y >= target_y
+            {
+                target_row_index -= 1;
+            }
+            if target_row_index == position.row_index && target_row_index > 0 {
+                target_row_index -= 1;
+            }
+            target_row_index
+        };
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: target_row_index,
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_page_down(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        if !self.is_multiline {
+            return Ok(self.move_cursor_text_end(cx, keep_selection));
+        }
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let target_row_index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            let view_height = self.page_height_in_lpxs(cx);
+            let target_y = laidout_text.rows[position.row_index].origin_in_lpxs.y + view_height;
+            let mut target_row_index = position.row_index;
+            while target_row_index + 1 < laidout_text.rows.len()
+                && laidout_text.rows[target_row_index + 1].origin_in_lpxs.y <= target_y
+            {
+                target_row_index += 1;
+            }
+            if target_row_index == position.row_index
+                && target_row_index + 1 < laidout_text.rows.len()
+            {
+                target_row_index += 1;
+            }
+            target_row_index
+        };
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: target_row_index,
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    fn page_height_in_lpxs(&self, cx: &Cx) -> f32 {
+        let rect = self.draw_bg.area().rect(cx);
+        let height = rect.size.y - self.layout.padding.top - self.layout.padding.bottom;
+        (height.max(0.0) as f32 / self.draw_text.font_scale.max(0.001)).max(1.0)
+    }
+
+    pub fn select_all(&mut self, cx: &mut Cx) {
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: Cursor {
+                    index: 0,
+                    prefer_next_row: false,
+                },
+                cursor: Cursor {
+                    index: self.text.len(),
+                    prefer_next_row: false,
+                },
+            },
+        );
+    }
+
+    pub fn select_word(&mut self, cx: &mut Cx) {
+        if self.selection.cursor.index < self.selection.anchor.index {
+            self.set_cursor(
+                cx,
+                Cursor {
+                    index: self.ceil_word_boundary(self.selection.cursor.index),
+                    prefer_next_row: true,
+                },
+                true,
+            );
+        } else if self.selection.cursor.index > self.selection.anchor.index {
+            self.set_cursor(
+                cx,
+                Cursor {
+                    index: self.floor_word_boundary(self.selection.cursor.index),
+                    prefer_next_row: false,
+                },
+                true,
+            );
+        } else {
+            self.set_selection(
+                cx,
+                Selection {
+                    anchor: Cursor {
+                        index: self.ceil_word_boundary(self.selection.cursor.index),
+                        prefer_next_row: true,
+                    },
+                    cursor: Cursor {
+                        index: self.floor_word_boundary(self.selection.cursor.index),
+                        prefer_next_row: false,
+                    },
+                },
+            );
+        }
+    }
+
+    /// Mark a stretch of this field's text as wrong, doubtful or noteworthy,
+    /// keeping the marks already set.
+    ///
+    /// `start` and `end` are byte offsets into [`TextInput::text`] and may
+    /// arrive either way round. The mark draws under the words themselves, so
+    /// a form can say *which* word it objects to instead of colouring the whole
+    /// control - which is all a field could say before.
+    ///
+    /// Marks are dropped the moment the text changes; validate again and mark
+    /// again. See [`TextMarkSet::clear_on_edit`].
+    pub fn add_mark(&mut self, cx: &mut Cx, start: usize, end: usize, kind: TextMarkKind) {
+        self.marks.push(TextMark::new(start, end, kind));
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Replace every mark on this field.
+    pub fn set_marks(&mut self, cx: &mut Cx, marks: impl IntoIterator<Item = TextMark>) {
+        self.marks.set(marks);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Drop every mark on this field.
+    pub fn clear_marks(&mut self, cx: &mut Cx) {
+        if self.marks.clear_on_edit() {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// The marks this field is showing, in the order they were given.
+    pub fn marks(&self) -> &[TextMark] {
+        self.marks.as_slice()
+    }
+
+    pub fn force_new_edit_group(&mut self) {
+        self.history.force_new_edit_group();
+    }
+
+    /// Whether the platform IME is still composing text in this field. That text
+    /// is the IME's until it commits; see [`Self::replace_range`].
+    pub fn is_composing(&self) -> bool {
+        self.has_composition()
+    }
+
+    /// Replaces `range` (byte offsets into the text) with `text` as an ordinary
+    /// undoable edit, without needing keyboard focus.
+    ///
+    /// This is how anything that isn't the keyboard — dictation, autocomplete, a
+    /// paste button — should write into the field. The edit goes through the same
+    /// path as typing: the input filter applies (text it rejects outright is
+    /// refused with [`ReplaceRangeError::Rejected`] rather than deleting the
+    /// range), it lands in the undo history (grouped per `undo`), `Changed` is
+    /// emitted, and the selection is carried across it, with any part that was
+    /// inside the range ending up after the replacement. Replacing text with
+    /// itself is not an edit. An IME composition elsewhere in the text is moved
+    /// along with the edit and the IME told about the new text; an edit that
+    /// overlaps the composition is refused with [`ReplaceRangeError::Composing`],
+    /// so wait for [`Self::is_composing`] to clear and try again.
+    pub fn replace_range(
+        &mut self,
+        cx: &mut Cx,
+        range: Range<usize>,
+        text: &str,
+        undo: UndoGroup,
+    ) -> Result<(), ReplaceRangeError> {
+        if self.is_read_only {
+            return Err(ReplaceRangeError::ReadOnly);
+        }
+        let Range { start, end } = range;
+        if start > end
+            || end > self.text.len()
+            || !self.text.is_char_boundary(start)
+            || !self.text.is_char_boundary(end)
+        {
+            return Err(ReplaceRangeError::InvalidRange);
+        }
+        // A history rewind or a keyboard delete can leave the recorded composition
+        // hanging past the text; what's left of it inside the text is what counts.
+        if self.has_composition() {
+            let len = self.text.len();
+            let composition_start = floor_grapheme_boundary(&self.text, self.composition_start.min(len));
+            let composition_end = floor_grapheme_boundary(&self.text, self.composition_end.min(len));
+            if composition_end > composition_start {
+                self.composition_start = composition_start;
+                self.composition_end = composition_end;
+            } else {
+                self.clear_composition();
+            }
+        }
+        if self.has_composition() && start < self.composition_end && end > self.composition_start {
+            return Err(ReplaceRangeError::Composing);
+        }
+        let replace_with = self.filter_input_replacing(text, Some(start..end));
+        if replace_with.is_empty() && !text.is_empty() {
+            return Err(ReplaceRangeError::Rejected);
+        }
+        if self.text[start..end] == replace_with {
+            return Ok(());
+        }
+        let uid = self.widget_uid();
+        self.preserved_selection_cursor = None;
+        if undo == UndoGroup::New {
+            self.history.force_new_edit_group();
+        }
+        self.create_or_extend_edit_group(EditKind::External);
+        let replacement_len = replace_with.len();
+        let selection = self.selection;
+        self.history.apply_edit(Edit { start, end, replace_with }, &mut self.text);
+        let carry = |index: usize| {
+            if index < start {
+                floor_grapheme_boundary(&self.text, index)
+            } else if index > end {
+                floor_grapheme_boundary(&self.text, (index - (end - start) + replacement_len).min(self.text.len()))
+            } else {
+                // Never before the replacement, even if it joined a grapheme after it.
+                ceil_grapheme_boundary(&self.text, start + replacement_len)
+            }
+        };
+        self.selection = Selection {
+            anchor: Cursor {
+                index: carry(selection.anchor.index),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: carry(selection.cursor.index),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
+        if self.has_composition() {
+            // The edit is entirely on one side of the composition, so it either
+            // shifts the whole composition or leaves it alone.
+            if end <= self.composition_start {
+                self.composition_start = self.composition_start - (end - start) + replacement_len;
+                self.composition_end = self.composition_end - (end - start) + replacement_len;
+            }
+            // update_ime_context skips the push while composing, so send the new
+            // text with the moved composition ourselves; the IME's copy of the
+            // field would otherwise go stale.
+            let sel = CharOffset(self.text[..self.selection.start().index].chars().count())
+                ..CharOffset(self.text[..self.selection.end().index].chars().count());
+            let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                ..CharOffset(self.text[..self.composition_end].chars().count());
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
+            self.ime_update_frame = cx.redraw_id();
+            cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+        }
+        self.needs_scroll_to_cursor = true;
+        self.laidout_text = None;
+        // Marks are spans over the text that was; a replacement is an edit like
+        // any other, so they go with it. See [`TextMarkSet::clear_on_edit`].
+        self.marks.clear_on_edit();
+        self.check_text_is_empty(cx);
+        self.draw_bg.redraw(cx);
+        self.emit_change(cx, uid);
+        cx.hide_clipboard_actions();
+        Ok(())
+    }
+
+    fn handle_focus_lost(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.animator_play(cx, ids!(focus.off));
+        self.animator_play(cx, ids!(blink.on));
+        cx.stop_timer(self.blink_timer);
+        cx.hide_text_ime();
+        self.composition_start = 0;
+        self.composition_end = 0;
+        self.pending_outside_focus_loss_touch = None;
+        // Only hide clipboard actions on mobile platforms where they're supported
+        match cx.os_type() {
+            OsType::Android(_) | OsType::Ios(_) => {
+                cx.hide_clipboard_actions();
+            }
+            _ => {}
+        }
+        cx.widget_action(uid, TextInputAction::KeyFocusLost);
+    }
+
+    fn has_composition(&self) -> bool {
+        self.composition_end > self.composition_start
+    }
+
+    fn clear_composition(&mut self) {
+        if self.composition_start == 0 && self.composition_end == 0 {
+            return;
+        }
+        self.composition_start = 0;
+        self.composition_end = 0;
+        // Force the next focused draw to sync `composition: None` to the platform.
+        self.last_sent_ime_sel_start = usize::MAX;
+        self.last_sent_ime_sel_end = usize::MAX;
+    }
+
+    fn get_ime_config(&self) -> TextInputConfig {
+        TextInputConfig {
+            soft_keyboard: SoftKeyboardConfig {
+                input_mode: self.effective_input_mode(),
+                // A password must never auto-capitalize or autocorrect.
+                autocapitalize: if self.is_password {
+                    AutoCapitalize::None
+                } else {
+                    self.autocapitalize
+                },
+                autocorrect: if self.is_password {
+                    AutoCorrect::Disabled
+                } else {
+                    self.autocorrect
+                },
+                return_key_type: self.return_key_type,
+            },
+            is_multiline: self.is_multiline,
+            is_secure: self.is_password,
+            submit_on_enter: self.submit_on_enter,
+            content_type: self.content_type,
+            is_read_only: self.is_read_only,
+        }
+    }
+
+    /// The platform keyboard configuration currently requested by this
+    /// field. Hosts that render the field through a draw-list transform use
+    /// this when they re-anchor the native IME candidate rectangle.
+    pub fn ime_config(&self) -> TextInputConfig {
+        self.get_ime_config()
+    }
+
+    /// Resolves the soft-keyboard layout for this field.
+    ///
+    /// An explicitly-set `input_mode` always wins. `InputMode::Text` is the
+    /// default ("no preference"), so we treat it as a request to infer a more
+    /// specific layout from the field's other hints: a numeric-only field gets
+    /// the decimal pad, otherwise the keyboard is derived from `content_type`
+    /// (e.g. an email field shows the email keyboard) so callers don't have to
+    /// set both. Inference only ever applies when `input_mode` was left at the
+    /// default, never overriding an explicit choice.
+    fn effective_input_mode(&self) -> InputMode {
+        if self.input_mode != InputMode::Text {
+            return self.input_mode;
+        }
+        if self.is_numeric_only {
+            return InputMode::Decimal;
+        }
+        match self.content_type {
+            TextInputContentType::EmailAddress => InputMode::Email,
+            TextInputContentType::Url => InputMode::Url,
+            TextInputContentType::TelephoneNumber => InputMode::Tel,
+            TextInputContentType::OneTimeCode => InputMode::Numeric,
+            // Username / passwords / street address / unset keep the full
+            // default keyboard (e.g. a password needs every character, and a
+            // username may be either an email or a handle).
+            TextInputContentType::None
+            | TextInputContentType::Username
+            | TextInputContentType::Password
+            | TextInputContentType::NewPassword
+            | TextInputContentType::FullStreetAddress => InputMode::Text,
+        }
+    }
+
+    fn update_ime_context(&mut self, cx: &mut Cx) {
+        if self.has_composition() {
+            return;
+        }
+
+        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+
+        if self.text != self.last_sent_ime_text
+            || self.selection.start().index != self.last_sent_ime_sel_start
+            || self.selection.end().index != self.last_sent_ime_sel_end
+        {
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
+
+            cx.sync_ime_state(
+                self.text.clone(),
+                CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                None,
+            );
+        }
+    }
+
+    fn draw_composition_underline(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if !self.has_composition() {
+            return;
+        }
+
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should never be `None` here");
+
+        let composition_selection = Selection {
+            anchor: Cursor {
+                index: self.composition_start.min(self.text.len()),
+                prefer_next_row: false,
+            },
+            cursor: Cursor {
+                index: self.composition_end.min(self.text.len()),
+                prefer_next_row: false,
+            },
+        };
+
+        let selection = self.selection_to_password_selection(composition_selection);
+        let underline_height = 1.5 * self.draw_text.font_scale;
+
+        self.draw_composition_underline.begin_many_instances(cx);
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(selection) {
+            let scaled_x =
+                text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64;
+            let scaled_y = text_rect.pos.y
+                + ((rect_in_lpxs.origin.y + rect_in_lpxs.size.height) * self.draw_text.font_scale)
+                    as f64
+                - underline_height as f64;
+            let scaled_w = (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64;
+
+            self.draw_composition_underline.draw_abs(
+                cx,
+                rect(scaled_x, scaled_y, scaled_w, underline_height as f64),
+            );
+        }
+        self.draw_composition_underline.end_many_instances(cx);
+    }
+
+    /// Draw a mark under the words of every marked range.
+    ///
+    /// One quad per row a mark touches. The layout's `selection_rects` has
+    /// already split the range at the wraps and hands back one rect per row,
+    /// each carrying that row's ascender - the same call that draws the IME
+    /// composition underline, used for the same reason.
+    ///
+    /// A password field draws no marks: the glyphs on screen are not the text,
+    /// so a byte range over the text does not name anything visible.
+    fn draw_marks(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if self.marks.is_empty() || self.is_password {
+            return;
+        }
+        let Some(laidout_text) = self.laidout_text.clone() else {
+            return;
+        };
+        let font_scale = self.draw_text.font_scale as f64;
+        let band_height = self.draw_mark.band_height();
+        let text_len = self.text.len();
+
+        self.draw_mark.begin_many_instances(cx);
+        for mark in self.marks.as_slice() {
+            let Some(range) = mark.clip_to(0, text_len) else {
+                continue;
+            };
+            let selection = Selection {
+                anchor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, range.start),
+                    prefer_next_row: false,
+                },
+                cursor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, range.end),
+                    prefer_next_row: false,
+                },
+            };
+            self.draw_mark.mark_kind = mark.kind;
+            for SelectionRect {
+                rect_in_lpxs,
+                ascender_in_lpxs,
+            } in laidout_text.selection_rects(selection)
+            {
+                let band = mark_band_rect(
+                    text_rect.pos,
+                    dvec2(
+                        rect_in_lpxs.origin.x as f64,
+                        rect_in_lpxs.origin.y as f64,
+                    ),
+                    rect_in_lpxs.size.width as f64,
+                    ascender_in_lpxs as f64,
+                    font_scale,
+                    band_height,
+                );
+                if band.size.x <= 0.0 {
+                    continue;
+                }
+                self.draw_mark.draw_abs(cx, band);
+            }
+        }
+        self.draw_mark.end_many_instances(cx);
+    }
+
+    fn ceil_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = 0;
+        for (word_boundary_index, _) in self.text.split_word_bound_indices() {
+            if word_boundary_index > index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
+    fn floor_word_boundary(&self, index: usize) -> usize {
+        let mut prev_word_boundary_index = self.text.len();
+        for (word_boundary_index, _) in self.text.split_word_bound_indices().rev() {
+            if word_boundary_index < index {
+                return prev_word_boundary_index;
+            }
+            prev_word_boundary_index = word_boundary_index;
+        }
+        prev_word_boundary_index
+    }
+
+    fn filter_input(&self, input: &str, is_set_text: bool) -> String {
+        let replacing = if is_set_text {
+            None
+        } else {
+            Some(self.selection.start().index..self.selection.end().index)
+        };
+        self.filter_input_replacing(input, replacing)
+    }
+
+    /// `replacing` is the range the input goes into, so a decimal field can tell
+    /// whether the text it keeps already has a dot; `None` means the whole text goes.
+    fn filter_input_replacing(&self, input: &str, replacing: Option<Range<usize>>) -> String {
+        // strip control chars (escape sequences/tabs the IME sometimes sends),
+        // but keep a newline in multiline fields where a soft keyboard inserts it
+        if input.len() == 1 {
+            if let Some(char) = input.chars().next() {
+                if char.is_control() && !(char == '\n' && self.is_multiline) {
+                    return String::new();
+                }
+            }
+        }
+        // Use input_mode for filtering; fall back to is_numeric_only for backwards compat
+        match self.effective_input_mode() {
+            InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
+            InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
+            InputMode::Decimal => {
+                let mut contains_dot = replacing.as_ref().map_or(false, |range| {
+                    self.text[..range.start].contains('.') || self.text[range.end..].contains('.')
+                });
+                input
+                    .chars()
+                    .filter(|c| match c {
+                        '.' if !contains_dot => {
+                            contains_dot = true;
+                            true
+                        }
+                        '-' | '+' => true,
+                        c => c.is_ascii_digit(),
+                    })
+                    .collect()
+            }
+            InputMode::Tel => input
+                .chars()
+                .filter(|c| {
+                    c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                })
+                .collect(),
+            InputMode::None
+            | InputMode::Text
+            | InputMode::Url
+            | InputMode::Email
+            | InputMode::Search => input.to_string(),
+        }
+    }
+
+    fn create_or_extend_edit_group(&mut self, edit_kind: EditKind) {
+        self.history
+            .create_or_extend_edit_group(edit_kind, self.selection);
+    }
+
+    fn apply_edit(&mut self, cx: &mut Cx, edit: Edit) {
+        self.selection.cursor.index = edit.start + edit.replace_with.len();
+        self.selection.anchor.index = self.selection.cursor.index;
+        self.needs_scroll_to_cursor = true;
+        self.history.apply_edit(edit, &mut self.text);
+        self.laidout_text = None;
+        self.marks.clear_on_edit();
+        self.check_text_is_empty(cx);
+    }
+
+    fn char_range_to_byte_range(&self, start: usize, end: usize) -> (usize, usize) {
+        let byte_start = self
+            .text
+            .char_indices()
+            .nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len());
+        let byte_end = self
+            .text
+            .char_indices()
+            .nth(end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len());
+        (byte_start.min(byte_end), byte_start.max(byte_end))
+    }
+
+    fn find_nearest_text_range(&self, needle: &str, preferred_start: usize) -> Option<(usize, usize)> {
+        if needle.is_empty() {
+            let start = preferred_start.min(self.text.len());
+            return Some((start, start));
+        }
+
+        let cursor = self.selection.cursor.index;
+        self.text
+            .match_indices(needle)
+            .min_by_key(|(start, _)| {
+                let after_cursor_penalty = if *start > cursor { self.text.len() } else { 0 };
+                (
+                    after_cursor_penalty,
+                    start.abs_diff(preferred_start),
+                    start.abs_diff(cursor),
+                )
+            })
+            .map(|(start, text)| (start, start + text.len()))
+    }
+
+    fn resolve_external_replace_range(
+        &self,
+        byte_start: usize,
+        byte_end: usize,
+        replaced_text: Option<&str>,
+    ) -> Option<(usize, usize)> {
+        let byte_start = byte_start.min(self.text.len());
+        let byte_end = byte_end.min(self.text.len()).max(byte_start);
+
+        let Some(replaced_text) = replaced_text else {
+            return Some((byte_start, byte_end));
+        };
+        if replaced_text.is_empty() {
+            return Some((byte_start, byte_end));
+        }
+        if self.text.get(byte_start..byte_end) == Some(replaced_text) {
+            return Some((byte_start, byte_end));
+        }
+
+        self.find_nearest_text_range(replaced_text, byte_start)
+    }
+
+    fn transform_index_after_edit(
+        text: &str,
+        index: usize,
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+    ) -> usize {
+        let transformed = if index <= start {
+            index
+        } else if index >= end {
+            let delta = replacement_len as isize - (end - start) as isize;
+            (index as isize + delta).max(0) as usize
+        } else {
+            start + replacement_len
+        };
+        floor_grapheme_boundary(text, transformed.min(text.len()))
+    }
+
+    fn apply_edit_preserving_selection(&mut self, cx: &mut Cx, edit: Edit) {
+        let selection = self.selection;
+        let start = edit.start;
+        let end = edit.end;
+        let replacement_len = edit.replace_with.len();
+
+        self.history.apply_edit(edit, &mut self.text);
+
+        self.selection = Selection {
+            anchor: Cursor {
+                index: Self::transform_index_after_edit(
+                    &self.text,
+                    selection.anchor.index,
+                    start,
+                    end,
+                    replacement_len,
+                ),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: Self::transform_index_after_edit(
+                    &self.text,
+                    selection.cursor.index,
+                    start,
+                    end,
+                    replacement_len,
+                ),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
+        self.needs_scroll_to_cursor = true;
+        self.laidout_text = None;
+        self.marks.clear_on_edit();
+        self.check_text_is_empty(cx);
+    }
+
+    fn undo(&mut self, cx: &mut Cx) -> bool {
+        if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
+            // The text the IME was composing is gone, so the composition is too.
+            self.clear_composition();
+            self.laidout_text = None;
+            self.marks.clear_on_edit();
+            self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
+            self.check_text_is_empty(cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn redo(&mut self, cx: &mut Cx) -> bool {
+        if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
+            self.clear_composition();
+            self.laidout_text = None;
+            self.marks.clear_on_edit();
+            self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
+            self.check_text_is_empty(cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_text_is_empty(&mut self, cx: &mut Cx) {
+        if self.text.is_empty() {
+            self.animator_play(cx, ids!(empty.on));
+        } else {
+            self.animator_play(cx, ids!(empty.off));
+        }
+    }
+
+    fn handle_navigation_key(&mut self, cx: &mut Cx, uid: WidgetUid, event: KeyEvent) -> bool {
+        let Some(navigation) = TextNavigation::from_key_event(event) else {
+            return false;
+        };
+        self.reset_blink_timer(cx);
+        let keep_selection = event.modifiers.shift;
+        let result = match navigation {
+            TextNavigation::Left => Ok(self.move_cursor_left(cx, keep_selection)),
+            TextNavigation::Right => Ok(self.move_cursor_right(cx, keep_selection)),
+            TextNavigation::WordLeft => Ok(self.move_cursor_word_left(cx, keep_selection)),
+            TextNavigation::WordRight => Ok(self.move_cursor_word_right(cx, keep_selection)),
+            TextNavigation::Up => self.move_cursor_up(cx, keep_selection),
+            TextNavigation::Down => self.move_cursor_down(cx, keep_selection),
+            TextNavigation::LineStart => self.move_cursor_line_start(cx, keep_selection),
+            TextNavigation::LineEnd => self.move_cursor_line_end(cx, keep_selection),
+            TextNavigation::TextStart => Ok(self.move_cursor_text_start(cx, keep_selection)),
+            TextNavigation::TextEnd => Ok(self.move_cursor_text_end(cx, keep_selection)),
+            TextNavigation::PageUp => self.move_cursor_page_up(cx, keep_selection),
+            TextNavigation::PageDown => self.move_cursor_page_down(cx, keep_selection),
+        };
+        match result {
+            Ok(true) => {}
+            Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event)),
+            Err(_) => warning!("can't move cursor because layout was invalidated by earlier event"),
+        }
+        true
+    }
+
+    fn backspace_range(&self, modifiers: KeyModifiers) -> (usize, usize) {
+        let mut start = self.selection.start().index;
+        let end = self.selection.end().index;
+        if start != end {
+            return (start, end);
+        }
+        start = if is_line_delete_modifier(modifiers) {
+            self.current_line_start_index().unwrap_or(start)
+        } else if is_word_modifier(modifiers) {
+            prev_word_boundary(&self.text, start)
+        } else {
+            prev_grapheme_boundary(&self.text, start)
+        };
+        (start, end)
+    }
+
+    fn delete_range(&self, modifiers: KeyModifiers) -> (usize, usize) {
+        let start = self.selection.start().index;
+        let mut end = self.selection.end().index;
+        if start != end {
+            return (start, end);
+        }
+        end = if is_line_delete_modifier(modifiers) {
+            self.current_line_end_index().unwrap_or(end)
+        } else if is_word_modifier(modifiers) {
+            next_word_boundary(&self.text, end)
+        } else {
+            next_grapheme_boundary(&self.text, end)
+        };
+        (start, end)
+    }
+
+    fn current_line_start_index(&self) -> Result<usize, ()> {
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+        let index = laidout_text.rows[position.row_index].text.start_in_parent();
+        Ok(self
+            .password_cursor_to_cursor(Cursor {
+                index,
+                prefer_next_row: true,
+            })
+            .index)
+    }
+
+    fn current_line_end_index(&self) -> Result<usize, ()> {
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+        let index = laidout_text.rows[position.row_index].text.end_in_parent();
+        Ok(self
+            .password_cursor_to_cursor(Cursor {
+                index,
+                prefer_next_row: false,
+            })
+            .index)
+    }
+}
+
+impl Widget for TextInput {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(&self.text);
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    if let Some(new_text) = vm
+                        .bx
+                        .heap
+                        .cast_to_owned_string(value, "copying text input contents")
+                    {
+                        vm.with_cx_mut(|cx| {
+                            self.set_text(cx, &new_text);
+                        });
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(self.text.clone())
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, text: &str) {
+        self.text = self.filter_input(text, true);
+        self.marks.clear_on_edit();
+        self.set_selection(
+            cx,
+            Selection {
+                anchor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, self.selection.anchor.index),
+                    prefer_next_row: self.selection.anchor.prefer_next_row,
+                },
+                cursor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, self.selection.cursor.index),
+                    prefer_next_row: self.selection.cursor.prefer_next_row,
+                },
+            },
+        );
+        self.history.clear();
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+        self.check_text_is_empty(cx);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_selection.append_to_draw_call(cx);
+        self.draw_composition_underline.append_to_draw_call(cx);
+        self.draw_mark.append_to_draw_call(cx);
+        // Push an inner clip rect to prevent scrolled text from bleeding into
+        // the padding area. For multiline, this clips vertically-scrolled content.
+        // For single-line, this clips horizontally-scrolled content that overflows.
+        // We use a placeholder rect here (inner_origin with large size);
+        // scroll_to_cursor will tighten the bounds after compute_final_size
+        // determines the actual dimensions.
+        let inner_origin = cx.turtle().inner_origin();
+        let content_clip_index =
+            cx.push_clip_rect_tracked(rect(inner_origin.x, inner_origin.y, f64::MAX, f64::MAX));
+        self.layout_text(cx);
+        let text_rect = self.draw_text(cx);
+        let cursor_rect = self.draw_cursor(cx, text_rect);
+        self.draw_selection(cx, text_rect);
+        self.draw_composition_underline(cx, text_rect);
+        self.draw_marks(cx, text_rect);
+        self.scroll_to_cursor(cx, content_clip_index);
+        cx.pop_clip_rect();
+        self.draw_scroll_bar(cx);
+        self.draw_bg.end(cx);
+        // A read-only field does no IME work at all (no state push, no keyboard).
+        if cx.has_key_focus(self.draw_bg.area()) && !self.is_read_only {
+            // Cache the caret relative to the draw_bg box (same draw space) so
+            // cursor_rect_in_absolute can add the box's window position at event time.
+            // Only the focused field needs this, so we piggyback on the focus check.
+            // The scroll offset (which for single-line inputs includes the vertical
+            // centering shift) moves the drawn caret, so subtract it here too.
+            self.cached_caret_offset = text_rect.pos + cursor_rect.pos
+                - self.draw_bg.area().rect(cx).pos
+                - dvec2(self.scroll_x, self.scroll_y);
+            self.cached_caret_size = cursor_rect.size;
+            if self.ime_update_frame != cx.redraw_id() {
+                self.update_ime_context(cx);
+            }
+            if self.effective_input_mode() != InputMode::None {
+                let ime_cursor_rect = self.ime_cursor_rect(cx, text_rect, cursor_rect);
+                cx.show_text_ime_with_config(
+                    self.draw_bg.area(),
+                    ime_cursor_rect,
+                    self.get_ime_config(),
+                );
+            }
+        }
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        DrawStep::done()
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.animator_toggle(
+            cx,
+            disabled,
+            Animate::Yes,
+            ids!(disabled.on),
+            ids!(disabled.off),
+        );
+    }
+
+    fn disabled(&self, cx: &Cx) -> bool {
+        self.animator_in_state(cx, ids!(disabled.on))
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+            self.draw_cursor.redraw(cx);
+        }
+
+        if self.blink_timer.is_event(event).is_some() {
+            if self.animator_in_state(cx, ids!(blink.off)) {
+                self.animator_play(cx, ids!(blink.on));
+            } else {
+                self.animator_play(cx, ids!(blink.off));
+            }
+            self.draw_cursor.redraw(cx);
+            self.blink_timer = cx.start_timeout(self.blink_speed)
+        }
+
+        let uid = self.widget_uid();
+
+        // Self-detect focus loss from taps outside our area
+        // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
+        // And only from a LIVE area: an input not drawn in its list's current
+        // redraw holds a stale area (or Empty) that can compare equal to the
+        // focus another widget just took — every such input then cleared
+        // the global focus on the same click, so a FabValueInput's editor
+        // committed the old value before a keystroke could reach it.
+        if !self.draw_bg.area().is_empty()
+            && self.draw_bg.area().is_valid(cx)
+            && cx.has_key_focus(self.draw_bg.area())
+            && !cx.fingers.is_area_captured(self.draw_bg.area())
+        {
+            let rect = self.draw_bg.area().rect(cx);
+            let should_lose_focus = match event {
+                // Handle desktop mouse clicks
+                Event::MouseUp(mu) => !rect.contains(mu.abs),
+                // Handle mobile touch events
+                Event::TouchUpdate(tu) => {
+                    let mut should_lose_focus = false;
+                    for touch in &tu.touches {
+                        match touch.state {
+                            TouchState::Start => {
+                                if rect.contains(touch.abs) {
+                                    self.pending_outside_focus_loss_touch = None;
+                                } else {
+                                    self.pending_outside_focus_loss_touch = Some(touch.uid);
+                                }
+                            }
+                            TouchState::Stop => {
+                                if self.pending_outside_focus_loss_touch == Some(touch.uid) {
+                                    should_lose_focus = !rect.contains(touch.abs);
+                                    self.pending_outside_focus_loss_touch = None;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    should_lose_focus
+                }
+                _ => false,
+            };
+
+            if should_lose_focus {
+                // Update focus state in cx
+                cx.set_key_focus(Area::Empty);
+                // Handle focus loss locally
+                self.handle_focus_lost(cx, uid);
+            }
+        }
+
+        // Handle scrollbar events for multiline text inputs.
+        if self.is_multiline {
+            // Handle mouse wheel / trackpad scroll directly.
+            // Makepad convention: positive scroll.y = viewport moves down = scroll_pos increases.
+            // self.scroll_y is the single source of truth; the ScrollBar is synced from it
+            // during draw_scroll_bar, so we don't update the ScrollBar here (which would
+            // trigger next_frame callbacks and cause feedback loops).
+            if let Event::Scroll(e) = event {
+                let bg_rect = self.draw_bg.area().rect(cx);
+                if !e.handled_y.get() && bg_rect.contains(e.abs) {
+                    // Use the cached max_scroll_y from the last draw pass to ensure
+                    // boundary checks match exactly, avoiding floating-point mismatch
+                    // with relative Fit bounds.
+                    let max_scroll_y = self.cached_max_scroll_y;
+                    if max_scroll_y > 0.0 {
+                        let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
+                        if new_scroll_y != self.scroll_y {
+                            self.scroll_y = new_scroll_y;
+                            self.draw_bg.redraw(cx);
+                            e.handled_y.set(true);
+                        }
+                    }
+                }
+            }
+
+            // Handle clicking/dragging on the scrollbar handle itself.
+            // We pass an empty callback because we sync scroll_y from the ScrollBar
+            // below, only when the scrollbar has actually captured the finger.
+            self.scroll_bar.handle_event_with(cx, event, &mut |_, _| {});
+
+            // If the scrollbar has captured the finger (user is dragging the handle),
+            // sync scroll_y from the ScrollBar (which is the source of truth during
+            // drag).
+            if self.scroll_bar.is_area_captured(cx) {
+                self.scroll_y = self.scroll_bar.get_scroll_pos();
+                self.draw_bg.redraw(cx);
+            }
+        }
+
+        // Handle horizontal scroll events for single-line text inputs.
+        // Only consume horizontal scroll (scroll.x), NOT vertical scroll —
+        // vertical scroll should propagate to parent containers.
+        if !self.is_multiline {
+            if let Event::Scroll(e) = event {
+                if !e.handled_x.get() && e.scroll.x != 0.0 {
+                    let bg_rect = self.draw_bg.area().rect(cx);
+                    if bg_rect.contains(e.abs) {
+                        let max_scroll_x = self.cached_max_scroll_x;
+                        if max_scroll_x > 0.0 {
+                            let new_scroll_x =
+                                (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
+                            if new_scroll_x != self.scroll_x {
+                                self.scroll_x = new_scroll_x;
+                                self.draw_bg.redraw(cx);
+                                e.handled_x.set(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Skip finger event processing if the scrollbar owns the finger,
+        // so dragging the scrollbar doesn't also move the text cursor.
+        let scrollbar_captured = self.is_multiline && self.scroll_bar.is_area_captured(cx);
+
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Text);
+                self.animator_play(cx, ids!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
+                self.animator_play(cx, ids!(hover.off));
+            }
+            Hit::KeyFocus(_) => {
+                self.animator_play(cx, ids!(focus.on));
+                self.reset_blink_timer(cx);
+                // Sync text state to platform IME before keyboard shows
+                let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+                let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+                cx.sync_ime_state(
+                    self.text.clone(),
+                    CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                    None,
+                );
+                self.last_sent_ime_text = self.text.clone();
+                self.last_sent_ime_sel_start = self.selection.start().index;
+                self.last_sent_ime_sel_end = self.selection.end().index;
+                cx.widget_action(uid, TextInputAction::KeyFocus);
+            }
+            Hit::KeyFocusLost(_) => {
+                self.handle_focus_lost(cx, uid);
+            }
+            Hit::KeyDown(event) if self.handle_navigation_key(cx, uid, event) => {}
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyA,
+                modifiers,
+                ..
+            }) if modifiers.is_primary() => {
+                self.select_all(cx);
+                // On touch platforms, show clipboard actions after select all
+                // This handles the case where select_all is triggered from the clipboard menu
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                {
+                    let has_selection = !self.selected_text().is_empty();
+                    let selection_rect = self.get_selection_rect(cx);
+                    cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                }
+            }
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                tap_count,
+                device,
+                ..
+            }) if device.is_primary_hit() && !scrollbar_captured => {
+                self.reset_blink_timer(cx);
+                self.set_key_focus(cx);
+                let rel = abs - self.text_area.rect(cx).pos;
+                let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                else {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                    return;
+                };
+
+                let selection = self.selection();
+                let has_selection = selection.cursor != selection.anchor;
+                let touching_selection = if has_selection {
+                    let sel_start = selection.start().index;
+                    let sel_end = selection.end().index;
+                    cursor.index >= sel_start && cursor.index <= sel_end
+                } else {
+                    false
+                };
+
+                if tap_count > 1 || !touching_selection {
+                    self.set_cursor(cx, cursor, false);
+                    self.preserved_selection_cursor = None;
+                } else {
+                    self.preserved_selection_cursor = Some(cursor);
+                }
+
+                match tap_count {
+                    2 => {
+                        self.select_word(cx);
+                        if device.is_touch() {
+                            let has_selection = !self.selected_text().is_empty();
+                            let selection_rect = self.get_selection_rect(cx);
+                            cx.show_clipboard_actions(
+                                has_selection,
+                                selection_rect,
+                                cx.keyboard_shift,
+                            );
+                        }
+                    }
+                    3 => {
+                        self.select_all(cx);
+                        if device.is_touch() {
+                            let has_selection = !self.selected_text().is_empty();
+                            let selection_rect = self.get_selection_rect(cx);
+                            cx.show_clipboard_actions(
+                                has_selection,
+                                selection_rect,
+                                cx.keyboard_shift,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
+                self.animator_play(cx, ids!(hover.down));
+            }
+            Hit::FingerUp(fe) => {
+                self.ignore_next_move = false;
+
+                if fe.was_tap() {
+                    if let Some(cursor) = self.preserved_selection_cursor.take() {
+                        self.set_cursor(cx, cursor, false);
+                    }
+                } else {
+                    self.preserved_selection_cursor = None;
+                }
+
+                if fe.is_over && fe.was_tap() {
+                    if fe.has_hovers() {
+                        self.animator_play(cx, ids!(hover.on));
+                    } else {
+                        self.animator_play(cx, ids!(hover.off));
+                    }
+                } else {
+                    self.animator_play(cx, ids!(hover.off));
+                }
+            }
+            Hit::FingerLongPress(lp) => {
+                self.preserved_selection_cursor = None;
+
+                // Select word at long press position
+                let rel = lp.abs - self.text_area.rect(cx).pos;
+                if let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                {
+                    // Check if cursor is over actual text
+                    if cursor.index < self.text.len() {
+                        self.set_cursor(cx, cursor, false);
+                        self.select_word(cx);
+                    } else {
+                        // Long press on empty space just position the cursor
+                        self.set_cursor(cx, cursor, false);
+                    }
+                }
+
+                // Show clipboard actions menu with updated selection
+                if lp.device.is_touch() {
+                    let has_selection = !self.selected_text().is_empty();
+                    let selection_rect = self.get_selection_rect(cx);
+                    cx.show_clipboard_actions(has_selection, selection_rect, cx.keyboard_shift);
+                }
+
+                // Skip next move to prevent selection change when finger lifts
+                self.ignore_next_move = true;
+            }
+            Hit::FingerMove(FingerMoveEvent {
+                abs,
+                tap_count,
+                device,
+                ..
+            }) if device.is_primary_hit() && !scrollbar_captured => {
+                // Skip first move after long press to prevent selection changes
+                if self.ignore_next_move {
+                    self.ignore_next_move = false;
+                    return;
+                }
+
+                // Clear preserved cursor - user is dragging to select
+                self.preserved_selection_cursor = None;
+                self.reset_blink_timer(cx);
+                self.set_key_focus(cx);
+                let rel = abs - self.text_area.rect(cx).pos;
+                let Ok(cursor) =
+                    self.point_in_lpxs_to_cursor(Point::new(rel.x as f32, rel.y as f32))
+                else {
+                    warning!("can't move cursor because layout was invalidated by earlier event");
+                    return;
+                };
+                self.set_cursor(cx, cursor, true);
+                match tap_count {
+                    2 => self.select_word(cx),
+                    3 => self.select_all(cx),
+                    _ => {}
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
+                modifiers: mods @ KeyModifiers { shift: false, .. },
+                ..
+            }) => {
+                // Decide whether this Enter press should submit or insert a newline:
+                // * Single-line inputs always submit.
+                // * Primary modifier (Cmd/Ctrl) + Enter always submits. A modifier
+                //   only comes from a physical keyboard, so this stays ungated and
+                //   keeps working even if keyboard detection lags.
+                // * Plain Enter submits only with a physical keyboard when
+                //   submit_on_enter is set; a soft keyboard's multiline Enter
+                //   always inserts a newline (the user submits via a button).
+                // In multiline mode, other modifier combos (Alt+Enter, or Ctrl+Enter
+                // on macOS) insert a newline below when not read-only.
+                let has_physical_keyboard = cx.keyboard.has_physical_keyboard();
+                let should_submit = !self.is_multiline
+                    || mods.is_primary()
+                    || (has_physical_keyboard && self.submit_on_enter && !mods.any());
+                if should_submit {
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else if !self.is_read_only {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
+            }
+
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                is_repeat: false,
+                ..
+            }) if !cx.has_cancel_owner() => {
+                cx.widget_action(uid, TextInputAction::Escaped);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Insert,
+                modifiers,
+                ..
+            }) if !modifiers.any() => {
+                self.reset_blink_timer(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
+                modifiers: mods @ KeyModifiers { shift: true, .. },
+                ..
+            }) if !self.is_read_only => {
+                if !self.is_multiline {
+                    // Single-line fields submit on Enter regardless of Shift; never embed
+                    // a raw newline.
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                modifiers,
+                ..
+            }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
+                let (start, end) = self.backspace_range(modifiers);
+                self.create_or_extend_edit_group(EditKind::Backspace);
+                self.apply_edit(
+                    cx,
+                    Edit {
+                        start,
+                        end,
+                        replace_with: String::new(),
+                    },
+                );
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                modifiers,
+                ..
+            }) if !self.is_read_only => {
+                self.reset_blink_timer(cx);
+                let (start, end) = self.delete_range(modifiers);
+                self.create_or_extend_edit_group(EditKind::Delete);
+                self.apply_edit(
+                    cx,
+                    Edit {
+                        start,
+                        end,
+                        replace_with: String::new(),
+                    },
+                );
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: modifiers @ KeyModifiers { shift: false, .. },
+                ..
+            }) if modifiers.is_primary() && !self.is_read_only => {
+                if !self.undo(cx) {
+                    return;
+                }
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: modifiers @ KeyModifiers { shift: true, .. },
+                ..
+            }) if modifiers.is_primary() && !self.is_read_only => {
+                if !self.redo(cx) {
+                    return;
+                }
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+            }
+            Hit::TextInput(event) if !self.is_read_only => {
+                // Text changes invalidate any preserved cursor from a pending tap gesture
+                self.preserved_selection_cursor = None;
+                self.pending_outside_focus_loss_touch = None;
+
+                // Full state sync (authoritative: Android InputConnection / iOS UITextView)
+                if let Some(full_state) = &event.full_state_sync {
+                    // The view can deliver characters a restricted field disallows (paste,
+                    // hardware keyboard); filter so iOS/Android match every other platform.
+                    // A selection-only sync (text unchanged) skips the filter pass + its
+                    // per-keystroke allocation.
+                    let (text_changed, rejected) = if self.text == full_state.text {
+                        (false, false)
+                    } else {
+                        let filtered = self.filter_input(&full_state.text, true);
+                        let rejected = filtered != full_state.text;
+                        let changed = self.text != filtered;
+                        if changed {
+                            // Apply only the changed middle span so undo records a small
+                            // delta; a whole-text replace would clone the entire old text
+                            // onto the undo stack on every keystroke.
+                            let common_prefix = self
+                                .text
+                                .chars()
+                                .zip(filtered.chars())
+                                .take_while(|(a, b)| a == b)
+                                .count();
+                            let old_count = self.text.chars().count();
+                            let new_count = filtered.chars().count();
+                            let max_suffix = old_count.min(new_count) - common_prefix;
+                            let common_suffix = self
+                                .text
+                                .chars()
+                                .rev()
+                                .zip(filtered.chars().rev())
+                                .take_while(|(a, b)| a == b)
+                                .count()
+                                .min(max_suffix);
+                            let start = CharOffset(common_prefix).to_byte_index(&self.text);
+                            let old_end =
+                                CharOffset(old_count - common_suffix).to_byte_index(&self.text);
+                            let new_end =
+                                CharOffset(new_count - common_suffix).to_byte_index(&filtered);
+                            self.create_or_extend_edit_group(EditKind::Other);
+                            // history.apply_edit records the inverse + rewrites self.text; the
+                            // selection is set authoritatively below, so skip the wasted
+                            // selection transform apply_edit_preserving_selection would do.
+                            self.history.apply_edit(
+                                Edit {
+                                    start,
+                                    end: old_end,
+                                    replace_with: filtered[start..new_end].to_string(),
+                                },
+                                &mut self.text,
+                            );
+                            self.laidout_text = None;
+                        }
+                        (changed, rejected)
+                    };
+
+                    // The view's selection offsets index the UNFILTERED full_state.text.
+                    // When chars were rejected, self.text is now shorter, so map each
+                    // endpoint through the filter (count filtered chars in the prefix)
+                    // before resolving to a byte index; otherwise self.text == the source
+                    // text and the offsets map directly.
+                    let remap_char_offset = |this: &Self, offset: CharOffset| -> usize {
+                        let char_idx = if rejected {
+                            // self.text is the filtered subsequence of full_state.text; count
+                            // the kept chars falling at or before this source offset (greedy
+                            // match), which avoids re-filtering a prefix.
+                            let mut kept = this.text.chars();
+                            let mut next_kept = kept.next();
+                            let mut count = 0;
+                            for (i, c) in full_state.text.chars().enumerate() {
+                                if i >= offset.0 {
+                                    break;
+                                }
+                                if Some(c) == next_kept {
+                                    count += 1;
+                                    next_kept = kept.next();
+                                }
+                            }
+                            count
+                        } else {
+                            offset.0
+                        };
+                        floor_grapheme_boundary(
+                            &this.text,
+                            CharOffset(char_idx).to_byte_index(&this.text),
+                        )
+                    };
+                    let sel_start_byte = remap_char_offset(self, full_state.selection.start);
+                    let sel_end_byte = remap_char_offset(self, full_state.selection.end);
+                    self.needs_scroll_to_cursor = true;
+                    self.selection = Selection {
+                        anchor: Cursor {
+                            index: sel_start_byte,
+                            prefer_next_row: false,
+                        },
+                        cursor: Cursor {
+                            index: sel_end_byte,
+                            prefer_next_row: false,
+                        },
+                    };
+
+                    if let Some(composition_range) = &full_state.composition {
+                        // Same filter remap as the selection: when chars were rejected the
+                        // composition offsets index the unfiltered source, so map them onto
+                        // the filtered self.text (remap_char_offset also grapheme-floors).
+                        self.composition_start = remap_char_offset(self, composition_range.start);
+                        self.composition_end = remap_char_offset(self, composition_range.end);
+                    } else {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                    }
+
+                    if rejected && self.has_composition() {
+                        // update_ime_context skips the re-push while composing, so push the
+                        // cleaned text (with the remapped composition) directly so the view
+                        // drops the rejected chars before the composition commits.
+                        let sel = CharOffset(self.text[..sel_start_byte].chars().count())
+                            ..CharOffset(self.text[..sel_end_byte].chars().count());
+                        let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                            ..CharOffset(self.text[..self.composition_end].chars().count());
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                        cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+                    } else if rejected {
+                        // The view still holds the rejected chars; force update_ime_context
+                        // to re-push the cleaned text back to it (sentinel selection).
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.last_sent_ime_sel_end = usize::MAX;
+                    } else {
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                    }
+
+                    // This path bypasses apply_edit(), so keep placeholder/color state in sync.
+                    self.check_text_is_empty(cx);
+                    self.draw_bg.redraw(cx);
+                    if text_changed {
+                        self.emit_change(cx, uid);
+                        cx.hide_clipboard_actions();
+                    }
+                    return;
+                }
+
+                // Handle iOS range replacement (autocorrect/paste)
+                if let Some((start, end)) = event.replace_range {
+                    let filtered_text = self.filter_input(&event.input, false);
+                    if filtered_text.is_empty() && !event.input.is_empty() {
+                        self.update_ime_context(cx);
+                        return;
+                    }
+
+                    let byte_start = start.to_byte_index(&self.text);
+                    let byte_end = end.to_byte_index(&self.text);
+                    let (byte_start, byte_end) =
+                        (byte_start.min(byte_end), byte_start.max(byte_end));
+
+                    self.composition_start = 0;
+                    self.composition_end = 0;
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit_preserving_selection(
+                        cx,
+                        Edit {
+                            start: byte_start,
+                            end: byte_end,
+                            replace_with: filtered_text,
+                        },
+                    );
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.animator_play(cx, ids!(empty.off));
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                    cx.hide_clipboard_actions();
+                    return;
+                }
+
+                // Handle regular text input and composition (all platforms)
+                let input = self.filter_input(&event.input, false);
+                if input.is_empty() {
+                    // Composition cancelled, remove preview text
+                    if event.replace_last && self.has_composition() {
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.composition_start.min(self.text.len()),
+                                end: self.composition_end.min(self.text.len()),
+                                replace_with: String::new(),
+                            },
+                        );
+                        self.draw_bg.redraw(cx);
+                        self.emit_change(cx, uid);
+                    }
+                    self.composition_end = self.composition_start;
+                    return;
+                }
+
+                if event.replace_last {
+                    // IME composition preview
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start,
+                                end,
+                                replace_with: input.clone(),
+                            },
+                        );
+                        self.composition_end = self.composition_start + input.len();
+                    } else {
+                        self.composition_start = self.selection.start().index;
+                        self.composition_end = self.composition_start + input.len();
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: input,
+                            },
+                        );
+                    }
+                    self.ime_update_frame = cx.redraw_id();
+                } else {
+                    // Final commit or regular text input
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start,
+                                end,
+                                replace_with: input,
+                            },
+                        );
+                        self.composition_end = self.composition_start;
+                    } else {
+                        self.create_or_extend_edit_group(if event.was_paste {
+                            EditKind::Other
+                        } else {
+                            EditKind::Insert
+                        });
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: input,
+                            },
+                        );
+                    }
+                }
+                self.animator_play(cx, ids!(empty.off));
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
+            }
+            Hit::TextRangeReplace(event) if !self.is_read_only => {
+                self.pending_outside_focus_loss_touch = None;
+
+                // iOS autocorrect sends range replacement events
+                let filtered_text = self.filter_input(&event.text, false);
+                if filtered_text.is_empty() && !event.text.is_empty() {
+                    self.update_ime_context(cx);
+                    return;
+                }
+
+                // Convert character indices to byte indices
+                let (byte_start, byte_end) =
+                    self.char_range_to_byte_range(event.start, event.end);
+                let resolved_range = self.resolve_external_replace_range(
+                    byte_start,
+                    byte_end,
+                    event.replaced_text.as_deref(),
+                );
+
+                match resolved_range {
+                    Some((byte_start, byte_end)) => {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit_preserving_selection(
+                            cx,
+                            Edit {
+                                start: byte_start,
+                                end: byte_end,
+                                replace_with: filtered_text,
+                            },
+                        );
+                    }
+                    None if event.fallback_to_insert => {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                        self.create_or_extend_edit_group(if filtered_text.is_empty() {
+                            EditKind::Other
+                        } else {
+                            EditKind::Insert
+                        });
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: filtered_text,
+                            },
+                        );
+                    }
+                    None => {
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.update_ime_context(cx);
+                        return;
+                    }
+                }
+
+                self.ime_update_frame = cx.redraw_id();
+                self.animator_play(cx, ids!(empty.off));
+                self.draw_bg.redraw(cx);
+                self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
+            }
+            Hit::TextCopy(event) => {
+                *event.response.borrow_mut() = Some(self.selected_text().to_string());
+            }
+            Hit::TextCut(event) => {
+                *event.response.borrow_mut() = Some(self.selected_text().to_string());
+                if !self.selected_text().is_empty() {
+                    self.history
+                        .create_or_extend_edit_group(EditKind::Other, self.selection);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: String::new(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
+            }
+            Hit::ImeAction(event) => {
+                use crate::makepad_platform::event::ImeAction;
+                let mods = KeyModifiers::default();
+                match event.action {
+                    ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
+                        cx.hide_text_ime();
+                        cx.set_key_focus(Area::Empty);
+                        self.emit_return(cx, uid, mods);
+                    }
+                    ImeAction::Next | ImeAction::Previous => {
+                        self.emit_return(cx, uid, mods);
+                    }
+                    ImeAction::Unspecified | ImeAction::None => {}
+                }
+            }
+            Hit::KeyDown(event) => {
+                cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl TextInputRef {
+    /// See [`TextInput::add_mark`].
+    pub fn add_mark(&self, cx: &mut Cx, start: usize, end: usize, kind: TextMarkKind) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.add_mark(cx, start, end, kind);
+        }
+    }
+
+    /// See [`TextInput::set_marks`].
+    pub fn set_marks(&self, cx: &mut Cx, marks: impl IntoIterator<Item = TextMark>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_marks(cx, marks);
+        }
+    }
+
+    /// See [`TextInput::clear_marks`].
+    pub fn clear_marks(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.clear_marks(cx);
+        }
+    }
+
+    /// See [`TextInput::marks`].
+    pub fn marks(&self) -> Vec<TextMark> {
+        self.borrow()
+            .map(|inner| inner.marks().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// See [`TextInput::set_max_lines`].
+    pub fn set_max_lines(&self, cx: &mut Cx, max_lines: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_max_lines(cx, max_lines);
+        }
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::take_key_focus`].
+    pub fn take_key_focus(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus(cx);
+        }
+    }
+
+    /// See [`TextInput::set_height`].
+    pub fn set_height(&self, cx: &mut Cx, height: Size) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_height(cx, height);
+        }
+    }
+
+    /// See [`TextInput::scroll_to_top`].
+    pub fn scroll_to_top(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.scroll_to_top(cx);
+        }
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_multiline()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_multiline(&self, cx: &mut Cx, is_multiline: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_multiline(cx, is_multiline);
+        }
+    }
+
+    /// Returns whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See [`TextInput::submit_on_enter`] for details.
+    pub fn submit_on_enter(&self) -> bool {
+        self.borrow()
+            .map(|inner| inner.submit_on_enter())
+            .unwrap_or(false)
+    }
+
+    /// Sets whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See [`TextInput::submit_on_enter`] for details.
+    pub fn set_submit_on_enter(&self, submit_on_enter: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_submit_on_enter(submit_on_enter);
+        }
+    }
+
+    pub fn is_password(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_password()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_password(&self, cx: &mut Cx, is_password: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_password(cx, is_password);
+        }
+    }
+
+    pub fn toggle_is_password(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle_is_password(cx);
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_read_only()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_read_only(&self, cx: &mut Cx, is_read_only: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_read_only(cx, is_read_only);
+        }
+    }
+
+    pub fn toggle_is_read_only(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle_is_read_only(cx);
+        }
+    }
+
+    pub fn is_numeric_only(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_numeric_only()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_numeric_only(&self, cx: &mut Cx, is_numeric_only: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_numeric_only(cx, is_numeric_only);
+        }
+    }
+
+    pub fn toggle_is_numeric_only(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle_is_numeric_only(cx);
+        }
+    }
+
+    pub fn empty_text(&self) -> String {
+        if let Some(inner) = self.borrow() {
+            inner.empty_text().to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn set_empty_text(&self, cx: &mut Cx, empty_text: String) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_empty_text(cx, empty_text);
+        }
+    }
+
+    pub fn selection(&self) -> Selection {
+        if let Some(inner) = self.borrow() {
+            inner.selection()
+        } else {
+            Default::default()
+        }
+    }
+
+    pub fn set_selection(&self, cx: &mut Cx, selection: Selection) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_selection(cx, selection);
+        }
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        if let Some(inner) = self.borrow() {
+            inner.cursor()
+        } else {
+            Default::default()
+        }
+    }
+
+    /// The caret's rectangle in absolute screen coordinates, or `None` if the
+    /// text hasn't been laid out yet. Useful for anchoring a popup to the cursor.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        self.borrow().and_then(|inner| inner.cursor_rect_in_absolute(cx))
+    }
+
+    pub fn ime_config(&self) -> TextInputConfig {
+        self.borrow()
+            .map(|inner| inner.ime_config())
+            .unwrap_or_default()
+    }
+
+    pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_cursor(cx, cursor, keep_selection);
+        }
+    }
+
+    pub fn selected_text(&self) -> String {
+        if let Some(inner) = self.borrow() {
+            inner.selected_text().to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn returned(&self, actions: &Actions) -> Option<(String, KeyModifiers)> {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::Returned(text, modifiers) = action {
+                return Some((text, modifiers));
+            }
+        }
+        None
+    }
+
+    pub fn escaped(&self, actions: &Actions) -> bool {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::Escaped = action {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns true if this TextInput lost keyboard focus in the given actions.
+    pub fn key_focus_lost(&self, actions: &Actions) -> bool {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::KeyFocusLost = action {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn changed(&self, actions: &Actions) -> Option<String> {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::Changed(text) = action {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    pub fn key_down_unhandled(&self, actions: &Actions) -> Option<KeyEvent> {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::KeyDownUnhandled(event) = action {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    /// Saves the internal state of this text input widget
+    /// to a new `TextInputState` object.
+    pub fn save_state(&self) -> TextInputState {
+        if let Some(inner) = self.borrow() {
+            TextInputState {
+                text: inner.text.clone(),
+                password_text: inner.password_text.clone(),
+                selection: inner.selection.clone(),
+                history: inner.history.clone(),
+            }
+        } else {
+            TextInputState::default()
+        }
+    }
+
+    /// Restores the internal state of this text input widget
+    /// from the given `TextInputState` object.
+    pub fn restore_state(&self, cx: &mut Cx, state: TextInputState) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, &state.text);
+            inner.password_text = state.password_text;
+            inner.history = state.history;
+            inner.set_selection(cx, state.selection);
+        }
+    }
+
+    /// See [`TextInput::replace_range`].
+    pub fn replace_range(
+        &self,
+        cx: &mut Cx,
+        range: Range<usize>,
+        text: &str,
+        undo: UndoGroup,
+    ) -> Result<(), ReplaceRangeError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.replace_range(cx, range, text, undo)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// See [`TextInput::is_composing`].
+    pub fn is_composing(&self) -> bool {
+        self.borrow().map_or(false, |inner| inner.is_composing())
+    }
+
+    /// See [`TextInput::force_new_edit_group`].
+    pub fn force_new_edit_group(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.force_new_edit_group();
+        }
+    }
+}
+
+/// How an edit made through [`TextInput::replace_range`] joins the undo history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UndoGroup {
+    /// The edit is its own undo step.
+    New,
+    /// The edit joins the previous `replace_range` edit's undo step, so a run of
+    /// them (say, every revision of one dictated phrase) undoes as one. Anything
+    /// else in between — typing, undo, a `New` edit — starts a fresh step.
+    Extend,
+}
+
+/// Why [`TextInput::replace_range`] refused an edit. The text is untouched in every case.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplaceRangeError {
+    ReadOnly,
+    /// The range runs past the text or splits a `char`.
+    InvalidRange,
+    /// The field's input filter rejected all of `text`.
+    Rejected,
+    /// The range overlaps text the platform IME is still composing. That text is
+    /// the IME's until it commits; wait for [`TextInput::is_composing`] to clear.
+    Composing,
+}
+
+/// The saved (checkpointed) state of a text input widget.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextInputState {
+    text: String,
+    password_text: String,
+    selection: Selection,
+    history: History,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum TextInputAction {
+    #[default]
+    None,
+    KeyFocus,
+    KeyFocusLost,
+    Returned(String, KeyModifiers),
+    Escaped,
+    Changed(String),
+    KeyDownUnhandled(KeyEvent),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TextNavigation {
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    TextStart,
+    TextEnd,
+    PageUp,
+    PageDown,
+}
+
+impl TextNavigation {
+    fn from_key_event(event: KeyEvent) -> Option<Self> {
+        let modifiers = event.modifiers;
+        if has_only_selection_modifier(modifiers) {
+            return match event.key_code {
+                KeyCode::ArrowLeft => Some(Self::Left),
+                KeyCode::ArrowRight => Some(Self::Right),
+                KeyCode::ArrowUp => Some(Self::Up),
+                KeyCode::ArrowDown => Some(Self::Down),
+                KeyCode::Home => Some(Self::LineStart),
+                KeyCode::End => Some(Self::LineEnd),
+                KeyCode::PageUp => Some(Self::PageUp),
+                KeyCode::PageDown => Some(Self::PageDown),
+                _ => None,
+            };
+        }
+        if is_word_modifier(modifiers) {
+            match event.key_code {
+                KeyCode::ArrowLeft => return Some(Self::WordLeft),
+                KeyCode::ArrowRight => return Some(Self::WordRight),
+                _ => {}
+            }
+        }
+        if is_text_boundary_modifier(modifiers) {
+            let uses_apple_text_boundary = uses_apple_text_boundary_modifier(modifiers);
+            return match event.key_code {
+                KeyCode::Home => Some(Self::TextStart),
+                KeyCode::End => Some(Self::TextEnd),
+                KeyCode::ArrowUp if uses_apple_text_boundary => Some(Self::TextStart),
+                KeyCode::ArrowDown if uses_apple_text_boundary => Some(Self::TextEnd),
+                KeyCode::ArrowLeft if uses_apple_text_boundary => Some(Self::LineStart),
+                KeyCode::ArrowRight if uses_apple_text_boundary => Some(Self::LineEnd),
+                _ => None,
+            };
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct History {
+    current_edit_kind: Option<EditKind>,
+    undo_stack: EditStack,
+    redo_stack: EditStack,
+}
+
+impl History {
+    fn force_new_edit_group(&mut self) {
+        self.current_edit_kind = None;
+    }
+
+    fn create_or_extend_edit_group(&mut self, edit_kind: EditKind, selection: Selection) {
+        if !self.current_edit_kind.map_or(false, |current_edit_kind| {
+            current_edit_kind.can_merge_with(edit_kind)
+        }) {
+            self.undo_stack.push_edit_group(selection);
+            self.current_edit_kind = Some(edit_kind);
+        }
+    }
+
+    fn apply_edit(&mut self, edit: Edit, text: &mut String) {
+        let inverted_edit = edit.invert(&text);
+        edit.apply(text);
+        self.undo_stack.push_edit(inverted_edit);
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self, selection: Selection, text: &mut String) -> Option<Selection> {
+        if let Some((new_selection, edits)) = self.undo_stack.pop_edit_group() {
+            self.redo_stack.push_edit_group(selection);
+            for edit in &edits {
+                let inverted_edit = edit.invert(text);
+                edit.apply(text);
+                self.redo_stack.push_edit(inverted_edit);
+            }
+            self.current_edit_kind = None;
+            Some(new_selection)
+        } else {
+            None
+        }
+    }
+
+    fn redo(&mut self, selection: Selection, text: &mut String) -> Option<Selection> {
+        if let Some((new_selection, edits)) = self.redo_stack.pop_edit_group() {
+            self.undo_stack.push_edit_group(selection);
+            for edit in &edits {
+                let inverted_edit = edit.invert(text);
+                edit.apply(text);
+                self.undo_stack.push_edit(inverted_edit);
+            }
+            self.current_edit_kind = None;
+            Some(new_selection)
+        } else {
+            None
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current_edit_kind = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+enum EditKind {
+    Insert,
+    Backspace,
+    Delete,
+    /// An edit made through `replace_range`; consecutive ones share an undo step.
+    External,
+    Other,
+}
+
+impl EditKind {
+    fn can_merge_with(self, other: EditKind) -> bool {
+        if self == Self::Other {
+            false
+        } else {
+            self == other
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct EditStack {
+    edit_groups: Vec<EditGroup>,
+    edits: Vec<Edit>,
+}
+
+impl EditStack {
+    fn push_edit_group(&mut self, selection: Selection) {
+        self.edit_groups.push(EditGroup {
+            selection,
+            edit_start: self.edits.len(),
+        });
+    }
+
+    fn push_edit(&mut self, edit: Edit) {
+        self.edits.push(edit);
+    }
+
+    fn pop_edit_group(&mut self) -> Option<(Selection, Vec<Edit>)> {
+        match self.edit_groups.pop() {
+            Some(edit_group) => Some((
+                edit_group.selection,
+                self.edits.drain(edit_group.edit_start..).rev().collect(),
+            )),
+            None => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.edit_groups.clear();
+        self.edits.clear();
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct EditGroup {
+    selection: Selection,
+    edit_start: usize,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct Edit {
+    start: usize,
+    end: usize,
+    replace_with: String,
+}
+
+impl Edit {
+    fn apply(&self, text: &mut String) {
+        text.replace_range(self.start..self.end, &self.replace_with);
+    }
+
+    fn invert(&self, text: &str) -> Self {
+        Self {
+            start: self.start,
+            end: self.start + self.replace_with.len(),
+            replace_with: text[self.start..self.end].to_string(),
+        }
+    }
+}
+
+fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let floor = floor_grapheme_boundary(text, index);
+    if floor != index {
+        return floor;
+    }
+    let mut cursor = GraphemeCursor::new(index, text.len(), true);
+    cursor.prev_boundary(text, 0).unwrap().unwrap_or(0)
+}
+
+fn next_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let ceil = ceil_grapheme_boundary(text, index);
+    if ceil != index {
+        return ceil;
+    }
+    let mut cursor = GraphemeCursor::new(index, text.len(), true);
+    cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
+}
+
+fn floor_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    if index == text.len() {
+        return index;
+    }
+    let mut boundary = 0;
+    for (next_boundary, _) in text.grapheme_indices(true) {
+        if next_boundary > index {
+            break;
+        }
+        boundary = next_boundary;
+    }
+    boundary
+}
+
+fn ceil_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    if index == text.len() {
+        return index;
+    }
+    for (boundary, _) in text.grapheme_indices(true) {
+        if boundary >= index {
+            return boundary;
+        }
+    }
+    text.len()
+}
+
+fn prev_word_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let mut previous_word_start = 0;
+    for (start, word) in text.unicode_word_indices() {
+        let end = start + word.len();
+        if end >= index {
+            if start < index {
+                return start;
+            }
+            return previous_word_start;
+        }
+        previous_word_start = start;
+    }
+    previous_word_start
+}
+
+fn next_word_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    for (start, word) in text.unicode_word_indices() {
+        let end = start + word.len();
+        if end > index || start >= index {
+            return end;
+        }
+    }
+    text.len()
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn has_only_selection_modifier(modifiers: KeyModifiers) -> bool {
+    !modifiers.control && !modifiers.alt && !modifiers.logo
+}
+
+fn is_word_modifier(modifiers: KeyModifiers) -> bool {
+    if cfg!(target_arch = "wasm32") {
+        return (modifiers.alt ^ modifiers.control) && !modifiers.logo;
+    }
+    if is_apple_text_platform() {
+        modifiers.alt && !modifiers.control && !modifiers.logo
+    } else {
+        modifiers.control && !modifiers.alt && !modifiers.logo
+    }
+}
+
+fn is_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
+    if cfg!(target_arch = "wasm32") {
+        return !modifiers.alt && (modifiers.logo ^ modifiers.control);
+    }
+    if is_apple_text_platform() {
+        modifiers.logo && !modifiers.control && !modifiers.alt
+    } else {
+        modifiers.control && !modifiers.alt && !modifiers.logo
+    }
+}
+
+fn is_line_delete_modifier(modifiers: KeyModifiers) -> bool {
+    uses_apple_text_boundary_modifier(modifiers)
+}
+
+fn uses_apple_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
+    (is_apple_text_platform() && modifiers.logo && !modifiers.control && !modifiers.alt)
+        || (cfg!(target_arch = "wasm32")
+            && modifiers.logo
+            && !modifiers.control
+            && !modifiers.alt)
+}
+
+fn is_apple_text_platform() -> bool {
+    cfg!(target_vendor = "apple")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A field on a bare `Cx`, plus every `Changed` it emits.
+    fn field(text: &str) -> (Cx, TextInputRef, Rc<RefCell<Vec<String>>>) {
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let seen = changes.clone();
+        let mut cx = Cx::new(Box::new(move |_, event| {
+            if let Event::Actions(actions) = event {
+                for action in actions.iter() {
+                    if let TextInputAction::Changed(text) = action.as_widget_action().cast() {
+                        seen.borrow_mut().push(text);
+                    }
+                }
+            }
+        }));
+        let input = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                TextInput {}
+            });
+            WidgetRef::script_from_value(vm, value).as_text_input()
+        });
+        input.set_text(&mut cx, text);
+        (cx, input, changes)
+    }
+
+    fn caret(cx: &mut Cx, input: &TextInputRef, index: usize) {
+        input.set_cursor(cx, Cursor { index, prefer_next_row: false }, false);
+    }
+
+    fn selection(input: &TextInputRef) -> (usize, usize) {
+        let selection = input.selection();
+        (selection.start().index, selection.end().index)
+    }
+
+    /// Typing goes through the private edit path, exactly as a key event would.
+    fn type_text(cx: &mut Cx, input: &TextInputRef, text: &str) {
+        let mut inner = input.borrow_mut().unwrap();
+        inner.create_or_extend_edit_group(EditKind::Insert);
+        let start = inner.selection.start().index;
+        let end = inner.selection.end().index;
+        inner.apply_edit(cx, Edit { start, end, replace_with: text.into() });
+    }
+
+    fn cx_edit(start: usize, end: usize, replace_with: &str) -> Edit {
+        Edit { start, end, replace_with: replace_with.into() }
+    }
+
+    fn undo(cx: &mut Cx, input: &TextInputRef) -> bool {
+        input.borrow_mut().unwrap().undo(cx)
+    }
+
+    fn redo(cx: &mut Cx, input: &TextInputRef) -> bool {
+        input.borrow_mut().unwrap().redo(cx)
+    }
+
+    #[test]
+    fn replace_range_edits_the_text_and_carries_the_selection_across() {
+        let (mut cx, input, changes) = field("hello world");
+
+        // An insertion at the caret leaves the caret after the new text.
+        caret(&mut cx, &input, 5);
+        input.replace_range(&mut cx, 5..5, " big", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello big world");
+        assert_eq!(selection(&input), (9, 9));
+        cx.handle_actions();
+        assert_eq!(*changes.borrow(), vec!["hello big world".to_string()]);
+
+        // A selection over the replaced range collapses after the replacement.
+        input.set_selection(&mut cx, Selection {
+            anchor: Cursor { index: 6, prefer_next_row: false },
+            cursor: Cursor { index: 9, prefer_next_row: false },
+        });
+        input.replace_range(&mut cx, 6..9, "small", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello small world");
+        assert_eq!(selection(&input), (11, 11));
+
+        // A caret before the range stays put; one after it shifts with the text.
+        caret(&mut cx, &input, 2);
+        input.replace_range(&mut cx, 6..11, "tiny", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello tiny world");
+        assert_eq!(selection(&input), (2, 2));
+        caret(&mut cx, &input, 16);
+        input.replace_range(&mut cx, 6..10, "enormous", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello enormous world");
+        assert_eq!(selection(&input), (20, 20));
+
+        // Deleting is just an empty replacement.
+        input.replace_range(&mut cx, 5..14, "", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "hello world");
+        assert_eq!(selection(&input), (11, 11));
+    }
+
+    #[test]
+    fn replace_range_refuses_bad_ranges_and_read_only_fields_untouched() {
+        let (mut cx, input, changes) = field("héllo");
+        caret(&mut cx, &input, 3);
+        // Splitting the two-byte é, running past the end, and a backwards range.
+        for range in [1..2, 0..99, 3..2] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "x", UndoGroup::New),
+                Err(ReplaceRangeError::InvalidRange)
+            );
+        }
+        input.set_is_read_only(&mut cx, true);
+        assert_eq!(
+            input.replace_range(&mut cx, 0..0, "x", UndoGroup::New),
+            Err(ReplaceRangeError::ReadOnly)
+        );
+        assert_eq!(input.text(), "héllo");
+        assert_eq!(selection(&input), (3, 3));
+        cx.handle_actions();
+        assert!(changes.borrow().is_empty());
+        // Nothing to undo either.
+        input.set_is_read_only(&mut cx, false);
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn replace_range_goes_through_the_input_filter() {
+        let (mut cx, input, _) = field("12");
+        input.set_is_numeric_only(&mut cx, true);
+        input.replace_range(&mut cx, 2..2, "3a4", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "1234");
+        // Text that filters to nothing is refused, and must not delete the range
+        // it was meant to replace.
+        for range in [4..4, 0..4] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "abc", UndoGroup::New),
+                Err(ReplaceRangeError::Rejected)
+            );
+        }
+        assert_eq!(input.text(), "1234");
+        // An explicitly empty text is a deletion, though.
+        input.replace_range(&mut cx, 0..2, "", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "34");
+        assert!(undo(&mut cx, &input));
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "12");
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn replacing_text_with_itself_is_not_an_edit() {
+        let (mut cx, input, changes) = field("hello");
+        input.replace_range(&mut cx, 0..5, "hello", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 5..5, "", UndoGroup::New).unwrap();
+        cx.handle_actions();
+        assert!(changes.borrow().is_empty());
+        assert!(!undo(&mut cx, &input));
+    }
+
+    #[test]
+    fn a_caret_carried_through_a_replacement_never_ends_up_before_it() {
+        // Replacing the base letter of "b́" (b plus a combining acute) with "c"
+        // joins the new letter to the accent; the caret goes after both.
+        let (mut cx, input, _) = field("ab\u{301}");
+        caret(&mut cx, &input, 1);
+        input.replace_range(&mut cx, 1..2, "c", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "ac\u{301}");
+        assert_eq!(selection(&input), (4, 4));
+    }
+
+    #[test]
+    fn a_composition_left_behind_by_undo_or_a_delete_does_not_break_edits() {
+        // Undoing the keyboard's preview ends the composition outright.
+        let (mut cx, input, _) = field("abc");
+        caret(&mut cx, &input, 3);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.create_or_extend_edit_group(EditKind::Other);
+            inner.apply_edit(&mut cx, cx_edit(3, 3, "に"));
+            inner.composition_start = 3;
+            inner.composition_end = 6;
+        }
+        assert!(input.is_composing());
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "abc");
+        assert!(!input.is_composing());
+
+        // A composition that a delete has truncated is trimmed to what is left of
+        // it, and one that is entirely gone is dropped, instead of indexing past
+        // the text.
+        let (mut cx, input, _) = field("abc 你");
+        caret(&mut cx, &input, 7);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 4;
+            inner.composition_end = 10;
+        }
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc 你");
+        let inner = input.borrow().unwrap();
+        assert_eq!((inner.composition_start, inner.composition_end), (5, 8));
+        drop(inner);
+        let (mut cx, input, _) = field("abc");
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 3;
+            inner.composition_end = 6;
+        }
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc");
+        assert!(!input.is_composing());
+    }
+
+    #[test]
+    fn extend_shares_an_undo_step_only_with_the_previous_external_edit() {
+        // A run of extended edits is one step.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "hello", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 5..5, " world", UndoGroup::Extend).unwrap();
+        input.replace_range(&mut cx, 6..11, "there", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "hello there");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+        assert!(redo(&mut cx, &input));
+        assert_eq!(input.text(), "hello there");
+
+        // Typing in between splits the steps in three.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "hello", UndoGroup::New).unwrap();
+        type_text(&mut cx, &input, "!");
+        assert_eq!(input.text(), "hello!");
+        input.replace_range(&mut cx, 6..6, " world", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "hello! world");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "hello!");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "hello");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+
+        // And so does asking for a new step.
+        let (mut cx, input, _) = field("");
+        input.replace_range(&mut cx, 0..0, "a", UndoGroup::New).unwrap();
+        input.replace_range(&mut cx, 1..1, "b", UndoGroup::Extend).unwrap();
+        input.replace_range(&mut cx, 2..2, "c", UndoGroup::New).unwrap();
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "ab");
+        assert!(undo(&mut cx, &input));
+        assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn an_edit_beside_a_composition_moves_it_and_one_inside_is_refused() {
+        let (mut cx, input, _) = field("abc 你好");
+        let composition = |input: &TextInputRef| {
+            let inner = input.borrow().unwrap();
+            (inner.composition_start, inner.composition_end)
+        };
+        // Moving the caret ends a composition, as it would for the IME, so place
+        // it before pretending the IME is composing 你好.
+        caret(&mut cx, &input, 10);
+        {
+            let mut inner = input.borrow_mut().unwrap();
+            inner.composition_start = 4;
+            inner.composition_end = 10;
+        }
+        assert!(input.is_composing());
+
+        // Before the composition: it shifts along with the caret.
+        input.replace_range(&mut cx, 0..0, "X", UndoGroup::New).unwrap();
+        assert_eq!(input.text(), "Xabc 你好");
+        assert_eq!(composition(&input), (5, 11));
+        assert_eq!(selection(&input), (11, 11));
+        assert!(input.is_composing());
+
+        // After it: nothing moves.
+        input.replace_range(&mut cx, 11..11, "!", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "Xabc 你好!");
+        assert_eq!(composition(&input), (5, 11));
+
+        // Touching its edges is fine; overlapping it is not.
+        input.replace_range(&mut cx, 1..5, "", UndoGroup::Extend).unwrap();
+        assert_eq!(input.text(), "X你好!");
+        assert_eq!(composition(&input), (1, 7));
+        for range in [4..4, 4..7, 0..4, 1..8] {
+            assert_eq!(
+                input.replace_range(&mut cx, range, "no", UndoGroup::Extend),
+                Err(ReplaceRangeError::Composing)
+            );
+        }
+        assert_eq!(input.text(), "X你好!");
+        assert_eq!(composition(&input), (1, 7));
+    }
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::{mark_band_rect, TextMark, TextMarkKind, TextMarkSet};
+    use crate::makepad_draw::*;
+
+    // --- a range onto the runs that have to draw it -----------------------
+
+    #[test]
+    fn a_mark_clips_into_the_run_that_holds_it() {
+        // "hello world", laid out as two runs: "hello " at 0 and "world" at 6.
+        let mark = TextMark::error(6, 11);
+        assert_eq!(mark.clip_to(0, 6), None);
+        assert_eq!(mark.clip_to(6, 5), Some(0..5));
+    }
+
+    #[test]
+    fn a_mark_spanning_two_runs_clips_into_both() {
+        let mark = TextMark::warning(3, 9);
+        assert_eq!(mark.clip_to(0, 6), Some(3..6));
+        assert_eq!(mark.clip_to(6, 5), Some(0..3));
+    }
+
+    #[test]
+    fn a_mark_past_the_end_is_clamped_to_the_text() {
+        let mark = TextMark::error(2, 900);
+        assert_eq!(mark.clip_to(0, 11), Some(2..11));
+    }
+
+    #[test]
+    fn a_mark_that_misses_a_run_yields_nothing() {
+        assert_eq!(TextMark::error(0, 4).clip_to(6, 5), None);
+        assert_eq!(TextMark::error(20, 24).clip_to(6, 5), None);
+    }
+
+    #[test]
+    fn an_empty_mark_yields_nothing() {
+        let mark = TextMark::note(4, 4);
+        assert!(mark.is_empty());
+        assert_eq!(mark.clip_to(0, 11), None);
+    }
+
+    #[test]
+    fn a_mark_given_back_to_front_is_normalised() {
+        let mark = TextMark::new(9, 3, TextMarkKind::Error);
+        assert_eq!((mark.start, mark.end), (3, 9));
+        assert_eq!(mark.clip_to(0, 11), Some(3..9));
+    }
+
+    // --- one mark, one band per row it touches ---------------------------
+
+    #[test]
+    fn a_band_hangs_from_the_rows_baseline() {
+        // A row 16 lpxs tall with a 12 lpx ascender, drawn at 2x.
+        let band = mark_band_rect(dvec2(100.0, 50.0), dvec2(4.0, 0.0), 30.0, 12.0, 2.0, 5.0);
+        assert_eq!(band.pos.x, 100.0 + 8.0);
+        assert_eq!(band.pos.y, 50.0 + 24.0);
+        assert_eq!(band.size.x, 60.0);
+        assert_eq!(band.size.y, 5.0);
+    }
+
+    #[test]
+    fn a_mark_split_across_a_wrap_gets_a_band_per_row() {
+        // What the layout hands back for a mark that wraps: the tail of row 0
+        // from x=40, then the head of row 1 from x=0. Row 1 sits 20 lpxs lower.
+        let rows = [
+            (dvec2(40.0, 0.0), 60.0, 12.0),
+            (dvec2(0.0, 20.0), 25.0, 12.0),
+        ];
+        let bands: Vec<Rect> = rows
+            .iter()
+            .map(|(origin, width, ascender)| {
+                mark_band_rect(dvec2(10.0, 10.0), *origin, *width, *ascender, 1.0, 4.0)
+            })
+            .collect();
+
+        assert_eq!(bands.len(), 2);
+        // Each piece hangs from its own row's baseline, not from the first's.
+        assert_eq!(bands[0].pos.y, 10.0 + 12.0);
+        assert_eq!(bands[1].pos.y, 10.0 + 32.0);
+        // The second piece starts at the left edge of the text, not where the
+        // first one ended.
+        assert_eq!(bands[0].pos.x, 50.0);
+        assert_eq!(bands[1].pos.x, 10.0);
+        // And both bands are the same height: the wave is in pixels.
+        assert_eq!(bands[0].size.y, bands[1].size.y);
+    }
+
+    #[test]
+    fn a_band_is_the_same_height_under_a_heading_as_under_a_caption() {
+        let caption = mark_band_rect(DVec2::default(), dvec2(0.0, 0.0), 40.0, 9.0, 1.0, 4.0);
+        let heading = mark_band_rect(DVec2::default(), dvec2(0.0, 0.0), 40.0, 30.0, 1.0, 4.0);
+        assert_eq!(caption.size.y, heading.size.y);
+        // ...and each still sits on its own baseline.
+        assert_eq!(caption.pos.y, 9.0);
+        assert_eq!(heading.pos.y, 30.0);
+    }
+
+    #[test]
+    fn a_zero_width_piece_makes_a_zero_width_band() {
+        let band = mark_band_rect(DVec2::default(), dvec2(5.0, 0.0), -3.0, 10.0, 1.0, 4.0);
+        assert_eq!(band.size.x, 0.0);
+    }
+
+    // --- the set ----------------------------------------------------------
+
+    #[test]
+    fn marks_are_dropped_on_edit() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(0, 4), TextMark::warning(6, 9)]);
+        assert_eq!(marks.len(), 2);
+
+        assert!(marks.clear_on_edit());
+        assert!(marks.is_empty());
+        // Nothing to drop the second time, so nothing to redraw for either.
+        assert!(!marks.clear_on_edit());
+    }
+
+    #[test]
+    fn overlapping_marks_both_survive() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::warning(0, 20), TextMark::error(4, 9)]);
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks.as_slice()[0].kind, TextMarkKind::Warning);
+        assert_eq!(marks.as_slice()[1].kind, TextMarkKind::Error);
+    }
+
+    #[test]
+    fn empty_marks_never_reach_the_draw_walk() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(3, 3), TextMark::error(3, 5)]);
+        assert_eq!(marks.len(), 1);
+        marks.push(TextMark::note(7, 7));
+        assert_eq!(marks.len(), 1);
+    }
+
+    #[test]
+    fn setting_marks_replaces_rather_than_appends() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(0, 4)]);
+        marks.set([TextMark::note(6, 9)]);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks.as_slice()[0].kind, TextMarkKind::Note);
+    }
+}

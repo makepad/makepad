@@ -3544,11 +3544,27 @@ impl FontFamily {
                     continue;
                 }
             }
-            expected_member_count += 1;
             let font_id = font_member_font_id(member);
+            // A member whose resource this process can never read (a font
+            // the build's font set leaves out, an asset missing from the
+            // package) is out of the family for good. Counted, it would keep
+            // the family incomplete, and an incomplete family is redefined
+            // on every frame: the layout cache emptied, every text laid out
+            // again, the missing asset opened again.
+            if fonts.is_font_unavailable(font_id) {
+                continue;
+            }
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
+                crate::trace!(
+                    "font",
+                    "family={:?} member={} path={:?} bytes={:?}",
+                    self.id.0,
+                    member.id,
+                    member.resource_path,
+                    font_data.as_ref().map(|d| d.len())
+                );
 
                 if let Some(data) = font_data {
                     if std::env::var_os("MAKEPAD_TRACE_FONT_LOAD").is_some() {
@@ -3568,21 +3584,35 @@ impl FontFamily {
                             variations: Vec::new(),
                         },
                     );
-                } else if fonts.note_missing_font(&member.resource_path) {
-                    error!(
-                        "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
-                        Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
-                        `INTER_FONT_ASSET` or `ROBOTO_FLEX_FONT_ASSET`, or a literal resource path.",
-                        member.resource_path, member.id
-                    );
+                } else if cx.script_resource_unavailable(&member.resource_path) {
+                    // Not packaged with this app: the family renders without
+                    // it (dropped, not asked for again every frame), and it
+                    // is said once, loudly, with the fix.
+                    if fonts.note_font_unavailable(font_id) && fonts.note_missing_font(&member.resource_path) {
+                        error!(
+                            "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
+                            Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
+                            `INTER_FONT_ASSET` or `ROBOTO_FLEX_FONT_ASSET`, or a literal resource path.",
+                            member.resource_path, member.id
+                        );
+                    }
+                    continue;
                 }
             }
+            expected_member_count += 1;
 
             if fonts.is_font_known(font_id) {
                 font_ids.push(font_id);
             }
         }
 
+        crate::trace!(
+            "font",
+            "family={:?} defined with {}/{} members",
+            self.id.0,
+            font_ids.len(),
+            expected_member_count
+        );
         fonts.set_font_family_definition(
             family_id,
             FontFamilyDefinition {
@@ -3611,6 +3641,7 @@ impl FontFamily {
 
         let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        fonts.borrow_mut().sync_unavailable_fonts(cx.script_resource_generation());
         let expected_member_count = {
             let fonts_ref = fonts.borrow();
             self.members
@@ -3619,6 +3650,7 @@ impl FontFamily {
                     member
                         .lazy
                         .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                        && !fonts_ref.is_font_unavailable(font_member_font_id(member))
                 })
                 .count()
         };
@@ -3793,6 +3825,8 @@ impl ScriptHook for FontFamily {
                         _ => None,
                     },
                 });
+            } else {
+                crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);
             }
         }
 

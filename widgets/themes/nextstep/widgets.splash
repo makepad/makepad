@@ -27,7 +27,23 @@ mod.widgets.Button.draw_bg.pixel = fn() {
     let focus_q=size-p-vec2(4.0)
     let fd=min(min(focus_p.x,focus_p.y),min(focus_q.x,focus_q.y))
     let dot=fract((floor(p.x)+floor(p.y))*0.5)<0.5
-    return if self.focus>0.5 && fd>=0.0 && fd<1.0 && dot {#000000}else{color}
+    let face=if self.focus>0.5 && fd>=0.0 && fd<1.0 && dot {#000000}else{color}
+    // The wait spinner is drawn by the face, so a style that replaces the
+    // face wholesale drops it and a button left waiting looks idle. The
+    // hover and disabled mixes are deliberately NOT restored: neither style
+    // lit a button under the pointer, and the label carries the disabled
+    // state on its own, from draw_text, which no style replaces.
+    if self.loading>0.0 {
+        let sdf=Sdf2d.viewport(p)
+        sdf.clear(face)
+        let c=size*0.5
+        let r=max(min(size.x,size.y)*0.5-self.loading_inset,1.0)
+        let a0=self.anim_time*2.0*PI
+        sdf.arc_round_caps(c.x,c.y,r,a0,a0+1.5*PI,self.loading_stroke)
+        sdf.fill(vec4(self.loading_color.rgb,self.loading_color.a*self.loading))
+        return sdf.result
+    }
+    return face
 }
 // Sunken white edit fields, independent of the light theme's gradient material.
 mod.widgets.TextInput.draw_bg.pixel = fn() {

@@ -1,0 +1,16 @@
+[package]
+name = "makepad-widgets-rich-text"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: Text flow, rich text, HTML, Markdown, LaTeX maths and the log list"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }
+makepad-html = { path = "../../../libs/html", version = "1.0.0" }
+unicode-segmentation = { version = "1.12.0", path = "../../../libs/unicode/unicode-segmentation" }
+pulldown-cmark = { version = "0.12.2", path = "../../../libs/pulldown-cmark", default-features = false, features = ["simd"] }
+makepad-latex-math = { path = "../../../libs/latex_math", version = "0.1.0" }

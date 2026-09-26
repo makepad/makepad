@@ -14,7 +14,11 @@ mod.theme.color_terminal_text = #000000
 mod.theme.color_fg_app = #aaaaaa
 mod.theme.color_bg_container = #aaaaaa
 mod.theme.color_focus = #000000
-mod.theme.color_bg_highlight = #000000
+// The ground behind a code chip, a quote and a table heading, which carry
+// ORDINARY text. It is not the selection colour, though the name invites
+// it: set to that, plain text sat on it at 1:1, black on black. White is what this style
+// draws its own content wells in.
+mod.theme.color_bg_highlight = #ffffff
 mod.theme.color_bg_highlight_inline = #000000
 mod.theme.color_ctrl_selected = #000000
 mod.theme.color_ctrl_active = #000000

@@ -1,532 +1,161 @@
-pub extern crate makepad_derive_widget;
-pub extern crate makepad_draw;
-pub use makepad_derive_widget::*;
-pub use makepad_draw::makepad_platform;
-pub use makepad_draw::*;
-pub use makepad_platform::log;
-pub use makepad_platform::makepad_script;
-pub use makepad_script::script_eval;
-pub use makepad_script::{ScriptValue, ScriptVm};
+//! `makepad-widgets`: the name every app depends on.
+//!
+//! The library is `makepad-widgets-core` (views, windows, text, buttons,
+//! inputs, lists, tabs, popups and the rest that is always there) plus one
+//! crate per widget family under `widgets/families`. Neither the core nor a
+//! family crate has features, so each compiles once per profile whatever
+//! families the apps sharing a target dir pick. This crate is the front: its
+//! features choose the family crates, it re-exports each under the module
+//! path it always had (`makepad_widgets::markdown::Markdown`, the prelude's
+//! glob items), and its `script_mod` registers the core with the chosen
+//! families in the order the widgets build on each other.
 
-pub use makepad_html;
-#[cfg(feature = "pdf")]
-pub use makepad_pdf_parse;
+pub use makepad_widgets_core::*;
 
-pub use makepad_draw::makepad_zune_jpeg;
-pub use makepad_draw::makepad_zune_png;
+#[cfg(feature = "tweaker")]
+pub use makepad_widgets_tweaker::{reflect, reflect::*, theme_store, tweaker};
 
-// Core modules (used internally first)
-pub mod animator;
-pub mod font_policy;
-pub mod desktop_style;
-pub mod app_icon;
-pub mod theme_desktop_dark;
-pub mod theme_desktop_light;
-pub mod theme_desktop_skeleton;
-pub mod widget;
-pub mod widget_async;
-pub mod splash_host;
-pub mod splash_storage;
-pub mod widget_match_event;
-pub mod widget_tree;
-
-// Modules ordered to match script_mod calls
-pub mod rubber_view;
-pub mod scroll_bar;
-pub mod scroll_bars;
-pub mod scroll_motion;
-pub mod view;
-pub mod view_ui;
-pub mod grid;
-
-pub mod animated_image_gif;
-pub mod browser;
-pub mod button;
-pub mod check_box;
-pub mod icon;
-pub mod image;
-pub mod image_blend;
-pub mod image_cache;
-pub mod label;
-pub mod link_label;
-pub mod radio_button;
-
-pub mod adaptive_view;
-pub mod desktop_button;
-pub mod gauss_view;
-pub mod gauss_chain;
-mod gauss_stack;
-pub mod backdrop;
-pub mod keyboard_view;
-pub mod nav_control;
-pub mod tweaker;
-pub mod ai_slot;
-#[cfg(feature = "voice")]
-pub mod voice_wave;
-pub mod window;
-pub mod cursor;
-pub mod window_menu;
-#[cfg(feature = "voice")]
-mod window_voice_input;
-
-pub mod combo_box;
-pub mod drop_down;
-pub mod drop_down2;
-pub mod popup_menu;
-pub mod slider;
-pub mod text_input;
-pub mod drop_slider;
-pub mod tip;
-pub mod value_input;
-pub mod fab_controls;
-pub mod menu_bar;
-
-pub mod splitter;
-
-pub mod fold_button;
-pub mod fold_header;
-
-pub mod glass_panel;
-pub mod loading_spinner;
-
-pub mod bare_step;
-pub mod turtle_step;
-
-pub mod data_grid;
-pub mod portal_list;
-pub mod reorder_list;
-pub mod text_flow;
-
-pub mod cached_widget;
-pub mod root;
-
-pub mod dock;
-pub mod tab;
-pub mod tab_bar;
-pub mod tab_close_button;
-
-pub mod html;
-pub mod markdown;
-
-#[cfg(feature = "maps")]
-pub mod map;
-pub mod math_view;
-#[cfg(feature = "pdf")]
-pub mod pdf_view;
-pub mod splash;
-pub mod svg;
-pub mod vector;
-
-// Touch gesture support (used by expandable_panel)
-pub mod touch_gesture;
-
-// Navigation and panels
-pub mod expandable_panel;
-pub mod scroll_shadow;
-pub mod stack_navigation;
-
-pub mod callout_tooltip;
-pub mod file_tree;
-pub mod modal;
-pub mod page_flip;
-pub mod hosted_view;
-pub mod popup_notification;
-pub mod slides_view;
-pub mod tooltip;
-pub mod video;
-
-pub mod command_text_input;
-pub mod defer_with_redraw;
-pub mod slide_panel;
-
-pub mod flat_list;
-
-pub mod chart;
-pub mod perf_graph;
-pub mod screen_cap;
-
-// Commented out modules (not yet converted)
-// lets depricate these for now
-// pub mod toggle_panel;
-// pub mod vectorline;
-// pub mod web_view;
-// pub mod rotated_image;
-// pub mod color_picker;
-// pub mod debug_view;
-// pub mod performance_view;
-// pub mod data_binding;
-
-pub use crate::{
-    adaptive_view::*,
-    animated_image_gif::*,
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
-    // loading_spinner - no public exports
-    bare_step::*,
-    button::*,
-    cached_widget::*,
-    callout_tooltip::*,
-    check_box::*,
-    combo_box::*,
-    desktop_button::*,
-    dock::*,
-
-    drop_down::*,
-    drop_down2::*,
-    expandable_panel::*,
-    file_tree::*,
-    flat_list::*,
-
-    fold_button::*,
-    fold_header::*,
-    gauss_view::*,
-    glass_panel::*,
-    grid::*,
-
-    icon::*,
-
-    image::*,
-    image_blend::*,
-    image_cache::*,
-    keyboard_view::*,
-    // view_ui - no public exports
-    label::*,
-    link_label::*,
-    menu_bar::*,
-    modal::*,
-    nav_control::*,
-    page_flip::*,
-    hosted_view::*,
-    popup_menu::*,
-    popup_notification::*,
-    data_grid::*,
-    portal_list::*,
-    reorder_list::*,
-    radio_button::*,
-    root::*,
-
-    rubber_view::*,
-    // Ordered to match script_mod calls
-    scroll_bar::ScrollBar,
-    scroll_bars::ScrollBars,
-    scroll_shadow::*,
-    slide_panel::*,
-    slider::*,
-    slides_view::*,
-
-    splitter::*,
-
-    stack_navigation::*,
-    tab::*,
-    tab_bar::*,
-    tab_close_button::*,
-    text_flow::*,
-
-    text_input::*,
-    tooltip::*,
-    // Navigation and panels
-    touch_gesture::*,
-    turtle_step::*,
-
-    view::*,
-    widget::{
-        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
-        WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
-        WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
-        WidgetSet, WidgetSetIterator, WidgetUid,
-    },
-    widget_async::{
-        enter_isolate, leave_isolate, set_splash_theme, set_widget_async_trace, CxSplashVmExt,
-        CxWidgetToScriptCallExt, IsolateEntry, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult,
-        SplashTheme, SplashVmId, MAIN_SPLASH_VM_ID,
-    },
-    widget_match_event::WidgetMatchEvent,
-    widget_tree::{set_ui_root, CxWidgetExt},
-
-    window::*,
-
-    window_menu::*,
+#[cfg(feature = "data")]
+pub use makepad_widgets_data::{
+    data_grid, data_grid::*, data_grid_columns, data_grid_columns::*, file_tree, file_tree::*,
+    tree, tree::*,
 };
 
-#[cfg(feature = "cef")]
-pub use crate::browser::*;
+#[cfg(feature = "dock")]
+pub use makepad_widgets_data::{dock, dock::*};
 
-#[cfg(feature = "voice")]
-pub use crate::voice_wave::*;
+#[cfg(feature = "rich_text")]
+pub use makepad_widgets_rich_text::{
+    html, html::*, log_list, log_list::*, makepad_html, markdown, markdown::*, math_view,
+    math_view::*, rich_text, rich_text::*, text_flow, text_flow::*,
+};
 
-pub use crate::html::*;
+#[cfg(feature = "nav_menus")]
+pub use makepad_widgets_menus::{
+    floating_action, floating_action::*, hamburger_menu, hamburger_menu::*, line_menu,
+    line_menu::*, pill_nav, pill_nav::*, radial_menu, radial_menu::*,
+};
 
-pub use crate::markdown::*;
+#[cfg(feature = "command_palette")]
+pub use makepad_widgets_menus::{command_palette, command_palette::*};
+
+#[cfg(feature = "charts")]
+pub use makepad_widgets_extras::{
+    chart, chart::*, chart_shapes, chart_shapes::*, waveform, waveform::*,
+};
+
+#[cfg(feature = "color")]
+pub use makepad_widgets_extras::{color, color::*};
+
+#[cfg(feature = "dates")]
+pub use makepad_widgets_extras::{
+    calendar, calendar::*, date_picker, date_picker::*, time_picker, time_picker::*,
+};
+
+#[cfg(feature = "chat")]
+pub use makepad_widgets_extras::{chat, chat::*};
+
+#[cfg(feature = "dropzone")]
+pub use makepad_widgets_extras::{dropzone, dropzone::*};
+
+#[cfg(feature = "vector")]
+pub use makepad_widgets_extras::{vector, vector::*};
+
+#[cfg(feature = "glass")]
+pub use makepad_widgets_extras::{glass_panel, glass_panel::*};
 
 #[cfg(feature = "maps")]
-pub use crate::map::overlay::{MapMarker, MapPuck, MapRouteOverlay};
-#[cfg(feature = "maps")]
-pub use crate::map::view::*;
-
-pub use crate::math_view::*;
-
-pub use crate::splash::*;
+pub use makepad_widgets_maps::{
+    map,
+    map::overlay::{MapMarker, MapPuck, MapRouteOverlay},
+    map::view::*,
+};
 
 #[cfg(feature = "pdf")]
-pub use crate::pdf_view::*;
-pub use crate::svg::*;
-pub use crate::vector::*;
+pub use makepad_widgets_pdf::{makepad_pdf_parse, pdf_view, pdf_view::*};
 
-pub use crate::chart::*;
-pub use crate::perf_graph::*;
-pub use crate::screen_cap::*;
+#[cfg(feature = "voice")]
+pub use makepad_widgets_voice::{voice_wave, voice_wave::*};
 
-pub use crate::video::*;
+#[cfg(feature = "cef")]
+pub use makepad_widgets_cef::{browser, browser::*};
 
-pub fn theme_mod(vm: &mut ScriptVm) {
-    makepad_draw::script_mod(vm);
-    if !vm.is_reload() {
-        makepad_platform::ime::script_mod(vm);
-    }
-
-    vm.bx.heap.new_module(id!(prelude));
-    vm.bx.heap.new_module(id!(themes));
-    crate::animator::script_mod(vm);
-    crate::theme_desktop_dark::script_mod(vm);
-    crate::theme_desktop_light::script_mod(vm);
-    crate::theme_desktop_skeleton::script_mod(vm);
-    #[cfg(not(target_arch = "wasm32"))]
-    script_eval!(vm, {
-        mod.helper = {
-            startup: |v|{
-                mod.res.load_all_resources()
-                //mod.gc.set_static(mod.prelude.widgets_header);
-                //mod.gc.set_static(mod.prelude.widgets_internal);
-                //mod.gc.set_static(mod.prelude.widgets);
-                v
-            }
-        }
-    });
-    #[cfg(target_arch = "wasm32")]
-    script_eval!(vm, {
-        mod.helper = {
-            startup: |v|{
-                v
-            }
-        }
-    });
-    crate::font_policy::install_theme_fonts(vm);
-    script_eval!(vm, {
-        mod.prelude.widgets_header = {
-            ..mod.res,
-            ..mod.helper,
-            ..mod.std,
-            ..mod.pod,
-            ..mod.math,
-            ..mod.sdf,
-            ..mod.animator,
-            ..mod.turtle,
-            ..mod.text,
-            ..mod.ime,
-            ..mod.shader,
-            ..mod.animator.Play,
-            ..mod.animator.Ease,
-            draw:mod.draw,
-            MouseCursor:mod.draw.MouseCursor
-        }
-        mod.theme = mod.themes.dark
-
-    });
+/// The AI chat slot. The requests global is the core's and is here whether
+/// or not the slot is linked (the window manager and the screen recorder
+/// read it); the slot itself comes with the `ai` feature.
+pub mod ai_slot {
+    #[cfg(feature = "ai")]
+    pub use makepad_widgets_ai::ai_slot::*;
+    pub use makepad_widgets_core::widget_hooks::{AiSelectedRegion, AiSlotRequests};
 }
 
-pub fn widgets_mod(vm: &mut ScriptVm) {
-    let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_host_io(vm, host_io_only);
-}
-
-pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
-    crate::desktop_style::apply_theme(vm);
-    // make the prelude for our own widgets
-    script_eval!(vm, {
-        mod.prelude.widgets_internal = {
-            ..mod.prelude.widgets_header,
-            theme:mod.theme,
-        }
-    });
-
-    vm.bx.heap.new_module(id!(widgets));
-
-    crate::scroll_bar::script_mod(vm);
-    crate::scroll_bars::script_mod(vm);
-    crate::view::script_mod(vm);
-    crate::view_ui::script_mod(vm);
-    crate::grid::script_mod(vm);
-    crate::rubber_view::script_mod(vm);
-
-    crate::label::script_mod(vm);
-    crate::link_label::script_mod(vm);
-    crate::button::script_mod(vm);
-    #[cfg(feature = "cef")]
-    if !host_io_only { crate::browser::script_mod(vm); }
-    crate::check_box::script_mod(vm);
-    crate::radio_button::script_mod(vm);
-    crate::image::script_mod(vm);
-    crate::animated_image_gif::script_mod(vm);
-    crate::image_blend::script_mod(vm);
-    crate::icon::script_mod(vm);
-
-    crate::adaptive_view::script_mod(vm);
-    crate::desktop_button::script_mod(vm);
-    crate::keyboard_view::script_mod(vm);
+/// The families a Window names, registered where it expects them; the ones
+/// this build lacks are empty hidden views.
+fn window_families() -> WindowFamilies {
+    #[allow(unused_mut)]
+    let mut window = WindowFamilies::default();
     #[cfg(feature = "voice")]
-    crate::voice_wave::script_mod(vm);
-    #[cfg(not(feature = "voice"))]
-    script_eval!(vm, {
-        use mod.widgets.View
-        mod.widgets.VoiceWave = mod.widgets.View {
-            visible: false
-        }
-    });
-    // A guest must not replace the app's own menu bar.
-    if !host_io_only { crate::window_menu::script_mod(vm); }
-    crate::nav_control::script_mod(vm);
-    crate::tweaker::script_mod(vm);
-    crate::gauss_view::script_mod(vm);
-    if !host_io_only { crate::screen_cap::script_mod(vm); }
-    // The AI slot before the window: its DSL names `AiChatSlot`.
-    crate::ai_slot::script_mod(vm);
-    crate::app_icon::script_mod(vm);
-    crate::cursor::script_mod(vm);
-    if !host_io_only { crate::window::script_mod(vm); }
-
-    crate::popup_menu::script_mod(vm);
-    crate::drop_down::script_mod(vm);
-    crate::drop_down2::script_mod(vm);
-    crate::text_input::script_mod(vm);
-    crate::slider::script_mod(vm);
-    crate::drop_slider::script_mod(vm);
-    crate::tip::script_mod(vm);
-    crate::value_input::script_mod(vm);
-    crate::fab_controls::script_mod(vm);
-    crate::menu_bar::script_mod(vm);
-    crate::combo_box::script_mod(vm);
-
-    crate::splitter::script_mod(vm);
-
-    crate::fold_button::script_mod(vm);
-    crate::fold_header::script_mod(vm);
-
-    crate::loading_spinner::script_mod(vm);
-    crate::glass_panel::script_mod(vm);
-
-    crate::bare_step::script_mod(vm);
-    crate::turtle_step::script_mod(vm);
-
-    crate::data_grid::script_mod(vm);
-    crate::portal_list::script_mod(vm);
-    crate::reorder_list::script_mod(vm);
-    crate::text_flow::script_mod(vm);
-
-    // Its singletons would let a guest reach widgets the host or other isolates cached.
-    if !host_io_only { crate::cached_widget::script_mod(vm); }
-    crate::root::script_mod(vm);
-
-    crate::tab_close_button::script_mod(vm);
-    crate::tab::script_mod(vm);
-    crate::tab_bar::script_mod(vm);
-    crate::dock::script_mod(vm);
-
-    // Navigation and panels
-    crate::scroll_shadow::script_mod(vm);
-    crate::stack_navigation::script_mod(vm);
-    crate::expandable_panel::script_mod(vm);
-    crate::modal::script_mod(vm);
-    crate::tooltip::script_mod(vm);
-    crate::callout_tooltip::script_mod(vm);
-    crate::popup_notification::script_mod(vm);
-    crate::video::script_mod(vm);
-    crate::page_flip::script_mod(vm);
-    crate::hosted_view::script_mod(vm);
-    crate::file_tree::script_mod(vm);
-    crate::flat_list::script_mod(vm);
-    crate::slides_view::script_mod(vm);
-    crate::slide_panel::script_mod(vm);
-
-    crate::html::script_mod(vm);
-    crate::markdown::script_mod(vm);
-
-    crate::splash::script_mod(vm);
-    #[cfg(feature = "pdf")]
-    crate::pdf_view::script_mod(vm);
-    crate::svg::script_mod(vm);
-    crate::vector::script_mod(vm);
-    crate::chart::script_mod(vm);
-    crate::perf_graph::script_mod(vm);
-    #[cfg(feature = "maps")]
-    crate::map::style::script_mod(vm);
-    #[cfg(feature = "maps")]
-    if !host_io_only { crate::map::view::script_mod(vm); }
-    crate::math_view::script_mod(vm);
-
-    // Safe area inset values (in Makepad layout points). Populated from the platform's
-    // display_context which is set before Startup on iOS/Android. On desktop
-    // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
     {
-        use makepad_script::trap::NoTrap;
-        let insets = vm.cx().display_context.safe_area_insets;
-        let widgets = vm.module(id!(widgets));
-        vm.bx.heap.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_TOP).into(),
-            insets.top.into(),
-            NoTrap,
-        );
-        vm.bx.heap.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_BOTTOM).into(),
-            insets.bottom.into(),
-            NoTrap,
-        );
-        vm.bx.heap.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_LEFT).into(),
-            insets.left.into(),
-            NoTrap,
-        );
-        vm.bx.heap.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_RIGHT).into(),
-            insets.right.into(),
-            NoTrap,
-        );
+        window.voice = Some(makepad_widgets_voice::voice_mod);
     }
-
-    script_eval!(vm, {
-        mod.prelude.widgets = {
-            ..mod.prelude.widgets_header,
-            theme:mod.theme,
-            ..mod.widgets,
-        }
-    });
+    #[cfg(feature = "tweaker")]
+    {
+        window.tweaker = Some(makepad_widgets_tweaker::tweaker_mod);
+    }
+    #[cfg(feature = "ai")]
+    {
+        window.ai = Some(makepad_widgets_ai::ai_mod);
+    }
+    window
 }
 
+/// The other families, after the core's widgets, in the order they build on
+/// each other: the colour family before the charts that read it, the data
+/// family before the dock.
+fn families() -> Vec<fn(&mut ScriptVm)> {
+    #[allow(unused_mut)]
+    let mut families: Vec<fn(&mut ScriptVm)> = Vec::new();
+    #[cfg(feature = "cef")]
+    families.push(makepad_widgets_cef::cef_mod);
+    #[cfg(feature = "glass")]
+    families.push(makepad_widgets_extras::glass_mod);
+    #[cfg(feature = "nav_menus")]
+    families.push(makepad_widgets_menus::nav_menus_mod);
+    #[cfg(feature = "data")]
+    families.push(makepad_widgets_data::data_mod);
+    #[cfg(feature = "dates")]
+    families.push(makepad_widgets_extras::dates_mod);
+    #[cfg(feature = "color")]
+    families.push(makepad_widgets_extras::color_mod);
+    #[cfg(feature = "charts")]
+    families.push(makepad_widgets_extras::charts_mod);
+    #[cfg(feature = "chat")]
+    families.push(makepad_widgets_extras::chat_mod);
+    #[cfg(feature = "dropzone")]
+    families.push(makepad_widgets_extras::dropzone_mod);
+    #[cfg(feature = "command_palette")]
+    families.push(makepad_widgets_menus::command_palette_mod);
+    #[cfg(feature = "rich_text")]
+    families.push(makepad_widgets_rich_text::rich_text_mod);
+    #[cfg(feature = "dock")]
+    families.push(makepad_widgets_data::dock_mod);
+    #[cfg(feature = "pdf")]
+    families.push(makepad_widgets_pdf::pdf_mod);
+    #[cfg(feature = "vector")]
+    families.push(makepad_widgets_extras::vector_mod);
+    #[cfg(feature = "maps")]
+    families.push(makepad_widgets_maps::maps_mod);
+    families
+}
+
+/// The widgets of the core and of this build's families (the theme must be
+/// in place: `theme_mod`).
+pub fn widgets_mod(vm: &mut ScriptVm) {
+    makepad_widgets_core::widgets_mod_with(vm, window_families(), &families());
+}
+
+/// The theme, the widgets of the core and of this build's families, and the
+/// desktop style over them: what every app's `script_mod` calls first.
 pub fn script_mod(vm: &mut ScriptVm) {
-    makepad_platform::startup_trace("widgets: theme_mod begin");
-    theme_mod(vm);
-    makepad_platform::startup_trace("widgets: theme_mod done");
-    widgets_mod(vm);
-    crate::desktop_style::apply_widgets(vm);
-    makepad_platform::startup_trace("widgets: widgets_mod done");
-}
-
-#[cfg(test)]
-mod animated_image_gif_registration_tests {
-    #[test]
-    fn test_animated_image_gif_is_registered_separately_from_image() {
-        let lib = include_str!("lib.rs");
-        let gif = include_str!("animated_image_gif.rs");
-        assert!(lib.contains("pub mod animated_image_gif;"));
-        assert!(lib.contains("animated_image_gif::*"));
-        assert!(lib.contains("crate::animated_image_gif::script_mod(vm);"));
-        assert!(gif.contains(
-            "mod.widgets.AnimatedImageGifBase = #(AnimatedImageGif::register_widget(vm))"
-        ));
-        assert!(gif.contains("mod.widgets.AnimatedImageGif = set_type_default()"));
-        assert!(lib.contains("pub mod image;"));
-        assert!(lib.contains("crate::image::script_mod(vm);"));
-    }
+    makepad_widgets_core::script_mod_with(vm, window_families(), &families());
 }

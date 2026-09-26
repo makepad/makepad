@@ -450,14 +450,18 @@ script_mod! {
                 // saturate at a capsule instead of degenerating into a diamond.
                 let k_left = min(2. * r_left, min(size.x, size.y));
                 let k_right = min(2. * r_right, min(size.x, size.y));
-                let bp_left = max(p + vec2(k_left, k_left).xy, vec2(0., 0.));
-                let bp_right = max(p + vec2(k_right, k_right).xy, vec2(0., 0.));
+                let q_left = p + vec2(k_left, k_left).xy;
+                let q_right = p + vec2(k_right, k_right).xy;
 
-                self.dist = mix(
-                    (length(bp_left) - k_left),
-                    (length(bp_right) - k_right),
-                    step(0.5 * w, p_r.x)
-                ) / self.scale_factor;
+                // The min(max(q.x,q.y),0) interior term, as in box_y: without it the
+                // interior distance is -2r, which is ZERO for a square corner, so the
+                // stroke's abs(dist) test passes everywhere inside and paints that half
+                // of the shape with the bevel. A row of joined buttons then looks cut
+                // in half down the middle.
+                let dist_left = min(max(q_left.x, q_left.y), 0.) + length(max(q_left, vec2(0., 0.))) - k_left;
+                let dist_right = min(max(q_right.x, q_right.y), 0.) + length(max(q_right, vec2(0., 0.))) - k_right;
+
+                self.dist = mix(dist_left, dist_right, step(0.5 * w, p_r.x)) / self.scale_factor;
 
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
@@ -483,22 +487,24 @@ script_mod! {
                 let k_rt = min(2. * r_right_top, min(size.x, size.y));
                 let k_rb = min(2. * r_right_bottom, min(size.x, size.y));
                 let k_lb = min(2. * r_left_bottom, min(size.x, size.y));
-                let bp_lt = max(p + vec2(k_lt, k_lt).xy, vec2(0., 0.));
-                let bp_rt = max(p + vec2(k_rt, k_rt).xy, vec2(0., 0.));
-                let bp_rb = max(p + vec2(k_rb, k_rb).xy, vec2(0., 0.));
-                let bp_lb = max(p + vec2(k_lb, k_lb).xy, vec2(0., 0.));
+                let q_lt = p + vec2(k_lt, k_lt).xy;
+                let q_rt = p + vec2(k_rt, k_rt).xy;
+                let q_rb = p + vec2(k_rb, k_rb).xy;
+                let q_lb = p + vec2(k_lb, k_lb).xy;
+
+                // The min(max(q.x,q.y),0) interior term, as in box_y: without it the
+                // interior distance is -2r, which is ZERO for a square corner, so the
+                // stroke's abs(dist) test passes everywhere inside and paints that
+                // quadrant with the bevel. A row of joined buttons, where the outer
+                // ends are round and the joints square, then looks cut in half.
+                let d_lt = min(max(q_lt.x, q_lt.y), 0.) + length(max(q_lt, vec2(0., 0.))) - k_lt;
+                let d_rt = min(max(q_rt.x, q_rt.y), 0.) + length(max(q_rt, vec2(0., 0.))) - k_rt;
+                let d_rb = min(max(q_rb.x, q_rb.y), 0.) + length(max(q_rb, vec2(0., 0.))) - k_rb;
+                let d_lb = min(max(q_lb.x, q_lb.y), 0.) + length(max(q_lb, vec2(0., 0.))) - k_lb;
 
                 self.dist = mix(
-                    mix(
-                        (length(bp_lt) - k_lt),
-                        (length(bp_lb) - k_lb),
-                        step(0.5 * h, p_r.y)
-                    ),
-                    mix(
-                        (length(bp_rt) - k_rt),
-                        (length(bp_rb) - k_rb),
-                        step(0.5 * h, p_r.y)
-                    ),
+                    mix(d_lt, d_lb, step(0.5 * h, p_r.y)),
+                    mix(d_rt, d_rb, step(0.5 * h, p_r.y)),
                     step(0.5 * w, p_r.x)
                 ) / self.scale_factor;
 
@@ -514,6 +520,34 @@ script_mod! {
                 self.dist = max(dm.x, dm.y) + length(max(d, vec2(0., 0.)));
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);
+            }
+
+            // A pointer: a square turned an eighth of a turn, centred on
+            // (x, y) with one corner on (tip_x, tip_y). Put the centre on the
+            // edge of the shape it hangs off and the half outside that edge is
+            // a right-angled triangle whose base is twice its height, while
+            // the half inside overlaps the shape. The overlap is the point:
+            // the union has no distance of zero along the base, so a stroke
+            // after it runs up one flank and down the other with no line
+            // across, and a fill or a shadow taken from it is one shape. A
+            // triangle that merely touched the edge would leave the base on
+            // the outline of both. A pointer of no length adds nothing, and
+            // says so without a branch, so every caller can draw one whether
+            // it has a pointer or not.
+            pointer: fn(x: float, y: float, tip_x: float, tip_y: float) {
+                let axis = vec2(tip_x - x, tip_y - y)
+                let reach = length(axis)
+                let n = axis / max(reach, 0.00001)
+                let q = self.pos - vec2(x, y)
+                let u = dot(q, n)
+                let v = q.x * n.y - q.y * n.x
+                let d = abs(vec2(u + v, u - v)) * 0.70710678 - vec2(reach * 0.70710678, reach * 0.70710678)
+                let square = min(max(d.x, d.y), 0.) + length(max(d, vec2(0., 0.)))
+                // Added, not mixed: a GPU lerp from 1e20 loses the distance
+                // to rounding and leaves zero, which strokes everything.
+                self.dist = square / self.scale_factor + (1.0 - step(0.00001, reach)) * 1e+20
+                self.old_shape = self.shape
+                self.shape = min(self.shape, self.dist)
             }
 
             hexagon: fn(x: float, y: float, r: float) {
