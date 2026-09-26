@@ -9,3 +9,7 @@ description = "Rust port of the core LZ4 block compressor and decompressor"
 force-scalar = []
 
 [dependencies]
+
+[[bin]]
+name = "makepad-lz4"
+path = "src/bin/lz4.rs"

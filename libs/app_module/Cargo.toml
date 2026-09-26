@@ -9,6 +9,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-ai-services = { path = "../ai/services" }
 makepad-strict-json = { path = "../strict_json" }

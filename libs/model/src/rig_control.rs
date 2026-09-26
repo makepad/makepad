@@ -46,7 +46,7 @@ pub(crate) fn topology(mesh:&mesh::Mesh)->[u8;32]{
     for v in mesh.vertices(){bytes.extend_from_slice(&v.id.0.to_le_bytes());}
     for f in mesh.faces(){bytes.extend_from_slice(&f.id.0.to_le_bytes());bytes.extend_from_slice(&f.corner_count.to_le_bytes());}
     for c in mesh.corners(){bytes.extend_from_slice(&c.id.0.to_le_bytes());bytes.extend_from_slice(&c.vertex.0.to_le_bytes());}
-    makepad_asset_data::sha256(&bytes)
+    makepad_core_util::sha256::sha256(&bytes)
 }
 impl RigState {
     pub fn is_empty(&self)->bool{self==&Self::default()}

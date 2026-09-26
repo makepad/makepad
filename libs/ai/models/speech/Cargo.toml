@@ -13,15 +13,16 @@ whisper = []
 vad = []
 # Kokoro-82M text-to-speech (+ its G2P).
 kokoro = []
-# IndexTTS-2.5 character-voice text-to-speech.
-indextts = []
+# IndexTTS-2.5 character-voice text-to-speech (its kernels come from makepad-ai-sfx).
+indextts = ["dep:makepad-ai-sfx"]
 # Precompile the Whisper ggml Metal library at build time (else runtime source compile).
 metal-precompile = []
 
 [dependencies]
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
-makepad-ai-sfx = { path = "../sfx" }
+# Only the IndexTTS modules use the SA3/MOSS/Woosh kernels (and so pull in ai-h3).
+makepad-ai-sfx = { path = "../sfx", optional = true }
 
 [[bin]]
 name = "g2p_test"

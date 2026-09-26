@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 # The NEURAL producer: the in-house Practical-RIFE v4.26 port, running on
 # the macOS Metal/BLAS device path. Optional — without it the classical
 # flow, crossfade and hold tiers are all still there.

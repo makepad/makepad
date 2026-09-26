@@ -56,6 +56,10 @@ features = [
     "apple-layout",
     "variable-fonts",
     "glyph-names",
+    # Apple system fonts (SF, PingFang) have >32 gvar tuples per glyph
+    # (SFNS.ttf: 54); without the heap spill in gvar-alloc, outline_glyph
+    # returns None for most glyphs and variable-font text renders blank.
+    "gvar-alloc",
 ]
 default-features = false
 

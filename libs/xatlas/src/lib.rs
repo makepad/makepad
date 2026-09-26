@@ -3,8 +3,9 @@
 //! Official Hunyuan-Paint (`xatlas.parametrize`) is:
 //! `Create` + `AddMesh` + `Generate` with default chart/pack options, then
 //! `uv / (width, height)`. This crate must match the C++ oracle dumps in
-//! `oracle/gold/` bit-exactly when built with the same flags
-//! (`XA_MULTITHREADED=0`, `XA_DEBUG=0`, `NDEBUG`).
+//! `oracle/gold/` for topology, atlas dimensions and texel density. UVs allow
+//! f32 rounding at the atlas scale across toolchains; the oracle uses
+//! `XA_MULTITHREADED=0`, `XA_DEBUG=0`, `NDEBUG`.
 
 // A bit-exact port keeps upstream's full surface; unused pieces stay to match the C++.
 #![allow(dead_code)]

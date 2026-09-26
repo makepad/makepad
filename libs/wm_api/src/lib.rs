@@ -223,7 +223,17 @@ fn spawn_sibling(bin: &str, args: &[&str]) -> bool {
     if !path.exists() {
         return false;
     }
-    std::process::Command::new(path)
+    let mut command = std::process::Command::new(path);
+    // Windows: a sibling linked as a console program (a plain `cargo
+    // build`) would open a console window of its own; its output goes
+    // nowhere anyway.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

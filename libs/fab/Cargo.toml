@@ -11,7 +11,7 @@ name = "fab"
 
 [dependencies]
 makepad-math = { path = "../math", version = "1.0.0" }
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data", "dock"] }
 makepad-render = { path = "../render", version = "0.1.0" }
 makepad-scene = { path = "../scene", version = "0.1.0" }
 makepad-raytrace = { path = "../raytrace", version = "0.1.0" }

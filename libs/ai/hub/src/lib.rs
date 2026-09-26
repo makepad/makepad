@@ -50,6 +50,7 @@ mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
+pub mod generate;
 pub mod gpu;
 pub mod home;
 pub mod hub;

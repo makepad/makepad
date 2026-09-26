@@ -85,18 +85,33 @@ impl StemsWeights {
         extra_bytes: usize,
         f16: bool,
     ) -> Result<Self> {
+        Self::load_plan(path, &weight_plan(), extra_bytes, f16)
+    }
+
+    /// Loads whatever `plan` names out of the checkpoint at `path`.
+    ///
+    /// The plan is the whole description of a model's weights, so a second
+    /// separator is a second plan and nothing else: the arena is sized from
+    /// it, the tensors are allocated in its order and filled from its
+    /// sources. [`load_with_options`](Self::load_with_options) is this with
+    /// the four-stem plan, which is what it has always done.
+    pub fn load_plan(
+        path: impl AsRef<Path>,
+        plan: &[PlanItem],
+        extra_bytes: usize,
+        f16: bool,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut state = PthStateDict::load(&path)
             .map_err(|e| DiffusionError::model(format!("stems checkpoint {}: {e}", path.display())))?;
-        let plan = weight_plan();
-        let total = plan_total_bytes(&plan, f16, extra_bytes)?;
+        let total = plan_total_bytes(plan, f16, extra_bytes)?;
         let mut ctx = Context::new(InitParams {
             mem_size: total,
             mem_buffer: None,
             no_alloc: false,
         });
         let mut ids = BTreeMap::new();
-        for item in &plan {
+        for item in plan {
             let ty = item.dtype(f16);
             let id = ctx
                 .new_named_tensor(
@@ -247,7 +262,7 @@ impl PlanItem {
 /// A norm scale or bias: always F32 (they are rank-1 or per-band vectors,
 /// negligible in size, and are consumed by elementwise ops that would have to
 /// convert anyway).
-fn item(name: String, extents: Vec<i64>, source: Source) -> PlanItem {
+pub(crate) fn item(name: String, extents: Vec<i64>, source: Source) -> PlanItem {
     PlanItem {
         name,
         extents,
@@ -257,7 +272,7 @@ fn item(name: String, extents: Vec<i64>, source: Source) -> PlanItem {
 }
 
 /// The `a` operand of a `mul_mat`.
-fn mat(name: String, extents: Vec<i64>, source: Source) -> PlanItem {
+pub(crate) fn mat(name: String, extents: Vec<i64>, source: Source) -> PlanItem {
     PlanItem {
         name,
         extents,
@@ -285,7 +300,7 @@ pub fn attn_name(block: usize, axis: usize, part: &str) -> String {
 pub fn ff_name(block: usize, axis: usize, part: &str) -> String {
     format!("block{block}.{}.ff.{part}", axis_tag(axis))
 }
-fn axis_tag(axis: usize) -> &'static str {
+pub(crate) fn axis_tag(axis: usize) -> &'static str {
     if axis == 0 {
         "time"
     } else {
@@ -297,7 +312,7 @@ pub fn mask_name(stem: usize, group: usize, part: &str) -> String {
     format!("mask{stem}.g{group}.{part}")
 }
 
-fn ckpt_transformer(block: usize, axis: usize) -> String {
+pub(crate) fn ckpt_transformer(block: usize, axis: usize) -> String {
     format!("layers.{block}.{axis}.layers.0")
 }
 
@@ -482,7 +497,11 @@ pub fn weight_plan() -> Vec<PlanItem> {
     plan
 }
 
-fn plan_total_bytes(plan: &[PlanItem], f16: bool, extra_bytes: usize) -> Result<usize> {
+pub(crate) fn plan_total_bytes(
+    plan: &[PlanItem],
+    f16: bool,
+    extra_bytes: usize,
+) -> Result<usize> {
     let mut total = 0usize;
     for item in plan {
         let ty = item.dtype(f16);

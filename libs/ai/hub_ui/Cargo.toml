@@ -6,5 +6,5 @@ license = "MIT OR Apache-2.0"
 description = "Shared Makepad model-install and weight-licence UI for local AI models"
 
 [dependencies]
-makepad-widgets = { path = "../../../widgets" }
+makepad-widgets = { path = "../../../widgets", default-features = false }
 makepad-ai-hub = { path = "../hub", default-features = false, features = ["local"] }

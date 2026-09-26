@@ -3,8 +3,6 @@ name = "makepad-csg"
 version = "0.1.0"
 edition = "2021"
 
-[workspace]
-
 [features]
 default = ["threads"]
 nightly = ["makepad-csg-boolean/nightly", "makepad-csg-math/nightly", "makepad-csg-mesh/nightly"]

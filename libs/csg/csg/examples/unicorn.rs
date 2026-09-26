@@ -58,7 +58,8 @@ fn write(t: &Instant, solid: &Solid, dir: &str, name: &str) {
 }
 
 fn main() {
-    let out_dir = "/Users/admin/makepad/makepad/libs/csg/output";
+    // Generated models; libs/csg/output is ignored by git.
+    let out_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../output");
     std::fs::create_dir_all(out_dir).unwrap();
     let t = Instant::now();
 

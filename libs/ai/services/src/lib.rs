@@ -7,10 +7,13 @@
 //! - `engine` (feature `engine`) — what a host runs: the registry of
 //!   connected services, the router that sends each call to its owner and
 //!   gates the risky ones, and the session over the hub's providers.
+//! - [`mcp`] — the loopback MCP endpoint (Director's lanes, and an app's
+//!   tools offered to Claude Desktop through its `--mcp` relay).
 //!
 //! Design of record: `local/agent_state/aichat/DESIGN.md`.
 
 pub mod engine;
+pub mod mcp;
 pub mod port;
 pub mod state;
 pub mod wire;
