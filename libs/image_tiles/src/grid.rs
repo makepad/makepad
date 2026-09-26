@@ -555,7 +555,7 @@ impl TileGrid {
     }
 
     /// Every picture on the grid: id, title, link — what a host searches
-    /// over (the SMBC hover text rides in the title).
+    /// over (a picture's caption or alt text rides in the title).
     pub fn items(&self) -> Vec<(ItemId, String, String)> {
         self.items.iter().map(|i| (i.id, i.title.to_string(), i.link.to_string())).collect()
     }
@@ -1316,7 +1316,9 @@ impl Widget for TileGrid {
             Hit::FingerUp(fu) => {
                 cx.set_cursor(MouseCursor::Default);
                 if let Some((_, _, moved)) = self.drag.take() {
-                    if !moved {
+                    // A press taken away (a list or the host took the finger)
+                    // clicks nothing.
+                    if !moved && !fu.cancelled {
                         let world = self.screen_to_world(fu.abs);
                         if let Some(rank) = self.item_at(world) {
                             let item = &self.items[rank];
@@ -1678,10 +1680,10 @@ mod tests {
 
     fn wall() -> Vec<(String, String)> {
         vec![
-            ("2026-01-02: A robot learns to love".into(), "https://smbc/1".into()),
-            ("2026-01-03: Physics of a cat".into(), "https://smbc/2".into()),
-            ("2026-01-04: The Robot uprising, again".into(), "https://smbc/3".into()),
-            ("2026-01-05: robotics for cats".into(), "https://smbc/robot".into()),
+            ("2026-01-02: A robot learns to love".into(), "https://example.com/1".into()),
+            ("2026-01-03: Physics of a cat".into(), "https://example.com/2".into()),
+            ("2026-01-04: The Robot uprising, again".into(), "https://example.com/3".into()),
+            ("2026-01-05: robotics for cats".into(), "https://example.com/robot".into()),
         ]
     }
 
@@ -1697,7 +1699,7 @@ mod tests {
         assert_eq!(order_for(&w, "robot cat"), vec![3]);
         assert!(order_for(&w, "dog").is_empty());
         // Case does not matter; the link counts.
-        assert_eq!(order_for(&w, "SMBC/2"), vec![1]);
+        assert_eq!(order_for(&w, "EXAMPLE.COM/2"), vec![1]);
     }
 
     #[test]

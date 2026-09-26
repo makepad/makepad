@@ -534,6 +534,129 @@ pub fn parameter_sets_annex_b(codec: &VideoCodec) -> Vec<u8> {
     out
 }
 
+// ------------------------------------------------------------ audio edit
+
+/// What the container says about where its sound starts and how long it
+/// is: the first real entry of the sound track's edit list. An encoder
+/// that pads the front of the stream writes the padding's length here as
+/// `media_time`, and the length of the music as `segment_duration`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioEdit {
+    /// Where the presentation starts inside the track, in the TRACK's
+    /// timescale (`media_timescale`).
+    pub media_time: i64,
+    /// How long the presentation is, in the MOVIE's timescale
+    /// (`movie_timescale`), not the track's.
+    pub segment_duration: i64,
+    /// The sound track's timescale, from its `mdhd`; usually the sample rate.
+    pub media_timescale: u32,
+    /// The movie's timescale, from `mvhd`.
+    pub movie_timescale: u32,
+}
+
+impl AudioEdit {
+    /// The edit in sample frames at `sample_rate`: (frames to skip at the
+    /// front, frames the presentation holds). Each converts with its own
+    /// timescale.
+    pub fn in_samples(&self, sample_rate: u32) -> (u64, u64) {
+        let scale = |value: i64, timescale: u32| -> u64 {
+            if value <= 0 || timescale == 0 {
+                return 0;
+            }
+            ((value as i128 * sample_rate as i128) / timescale as i128) as u64
+        };
+        (
+            scale(self.media_time, self.media_timescale),
+            scale(self.segment_duration, self.movie_timescale),
+        )
+    }
+}
+
+/// Ceiling on edit-list entries: a real list holds one or two.
+const MAX_EDITS: usize = 4096;
+
+/// The first real edit of the first sound track in a `moov` payload.
+/// `Ok(None)` for a file with no sound track, or a sound track with no
+/// edit list. A truncated list is an error, never a panic.
+pub fn audio_edit(moov: &[u8]) -> Result<Option<AudioEdit>, Mp4Error> {
+    if moov.len() as u64 > MAX_MOOV_BYTES {
+        return Err(Mp4Error::TooLarge);
+    }
+    let kids = children(moov)?;
+    let mvhd = child(&kids, b"mvhd").ok_or(Mp4Error::Missing("mvhd"))?;
+    let (version, mvhd) = full_box(mvhd, "mvhd")?;
+    let movie_timescale = if version == 1 {
+        need(mvhd, 0, 20, "mvhd v1")?;
+        be_u32(mvhd, 16)
+    } else {
+        need(mvhd, 0, 12, "mvhd v0")?;
+        be_u32(mvhd, 8)
+    };
+    if movie_timescale == 0 {
+        return Err(Mp4Error::Malformed("mvhd timescale"));
+    }
+    for (kind, trak) in &kids {
+        if kind != b"trak" {
+            continue;
+        }
+        let trak_kids = children(trak)?;
+        let mdia = child(&trak_kids, b"mdia").ok_or(Mp4Error::Missing("mdia"))?;
+        let mdia_kids = children(mdia)?;
+        let hdlr = child(&mdia_kids, b"hdlr").ok_or(Mp4Error::Missing("hdlr"))?;
+        let (_, hdlr) = full_box(hdlr, "hdlr")?;
+        need(hdlr, 4, 4, "hdlr handler")?;
+        if &hdlr[4..8] != b"soun" {
+            continue;
+        }
+        let mdhd = child(&mdia_kids, b"mdhd").ok_or(Mp4Error::Missing("mdhd"))?;
+        let (version, mdhd) = full_box(mdhd, "mdhd")?;
+        let media_timescale = if version == 1 {
+            need(mdhd, 0, 28, "mdhd v1")?;
+            be_u32(mdhd, 16)
+        } else {
+            need(mdhd, 0, 16, "mdhd v0")?;
+            be_u32(mdhd, 8)
+        };
+        if media_timescale == 0 {
+            return Err(Mp4Error::Malformed("mdhd timescale"));
+        }
+        let Some(edts) = child(&trak_kids, b"edts") else { return Ok(None) };
+        let Some(elst) = child(&children(edts)?, b"elst") else { return Ok(None) };
+        let (version, elst) = full_box(elst, "elst")?;
+        need(elst, 0, 4, "elst count")?;
+        let count = be_u32(elst, 0) as usize;
+        if count > MAX_EDITS {
+            return Err(Mp4Error::Malformed("elst count"));
+        }
+        let entry_len = if version == 1 { 20 } else { 12 };
+        // The whole table has to be there, not just the entry that is
+        // used: a list cut short is a broken index, not a shorter one.
+        need(elst, 4, count * entry_len, "elst entry")?;
+        let mut at = 4;
+        for _ in 0..count {
+            let (segment_duration, media_time) = if version == 1 {
+                (be_u64(elst, at) as i64, be_u64(elst, at + 8) as i64)
+            } else {
+                (be_u32(elst, at) as i64, be_i32(elst, at + 4) as i64)
+            };
+            at += entry_len;
+            // An empty edit is a gap before the sound starts, not the
+            // sound's own edit: the first real entry is the one.
+            if media_time < 0 {
+                continue;
+            }
+            return Ok(Some(AudioEdit {
+                media_time,
+                segment_duration,
+                media_timescale,
+                movie_timescale,
+            }));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
 /// Read an mp4 from any byte source (a file, a range fetcher): walk the
 /// top-level boxes for `moov`, refusing fragmented files. `read(offset,
 /// len)` returns up to `len` bytes at `offset` (fewer at end of file).
@@ -633,6 +756,98 @@ mod tests {
         let ftyp = bx(b"ftyp", b"isom\0\0\0\0isom");
         let mdat = bx(b"mdat", &[0u8; 8000]);
         [ftyp, moov, mdat].concat()
+    }
+
+    /// A sound track: `mdhd` at `timescale`, and the edit list given, as
+    /// (segment_duration, media_time) pairs, at `elst_version`.
+    fn sound_trak(timescale: u32, edits: Option<&[(i64, i64)]>, elst_version: u8) -> Vec<u8> {
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"soun", &[0u8; 12], b"\0"].concat());
+        let mut mdhd = u32s(&[0, 0, timescale, timescale * 10]);
+        mdhd.extend_from_slice(&[0, 0, 0, 0]);
+        let mdhd = full(b"mdhd", 0, &mdhd);
+        let mdia = bx(b"mdia", &[mdhd, hdlr].concat());
+        let mut trak = Vec::new();
+        if let Some(edits) = edits {
+            let mut body = u32s(&[edits.len() as u32]);
+            for (segment_duration, media_time) in edits {
+                if elst_version == 1 {
+                    body.extend_from_slice(&(*segment_duration as u64).to_be_bytes());
+                    body.extend_from_slice(&media_time.to_be_bytes());
+                } else {
+                    body.extend_from_slice(&(*segment_duration as u32).to_be_bytes());
+                    body.extend_from_slice(&(*media_time as i32).to_be_bytes());
+                }
+                body.extend_from_slice(&1u16.to_be_bytes());
+                body.extend_from_slice(&0u16.to_be_bytes());
+            }
+            trak.extend(bx(b"edts", &full(b"elst", elst_version, &body)));
+        }
+        trak.extend(mdia);
+        bx(b"trak", &trak)
+    }
+
+    /// A moov with an `mvhd` at `movie_timescale` and the tracks given.
+    fn moov_with(movie_timescale: u32, traks: &[Vec<u8>]) -> Vec<u8> {
+        let mut mvhd = u32s(&[0, 0, movie_timescale, movie_timescale * 10]);
+        mvhd.extend_from_slice(&[0u8; 80]);
+        let mvhd = full(b"mvhd", 0, &mvhd);
+        [vec![mvhd], traks.to_vec()].concat().concat()
+    }
+
+    #[test]
+    fn the_sound_tracks_edit_is_read_with_each_timescale_its_own() {
+        let d = 44_100 * 3;
+        let moov = moov_with(1000, &[sound_trak(44_100, Some(&[(3000, 2112)]), 0)]);
+        let edit = audio_edit(&moov).unwrap().expect("an edit");
+        assert_eq!(edit.media_time, 2112);
+        assert_eq!(edit.segment_duration, 3000, "in the movie's timescale");
+        assert_eq!(edit.media_timescale, 44_100);
+        assert_eq!(edit.movie_timescale, 1000);
+        assert_eq!(edit.in_samples(44_100), (2112, d as u64), "each converts with its own");
+        assert_eq!(edit.in_samples(48_000), (2298, 48_000 * 3));
+    }
+
+    #[test]
+    fn a_sound_track_without_an_edit_list_and_a_file_without_sound_say_so() {
+        let moov = moov_with(1000, &[sound_trak(44_100, None, 0)]);
+        assert_eq!(audio_edit(&moov).unwrap(), None);
+        let file = synthetic(avc1());
+        let index = parse_file(&file).expect("the picture still indexes");
+        assert_eq!(index.samples.len(), 3);
+        // The synthetic moov has no mvhd: an index for the picture never
+        // needed one, and a sound edit cannot be read without one.
+        let moov_only_video = {
+            let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"vide", &[0u8; 12], b"\0"].concat());
+            moov_with(600, &[bx(b"trak", &bx(b"mdia", &hdlr))])
+        };
+        assert_eq!(audio_edit(&moov_only_video).unwrap(), None, "no sound track, no edit");
+    }
+
+    #[test]
+    fn an_empty_edit_before_the_sound_is_skipped() {
+        let moov = moov_with(1000, &[sound_trak(44_100, Some(&[(500, -1), (3000, 2112)]), 0)]);
+        let edit = audio_edit(&moov).unwrap().expect("an edit");
+        assert_eq!((edit.media_time, edit.segment_duration), (2112, 3000));
+        let only_gaps = moov_with(1000, &[sound_trak(44_100, Some(&[(500, -1)]), 0)]);
+        assert_eq!(audio_edit(&only_gaps).unwrap(), None);
+    }
+
+    #[test]
+    fn a_long_form_edit_list_reads_the_same() {
+        let moov = moov_with(90_000, &[sound_trak(48_000, Some(&[(270_000, 1024)]), 1)]);
+        let edit = audio_edit(&moov).unwrap().expect("an edit");
+        assert_eq!(edit.in_samples(48_000), (1024, 48_000 * 3));
+    }
+
+    #[test]
+    fn a_truncated_edit_list_is_an_error_and_never_a_panic() {
+        let mut moov = moov_with(1000, &[sound_trak(44_100, Some(&[(3000, 2112)]), 0)]);
+        // Claim two entries while holding one.
+        let count_at = moov.windows(4).rposition(|w| w == b"elst").unwrap() + 4 + 4;
+        moov[count_at..count_at + 4].copy_from_slice(&2u32.to_be_bytes());
+        assert_eq!(audio_edit(&moov), Err(Mp4Error::Malformed("elst entry")));
+        let no_mvhd = sound_trak(44_100, Some(&[(3000, 2112)]), 0);
+        assert_eq!(audio_edit(&no_mvhd), Err(Mp4Error::Missing("mvhd")));
     }
 
     fn avc1() -> Vec<u8> {

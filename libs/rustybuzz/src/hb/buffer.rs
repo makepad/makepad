@@ -227,7 +227,7 @@ impl hb_glyph_info_t {
         if u as u32 >= 0x80 {
             *scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_NON_ASCII;
 
-            if u.is_default_ignorable() {
+            if CharExt::is_default_ignorable(u) {
                 props |= UnicodeProps::IGNORABLE.bits();
                 *scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_DEFAULT_IGNORABLES;
 
@@ -842,7 +842,7 @@ impl hb_buffer_t {
         let not_mask = !mask;
         value &= mask;
 
-        if cluster_start == 0 && cluster_end == core::u32::MAX {
+        if cluster_start == 0 && cluster_end == u32::MAX {
             for info in &mut self.info[..self.len] {
                 info.mask = (info.mask & not_mask) | value;
             }
@@ -1323,7 +1323,7 @@ impl hb_buffer_t {
         end: usize,
         cluster: Option<u32>,
     ) -> u32 {
-        let mut cluster = cluster.unwrap_or(core::u32::MAX);
+        let mut cluster = cluster.unwrap_or(u32::MAX);
 
         if start == end {
             return cluster;

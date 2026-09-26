@@ -434,7 +434,8 @@ impl FabToolPanel {
     }
 
     fn clicked(&self, cx: &mut Cx, actions: &Actions, id: &[LiveId]) -> bool {
-        self.view.view(cx, id).finger_up(actions).is_some()
+        // A press taken away (a list or the host took the finger) is no click.
+        self.view.view(cx, id).finger_up(actions).is_some_and(|up| !up.cancelled)
     }
 
     fn label(&self, cx: &mut Cx, id: &[LiveId], text: &str) {

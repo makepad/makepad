@@ -81,6 +81,7 @@ pub type cef_touch_handle_state_t = c_void;
 pub type cef_composition_underline_t = c_void;
 pub type cef_color_type_t = c_int;
 pub type cef_alpha_type_t = c_int;
+pub type cef_channel_layout_t = c_int;
 pub type cef_transition_type_t = c_int;
 pub type cef_errorcode_t = c_int;
 pub type cef_window_open_disposition_t = c_int;
@@ -102,6 +103,10 @@ pub const CEF_COLOR_TYPE_BGRA_8888: cef_color_type_t = 1;
 pub const CEF_ALPHA_TYPE_OPAQUE: cef_alpha_type_t = 0;
 pub const CEF_ALPHA_TYPE_PREMULTIPLIED: cef_alpha_type_t = 1;
 pub const CEF_ALPHA_TYPE_POSTMULTIPLIED: cef_alpha_type_t = 2;
+// cef_channel_layout_t mirrors Chromium's media::ChannelLayout; existing
+// values never change.
+pub const CEF_CHANNEL_LAYOUT_MONO: cef_channel_layout_t = 2;
+pub const CEF_CHANNEL_LAYOUT_STEREO: cef_channel_layout_t = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -666,6 +671,54 @@ pub struct cef_client_t {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_audio_parameters_t {
+    pub size: usize,
+    pub channel_layout: cef_channel_layout_t,
+    pub sample_rate: c_int,
+    pub frames_per_buffer: c_int,
+}
+
+#[repr(C)]
+pub struct cef_audio_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub get_audio_parameters: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            params: *mut cef_audio_parameters_t,
+        ) -> c_int,
+    >,
+    pub on_audio_stream_started: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            params: *const cef_audio_parameters_t,
+            channels: c_int,
+        ),
+    >,
+    pub on_audio_stream_packet: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            data: *const *const f32,
+            frames: c_int,
+            pts: i64,
+        ),
+    >,
+    pub on_audio_stream_stopped: Option<
+        unsafe extern "system" fn(self_: *mut cef_audio_handler_t, browser: *mut cef_browser_t),
+    >,
+    pub on_audio_stream_error: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            message: *const cef_string_t,
+        ),
+    >,
+}
+
+#[repr(C)]
 pub struct cef_browser_process_handler_t {
     pub base: cef_base_ref_counted_t,
     pub on_register_custom_preferences: Option<
@@ -999,6 +1052,29 @@ pub struct cef_image_t {
 }
 
 #[repr(C)]
+pub struct cef_completion_callback_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_complete: Option<unsafe extern "system" fn(self_: *mut cef_completion_callback_t)>,
+}
+
+/// The cookie store of a request context. Same layout in the 138 and 144
+/// headers: five methods, of which only the flush is called.
+#[repr(C)]
+pub struct cef_cookie_manager_t {
+    pub base: cef_base_ref_counted_t,
+    pub visit_all_cookies: cef_unused_callback_t,
+    pub visit_url_cookies: cef_unused_callback_t,
+    pub set_cookie: cef_unused_callback_t,
+    pub delete_cookies: cef_unused_callback_t,
+    pub flush_store: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_cookie_manager_t,
+            callback: *mut cef_completion_callback_t,
+        ) -> c_int,
+    >,
+}
+
+#[repr(C)]
 pub struct cef_download_image_callback_t {
     pub base: cef_base_ref_counted_t,
     pub on_download_image_finished: Option<
@@ -1029,7 +1105,14 @@ pub struct cef_frame_t {
     pub load_request: cef_unused_callback_t,
     pub load_url:
         Option<unsafe extern "system" fn(self_: *mut cef_frame_t, url: *const cef_string_t)>,
-    pub execute_java_script: cef_unused_callback_t,
+    pub execute_java_script: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_frame_t,
+            code: *const cef_string_t,
+            script_url: *const cef_string_t,
+            start_line: c_int,
+        ),
+    >,
     pub is_main: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
     pub is_focused: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
 }

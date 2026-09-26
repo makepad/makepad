@@ -8,7 +8,6 @@ mod tables;
 
 use core::convert::{TryFrom, TryInto};
 use core::fmt;
-use core::u64;
 pub use tables::script_extensions;
 use tables::{get_script, get_script_extension, NEXT_SCRIPT};
 pub use tables::{Script, UNICODE_VERSION};

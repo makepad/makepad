@@ -58,3 +58,38 @@ impl Model for NoModelWithReason {
         std::mem::take(&mut self.queued)
     }
 }
+
+/// Claude Desktop answers, not this panel: the conversation happens there,
+/// through the app's MCP endpoint, and its calls land here as cards. A line
+/// typed here is told so; the tool console still works.
+pub struct ClaudeDesktopModel {
+    queued: Vec<ModelEvent>,
+}
+
+impl ClaudeDesktopModel {
+    pub fn new() -> Self {
+        ClaudeDesktopModel { queued: Vec::new() }
+    }
+}
+
+impl Model for ClaudeDesktopModel {
+    fn label(&self) -> String {
+        "Claude Desktop".into()
+    }
+    fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
+        Ok(())
+    }
+    fn send_user(&mut self, _text: &str, _dynamic_context: &str) {
+        self.queued.push(ModelEvent::Error(
+            "Claude Desktop answers for this app: type in Claude Desktop; its calls show here. \
+             The tools still work from this console: /name {json}"
+                .into(),
+        ));
+    }
+    fn send_tool_result(&mut self, _call_id: &str, _text: &str, _is_error: bool) {}
+    fn cancel(&mut self) {}
+    fn reset(&mut self) {}
+    fn poll(&mut self) -> Vec<ModelEvent> {
+        std::mem::take(&mut self.queued)
+    }
+}
