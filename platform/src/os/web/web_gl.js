@@ -351,10 +351,37 @@ export class WasmWebGL extends WasmWebBrowser {
     ) {
       return;
     }
-    let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
-    this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
+    // CHROME63 (not a syntax issue): a view built straight off
+    // `this.memory.buffer` with an unvalidated ptr/len aborts the whole
+    // browser. Blink CHECK-fails in `VerifySubRange` while converting the view
+    // for `bufferData`, which is a SIGABRT with no JS-level error, so it can
+    // never be caught here. Wasm memory can also have grown since the pointer
+    // was produced, which detaches every view taken before the growth, so the
+    // range is re-validated against the current buffer here.
+    const checked = this.make_validated_wasm_view(
+      ptr_f32,
+      4,
+      false,
+      "uniform buffer",
+      Float32Array,
+    );
+    if (!checked.ok) {
+      this.report_uniform_upload_once(checked.reason);
+      return;
+    }
+    this.upload_uniform_buffer_data(gl, gl_buf, checked.array, gl.DYNAMIC_DRAW);
     gl_buf._last_upload_gen_lo = gen_lo;
     gl_buf._last_upload_gen_hi = gen_hi;
+  }
+
+  report_uniform_upload_once(reason) {
+    const reports = this._uniform_upload_reports ||
+      (this._uniform_upload_reports = new Set());
+    if (reports.has(reason) || reports.size >= MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS) {
+      return;
+    }
+    reports.add(reason);
+    console.error(`makepad: WebGL uniform buffer upload rejected: ${reason}`);
   }
 
   reset_uniform_buffer_upload_cache(gl_buf) {
@@ -374,7 +401,38 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.bindBuffer(gl.UNIFORM_BUFFER, null);
   }
 
+  // CHROME63 (not a syntax issue): last line of defence before a typed array
+  // reaches WebGL. Blink validates an ArrayBufferView argument with
+  // `VerifySubRange(buffer, byte_offset, length)` and turns a failure into a
+  // CHECK abort — the whole browser dies with a SIGABRT and no JS-level error.
+  // A view goes out of range when wasm memory grows (detaching every view
+  // taken before it) or when a ptr/len pair outlives its memory. Refuse the
+  // call instead.
+  view_is_uploadable(view) {
+    try {
+      if (!view || !view.buffer || !Number.isSafeInteger(view.byteOffset) ||
+          !Number.isSafeInteger(view.byteLength) || !Number.isSafeInteger(view.buffer.byteLength)) {
+        return false;
+      }
+      // A detached buffer reports byteLength 0 while the view keeps its old extent.
+      if (view.buffer.detached === true) {
+        return false;
+      }
+      return view.byteOffset + view.byteLength <= view.buffer.byteLength;
+    } catch (_error) {
+      return false;
+    }
+  }
+
   upload_buffer_data(gl, target, gl_buf, data, usage) {
+    if (!this.view_is_uploadable(data)) {
+      this.report_uniform_upload_once(
+        `buffer view is out of range (byteOffset=${data && data.byteOffset}, ` +
+        `byteLength=${data && data.byteLength}, ` +
+        `buffer=${data && data.buffer && data.buffer.byteLength})`,
+      );
+      return;
+    }
     const byte_length = data.byteLength || data.length * 4;
     if (gl_buf._buffer_byte_length !== byte_length) {
       gl.bufferData(target, data, usage);
@@ -981,6 +1039,18 @@ export class WasmWebGL extends WasmWebBrowser {
           target,
           admission.options.nearest,
           admission.options.faces === 6,
+        );
+      }
+      if (!this.view_is_uploadable(source)) {
+        // Same reasoning as `upload_buffer_data`: an out-of-range view makes
+        // Blink CHECK-fail inside texImage2D/texSubImage2D and abort the
+        // browser, so refuse before the call instead.
+        return this.reject_texture_upload(
+          args,
+          "out-of-range-source-view",
+          `texture source view is out of range (byteOffset=${source && source.byteOffset}, ` +
+          `byteLength=${source && source.byteLength}, ` +
+          `buffer=${source && source.buffer && source.buffer.byteLength})`,
         );
       }
       upload(gl, target, allocation_changed, source, admission);
@@ -2442,11 +2512,18 @@ export class WasmWebGL extends WasmWebBrowser {
 
       const xr = this.xr;
       if (xr !== undefined && xr.in_xr_pass) {
-        const pass_uniforms = new Float32Array(
-          this.memory.buffer,
-          args.pass_uniforms.ptr,
-          args.pass_uniforms.len,
+        const checked_pass_uniforms = this.make_validated_wasm_view(
+          args.pass_uniforms,
+          4,
+          false,
+          "xr pass uniforms",
+          Float32Array,
         );
+        if (!checked_pass_uniforms.ok) {
+          this.report_uniform_upload_once(checked_pass_uniforms.reason);
+          return;
+        }
+        const pass_uniforms = checked_pass_uniforms.array;
         const draw_eye = (eye) => {
           const viewport = eye.viewport;
           gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
