@@ -2387,6 +2387,20 @@ state_texts() { # state_texts STATE BYTES -> st_text st_act (menu.txt)
     esac
 }
 main_rows() {
+    printf 'head|YOUR APPS\n'
+    if [ -z "$email" ]; then printf 'item|login|Log in with your email address|||to see your licenses\n'
+    else
+        case "$lic_state" in
+            checking) printf 'note|%schecking licenses for %s…%s\n' "$dim" "$email" "$r0" ;;
+            ok) if [ -n "$m_license_rows" ]; then printf '%s' "$m_license_rows"; else printf 'note|%snone on this email yet · buy or request beta access at makepad.nl%s\n' "$dim" "$r0"; fi ;;
+            *) printf 'note|%slicenses not checked: %s%s\n' "$warn" "$lic_error" "$r0"; printf '%s' "$m_license_rows" ;;
+        esac
+    fi
+    printf 'head|MAKEPAD EXPERIMENTS\n'
+    printf 'item|free|Experiments|free|%s · %s ready|open list\n' "$m_free_total" "$m_free_ready"
+    printf 'head|CODING AGENTS · each one knows how to change and rebuild these apps\n'
+    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open\n' "$mr_cmd" "$mr_title"; done
+    printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open\n" "$dim" "$r0"
     printf 'head|SETUP\n'
     if [ -z "$email" ]; then printf 'item|account|Account||%snot logged in%s|log in\n' "$warn" "$r0"
     else
@@ -2403,22 +2417,6 @@ main_rows() {
     accepted_agreements
     if is_accepted makepad && is_accepted rust; then printf 'item|terms|Agreements||%s✓%s accepted %s· Makepad, Rust%s|read\n' "$ok" "$r0" "$dim" "$r0"
     else printf 'item|terms|Agreements||%snot accepted%s|read\n' "$warn" "$r0"; fi
-    if [ "$m_rust_ok" = 0 ]; then printf 'item|rust|Rust||%snot set up%s|set up\n' "$warn" "$r0"
-    elif [ -n "$m_rust_external" ]; then printf 'item|rust|Rust||%s✓%s installed Rust %s|change\n' "$ok" "$r0" "$(short "$m_rust_external")"
-    else printf 'item|rust|Rust||%s✓%s private %s %sin %s%s|change\n' "$ok" "$r0" "$rust_version" "$dim" "$(short "$root")" "$r0"; fi
-    if [ "$plat" = mac ]; then
-        case "$tools_problem" in
-            '') printf 'item|system|Xcode tools||%s✓%s clang, SDK, git|recheck\n' "$ok" "$r0" ;;
-            license) printf 'item|system|Xcode tools||%slicense not accepted%s|accept\n' "$warn" "$r0" ;;
-            *) printf 'item|system|Xcode tools||%snot installed%s|install\n' "$warn" "$r0" ;;
-        esac
-    else
-        case "$tools_problem" in
-            '') printf 'item|system|System packages||%s✓%s compiler, linker, git|recheck\n' "$ok" "$r0" ;;
-            unsupported) printf 'item|system|System packages||%sneeds glibc Linux%s|\n' "$warn" "$r0" ;;
-            *) printf 'item|system|System packages||%smissing%s|set up\n' "$warn" "$r0" ;;
-        esac
-    fi
     if [ -f "$scratch/disk" ]; then
         read -r mr_total mr_build < "$scratch/disk"
         mr_gb=$(awk -v t="$mr_total" -v b="$mr_build" 'BEGIN { printf "%.1f %.1f", t / 1048576, b / 1048576 }')
@@ -2432,20 +2430,6 @@ main_rows() {
         0*) printf 'item|updates|Update||%s✓%s up to date · %s|check again\n' "$ok" "$r0" "${checked#* }" ;;
         *) printf 'item|updates|Update||updates downloaded · %s|check again\n' "${checked#* }" ;;
     esac
-    printf 'head|YOUR APPS\n'
-    if [ -z "$email" ]; then printf 'item|login|Log in with your email address|||to see your licenses\n'
-    else
-        case "$lic_state" in
-            checking) printf 'note|%schecking licenses for %s…%s\n' "$dim" "$email" "$r0" ;;
-            ok) if [ -n "$m_license_rows" ]; then printf '%s' "$m_license_rows"; else printf 'note|%snone on this email yet · buy or request beta access at makepad.nl%s\n' "$dim" "$r0"; fi ;;
-            *) printf 'note|%slicenses not checked: %s%s\n' "$warn" "$lic_error" "$r0"; printf '%s' "$m_license_rows" ;;
-        esac
-    fi
-    printf 'head|MAKEPAD EXPERIMENTS\n'
-    printf 'item|free|Experiments|free|%s · %s ready|open list\n' "$m_free_total" "$m_free_ready"
-    printf 'head|CODING AGENTS · each one knows how to change and rebuild these apps\n'
-    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open\n' "$mr_cmd" "$mr_title"; done
-    printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open\n" "$dim" "$r0"
 }
 free_rows() {
     printf 'note|\n'
@@ -2458,9 +2442,8 @@ select_id() {
     si_n=$(screen_rows | grep '^item|' | grep -n "^item|$1|" | head -n 1 | cut -d: -f1)
     [ -z "$si_n" ] || sel=$((si_n - 1))
 }
-first_license_row() {
-    sel=$(main_rows | sed '/^head|YOUR APPS/q' | grep -c '^item|')
-}
+# YOUR APPS is the first section: the menu starts on its first row.
+first_license_row() { sel=0; }
 measure_disk() {
     rm -f "$scratch/disk"
     (
@@ -2624,7 +2607,7 @@ choose_rust() {
         if [ "$chosen" = system ]; then record_rust "$cr_candidate"; log 'Using the installed Rust.'; else record_rust private; log 'Using a private Rust in this folder.'; fi
     elif [ -n "$cr_stale" ]; then
         choose "The selected Rust at $(short "$cr_stale") cannot be used. Switch to a private Rust in this folder?" '' switch switch keep || return 1
-        [ "$chosen" = switch ] || { message="${warn}Kept the selected Rust at $(short "$cr_stale"). Make it available again, or choose Rust to switch.${r0}"; return 1; }
+        [ "$chosen" = switch ] || { message="${warn}Kept the selected Rust at $(short "$cr_stale"). Make it available again, or select the app again to switch.${r0}"; return 1; }
         record_rust private
     else
         log "Installed Rust not used: $rust_reason"
@@ -2802,7 +2785,7 @@ open_app() {
     fi
     oa_title=$rel_title
     [ "$rel_id" != makepad ] || oa_title=$(free_apps | awk -F'|' -v id="$oa_id" '$1 == id { print $2 }')
-    rust_ready "$rel_rust" || { message="${warn}The latest source requires Rust $rel_rust. Select Rust first.${r0}"; return 0; }
+    rust_ready "$rel_rust" || { message="${warn}The latest source requires Rust $rel_rust; it could not be set up.${r0}"; return 0; }
     keep_edits "$oa_id" "$release_file"
     rel_load "$release_file"
     source_labels
@@ -3059,8 +3042,8 @@ if [ "$plat" = linux ] && [ ! -f "$root/graphics-notice-read" ]; then
     gpu_screen || { quiet_exit='Setup cancelled. Nothing was downloaded or installed.'; exit 0; }
 fi
 
-# Every start refreshes the licenses and sets up missing build tools, then
-# stops at the menu with the first app selected.
+# Every start refreshes the licenses, then stops at the menu with the first
+# app selected.
 [ -f "$root/available/makepad.json" ] || { busy 'Checking the Makepad release'; fetch_public || log "$public_error"; }
 load_registry
 tools_check || :
@@ -3084,7 +3067,7 @@ fi
 measure_disk
 scan
 draw
-install_build_tools || :
+# Build tools are set up when an app is first built, not at the start.
 # Start on the first licensed app, or on logging in.
 sel=0
 if [ -z "$email" ] || [ -n "$m_license_rows" ]; then first_license_row; fi
