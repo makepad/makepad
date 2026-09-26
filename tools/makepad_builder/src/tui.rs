@@ -543,8 +543,9 @@ impl Setup {
         }
     }
     /// The Local AI row: turning it on shows the Local AI page and installs
-    /// what is missing on this row (one bar); turning it off switches back
-    /// to Rust's GNU toolchain (what was installed stays). Either way the
+    /// what is missing on this row (one bar); turning it off (at once, no
+    /// question) switches back to Rust's GNU toolchain (what was installed
+    /// stays). Either way the
     /// built apps compile again (their toolchain stamp no longer matches).
     fn local_ai_toggle(&mut self) -> Result<(), String> {
         if !crate::cuda::gpu_present() {
@@ -556,13 +557,12 @@ impl Setup {
             return Ok(());
         }
         if runtime::windows_chain(&self.root) == WindowsChain::Msvc {
-            let question = "Turn local AI off? Apps then compile with Rust's GNU toolchain, without CUDA; the Build Tools and CUDA stay in this folder.";
-            if view::choose(question, "", &["turn off", "keep"], 1)?.as_deref() == Some("turn off") {
-                runtime::record_windows_chain(&self.root, WindowsChain::Gnu)?;
-                self.cuda = crate::cuda::build_with(&self.root);
-                activity("Local AI off: Rust's GNU toolchain.");
-                view::message(done("Local AI is off. Apps compile again on their next run."));
-            }
+            // Off at once: Rust's GNU toolchain; the Build Tools and CUDA
+            // stay in this folder for turning it on again.
+            runtime::record_windows_chain(&self.root, WindowsChain::Gnu)?;
+            self.cuda = crate::cuda::build_with(&self.root);
+            activity("Local AI off: Rust's GNU toolchain.");
+            view::message(text("Local AI is off; apps compile again on their next run.", DIM));
             return Ok(());
         }
         let Some(chain) = self.local_ai_screen()? else { return Ok(()) };
