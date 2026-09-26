@@ -171,7 +171,7 @@ fn spawn_listener() -> Discovered {
     let discovered = Discovered::default();
     let nodes = discovered.nodes.clone();
     std::thread::spawn(move || {
-        let socket = match makepad_asset_client::bind_reuse_udp(DISCOVERY_PORT) {
+        let socket = match makepad_core_util::udp::bind_reuse_udp(DISCOVERY_PORT) {
             Ok(socket) => socket,
             Err(e) => {
                 eprintln!(

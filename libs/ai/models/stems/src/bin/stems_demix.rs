@@ -8,9 +8,17 @@
 //! separator, writes `drums.wav` / `bass.wav` / `other.wav` / `vocals.wav`
 //! at the input rate plus per-stem RMS/peak so leakage is visible in
 //! numbers before ears.
+//!
+//! ```text
+//! stems_demix --vocals <MelBandRoformer.ckpt> <track.wav> <out_dir>
+//! ```
+//!
+//! The same for the vocals-only model: writes `vocals.wav` and
+//! `instrumental.wav`, the second being the mix less the first.
 
-use makepad_ai_stems::config::Stem;
-use makepad_ai_stems::demix::demix_all;
+use makepad_ai_stems::config::{Stem, SAMPLE_RATE};
+use makepad_ai_stems::demix::{demix_all, demix_all_lanes};
+use makepad_ai_stems::melband::{instrumental, VocalsModel};
 use makepad_ai_stems::model::{StemsModel, StereoBuf};
 use std::io::Write;
 use std::path::Path;
@@ -93,10 +101,47 @@ fn db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
 }
 
+/// The `--vocals` run: one model forward per 4 seconds, two lanes out.
+fn demix_vocals(checkpoint: &str, track: &StereoBuf, rate: u32, out_dir: &Path) {
+    assert_eq!(rate, SAMPLE_RATE, "the vocals model runs at 44.1 kHz only");
+
+    let load = std::time::Instant::now();
+    let mut model = VocalsModel::load(checkpoint).expect("load separator");
+    println!("load+compile {:.2}s", load.elapsed().as_secs_f64());
+
+    let run = std::time::Instant::now();
+    let vocals = demix_all_lanes(&mut model, track, |done, total| {
+        print!("\rchunk {done}/{total}");
+        let _ = std::io::stdout().flush();
+    })
+    .expect("demix")
+    .remove(0);
+    let secs = run.elapsed().as_secs_f64();
+    let audio_secs = track.frames() as f64 / rate as f64;
+    println!(
+        "\ndemix {secs:.1}s for {audio_secs:.1}s of audio = {:.2}x realtime",
+        audio_secs / secs
+    );
+
+    let rest = instrumental(track, &vocals);
+    let (track_rms, track_peak) = stats(track);
+    println!("mix          rms {:>6.1} dB  peak {:>6.1} dB", db(track_rms), db(track_peak));
+    for (name, buf) in [("vocals", &vocals), ("instrumental", &rest)] {
+        let (rms, peak) = stats(buf);
+        write_wav_pcm16(&out_dir.join(format!("{name}.wav")), buf, rate);
+        println!("{name:<12} rms {:>6.1} dB  peak {:>6.1} dB", db(rms), db(peak));
+    }
+    println!("wrote vocals and instrumental to {}", out_dir.display());
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let vocals_only = args.get(1).map(String::as_str) == Some("--vocals");
+    if vocals_only {
+        args.remove(1);
+    }
     if args.len() < 4 {
-        eprintln!("usage: stems_demix <checkpoint.ckpt> <track.wav> <out_dir>");
+        eprintln!("usage: stems_demix [--vocals] <checkpoint.ckpt> <track.wav> <out_dir>");
         std::process::exit(2);
     }
     let out_dir = Path::new(&args[3]);
@@ -104,6 +149,11 @@ fn main() {
 
     let (track, rate) = read_wav_pcm16(Path::new(&args[2]));
     println!("track: {} frames @ {rate} Hz ({:.1}s)", track.frames(), track.frames() as f64 / rate as f64);
+
+    if vocals_only {
+        demix_vocals(&args[1], &track, rate, out_dir);
+        return;
+    }
 
     let load = std::time::Instant::now();
     let mut model = StemsModel::load(&args[1]).expect("load separator");

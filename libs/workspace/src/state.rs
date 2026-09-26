@@ -169,6 +169,21 @@ pub struct Settings {
     /// Experimental infinite zoom: a prepared map inside the glyph
     /// (`None` = off). Older settings files without the field stay off.
     pub infinite_zoom: Option<bool>,
+    /// Columns between tab stops in the code map (`None` = 8, what gcc,
+    /// the kernel and Go display with). See [`Settings::tab_width`].
+    pub tab_width: Option<u32>,
+    /// Directories hidden from the code map, per prepared project
+    /// (`None` = nothing hidden anywhere). See [`MapHidden`].
+    pub map_hidden: Option<Vec<MapHidden>>,
+}
+
+/// The directories one prepared project hides from its code map: the
+/// project is the prepared map's identity (the namespace directory name),
+/// the paths are workspace-relative directory paths as the map labels them.
+#[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
+pub struct MapHidden {
+    pub project: String,
+    pub paths: Vec<String>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
@@ -202,6 +217,35 @@ impl Settings {
     }
     pub fn infinite_zoom(&self) -> bool {
         self.infinite_zoom.unwrap_or(true)
+    }
+    /// The hidden directory paths of `project`, in the order they were hidden.
+    pub fn map_hidden_paths(&self, project: &str) -> &[String] {
+        self.map_hidden
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .find(|entry| entry.project == project)
+            .map_or(&[], |entry| entry.paths.as_slice())
+    }
+    /// Replace the hidden directory paths of `project`; an empty list
+    /// removes the project's entry, and no entries at all leaves the field
+    /// out of the file.
+    pub fn set_map_hidden_paths(&mut self, project: &str, paths: Vec<String>) {
+        let mut entries = self.map_hidden.take().unwrap_or_default();
+        entries.retain(|entry| entry.project != project);
+        if !paths.is_empty() {
+            entries.push(MapHidden {
+                project: project.to_owned(),
+                paths,
+            });
+        }
+        self.map_hidden = (!entries.is_empty()).then_some(entries);
+    }
+    /// The tab stop width the code map lays source out with: a tab advances
+    /// to the next multiple of it. 8 when unset; a hand-edited value is kept
+    /// within 1..=16.
+    pub fn tab_width(&self) -> u32 {
+        self.tab_width.unwrap_or(8).clamp(1, 16)
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -422,6 +466,27 @@ mod tests {
     }
 
     #[test]
+    fn map_hidden_paths_round_trip_per_project() {
+        let mut s = Settings::deserialize_ron("(dark: false)").unwrap();
+        assert!(s.map_hidden_paths("a").is_empty());
+        s.set_map_hidden_paths("a", vec!["libs".into(), "apps/wm".into()]);
+        s.set_map_hidden_paths("b", vec!["src".into()]);
+        let text = s.serialize_ron();
+        let back = Settings::deserialize_ron(&text).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.map_hidden_paths("a"), ["libs".to_string(), "apps/wm".to_string()]);
+        assert_eq!(back.map_hidden_paths("b"), ["src".to_string()]);
+        assert!(back.map_hidden_paths("c").is_empty());
+        // clearing one project keeps the other; clearing both drops the field
+        s.set_map_hidden_paths("a", Vec::new());
+        assert!(s.map_hidden_paths("a").is_empty());
+        assert_eq!(s.map_hidden_paths("b"), ["src".to_string()]);
+        s.set_map_hidden_paths("b", Vec::new());
+        assert_eq!(s.map_hidden, None);
+        assert!(!s.serialize_ron().contains("map_hidden"));
+    }
+
+    #[test]
     fn settings_without_export_width_load_with_the_default() {
         // a settings file written before the print export existed
         let old = "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
@@ -450,6 +515,8 @@ mod tests {
             history_keep_zoom: None,
             map_theme: None,
             infinite_zoom: None,
+            tab_width: None,
+            map_hidden: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);

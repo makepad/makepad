@@ -960,7 +960,7 @@ impl Tree {
                 let new_key = FullKey::Full(self.complex.len() as u16);
                 let simples = &self.simples[usize::from(idx)];
                 self.complex.push(Full {
-                    char_continuation: [Code::max_value(); 256],
+                    char_continuation: [Code::MAX; 256],
                 });
                 let full = self.complex.last_mut().unwrap();
                 for (&pch, &pcont) in simples.chars.iter().zip(simples.codes.iter()) {

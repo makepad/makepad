@@ -460,7 +460,7 @@ fn fresh_ui_rig_has_real_wrist_directions() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = makepad_asset_client::paths::library_root().join("lib-13.glb");
+    let rig_path = asset_library_root().join("lib-13.glb");
     if !rig_path.is_file() {
         eprintln!("fresh UI rig fixture absent; skipping");
         return;
@@ -537,7 +537,7 @@ fn fresh_yoshi_rig_with_raised_hip_heads_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = makepad_asset_client::paths::library_root().join("lib-19.glb");
+    let rig_path = asset_library_root().join("lib-19.glb");
     if !rig_path.is_file() {
         eprintln!("fresh Yoshi rig fixture absent; skipping");
         return;
@@ -572,7 +572,7 @@ fn fresh_elf_rig_with_terminal_hand_leaves_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = makepad_asset_client::paths::library_root().join("lib-34.glb");
+    let rig_path = asset_library_root().join("lib-34.glb");
     if !rig_path.is_file() {
         eprintln!("fresh elf rig fixture absent; skipping");
         return;
@@ -614,7 +614,7 @@ fn clean_elf_rig_with_low_hands_and_split_ankles_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = makepad_asset_client::paths::library_root().join("lib-49.glb");
+    let rig_path = asset_library_root().join("lib-49.glb");
     if !rig_path.is_file() {
         eprintln!("clean elf rig fixture absent; skipping");
         return;
@@ -666,7 +666,7 @@ fn export_fresh_ui_foot_frame_candidate_if_requested() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = makepad_asset_client::paths::library_root().join("lib-13.glb");
+    let rig_path = asset_library_root().join("lib-13.glb");
     let rig = std::fs::read(&rig_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", rig_path.display()));
     let clips = [
@@ -701,4 +701,27 @@ fn oracle_frame(
     } else {
         sample_channel(channel, lanes, time)
     }
+}
+
+/// The device-local asset library these fixtures come from: the asset
+/// client's rule (`MAKEPAD_ASSET_LIBRARY`, else `MAKEPAD_ROOT` or this
+/// checkout, then `local/asset-library`), restated so the hub's tests do not
+/// link the asset client to find a directory.
+fn asset_library_root() -> std::path::PathBuf {
+    let from_env = |name: &str| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    from_env("MAKEPAD_ASSET_LIBRARY").unwrap_or_else(|| {
+        from_env("MAKEPAD_ROOT")
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(3)
+                    .expect("the AI hub lives under libs/ai/hub")
+                    .to_path_buf()
+            })
+            .join("local/asset-library")
+    })
 }

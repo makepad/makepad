@@ -17,6 +17,7 @@ use crate::state::*;
 use crate::wire::*;
 use makepad_strict_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::Sender;
 
 /// The base doctrine every conversation starts with.
 pub const DOCTRINE: &str = include_str!("doctrine.md");
@@ -90,6 +91,9 @@ pub struct EngineCore {
     state: EngineState,
     pending: HashMap<String, Pending>,
     parked: HashMap<String, Parked>,
+    /// Calls from outside the conversation (an MCP client), by call id:
+    /// where each one's result goes when its card lands.
+    external: HashMap<String, Sender<ToolResult>>,
     awaiting: Option<AwaitingApp>,
     seen_generation: Option<u64>,
     next_call: u64,
@@ -120,6 +124,7 @@ impl EngineCore {
             state,
             pending: HashMap::new(),
             parked: HashMap::new(),
+            external: HashMap::new(),
             awaiting: None,
             seen_generation: None,
             next_call: 0,
@@ -230,6 +235,31 @@ impl EngineCore {
         let args = if args.is_empty() { "{}" } else { args };
         let call_id = self.mint_call_id();
         self.dispatch(call_id, name, args, true, now);
+    }
+
+    /// A tool call from outside the conversation — Claude Desktop through
+    /// the app's MCP endpoint. It runs like a console line (a card in the
+    /// transcript, the model never hears of it) but is gated like the
+    /// model's own calls: a destructive one waits for the person's confirm.
+    /// Its result, whatever ends it, goes to `reply`.
+    pub fn call_external(&mut self, name: &str, args: &str, reply: Sender<ToolResult>, now: f64) -> Option<EngineEvent> {
+        let call_id = self.mint_call_id();
+        self.external.insert(call_id.clone(), reply);
+        self.dispatch(call_id, name, args, true, now)
+    }
+
+    /// Answer every outside call still open as cancelled: its client is
+    /// going away (the provider changed, the panel closed). A parked one
+    /// loses its confirm card, a running one is cancelled at its app.
+    pub fn cancel_external(&mut self) {
+        let open: Vec<String> = self.external.keys().cloned().collect();
+        for call_id in open {
+            self.parked.remove(&call_id);
+            if let Some(p) = self.pending.remove(&call_id) {
+                self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
+            }
+            self.mark_done(&call_id, &ToolResult::cancelled(&call_id));
+        }
     }
 
     /// Stop the turn: the model, every running call, every parked one.
@@ -565,7 +595,7 @@ impl EngineCore {
         }
         let risk = def.risk.max(self.registry.risk_floor(&app));
         let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json };
-        if risk == Risk::Destructive && !from_console {
+        if risk == Risk::Destructive && (!from_console || self.external.contains_key(&call_id)) {
             if let Some(t) = self.state.tool_mut(&call_id) {
                 t.status = ToolStatus::Confirm;
             }
@@ -937,6 +967,9 @@ impl EngineCore {
     }
 
     fn mark_done(&mut self, call_id: &str, result: &ToolResult) {
+        if let Some(reply) = self.external.remove(call_id) {
+            let _ = reply.send(result.clone());
+        }
         if let Some(t) = self.state.tool_mut(call_id) {
             t.status = ToolStatus::Done { outcome: result.outcome, note: result.note.clone(), text: result.text.clone() };
             if !result.outcome.is_ok() {

@@ -288,6 +288,39 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     Ok(meta.info.total_samples as f64 / meta.info.sample_rate as f64)
 }
 
+/// How many leading bytes the metadata needs, judged from `head`: every
+/// block up to the last, walked by their headers (a cover picture before
+/// the comments can be megabytes). `None` when `head` holds them all, or is
+/// not FLAC.
+pub fn head_needed(head: &[u8]) -> Option<usize> {
+    let mut at = metadata::skip_id3(head);
+    if head.len() < at.saturating_add(4) {
+        return Some(at.saturating_add(4 + 4));
+    }
+    if head.get(at..at + 4) != Some(&b"fLaC"[..]) {
+        return None;
+    }
+    at += 4;
+    loop {
+        let Some(block) = head.get(at..at + 4) else { return Some(at + 4) };
+        let len = ((block[1] as usize) << 16) | ((block[2] as usize) << 8) | block[3] as usize;
+        let end = at + 4 + len;
+        if block[0] & 0x80 != 0 {
+            return (head.len() < end).then_some(end);
+        }
+        at = end;
+    }
+}
+
+/// Tags and length from the metadata at the start of a file: `head` must
+/// hold every metadata block (see [`head_needed`]).
+pub fn probe_head(head: &[u8]) -> Result<(Tags, Option<f64>), AudioError> {
+    let meta = metadata::parse_metadata(head, MAX_CHANNELS)?;
+    let info = &meta.info;
+    let seconds = (info.total_samples > 0 && info.sample_rate > 0).then(|| info.total_samples as f64 / info.sample_rate as f64);
+    Ok((meta.tags, seconds))
+}
+
 /// Vorbis comments from a VORBIS_COMMENT block, if any. STREAMINFO must still
 /// parse; a file with no comment block yields empty tags.
 pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {

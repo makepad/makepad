@@ -1469,7 +1469,7 @@ fn flatten_text_prompt(system: &str, messages: &[ChatMessage]) -> String {
 #[cfg(test)]
 mod preload_note_tests {
     use super::*;
-    use makepad_asset_client::json::Value;
+    use makepad_strict_json::Value;
 
     /// The preload note percents the PREFILL, not the whole job: a job bar
     /// that gives prefill a 2-8% sliver must still read 0..100 while the
@@ -1499,7 +1499,7 @@ mod preload_note_tests {
 mod wire_transcript_tests {
     use super::*;
     use crate::providers::provider::{ChatProvider, TurnInput};
-    use makepad_asset_client::json;
+    use makepad_strict_json as json;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;

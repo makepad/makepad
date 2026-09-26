@@ -278,10 +278,12 @@ fn elect_and_run(
             return;
         }
 
-        // 4. Nothing answers. Say so, and try again on the person's next
-        // line — a fleet node may have come up by then.
-        send(ChatEvent::Failed(no_model_message(&fleet_reason, &config.llm.model)));
-        match wait_next_user(&msg_rx, first.take()) {
+        // 4. Nothing answers. Say so once, and try again on the person's
+        // next line — a fleet node may have come up by then. The line that
+        // just failed is dropped: handing it back would retry it forever.
+        eprintln!("[hub-chat] no model: {fleet_reason}; local {}", config.llm.model.display());
+        send(ChatEvent::Failed(no_model_message(&config.llm.model)));
+        match wait_next_user(&msg_rx, None) {
             Some(msg) => first = Some(msg),
             None => return,
         }
@@ -443,19 +445,21 @@ fn fleet_provider_with<T: FleetTransport>(
     }
 }
 
-/// What the person reads when nothing answers: every route that was tried,
-/// and where a model may be put. No download starts on its own.
-pub fn no_model_message(fleet_reason: &str, model: &Path) -> String {
-    let local = if model.as_os_str().is_empty() {
-        "no local weights are configured".to_string()
+/// What the person reads when nothing answers: plainly, and where a model
+/// may be put. The routes that were tried go to the log. No download starts
+/// on its own.
+pub fn no_model_message(model: &Path) -> String {
+    if model.as_os_str().is_empty() {
+        format!(
+            "No local AI model is installed yet. Put a model file (.gguf) in {}, or pick another AI above.",
+            crate::home::weights_dir().display()
+        )
     } else {
-        format!("no weights at {}", model.display())
-    };
-    format!(
-        "no model is answering: {fleet_reason}, and {local}. \
-         Put a GGUF under {} or start a fleet chat node.",
-        crate::home::weights_dir().display()
-    )
+        format!(
+            "The local AI model {} is missing. Put it back, or pick another AI above.",
+            model.display()
+        )
+    }
 }
 
 /// Block for the person's next line; stale tool results from the turn
@@ -813,13 +817,13 @@ mod tests {
     }
 
     #[test]
-    fn the_no_model_message_names_every_route_and_where_weights_go() {
-        let text = no_model_message("no fleet chat node heard", Path::new(""));
-        assert!(text.contains("no fleet chat node heard"), "{text}");
-        assert!(text.contains("no local weights are configured"), "{text}");
-        assert!(text.contains("weights"), "{text}");
-        let text = no_model_message("x", Path::new("/nowhere/m.gguf"));
-        assert!(text.contains("no weights at /nowhere/m.gguf"), "{text}");
+    fn the_no_model_message_says_where_a_model_goes() {
+        let text = no_model_message(Path::new(""));
+        assert!(text.contains("No local AI model is installed"), "{text}");
+        assert!(text.contains(&crate::home::weights_dir().display().to_string()), "{text}");
+        assert!(!text.contains("fleet"), "{text}");
+        let text = no_model_message(Path::new("/nowhere/m.gguf"));
+        assert!(text.contains("/nowhere/m.gguf is missing"), "{text}");
     }
 
     /// A scripted node: records every `/generate` body, answers job polls

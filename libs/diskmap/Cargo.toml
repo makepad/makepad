@@ -7,5 +7,5 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-git = { path = "../git" }

@@ -356,6 +356,13 @@ impl TestApp {
                     wait,
                     ..MouseInput::at(MouseKind::Down, window, event.x, event.y)
                 })?,
+                // The test client speaks no cancellation: a cancel replayed as an
+                // up would click, so it is refused rather than faked.
+                StudioToApp::MouseCancel(_) => {
+                    return Err(TestError::new(
+                        "MouseCancel is not supported by the test client (it has no cancel input; replaying it as an up would click)",
+                    ))
+                }
                 StudioToApp::MouseUp(event) => self.client().mouse(&MouseInput {
                     button: button_index(event.button_raw_bits),
                     modifiers: event.modifiers.into_key_modifiers(),
@@ -1144,6 +1151,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::Tick => "Tick",
         StudioToApp::MouseDown(_) => "MouseDown",
         StudioToApp::MouseUp(_) => "MouseUp",
+        StudioToApp::MouseCancel(_) => "MouseCancel",
         StudioToApp::MouseMove(_) => "MouseMove",
         StudioToApp::TweakRay(_) => "TweakRay",
         StudioToApp::KeyDown(_) => "KeyDown",
@@ -1158,6 +1166,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
         StudioToApp::Gpu(_) => "Gpu",
+        StudioToApp::Relay(_) => "Relay",
     }
 }
 

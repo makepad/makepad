@@ -16,7 +16,7 @@ name = "image-tiles-bake"
 path = "src/bin/bake.rs"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 # The library index: items and shard bookkeeping in our own SQLite engine.
 makepad-sqlite = { path = "../sqlite_query" }
 # Hardware HEVC intra frames (VideoToolbox) for the on-disk tapes: no JPEGs

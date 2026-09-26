@@ -608,7 +608,13 @@ impl Widget for FabColorWheel {
             }
             Hit::FingerUp(fe) => {
                 if self.drag.is_some() {
-                    self.apply_pointer(cx, uid, fe.abs, true);
+                    if fe.cancelled {
+                        // Taken away: the colour stays the last one the drag
+                        // set, and the edit ends there.
+                        cx.widget_action(uid, ColorWheelAction::Ended(self.hsv()));
+                    } else {
+                        self.apply_pointer(cx, uid, fe.abs, true);
+                    }
                     self.drag = None;
                 }
             }

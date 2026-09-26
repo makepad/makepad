@@ -31,12 +31,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_REQUIRE_CUDA");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_NO_CUDA");
-    println!("cargo:rerun-if-env-changed=CUDA_HOME");
-    println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    // The Windows toolkit scan roots at %ProgramFiles%, so it is an input to
-    // the decision as much as CUDA_PATH is — without this, installing (or
-    // hiding) a toolkit leaves a stale cached answer behind.
-    println!("cargo:rerun-if-env-changed=ProgramFiles");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_CUDA_ROOT");
     println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -388,18 +383,39 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
 /// device itself. No console (CI, a piped build, a GUI invocation) simply
 /// means no progress lines; the `cargo:warning` summary still records what
 /// happened.
-struct Console(Option<fs::File>);
+/// Where the kernel progress goes: the terminal, or, when a front end such as
+/// the Makepad Builder draws the build itself, the one-line status file it
+/// names in `MAKEPAD_BUILD_STATUS_FILE`, so the lines never land on top of
+/// its screen. The variable is read, not declared as a rerun trigger, so
+/// setting it never rebuilds anything.
+enum Console {
+    Terminal(Option<fs::File>),
+    StatusFile(PathBuf),
+}
 
 impl Console {
     fn open() -> Self {
+        if let Some(path) = env::var_os("MAKEPAD_BUILD_STATUS_FILE").filter(|p| !p.is_empty()) {
+            return Console::StatusFile(PathBuf::from(path));
+        }
         let device = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
-        Console(fs::OpenOptions::new().write(true).open(device).ok())
+        Console::Terminal(fs::OpenOptions::new().write(true).open(device).ok())
     }
 
     fn line(&mut self, message: &str) {
-        if let Some(console) = self.0.as_mut() {
-            let _ = writeln!(console, "{message}");
-            let _ = console.flush();
+        match self {
+            Console::Terminal(Some(console)) => {
+                let _ = writeln!(console, "{message}");
+                let _ = console.flush();
+            }
+            Console::Terminal(None) => {}
+            // Replaced whole each time: the reader shows the latest line.
+            Console::StatusFile(path) => {
+                let next = path.with_extension("next");
+                if fs::write(&next, message.trim()).is_ok() {
+                    let _ = fs::rename(&next, &*path);
+                }
+            }
         }
     }
 }
@@ -653,72 +669,16 @@ fn is_toolkit_root(path: &Path, target_os: &str) -> bool {
     nvcc_path(path, target_os).exists() && cuda_lib_dir(path, target_os).is_some()
 }
 
+/// The one toolkit a build may use: the root named by `MAKEPAD_CUDA_ROOT`
+/// (the Makepad Builder's private CUDA, or a build box that opts in the same
+/// way). A system install is never picked up: CUDA_PATH, CUDA_HOME and the
+/// usual install folders are ignored, because an exe linked against a system
+/// toolkit then needs that toolkit's DLLs on PATH wherever it runs.
 fn cuda_root(target_os: &str) -> Option<PathBuf> {
-    for var in ["CUDA_HOME", "CUDA_PATH"] {
-        if let Some(path) = env::var_os(var).map(PathBuf::from) {
-            if is_toolkit_root(&path, target_os) {
-                return Some(path);
-            }
-        }
-    }
-    if target_os == "windows" {
-        newest_versioned_root(
-            &env::var_os("ProgramFiles")
-                .map(PathBuf::from)
-                .map(|program_files| {
-                    program_files
-                        .join("NVIDIA GPU Computing Toolkit")
-                        .join("CUDA")
-                })?,
-            target_os,
-        )
-    } else {
-        // `/usr/local/cuda` is the distribution's own "newest" symlink; only
-        // scan for `cuda-13.3`-style siblings when it is missing or unusable.
-        let default = Path::new("/usr/local/cuda");
-        if is_toolkit_root(default, target_os) {
-            return Some(default.to_path_buf());
-        }
-        newest_versioned_root(Path::new("/usr/local"), target_os)
-            .or_else(|| newest_versioned_root(Path::new("/opt"), target_os))
-    }
+    let path = PathBuf::from(env::var_os("MAKEPAD_CUDA_ROOT")?);
+    is_toolkit_root(&path, target_os).then_some(path)
 }
 
-/// Newest **usable** toolkit under `base`, by numeric version — `v13.3` beats
-/// `v12.4`, and (unlike a filename sort) `v12.4` beats `v9.0`. Directory
-/// names are `vMAJOR.MINOR` on Windows and `cuda-MAJOR.MINOR` on Linux; both
-/// are read by simply taking the digits.
-fn newest_versioned_root(base: &Path, target_os: &str) -> Option<PathBuf> {
-    let mut roots = fs::read_dir(base)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| is_toolkit_root(path, target_os))
-        .map(|path| {
-            let version = path
-                .file_name()
-                .map(|name| version_key(&name.to_string_lossy()))
-                .unwrap_or_default();
-            (version, path)
-        })
-        .collect::<Vec<_>>();
-    roots.sort_by(|a, b| a.0.cmp(&b.0));
-    roots.pop().map(|(_, path)| path)
-}
-
-/// `"v13.3"` / `"cuda-13.3"` -> `(13, 3)`; anything unparsable sorts lowest.
-fn version_key(name: &str) -> (u32, u32) {
-    let digits = name.trim_start_matches(|c: char| !c.is_ascii_digit());
-    let mut parts = digits.split('.');
-    let major = parts.next().unwrap_or_default().parse().unwrap_or(0);
-    let minor = parts
-        .next()
-        .map(|part| part.trim_end_matches(|c: char| !c.is_ascii_digit()))
-        .unwrap_or_default()
-        .parse()
-        .unwrap_or(0);
-    (major, minor)
-}
 
 fn find_msvc_tool(tool_name: &str) -> Option<PathBuf> {
     if let Some(paths) = env::var_os("PATH") {

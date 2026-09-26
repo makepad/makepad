@@ -9,9 +9,9 @@ use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
 use makepad_widgets::*;
 
 /// Picker rows: index 0 follows the host OS, then `DesktopStyle::ALL` in
-/// order. The Settings panel's `DropDown` labels are spelled out in Splash
-/// (so a stylesheet reapply keeps them); `labels_match_the_picker` pins the
-/// two lists together.
+/// order except BlackOrange. The Settings panel's labels are spelled out
+/// in Splash (so a stylesheet reapply keeps them); `labels_match_the_picker`
+/// pins the two lists together.
 pub const FOLLOW_HOST: &str = "Follow host OS";
 pub const PICKER_LABELS: [&str; 8] = [
     FOLLOW_HOST,
@@ -71,12 +71,13 @@ impl StyleChoice {
 }
 
 /// Picker index for a settings value (0 = follow host).
+/// A saved style absent from the picker also displays the follow-host row.
 pub fn picker_index(settings: &Settings) -> usize {
     settings
         .style
         .as_deref()
         .and_then(DesktopStyle::parse)
-        .and_then(|f| DesktopStyle::ALL.iter().position(|s| *s == f))
+        .and_then(|f| picker_families().position(|s| s == f))
         .map(|i| i + 1)
         .unwrap_or(0)
 }
@@ -85,7 +86,13 @@ pub fn picker_index(settings: &Settings) -> usize {
 pub fn family_at(index: usize) -> Option<DesktopStyle> {
     index
         .checked_sub(1)
-        .and_then(|i| DesktopStyle::ALL.get(i).copied())
+        .and_then(|i| picker_families().nth(i))
+}
+
+fn picker_families() -> impl Iterator<Item = DesktopStyle> {
+    DesktopStyle::ALL
+        .into_iter()
+        .filter(|style| *style != DesktopStyle::BlackOrange)
 }
 
 /// The family a standalone Studio follows on this machine.
@@ -184,9 +191,10 @@ mod tests {
     #[test]
     fn labels_match_the_picker() {
         assert_eq!(PICKER_LABELS[0], FOLLOW_HOST);
-        for (i, style) in DesktopStyle::ALL.iter().enumerate() {
+        assert_eq!(PICKER_LABELS.len(), picker_families().count() + 1);
+        for (i, style) in picker_families().enumerate() {
             assert_eq!(PICKER_LABELS[i + 1], style.label());
-            assert_eq!(family_at(i + 1), Some(*style));
+            assert_eq!(family_at(i + 1), Some(style));
         }
         assert_eq!(family_at(0), None);
         assert_eq!(family_at(99), None);
@@ -194,6 +202,24 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_the_picker() {
+        for (i, family) in picker_families().enumerate() {
+            let settings = Settings { style: Some(family.id().into()), ..Default::default() };
+            assert_eq!(picker_index(&settings), i + 1);
+            assert_eq!(family_at(picker_index(&settings)), Some(family));
+        }
+        let hidden = Settings { style: Some("blackorange".into()), ..Default::default() };
+        assert_eq!(picker_index(&hidden), 0);
+        assert_eq!(
+            StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).family,
+            DesktopStyle::Macos
+        );
+        let hidden = Settings { style: Some("black-orange".into()), ..Default::default() };
+        assert_eq!(picker_index(&hidden), 0);
+        assert_eq!(
+            StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).family,
+            DesktopStyle::BlackOrange
+        );
+
         let s = Settings { style: Some("nextstep".into()), dark: true, ..Default::default() };
         assert_eq!(picker_index(&s), 5);
         let c = StyleChoice::from_settings(&s, DesktopStyle::Macos, Some(true));

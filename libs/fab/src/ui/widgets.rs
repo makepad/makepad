@@ -1438,7 +1438,9 @@ impl Widget for FabOverflowTabStrip {
             Hit::FingerUp(fe) => {
                 let tab = self.tab_at(fe.abs);
                 let arrow = self.arrow_at(fe.abs);
-                if tab.is_some() && tab == self.down_tab {
+                if fe.cancelled {
+                    // A press taken away selects and scrolls nothing.
+                } else if tab.is_some() && tab == self.down_tab {
                     cx.widget_action(self.uid, FabOverflowTabAction::Selected(tab.unwrap()));
                 } else if arrow != 0 && arrow == self.down_arrow {
                     self.scroll_by(cx, arrow as f64 * TAB_SCROLL_STEP);
@@ -1646,7 +1648,8 @@ mod overflow_tab_tests {
 pub fn fold_panel_clicked(view: &View, cx: &mut Cx, actions: &Actions, panel: &[LiveId]) -> bool {
     let mut hdr = panel.to_vec();
     hdr.push(live_id!(hdr));
-    if view.view(cx, &hdr).finger_up(actions).is_none() {
+    // A press taken away (a list or the host took the finger) is no click.
+    if !view.view(cx, &hdr).finger_up(actions).is_some_and(|up| !up.cancelled) {
         return false;
     }
     let fold = view.fold_header(cx, panel);
