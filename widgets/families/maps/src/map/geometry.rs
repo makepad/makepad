@@ -1700,6 +1700,20 @@ pub trait TagLookup {
     }
 }
 
+/// Renderer tags seen through the archive's detail-feature contract: the
+/// parser keeps OSM's own `layer=*` under "osm_layer" (the source-layer name
+/// owns "layer").
+pub struct RendererDetailTags<'a, T: TagLookup + ?Sized>(pub &'a T);
+
+impl<T: TagLookup + ?Sized> makepad_mbtile_reader::DetailTags for RendererDetailTags<'_, T> {
+    fn tag(&self, key: &str) -> Option<&str> {
+        self.0.get(key)
+    }
+    fn osm_layer(&self) -> Option<&str> {
+        self.0.get("osm_layer")
+    }
+}
+
 impl TagLookup for HashMap<String, String> {
     fn get(&self, key: &str) -> Option<&str> {
         HashMap::get(self, key).map(String::as_str)
