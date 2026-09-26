@@ -665,9 +665,18 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+// CHROME63 (2 changes, both load-bearing):
+//  * `-Ctarget-cpu=mvp` on both flag sets. Chrome 63 implements the MVP wasm
+//    instruction set only, so LLVM must not emit sign-extend, saturating-float
+//    or bulk-memory instructions.
+//  * the single-threaded set must NOT pass `--export=__stack_pointer`.
+//    __stack_pointer is a mutable global, and Chrome only gained mutable-global
+//    exports in 74; exporting it makes the module fail to instantiate with
+//    "mutable globals cannot be exported". The threaded set keeps the export
+//    because its web worker reads `wasm.exports.__stack_pointer.value`.
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -Ctarget-cpu=mvp -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
+    "-C codegen-units=1 -C debuginfo=0 -Ctarget-cpu=mvp -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
 
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = if threaded {
