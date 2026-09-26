@@ -468,7 +468,7 @@ impl Setup {
         if !cfg!(target_os = "macos") {
             rows.push(info(self.graphics_row(), "The GPU driver notice."));
         }
-        rows.push(info(self.agreements_row(), "The licenses you accepted; ⏎ opens them."));
+        rows.push(info(self.agreements_row(), "The licenses that apply; ⏎ opens them."));
         rows.push(info(self.disk_row(), "Clearing build data keeps your apps; the next compile starts from scratch."));
         View {
             subtitle: ABOUT.trim().into(),
@@ -537,17 +537,17 @@ impl Setup {
             item("gpu", "Graphics", "", text("read the driver notice", WARN), "read")
         }
     }
-    /// ✓ once every agreement the build tools need is accepted (on the
-    /// Agreements screen or a consent screen); NVIDIA joins when CUDA's is.
+    /// The Makepad license applies by downloading and Rust's needs no
+    /// acceptance, so nothing is asked for them; only Microsoft's build
+    /// tools and SDK and NVIDIA's CUDA (Windows with local AI) are accepted,
+    /// on their consent screen or the Agreements page.
     fn agreements_row(&self) -> Row {
         let accepted = self.accepted_agreements();
         let required = required_for(&self.root);
-        let status = if required.iter().all(|id| accepted.iter().any(|a| a == id)) {
-            let mut names = vec!["Makepad"];
-            if cfg!(windows) && accepted.iter().any(|a| a == "vs") {
-                names.push("Microsoft");
-            }
-            names.push("Rust");
+        let status = if required.is_empty() && !accepted.iter().any(|a| a == "cuda") {
+            done("nothing to accept")
+        } else if required.iter().all(|id| accepted.iter().any(|a| a == id)) {
+            let mut names = vec!["Microsoft"];
             if accepted.iter().any(|a| a == "cuda") {
                 names.push("NVIDIA");
             }
@@ -900,17 +900,24 @@ impl Setup {
             let mut rows: Vec<Row> = agreements()
                 .into_iter()
                 .map(|(id, name, url)| {
-                    let state = if accepted.iter().any(|a| a == id) {
-                        vec![view::Span("✓".into(), OK), view::Span(" accepted  ".into(), PLAIN), view::Span(host(url).into(), DIM)]
-                    } else {
-                        vec![view::Span("not accepted  ".into(), WARN), view::Span(host(url).into(), DIM)]
+                    let state = match id {
+                        // Downloading the Builder is agreeing to it (the site says so).
+                        "makepad" => vec![view::Span("applies by downloading  ".into(), DIM), view::Span(host(url).into(), DIM)],
+                        // MIT or Apache 2.0: nothing to accept.
+                        "rust" => vec![view::Span("nothing to accept  ".into(), DIM), view::Span(host(url).into(), DIM)],
+                        _ if accepted.iter().any(|a| a == id) => vec![view::Span("✓".into(), OK), view::Span(" accepted  ".into(), PLAIN), view::Span(host(url).into(), DIM)],
+                        _ => vec![view::Span("not accepted  ".into(), WARN), view::Span(host(url).into(), DIM)],
                     };
                     item(format!("url:{id}"), format!("{name:<36}"), "", state, "open in browser")
                 })
                 .collect();
-            rows.push(Row::Note(Vec::new()));
-            rows.push(item("agree", "Agree to all", "", Vec::new(), "accept every agreement above"));
-            rows.push(item("disagree", "Disagree", "", Vec::new(), "withdraw acceptance"));
+            // Only the vendors' agreements (Windows) are accepted or withdrawn.
+            let vendor: Vec<&str> = agreements().iter().map(|a| a.0).filter(|id| !matches!(*id, "makepad" | "rust")).collect();
+            if !vendor.is_empty() {
+                rows.push(Row::Note(Vec::new()));
+                rows.push(item("agree", "Agree to all", "", Vec::new(), "accept the Microsoft and NVIDIA agreements"));
+                rows.push(item("disagree", "Disagree", "", Vec::new(), "withdraw acceptance"));
+            }
             let view = View {
                 crumb: " › License agreements".into(),
                 subtitle: "Return opens an agreement in your browser.".into(),
@@ -921,8 +928,7 @@ impl Setup {
             };
             match view::menu(view, &mut selected, &|| false)? {
                 Nav::Select(id) if id == "agree" => {
-                    let ids: Vec<&str> = agreements().iter().map(|a| a.0).collect();
-                    self.record_agreements(&ids)?;
+                    self.record_agreements(&vendor)?;
                     view::message(done("Agreements accepted."));
                 }
                 Nav::Select(id) if id == "disagree" => {
@@ -1150,7 +1156,7 @@ impl Setup {
             match view::menu(view, &mut selected, &|| false)? {
                 Nav::Select(id) if id == "agree" => {
                     let mut all = self.accepted_agreements();
-                    for id in ["makepad", "rust", "vs", "sdk", "cuda"] {
+                    for id in ["vs", "sdk", "cuda"] {
                         if !all.iter().any(|a| a == id) {
                             all.push(id.into());
                         }
@@ -1917,12 +1923,6 @@ impl Setup {
         if JOBS.with(|j| j.borrow().update.is_some()) {
             return Ok(());
         }
-        // Updates download Makepad sources; withdrawn agreements ask again.
-        if !self.consent("Update", "Updates download the newest sources of your apps.", "", &["makepad"], "check for updates")? {
-            view::set_view(self.main_view());
-            view::message(text("Nothing was downloaded.", DIM));
-            return Ok(());
-        }
         self.check_licenses()?;
         // The rest runs in the background, on the Update row: it spins and
         // says what it is doing while the menu stays usable.
@@ -2087,14 +2087,17 @@ fn agreements() -> Vec<(&'static str, &'static str, &'static str)> {
     list
 }
 
-/// The agreements installing the build tools needs on this platform.
+/// The agreements installing the build tools needs on this platform: only
+/// Microsoft's, for its C++ build tools and SDK on Windows. The Makepad
+/// license applies by downloading the Builder and Rust's (MIT or Apache
+/// 2.0) needs no acceptance, so neither is asked.
 fn required_agreements() -> &'static [&'static str] {
-    if cfg!(windows) { &["makepad", "vs", "sdk", "rust"] } else { &["makepad", "rust"] }
+    if cfg!(windows) { &["vs", "sdk"] } else { &[] }
 }
 /// The agreements the chosen compiler needs: Rust's GNU toolchain on
-/// Windows needs no Microsoft agreement.
+/// Windows needs none.
 fn required_for(root: &Path) -> &'static [&'static str] {
-    if cfg!(windows) && runtime::windows_chain(root) == WindowsChain::Gnu { &["makepad", "rust"] } else { required_agreements() }
+    if cfg!(windows) && runtime::windows_chain(root) == WindowsChain::Gnu { &[] } else { required_agreements() }
 }
 /// Agreement rows: full name and host; Return opens the link.
 fn agreement_rows(ids: Option<&[&str]>) -> Vec<Row> {

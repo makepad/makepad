@@ -138,6 +138,32 @@ thread_local! {
     /// The row last worked on; `menu` starts its selection there once.
     static WORKED_ON: RefCell<Option<String>> = const { RefCell::new(None) };
     static BACKGROUND: RefCell<Background> = RefCell::new(Background::default());
+    /// The question being answered, if any (see `Prompt`).
+    static PROMPT: RefCell<Option<Prompt>> = const { RefCell::new(None) };
+}
+/// A question being answered (an email, a folder, a choice): every prompt
+/// is shown the same way, as rows at the end of the content above the
+/// rule, its active row selected like a menu row. The line under the rule
+/// stays for messages.
+struct Prompt {
+    lines: Vec<Text>,
+    active: usize,
+}
+fn set_prompt(prompt: Option<Prompt>) {
+    PROMPT.with(|p| *p.borrow_mut() = prompt);
+}
+/// The question's own lines: a blank one, then the question wrapped.
+fn prompt_head(question: &str, note: &str) -> Vec<Text> {
+    let mut lines = vec![Vec::new()];
+    for line in wrap_text(&text(clean(question), PLAIN), 72, 4) {
+        let mut spans = vec![Span("    ".into(), PLAIN)];
+        spans.extend(line);
+        lines.push(spans);
+    }
+    if !note.is_empty() {
+        lines.push(vec![Span("    ".into(), PLAIN), Span(clean(note), DIM)]);
+    }
+    lines
 }
 
 /// Setup detail (stages, compiler output summaries, errors) goes to this file.
@@ -638,10 +664,18 @@ fn draw() {
         let view = view.borrow();
         let work = work_rows().map(|rows| View { rows, back: true, ..View::default() });
         let selected = SELECTED.with(StdCell::get);
-        let (body, selected_line) = match &work {
-            Some(page) => body_lines(page, None),
-            None => body_lines(&view, selected),
+        let prompt = PROMPT.with(|p| p.borrow().as_ref().map(|p| (p.lines.clone(), p.active)));
+        let (mut body, mut selected_line) = match (&work, &prompt) {
+            (Some(page), _) => body_lines(page, None),
+            (None, Some(_)) => body_lines(&view, None),
+            (None, None) => body_lines(&view, selected),
         };
+        // A question's rows follow the content; its active row is the one
+        // selected.
+        if let (None, Some((prompt_lines, active))) = (&work, prompt.clone()) {
+            selected_line = Some(body.len() + active);
+            body.extend(prompt_lines.into_iter().map(|line| (line, None)));
+        }
         // Everything above the footer scrolls as one: the header, then the
         // rows. The email shows on the Account row, not in the header.
         let _ = &view.email;
@@ -684,6 +718,7 @@ fn draw() {
             let below = lines[offset + room..].iter().filter(|l| l.1.is_some()).count();
             let above = lines[..offset].iter().filter(|l| l.1.is_some()).count();
             let more = match (above, below) {
+                (0, 0) => String::new(),
                 (0, below) => format!("↓ {below} more"),
                 (above, 0) => format!("↑ {above} above"),
                 (above, below) => format!("↑ {above} above · ↓ {below} more"),
@@ -710,7 +745,7 @@ fn draw() {
         let choice = CHOICE.with(|c| c.borrow().clone());
         let mut message = MESSAGE.with(|m| m.borrow().clone());
         let item = selected.and_then(|n| view.rows.iter().filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None }).nth(n));
-        let main = work.is_none() && !view.back;
+        let main = work.is_none() && !view.back && prompt.is_none();
         if message.is_empty() && choice.is_empty() && main {
             if let Some(item) = item {
                 message = info_line(item);
@@ -816,8 +851,8 @@ pub(super) fn menu(view: View, selected: &mut usize, changed: &dyn Fn() -> bool)
     }
 }
 
-/// An inline question on the status line with its options on the next line
-/// and a dim note after them: ←→ or a first letter picks, ⏎ accepts, Escape
+/// A question with its options as rows in the content (see `Prompt`),
+/// the default one selected: ↑↓ or a first letter picks, ⏎ accepts, Escape
 /// backs out (None). Closed input and Ctrl-C also return None.
 pub(super) fn choose(question: &str, note: &str, options: &[&str], default: usize) -> Result<Option<String>, String> {
     if options.is_empty() {
@@ -837,21 +872,19 @@ pub(super) fn choose(question: &str, note: &str, options: &[&str], default: usiz
     }
     let mut pick = default.min(options.len() - 1);
     let _input = console::Input::enter()?;
-    let saved = SELECTED.with(StdCell::get);
+    MESSAGE.with(|m| m.borrow_mut().clear());
     let result = loop {
-        MESSAGE.with(|m| *m.borrow_mut() = text(clean(question), PLAIN));
-        CHOICE.with(|c| {
-            let mut spans = Vec::new();
-            for (i, option) in options.iter().enumerate() {
-                spans.push(if i == pick { Span(format!(" {option} "), INV) } else { Span(format!(" {option} "), PLAIN) });
-                spans.push(Span(" ".into(), PLAIN));
-            }
-            if !note.is_empty() {
-                spans.push(Span(format!(" {note}"), DIM));
-            }
-            *c.borrow_mut() = spans;
-        });
-        FOOTER.with(|f| f.set(Some("←→ choose   ⏎ accept   esc back")));
+        let mut lines = prompt_head(question, note);
+        let first = lines.len();
+        for (i, option) in options.iter().enumerate() {
+            lines.push(if i == pick {
+                vec![Span("  ".into(), PLAIN), Span("▌".into(), MARK), Span(" ".into(), PLAIN), Span((*option).into(), BOLD), Span(" ⏎".into(), OK)]
+            } else {
+                vec![Span(format!("    {option}"), PLAIN)]
+            });
+        }
+        set_prompt(Some(Prompt { lines, active: first + pick }));
+        FOOTER.with(|f| f.set(Some("↑↓ choose   ⏎ accept   esc back")));
         draw();
         match console::key()? {
             Key::Left | Key::Up => pick = pick.saturating_sub(1),
@@ -868,16 +901,16 @@ pub(super) fn choose(question: &str, note: &str, options: &[&str], default: usiz
             _ => {}
         }
     };
-    SELECTED.with(|s| s.set(saved));
+    set_prompt(None);
     MESSAGE.with(|m| m.borrow_mut().clear());
-    CHOICE.with(|c| c.borrow_mut().clear());
     FOOTER.with(|f| f.set(None));
     Ok(result)
 }
 
-/// A one-line editor on the status line. Escape or closed input: None.
+/// A one-line editor as a row in the content (see `Prompt`), under its
+/// question; `hint` is the line under it. Escape or closed input: None.
 /// `initial` pre-fills the text with the cursor at its end (a rejected email
-/// to correct); `hint` is the line under it.
+/// to correct).
 pub(super) fn edit(prompt: &str, initial: &str, hint: Text, footer: &'static str) -> Result<Option<String>, String> {
     if !COLOR.with(StdCell::get) {
         if !hint.is_empty() { println!("{}", plain_text(&hint)); }
@@ -886,14 +919,16 @@ pub(super) fn edit(prompt: &str, initial: &str, hint: Text, footer: &'static str
     let mut value = initial.to_owned();
     let _input = console::Input::enter()?;
     let result = loop {
-        MESSAGE.with(|m| {
-            *m.borrow_mut() = vec![
-                Span(format!("{prompt} "), PLAIN),
-                Span(value.clone(), BOLD),
-                Span(" ".into(), INV),
-            ];
-        });
-        CHOICE.with(|c| *c.borrow_mut() = hint.clone());
+        let mut lines = prompt_head(prompt, "");
+        let active = lines.len();
+        lines.push(vec![Span("  ".into(), PLAIN), Span("▌".into(), MARK), Span(" ".into(), PLAIN), Span(value.clone(), BOLD), Span(" ".into(), INV)]);
+        if !hint.is_empty() {
+            let mut spans = vec![Span("    ".into(), PLAIN)];
+            spans.extend(hint.iter().cloned());
+            lines.push(spans);
+        }
+        set_prompt(Some(Prompt { lines, active }));
+        MESSAGE.with(|m| m.borrow_mut().clear());
         FOOTER.with(|f| f.set(Some(footer)));
         draw();
         match console::key()? {
@@ -905,8 +940,8 @@ pub(super) fn edit(prompt: &str, initial: &str, hint: Text, footer: &'static str
             _ => {}
         }
     };
+    set_prompt(None);
     MESSAGE.with(|m| m.borrow_mut().clear());
-    CHOICE.with(|c| c.borrow_mut().clear());
     FOOTER.with(|f| f.set(None));
     Ok(result)
 }
