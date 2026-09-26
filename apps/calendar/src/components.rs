@@ -1,6 +1,9 @@
 //! Quiet controls and row-owned hit regions shared by Calendar presentations.
 use crate::model::*;
 use crate::presentation::*;
+// The calendar's own colour contrast, not the theme store's: both come in
+// through globs and rustc will not pick one for us.
+use crate::presentation::contrast;
 use crate::presentation::rect;
 use makepad_civil_time::Day;
 use makepad_widgets::animator::Ease;
@@ -135,7 +138,7 @@ script_mod! {
     mod.widgets.EventRow = mod.widgets.CalendarHitRow{
         width: Fill height: 72 flow: Down show_bg: false
         content := mod.calendar.Plain{
-            flow: Right padding: Inset{left: 20 right: 20 top: 12 bottom: 12}
+            flow: Right padding: Inset{left: 16 right: 16 top: 12 bottom: 12}
             times := mod.calendar.Plain{width: 56 flow: Down spacing: 4
                 starts := mod.calendar.Ink{width: Fill height: 20 draw_text.text_style: theme.font_regular{font_size: 9.75}}
                 ends := mod.calendar.Ink{width: Fill height: 18 draw_text +: {color: secondary text_style: theme.font_regular{font_size: 9.75}}}
@@ -148,7 +151,7 @@ script_mod! {
                 calendar_name := mod.calendar.Ink{width: Fill height: 18 draw_text.color: secondary}
             }
         }
-        separator := mod.widgets.AppRule{height: 0.5 margin: Inset{left: 100 right: 20}}
+        separator := mod.widgets.AppRule{height: 0.5 margin: Inset{left: 96 right: 16}}
     }
     mod.widgets.CalendarRows = mod.calendar.Plain{
         height: Fit flow: Down
@@ -339,6 +342,11 @@ pub struct AppRule {
     vertical: bool,
     #[live(1.0)]
     strength: f32,
+    // Without it `set_visible(false)` was a no-op and the phone month,
+    // which hides its rules, drew them anyway.
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[redraw]
     #[rust]
     area: Area,
@@ -346,13 +354,18 @@ pub struct AppRule {
 impl Widget for AppRule {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         let c = cx.with_vm(CalendarColors::resolve);
         cx.begin_turtle(walk, Layout::default());
         let mut r = cx.turtle().rect();
         self.draw_line.color = mix(c.paper, c.rule, self.strength);
         if self.vertical {
+            r.pos.x = snap_px(cx, r.pos.x);
             r.size.x = hairline(cx);
         } else {
+            r.pos.y = snap_px(cx, r.pos.y);
             r.size.y = hairline(cx);
         }
         self.draw_line.draw_abs(cx, r);
@@ -557,6 +570,8 @@ impl Widget for CalendarControlGroup {
             Event::MouseMove(e) => Some((e.abs, 0.5, 0.1)),
             Event::MouseDown(e) => Some((e.abs, 1.0, 0.07)),
             Event::MouseUp(e) => Some((e.abs, 0.5, 0.12)),
+            // The press itself taken away: the pressed look lets go.
+            Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id) => Some((e.abs, 0.0, 0.12)),
             Event::TouchUpdate(e) => e.touches.first().map(|t| {
                 (
                     t.abs,

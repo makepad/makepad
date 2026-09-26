@@ -2,7 +2,7 @@
 //! moves them.
 //!
 //! The pages themselves are drawn by the stock `PdfView` from
-//! widgets/src/pdf_view.rs — a `PortalList` of `PdfPageView`s, each of which
+//! widgets/families/pdf/src/pdf_view.rs — a `PortalList` of `PdfPageView`s, each of which
 //! replays its page's content-stream ops into `DrawVector` geometry and
 //! `DrawText` runs. That gives continuous vertical scrolling, the gap
 //! between pages, drag and wheel scrolling, and (because `PortalList` is
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 /// The dark margin left of, right of and around the paper.
 const GUTTER: f64 = 12.0;
 /// The gap between pages, matching the `Page` template's bottom margin in
-/// widgets/src/pdf_view.rs.
+/// widgets/families/pdf/src/pdf_view.rs.
 const PAGE_GAP: f64 = 8.0;
 /// One press of Cmd+ or Cmd-.
 const ZOOM_STEP: f64 = 1.25;

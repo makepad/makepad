@@ -24,7 +24,10 @@ required-features = ["standalone"]
 
 [features]
 dynamic-module = []
-default = ["standalone"]
+default = ["tweaker", "standalone"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
 demo = []
 # The standalone window (src/main.rs). A host that links the module leaves
 # this off and gets the lib only. Nothing today is exclusively the
@@ -34,7 +37,7 @@ demo = []
 standalone = []
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-ai-services = { path = "../../libs/ai/services" }

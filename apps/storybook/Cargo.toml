@@ -1,0 +1,15 @@
+[package]
+name = "makepad-storybook"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "The widget catalogue: every component organised, documented and previewed live"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["tweaker", "charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
+makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
+
+[features]
+maps = ["makepad-widgets/maps"]
+pdf = ["makepad-widgets/pdf"]

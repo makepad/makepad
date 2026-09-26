@@ -511,7 +511,9 @@ pub fn splash_source(theme: &ImportedTheme) -> String {
 // ----------------------------------------------------------------------
 
 pub fn makepad_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         return PathBuf::from(home);
     }
     std::env::var_os("USERPROFILE")
@@ -590,10 +592,9 @@ pub fn ensure_default_theme() {
 }
 
 fn curl(url: &str) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("curl")
-        .args(["-sfL", "--max-time", "60", url])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("curl");
+    crate::host::no_console_window(&mut command);
+    let out = command.args(["-sfL", "--max-time", "60", url]).output().ok()?;
     if !out.status.success() {
         return None;
     }

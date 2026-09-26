@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- checklist: two ticked, one open -->
+  <g>
+    <circle cx="322" cy="332" r="64" fill="#4fd18b"/>
+    <path d="M290 334 L314 358 L356 308" fill="none" stroke="#0e1d33" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="430" y="310" width="330" height="44" rx="22" fill="#e8eef6" fill-opacity="0.45"/>
+    <circle cx="322" cy="512" r="64" fill="#4fd18b"/>
+    <path d="M290 514 L314 538 L356 488" fill="none" stroke="#0e1d33" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="430" y="490" width="270" height="44" rx="22" fill="#e8eef6" fill-opacity="0.45"/>
+    <circle cx="322" cy="692" r="52" fill="none" stroke="#5ee0c8" stroke-width="24"/>
+    <rect x="430" y="670" width="330" height="44" rx="22" fill="#e8eef6"/>
+  </g>
+</svg>

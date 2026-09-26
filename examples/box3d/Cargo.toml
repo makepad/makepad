@@ -6,7 +6,13 @@ edition = "2021"
 description = "Box3D physics simulation rendered in 3D with makepad"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
 makepad-xr = { path = "../../xr", version = "1.0.0" }
 makepad-box3d = { path = "../../libs/box3d" }

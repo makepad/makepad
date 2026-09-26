@@ -7,7 +7,7 @@
 //! there, tells it which collection to open, and hands the host its
 //! tools. The module never touches a file, a socket or a thread itself:
 //! the baked library is read by the grid's own store worker, and a
-//! collection is asked for by NAME (`smbc`), resolved under the library
+//! collection is asked for by NAME (`photos`), resolved under the library
 //! root — never a path from the model.
 
 use crate::view::PhotosView;
@@ -102,8 +102,8 @@ mod tests {
         let schema = m.open_schema();
         assert_eq!(schema.version, 1);
         assert!(schema.empty_open().is_ok(), "no argument is required");
-        let open = schema.validate(r#"{"collection":"smbc"}"#, &[]).unwrap();
-        assert_eq!(open.text("collection"), Some("smbc"));
+        let open = schema.validate(r#"{"collection":"photos"}"#, &[]).unwrap();
+        assert_eq!(open.text("collection"), Some("photos"));
         assert!(schema.validate(r#"{"path":"/tmp/x"}"#, &[]).is_err(), "a path is never an open argument");
     }
 }

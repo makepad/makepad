@@ -31,7 +31,13 @@ path = "src/lib.rs"
 name = "video"
 path = "src/main.rs"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

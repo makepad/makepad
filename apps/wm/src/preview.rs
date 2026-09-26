@@ -193,6 +193,11 @@ pub fn spawn_for_request(
 ) -> Result<crate::clients::ClientSlot, String> {
     let (app, extra) = app_for_request(req)
         .ok_or_else(|| format!("no app '{}' for {}", req.app, req.path.display()))?;
+    // A preview never compiles: the viewer runs only when it is built and
+    // up to date.
+    if !app.is_current() {
+        return Err(format!("{} is not built or out of date", app.bin));
+    }
     // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
     // (`PreviewCache`), which keeps a viewer alive between panels rather
     // than standing one by before the first.

@@ -252,7 +252,7 @@ impl Widget for AlarmList {
                         if self.reveal == 0.0 {
                             self.revealed = None;
                         }
-                    } else if drag.axis == DragAxis::Pending {
+                    } else if drag.axis == DragAxis::Pending && !e.cancelled {
                         let r = self.area.rect(cx);
                         if self.rows.is_empty() {
                             if self.add_rect.is_some_and(|a| a.contains(e.abs)) {
@@ -298,8 +298,9 @@ impl Widget for AlarmList {
         let color = self.time_text.color;
         let caption_color = self.caption.color;
         if self.rows.is_empty() {
-            // Centred around y 250: title, explanation, then a 144×48 Add.
-            let cy = r.pos.y + 250.0 - 118.0;
+            // Title, explanation, then a 144×48 Add: a 122 pt group placed
+            // 92 pt down a tall page, centred in a short (landscape) one.
+            let cy = r.pos.y + 132.0f64.min((r.size.y - 122.0) * 0.5 + 40.0);
             if let Some(run) = self.empty_title.prepare_single_line_run(cx, "No alarms") {
                 self.empty_title.draw_abs(cx, dvec2(r.pos.x + (r.size.x - run.width_in_lpxs as f64) * 0.5, cy - 40.0), "No alarms");
             }

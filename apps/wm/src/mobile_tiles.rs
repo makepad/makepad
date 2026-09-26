@@ -38,10 +38,47 @@ pub fn tile_apps(launchable: &crate::apps::Launchable) -> Vec<(&'static str, Til
 
 /// Screen margin around the home content (iOS and Android both use 16pt).
 pub const HOME_MARGIN: f64 = 16.0;
-/// Gap between two tiles and between a tile and the favorites grid.
-pub const TILE_GAP: f64 = 14.0;
-/// Corner radius of a tile capture on screen.
-pub const TILE_RADIUS: f64 = 22.0;
+/// The home page's and the app cards' measures, per skin. Android takes
+/// the Material targets; iOS keeps the measures it always had.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HomeMetrics {
+    /// Gap between two tiles.
+    pub tile_gap: f64,
+    /// From the last tile to the favorites grid, upright and on its side.
+    pub favorites_gap: f64,
+    pub favorites_gap_landscape: f64,
+    /// The tallest a tile row gets on its side (compact faces), if capped.
+    pub landscape_tile_max: Option<f64>,
+    /// The least height of a favorites row on its side.
+    pub landscape_cell_min: f64,
+    /// A home icon on its side (upright both skins draw 60).
+    pub landscape_icon: f64,
+    /// An icon's label: its size, its gap under the icon, its line height.
+    pub label: (f64, f64, f64),
+    /// Corners the eye sees: a tile's, and an app card's (Recents, and an
+    /// app zooming between its icon and full screen).
+    pub tile_radius: f64,
+    pub card_radius: f64,
+    /// Between two cards in Recents.
+    pub card_gap: f64,
+}
+impl HomeMetrics {
+    pub fn of(style: crate::desktop::DesktopStyle) -> Self {
+        if style == crate::desktop::DesktopStyle::Android {
+            Self {
+                tile_gap: 16.0, favorites_gap: 24.0, favorites_gap_landscape: 16.0,
+                landscape_tile_max: Some(96.0), landscape_cell_min: 72.0, landscape_icon: 48.0,
+                label: (12.0, 8.0, 16.0), tile_radius: 28.0, card_radius: 28.0, card_gap: 24.0,
+            }
+        } else {
+            Self {
+                tile_gap: 14.0, favorites_gap: 20.0, favorites_gap_landscape: 20.0,
+                landscape_tile_max: None, landscape_cell_min: 64.0, landscape_icon: 44.0,
+                label: (11.0, 4.0, 20.0), tile_radius: 44.0, card_radius: 52.0, card_gap: 22.0,
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TileSlot {
@@ -69,31 +106,35 @@ pub struct HomeLayout {
 /// dock. `top` is where content starts (below the status bar and, on
 /// Android, the big clock). Pure geometry, so both orientations are tested.
 pub fn home_layout(screen: Rect, top: f64, dock: Rect) -> HomeLayout {
-    home_layout_for(screen, top, dock, &TILE_APPS)
+    home_layout_for(screen, top, dock, &TILE_APPS, HomeMetrics::of(crate::desktop::DesktopStyle::Ios))
 }
 
 /// [`home_layout`] for the tile apps a build has (see [`tile_apps`]): the
 /// small tiles share the first row, a wide tile takes the row under them
 /// — the top row when there are no small ones — and the favorites start
 /// right under the last tile, or at `top` when there is none.
-pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'static str, TileKind)]) -> HomeLayout {
+pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'static str, TileKind)], metrics: HomeMetrics) -> HomeLayout {
     let landscape = screen.size.x > screen.size.y;
+    let gap = metrics.tile_gap;
+    let favorites_gap = if landscape { metrics.favorites_gap_landscape } else { metrics.favorites_gap };
     let m = HOME_MARGIN;
     let left = screen.pos.x + m;
     let width = (screen.size.x - m * 2.0).max(1.0);
     let mut tiles = Vec::new();
     let tiles_bottom;
     if landscape {
-        let w = ((width - TILE_GAP * 2.0) / 3.0).max(1.0);
-        // Short enough that a row of favorites still fits above the dock.
-        let h = (w * 0.56).min((dock.pos.y - top - 126.0).max(60.0)).max(1.0);
+        let w = ((width - gap * 2.0) / 3.0).max(1.0);
+        // A short row (Android: at most 96, the tiles show their compact
+        // faces), and never so tall that a row of favorites no longer fits
+        // above the dock.
+        let h = (w * 0.56).min(metrics.landscape_tile_max.unwrap_or(f64::MAX)).min((dock.pos.y - top - 126.0).max(60.0)).max(1.0);
         for (index, (app, kind)) in tile_apps.iter().enumerate() {
-            let x = left + index as f64 * (w + TILE_GAP);
+            let x = left + index as f64 * (w + gap);
             tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(x, top), size: dvec2(w, h) } });
         }
-        tiles_bottom = if tile_apps.is_empty() { top - TILE_GAP - 6.0 } else { top + h };
+        tiles_bottom = if tile_apps.is_empty() { top - favorites_gap } else { top + h };
     } else {
-        let s = ((width - TILE_GAP) / 2.0).max(1.0);
+        let s = ((width - gap) / 2.0).max(1.0);
         let smalls = tile_apps.iter().filter(|(_, kind)| *kind == TileKind::Small).count();
         let mut y = top;
         let mut small = 0;
@@ -101,27 +142,27 @@ pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'stati
         for (app, kind) in tile_apps.iter() {
             match kind {
                 TileKind::Small => {
-                    let x = left + small as f64 * (s + TILE_GAP);
+                    let x = left + small as f64 * (s + gap);
                     small += 1;
                     rows = rows.max(1);
                     tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(x, y), size: dvec2(s, s) } });
                 }
                 TileKind::Wide => {
                     if smalls > 0 {
-                        y += s + TILE_GAP;
+                        y += s + gap;
                     }
                     rows += 1;
                     tiles.push(TileSlot { app, kind: *kind, rect: Rect { pos: dvec2(left, y), size: dvec2(width, s) } });
                 }
             }
         }
-        tiles_bottom = if rows == 0 { top - TILE_GAP - 6.0 } else { y + s };
+        tiles_bottom = if rows == 0 { top - favorites_gap } else { y + s };
     }
     let columns = if landscape { 7 } else { 4 };
-    let fav_top = tiles_bottom + TILE_GAP + 6.0;
+    let fav_top = tiles_bottom + favorites_gap;
     // Leave a separate strip for the page indicator / App Library target.
     let fav_bottom = dock.pos.y - 36.0;
-    let cell_min = if landscape { 64.0 } else { 88.0 };
+    let cell_min = if landscape { metrics.landscape_cell_min } else { 88.0 };
     let (favorites, row_height, capacity) = if fav_bottom - fav_top >= cell_min {
         let rows = ((fav_bottom - fav_top) / cell_min).floor().max(1.0) as usize;
         let row_height = ((fav_bottom - fav_top) / rows as f64).min(104.0);
@@ -141,7 +182,7 @@ pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'stati
 /// every launch target is reachable from exactly one card.
 pub const LIBRARY_GROUPS: [(&str, &[&str]); 5] = [
     ("Utilities", &["clock", "weather", "calculator", "terminal", "files", "task"]),
-    ("Creativity", &["photos", "mixer", "score", "vj", "fab", "fabric"]),
+    ("Creativity", &["photos", "mixer", "score", "fab", "fabric"]),
     ("Productivity", &["sheets", "finance", "mail", "notes", "calendar", "reminders", "browser", "route", "studio"]),
     ("Media", &["video", "image", "pdf"]),
     ("Other", &[]),
@@ -373,6 +414,12 @@ pub struct TileClient {
     /// trustworthy (a full-screen card is never a stretched tile, a tile is
     /// never a squeezed window).
     pub confirmed: bool,
+    /// A process client: the Ticks it had been sent when the face went out
+    /// (and when). A frame drawn before the child read the face can have
+    /// the new SIZE already (the run view announces its rect on its own)
+    /// with the OLD face — the tile's dial blown up to full screen — so a
+    /// frame confirms the face only once those Ticks are acknowledged.
+    pub fence: Option<(u64, f64)>,
 }
 
 impl TileClient {
@@ -441,7 +488,7 @@ impl HomeTiles {
     /// already had open (its tile is an extra face of that window).
     pub fn bind(&mut self, app: &str, client: ClientId, background: bool) {
         self.clients.retain(|t| t.app != app && t.client != client);
-        self.clients.push(TileClient { app: app.to_string(), client, background, sent: None, confirmed: false });
+        self.clients.push(TileClient { app: app.to_string(), client, background, sent: None, confirmed: false, fence: None });
     }
 
     /// The client is gone (died, closed): its tile is empty again.
@@ -496,7 +543,26 @@ impl HomeTiles {
     /// belongs to, or None for a stale frame from the previous viewport.
     /// Before anything was sent the client is in its default full face.
     pub fn note_frame(&mut self, client: ClientId, size: Vec2d) -> Option<Face> {
+        self.note_frame_acked(client, size, u64::MAX, 0.0)
+    }
+    /// The face was sent to a process client that had been sent `ticks`
+    /// Ticks by then (`now`): see `TileClient::fence`.
+    pub fn set_fence(&mut self, client: ClientId, ticks: u64, now: f64) {
+        if let Some(t) = self.get_mut(client) {
+            t.fence = Some((ticks, now));
+        }
+    }
+    /// `note_frame` for a process client that has acknowledged `acked`
+    /// Ticks: a frame that may predate the face belongs to neither face.
+    /// The fence lapses after `FACE_FENCE_SECS` so no face waits forever.
+    pub fn note_frame_acked(&mut self, client: ClientId, size: Vec2d, acked: u64, now: f64) -> Option<Face> {
         let t = self.get_mut(client)?;
+        if let Some((ticks, at)) = t.fence {
+            if acked < ticks && now - at < FACE_FENCE_SECS {
+                return None;
+            }
+            t.fence = None;
+        }
         let Some((face, viewport)) = t.sent else { return Some(Face::Full) };
         if same_size(viewport, size) {
             t.confirmed = true;
@@ -529,6 +595,11 @@ impl HomeTiles {
         self.attempts.remove(app);
     }
 }
+
+/// How long a face waits for the child to acknowledge the Ticks sent
+/// before it (`TileClient::fence`) before any frame of the right size
+/// confirms it anyway.
+pub const FACE_FENCE_SECS: f64 = 0.5;
 
 /// A frame size matches a viewport within the rounding the host's DPI
 /// scaling introduces.
@@ -617,18 +688,19 @@ mod tests {
         let top = screen.pos.y + 70.0;
         let all = home_layout(screen, top, dock);
         // Only the wide tile: it takes the top row, favorites move up.
-        let photos = home_layout_for(screen, top, dock, &[("photos", TileKind::Wide)]);
+        let ios = HomeMetrics::of(crate::desktop::DesktopStyle::Ios);
+        let photos = home_layout_for(screen, top, dock, &[("photos", TileKind::Wide)], ios);
         assert_eq!(photos.tiles.len(), 1);
         assert_eq!(photos.tiles[0].rect.pos.y, top);
         assert_eq!(photos.tiles[0].rect.size, all.tiles[2].rect.size);
         assert!(photos.favorites.pos.y < all.favorites.pos.y);
         assert!(photos.capacity > all.capacity);
         // No tiles at all: favorites start at the top.
-        let none = home_layout_for(screen, top, dock, &[]);
+        let none = home_layout_for(screen, top, dock, &[], ios);
         assert!(none.tiles.is_empty());
         assert_eq!(none.favorites.pos.y, top);
         // One small tile keeps its square and the wide one goes under it.
-        let two = home_layout_for(screen, top, dock, &[("clock", TileKind::Small), ("photos", TileKind::Wide)]);
+        let two = home_layout_for(screen, top, dock, &[("clock", TileKind::Small), ("photos", TileKind::Wide)], ios);
         assert_eq!(two.tiles[0].rect, all.tiles[0].rect);
         assert_eq!(two.tiles[1].rect, all.tiles[2].rect);
         // The build's tile apps follow what it can launch.
@@ -656,6 +728,46 @@ mod tests {
         }
         assert!(layout.favorites.pos.y + layout.favorites.size.y <= dock.pos.y);
         assert!(layout.capacity >= layout.columns, "a row of favorites fits beside the dock");
+    }
+
+    /// The desktop skin's phone on its side, laid out the way the home page
+    /// draws it: short tiles over one full row of favorites, both clear of
+    /// the dock; upright, the favorites start 24 under the wide tile.
+    #[test]
+    fn android_home_keeps_its_favorites_row_on_its_side() {
+        let android = crate::desktop::DesktopStyle::Android;
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, dylibs: false };
+        let size = phone_size(android);
+        let side = Rect { pos: dvec2(0.0, 32.0), size: dvec2(size.y, size.x - 32.0) };
+        let layout = PhoneSurface::home_layout(android, side, PhoneChrome::Simulated, &launchable);
+        let dock = PhoneSurface::home_dock(side, PhoneChrome::Simulated);
+        assert!(layout.landscape);
+        assert!(layout.tiles.iter().all(|t| t.rect.size.y <= 96.0), "short tiles");
+        assert!(layout.capacity >= layout.columns, "one row of favorites: {}", layout.capacity);
+        assert!(layout.row_height >= 72.0);
+        assert!(layout.favorites.pos.y + layout.favorites.size.y <= dock.pos.y);
+        let upright = Rect { pos: dvec2(0.0, 32.0), size: size - dvec2(0.0, 32.0) };
+        let layout = PhoneSurface::home_layout(android, upright, PhoneChrome::Simulated, &launchable);
+        let wide = layout.tiles.iter().find(|t| t.kind == TileKind::Wide).unwrap();
+        let m = HomeMetrics::of(android);
+        assert!((layout.favorites.pos.y - (wide.rect.pos.y + wide.rect.size.y) - m.favorites_gap).abs() < 0.01);
+        assert!((layout.tiles[1].rect.pos.x - (layout.tiles[0].rect.pos.x + layout.tiles[0].rect.size.x) - m.tile_gap).abs() < 0.01);
+    }
+
+    /// The iOS skin keeps the home page it had before the Android polish:
+    /// 14 between tiles, favorites 20 under them, uncapped tiles on its side.
+    #[test]
+    fn ios_home_keeps_its_measures() {
+        let ios = crate::desktop::DesktopStyle::Ios;
+        let m = HomeMetrics::of(ios);
+        assert_eq!((m.tile_gap, m.favorites_gap, m.landscape_tile_max, m.tile_radius, m.card_radius, m.card_gap), (14.0, 20.0, None, 44.0, 52.0, 22.0));
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, dylibs: false };
+        let size = phone_size(ios);
+        let upright = Rect { pos: dvec2(0.0, 32.0), size: size - dvec2(0.0, 32.0) };
+        let layout = PhoneSurface::home_layout(ios, upright, PhoneChrome::Simulated, &launchable);
+        let wide = layout.tiles.iter().find(|t| t.kind == TileKind::Wide).unwrap();
+        assert!((layout.favorites.pos.y - (wide.rect.pos.y + wide.rect.size.y) - 20.0).abs() < 0.01);
+        assert!((layout.tiles[1].rect.pos.x - (layout.tiles[0].rect.pos.x + layout.tiles[0].rect.size.x) - 14.0).abs() < 0.01);
     }
 
     #[test]
@@ -703,6 +815,29 @@ mod tests {
         assert!(tiles.get(7).is_none());
         assert_eq!(tiles.forget_client(9).as_deref(), Some("clock"));
         assert_eq!(tiles.client_of("clock"), None);
+    }
+
+    /// A process child hears its new size from the run view before it
+    /// reads the new face: a full-size frame drawn in the OLD face (the
+    /// tile's dial blown up to the screen) must not confirm the Full face.
+    /// Only a frame after every Tick sent before the face was acknowledged
+    /// does — or any right-sized frame once the fence lapsed.
+    #[test]
+    fn a_full_face_waits_for_the_ticks_sent_before_it() {
+        let mut tiles = HomeTiles::default();
+        tiles.bind("clock", 5, true);
+        let full = dvec2(412.0, 816.0);
+        tiles.note_sent(5, Face::Full, full);
+        tiles.set_fence(5, 10, 1.0);
+        assert_eq!(tiles.note_frame_acked(5, full, 9, 1.05), None, "drawn before the face was read");
+        assert!(!tiles.get(5).unwrap().full_ready());
+        assert_eq!(tiles.note_frame_acked(5, full, 10, 1.07), Some(Face::Full));
+        assert!(tiles.get(5).unwrap().full_ready());
+        // A child that never acknowledges is not stuck forever.
+        tiles.note_sent(5, Face::Tile, dvec2(180.0, 180.0));
+        tiles.note_sent(5, Face::Full, full);
+        tiles.set_fence(5, 20, 2.0);
+        assert_eq!(tiles.note_frame_acked(5, full, 12, 2.0 + FACE_FENCE_SECS + 0.01), Some(Face::Full));
     }
 
     #[test]

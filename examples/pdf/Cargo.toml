@@ -6,6 +6,12 @@ edition = "2021"
 description = "Makepad PDF viewer example"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["pdf"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["pdf"] }
 makepad-pdf-parse = { path = "../../libs/pdf_parse", version = "1.0.0" }

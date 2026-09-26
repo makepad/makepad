@@ -225,12 +225,55 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// `date +"%A %H:%M"` — omarchy's `dddd HH:mm`.
+/// The wall clock in local time, read in-process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalTime {
+    pub year: i64,
+    /// 1–12.
+    pub month: u32,
+    /// 1–31.
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    /// 0 = Monday.
+    pub weekday: u32,
+}
+
+/// Now, in the local time zone, from the shared host clock
+/// (`localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows).
+/// The sampler used to run `date` twice a second; on the phone each
+/// fork+exec of a process with the WM's address space cost about 5% of a
+/// core and showed up in every swipe profile as `execve`.
+pub fn local_now() -> Option<LocalTime> {
+    let now = makepad_civil_time::local(makepad_civil_time::now_secs())?;
+    Some(LocalTime {
+        year: now.year as i64,
+        month: now.month,
+        day: now.day,
+        hour: now.hour,
+        minute: now.minute,
+        weekday: now.weekday(),
+    })
+}
+
+/// English full weekday names, Monday first — `date`'s `%A`.
+const WEEKDAY_FULL: [&str; 7] =
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+/// `%A %H:%M` — omarchy's `dddd HH:mm`; `alt` is `%-d %B W%V %Y`.
 pub fn sample_clock(alt: bool) -> String {
-    let fmt = if alt { "+%-d %B W%V %Y" } else { "+%A %H:%M" };
-    run("date", &[fmt])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    let Some(now) = local_now() else { return String::new() };
+    if alt {
+        format!(
+            "{} {} W{:02} {}",
+            now.day,
+            super::panels::MONTH_NAMES[(now.month - 1) as usize],
+            super::panels::iso_week(now.year, now.month, now.day),
+            now.year
+        )
+    } else {
+        format!("{} {:02}:{:02}", WEEKDAY_FULL[now.weekday as usize], now.hour, now.minute)
+    }
 }
 
 /// Everything the bar reads from the OS, gathered OFF the main thread.
@@ -280,8 +323,9 @@ pub fn start_status_sampler(
                 let (volume, muted) = sample_volume();
                 status.volume = volume;
                 status.muted = muted;
-                status.clock = sample_clock(false);
-                status.clock_alt = sample_clock(true);
+                // The clock is not sampled here: `localtime_r` reads the
+                // process environment, which the UI thread writes (child
+                // env, MAKEPAD_WM_ROOT); the UI thread formats it itself.
                 if round % 5 == 0 {
                     status.battery = sample_battery();
                     status.network = sample_network();

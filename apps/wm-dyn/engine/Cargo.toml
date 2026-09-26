@@ -23,10 +23,13 @@ path = "src/lib.rs"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-# Superset of every feature an app or the WM asks of a shared crate: the
-# feature set of an engine unit must be the same in the host build and in
-# each on-device `-p <app>` build, and feature unification takes the union.
-makepad-widgets = { path = "../../../widgets", features = ["maps"] }
+# Superset of every feature an app or the WM asks of a shared crate. The
+# packaged workspace unifies features across all of its members (the dyn-pack
+# stage writes `feature-unification = "workspace"`), so an on-device `-p <app>`
+# build resolves the same engine units as the host's cross-build whatever an
+# app asks for; naming the union here keeps a plain desktop build of wm-dyn
+# (selected-package unification) on the same units too.
+makepad-widgets = { path = "../../../widgets", default-features = false, features = ["maps"] }
 makepad-app-module = { path = "../../../libs/app_module" }
 makepad-ai-services = { path = "../../../libs/ai/services" }
 makepad-wm-theme = { path = "../../../libs/wm_theme" }

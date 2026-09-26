@@ -31,11 +31,19 @@ impl Host {
     /// provide an arbitrary filesystem path to the media viewer.
     fn evidence_preview_path(&self, flow: &str, id: &str) -> Result<PathBuf, String> {
         let flow_state = self.flow(flow)?;
-        let path = flow_state.captures.iter().find(|capture| capture.id == id)
+        let path = flow_state
+            .captures
+            .iter()
+            .find(|capture| capture.id == id)
             .map(|capture| capture.path.clone())
-            .or_else(|| self.attachments.iter()
-                .find(|attachment| self.attachment_owner(attachment) == flow && attachment.id == id)
-                .map(|attachment| attachment.path.clone()))
+            .or_else(|| {
+                self.attachments
+                    .iter()
+                    .find(|attachment| {
+                        self.attachment_owner(attachment) == flow && attachment.id == id
+                    })
+                    .map(|attachment| attachment.path.clone())
+            })
             .ok_or("Image does not belong to this lane")?;
         recording_owned_path(&self.directory, &path)?;
         Ok(path)
@@ -45,7 +53,12 @@ impl Host {
         let path = self.evidence_preview_path(flow, id)?;
         let bytes = recording_bytes(&self.directory, &path, 64 * 1024 * 1024)?;
         let image = decode_evidence_image(&bytes, &path)?;
-        if let Some(capture) = self.flow(flow)?.captures.iter().find(|capture| capture.id == id) {
+        if let Some(capture) = self
+            .flow(flow)?
+            .captures
+            .iter()
+            .find(|capture| capture.id == id)
+        {
             if image.width != capture.width as usize || image.height != capture.height as usize {
                 return Err("Image dimensions no longer match the registered capture".into());
             }
@@ -67,7 +80,12 @@ impl Host {
         )
     }
     fn lane_widths_json(&self) -> Value {
-        Value::Obj(self.lane_widths.iter().map(|(flow, width)| (flow.clone(), Value::F64(*width))).collect())
+        Value::Obj(
+            self.lane_widths
+                .iter()
+                .map(|(flow, width)| (flow.clone(), Value::F64(*width)))
+                .collect(),
+        )
     }
     fn restore_media(&mut self, value: &Value) -> Result<(), String> {
         if let Some(Value::Obj(items)) = value.get("lane_widths") {
@@ -78,7 +96,8 @@ impl Host {
                     _ => continue,
                 };
                 if cli_identifier(flow) && width.is_finite() {
-                    self.lane_widths.insert(flow.clone(), width.clamp(420.0, 1600.0));
+                    self.lane_widths
+                        .insert(flow.clone(), width.clamp(420.0, 1600.0));
                 }
             }
         }
@@ -122,12 +141,15 @@ impl Host {
                         .get("delivered")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    submitted: item.get("submitted").and_then(Value::as_bool).unwrap_or(false),
+                    submitted: item
+                        .get("submitted")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 });
             }
         }
         if let Some(Value::Obj(items)) = value.get("presentation") {
-            for (id, v) in items.iter().take(4) {
+            for (id, v) in items.iter().take(iteration::MAX_STORED_FLOWS) {
                 let height = match v {
                     Value::F64(v) => *v,
                     Value::Int(v) => *v as f64,
@@ -141,6 +163,9 @@ impl Host {
         }
         if let Some(Value::Obj(reports)) = value.get("reports") {
             self.reports.extend(reports.iter().take(128).cloned());
+        }
+        if let Some(tree) = value.get("tree") {
+            self.tree = TreePresentation::parse(tree)?;
         }
         Ok(())
     }
@@ -212,15 +237,30 @@ impl Host {
         Ok(Value::Bool(true))
     }
     fn clear_attachment_tray(&mut self, flow: &str) -> Result<Value, String> {
-        if !self.engine.flows.contains_key(flow) { return Err("Unknown flow".into()); }
-        let changed: Vec<_> = self.attachments.iter().enumerate().filter(|(_,a)| self.attachment_owner(a) == flow && a.delivered && !a.submitted).map(|(i,_)|i).collect();
-        for index in &changed { self.attachments[*index].submitted = true; }
+        if !self.engine.flows.contains_key(flow) {
+            return Err("Unknown flow".into());
+        }
+        let changed: Vec<_> = self
+            .attachments
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| self.attachment_owner(a) == flow && a.delivered && !a.submitted)
+            .map(|(i, _)| i)
+            .collect();
+        for index in &changed {
+            self.attachments[*index].submitted = true;
+        }
         if let Err(error) = self.persist() {
-            for index in &changed { self.attachments[*index].submitted = false; }
+            for index in &changed {
+                self.attachments[*index].submitted = false;
+            }
             return Err(error);
         }
         self.changed = true;
-        Ok(json::obj(vec![("flow", s(flow)), ("hidden_thumbnails", Value::Int(changed.len() as i64))]))
+        Ok(json::obj(vec![
+            ("flow", s(flow)),
+            ("hidden_thumbnails", Value::Int(changed.len() as i64)),
+        ]))
     }
     fn load_previews(&mut self) {
         let paths: Vec<_> = self
@@ -296,7 +336,10 @@ fn read_evidence_image(path: &Path) -> Result<makepad_widgets::image_cache::Imag
     decode_evidence_image(&bytes, path)
 }
 
-fn decode_evidence_image(bytes: &[u8], path: &Path) -> Result<makepad_widgets::image_cache::ImageBuffer, String> {
+fn decode_evidence_image(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<makepad_widgets::image_cache::ImageBuffer, String> {
     if !(bytes.starts_with(b"\x89PNG\r\n\x1a\n")
         || bytes.starts_with(b"\xff\xd8\xff")
         || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")))

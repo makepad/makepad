@@ -34,7 +34,7 @@ script_mod! {
             flow: Down
             width: 380
             height: 620
-            margin: Inset{right: 14, bottom: 6}
+            margin: Inset{right: 16, bottom: 8}
             padding: 10
             spacing: 0
             draw_bg +: {
@@ -173,12 +173,17 @@ script_mod! {
                 text: "starting…"
             }
         }
+        // On the location controls' line: 48 pt, 16 pt in from the edges.
         assistant_button := AppButton{
-            margin: Inset{right: 14, bottom: 16}
-            padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
+            width: 48
+            height: 48
+            margin: Inset{right: 16, bottom: 16}
+            padding: 0
             spacing: 0
+            align: Align{x: 0.5 y: 0.5}
             text: ""
-            icon_walk: Walk{width: 18, height: 18}
+            draw_bg +: {border_radius: 12.0}
+            icon_walk: Walk{width: 24, height: 24}
             draw_icon +: {
                 svg: crate_resource("self://resources/icons/assistant.svg")
                 color: #x223038

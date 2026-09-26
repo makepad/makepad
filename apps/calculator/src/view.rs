@@ -268,9 +268,16 @@ script_mod! {
         tape_empty := EmptyHistory{}
     }
 
-    let IconBtn = glass.GlassButton{
-        width: 44 height: 44 text: "" padding: 0 spacing: 0
-        icon_walk: Walk{width: 20 height: 20}
+    // Flat, not glass (as the landscape bar's): a glass disc refracts what
+    // lies beside it into a coloured sliver next to its icon.
+    let IconBtn = ButtonFlat{
+        width: 48 height: 48 text: "" margin: 0 padding: 0 spacing: 0
+        align: Align{x: 0.5 y: 0.5}
+        icon_walk: Walk{width: 24 height: 24}
+        draw_bg +: {
+            color: theme.color_inset_1 color_hover: theme.color_inset_hover color_down: theme.color_inset_down
+            border_size: 0.0 border_radius: 24.0
+        }
     }
 
     let CalculatorSurface = View{
@@ -311,23 +318,34 @@ script_mod! {
                 }
             }
         }
+        // Landscape header, 56 pt: history (48) · 8 · Deg/Rad (48) · the
+        // right-aligned expression (12/16) over the result (32/40).
         short_bar := View{
             visible: false
-            width: Fill height: 44
+            width: Fill height: 56
             flow: Right align: Align{y: 0.5} spacing: 8
-            short_history := IconBtn{
+            // Flat, not glass: the glass disc refracted the key row under it
+            // into a coloured smear beside the icon.
+            short_history := ButtonFlat{
+                width: 48 height: 48 text: "" margin: 0 padding: 0 spacing: 0
+                align: Align{x: 0.5 y: 0.5}
+                icon_walk: Walk{width: 24 height: 24}
                 draw_icon +: {
                     svg: crate_resource("self:resources/icons/history.svg")
                     color: theme.color_text
                 }
+                draw_bg +: {
+                    color: theme.color_inset_1 color_hover: theme.color_inset_hover color_down: theme.color_inset_down
+                    border_size: 0.0 border_radius: 24.0
+                }
             }
             short_status := Label{
-                width: Fit height: Fill
+                width: 48 height: Fit
                 padding: 0
-                align: Align{y: 1.0}
+                align: Align{x: 0.5 y: 0.5}
                 draw_text +: {
                     color: mix(theme.color_text, theme.color_bg_app, 0.2)
-                    text_style: theme.font_regular{font_size: 9}
+                    text_style: theme.font_regular{font_size: 10.5}
                 }
             }
             short_retry := Button{visible: false text: "Retry" width: Fit height: 44}
@@ -336,19 +354,25 @@ script_mod! {
                 width: Fill height: Fill
                 flow: Down
                 short_expr := Label{
-                    width: Fill height: 16 padding: 0 max_lines: 1
+                    width: Fill height: 16 padding: 0 max_lines: 1 text_overflow: Ellipsis
                     align: Align{x: 1.0 y: 0.5}
                     draw_text +: {
                         color: mix(theme.color_text, theme.color_bg_app, 0.2)
-                        text_style: theme.font_regular{font_size: 10.5}
+                        text_style: theme.font_regular{font_size: 9}
                     }
                 }
-                short_result := Label{
-                    width: Fill height: 28 padding: 0 max_lines: 1
+                // Right-aligned while it fits; a result still too wide at
+                // 24 pt pans sideways instead of clipping.
+                short_result_scroll := ScrollXView{
+                    width: Fill height: 40
                     align: Align{x: 1.0 y: 0.5}
-                    draw_text +: {
-                        color: theme.color_text
-                        text_style: theme.font_regular{font_size: 21}
+                    short_result := Label{
+                        width: Fit height: Fill padding: 0 max_lines: 1
+                        align: Align{y: 0.5}
+                        draw_text +: {
+                            color: theme.color_text
+                            text_style: theme.font_regular{font_size: 24}
+                        }
                     }
                 }
             }
@@ -855,7 +879,7 @@ impl CalculatorView {
             script_apply_eval!(cx, w, { draw_text.text_style.font_size: #(util_fs) });
         }
         let top_inset = if metrics.show_short_bar { 4.0 } else if metrics.class.width == WidthClass::Compact { 8.0 } else { pad };
-        let toolbar_h = if metrics.show_toolbar { if metrics.class.width == WidthClass::Compact { 44.0 } else { 48.0 } } else if metrics.show_short_bar { 44.0 } else { 0.0 };
+        let toolbar_h = if metrics.show_toolbar { 48.0 } else if metrics.show_short_bar { metrics.short_bar_h } else { 0.0 };
         let display_h = if !metrics.show_display { 0.0 } else if metrics.class.width == WidthClass::Compact { 136.0 } else { 128.0 };
         let gap_h = if metrics.show_short_bar { 8.0 } else { 16.0 };
         let keypad_h = 5.0 * kh + 4.0 * vg;
@@ -863,6 +887,17 @@ impl CalculatorView {
         let viewport_h = keypad_h.min(remaining);
         let mut toolbar = self.widget(cx, ids!(toolbar));
         script_apply_eval!(cx, toolbar, { height: #(toolbar_h) });
+        if metrics.show_short_bar {
+            let bar_h = metrics.short_bar_h;
+            let mut short_bar = self.widget(cx, ids!(short_bar));
+            script_apply_eval!(cx, short_bar, { height: #(bar_h) });
+            // The 44 pt fallback header shrinks its children with it.
+            let target = bar_h.min(48.0);
+            let mut history = self.widget(cx, ids!(short_history));
+            script_apply_eval!(cx, history, { width: #(target) height: #(target) draw_bg +: {border_radius: #(target * 0.5)} });
+            let mut scroll = self.widget(cx, ids!(short_result_scroll));
+            script_apply_eval!(cx, scroll, { height: #(bar_h - 16.0) });
+        }
         let mut display = self.widget(cx, ids!(display));
         script_apply_eval!(cx, display, { height: #(display_h) });
         let mut air = self.widget(cx, ids!(air));
@@ -885,6 +920,9 @@ impl CalculatorView {
         } else {
             32.0
         };
+        // Each display fits on its own allocation: in landscape the portrait
+        // `result` is hidden and has none, which must not skip `short_result`.
+        self.fit_short_result(cx, metrics, &text);
         let width = self.widget(cx, ids!(result)).area().rect(cx).size.x;
         if width < 8.0 {
             return;
@@ -908,8 +946,32 @@ impl CalculatorView {
                 pt -= 2.0;
             }
         }
+    }
+
+    /// The landscape result: 32/40 in the 56 pt header (its line box is
+    /// the header less the 16 pt expression line), stepping down to 24 pt
+    /// before it would crowd the header controls; past that it pans.
+    fn fit_short_result(&mut self, cx: &mut Cx, metrics: LayoutMetrics, text: &str) {
+        if !metrics.show_short_bar {
+            return;
+        }
+        let line_box = (metrics.short_bar_h - 16.0).max(20.0);
+        let max_pt = metrics.result_pt.min(32.0).min((line_box * 0.8).floor());
+        let min_pt = max_pt.min(24.0);
+        let width = self.widget(cx, ids!(short_result_scroll)).area().rect(cx).size.x;
         if let Some(mut label) = self.label(cx, ids!(short_result)).borrow_mut() {
-            label.draw_text.text_style.font_size = font_size_for_pt(metrics.result_pt.min(28.0)) as f32;
+            let mut pt = max_pt;
+            loop {
+                label.draw_text.text_style.font_size = font_size_for_pt(pt) as f32;
+                if width < 8.0 || pt <= min_pt {
+                    break;
+                }
+                let laid = label.draw_text.layout(cx, 0.0, 0.0, None, false, Align { x: 1.0, y: 0.5 }, text);
+                if laid.size_in_lpxs.width as f64 <= width - 4.0 {
+                    break;
+                }
+                pt = (pt - 2.0).max(min_pt);
+            }
         }
     }
 
@@ -1437,6 +1499,12 @@ mod tests {
                 assert!(rect.pos.y + rect.size.y <= viewport.pos.y + viewport.size.y + 0.1, "key clipped by {viewport:?}: {rect:?}");
             }
             if size.y == 300.0 {
+                // The 44 pt fallback header holds its children.
+                let bar = view.widget(&mut cx, ids!(short_bar)).area().rect(&cx);
+                for id in [ids!(short_history), ids!(short_result_scroll), ids!(short_expr)] {
+                    let r = view.widget(&mut cx, id).area().rect(&cx);
+                    assert!(r.pos.y >= bar.pos.y - 0.1 && r.pos.y + r.size.y <= bar.pos.y + bar.size.y + 0.1, "{id:?} {r:?} outside {bar:?}");
+                }
                 assert!((viewport.pos.y - 56.0).abs() < 0.1, "{viewport:?}");
                 assert!((viewport.size.y - 236.0).abs() < 0.1, "{viewport:?}");
             }

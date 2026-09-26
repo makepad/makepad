@@ -1,5 +1,14 @@
 // The status bar, utility panel and F10 tools read one worker snapshot.
 impl App {
+    /// The caption's usage button and its surrounding island.
+    fn usage_island_ids(provider: UsageProvider) -> (LiveId, LiveId) {
+        match provider {
+            UsageProvider::Claude => (id!(fable_usage), id!(fable_island)),
+            UsageProvider::Codex => (id!(astra_usage), id!(astra_island)),
+            UsageProvider::Grok => (id!(grok_usage), id!(grok_island)),
+        }
+    }
+
     fn hide_usage_email(&mut self, cx: &mut Cx) {
         self.usage_email_hover = None;
         if self.usage_email_visible {
@@ -11,26 +20,40 @@ impl App {
     fn handle_usage_email_hover(&mut self, cx: &mut Cx, event: &Event) {
         if self.usage_history_provider.is_some()
             || self.ui.modal(cx, ids!(utility_overlay)).is_open()
-            || matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
-                | Event::KeyDown(_) | Event::TouchUpdate(_) | Event::WindowLostFocus(_) | Event::MouseLeave(_)
-                | Event::WindowGeomChange(_)) {
+            || matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseUp(_)
+                    | Event::Scroll(_)
+                    | Event::KeyDown(_)
+                    | Event::TouchUpdate(_)
+                    | Event::WindowLostFocus(_)
+                    | Event::MouseLeave(_)
+                    | Event::WindowGeomChange(_)
+            )
+        {
             self.hide_usage_email(cx);
             return;
         }
         let now = cx.seconds_since_app_start();
         if let Event::MouseMove(pointer) = event {
             let strip = self.ui.view(cx, ids!(usage_strip)).area().rect(cx);
-            let provider = [(UsageProvider::Claude, id!(fable_usage)), (UsageProvider::Codex, id!(astra_usage))]
-                .into_iter().find_map(|(provider, id)| {
-                    let area = self.ui.view(cx, &[id]).area();
-                    (!area.is_empty() && strip.contains(pointer.abs) && area.rect(cx).contains(pointer.abs)).then_some(provider)
-                });
+            let provider = UsageProvider::ALL.into_iter().find_map(|provider| {
+                let (id, _) = Self::usage_island_ids(provider);
+                let area = self.ui.view(cx, &[id]).area();
+                (!area.is_empty()
+                    && strip.contains(pointer.abs)
+                    && area.rect(cx).contains(pointer.abs))
+                .then_some(provider)
+            });
             if provider != self.usage_email_hover.map(|(provider, _)| provider) {
                 self.hide_usage_email(cx);
                 self.usage_email_hover = provider.map(|provider| (provider, now));
             }
         }
-        let Some((provider, entered)) = self.usage_email_hover else { return; };
+        let Some((provider, entered)) = self.usage_email_hover else {
+            return;
+        };
         let age = now - entered;
         if age >= 4.35 {
             if self.usage_email_visible {
@@ -39,16 +62,31 @@ impl App {
             }
             // Keep the expired hover until the pointer leaves this button.
         } else if age >= 0.35 {
-            let email = self.usage_snapshot.provider(provider)
-                .and_then(|usage| usage.account_email.as_deref()).unwrap_or("Account unavailable");
+            let email = self
+                .usage_snapshot
+                .provider(provider)
+                .and_then(|usage| usage.account_email.as_deref())
+                // Grok's CLI reports the allowance without a readable identity.
+                .unwrap_or(if provider == UsageProvider::Grok {
+                    "Account email is not reported by the Grok CLI"
+                } else {
+                    "Account unavailable"
+                });
             if self.usage_email_visible {
-                self.ui.tooltip(cx, ids!(usage_email_tooltip)).set_text(cx, email);
+                self.ui
+                    .tooltip(cx, ids!(usage_email_tooltip))
+                    .set_text(cx, email);
             } else {
-                let id = if provider == UsageProvider::Claude { id!(fable_usage) } else { id!(astra_usage) };
+                let (id, _) = Self::usage_island_ids(provider);
                 let rect = self.ui.view(cx, &[id]).area().rect(cx);
                 let size = self.ui.window(cx, ids!(main_window)).get_inner_size(cx);
-                let pos = dvec2(rect.pos.x.clamp(8.0, (size.x - 344.0).max(8.0)), rect.pos.y + rect.size.y + 5.0);
-                self.ui.tooltip(cx, ids!(usage_email_tooltip)).show_with_options(cx, pos, email);
+                let pos = dvec2(
+                    rect.pos.x.clamp(8.0, (size.x - 344.0).max(8.0)),
+                    rect.pos.y + rect.size.y + 5.0,
+                );
+                self.ui
+                    .tooltip(cx, ids!(usage_email_tooltip))
+                    .show_with_options(cx, pos, email);
                 self.usage_email_visible = true;
             }
         }
@@ -62,40 +100,66 @@ impl App {
     fn toggle_usage_history(&mut self, cx: &mut Cx, provider: UsageProvider) {
         self.hide_usage_email(cx);
         if self.usage_history_provider == Some(provider)
-            && self.ui.modal(cx, ids!(usage_history_overlay)).is_open() {
+            && self.ui.modal(cx, ids!(usage_history_overlay)).is_open()
+        {
             self.close_usage_history(cx);
             return;
         }
         self.close_utility(cx);
         self.usage_history_provider = Some(provider);
-        self.ui.label(cx, ids!(usage_history_title)).set_text(cx, &format!("{} · Account history", provider.label()));
+        self.ui
+            .label(cx, ids!(usage_history_title))
+            .set_text(cx, &format!("{} · Account history", provider.label()));
         self.refresh_usage_history(cx);
         self.ui.modal(cx, ids!(usage_history_overlay)).open(cx);
     }
 
     fn refresh_usage_history(&self, cx: &mut Cx) {
-        let Some(provider) = self.usage_history_provider else { return; };
-        if let Some(mut view) = self.ui.widget(cx, ids!(usage_history_list)).borrow_mut::<StudioUsageHistoryView>() {
+        let Some(provider) = self.usage_history_provider else {
+            return;
+        };
+        if let Some(mut view) = self
+            .ui
+            .widget(cx, ids!(usage_history_list))
+            .borrow_mut::<StudioUsageHistoryView>()
+        {
             view.set_snapshot(cx, self.usage_snapshot.clone(), provider);
         }
         self.refresh_usage_history_layout(cx);
     }
 
     fn refresh_usage_history_layout(&self, cx: &mut Cx) {
-        let Some(provider) = self.usage_history_provider else { return; };
-        let island = if provider == UsageProvider::Claude { id!(fable_island) } else { id!(astra_island) };
+        let Some(provider) = self.usage_history_provider else {
+            return;
+        };
+        let (_, island) = Self::usage_island_ids(provider);
         let anchor = self.ui.view(cx, &[island]).area().rect(cx);
         let size = self.ui.window(cx, ids!(main_window)).get_inner_size(cx);
-        if size.x <= 0.0 || size.y <= 0.0 { return; }
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
         let width = (size.x - 16.0).clamp(1.0, 560.0);
         let y = (anchor.pos.y + anchor.size.y + 5.0).clamp(8.0, (size.y - 80.0).max(8.0));
         let x = anchor.pos.x.clamp(8.0, (size.x - width - 8.0).max(8.0));
-        let preferred = self.ui.widget(cx, ids!(usage_history_list)).borrow::<StudioUsageHistoryView>()
-            .map(|view| view.preferred_height()).unwrap_or(100.0);
-        let height = (preferred + 54.0).clamp(110.0, 420.0).min((size.y - y - 8.0).max(1.0));
-        if let Some(mut content) = self.ui.view(cx, ids!(usage_history_overlay.content)).borrow_mut() {
+        let preferred = self
+            .ui
+            .widget(cx, ids!(usage_history_list))
+            .borrow::<StudioUsageHistoryView>()
+            .map(|view| view.preferred_height())
+            .unwrap_or(100.0);
+        let height = (preferred + 54.0)
+            .clamp(110.0, 420.0)
+            .min((size.y - y - 8.0).max(1.0));
+        if let Some(mut content) = self
+            .ui
+            .view(cx, ids!(usage_history_overlay.content))
+            .borrow_mut()
+        {
             let pos = Some(dvec2(x, y));
-            if content.walk.width != Size::Fixed(width) || content.walk.height != Size::Fixed(height) || content.walk.abs_pos != pos {
+            if content.walk.width != Size::Fixed(width)
+                || content.walk.height != Size::Fixed(height)
+                || content.walk.abs_pos != pos
+            {
                 content.walk.width = Size::Fixed(width);
                 content.walk.height = Size::Fixed(height);
                 content.walk.abs_pos = pos;
@@ -105,10 +169,17 @@ impl App {
     }
 
     fn handle_usage_history_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.modal(cx, ids!(usage_history_overlay)).dismissed(actions) {
+        if self
+            .ui
+            .modal(cx, ids!(usage_history_overlay))
+            .dismissed(actions)
+        {
             self.close_usage_history(cx);
         }
-        for (id, provider) in [(id!(fable_history), UsageProvider::Claude), (id!(astra_history), UsageProvider::Codex)] {
+        for (id, provider) in [
+            (id!(fable_history), UsageProvider::Claude),
+            (id!(astra_history), UsageProvider::Codex),
+        ] {
             if self.ui.button(cx, &[id]).clicked(actions) {
                 self.toggle_usage_history(cx, provider);
             }
@@ -117,7 +188,9 @@ impl App {
     }
 
     fn handle_usage_history_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
-        if self.usage_history_provider.is_none() { return false; }
+        if self.usage_history_provider.is_none() {
+            return false;
+        }
         match event {
             Event::KeyDown(key) if key.key_code == KeyCode::Escape => return true,
             Event::KeyUp(key) if key.key_code == KeyCode::Escape => {
@@ -149,6 +222,8 @@ impl App {
         match provider {
             Some("claude") => Some(UsageProvider::Claude),
             Some("codex") => Some(UsageProvider::Codex),
+            // A Grok lane raises no limit report and has no account recovery
+            // yet, so it takes no slot in the stall baselines either.
             _ => None,
         }
     }
@@ -212,6 +287,10 @@ impl App {
                 "Sign out and sign in",
                 "Save this lane’s verified conversation ID, then sign out of Codex and open browser sign-in. Resume that exact conversation after login.\n\nThis changes the shared Codex account used by other lanes.",
             ),
+            UsageProvider::Grok => {
+                self.flow_note(cx, "Account recovery is available for Fable and Astra lanes");
+                return;
+            }
         };
         let message = format!("{}\n\n{explanation}", lane.title);
         self.show_utility(
@@ -220,8 +299,12 @@ impl App {
             id!(ProviderRecoveryConfirmTab),
             title,
         );
-        self.ui.label(cx, ids!(provider_recovery_message)).set_text(cx, &message);
-        self.ui.button(cx, ids!(provider_recovery_accept)).set_text(cx, accept);
+        self.ui
+            .label(cx, ids!(provider_recovery_message))
+            .set_text(cx, &message);
+        self.ui
+            .button(cx, ids!(provider_recovery_accept))
+            .set_text(cx, accept);
         // Freeze the lane now; changing selection while the popup is open
         // must not redirect an account operation to a different conversation.
         self.usage_recovery_confirmation = Some((provider, flow));
@@ -236,22 +319,40 @@ impl App {
             self.usage_recovery_confirmation = None;
             return;
         }
-        if self.ui.button(cx, ids!(provider_recovery_cancel)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(provider_recovery_cancel))
+            .clicked(actions)
+        {
             self.close_utility(cx);
             return;
         }
-        if !self.ui.button(cx, ids!(provider_recovery_accept)).clicked(actions) {
+        if !self
+            .ui
+            .button(cx, ids!(provider_recovery_accept))
+            .clicked(actions)
+        {
             return;
         }
         let Some((provider, flow)) = self.usage_recovery_confirmation.take() else {
             return;
         };
         self.close_utility(cx);
-        if !self.iterations.snapshot.engine.flows.get(&flow).is_some_and(|lane| {
-            lane.lifecycle == iteration::FlowLifecycle::Active
-                && self.flow_usage_provider(&flow) == Some(provider)
-        }) {
-            self.flow_note(cx, "This lane is no longer connected to that provider; recovery was canceled");
+        if !self
+            .iterations
+            .snapshot
+            .engine
+            .flows
+            .get(&flow)
+            .is_some_and(|lane| {
+                lane.lifecycle == iteration::FlowLifecycle::Active
+                    && self.flow_usage_provider(&flow) == Some(provider)
+            })
+        {
+            self.flow_note(
+                cx,
+                "This lane is no longer connected to that provider; recovery was canceled",
+            );
             return;
         }
         self.iterations.selected = Some(flow.clone());
@@ -281,11 +382,17 @@ impl App {
                 .collect::<Vec<_>>(),
         );
         for (flow, provider) in flows {
-            let Some(tab) = self.terminal_view_for_flow(&flow) else { continue; };
+            let Some(tab) = self.terminal_view_for_flow(&flow) else {
+                continue;
+            };
             let Some(binding) = self.agent_sessions.bindings.get(&tab) else {
                 continue;
             };
-            let generation = self.agent_sessions.mirrors.get(&tab).or(binding.info.as_ref())
+            let generation = self
+                .agent_sessions
+                .mirrors
+                .get(&tab)
+                .or(binding.info.as_ref())
                 .map(|info| info.supervisor_pid as u64)
                 .unwrap_or(tab);
             let Ok(widget) = self.terminal(cx, tab) else {
@@ -306,15 +413,82 @@ impl App {
             };
         }
     }
+    /// Usage as the global status shows it: which providers were observed and
+    /// whether a lane reported a limit. Windows, plans, accounts and their
+    /// history are read with `inspect_usage`.
+    fn usage_status_json(&self) -> Value {
+        let reports: Vec<Value> = UsageProvider::ALL
+            .into_iter()
+            .flat_map(|provider| self.usage_stalls.reports(provider))
+            .map(|report| {
+                json::obj(vec![
+                    ("flow", json::s(&report.lane)),
+                    ("provider", json::s(report.provider.as_str())),
+                    ("status", json::s(report.label())),
+                    ("observed_at", Value::Int(report.observed_at as i64)),
+                ])
+            })
+            .collect();
+        let (reports, omitted) = bounded_rows(reports, 1024);
+        json::obj(vec![
+            (
+                "providers",
+                Value::Arr(
+                    self.usage_snapshot
+                        .providers
+                        .iter()
+                        .map(|provider| {
+                            json::obj(vec![
+                                ("provider", json::s(provider.provider.as_str())),
+                                ("observed_at", Value::Int(provider.observed_at as i64)),
+                                ("stale", Value::Bool(provider.is_stale(disk::now()))),
+                                ("error", Value::Bool(provider.error.is_some())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            ("limit_reports", Value::Arr(reports)),
+            ("omitted_limit_reports", Value::Int(omitted as i64)),
+            (
+                "accounts_in_history",
+                Value::Int(self.usage_snapshot.account_history.len() as i64),
+            ),
+            (
+                "error",
+                Value::Bool(
+                    self.usage_error.is_some() || self.usage_snapshot.history_error.is_some(),
+                ),
+            ),
+            ("detail", json::s("inspect_usage")),
+        ])
+    }
+
     fn usage_json(&self) -> Value {
         let number = |value: Option<f64>| value.map(Value::F64).unwrap_or(Value::Null);
         json::obj(vec![
-            ("account_history", Value::Arr(self.usage_snapshot.account_history.iter().map(|account| account.json()).collect())),
-            ("history_error", self.usage_snapshot.history_error.as_ref().map(json::s).unwrap_or(Value::Null)),
+            (
+                "account_history",
+                Value::Arr(
+                    self.usage_snapshot
+                        .account_history
+                        .iter()
+                        .map(|account| account.json())
+                        .collect(),
+                ),
+            ),
+            (
+                "history_error",
+                self.usage_snapshot
+                    .history_error
+                    .as_ref()
+                    .map(json::s)
+                    .unwrap_or(Value::Null),
+            ),
             (
                 "limit_reports",
                 Value::Arr(
-                    [UsageProvider::Claude, UsageProvider::Codex]
+                    UsageProvider::ALL
                         .into_iter()
                         .flat_map(|p| self.usage_stalls.reports(p))
                         .map(|r| {
@@ -375,7 +549,7 @@ impl App {
                                 (
                                     "windows",
                                     Value::Arr(
-                                        p.limits()
+                                        [p.limits()[0], p.period_limit()]
                                             .into_iter()
                                             .flatten()
                                             .map(|w| {
@@ -433,20 +607,13 @@ impl App {
     }
 
     fn refresh_usage_panel(&self, cx: &mut Cx) {
-        for (provider, id, island, recovery) in [
-            (
-                UsageProvider::Claude,
-                id!(fable_usage),
-                id!(fable_island),
-                id!(fable_recover),
-            ),
-            (
-                UsageProvider::Codex,
-                id!(astra_usage),
-                id!(astra_island),
-                id!(astra_recover),
-            ),
+        for (provider, recovery) in [
+            (UsageProvider::Claude, Some(id!(fable_recover))),
+            (UsageProvider::Codex, Some(id!(astra_recover))),
+            // Grok lanes have no account recovery, so its island has no control.
+            (UsageProvider::Grok, None),
         ] {
+            let (id, island) = Self::usage_island_ids(provider);
             let limit = if self.usage_stalls.reports(provider).is_empty() {
                 0.0f32
             } else {
@@ -456,17 +623,22 @@ impl App {
             script_apply_eval!(cx, group, {draw_bg +: {limit_reached: #(limit)}});
             group.redraw(cx);
             let p = self.usage_snapshot.provider(provider);
-            let limits = p.map(|p| p.limits()).unwrap_or([None, None]);
+            let limits = p
+                .map(|p| [p.limits()[0], p.period_limit()])
+                .unwrap_or([None, None]);
             // LIMIT shares ProviderPercent's theme style but never receives a
             // quota color, so it remains the normal-color reference on recovery
             // below a threshold or when a value becomes unavailable.
-            let normal_percent_color = self.ui.widget(cx, &[id, id!(usage_limit)])
-                .borrow::<Label>().map(|label| label.draw_text.color);
+            let normal_percent_color = self
+                .ui
+                .widget(cx, &[id, id!(usage_limit)])
+                .borrow::<Label>()
+                .map(|label| label.draw_text.color);
             for (index, percent, reset) in [
                 (0, id!(percent_session), id!(reset_session)),
                 (1, id!(percent_week), id!(reset_week)),
             ] {
-                if index == 0 && provider == UsageProvider::Codex {
+                if index == 0 && provider != UsageProvider::Claude {
                     continue;
                 }
                 let used = limits[index]
@@ -478,10 +650,23 @@ impl App {
                 let label = self.ui.label(cx, &[id, percent]);
                 label.set_text(cx, &value);
                 if let Some(normal) = normal_percent_color {
-                    let dark_surface = normal.x * 0.2126 + normal.y * 0.7152 + normal.z * 0.0722 > 0.5;
+                    let dark_surface =
+                        normal.x * 0.2126 + normal.y * 0.7152 + normal.z * 0.0722 > 0.5;
                     let color = match used {
-                        Some(value) if value >= 90.0 => if dark_surface { vec4(1.0, 0.39, 0.43, 1.0) } else { vec4(0.77, 0.12, 0.18, 1.0) },
-                        Some(value) if value >= 80.0 => if dark_surface { vec4(0.98, 0.65, 0.25, 1.0) } else { vec4(0.70, 0.36, 0.04, 1.0) },
+                        Some(value) if value >= 90.0 => {
+                            if dark_surface {
+                                vec4(1.0, 0.39, 0.43, 1.0)
+                            } else {
+                                vec4(0.77, 0.12, 0.18, 1.0)
+                            }
+                        }
+                        Some(value) if value >= 80.0 => {
+                            if dark_surface {
+                                vec4(0.98, 0.65, 0.25, 1.0)
+                            } else {
+                                vec4(0.70, 0.36, 0.04, 1.0)
+                            }
+                        }
                         _ => normal,
                     };
                     label.set_text_color(cx, color);
@@ -490,6 +675,13 @@ impl App {
                     .map(|window| window.reset_brief())
                     .unwrap_or_else(|| "—".into());
                 self.ui.label(cx, &[id, reset]).set_text(cx, &value);
+            }
+            if provider == UsageProvider::Grok {
+                // Grok names its own credit period: a month is never shown as a week.
+                let month = limits[1].is_some_and(|window| window.scope == Some("month"));
+                self.ui
+                    .label(cx, &[id, id!(scope_week)])
+                    .set_text(cx, if month { "M" } else { "W" });
             }
             // the quiet slot reads "refreshing…" while this provider's fetch
             // runs, else "stale" once the last observation is old
@@ -512,7 +704,7 @@ impl App {
                 id!(reset_week),
                 id!(usage_stale),
             ] {
-                if provider == UsageProvider::Codex
+                if provider != UsageProvider::Claude
                     && [id!(scope_session), id!(percent_session), id!(reset_session)]
                         .contains(&segment)
                 {
@@ -526,6 +718,9 @@ impl App {
                 }
             }
             self.ui.widget(cx, &[id]).redraw(cx);
+            let Some(recovery) = recovery else {
+                continue;
+            };
             if let Some(mut button) = self.ui.widget(cx, &[recovery]).borrow_mut::<Button>() {
                 button
                     .draw_icon
@@ -549,15 +744,21 @@ impl App {
         for (kind, label) in [
             (UsageProvider::Codex, id!(codex_usage_report)),
             (UsageProvider::Claude, id!(claude_usage_report)),
+            (UsageProvider::Grok, id!(grok_usage_report)),
         ] {
             let text = self
                 .usage_snapshot
                 .provider(kind)
                 .map(|p| {
-                    let mut text = ["Session", "Week"]
+                    let period = p.period_limit();
+                    let period_label = if period.is_some_and(|w| w.scope == Some("month")) {
+                        "Month"
+                    } else {
+                        "Week"
+                    };
+                    let mut text = [("Session", p.limits()[0]), (period_label, period)]
                         .into_iter()
-                        .zip(p.limits())
-                        .filter(|(label, _)| kind == UsageProvider::Claude || *label == "Week")
+                        .filter(|(label, _)| kind == UsageProvider::Claude || *label != "Session")
                         .map(|(label, window)| match window {
                             Some(w) => format!(
                                 "{label}: {} used · {}",
@@ -570,9 +771,21 @@ impl App {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    if kind == UsageProvider::Grok {
+                        // A credit period Grok names otherwise stays under its own name.
+                        for window in p.windows.iter().filter(|w| w.scope.is_none()) {
+                            text.push_str(&format!("\n{}", window.summary()));
+                        }
+                    }
                     text.push_str(&format!(
                         "\nAccount: {}",
-                        p.account_email.as_deref().unwrap_or("unavailable")
+                        p.account_email
+                            .as_deref()
+                            .unwrap_or(if kind == UsageProvider::Grok {
+                                "not reported by the Grok CLI"
+                            } else {
+                                "unavailable"
+                            })
                     ));
                     if p.observed_at > 0 {
                         let age = disk::now().saturating_sub(p.observed_at) / 60;

@@ -5,15 +5,19 @@
 //! OS implements that trait with its own native mechanism — never by shelling
 //! out to `ps`/`top` and scraping text.
 //!
-//! * [`macos`]   — sysctl `KERN_PROC_ALL` (pid/ppid/uid/state/name), libproc
-//!                 `proc_pidinfo(PROC_PIDTASKINFO)` (cpu time / rss / threads),
+//! * [`macos`]   — sysctl `KERN_PROC_ALL` (pid/ppid/uid/state/name/start),
+//!                 libproc `proc_pidinfo` (task/thread/fd/region info),
+//!                 `proc_pid_rusage` (footprint, disk bytes),
 //!                 mach `host_processor_info` (per-core ticks),
 //!                 `host_statistics64(HOST_VM_INFO64)` + `hw.memsize` (memory),
-//!                 sysctl `NET_RT_IFLIST2` (`if_msghdr2`) for interface bytes.
-//! * [`linux`]   — `/proc` (`stat`, `meminfo`, `net/dev`, `loadavg`, `uptime`,
-//!                 `<pid>/stat|status|cmdline`, `/etc/passwd` for uid → name).
-//! * [`windows`] — Win32: `CreateToolhelp32Snapshot` + `Process32*W` for the
-//!                 list and the tree, `GetProcessTimes`/`K32GetProcessMemoryInfo`
+//!                 sysctl `NET_RT_IFLIST2` (`if_msghdr2`) for interface bytes,
+//!                 IOKit `IOBlockStorageDriver` statistics (disk bytes) and
+//!                 `IOAccelerator` performance statistics (GPU utilisation).
+//! * [`linux`]   — `/proc` (`stat`, `meminfo`, `net/dev`, `diskstats`,
+//!                 `loadavg`, `uptime`, `<pid>/stat|status|cmdline|task|fd|maps`,
+//!                 `net/tcp|udp`, `/etc/passwd` for uid → name).
+//! * [`windows`] — Win32: `CreateToolhelp32Snapshot` for processes, threads
+//!                 and modules, `GetProcessTimes`/`K32GetProcessMemoryInfo`
 //!                 per process, `NtQuerySystemInformation` per core,
 //!                 `GlobalMemoryStatusEx` + `K32GetPerformanceInfo` for memory,
 //!                 `GetIfTable2Ex` for network, `TerminateProcess` for the kill.
@@ -23,15 +27,17 @@
 //! [`new_backend`] picks by `cfg(target_os)`, and only the Windows module's
 //! FFI half is behind `cfg(windows)`.
 //!
-//! Verified live on macOS. Linux and Windows are compile-checked for
-//! `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc` with their pure
-//! parts covered by tests; neither has run on its own hardware yet.
+//! A metric an OS cannot measure is reported as [`Reading::Unavailable`] with
+//! the reason, never as a number made up from something else.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "macos")]
+pub mod macos_ntstat;
 pub mod windows;
 
 /// Scheduler state of a process, normalised across operating systems.
@@ -61,24 +67,157 @@ impl ProcState {
             ProcState::Unknown => "?",
         }
     }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            ProcState::Running => "running",
+            ProcState::Sleeping => "sleeping",
+            ProcState::Waiting => "uninterruptible wait",
+            ProcState::Idle => "idle",
+            ProcState::Stopped => "stopped",
+            ProcState::Zombie => "zombie",
+            ProcState::Unknown => "not inspectable",
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            ProcState::Running => 1,
+            ProcState::Sleeping => 2,
+            ProcState::Waiting => 3,
+            ProcState::Idle => 4,
+            ProcState::Stopped => 5,
+            ProcState::Zombie => 6,
+            ProcState::Unknown => 0,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ProcState::Running,
+            2 => ProcState::Sleeping,
+            3 => ProcState::Waiting,
+            4 => ProcState::Idle,
+            5 => ProcState::Stopped,
+            6 => ProcState::Zombie,
+            _ => ProcState::Unknown,
+        }
+    }
 }
 
-/// One process as every backend reports it.
-#[derive(Clone, Debug, Default)]
-pub struct ProcInfo {
+/// The identity of one process incarnation: a pid *and* the precise moment
+/// it started, so a pid the kernel hands out again never continues a dead
+/// process' history or receives a signal meant for it.
+///
+/// `start` is the OS's own precise start stamp, opaque to the UI: microseconds
+/// since the epoch on macOS (`pbi_start_tvsec/usec`), boot time plus raw
+/// start ticks on Linux, the full creation `FILETIME` on Windows. `0` means
+/// the backend could not read a start time — an *unverified* identity, on
+/// which no destructive action is taken.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProcKey {
     pub pid: u32,
+    pub start: u64,
+}
+
+impl ProcKey {
+    pub fn verified(&self) -> bool {
+        self.start != 0
+    }
+}
+
+/// The descriptive side of one process incarnation. Interned by the backend
+/// and shared (`Arc`) by every sample that mentions it, so a 0.1 s tick never
+/// copies a thousand command lines. Most of it is fixed for the life of the
+/// incarnation, but a parent can exit (reparenting) and a process can exec:
+/// when any field changes the backend interns a NEW `Arc` for the same key,
+/// so older samples keep the metadata that was true when they were taken.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ProcMeta {
+    pub key: ProcKey,
     pub ppid: u32,
     pub user: String,
     /// Short program name (basename of the executable, or the kernel's comm).
     pub name: String,
     /// Full command line where the OS lets us read it, else the exe path.
     pub cmdline: String,
+    /// Wall-clock start, seconds since the epoch, 0 when unknown.
+    pub started_secs: u64,
+    /// A user-facing application: an `.app` bundle executable on macOS; on
+    /// Linux and Windows the current user's own user-space processes.
+    pub is_app: bool,
+}
+
+/// One process as every backend reports it, per tick.
+#[derive(Clone, Debug)]
+pub struct ProcInfo {
+    pub meta: Arc<ProcMeta>,
     /// Percent of one core, so a busy 8-thread process reads ~800.
     pub cpu_pct: f64,
     pub mem_rss: u64,
+    /// Cumulative user+system CPU time, when the OS lets us read it.
+    pub cpu_time_ns: Option<u64>,
     pub state: ProcState,
     pub threads: u32,
+    /// The rest of what the same OS records held, kept rather than dropped.
+    pub extra: ProcExtra,
 }
+
+/// Figures the basic sample reads for every process anyway, from the same
+/// OS record as its CPU and memory (`proc_taskinfo` + `kinfo_proc` on macOS,
+/// `/proc/<pid>/stat` on Linux, `PROCESS_MEMORY_COUNTERS` + the Toolhelp
+/// entry on Windows): no extra call per process. `None` where this OS's
+/// record has no such field. Counters are cumulative for the process' life;
+/// the Darwin task counters are 32-bit in the kernel and wrap, which a rate
+/// treats like a reset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcExtra {
+    pub virtual_bytes: Option<u64>,
+    pub faults: Option<u64>,
+    pub pageins: Option<u64>,
+    pub cow_faults: Option<u64>,
+    pub context_switches: Option<u64>,
+    pub syscalls: Option<u64>,
+    pub priority: Option<i32>,
+    pub nice: Option<i32>,
+    pub running_threads: Option<u32>,
+    pub commit_bytes: Option<u64>,
+    pub peak_resident: Option<u64>,
+    pub peak_commit: Option<u64>,
+    /// Bytes the process read from and wrote to storage (`ri_diskio_*` on
+    /// macOS, `/proc/<pid>/io` `read_bytes`/`write_bytes` on Linux,
+    /// `IO_COUNTERS` transfer bytes on Windows, which include network
+    /// and device I/O).
+    pub disk_read: Option<u64>,
+    pub disk_written: Option<u64>,
+    /// The kernel's memory ledger for the process (macOS `ri_phys_footprint`).
+    pub footprint: Option<u64>,
+    /// Wake-ups from idle over the process' life (macOS
+    /// `ri_pkg_idle_wkups`).
+    pub idle_wakeups: Option<u64>,
+    /// Network traffic of the process' sockets over its life: macOS
+    /// `ntstat` per-socket counters summed per process (sockets that
+    /// closed keep counting). `None` where the OS does not attribute
+    /// traffic to processes.
+    pub net_rx_bytes: Option<u64>,
+    pub net_tx_bytes: Option<u64>,
+    pub net_rx_packets: Option<u64>,
+    pub net_tx_packets: Option<u64>,
+}
+
+/// What a detail read should include beyond the cheap per-process figures
+/// (identity, memory ledger, counters). The descriptor walk and the
+/// address-space walk are the expensive parts; a pinned process' metric tick
+/// asks for neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Want {
+    pub threads: bool,
+    /// Descriptors and sockets (the Files and Ports tabs).
+    pub files: bool,
+    /// The mapped-file walk (the Libraries tab, region summary).
+    pub libraries: bool,
+}
+
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemInfo {
@@ -99,8 +238,33 @@ pub struct NetInfo {
     pub tx_per_second: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiskInfo {
+    pub read_total: u64,
+    pub write_total: u64,
+    pub read_per_second: f64,
+    pub write_per_second: f64,
+}
+
+/// A measurement the OS may or may not provide. `Unavailable` carries the
+/// reason the UI prints in the metric's place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reading<T> {
+    Value(T),
+    Unavailable(&'static str),
+}
+
+impl<T: Copy> Reading<T> {
+    pub fn value(&self) -> Option<T> {
+        match self {
+            Reading::Value(value) => Some(*value),
+            Reading::Unavailable(_) => None,
+        }
+    }
+}
+
 /// Everything one sampler tick collected.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Snapshot {
     /// Busy percent averaged over all cores (0..100).
     pub cpu_total: f64,
@@ -108,11 +272,194 @@ pub struct Snapshot {
     pub cpu_cores: Vec<f64>,
     pub mem: MemInfo,
     pub net: NetInfo,
+    pub disk: Reading<DiskInfo>,
+    /// GPU busy percent as the driver reports it.
+    pub gpu_pct: Reading<f64>,
+    /// Package power in watts. No backend measures it yet; it is never
+    /// estimated from CPU load.
+    pub power_watts: Reading<f64>,
     pub processes: Vec<ProcInfo>,
     pub load_avg: [f64; 3],
     pub uptime_seconds: u64,
-    /// Which backend produced this (shown in the window title bar).
+    /// Which backend produced this (shown in the status line).
     pub backend: &'static str,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            cpu_total: 0.0,
+            cpu_cores: Vec::new(),
+            mem: MemInfo::default(),
+            net: NetInfo::default(),
+            disk: Reading::Unavailable("no disk counters on this platform"),
+            gpu_pct: Reading::Unavailable("no GPU counters on this platform"),
+            power_watts: Reading::Unavailable("power is not measured"),
+            processes: Vec::new(),
+            load_avg: [0.0; 3],
+            uptime_seconds: 0,
+            backend: "unsupported",
+        }
+    }
+}
+
+// ---- per-process detail (the inspector) ----
+
+/// A detail block the OS either handed over or refused. `Unavailable`
+/// carries the reason ("permission denied", "not supported on windows"), and
+/// the inspector prints that instead of zeros.
+#[derive(Clone, Debug)]
+pub enum Detail<T> {
+    Ready(T),
+    Unavailable(String),
+}
+
+impl<T> Detail<T> {
+    pub fn denied() -> Self {
+        Detail::Unavailable("permission denied: the OS refused to open this process".to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThreadState {
+    Running,
+    Stopped,
+    Waiting,
+    Uninterruptible,
+    Halted,
+    #[default]
+    Unknown,
+}
+
+impl ThreadState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThreadState::Running => "Running",
+            ThreadState::Stopped => "Stopped",
+            ThreadState::Waiting => "Waiting",
+            ThreadState::Uninterruptible => "Uninterruptible",
+            ThreadState::Halted => "Halted",
+            ThreadState::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ThreadInfo {
+    /// The OS's handle for the thread: the thread id on Linux and Windows,
+    /// the kernel thread handle `PROC_PIDLISTTHREADS` returns on macOS.
+    pub id: u64,
+    pub name: String,
+    pub state: ThreadState,
+    /// Percent of one core, as the kernel's own recent estimate; `None`
+    /// where the OS keeps no such estimate per thread.
+    pub cpu_pct: Option<f64>,
+    /// Cumulative user+system time of this thread.
+    pub cpu_time_ns: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegionSummary {
+    pub regions: u32,
+    pub resident: u64,
+    pub private_resident: u64,
+    pub shared_resident: u64,
+}
+
+/// The memory part of a detail read beyond its numeric `measures` (which
+/// carry every memory figure with its OS name, see `metrics::Measure`).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryDetail {
+    /// Resident pages summed over the address-space walk; a different
+    /// measurement from the memory ledger (shared pages count in every
+    /// process that maps them).
+    pub regions: Option<RegionSummary>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileInfo {
+    pub fd: i32,
+    pub kind: &'static str,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PortInfo {
+    pub protocol: &'static str,
+    pub local: String,
+    pub remote: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LibraryInfo {
+    pub path: String,
+    /// Bytes mapped from this file.
+    pub mapped: u64,
+}
+
+/// Identity facts read straight from the OS for the inspected process.
+#[derive(Clone, Debug, Default)]
+pub struct IdentityDetail {
+    pub path: String,
+    pub status: String,
+    /// Read in the same call as the thread list, so the recorder can compare
+    /// the process with its threads over one interval.
+    pub cpu_time_ns: Option<u64>,
+    pub threads: u32,
+    pub running_threads: u32,
+}
+
+/// Everything the inspector shows for one process, collected in one go on
+/// the worker. `time_ms` is when it was collected: shown next to the data so
+/// a historical view can say exactly how old it is.
+#[derive(Clone, Debug)]
+pub struct ProcDetail {
+    pub key: ProcKey,
+    pub time_ms: u64,
+    pub identity: Detail<IdentityDetail>,
+    pub memory: Detail<MemoryDetail>,
+    pub threads: Detail<Vec<ThreadInfo>>,
+    pub files: Detail<Vec<FileInfo>>,
+    pub ports: Detail<Vec<PortInfo>>,
+    /// `None` when this collection skipped the (expensive) library walk; the
+    /// previous list stays valid.
+    pub libraries: Option<Detail<Vec<LibraryInfo>>>,
+    /// Every numeric reading this read produced that the basic sample does
+    /// not already carry, in [`crate::metrics::Measure`] units.
+    pub measures: Vec<(crate::metrics::Measure, i64)>,
+    /// The thread list is whole: a thread missing from it has ended. False
+    /// when the list was cut at its cap or a thread could not be read.
+    pub threads_complete: bool,
+    /// The descriptor list is whole: a descriptor missing from it was
+    /// closed. False when the list was cut at its cap.
+    pub files_complete: bool,
+}
+
+impl ProcDetail {
+    /// Every tab says the same thing: why nothing could be read.
+    pub fn unavailable(key: ProcKey, time_ms: u64, reason: &str) -> Self {
+        fn says<T>(reason: &str) -> Detail<T> {
+            Detail::Unavailable(reason.to_string())
+        }
+        Self {
+            key,
+            time_ms,
+            identity: says(reason),
+            memory: says(reason),
+            threads: says(reason),
+            files: says(reason),
+            ports: says(reason),
+            libraries: Some(says(reason)),
+            measures: Vec::new(),
+            threads_complete: false,
+            files_complete: false,
+        }
+    }
+
+    pub fn gone(key: ProcKey, time_ms: u64) -> Self {
+        Self::unavailable(key, time_ms, "the process is gone (or its pid now belongs to another process)")
+    }
 }
 
 /// One operating system's view of the machine.
@@ -121,6 +468,22 @@ pub trait SystemBackend: Send {
     fn sample(&mut self) -> Snapshot;
     /// Short backend name for the status line.
     fn name(&self) -> &'static str;
+    /// Detail for `key`, read now; `want` says which of the walks to run.
+    /// A part not asked for is `Unavailable("not collected")`.
+    fn detail(&mut self, key: ProcKey, want: Want) -> ProcDetail;
+    /// Re-read `key`'s start stamp and signal it only when it still matches.
+    /// Unix re-reads then calls `kill`, which leaves the (tiny) window of a
+    /// pid reused between the two calls; Windows checks and terminates
+    /// through one handle, so there is none.
+    fn signal_verified(&mut self, key: ProcKey, force: bool) -> Result<(), String>;
+    /// A direct check of one incarnation: `Some(true)` it runs, `Some(false)`
+    /// it is verifiably gone (no such pid, or the pid now has another start
+    /// stamp), `None` the OS would not say. Used before a process missing
+    /// from a list is recorded as exited: a list can miss a process it could
+    /// not read.
+    fn is_alive(&mut self, _key: ProcKey) -> Option<bool> {
+        None
+    }
 }
 
 /// The backend for the OS we were compiled for.
@@ -143,26 +506,26 @@ pub fn new_backend() -> Box<dyn SystemBackend> {
     }
 }
 
-/// Ask a process to exit.
+/// Ask a process to exit, but only the process the row meant: the start
+/// stamp is re-read first and a mismatch (the pid was reused, or the process
+/// is gone) refuses instead of signalling whatever holds the number now.
 ///
 /// `force` escalates: SIGTERM → SIGKILL on unix. Windows has no polite
 /// equivalent — `TerminateProcess` is always immediate — so `force` changes
 /// nothing there and the UI says as much.
-pub fn terminate(pid: u32, force: bool) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        unix_signal::terminate(pid, force)
+pub fn terminate(backend: &mut dyn SystemBackend, key: ProcKey, force: bool) -> Result<(), String> {
+    if is_protected(key.pid) {
+        return Err(format!("PID {} is protected and will not be signalled", key.pid));
     }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = force;
-        windows::terminate(pid)
+    if !key.verified() {
+        return Err(format!("PID {} has no verified start time; not signalled", key.pid));
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = (pid, force);
-        Err("no process backend for this platform".to_string())
-    }
+    backend.signal_verified(key, force)
+}
+
+/// Processes nothing in task will signal: the kernel, init/launchd, and task.
+pub fn is_protected(pid: u32) -> bool {
+    pid == 0 || pid == 1 || pid == std::process::id()
 }
 
 #[allow(dead_code)]
@@ -176,12 +539,20 @@ impl SystemBackend for Unsupported {
     }
 
     fn sample(&mut self) -> Snapshot {
-        Snapshot { backend: "unsupported", ..Snapshot::default() }
+        Snapshot::default()
+    }
+
+    fn detail(&mut self, key: ProcKey, _want: Want) -> ProcDetail {
+        ProcDetail::unavailable(key, now_ms(), "process detail: not available on this platform")
+    }
+
+    fn signal_verified(&mut self, _key: ProcKey, _force: bool) -> Result<(), String> {
+        Err("no process backend for this platform".to_string())
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod unix_signal {
+pub mod unix_signal {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -229,6 +600,48 @@ pub fn cpu_pct_from_ticks(current: [u64; CPU_STATES], previous: [u64; CPU_STATES
     }
     ((total - deltas[2]) as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
 }
+
+/// Percent of one core from two cumulative CPU-time readings over a wall
+/// clock span. A counter that went *down* (the pid was reused and the cache
+/// missed it) reads 0 rather than a spike.
+pub fn cpu_pct_from_time(now_ns: u64, before_ns: u64, elapsed_ns: u64) -> f64 {
+    if elapsed_ns == 0 || now_ns < before_ns {
+        return 0.0;
+    }
+    (now_ns - before_ns) as f64 / elapsed_ns as f64 * 100.0
+}
+
+/// The placeholder for a part of a detail read that was not asked for.
+pub fn not_collected<T>() -> Detail<T> {
+    Detail::Unavailable(NOT_COLLECTED.to_string())
+}
+
+pub const NOT_COLLECTED: &str = "not collected in this read";
+
+/// Unix time in milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// Clamp a string the OS handed us to a sane length, so one process with a
+/// megabyte of arguments cannot make every sample and journal chunk huge.
+pub fn bounded(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut cut = max;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
+pub const MAX_NAME_LEN: usize = 256;
+pub const MAX_CMDLINE_LEN: usize = 4096;
 
 /// One row of a depth-first process tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

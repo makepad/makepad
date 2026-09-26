@@ -5,10 +5,16 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Fabric: a photo in, a fitted sewing pattern out — body model, measurements, draft, cut sheet"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
 # The window manager's vocabulary: the bar's title and the polite close.
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-fabric-measure = { path = "../../libs/fabric/measure" }
 makepad-fabric-draft = { path = "../../libs/fabric/draft" }
 # The body model runs in-process (Metal on the Mac, CUDA on a box); the

@@ -13,6 +13,7 @@ use makepad_widgets::makepad_platform::storage::{
     StorageHandle, StorageRequestId, StorageResponse, StorageResult,
 };
 use makepad_widgets::*;
+use std::collections::HashMap;
 
 pub(crate) fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
     let theme = vm.module(id!(theme));
@@ -63,11 +64,32 @@ script_mod! {
         margin: 0 padding: 0
         draw_bg +: {pixel: fn() {return vec4(0.0, 0.0, 0.0, 0.0)}}
     }
-    let MailAction = mod.widgets.glass.GlassButton{
-        width: 44 height: 44 padding: 0 margin: 0
-        icon_walk: Walk{width: 20 height: 20}
+    // Flat discs, not glass: every action sits on an opaque bar, and a glass
+    // button makes the app render its whole window twice a frame (a backdrop
+    // pass plus the blur pyramid) — on the phone that doubled every scroll
+    // frame of the list.
+    let MailAction = ButtonFlat{
+        width: 48 height: 48 text: "" padding: 0 margin: 0 spacing: 0
+        align: Align{x: 0.5 y: 0.5}
+        icon_walk: Walk{width: 24 height: 24}
         draw_text +: {color: theme.color_text}
-        draw_glass +: {tint: theme.color_inset}
+        draw_bg +: {
+            // Hover and press in the selection tint: several themes give
+            // color_inset_hover/down the inset colour itself, and a flat disc
+            // with no state change reads as dead.
+            color: theme.color_inset color_hover: theme.color_bg_highlight color_down: theme.color_bg_highlight
+            border_size: 0.0 border_radius: 24.0
+        }
+    }
+    // Actions that sit on a bar: the bar is the surface.
+    let MailBarAction = MailAction{}
+    // An opaque bar: toolbars and bottom action bars. Nothing scrolls
+    // through it, so the list above it never reads as covered.
+    let MailBar = RoundedView{
+        width: Fill height: 56
+        flow: Right align: Align{y: 0.5} spacing: 8
+        padding: Inset{left: 4 right: 4}
+        draw_bg +: { color: theme.color_inset border_radius: 14 }
     }
     let MailSearch = TextInput{
         width: Fill height: 44
@@ -89,6 +111,36 @@ script_mod! {
             text_style: theme.font_regular{font_size: 12.75}
         }
         draw_bg +: { color: #0000 }
+    }
+    // A phone mailbox row: 56 pt, a 24 pt icon at the 16 pt margin, the
+    // name from 56 pt, the count right-aligned in a 40 pt trailing slot and
+    // a hairline from the name's edge to the trailing margin.
+    let MbPhone = MbBtn{
+        height: 56 spacing: 16
+        padding: Inset{left: 16 right: 72}
+        icon_walk: Walk{width: 24 height: 24}
+        draw_text +: { text_style: theme.font_regular{font_size: 12} }
+    }
+    let MailboxRow = View{
+        width: Fill height: 56 flow: Overlay
+        count_slot := View{
+            width: Fill height: Fill align: Align{x: 1.0 y: 0.5}
+            padding: Inset{right: 16}
+            // The button's label rides 3 pt lower than a centred Fit label;
+            // the margin puts the count on the name's line.
+            count := MailText{
+                width: 40 height: Fit align: Align{x: 1.0} margin: Inset{top: 3}
+                draw_text +: { text_style: theme.font_regular{font_size: 12} }
+            }
+        }
+        sep := View{
+            width: Fill height: Fill flow: Down
+            View{width: Fill height: Fill}
+            SolidView{
+                width: Fill height: 0.5 margin: Inset{left: 56 right: 16}
+                draw_bg.color: theme.color_bevel_outset_2
+            }
+        }
     }
     let Chip = RoundedView{
         width: Fill height: Fit flow: Right spacing: 8 padding: Inset{left: 12 right: 12 top: 12 bottom: 12}
@@ -217,20 +269,23 @@ script_mod! {
 
         wide := View{
             visible: false width: Fill height: Fill flow: Down
-            wide_toolbar := MailPanel{
-                height: 56 padding: 6 flow: Right spacing: 8 align: Align{y: 0.5}
+            // One opaque toolbar over both panes; its actions sit flat on it.
+            wide_toolbar := SolidView{
+                width: Fill height: 56 padding: Inset{left: 16 right: 16} flow: Right spacing: 8 align: Align{y: 0.5}
+                draw_bg.color: theme.color_bg_app
                 wide_title := MailStrong{text: "Mail" width: 220 draw_text +: { text_style: theme.font_bold{font_size: 12.75} }}
-                wide_mailbox_btn := Button{visible: false text: "Inbox" height: 44 margin: 0}
-                wide_compose := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
-                wide_reply := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/reply.svg") color: theme.color_text}}
-                wide_forward := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/forward.svg") color: theme.color_text}}
-                wide_archive := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/archive.svg") color: theme.color_text}}
-                wide_delete := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/delete.svg") color: theme.color_text}}
-                wide_flag := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/flag.svg") color: theme.color_warning}}
-                wide_more := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/more.svg") color: theme.color_text}}
+                wide_mailbox_btn := Button{visible: false text: "Inbox" height: 40 margin: 0}
+                wide_compose := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
+                wide_reply := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/reply.svg") color: theme.color_text}}
+                wide_forward := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/forward.svg") color: theme.color_text}}
+                wide_archive := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/archive.svg") color: theme.color_text}}
+                wide_delete := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/delete.svg") color: theme.color_text}}
+                wide_flag := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/flag.svg") color: theme.color_warning}}
+                wide_more := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/more.svg") color: theme.color_text}}
                 View{width: Fill}
-                wide_search := MailSearch{width: 240 height: 36 margin: 0}
+                wide_search := MailSearch{width: 220 height: 40 margin: 0}
             }
+            toolbar_rule := SolidView{width: Fill height: 1 draw_bg.color: theme.color_bevel_outset_2}
             columns := View{
                 flow: Right height: Fill spacing: 0
                 sidebar := ScrollYView{
@@ -291,37 +346,61 @@ script_mod! {
                 flow: Down
                 show_bg: true
                 draw_bg.color: theme.color_bg_app
-                nav := View{height: 52}
-                title := MailStrong{
-                    height: 52 text: "Mailboxes" padding: Inset{left: 20}
-                    draw_text +: { text_style: theme.font_bold{font_size: 25.5} }
+                // The root's large title: 28/36 at the 16 pt margin, where
+                // the cards and the search start.
+                title_bar := View{
+                    height: 64 padding: Inset{left: 16 right: 16} align: Align{y: 0.5}
+                    title := MailStrong{
+                        height: 36 text: "Mailboxes"
+                        draw_text +: { text_style: theme.font_bold{font_size: 21} }
+                    }
                 }
                 mailbox_body := ScrollYView{
-                    height: Fill flow: Down padding: Inset{left: 16 right: 16} spacing: 12
+                    height: Fill flow: Down padding: Inset{left: 16 right: 16 top: 8 bottom: 8} spacing: 16
                     favorites := RoundedView{
                         flow: Down height: Fit
-                        draw_bg +: { color: theme.color_inset border_radius: 16 }
-                        mb_inbox := MbBtn{text: "Inbox" height: 52 draw_icon.svg: crate_resource("self:resources/icons/inbox.svg")}
-                        mb_vips := MbBtn{text: "VIPs" height: 52 draw_icon.svg: crate_resource("self:resources/icons/vip.svg")}
-                        mb_flagged := MbBtn{text: "Flagged" height: 52 draw_icon.svg: crate_resource("self:resources/icons/flag.svg")}
+                        draw_bg +: { color: theme.color_inset border_radius: 8 }
+                        row_inbox := MailboxRow{
+                            mb_inbox := MbPhone{text: "Inbox" draw_icon.svg: crate_resource("self:resources/icons/inbox.svg")}
+                        }
+                        row_vips := MailboxRow{
+                            mb_vips := MbPhone{text: "VIPs" draw_icon.svg: crate_resource("self:resources/icons/vip.svg")}
+                        }
+                        row_flagged := MailboxRow{ sep +: {visible: false}
+                            mb_flagged := MbPhone{text: "Flagged" draw_icon.svg: crate_resource("self:resources/icons/flag.svg")}
+                        }
                     }
                     local_mail := RoundedView{
                         flow: Down height: Fit
-                        draw_bg +: { color: theme.color_inset border_radius: 16 }
-                        mb_drafts := MbBtn{text: "Drafts" draw_icon.svg: crate_resource("self:resources/icons/drafts.svg")}
-                        mb_sent := MbBtn{text: "Sent" draw_icon.svg: crate_resource("self:resources/icons/sent.svg")}
-                        mb_archive := MbBtn{text: "Archive" draw_icon.svg: crate_resource("self:resources/icons/archive.svg")}
-                        mb_junk := MbBtn{text: "Junk" draw_icon.svg: crate_resource("self:resources/icons/junk.svg")}
-                        mb_trash := MbBtn{text: "Trash" draw_icon.svg: crate_resource("self:resources/icons/trash.svg")}
-                        mb_projects := MbBtn{text: "Projects" draw_icon.svg: crate_resource("self:resources/icons/projects.svg")}
-                        mb_travel := MbBtn{text: "Travel" draw_icon.svg: crate_resource("self:resources/icons/travel.svg")}
+                        draw_bg +: { color: theme.color_inset border_radius: 8 }
+                        row_drafts := MailboxRow{
+                            mb_drafts := MbPhone{text: "Drafts" draw_icon.svg: crate_resource("self:resources/icons/drafts.svg")}
+                        }
+                        row_sent := MailboxRow{
+                            mb_sent := MbPhone{text: "Sent" draw_icon.svg: crate_resource("self:resources/icons/sent.svg")}
+                        }
+                        row_archive := MailboxRow{
+                            mb_archive := MbPhone{text: "Archive" draw_icon.svg: crate_resource("self:resources/icons/archive.svg")}
+                        }
+                        row_junk := MailboxRow{
+                            mb_junk := MbPhone{text: "Junk" draw_icon.svg: crate_resource("self:resources/icons/junk.svg")}
+                        }
+                        row_trash := MailboxRow{
+                            mb_trash := MbPhone{text: "Trash" draw_icon.svg: crate_resource("self:resources/icons/trash.svg")}
+                        }
+                        row_projects := MailboxRow{
+                            mb_projects := MbPhone{text: "Projects" draw_icon.svg: crate_resource("self:resources/icons/projects.svg")}
+                        }
+                        row_travel := MailboxRow{ sep +: {visible: false}
+                            mb_travel := MbPhone{text: "Travel" draw_icon.svg: crate_resource("self:resources/icons/travel.svg")}
+                        }
                     }
                 }
-                actions := MailPanel{
-                    height: 52 margin: Inset{left: 16 right: 16 bottom: 8}
-                    flow: Right padding: 4 align: Align{y: 0.5}
-                    phone_status_mb := MailMuted{width: Fill text: "Demo mail · Saved"}
-                    phone_compose_mb := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
+                actions := MailBar{
+                    margin: Inset{left: 16 right: 16 top: 8 bottom: 8}
+                    padding: Inset{left: 16 right: 4}
+                    phone_status_mb := MailMuted{width: Fill draw_text +: { text_style: theme.font_regular{font_size: 10.5} }}
+                    phone_compose_mb := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
                 }
             }
             messages := StackNavigationView{
@@ -331,17 +410,20 @@ script_mod! {
                     flow: Down
                     show_bg: true
                     draw_bg.color: theme.color_bg_app
+                    // One 64 pt app bar: the 48 pt back target at the 16 pt
+                    // margin, the 22/28 title at x = 72.
                     list_nav := View{
-                        height: 52 flow: Right padding: Inset{left: 4} align: Align{y: 0.5}
-                        list_back := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/back.svg") color: theme.color_text}}
+                        height: 64 flow: Right spacing: 8 align: Align{y: 0.5}
+                        padding: Inset{left: 16 right: 16}
+                        list_back := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/back.svg") color: theme.color_text}}
+                        list_title := MailStrong{
+                            width: Fill max_lines: 1 text_overflow: Ellipsis
+                            draw_text +: { text_style: theme.font_bold{font_size: 16.5} }
+                        }
                     }
-                    list_title := MailStrong{
-                        height: 52 padding: Inset{left: 20}
-                        draw_text +: { text_style: theme.font_bold{font_size: 25.5} }
-                    }
-                    phone_search := MailSearch{margin: Inset{left: 16 right: 16} height: 44}
+                    phone_search := MailSearch{margin: Inset{left: 16 right: 16 bottom: 8} height: 48}
                     phone_scope := MailScope{
-                        visible: false height: 44 margin: Inset{left: 16 right: 16}
+                        visible: false height: 44 margin: Inset{left: 16 right: 16 bottom: 8}
                         labels: ["This Mailbox", "All Mail"]
                     }
                     phone_list := PortalList{
@@ -355,12 +437,14 @@ script_mod! {
                         phone_empty_sub := MailMuted{}
                         phone_clear_search := Button{visible: false text: "Clear Search" height: 44}
                     }
-                    list_actions := MailPanel{
-                        height: 52 margin: Inset{left: 16 right: 16 bottom: 8}
-                        flow: Right padding: 4 align: Align{y: 0.5} spacing: 8
-                        phone_unread := Button{text: "Unread" height: 44}
-                        phone_status_list := MailMuted{width: Fill}
-                        phone_compose_list := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
+                    list_actions := MailBar{
+                        margin: Inset{left: 16 right: 16 top: 8 bottom: 8}
+                        phone_unread := Button{text: "Unread" height: 40 margin: Inset{left: 4}}
+                        phone_status_list := MailMuted{
+                            width: Fill align: Align{x: 0.5}
+                            draw_text +: { text_style: theme.font_regular{font_size: 10.5} }
+                        }
+                        phone_compose_list := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
                     }
                 }
             }
@@ -372,22 +456,25 @@ script_mod! {
                     show_bg: true
                     draw_bg.color: theme.color_bg_app
                     read_nav := View{
-                        height: 52 flow: Right padding: Inset{left: 4} align: Align{y: 0.5}
-                        read_back := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/back.svg") color: theme.color_text}}
-                        read_title := MailStrong{width: Fill}
+                        height: 64 flow: Right spacing: 8 align: Align{y: 0.5}
+                        padding: Inset{left: 16 right: 16}
+                        read_back := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/back.svg") color: theme.color_text}}
+                        read_title := MailStrong{
+                            width: Fill max_lines: 1 text_overflow: Ellipsis
+                            draw_text +: { text_style: theme.font_bold{font_size: 16.5} }
+                        }
                     }
                     phone_reader := ScrollYView{height: Fill
                         reader_content := ReaderBlock{}
                     }
-                    read_actions := MailPanel{
-                        height: 52 margin: Inset{left: 16 right: 16 bottom: 8}
-                        flow: Right padding: 4 align: Align{y: 0.5} spacing: 8
-                        phone_archive := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/archive.svg") color: theme.color_text}}
-                        phone_move := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/projects.svg") color: theme.color_text}}
-                        phone_delete := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/delete.svg") color: theme.color_error}}
-                        phone_reply := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/reply.svg") color: theme.color_text}}
+                    read_actions := MailBar{
+                        margin: Inset{left: 16 right: 16 top: 8 bottom: 8}
+                        phone_archive := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/archive.svg") color: theme.color_text}}
+                        phone_move := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/projects.svg") color: theme.color_text}}
+                        phone_delete := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/delete.svg") color: theme.color_error}}
+                        phone_reply := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/reply.svg") color: theme.color_text}}
                         View{width: Fill}
-                        phone_compose_read := MailAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
+                        phone_compose_read := MailBarAction{draw_icon +: {svg: crate_resource("self:resources/icons/compose.svg") color: theme.color_text}}
                     }
                 }
             }
@@ -526,6 +613,12 @@ pub struct MailView {
     quit_ready: bool,
     #[rust]
     last_metrics: Option<LayoutMetrics>,
+    // What each list item widget was last bound to. Binding a row runs script
+    // evals and restyles every label, which cost most of a phone frame when it
+    // ran for every visible row on every scroll frame; now it runs only when the
+    // item shows a different row or the row, selection or layout changed.
+    #[rust]
+    bound_rows: HashMap<WidgetUid, RowBinding>,
     #[rust]
     last_size: Option<DVec2>,
     #[rust]
@@ -779,17 +872,25 @@ impl MailView {
         script_apply_eval!(cx, sheet, { width: #(metrics.compose_w) height: #(metrics.compose_h) });
         self.view.widget(cx, ids!(divider_a)).set_visible(cx, metrics.show_sidebar);
         self.view.widget(cx, ids!(wide_title)).set_visible(cx, metrics.show_sidebar);
-        for id in [ids!(wide_forward), ids!(wide_flag)] {
-            self.view.widget(cx, id).set_visible(cx, !metrics.collapse_extra_actions);
-        }
         let mut toolbar = self.view.widget(cx, ids!(wide_toolbar));
-        let vertical = if metrics.short {2.0} else {6.0};
         script_apply_eval!(cx, toolbar, {height: #(metrics.toolbar_h)
-            padding: mod.prelude.widgets.Inset{left: 6 right: 6 top: #(vertical) bottom: #(vertical)}});
+            padding: mod.prelude.widgets.Inset{left: 16 right: 16 top: 4 bottom: 4}});
         let mut selector = self.view.widget(cx, ids!(wide_mailbox_btn));
         script_apply_eval!(cx, selector, {width: 140});
+        // Without the sidebar the toolbar's selector names the mailbox, so
+        // the list keeps no second title: only the counts, where there is
+        // room for them.
+        let heading_h = if metrics.show_sidebar {
+            metrics.list_header_h
+        } else if metrics.short {
+            0.0
+        } else {
+            32.0
+        };
         let mut heading = self.view.widget(cx, ids!(heading));
-        script_apply_eval!(cx, heading, {height: #(metrics.list_header_h)});
+        heading.set_visible(cx, heading_h > 0.0);
+        script_apply_eval!(cx, heading, {height: #(heading_h.max(1.0))});
+        self.view.widget(cx, ids!(wide_heading)).set_visible(cx, metrics.show_sidebar);
         self.view.widget(cx, ids!(wide_counts)).set_visible(cx, !metrics.short);
         self.view.widget(cx, ids!(wide_status_bar)).set_visible(cx, !metrics.short);
         let mut header = self.view.widget(cx, ids!(compose_header));
@@ -914,6 +1015,7 @@ impl MailView {
         let mailbox = self.ui.list.mailbox;
         self.view.label(cx, ids!(wide_heading)).set_text(cx, mailbox.label());
         self.view.label(cx, ids!(list_title)).set_text(cx, mailbox.label());
+        self.view.label(cx, ids!(read_title)).set_text(cx, mailbox.label());
         self.view.button(cx, ids!(wide_mailbox_btn)).set_text(cx, mailbox.label());
         let searching = !self.ui.list.query.trim().is_empty();
         self.view.widget(cx, ids!(wide_scope)).set_visible(cx, searching);
@@ -951,13 +1053,25 @@ impl MailView {
                 if let Some(id) = side_id(mb) {
                     self.view.button(cx, id).set_text(cx, &label);
                 }
-                if let Some(id) = mb_id(mb) {
-                    self.view.button(cx, id).set_text(cx, &label);
+                // The phone row keeps the name and right-aligns the count.
+                if let Some(id) = mb_row_id(mb) {
+                    let count = if count == 0 {String::new()} else {count.to_string()};
+                    self.view.widget(cx, id).label(cx, ids!(count)).set_text(cx, &count);
                 }
             }
             self.view.label(cx, ids!(compose_from)).set_text(cx, &format!("From: {}", doc.me.display()));
         }
         let has_sel = self.ui.selected.is_some();
+        // In the two-pane layout the message actions appear with a message;
+        // the three-pane desktop keeps them in place, disabled.
+        let metrics = self.last_metrics.unwrap_or_default();
+        let reader_actions = has_sel || metrics.kind != LayoutKind::WideTwo;
+        for id in [ids!(wide_reply), ids!(wide_archive), ids!(wide_delete), ids!(wide_more)] {
+            self.view.widget(cx, id).set_visible(cx, reader_actions);
+        }
+        for id in [ids!(wide_forward), ids!(wide_flag)] {
+            self.view.widget(cx, id).set_visible(cx, reader_actions && !metrics.collapse_extra_actions);
+        }
         self.view.widget(cx, ids!(wide_reply)).set_disabled(cx, !has_sel);
         self.view.widget(cx, ids!(wide_forward)).set_disabled(cx, !has_sel);
         self.view.widget(cx, ids!(wide_archive)).set_disabled(cx, !has_sel);
@@ -1519,7 +1633,7 @@ impl MailView {
     }
 
     fn glass(&self, cx: &Cx, id: &[LiveId], actions: &Actions) -> bool {
-        self.view.glass_button(cx, id).clicked(actions)
+        self.view.button(cx, id).clicked(actions)
     }
 
     fn draw_messages(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
@@ -1527,7 +1641,25 @@ impl MailView {
         while let Some(index) = list.next_visible_item(cx) {
             let Some(row) = self.rows.get(index).cloned() else { continue };
             let item = list.item(cx, index, live_id!(Message));
-            self.bind_message_row(cx, item.clone(), row);
+            let binding = RowBinding {
+                selected: self.ui.selected == Some(row.id),
+                search_all: !self.ui.list.query.trim().is_empty() && self.ui.list.scope == SearchScope::AllMail,
+                today: self.doc.as_ref().map(|d| d.seed_anchor.midnight_utc).unwrap_or(0),
+                metrics: self.last_metrics,
+                row,
+            };
+            // A restyle (theme switch) re-applies the template to live items and
+            // drops the sizes the bind set; the sender's font size tells.
+            let metrics = self.last_metrics.unwrap_or_else(|| layout_for(1240.0, 800.0));
+            let sender_size = if metrics.kind == LayoutKind::Compact && !metrics.short { 12.75 } else { 9.75 };
+            let restyled = item
+                .label(cx, ids!(sender))
+                .borrow()
+                .is_some_and(|l| l.draw_text.text_style.font_size != sender_size);
+            if restyled || self.bound_rows.get(&item.widget_uid()) != Some(&binding) {
+                self.bind_message_row(cx, item.clone(), binding.row.clone());
+                self.bound_rows.insert(item.widget_uid(), binding);
+            }
             item.draw_all(cx, &mut Scope::empty());
         }
     }
@@ -1542,13 +1674,16 @@ impl MailView {
         let compact = metrics.kind == LayoutKind::Compact && !metrics.short;
         let sender_size = if compact { 12.75 } else { 9.75 };
         let date_w = if compact { 76.0 } else { 68.0 };
-        let preview_lines = if metrics.short { 1 } else { 2 };
-        let preview_h = if metrics.short { 16.0 } else if compact { 40.0 } else { 32.0 };
+        let preview_lines = metrics.preview_lines as usize;
+        let preview_h = if preview_lines == 1 { 16.0 } else if compact { 40.0 } else { 32.0 };
         script_apply_eval!(cx, item, { height: #(metrics.row_h) });
         let left = if compact {32.0} else {28.0};
         let top = if compact {10.0} else {9.0};
         if let Some(mut content) = item.widget(cx, ids!(content)).borrow_mut::<View>() {
-            content.layout.padding = Inset {left, right: 16.0, top, bottom: if compact {12.0} else {9.0}};
+            // 24 pt on the right in the phone's lists, portrait and
+            // landscape, keeps the flag and the clip clear of the scroll bar.
+            let right = if compact || metrics.short {24.0} else {16.0};
+            content.layout.padding = Inset {left, right, top, bottom: if compact {12.0} else {9.0}};
         }
         for (id, height) in [(ids!(sender_line), if compact {22.0} else {17.0}), (ids!(subject_line), if compact {20.0} else {17.0})] {
             if let Some(mut line) = item.widget(cx, id).borrow_mut::<View>() { line.walk.height = Size::Fixed(height); }
@@ -1611,6 +1746,17 @@ impl MailView {
 
 }
 
+/// Everything `bind_message_row` reads, so a list item is rebound only when
+/// one of them changed (see `MailView::bound_rows`).
+#[derive(Clone, PartialEq)]
+struct RowBinding {
+    row: MessageRow,
+    selected: bool,
+    search_all: bool,
+    today: i64,
+    metrics: Option<LayoutMetrics>,
+}
+
 fn apply_or_status(view: &mut MailView, cx: &mut Cx, command: Command) -> Option<Mutation> {
     match view.mutate(cx, command) {
         Ok(m) => Some(m),
@@ -1649,6 +1795,21 @@ fn mb_id(mailbox: Mailbox) -> Option<&'static [LiveId]> {
         Mailbox::Folder(Folder::Trash) => ids!(mb_trash),
         Mailbox::Folder(Folder::Projects) => ids!(mb_projects),
         Mailbox::Folder(Folder::Travel) => ids!(mb_travel),
+    })
+}
+
+fn mb_row_id(mailbox: Mailbox) -> Option<&'static [LiveId]> {
+    Some(match mailbox {
+        Mailbox::Folder(Folder::Inbox) => ids!(row_inbox),
+        Mailbox::Vips => ids!(row_vips),
+        Mailbox::Flagged => ids!(row_flagged),
+        Mailbox::Folder(Folder::Drafts) => ids!(row_drafts),
+        Mailbox::Folder(Folder::Sent) => ids!(row_sent),
+        Mailbox::Folder(Folder::Archive) => ids!(row_archive),
+        Mailbox::Folder(Folder::Junk) => ids!(row_junk),
+        Mailbox::Folder(Folder::Trash) => ids!(row_trash),
+        Mailbox::Folder(Folder::Projects) => ids!(row_projects),
+        Mailbox::Folder(Folder::Travel) => ids!(row_travel),
     })
 }
 
@@ -1819,7 +1980,10 @@ mod tests {
     fn toolbar_targets_and_search_fit_at_700_by_800_and_across_wide_sizes() {
         let (mut cx, root) = root();
         let mut view = root.borrow_mut::<MailView>().unwrap();
-        for (width, height) in [(700.0, 800.0), (771.0, 800.0), (772.0, 800.0), (874.0, 300.0), (1100.0, 800.0), (1240.0, 800.0)] {
+        for selected in [false, true] {
+        view.ui.selected = if selected {view.rows.first().map(|row| row.id)} else {None};
+        assert_eq!(view.ui.selected.is_some(), selected);
+        for (width, height) in [(700.0, 800.0), (771.0, 800.0), (772.0, 800.0), (799.0, 800.0), (800.0, 800.0), (874.0, 300.0), (1100.0, 800.0), (1240.0, 800.0)] {
             let _frame = draw(&mut cx, &mut view, dvec2(width, height));
             let mut right = 0.0;
             for id in [ids!(wide_title), ids!(wide_mailbox_btn), ids!(wide_compose), ids!(wide_reply), ids!(wide_forward), ids!(wide_archive), ids!(wide_delete), ids!(wide_flag), ids!(wide_more), ids!(wide_search)] {
@@ -1834,9 +1998,23 @@ mod tests {
                 right = rect.pos.x + rect.size.x;
             }
             for id in [ids!(wide_compose), ids!(wide_reply), ids!(wide_archive), ids!(wide_delete), ids!(wide_more)] {
-                let rect = view.view.widget(&cx, id).area().rect(&cx);
-                assert_eq!(rect.size, dvec2(44.0, 44.0));
+                let widget = view.view.widget(&cx, id);
+                if !widget.visible() { continue; }
+                assert_eq!(widget.area().rect(&cx).size, dvec2(48.0, 48.0));
             }
+            // Visibility, apart from geometry: the two-pane layout shows the
+            // message actions only with a message selected; forward and flag
+            // collapse below the full toolbar's width.
+            let metrics = view.last_metrics.unwrap();
+            let reader = selected || metrics.kind == LayoutKind::WideThree;
+            for id in [ids!(wide_reply), ids!(wide_archive), ids!(wide_delete), ids!(wide_more)] {
+                assert_eq!(view.view.widget(&cx, id).visible(), reader, "{width}x{height} sel {selected} {id:?}");
+            }
+            for id in [ids!(wide_forward), ids!(wide_flag)] {
+                assert_eq!(view.view.widget(&cx, id).visible(), reader && !metrics.collapse_extra_actions,
+                    "{width}x{height} sel {selected} {id:?}");
+            }
+            assert_eq!(metrics.collapse_extra_actions, height < 420.0 || width < 800.0, "{width}x{height}");
             if width == 700.0 {
                 assert!(!view.view.widget(&cx, ids!(wide_forward)).visible());
                 assert!(!view.view.widget(&cx, ids!(wide_flag)).visible());
@@ -1845,6 +2023,7 @@ mod tests {
                 assert!(view.sheet_actions.contains(&SheetChoice::Flag));
                 view.close_sheet(&mut cx);
             }
+        }
         }
         no_script_errors(&mut cx);
     }
@@ -2058,8 +2237,8 @@ mod tests {
             assert_eq!(sheet.walk(&mut cx).width, Size::Fixed(width.min(680.0)));
             if height == 300.0 {
                 assert_eq!(sheet.walk(&mut cx).height, Size::Fixed(284.0));
-                assert_eq!(view.view.widget(&cx, ids!(wide_toolbar)).walk(&mut cx).height, Size::Fixed(48.0));
-                assert_eq!(view.view.widget(&cx, ids!(heading)).walk(&mut cx).height, Size::Fixed(44.0));
+                assert_eq!(view.view.widget(&cx, ids!(wide_toolbar)).walk(&mut cx).height, Size::Fixed(56.0));
+                assert!(!view.view.widget(&cx, ids!(heading)).visible());
                 assert!(!view.view.widget(&cx, ids!(wide_title)).visible());
                 assert!(!view.view.widget(&cx, ids!(wide_forward)).visible());
                 assert!(!view.view.widget(&cx, ids!(wide_flag)).visible());
@@ -2153,7 +2332,7 @@ mod tests {
         let mut view = root.borrow_mut::<MailView>().unwrap();
         let list = view.view.portal_list(&cx, ids!(wide_list));
         let item = list.item(&mut cx, 0, live_id!(Message));
-        for (width, height, row_h, lines, sender_size) in [(402.0, 780.0, 104.0, 2, 12.75), (1240.0, 800.0, 84.0, 2, 9.75), (874.0, 300.0, 76.0, 1, 9.75)] {
+        for (width, height, row_h, lines, sender_size) in [(402.0, 780.0, 104.0, 2, 12.75), (1240.0, 800.0, 84.0, 2, 9.75), (874.0, 300.0, 84.0, 2, 9.75), (402.0, 300.0, 76.0, 1, 9.75)] {
             view.update_layout(&mut cx, dvec2(width, height));
             view.bind_message_row(&mut cx, item.clone(), view.rows[0].clone());
             assert_eq!(item.walk(&mut cx).height, Size::Fixed(row_h));
@@ -2231,10 +2410,10 @@ mod tests {
                 let panel = #(panel)
                 let segmented = #(scope)
                 let action = #(action)
-                panel.draw_bg.fallback_color == mod.theme.color_inset
+                panel.draw_bg.color == mod.theme.color_bg_app
                     && segmented.draw_text.color == mod.theme.color_text
                     && segmented.draw_sel.fill_color == mod.theme.color_bg_highlight
-                    && action.draw_glass.tint == mod.theme.color_inset
+                    && action.draw_bg.color == mod.theme.color_inset
             });
             assert_eq!(matches.as_bool(), Some(true));
         });

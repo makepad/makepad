@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- terminal: a console window with a prompt and a block cursor -->
+  <rect x="192" y="232" width="640" height="560" rx="56" fill="#0a1322" stroke="#e8eef6" stroke-width="28"/>
+  <path d="M206 330 L818 330" stroke="#e8eef6" stroke-width="20"/>
+  <circle cx="266" cy="286" r="16" fill="#e8eef6"/>
+  <circle cx="318" cy="286" r="16" fill="#e8eef6"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="#5ee0c8" stroke-width="48">
+    <path d="M300 440 L400 530 L300 620"/>
+  </g>
+  <rect x="460" y="600" width="170" height="48" rx="12" fill="#5ee0c8"/>
+</svg>

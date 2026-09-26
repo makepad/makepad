@@ -2,7 +2,7 @@
 //! commands; one worker captures this app's drawable and commits a spool event.
 
 use makepad_widgets::ai_slot::{AiSelectedRegion, AiSlotRequests};
-use makepad_widgets::tweaker::{feedback_snapshot, TweakDiffEntry};
+use makepad_widgets::widget_hooks::{TweakDiffEntry, WidgetHooks};
 use makepad_widgets::makepad_micro_serde::*;
 use makepad_widgets::makepad_platform::{
     screen_capture,
@@ -851,7 +851,11 @@ impl StudioAppFeedback {
                 }
             }
         }
-        if let Some(snapshot) = feedback_snapshot(self.tweak_generation) {
+        // The design delta comes from the tweaker when the app has it; an app
+        // built without the overlay has none to send.
+        let snapshot = WidgetHooks::tweaker(cx)
+            .and_then(|tweaker| (tweaker.feedback_snapshot)(self.tweak_generation));
+        if let Some(snapshot) = snapshot {
             self.tweak_generation = snapshot.generation;
             match snapshot.entries {
                 Ok(entries) => self.pending_tweaks = Some((snapshot.generation, Arc::new(entries))),
