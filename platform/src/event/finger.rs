@@ -416,6 +416,11 @@ impl CxFingers {
         Area::Empty
     }
 
+    /// Whether a pointer is currently over `area`.
+    pub fn is_area_hovered(&self, area: Area) -> bool {
+        area != Area::Empty && self.hovers.iter().any(|hover| hover.area == area)
+    }
+
     pub(crate) fn cycle_hover_area(&mut self, digit_id: DigitId) {
         if let Some(hover) = self.hovers.iter_mut().find(|v| v.digit_id == digit_id) {
             hover.area = hover.new_area;
