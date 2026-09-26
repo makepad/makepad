@@ -7,8 +7,14 @@ description = "Makepad splash example"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "EVyKRfOGV339Re5CS45PMHHxw_M="
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
 
 [dev-dependencies]

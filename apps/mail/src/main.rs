@@ -100,6 +100,20 @@ impl App {
     }
 }
 
+fn size_from_args(args: &[String]) -> Option<Vec2d> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let value = match arg.strip_prefix("--size=") {
+            Some(value) => value,
+            None if arg == "--size" => args.next()?,
+            None => continue,
+        };
+        let (width, height) = value.split_once(['x', 'X'])?;
+        return Some(dvec2(width.trim().parse().ok()?, height.trim().parse().ok()?));
+    }
+    None
+}
+
 fn is_close_requested(json: &str) -> bool {
     let Ok(value) = makepad_strict_json::parse(json.as_bytes()) else {
         return false;
@@ -118,6 +132,11 @@ fn is_close_requested(json: &str) -> bool {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         let args: Vec<_> = std::env::args().collect();
+        // `--size WxH` (or `--size=WxH`) sets the window size at start, so the
+        // layout's breakpoints can be checked without resizing by hand.
+        if let Some(size) = size_from_args(&args) {
+            self.ui.window(cx, ids!(main_window)).resize(cx, size);
+        }
         self.local_mode = !args.iter().any(|a| a == "--demo") && (cfg!(target_os = "macos") || args.iter().any(|a| a == "--mail-root"));
         if self.local_mode {
             let arg = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i+1)).map(std::path::PathBuf::from);

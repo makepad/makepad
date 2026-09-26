@@ -108,16 +108,24 @@ impl Host {
                 let Some(origin) = self.engine.evidence_origin("run", &run.id) else {
                     continue;
                 };
-                let Some(artifact) = flow
+                // The run used the lane's own artifact, or one a direct
+                // parent granted it; the recording belongs to the run's lane.
+                let Some(commit) = flow
                     .artifacts
                     .iter()
                     .find(|artifact| artifact.id == run.artifact_id)
+                    .map(|artifact| artifact.commit.clone())
+                    .or_else(|| {
+                        self.engine
+                            .agent_grant_for(&flow.id, &run.artifact_id)
+                            .map(|grant| grant.commit.clone())
+                    })
                 else {
                     continue;
                 };
                 if !recording_identifier(origin)
                     || !recording_identifier(&run.id)
-                    || !recording_commit(&artifact.commit)
+                    || !recording_commit(&commit)
                 {
                     continue;
                 }
@@ -126,8 +134,8 @@ impl Host {
                     KnownRecordingRun {
                         flow: origin.to_owned(),
                         run: run.id.clone(),
-                        artifact: artifact.id.clone(),
-                        commit: artifact.commit.clone(),
+                        artifact: run.artifact_id.clone(),
+                        commit,
                         directory: self.directory.join("runs").join(&run.id).join("video"),
                         active: !run.closed,
                         is_test: run.role == iteration::RunRole::AiTest,

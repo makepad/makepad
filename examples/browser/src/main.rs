@@ -320,6 +320,8 @@ pub fn app_main() {
     }
     startup_trace("cef initialize ok");
 
+    // What `app_main!` does for its apps: this build's package dir and icons.
+    makepad_widgets::makepad_platform::app_meta::set_app_build_meta(makepad_widgets::_app_build_meta!());
     let app = Rc::new(RefCell::new(None));
     let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
         if let Event::Startup = event {

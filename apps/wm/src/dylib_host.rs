@@ -3,16 +3,31 @@
 //! [`ModuleHost`] path as a statically linked module.
 //!
 //! The engine (`apps/wm-dyn/engine`, one Rust dylib that re-exports
-//! `makepad-widgets` and friends) must already be in the process
-//! (`-C prefer-dynamic`) so the app `.so` binds the host's `Cx`, not a second
-//! copy. `--stdin-loop` stays the desktop process model.
+//! `makepad-widgets` and friends) is already in the process
+//! (`-C prefer-dynamic`); the app `.so` must bind it and never carry a
+//! second widgets: Rust's ABI is per build, so a widgets compiled here could
+//! not bind the loaded engine (and on the phone its build script cannot even
+//! run: W^X). No app manifest says any of this — the host does, at the two
+//! levels of the build it runs:
+//!  - cargo: the packaged workspace resolves features across ALL of its
+//!    members (`.cargo/config.toml` `feature-unification = "workspace"`,
+//!    written by `cargo makepad android dyn-pack`; `--no-default-features` on both the
+//!    engine cross-build and here), so `-p <app>` sees exactly the widgets
+//!    unit the engine was built from — Fresh, never compiled;
+//!  - rustc: the app's own invocation gets `--extern force:makepad_wm_engine=
+//!    <engine .so>` (cargo's `--` passthrough), which loads the engine crate
+//!    without a source-level `extern crate`; rustc then links every rlib the
+//!    engine contains from it (`IncludedFromDylib`) instead of embedding it.
+//! Both are nightly-gated on this toolchain, so every cargo child runs with
+//! `RUSTC_BOOTSTRAP=1` — the Mac cross-build too: the flag is in every
+//! crate's SVH. `--stdin-loop` stays the desktop process model.
 //!
 //! Android: the APK carries the engine `.so`s, and its assets carry the
 //! rustc toolchain, the checkout and the cross-built `target/` tree. The
 //! first tile open provisions those into the app's files dir
 //! ([`android::provision`]); every cargo/rustc child then runs under the
-//! environment that makes cargo's fingerprints match the shipped tree (see
-//! local/wm-dyn/STATUS.md, "Identity").
+//! environment that makes cargo's fingerprints match the shipped tree (the
+//! identity rules: tools/cargo_makepad/src/android/dyn_pack).
 
 use crate::clients::{self, AppDef, ClientLine};
 use crate::hub::ClientId;
@@ -28,6 +43,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 const ENTRY: &[u8] = b"makepad_app_module\0";
+
+/// The client id provisioning reports under: no tile, the desk shows its
+/// lines (lib.rs `drain_client_lines`, `WmState::provision`).
+pub const PROVISION_CLIENT: ClientId = 0;
 
 pub struct LoadedDylib {
     /// Kept so the module vtable stays valid.
@@ -163,8 +182,10 @@ fn compile_app(
     // `--crate-type dylib` is cargo's own flag, not a `--` passthrough: only
     // then does cargo hand rustc the deps as `.rlib`s (a passthrough leaves
     // the unit an rlib in cargo's eyes and it passes `.rmeta`s, which rustc
-    // refuses for a dylib). `--no-default-features` keeps the app's
-    // `standalone` graph out, so the engine's feature set is the host's.
+    // refuses for a dylib). `--no-default-features` applies to every member
+    // of the packaged workspace (feature unification is workspace-wide
+    // there) and keeps the apps' `standalone` graphs out — the engine was
+    // cross-built with the same flag, so the units match.
     cmd.arg("rustc").arg("--release").arg("--lib").arg("--crate-type").arg("dylib");
     if cfg!(target_os = "android") {
         cmd.arg("--offline").arg("--frozen");
@@ -179,6 +200,18 @@ fn compile_app(
         .arg("--no-default-features")
         .arg("--features")
         .arg("dynamic-module");
+    // The engine joins the app's crate graph here, not in its manifest:
+    // `--extern force:` loads it without an `extern crate` in the app, and
+    // rustc links widgets and friends from the dylib that is already in
+    // this process. Passthrough args reach only the app's own rustc.
+    let engine = engine_dylib(&target_dir);
+    if !engine.is_file() {
+        return Err(format!("engine dylib missing: {}", engine.display()));
+    }
+    cmd.arg("--")
+        .arg("-Zunstable-options")
+        .arg("--extern")
+        .arg(format!("force:makepad_wm_engine={}", engine.display()));
     // Android: everything lives under the app's files dir, with the exact
     // strings the Mac cross-build used (cargo hashes them). Desktop: the
     // process environment (CARGO_TARGET_DIR of the host build) is the
@@ -186,7 +219,12 @@ fn compile_app(
     #[cfg(target_os = "android")]
     dyn_env.env(&mut cmd);
     #[cfg(not(target_os = "android"))]
-    cmd.env("RUSTFLAGS", rustflags());
+    {
+        // `-Zunstable-options` and the workspace feature unification are
+        // nightly-gated; Android has this in the packed env (env.txt).
+        cmd.env("RUSTFLAGS", rustflags());
+        cmd.env("RUSTC_BOOTSTRAP", "1");
+    }
     #[cfg(target_os = "android")]
     let engine_before = dyn_env.engine_stamp();
 
@@ -264,26 +302,39 @@ fn lib_stem(package: &str) -> String {
     format!("lib{}", package.replace('-', "_"))
 }
 
-fn dylib_path(root: &Path, data_dir: Option<&str>, package: &str) -> Result<PathBuf, String> {
-    let stem = lib_stem(package);
-    let ext = if cfg!(target_os = "windows") {
+fn dylib_ext() -> &'static str {
+    if cfg!(target_os = "windows") {
         "dll"
     } else if cfg!(target_os = "macos") {
         "dylib"
     } else {
         "so"
-    };
-    let target_root = shared_target_dir(root, data_dir);
-    let triple = if cfg!(target_os = "android") {
-        "aarch64-linux-android/release"
+    }
+}
+
+/// The release output dir inside a target dir: the cross-compiled triple's
+/// on Android, the host's elsewhere.
+fn release_dir(target_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "android") {
+        target_dir.join("aarch64-linux-android/release")
     } else {
-        "release"
-    };
-    let name = format!("{stem}.{ext}");
-    for dir in [
-        target_root.join(triple),
-        target_root.join(triple).join("deps"),
-    ] {
+        target_dir.join("release")
+    }
+}
+
+/// The engine dylib this process loaded, as the shared target dir holds
+/// it (a path package's dylib: no `-<hash>` in the name). Every app dylib
+/// is linked against exactly this file (`--extern force:`), and cargo must
+/// leave it alone (`Dyn::engine_stamp`).
+fn engine_dylib(target_dir: &Path) -> PathBuf {
+    release_dir(target_dir).join("deps").join(format!("libmakepad_wm_engine.{}", dylib_ext()))
+}
+
+fn dylib_path(root: &Path, data_dir: Option<&str>, package: &str) -> Result<PathBuf, String> {
+    let stem = lib_stem(package);
+    let release = release_dir(&shared_target_dir(root, data_dir));
+    let name = format!("{stem}.{}", dylib_ext());
+    for dir in [release.clone(), release.join("deps")] {
         let p = dir.join(&name);
         if p.exists() {
             return Ok(p);
@@ -343,32 +394,32 @@ unsafe extern "C" {
     fn close(fd: i32) -> i32;
 }
 
-/// The Android super-app's files-dir layout and first-run provisioning.
-///
-/// Assets (`assets/wmdyn/…`, packed by local/wm-dyn/pack.py):
-/// `stamp` (pack id), `env.txt` (KEY=VALUE: the linker string and RUSTFLAGS
-/// of the Mac cross-build), `proc-macros.txt` (host crates to bootstrap),
-/// `proc-macro-svh.txt` (the SVH each rebuilt proc-macro must carry),
-/// `manifest.txt` (`name parts bytes` per tarball) and `<name>.NNN` parts
-/// of `src.tar.gz`, `target.tar.gz`, `tc.tar.gz`.
-///
-/// nativeLibraryDir (`apk_data_file`, executable) carries the musl loader
-/// `libld-musl.so`, `libbusybox.so`, and the `#!/system/bin/sh` drivers
-/// `librustc-wrap.so` / `libmk-ld.so` / `libmk-host-ld.so`. Everything under
-/// files/ is only ever mmap-exec'd (allowed), never execve'd (denied).
+/// The Android super-app's files-dir layout and first-run provisioning: the
+/// assets `cargo makepad android dyn-pack` packed, unpacked by
+/// makepad-ondevice-build (libs/ondevice_build: the stamps, the streamed LZ4
+/// parts, the proc-macro bootstrap and SVH rewrite, the mtime alignment).
 #[cfg(target_os = "android")]
 mod android {
     use super::*;
-    use makepad_widgets::makepad_platform::os::linux::android::android_jni::load_asset;
-    use std::io::Write;
+    use makepad_ondevice_build::{Assets, Toolchain};
+    use makepad_widgets::makepad_platform::os::linux::android::android_jni::{load_asset, open_asset};
 
-    pub struct Dyn {
-        pub data: PathBuf,
-        pub nlib: PathBuf,
-        env: Vec<(String, String)>,
+    /// The APK's assets through the AssetManager: this is the WM's own
+    /// process, the one with a JVM.
+    struct ApkAssets;
+
+    impl Assets for ApkAssets {
+        fn load(&mut self, name: &str) -> Option<Vec<u8>> {
+            load_asset(name)
+        }
+        fn open(&mut self, name: &str) -> Option<Box<dyn std::io::Read>> {
+            open_asset(name).map(|r| Box::new(r) as Box<dyn std::io::Read>)
+        }
     }
 
-    const STAMP: &str = ".wmdyn-stamp";
+    pub struct Dyn {
+        tc: Toolchain,
+    }
 
     pub fn detect(data_dir: Option<&str>) -> Result<Dyn, String> {
         let data = PathBuf::from(data_dir.ok_or("no data dir")?);
@@ -379,206 +430,34 @@ mod android {
             .find(|p| p.ends_with("/libmakepad.so"))
             .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
             .ok_or("libmakepad.so is not a file on disk (extractNativeLibs?)")?;
-        let env = load_asset("wmdyn/env.txt")
-            .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/env.txt missing")?
-            .lines()
-            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-            .collect();
-        Ok(Dyn { data, nlib, env })
+        Ok(Dyn { tc: Toolchain::new(data, nlib, &mut ApkAssets)? })
     }
 
     impl Dyn {
         /// `cargo` = the musl loader running the toolchain's cargo.
         pub fn cargo(&self) -> Command {
-            let mut cmd = Command::new(self.nlib.join("libld-musl.so"));
-            cmd.arg(self.data.join("tc/bin/cargo"));
+            let mut cmd = Command::new(self.tc.nlib.join("libld-musl.so"));
+            cmd.arg(self.tc.data.join("tc/bin/cargo"));
             cmd
         }
 
         pub fn env(&self, cmd: &mut Command) {
-            cmd.env_remove("MAKEPAD");
-            cmd.env("RUSTC", self.nlib.join("librustc-wrap.so"));
-            cmd.env("MAKEPAD_DYN_DIR", &self.data);
-            cmd.env("MAKEPAD_DYN_NLIB", &self.nlib);
-            cmd.env("CARGO_HOME", self.data.join("cargo"));
-            cmd.env("CARGO_TARGET_DIR", self.data.join("target"));
-            cmd.env("HOME", self.data.join("home"));
-            cmd.env("TMPDIR", self.data.join("tmp"));
-            cmd.env("PATH", "/system/bin");
-            cmd.env("CARGO_TERM_COLOR", "never");
-            cmd.env("CARGO_BUILD_JOBS", "4");
-            for (k, v) in &self.env {
-                cmd.env(k, v);
-            }
+            self.tc.env(cmd);
         }
 
         /// (size, mtime) of the shipped engine `.so` in target/: cargo must
         /// leave it alone.
         pub fn engine_stamp(&self) -> Option<(u64, std::time::SystemTime)> {
-            let p = self.data.join("target/aarch64-linux-android/release/deps/libmakepad_wm_engine.so");
-            let m = std::fs::metadata(p).ok()?;
+            let m = std::fs::metadata(engine_dylib(&self.tc.target())).ok()?;
             Some((m.len(), m.modified().ok()?))
         }
     }
 
+    /// First tile open: provisioning (makepad-ondevice-build). The desk
+    /// shows the lines; a tap on a tile retries a failure.
     pub fn provision(d: &Dyn, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
-        let stamp = load_asset("wmdyn/stamp")
-            .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/stamp missing: APK packed without local/wm-dyn/pack.py")?;
-        if std::fs::read_to_string(d.data.join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
-            std::env::set_var("MAKEPAD_WM_ROOT", d.data.join("src"));
-            return Ok(());
-        }
-        say(lines, client, format!("provisioning {} into {}", stamp.trim(), d.data.display()));
-        for dir in ["src", "target", "tc", "cargo", "home", "tmp"] {
-            let _ = std::fs::remove_dir_all(d.data.join(dir));
-        }
-        let _ = std::fs::remove_file(d.data.join(STAMP));
-        for dir in ["cargo", "home", "tmp"] {
-            std::fs::create_dir_all(d.data.join(dir)).map_err(|e| format!("mkdir {dir}: {e}"))?;
-        }
-        let manifest = load_asset("wmdyn/manifest.txt")
-            .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/manifest.txt missing")?;
-        for line in manifest.lines() {
-            let mut it = line.split_whitespace();
-            let (Some(name), Some(parts), Some(bytes)) = (it.next(), it.next(), it.next()) else { continue };
-            let parts: usize = parts.parse().map_err(|_| format!("manifest: {line}"))?;
-            say(lines, client, format!("extracting {name} ({bytes} bytes, {parts} parts)"));
-            extract(d, name, parts, lines, client)?;
-        }
-        std::env::set_var("MAKEPAD_WM_ROOT", d.data.join("src"));
-        bootstrap(d, lines, client)?;
-        patch_proc_macro_svh(d, lines, client)?;
-        say(lines, client, "aligning target/ mtimes");
-        bump_mtimes(&d.data.join("target"))?;
-        std::fs::write(d.data.join(STAMP), &stamp).map_err(|e| format!("stamp: {e}"))?;
-        say(lines, client, "provisioned");
-        Ok(())
-    }
-
-    /// Concatenate asset parts to a file, then `busybox tar -xzf` that file.
-    /// Piping stdin died immediately (Broken pipe) on this Pixel.
-    fn extract(d: &Dyn, name: &str, parts: usize, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
-        let tar_path = d.data.join(name);
-        {
-            let mut out = std::fs::File::create(&tar_path).map_err(|e| format!("create {name}: {e}"))?;
-            for i in 0..parts {
-                let part = format!("wmdyn/{name}.{i:03}");
-                let bytes = load_asset(&part).ok_or_else(|| format!("asset {part} missing"))?;
-                out.write_all(&bytes).map_err(|e| format!("write {name}: {e}"))?;
-                let pct = ((i + 1) * 100) / parts;
-                say(lines, client, format!("extracting {name}: {}/{parts} ({pct}%)", i + 1));
-            }
-            out.flush().map_err(|e| format!("flush {name}: {e}"))?;
-        }
-        say(lines, client, format!("unpacking {name}"));
-        let report = makepad_tar::unpack_file(&tar_path, &d.data).map_err(|e| format!("unpack {name}: {e}"))?;
-        say(lines, client, format!("unpacked {name}: {} files, {} links", report.files, report.symlinks + report.hardlinks));
-        let _ = std::fs::remove_file(&tar_path);
-        Ok(())
-    }
-
-    /// The host-kind units the Mac could not ship (Mach-O): proc-macros and
-    /// their host rlibs, rebuilt here by the musl rustc as dependencies of
-    /// the generated `wmdyn-bootstrap` crate (build-override profile, the
-    /// resolved features: the same unit hashes the engine's fingerprints
-    /// name). The engine units stay Fresh once the mtimes are aligned.
-    fn bootstrap(d: &Dyn, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
-        let mut cmd = d.cargo();
-        cmd.current_dir(d.data.join("src"));
-        cmd.args(["build", "--release", "--offline", "--frozen", "--target", "aarch64-linux-android"]);
-        cmd.args(["-p", "wmdyn-bootstrap"]);
-        d.env(&mut cmd);
-        say(lines, client, "bootstrapping proc-macros with the on-device rustc");
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("cargo (bootstrap): {e}"))?;
-        let mut err = String::new();
-        if let Some(stderr) = child.stderr.take() {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let text = line.trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
-                say(lines, client, text.clone());
-                if err.len() < 800 {
-                    err.push_str(&text);
-                    err.push('\n');
-                }
-            }
-        }
-        let status = child.wait().map_err(|e| format!("cargo wait: {e}"))?;
-        if !status.success() {
-            return Err(format!("proc-macro bootstrap failed ({status}): {err}"));
-        }
-        Ok(())
-    }
-
-    /// The SVH law (crate::rmeta): the engine's metadata names every
-    /// proc-macro by the SVH of the Mac's Mach-O build, and a proc-macro the
-    /// musl rustc rebuilt carries another one (host triple, host std are in
-    /// the hash) — rustc then fails the first app build with E0463 "can't
-    /// find crate for makepad_micro_serde_derive which makepad_wm_engine
-    /// depends on". So each rebuilt `.so` gets the recorded SVH written into
-    /// its header (assets/wmdyn/proc-macro-svh.txt: `lib<crate>-<hash>.so
-    /// <svh>`, from pack.py), before the mtime bump. A listed file the
-    /// bootstrap did not produce means the unit hashes differ from the
-    /// Mac's: the engine would not be Fresh either — stop here, say which.
-    fn patch_proc_macro_svh(d: &Dyn, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
-        let list = load_asset("wmdyn/proc-macro-svh.txt")
-            .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/proc-macro-svh.txt missing: APK packed by an older local/wm-dyn/pack.py")?;
-        let deps = d.data.join("target/release/deps");
-        for line in list.lines() {
-            let mut it = line.split_whitespace();
-            let (Some(file), Some(hex)) = (it.next(), it.next()) else { continue };
-            let want = crate::rmeta::parse_svh(hex).ok_or_else(|| format!("proc-macro-svh.txt: bad svh {hex}"))?;
-            let path = deps.join(file);
-            let mut data = std::fs::read(&path)
-                .map_err(|e| format!("bootstrap produced no {file} (unit hash differs from the Mac's?): {e}"))?;
-            let h = crate::rmeta::read_header(&data).map_err(|e| format!("{file}: {e}"))?;
-            if h.svh == want {
-                say(lines, client, format!("{file}: svh already {hex}"));
-                continue;
-            }
-            crate::rmeta::set_svh(&mut data, &h, want);
-            std::fs::write(&path, &data).map_err(|e| format!("write {file}: {e}"))?;
-            say(
-                lines,
-                client,
-                format!("{file}: svh {} -> {hex} ({} {})", crate::rmeta::svh_hex(&h.svh), h.name, h.triple),
-            );
-        }
-        Ok(())
-    }
-
-    /// Every file under target/ gets the same mtime, newer than any source:
-    /// cargo's "dependency output newer than mine" staleness rule cannot
-    /// fire between the Mac-built engine and the device-built proc-macros.
-    fn bump_mtimes(dir: &Path) -> Result<(), String> {
-        // One whole-second instant for every file: cargo compares dependency
-        // output mtimes with strict "newer than", nanoseconds included.
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            let rd = std::fs::read_dir(&d).map_err(|e| format!("read_dir {}: {e}", d.display()))?;
-            for entry in rd.flatten() {
-                let p = entry.path();
-                let Ok(ft) = entry.file_type() else { continue };
-                if ft.is_dir() {
-                    stack.push(p);
-                } else if ft.is_file() {
-                    if let Ok(f) = std::fs::File::options().write(true).open(&p) {
-                        let _ = f.set_modified(now);
-                    }
-                }
-            }
-        }
+        makepad_ondevice_build::provision(&d.tc, &mut ApkAssets, &mut |text| say(lines, client, text))?;
+        std::env::set_var("MAKEPAD_WM_ROOT", d.tc.src());
         Ok(())
     }
 }

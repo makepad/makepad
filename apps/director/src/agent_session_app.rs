@@ -19,7 +19,23 @@ struct AgentSessionAppState {
     saved_views: HashMap<u64, String>,
     views_loaded: bool,
     next_inventory_probe: f64,
-    reported_titles: HashMap<String, String>,
+    /// Last terminal fact reported to the worker per tab, so unchanged
+    /// observations append no events.
+    reported_terminals: HashMap<u64, makepad_director::iteration::AgentTerminalFact>,
+    /// Inbox message ids typed into a prompt here, pending the worker's
+    /// durable acknowledgement in the next snapshot.
+    delivered_messages: HashSet<u64>,
+    /// Terminal observation requests in flight: request id -> tab. The cache
+    /// above only stands once the worker accepted the report.
+    terminal_reports: HashMap<String, u64>,
+    /// A fact the worker refused, per tab: (fact, refusals, retry not before
+    /// this epoch ms). It is sent again a bounded number of times; a changed
+    /// fact starts over.
+    refused_terminals: HashMap<u64, (makepad_director::iteration::AgentTerminalFact, u8, u64)>,
+    /// Typed messages whose delivery report the worker has not accepted yet:
+    /// message id -> (flow, request in flight). Only the report is retried;
+    /// the text is never typed a second time.
+    delivery_reports: HashMap<u64, (String, Option<String>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,6 +51,8 @@ enum AgentTerminalRequest {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AgentTerminalPhase {
+    /// The lane's callback binding is not published yet; no provider starts.
+    WaitingForBinding,
     Connecting,
     Attached,
     Detached,
@@ -46,12 +64,25 @@ enum AgentTerminalPhase {
 impl AgentTerminalPhase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::WaitingForBinding => "waiting_for_binding",
             Self::Connecting => "connecting",
             Self::Attached => "attached",
             Self::Detached => "detached",
             Self::Ended => "ended",
             Self::Stopping => "stopping",
             Self::Unavailable => "unavailable",
+        }
+    }
+    fn observed(self) -> makepad_director::iteration::AgentTerminalState {
+        use makepad_director::iteration::AgentTerminalState;
+        match self {
+            Self::WaitingForBinding => AgentTerminalState::WaitingForBinding,
+            Self::Connecting => AgentTerminalState::Connecting,
+            Self::Attached => AgentTerminalState::Attached,
+            Self::Detached => AgentTerminalState::Detached,
+            Self::Ended => AgentTerminalState::Ended,
+            Self::Stopping => AgentTerminalState::Stopping,
+            Self::Unavailable => AgentTerminalState::Unavailable,
         }
     }
 }
@@ -230,12 +261,366 @@ impl App {
                 } else {
                     AgentTerminalRequest::Prepare
                 };
-                if let Err(error) = self.queue_agent_terminal(id.0, kind) {
+                // A fresh provider start waits for the lane's published
+                // callback binding; an existing session only reattaches.
+                if kind == AgentTerminalRequest::Prepare && !self.callback_ready_for_tab(id.0) {
+                    if let Some(binding) = self.agent_sessions.bindings.get_mut(&id.0) {
+                        binding.phase = AgentTerminalPhase::WaitingForBinding;
+                        binding.error = None;
+                    }
+                } else if let Err(error) = self.queue_agent_terminal(id.0, kind) {
                     self.set_agent_terminal_error(id.0, error);
                 }
             }
             self.refresh_agent_terminal_status(cx, id.0);
         }
+        // Bindings that waited for their callback start once it is published.
+        let waiting: Vec<u64> = self
+            .agent_sessions
+            .bindings
+            .iter()
+            .filter(|(tab, binding)| {
+                binding.open
+                    && binding.phase == AgentTerminalPhase::WaitingForBinding
+                    && self.callback_ready_for_tab(**tab)
+                    && !self
+                        .agent_sessions
+                        .requests
+                        .values()
+                        .any(|(pending, _)| pending == *tab)
+            })
+            .map(|(tab, _)| *tab)
+            .collect();
+        for tab in waiting {
+            if let Some(binding) = self.agent_sessions.bindings.get_mut(&tab) {
+                binding.phase = AgentTerminalPhase::Connecting;
+            }
+            if let Err(error) = self.queue_agent_terminal(tab, AgentTerminalRequest::Prepare) {
+                self.set_agent_terminal_error(tab, error);
+            }
+            self.refresh_agent_terminal_status(cx, tab);
+        }
+        self.report_agent_terminals();
+    }
+
+    /// The flow whose stable terminal origin owns this tab, if any.
+    fn flow_for_tab(&self, tab: u64) -> Option<String> {
+        self.iterations
+            .snapshot
+            .engine
+            .flows
+            .values()
+            .find(|flow| flow.successor.is_none() && self.flow_terminal_id(&flow.id) == tab)
+            .map(|flow| flow.id.clone())
+    }
+
+    /// Non-flow terminals have no binding to wait for; flow-backed ones start
+    /// their provider only after the worker published the callback binding.
+    fn callback_ready_for_tab(&self, tab: u64) -> bool {
+        match self.flow_for_tab(tab) {
+            Some(flow) => self.iterations.snapshot.callback_ready.contains(&flow),
+            None => true,
+        }
+    }
+
+    /// Report each flow-backed terminal's observed state to the worker so
+    /// agent status carries evidence. Unchanged facts are not resent.
+    fn report_agent_terminals(&mut self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut reports = Vec::new();
+        for (tab, binding) in &self.agent_sessions.bindings {
+            let Some(flow) = self.flow_for_tab(*tab) else {
+                continue;
+            };
+            let provider = match binding.provider {
+                makepad_director::agent_session::AgentProvider::Shell
+                | makepad_director::agent_session::AgentProvider::Unknown => None,
+                provider => Some(provider.as_str().to_owned()),
+            };
+            let fact = makepad_director::iteration::AgentTerminalFact {
+                state: binding.phase.observed(),
+                provider,
+                session: Some(binding.session_id.clone()),
+                conversation: binding
+                    .resume
+                    .as_ref()
+                    .map(|identity| identity.conversation_id.clone()),
+                pid: binding
+                    .info
+                    .as_ref()
+                    .map(|info| info.supervisor_pid)
+                    .filter(|pid| *pid != 0),
+                error: binding
+                    .error
+                    .as_ref()
+                    .map(|error| error.chars().take(1024).collect()),
+                at: now_ms,
+                // Seen by this session owner now, not restored from disk.
+                live: true,
+            };
+            let same = |last: &makepad_director::iteration::AgentTerminalFact| {
+                let mut last = last.clone();
+                last.at = fact.at;
+                last == fact
+            };
+            if self
+                .agent_sessions
+                .reported_terminals
+                .get(tab)
+                .is_some_and(same)
+            {
+                continue;
+            }
+            // A refused fact is retried three times, five seconds apart; a
+            // different fact is a new report.
+            match self.agent_sessions.refused_terminals.get(tab) {
+                Some((refused, count, retry_at)) if same(refused) => {
+                    if *count >= 3 || now_ms < *retry_at {
+                        continue;
+                    }
+                }
+                Some(_) => {
+                    self.agent_sessions.refused_terminals.remove(tab);
+                }
+                None => {}
+            }
+            reports.push((*tab, flow, fact));
+        }
+        for (tab, flow, fact) in reports {
+            self.iterations.sequence += 1;
+            let id = format!("terminal-observed:{}", self.iterations.sequence);
+            let Some(worker) = &self.iterations.worker else {
+                return;
+            };
+            match worker.submit(
+                id.clone(),
+                IterationRequest::TerminalObserved {
+                    flow,
+                    fact: fact.clone(),
+                },
+            ) {
+                Ok(()) => {
+                    // Cached while in flight so it is not sent on every pass;
+                    // a refusal takes it out again.
+                    self.agent_sessions.reported_terminals.insert(tab, fact);
+                    if self.agent_sessions.terminal_reports.len() >= 256 {
+                        self.agent_sessions.terminal_reports.clear();
+                    }
+                    self.agent_sessions.terminal_reports.insert(id, tab);
+                }
+                Err(error) => log!("studio terminal observation: {error}"),
+            }
+        }
+    }
+
+    /// The worker answered a terminal observation. A refusal means the engine
+    /// does not hold that fact: the cache entry goes, so it is reported again.
+    fn agent_terminal_reported(&mut self, request: &str, accepted: bool) {
+        let Some(tab) = self.agent_sessions.terminal_reports.remove(request) else {
+            return;
+        };
+        if accepted {
+            self.agent_sessions.refused_terminals.remove(&tab);
+            return;
+        }
+        let Some(fact) = self.agent_sessions.reported_terminals.remove(&tab) else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let refusals = match self.agent_sessions.refused_terminals.get(&tab) {
+            Some((refused, count, _))
+                if {
+                    let mut refused = refused.clone();
+                    refused.at = fact.at;
+                    refused == fact
+                } =>
+            {
+                count.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.agent_sessions
+            .refused_terminals
+            .insert(tab, (fact, refusals, now_ms + 5_000));
+    }
+
+    /// The worker answered a delivery report. A refused report is sent again
+    /// on the next pass; the terminal is not typed into again.
+    fn agent_delivery_reported(&mut self, request: &str, accepted: bool) {
+        let Some(id) = self
+            .agent_sessions
+            .delivery_reports
+            .iter()
+            .find(|(_, (_, pending))| pending.as_deref() == Some(request))
+            .map(|(id, _)| *id)
+        else {
+            return;
+        };
+        if accepted {
+            self.agent_sessions.delivery_reports.remove(&id);
+        } else if let Some((_, pending)) = self.agent_sessions.delivery_reports.get_mut(&id) {
+            *pending = None;
+        }
+    }
+
+    /// Send every delivery report that is not in flight. A failed submit or a
+    /// refused report stays queued for the next pass.
+    fn report_agent_deliveries(&mut self) {
+        let Some(worker) = &self.iterations.worker else {
+            return;
+        };
+        for (message, (flow, pending)) in self.agent_sessions.delivery_reports.iter_mut() {
+            if pending.is_some() {
+                continue;
+            }
+            self.iterations.sequence += 1;
+            let id = format!("agent-delivered:{}", self.iterations.sequence);
+            match worker.submit(
+                id.clone(),
+                IterationRequest::AgentDelivered {
+                    flow: flow.clone(),
+                    id: *message,
+                },
+            ) {
+                Ok(()) => *pending = Some(id),
+                Err(error) => log!("studio message delivery report: {error}"),
+            }
+        }
+    }
+
+    /// Queued inbox messages are typed into the recipient's own attached
+    /// terminal only when its input prompt is provably empty, through the
+    /// same proof the Fable /login path uses; bracketed paste keeps the text
+    /// as one input and the single Enter submits it. Anything else stays
+    /// queued and visible as such; a human draft is never overwritten.
+    /// This notification is best effort: the durable channel is the inbox,
+    /// which the recipient reads and acknowledges itself.
+    fn deliver_agent_messages(&mut self, cx: &mut Cx) {
+        let snapshot = self.iterations.snapshot.clone();
+        let engine = &snapshot.engine;
+        let undelivered = |id: u64| {
+            engine.agent_ids().iter().any(|node| {
+                engine
+                    .agent_undelivered(node)
+                    .iter()
+                    .any(|message| message.id == id)
+            })
+        };
+        self.agent_sessions
+            .delivered_messages
+            .retain(|id| undelivered(*id));
+        self.agent_sessions
+            .delivery_reports
+            .retain(|id, _| undelivered(*id));
+        self.report_agent_deliveries();
+        for node in engine.agent_ids() {
+            // Every typed message stays accounted for: while reports are
+            // backed up, nothing further is typed.
+            if self.agent_sessions.delivery_reports.len()
+                >= makepad_director::iteration::MAX_AGENT_INBOX
+            {
+                break;
+            }
+            let Some(flow) = engine.agent_current_flow(&node).map(|flow| flow.id.clone()) else {
+                continue;
+            };
+            let Some(message) = engine
+                .agent_undelivered(&node)
+                .into_iter()
+                .find(|message| !self.agent_sessions.delivered_messages.contains(&message.id))
+                .cloned()
+            else {
+                continue;
+            };
+            let tab = self.flow_terminal_id(&flow);
+            if self.agent_sessions.mirrors.contains_key(&tab)
+                || self
+                    .agent_sessions
+                    .view_requests
+                    .values()
+                    .any(|pending| *pending == tab)
+                || self
+                    .agent_sessions
+                    .requests
+                    .values()
+                    .any(|(pending, _)| *pending == tab)
+            {
+                continue;
+            }
+            let Some(binding) = self.agent_sessions.bindings.get(&tab) else {
+                continue;
+            };
+            // A task is only ever pasted into an agent provider's prompt. A
+            // shell or an unidentified program may show the same `>` row,
+            // where the text would run as a command.
+            if !matches!(
+                binding.provider,
+                makepad_director::agent_session::AgentProvider::Codex
+                    | makepad_director::agent_session::AgentProvider::Fable
+                    | makepad_director::agent_session::AgentProvider::Grok
+            ) {
+                continue;
+            }
+            if !binding.open
+                || binding.phase != AgentTerminalPhase::Attached
+                || binding.error.is_some()
+                || binding
+                    .recovery
+                    .as_ref()
+                    .is_some_and(|recovery| recovery.phase.active())
+            {
+                continue;
+            }
+            let terminal = self
+                .ui
+                .dock(cx, ids!(dock))
+                .item(LiveId(tab))
+                .widget(cx, ids!(term));
+            let Some(mut term) = terminal.borrow_mut::<MpTerm>() else {
+                continue;
+            };
+            let Some((rows, _, _)) = term.ai_screen_rows(None) else {
+                continue;
+            };
+            let visible = rows.len();
+            let Some((rows, cursor_y, cursor_x)) = term.ai_screen_rows(Some(visible)) else {
+                continue;
+            };
+            let row = rows.get(cursor_y).map(|row| row.trim()).unwrap_or("");
+            if cursor_x > 4 || !matches!(row, ">" | "❯" | "›") {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(
+                format!(
+                    "[Director {} #{} from agent {}] {}\nAcknowledge with: \"$MAKEPAD_STUDIO_CLI\" agent '{{\"action\":\"inbox\",\"ack\":{}}}'",
+                    message.kind.as_str(),
+                    message.id,
+                    message.from,
+                    message.text.replace('\r', "\n"),
+                    message.id
+                )
+                .as_bytes(),
+            );
+            bytes.extend_from_slice(b"\x1b[201~\r");
+            if !term.ai_type_bytes(&bytes) {
+                continue;
+            }
+            drop(term);
+            terminal.redraw(cx);
+            self.agent_sessions.delivered_messages.insert(message.id);
+            self.agent_sessions
+                .delivery_reports
+                .insert(message.id, (flow, None));
+        }
+        self.report_agent_deliveries();
     }
 
     fn queue_agent_terminal(
@@ -265,6 +650,15 @@ impl App {
             .any(|(id, _)| *id == tab)
         {
             return Err("An agent session operation is already pending for this tab".into());
+        }
+        if matches!(
+            kind,
+            AgentTerminalRequest::Prepare
+                | AgentTerminalRequest::Restore
+                | AgentTerminalRequest::Recover
+        ) && !self.callback_ready_for_tab(tab)
+        {
+            return Err("This lane's callback binding is not published yet; the provider waits for it (the tab shows waiting for callback) before starting, resuming or recovering".into());
         }
         if matches!(
             kind,
@@ -332,7 +726,7 @@ impl App {
                 flow.successor.is_none() && self.flow_terminal_id(&flow.id) == tab)
                 .map(|flow| {
                     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-                    let cli = executable.with_file_name(if cfg!(windows) { "studio-flow.exe" } else { "studio-flow" });
+                    let cli = executable.with_file_name(if cfg!(windows) { "director-flow.exe" } else { "director-flow" });
                     let control = self.state_dir().join("iterations").join("control").join(&flow.id);
                     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
                     Ok::<_, String>(format!("export MAKEPAD_STUDIO_FLOW_ID={}; export MAKEPAD_STUDIO_CONTROL_DIR={}; export MAKEPAD_STUDIO_CLI={}; exec \"${{SHELL:-/bin/sh}}\" -l",
@@ -521,6 +915,9 @@ impl App {
             .set_text(cx, &text);
         let title = match binding.phase {
             AgentTerminalPhase::Attached => binding.title.clone(),
+            AgentTerminalPhase::WaitingForBinding => {
+                format!("{} · waiting for callback", binding.title)
+            }
             AgentTerminalPhase::Connecting => format!("{} · connecting", binding.title),
             AgentTerminalPhase::Detached => format!("{} · detached", binding.title),
             AgentTerminalPhase::Ended => format!("{} · ended", binding.title),
@@ -547,6 +944,9 @@ impl App {
             recovery.message.clone()
         } else {
             match binding.phase {
+                AgentTerminalPhase::WaitingForBinding => {
+                    "Waiting for this lane's callback binding before starting its provider…".into()
+                }
                 AgentTerminalPhase::Connecting => {
                     "Connecting to the persistent agent session…".into()
                 }
@@ -678,6 +1078,9 @@ impl App {
             .as_mut()
             .map(|worker| worker.poll())
             .unwrap_or_default();
+        if self.iterations.snapshot_ready {
+            self.deliver_agent_messages(cx);
+        }
         if replies.is_empty() {
             return;
         }
@@ -810,7 +1213,7 @@ impl App {
                                 }
                             }
                         }
-                        log!("studio stop agent refused: {error}");
+                        log!("studio agent terminal {tab:x}: stop or recovery refused: {error}");
                     } else {
                         self.set_agent_terminal_error(tab, error);
                     }
@@ -819,6 +1222,7 @@ impl App {
             self.refresh_agent_terminal_status(cx, tab);
         }
         self.sync_terminal_busy();
+        self.report_agent_terminals();
         self.refresh_workspace(cx);
         self.refresh_ai_context(cx);
     }
@@ -1174,23 +1578,81 @@ impl App {
         binding.info.as_ref().map(|info| info.supervisor_pid)
     }
 
-    fn agent_sessions_json(&self) -> Value {
-        let mut bindings: Vec<_> = self.agent_sessions.bindings.iter().collect();
-        bindings.sort_by_key(|(tab, _)| **tab);
-        json::obj(vec![
-            ("ui_close", json::s("detach_only")),
+    /// One compact terminal row for the global status: the session, its
+    /// state, the provider and the proven conversation, with errors as short
+    /// excerpts. Paths, transport versions and evidence files are left to
+    /// the lane's own operations so the index stays small.
+    fn terminal_status_row(&self, tab: u64) -> Value {
+        let Some(binding) = self.agent_sessions.bindings.get(&tab) else {
+            return json::obj(vec![("status", json::s("not_started"))]);
+        };
+        let mut fields = vec![
+            ("tab", json::s(format!("{tab:x}"))),
+            ("session_id", json::s(&binding.session_id)),
+            ("status", json::s(binding.phase.as_str())),
+            ("provider", json::s(binding.provider.as_str())),
             (
-                "flow_terminals",
-                Value::Obj(
-                    self.iterations
-                        .snapshot
-                        .engine
-                        .flows
-                        .keys()
-                        .map(|flow| (flow.clone(), self.flow_terminal_info(flow)))
-                        .collect(),
-                ),
+                "conversation_id",
+                binding
+                    .resume
+                    .as_ref()
+                    .map(|identity| json::s(&identity.conversation_id))
+                    .unwrap_or(Value::Null),
             ),
+        ];
+        if let Some(info) = &binding.info {
+            fields.push(("supervisor_pid", Value::Int(info.supervisor_pid as i64)));
+            if let Some(error) = &info.resume_error {
+                fields.push(("resume_error", json::s(status_excerpt(error, 200))));
+            }
+            if let Some(warning) = &info.transport_warning {
+                fields.push(("transport_warning", json::s(status_excerpt(warning, 160))));
+            }
+        }
+        if let Some(recovery) = &binding.recovery {
+            fields.push(("recovery", json::s(recovery.phase.as_str())));
+        }
+        if let Some(info) = self.agent_sessions.mirrors.get(&tab) {
+            fields.push(("viewing_session", json::s(&info.session_id)));
+        }
+        if let Some(error) = &binding.error {
+            fields.push(("error", json::s(status_excerpt(error, 200))));
+        }
+        if !binding.open {
+            fields.push(("tab_open", Value::Bool(false)));
+        }
+        if self
+            .agent_sessions
+            .requests
+            .values()
+            .any(|(pending, _)| *pending == tab)
+        {
+            fields.push(("pending", Value::Bool(true)));
+        }
+        json::obj(fields)
+    }
+
+    /// The terminals that belong to no lane, as compact rows; lane terminals
+    /// are listed once, under `flow_terminals`.
+    fn session_status_rows(&self, lane_tabs: &HashSet<u64>) -> Vec<Value> {
+        let mut tabs: Vec<u64> = self
+            .agent_sessions
+            .bindings
+            .keys()
+            .copied()
+            .filter(|tab| !lane_tabs.contains(tab))
+            .collect();
+        tabs.sort_unstable();
+        tabs.into_iter()
+            .map(|tab| self.terminal_status_row(tab))
+            .collect()
+    }
+
+    /// What closing a view or a tab means for a session, and the session
+    /// manager's own error if it has one.
+    fn agent_session_rules(&self) -> Vec<(&'static str, Value)> {
+        vec![
+            ("ui_close", json::s("detach_only")),
             ("tab_close", json::s("detach_only")),
             ("explicit_stop_required", Value::Bool(true)),
             (
@@ -1198,120 +1660,9 @@ impl App {
                 self.agent_sessions
                     .error
                     .as_ref()
-                    .map(json::s)
+                    .map(|error| json::s(status_excerpt(error, 200)))
                     .unwrap_or(Value::Null),
             ),
-            (
-                "sessions",
-                Value::Arr(
-                    bindings
-                        .into_iter()
-                        .map(|(tab, binding)| {
-                            json::obj(vec![
-                                ("tab", json::s(format!("{tab:x}"))),
-                                ("session_id", json::s(&binding.session_id)),
-                                (
-                                    "display_session",
-                                    json::s(
-                                        self.agent_sessions
-                                            .mirrors
-                                            .get(tab)
-                                            .map(|info| info.session_id.as_str())
-                                            .unwrap_or(&binding.session_id),
-                                    ),
-                                ),
-                                (
-                                    "shared_view",
-                                    Value::Bool(self.agent_sessions.mirrors.contains_key(tab)),
-                                ),
-                                ("status", json::s(binding.phase.as_str())),
-                                ("provider", json::s(binding.provider.as_str())),
-                                (
-                                    "transport_program",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .map(|info| json::s(&info.transport_program))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "transport_version",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .map(|info| json::s(&info.transport_version))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "transport_warning",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .and_then(|info| info.transport_warning.as_ref())
-                                        .map(json::s)
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "resume_id",
-                                    binding
-                                        .resume
-                                        .as_ref()
-                                        .map(|identity| json::s(&identity.conversation_id))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "resume_evidence",
-                                    binding
-                                        .resume
-                                        .as_ref()
-                                        .map(|identity| json::s(&identity.evidence_path))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "resume_error",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .and_then(|info| info.resume_error.as_ref())
-                                        .map(json::s)
-                                        .unwrap_or(Value::Null),
-                                ),
-                                ("tab_open", Value::Bool(binding.open)),
-                                (
-                                    "supervisor_pid",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .map(|info| Value::Int(info.supervisor_pid as i64))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                ("cwd", json::s(binding.cwd.to_string_lossy())),
-                                (
-                                    "backend",
-                                    binding
-                                        .info
-                                        .as_ref()
-                                        .map(|info| json::s(info.backend))
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "error",
-                                    binding.error.as_ref().map(json::s).unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "pending",
-                                    Value::Bool(
-                                        self.agent_sessions
-                                            .requests
-                                            .values()
-                                            .any(|(pending, _)| pending == tab),
-                                    ),
-                                ),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ])
+        ]
     }
 }

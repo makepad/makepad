@@ -58,49 +58,40 @@ impl App {
             .min()
     }
 
+    /// A lane's name is its flow title, given by create, delegation or
+    /// flow_rename. The program in its terminal retitles the PTY all the time
+    /// (the shell's name, a provider's startup banner, spinner frames): that
+    /// caption describes the process, not the lane, so it never renames the
+    /// lane and never stands in for its title. Ordinary terminal tabs keep
+    /// their live captions; they do not pass through here.
+    /// The one header note left is a lane whose view is connected to another
+    /// session: it keeps its own name and says what it is showing.
     fn refresh_terminal_view_labels(&mut self, cx: &mut Cx) {
         let mut labels = std::collections::BTreeMap::new();
-        let flows: Vec<_> = self
-            .iterations
-            .snapshot
-            .engine
+        let engine = &self.iterations.snapshot.engine;
+        for flow in engine
             .flows
             .values()
             .filter(|flow| !self.iterations.deleting.contains(&flow.id))
-            .map(|flow| (flow.id.clone(), flow.title.clone()))
-            .collect();
-        for (flow, old_title) in flows {
-            let tab = self.flow_terminal_id(&flow);
-            let info = self.agent_sessions.mirrors.get(&tab).or_else(|| {
-                self.agent_sessions
-                    .bindings
-                    .get(&tab)
-                    .and_then(|b| b.info.as_ref())
-            });
-            if let Some(info) = info {
-                let title = info.title.clone();
-                labels.insert(flow.clone(), title.clone());
-                if title == old_title {
-                    self.agent_sessions.reported_titles.remove(&flow);
-                }
-                if title != old_title
-                    && self.agent_sessions.reported_titles.get(&flow) != Some(&title)
-                {
-                    if self
-                        .submit_iteration(
-                            cx,
-                            IterationRequest::TerminalNamed {
-                                flow: flow.clone(),
-                                title: title.clone(),
-                            },
-                            "terminal_name",
-                        )
-                        .is_ok()
-                    {
-                        self.agent_sessions.reported_titles.insert(flow, title);
-                    }
-                }
-            }
+        {
+            let Some(info) = self
+                .agent_sessions
+                .mirrors
+                .get(&self.flow_terminal_id(&flow.id))
+            else {
+                continue;
+            };
+            // The lane that owns the shown session, by its name; a session
+            // outside the flows only has its caption.
+            let source = self
+                .info_owner_flow(info)
+                .and_then(|owner| engine.flows.get(&owner))
+                .map(|owner| owner.title.clone())
+                .unwrap_or_else(|| info.title.clone());
+            labels.insert(
+                flow.id.clone(),
+                format!("{}  ·  viewing {source}", flow.title),
+            );
         }
         if let Some(mut view) = self
             .ui
@@ -111,7 +102,10 @@ impl App {
         }
     }
 
-    fn info_owner_flow(&self, info: &makepad_director::agent_session::SessionInfo) -> Option<String> {
+    fn info_owner_flow(
+        &self,
+        info: &makepad_director::agent_session::SessionInfo,
+    ) -> Option<String> {
         if self.agent_sessions.inventory_state_dir.as_ref() != Some(&info.state_dir) {
             return None;
         }
@@ -163,7 +157,8 @@ impl App {
     }
 
     fn update_terminal_connections(&mut self, cx: &mut Cx) {
-        let choices = makepad_director::agent_session::terminal_menu(&self.agent_sessions.inventory);
+        let choices =
+            makepad_director::agent_session::terminal_menu(&self.agent_sessions.inventory);
         if let Some(mut view) = self
             .ui
             .widget(cx, ids!(flow_scene))

@@ -63,6 +63,57 @@ struct AppRun {
     pop_out: bool,
     embedding_client: Option<u64>,
     embedding_port: Option<u16>,
+    /// The mode the caller asked for; `mode` is what actually launched.
+    requested: iteration::LaunchMode,
+    /// Parent-artifact grant this run executes under, if any.
+    grant: Option<String>,
+    /// The person's input counter read once at test start. Every automated
+    /// mutation carries it; a changed counter or a 409 hands the app over.
+    user_seq: Option<u64>,
+    /// The human interacted during an AI test: automation stopped and the
+    /// instance stays running until they close it.
+    handed_off: bool,
+    /// Windows the app opened beyond the one hosted view; not observed.
+    extra_windows: usize,
+    /// Why automation let go of this app, when it did.
+    handoff_reason: Option<String>,
+    /// The person asked Director to close this app. Only that request closes
+    /// a handed-off app; automatic cleanup never sets it.
+    operator_close: bool,
+    /// A guarded close request ended with the unchanged input counter, so the
+    /// app was still the test's when it was asked to quit.
+    close_verified: bool,
+    /// The host transport presented this hosted app's first valid frame.
+    first_frame: bool,
+    /// Display title of a demonstration test, if any.
+    demo: Option<String>,
+}
+
+/// One app launch. `requested` is what the caller asked for and `mode` what
+/// this launch actually is; they differ only for a recorded fallback.
+struct AppLaunch<'a> {
+    flow: &'a str,
+    artifact: &'a str,
+    path: &'a Path,
+    mode: iteration::LaunchMode,
+    requested: iteration::LaunchMode,
+    reopening: bool,
+    embedded: Option<(String, u64, u16)>,
+    role: iteration::RunRole,
+    grant: Option<&'a str>,
+    demo: Option<&'a str>,
+}
+
+/// An immutable executable a lane may run: its own retained artifact, or one
+/// its direct parent granted. The provenance stays with the original owner.
+#[derive(Clone)]
+struct RetainedArtifact {
+    id: String,
+    commit: String,
+    path: PathBuf,
+    /// Flow directory under `artifacts/` that retains the executable.
+    origin_flow: String,
+    grant: Option<iteration::AgentGrant>,
 }
 struct CargoLease(PathBuf);
 impl Drop for CargoLease {
@@ -170,7 +221,7 @@ impl Host {
         let target_directory = owned.common_dir.join("studio-target");
         fs::create_dir_all(&target_directory).map_err(err)?;
         if !rustc_guard()?.is_file() {
-            return Err("Build studio-rustc-guard before running iteration checks".into());
+            return Err("Build director-rustc-guard before running iteration checks".into());
         }
         Ok(Build {
             job: job.into(),
@@ -628,47 +679,101 @@ impl Host {
         reopening: bool,
         embedded: Option<(String, u64, u16)>,
     ) -> Result<(), String> {
-        self.spawn_artifact_role(
+        self.spawn_app(AppLaunch {
             flow,
             artifact,
             path,
             mode,
+            requested: mode,
             reopening,
             embedded,
-            iteration::RunRole::Human,
-        )
+            role: iteration::RunRole::Human,
+            grant: None,
+            demo: None,
+        })
     }
 
-    fn spawn_artifact_role(
-        &mut self,
+    /// The lane's own retained artifact, or one named by a grant its direct
+    /// parent issued to exactly this lane. Anything else is refused: no other
+    /// lane's artifact, no unrelated grant and no external executable.
+    fn retained_artifact(
+        &self,
         flow: &str,
         artifact: &str,
-        path: &Path,
-        mode: iteration::LaunchMode,
-        reopening: bool,
-        embedded: Option<(String, u64, u16)>,
-        role: iteration::RunRole,
-    ) -> Result<(), String> {
-        if self.apps.contains_key(flow) {
-            return Err("Close the current app before opening another revision".into());
-        }
+        grant: Option<&str>,
+    ) -> Result<RetainedArtifact, String> {
         let state = self.flow(flow)?;
+        if let Some(id) = grant {
+            let grant = self
+                .engine
+                .agent_grant_by_id(flow, id)
+                .ok_or("Unknown artifact grant for this lane")?;
+            if grant.artifact != artifact {
+                return Err("That grant names a different artifact".into());
+            }
+            return Ok(RetainedArtifact {
+                id: grant.artifact.clone(),
+                commit: grant.commit.clone(),
+                path: grant.path.clone(),
+                origin_flow: grant.origin_flow.clone(),
+                grant: Some(grant.clone()),
+            });
+        }
         let selected = state
             .artifacts
             .iter()
-            .find(|item| item.id == artifact && item.path == path)
-            .ok_or("Unknown immutable artifact")?
-            .clone();
-        let owned = self.owned(flow)?;
+            .find(|item| item.id == artifact)
+            .ok_or("Unknown retained artifact; a parent's artifact needs grant=<grant id>")?;
+        Ok(RetainedArtifact {
+            id: selected.id.clone(),
+            commit: selected.commit.clone(),
+            path: selected.path.clone(),
+            origin_flow: self
+                .engine
+                .evidence_origin("artifact", artifact)
+                .unwrap_or(flow)
+                .to_owned(),
+            grant: None,
+        })
+    }
+
+    fn spawn_app(&mut self, launch: AppLaunch) -> Result<(), String> {
+        let AppLaunch {
+            flow,
+            artifact,
+            path,
+            mode,
+            requested,
+            reopening,
+            embedded,
+            role,
+            grant,
+            demo,
+        } = launch;
+        if self.apps.contains_key(flow) {
+            return Err("Close the current app before opening another revision".into());
+        }
+        self.app_budget()?;
+        let state = self.flow(flow)?;
+        let selected = self.retained_artifact(flow, artifact, grant)?;
+        if selected.path != path {
+            return Err("Unknown immutable artifact".into());
+        }
+        // A granted artifact runs against the checkout that built it when that
+        // lane still exists; the child's run directory and evidence stay its own.
+        let owned = match selected
+            .grant
+            .as_ref()
+            .and_then(|grant| self.engine.agent_current_flow(&grant.owner))
+        {
+            Some(owner) => self.owned(&owner.id)?,
+            None => self.owned(flow)?,
+        };
         let actual = fs::canonicalize(path).map_err(err)?;
         let artifact_root = fs::canonicalize(
             self.directory
                 .join("artifacts")
-                .join(
-                    self.engine
-                        .evidence_origin("artifact", artifact)
-                        .unwrap_or(flow),
-                )
+                .join(&selected.origin_flow)
                 .join(artifact),
         )
         .map_err(err)?;
@@ -785,6 +890,32 @@ impl Host {
                     binary_hash.as_deref().map(s).unwrap_or(Value::Null),
                 ),
                 ("resource_snapshot", Value::Bool(false)),
+                ("requested_mode", s(requested.as_str())),
+                (
+                    "node",
+                    self.engine
+                        .agent_node(flow)
+                        .map(|node| s(&node.id))
+                        .unwrap_or(Value::Null),
+                ),
+                // Provenance of a granted artifact stays with its owner; the
+                // run, input, results and video belong to this lane.
+                (
+                    "grant",
+                    selected
+                        .grant
+                        .as_ref()
+                        .map(|grant| {
+                            json::obj(vec![
+                                ("id", s(&grant.id)),
+                                ("owner", s(&grant.owner)),
+                                ("origin_flow", s(&grant.origin_flow)),
+                                ("artifact", s(&grant.artifact)),
+                                ("commit", s(&grant.commit)),
+                            ])
+                        })
+                        .unwrap_or(Value::Null),
+                ),
             ])
             .to_json()
             .as_bytes(),
@@ -795,6 +926,7 @@ impl Host {
                 artifact_id: artifact.into(),
                 run_id: run.clone(),
                 pid: Some(pid),
+                mode,
             }
         } else if reopening {
             Observation::RunReopened {
@@ -841,19 +973,50 @@ impl Host {
                 pop_out: false,
                 embedding_client,
                 embedding_port,
+                requested,
+                grant: selected.grant.as_ref().map(|grant| grant.id.clone()),
+                user_seq: None,
+                handed_off: false,
+                handoff_reason: None,
+                operator_close: false,
+                close_verified: false,
+                first_frame: false,
+                demo: demo.map(str::to_owned),
+                extra_windows: 0,
             },
         );
         self.changed = true;
         Ok(())
     }
 
+    /// Automatic cleanup: test stop, a failed start, fallback retirement,
+    /// lane lifecycle and shutdown. It never closes an app a person took over.
     fn close(&mut self, flow: &str) -> Result<(), String> {
+        self.close_app(flow, false)
+    }
+
+    /// The person's explicit Close in Director. It is the only way a
+    /// handed-off app is closed, and it is sent without the test's guard.
+    fn close_by_operator(&mut self, flow: &str) -> Result<(), String> {
+        self.close_app(flow, true)
+    }
+
+    fn close_app(&mut self, flow: &str, operator: bool) -> Result<(), String> {
+        if !operator && self.apps.get(flow).is_some_and(|run| run.handed_off) {
+            return Err("A person is using this test app; automation does not close it. Close it from Director".into());
+        }
         self.cancel_test_operation(flow, "Owned app close requested");
         if self.cancel_pending_embedding(flow, "Launch canceled before the child started") {
             return Ok(());
         }
         if let Some(run) = self.apps.get_mut(flow) {
             run.pop_out = false;
+            if operator && !run.operator_close {
+                // Their request starts its own close sequence.
+                run.operator_close = true;
+                run.close_stage = 0;
+                run.closing = Some(Instant::now());
+            }
             run.closing.get_or_insert_with(Instant::now);
             self.note = format!("{flow}: capturing the final frame and closing the owned app");
             self.changed = true;
@@ -919,6 +1082,14 @@ impl Host {
                     .into(),
             );
         }
+        if run.role != iteration::RunRole::Human {
+            // Popping out closes and reopens the app, which would rerun an
+            // active AI test behind its agent's back.
+            return Err(
+                "An AI test preview is watch-only and is not popped out; its agent owns that run"
+                    .into(),
+            );
+        }
         if run.mode == iteration::LaunchMode::Standalone {
             return Err("This app is already running standalone".into());
         }
@@ -952,13 +1123,46 @@ impl Host {
                     }
                 }
             }
+            // An automatic close of an AI test is guarded; the person's own
+            // close request from Director is not.
+            let guarded = run.role == iteration::RunRole::AiTest && !run.operator_close;
             if let Some(request) = &mut run.close_request {
                 match request.try_wait() {
                     Ok(Some(_)) => {
                         run.close_request = None;
-                        if let Err(error) = retain_close_capture(&run) {
-                            self.note = format!("{flow}: {error}");
-                            self.changed = true;
+                        // Ownership evidence is read first, whatever curl's
+                        // own exit status was: a partial reply can still
+                        // carry the 409 or the moved input counter.
+                        let evidence = if guarded {
+                            close_evidence(&run)
+                        } else {
+                            CloseEvidence::Verified
+                        };
+                        match evidence {
+                            CloseEvidence::Refused(reason) => {
+                                self.note = format!(
+                                    "{flow}: {reason}; the app was not closed and stays running"
+                                );
+                                hand_off(&mut run, reason);
+                                self.changed = true;
+                            }
+                            CloseEvidence::Verified => {
+                                run.close_verified = true;
+                                if let Err(error) = retain_close_capture(&run) {
+                                    self.note = format!("{flow}: {error}");
+                                    self.changed = true;
+                                }
+                            }
+                            // An established guard without the ending counter
+                            // of this very reply proves nothing: no further
+                            // request is sent and nothing is killed. If the
+                            // process still runs at the deadline below it is
+                            // left to the person; one that exits meanwhile
+                            // simply finishes its cleanup.
+                            CloseEvidence::Unknown => {
+                                run.close_verified = false;
+                                run.close_stage = 2;
+                            }
                         }
                     }
                     Ok(None) => {}
@@ -974,36 +1178,85 @@ impl Host {
                     if let Some(port) = run.port {
                         let route = if run.close_stage == 0 { "gq" } else { "quit" };
                         run.close_stage += 1;
-                        match Command::new("curl")
-                            .args([
-                                "--silent",
-                                "--show-error",
-                                "--fail",
-                                "--max-time",
-                                "2",
-                                "--connect-timeout",
-                                "1",
-                                "--output",
-                            ])
-                            .arg(run.directory.join("close.json"))
-                            .arg(format!("http://127.0.0.1:{port}/{route}"))
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn()
-                        {
-                            Ok(child) => run.close_request = Some(child),
-                            Err(error) => {
-                                self.note =
-                                    format!("{flow}: graceful {route} could not start: {error}");
+                        let mut command = Command::new("curl");
+                        command.args([
+                            "--silent",
+                            "--show-error",
+                            "--max-time",
+                            "2",
+                            "--connect-timeout",
+                            "1",
+                        ]);
+                        let mut url = format!("http://127.0.0.1:{port}/{route}");
+                        // The status and the ending input counter must be
+                        // recordable before a guarded close is sent at all.
+                        let status = if guarded {
+                            let code = run.directory.join("close.code");
+                            let headers = run.directory.join("close.headers");
+                            if let Some(sequence) = run.user_seq {
+                                url.push_str(&format!("?if_user_seq={sequence}"));
+                            }
+                            command
+                                .args(["--write-out", "%{http_code}", "--dump-header"])
+                                .arg(&headers);
+                            // Both files are created here, emptied of any
+                            // earlier stage, before curl may write to them.
+                            File::create(&headers)
+                                .and_then(|_| File::create(&code))
+                                .map(Stdio::from)
+                                .map_err(|error| {
+                                    format!("the close reply could not be recorded ({error}), so the app was not asked to close")
+                                })
+                        } else {
+                            command.arg("--fail");
+                            Ok(Stdio::null())
+                        };
+                        // Each request proves ownership for itself only.
+                        run.close_verified = false;
+                        match status {
+                            Ok(status) => match command
+                                .arg("--output")
+                                .arg(run.directory.join("close.json"))
+                                .arg(url)
+                                .stdin(Stdio::null())
+                                .stdout(status)
+                                .stderr(Stdio::null())
+                                .spawn()
+                            {
+                                Ok(child) => run.close_request = Some(child),
+                                Err(error) => {
+                                    self.note = format!(
+                                        "{flow}: graceful {route} could not start: {error}"
+                                    );
+                                    self.changed = true;
+                                }
+                            },
+                            Err(reason) => {
+                                self.note = format!("{flow}: {reason}; it stays running");
+                                hand_off(&mut run, reason);
                                 self.changed = true;
                             }
                         }
                     }
                 }
-                if run.exit.is_none() && since.elapsed() > Duration::from_secs(6) {
-                    if let Err(error) = run.child.kill() {
-                        self.note = format!("{flow}: owned app did not close: {error}");
+                if run.closing.is_some()
+                    && run.exit.is_none()
+                    && run.close_request.is_none()
+                    && since.elapsed() > Duration::from_secs(6)
+                {
+                    // A test with an established guard is only killed after its
+                    // latest close reply proved the counter unchanged. Without
+                    // that proof the app is left to the person.
+                    if may_force_kill(&run) {
+                        if let Err(error) = run.child.kill() {
+                            self.note = format!("{flow}: owned app did not close: {error}");
+                            self.changed = true;
+                        }
+                    } else {
+                        let reason = "no close reply carried the person's input counter, so ownership could not be verified".to_owned();
+                        self.note =
+                            format!("{flow}: {reason}; the app was not killed and stays running");
+                        hand_off(&mut run, reason);
                         self.changed = true;
                     }
                 }
@@ -1022,6 +1275,24 @@ impl Host {
                     ("run", s(&run.run)),
                     ("artifact", s(&run.artifact)),
                     ("role", s(run.role.as_str())),
+                    ("requested_mode", s(run.requested.as_str())),
+                    ("mode", s(run.mode.as_str())),
+                    ("grant", run.grant.as_deref().map(s).unwrap_or(Value::Null)),
+                    ("handed_off", Value::Bool(run.handed_off)),
+                    (
+                        "handoff_reason",
+                        run.handoff_reason.as_deref().map(s).unwrap_or(Value::Null),
+                    ),
+                    ("operator_close", Value::Bool(run.operator_close)),
+                    (
+                        "first_frame",
+                        if run.mode == iteration::LaunchMode::Embedded {
+                            Value::Bool(run.first_frame)
+                        } else {
+                            Value::Null
+                        },
+                    ),
+                    ("unobserved_windows", Value::Int(run.extra_windows as i64)),
                     ("closed", Value::Bool(true)),
                     ("human_requested", Value::Bool(human_requested)),
                     (
@@ -1268,9 +1539,9 @@ fn rustc_guard() -> Result<PathBuf, String> {
     Ok(std::env::current_exe()
         .map_err(err)?
         .with_file_name(if cfg!(windows) {
-            "studio-rustc-guard.exe"
+            "director-rustc-guard.exe"
         } else {
-            "studio-rustc-guard"
+            "director-rustc-guard"
         }))
 }
 fn source_fingerprint(repository: &Path) -> Result<String, String> {
@@ -1360,6 +1631,60 @@ fn copy_immutable(source: &Path, destination: &Path) -> Result<(), String> {
     }
     result
 }
+/// What a guarded close reply proved about who owns the app.
+enum CloseEvidence {
+    /// HTTP 409, or the person's input counter moved: they are using it.
+    Refused(String),
+    /// The reply ended on the counter the test started with, or the test had
+    /// not established a guard yet and the app did not refuse.
+    Verified,
+    /// A guard exists but no ending counter came back.
+    Unknown,
+}
+
+fn close_evidence(run: &AppRun) -> CloseEvidence {
+    let code = bounded_read(&run.directory.join("close.code"), 16)
+        .ok()
+        .and_then(|code| code.trim().parse::<u16>().ok());
+    if code == Some(409) {
+        return CloseEvidence::Refused(
+            "the app refused the close with HTTP 409 because a person is using it".into(),
+        );
+    }
+    let ending = bounded_read(&run.directory.join("close.headers"), 64 * 1024)
+        .ok()
+        .and_then(|headers| test_user_seq_header(&headers));
+    match (run.user_seq, ending) {
+        (Some(expected), Some(ending)) if expected != ending => CloseEvidence::Refused(format!(
+            "the person's input counter moved from {expected} to {ending} during the close"
+        )),
+        (Some(_), None) => CloseEvidence::Unknown,
+        _ => CloseEvidence::Verified,
+    }
+}
+
+/// Whether automation may still end this process by force. Never an app a
+/// person took over. A guarded AI test (automatic close, guard established)
+/// only once its latest close request was answered with the unchanged input
+/// counter; a request still in flight has proven nothing. Human apps and the
+/// person's own close of a test app are not restricted here.
+fn may_force_kill(run: &AppRun) -> bool {
+    if run.handed_off {
+        return false;
+    }
+    let guarded = run.role == iteration::RunRole::AiTest && !run.operator_close;
+    !guarded || run.user_seq.is_none() || (run.close_verified && run.close_request.is_none())
+}
+
+/// Automation lets go of an app: nothing closes, kills or replaces it any
+/// more except the person's own close from Director.
+fn hand_off(run: &mut AppRun, reason: String) {
+    run.handed_off = true;
+    run.handoff_reason.get_or_insert(reason);
+    run.closing = None;
+    run.close_stage = 0;
+}
+
 fn log_tail(path: &Path, limit: usize) -> Result<String, String> {
     use std::io::Seek;
     let mut file = File::open(path).map_err(err)?;

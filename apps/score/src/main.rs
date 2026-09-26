@@ -312,6 +312,7 @@ mod tests {
     #[test]
     fn application_dsl_mounts_score_shell() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        cx.init_cx_os();
         let errors = cx.with_vm(|vm| {
             vm.bx.captured_errors = Some(Vec::new());
             makepad_widgets::makepad_platform::script::script_mod(vm);

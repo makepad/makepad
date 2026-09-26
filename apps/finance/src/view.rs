@@ -41,7 +41,8 @@ script_mod! {
         spacing: 8
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: theme.container_corner_radius
+            // 16 pt visible corners: the box radius is half the visible one.
+            border_radius: 8.0
             border_size: 1.0
             border_color: mod.finance.line_soft
         }
@@ -103,6 +104,34 @@ script_mod! {
             color_down: mod.finance.fg
             color_focus: mod.finance.fg_dim
             text_style: theme.font_regular{font_size: 10}
+        }
+    }
+
+    // A 48 pt hit row with a 40 pt selection pill drawn inside it: the
+    // Button is the whole row (its theme keeps a 48 pt minimum) and paints
+    // nothing; `tab_pill` behind it is lit for the current screen.
+    let PhoneTab = View{
+        width: Fill
+        height: 48
+        flow: Overlay
+        align: Align{x: 0.5, y: 0.5}
+        tab_pill := RoundedView{
+            width: Fill
+            height: 40
+            draw_bg +: { color: #x00000000 border_size: 0.0 border_radius: 10.0 }
+        }
+        tab_hit := NavItem{
+            width: Fill
+            height: 48
+            align: Align{x: 0.5, y: 0.5}
+            padding: Inset{left: 8, right: 8}
+            draw_bg +: {
+                color: #x00000000
+                color_hover: #x00000000
+                color_down: #x00000000
+                color_focus: #x00000000
+            }
+            draw_text +: { text_style: theme.font_regular{font_size: 10.5} }
         }
     }
 
@@ -275,26 +304,30 @@ script_mod! {
         bar_meter := Meter{}
     }
 
+    // 16 pt visible corners (the box radius is half the visible one), 16 pt
+    // padding, the value 22/28 (fitted down to 20 when the card is narrow)
+    // and the label and note 12/16.
     let StatCard = RoundedView{
         width: Fill
-        height: Fit
+        height: Fit{min: 112}
         flow: Down
-        padding: 14
+        padding: 16
         spacing: 6
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: theme.container_corner_radius
+            border_radius: 8.0
             border_size: 1.0
             border_color: mod.finance.line_soft
         }
-        stat_label := Dim{}
+        stat_label := Dim{draw_text.text_style.font_size: 9}
         stat_value := Label{
+            padding: 0
             draw_text +: {
                 color: mod.finance.fg
-                text_style: theme.font_code{font_size: 15}
+                text_style: theme.font_code{font_size: 16.5}
             }
         }
-        stat_note := Dim{}
+        stat_note := Dim{draw_text.text_style.font_size: 9}
     }
 
     let Trend = FinanceChart{
@@ -376,7 +409,7 @@ script_mod! {
                 // ---- Top bar: title, search, and the range chips.
                 topbar := Panel{
                     width: Fill
-                    height: 52
+                    height: 56
                     flow: Right
                     align: Align{x: 0.0, y: 0.5}
                     padding: Inset{left: 16, right: 16}
@@ -400,17 +433,32 @@ script_mod! {
                         height: Fill
                         flow: Down
                         padding: 16
-                        spacing: 14
+                        spacing: 16
 
+                        // Two pairs: side by side they are four across;
+                        // stacked (a pane under 720 pt) they are two
+                        // columns of two.
                         stats_row := View{
                             width: Fill
                             height: Fit
                             flow: Right
-                            spacing: 12
-                            stat_in := StatCard{}
-                            stat_out := StatCard{}
-                            stat_net := StatCard{}
-                            stat_saved := StatCard{}
+                            spacing: 16
+                            stats_a := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 16
+                                stat_in := StatCard{}
+                                stat_out := StatCard{}
+                            }
+                            stats_b := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 16
+                                stat_net := StatCard{}
+                                stat_saved := StatCard{}
+                            }
                         }
 
                         worth_card := Card{
@@ -573,13 +621,15 @@ script_mod! {
             height: 56
             flow: Right
             align: Align{x: 0.5, y: 0.5}
-            padding: Inset{left: 6, right: 6}
-            spacing: 2
-            tab_overview := NavItem{ height: Fill, text: "Overview" }
-            tab_ledger := NavItem{ height: Fill, text: "Ledger" }
-            tab_budget := NavItem{ height: Fill, text: "Budget" }
-            tab_reports := NavItem{ height: Fill, text: "Reports" }
-            tab_import := NavItem{ height: Fill, text: "Import" }
+            padding: Inset{left: 8, right: 8}
+            spacing: 8
+            // Each tab a 40 pt pill; the current one gets the accent
+            // container (`sync_chrome`).
+            tab_overview := PhoneTab{ tab_hit.text: "Overview" }
+            tab_ledger := PhoneTab{ tab_hit.text: "Ledger" }
+            tab_budget := PhoneTab{ tab_hit.text: "Budget" }
+            tab_reports := PhoneTab{ tab_hit.text: "Reports" }
+            tab_import := PhoneTab{ tab_hit.text: "Import" }
         }
     }
 }
@@ -785,6 +835,10 @@ pub struct Finance {
     screen: Screen,
     #[rust(Layout::Wide)]
     layout: Layout,
+    /// The width this widget was last given: it decides how the four
+    /// stats pair up and whether their values fit at 22 pt.
+    #[rust]
+    width: f64,
     #[rust(Range::Month)]
     range: Range,
     /// Which account the register is filtered to; `None` = all of them.
@@ -968,6 +1022,31 @@ impl Finance {
         self.widget(cx, ids!(tab_import)).set_visible(cx, !compact && self.backend.has_import());
     }
 
+    /// The four stats pair up by the pane they are given: four across when
+    /// it is 720 pt or wider, two columns of two below that (the phone shows
+    /// the first pair only). Their values are 22 pt, or 20 pt when the
+    /// longest would not fit a card at 22: a sign, a decimal or the currency
+    /// is never clipped.
+    fn fit_stats(&mut self, cx: &mut Cx, values: &[String]) {
+        let compact = self.layout == Layout::Compact;
+        let shown = if compact { &values[..2.min(values.len())] } else { values };
+        let longest = shown.iter().map(|v| v.chars().count()).max().unwrap_or(0);
+        let fit = stat_fit(self.width, compact, longest);
+        let mut row = self.view(cx, ids!(stats_row));
+        if fit.across {
+            script_apply_eval!(cx, row, { flow: mod.turtle.Right });
+        } else {
+            script_apply_eval!(cx, row, { flow: mod.turtle.Down });
+        }
+        self.view(cx, ids!(stats_b)).set_visible(cx, !compact);
+        // Makepad points are the design's points times 3/4.
+        let size = fit.size_pt * 0.75;
+        for id in [ids!(stat_in), ids!(stat_out), ids!(stat_net), ids!(stat_saved)] {
+            let mut value = self.view(cx, id).widget(cx, ids!(stat_value));
+            script_apply_eval!(cx, value, { draw_text.text_style.font_size: #(size) });
+        }
+    }
+
     /// Push every value the chrome shows. Cheap enough to run whenever
     /// something changed, rather than tracking what.
     fn sync_chrome(&mut self, cx: &mut Cx) {
@@ -993,6 +1072,26 @@ impl Finance {
             });
         }
 
+        // The phone's tabs: the current one sits in the accent container.
+        for (screen, id) in Screen::ALL.iter().zip([
+            ids!(tab_overview),
+            ids!(tab_ledger),
+            ids!(tab_budget),
+            ids!(tab_reports),
+            ids!(tab_import),
+        ]) {
+            let mut pill = self.view(cx, id).widget(cx, ids!(tab_pill));
+            let mut hit = self.view(cx, id).widget(cx, ids!(tab_hit));
+            if *screen == self.screen {
+                script_apply_eval!(cx, pill, { draw_bg +: { color: mod.finance.accent_soft } });
+                script_apply_eval!(cx, hit, { draw_text +: { color: mod.finance.fg } });
+            } else {
+                let clear = Vec4f::default();
+                script_apply_eval!(cx, pill, { draw_bg +: { color: #(clear) } });
+                script_apply_eval!(cx, hit, { draw_text +: { color: mod.finance.fg_dim } });
+            }
+        }
+
         let worth = self.ledger.net_worth_on(today);
         self.label(cx, ids!(net_worth_value))
             .set_text(cx, &format_money(worth, currency));
@@ -1015,6 +1114,12 @@ impl Finance {
             card.label(cx, ids!(stat_value)).set_text(cx, &value);
             card.label(cx, ids!(stat_note)).set_text(cx, note);
         }
+        self.fit_stats(cx, &[
+            format_money(flow.income, currency),
+            format_money(flow.expense, currency),
+            format_money(flow.net(), currency),
+            saved.clone(),
+        ]);
 
         // Net worth chart: 24 months of ends-of-month.
         let series = report::net_worth_series(&self.ledger, 24, today);
@@ -1444,6 +1549,10 @@ impl Widget for Finance {
             if layout != self.layout {
                 self.apply_layout(cx, layout);
             }
+            if (width - self.width).abs() > 0.5 {
+                self.width = width;
+                self.chrome_synced = false;
+            }
         }
         if !self.chrome_synced {
             self.sync_chrome(cx);
@@ -1575,13 +1684,13 @@ impl WidgetMatchEvent for Finance {
             (Screen::Budget, ids!(nav_budget), ids!(tab_budget)),
             (Screen::Reports, ids!(nav_reports), ids!(tab_reports)),
         ] {
-            if self.button(cx, nav).clicked(actions) || self.button(cx, tab).clicked(actions) {
+            if self.button(cx, nav).clicked(actions) || self.view(cx, tab).button(cx, ids!(tab_hit)).clicked(actions) {
                 self.set_screen(cx, screen);
             }
         }
         if self.backend.has_import()
             && (self.button(cx, ids!(nav_import)).clicked(actions)
-                || self.button(cx, ids!(tab_import)).clicked(actions))
+                || self.view(cx, ids!(tab_import)).button(cx, ids!(tab_hit)).clicked(actions))
         {
             self.set_screen(cx, Screen::Import);
         }
@@ -1666,6 +1775,38 @@ impl WidgetMatchEvent for Finance {
     }
 }
 
+/// How the four stats sit in a widget `width` wide: four across or two
+/// columns, and the value size in design points. 22 when the longest value
+/// (`longest` characters) fits a card, else 20; four across only when 20
+/// fits four; below 20 the size shrinks to fit (never under 12), so a sign,
+/// a decimal or the currency is never clipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StatFit {
+    pub across: bool,
+    pub size_pt: f64,
+}
+
+/// The amounts are monospaced; a glyph is at most this many ems wide.
+const STAT_GLYPH_EM: f64 = 0.62;
+
+pub(crate) fn stat_fit(width: f64, compact: bool, longest: usize) -> StatFit {
+    let pane = width - if compact { 0.0 } else { 248.0 };
+    // The card's text width: the pane's 16 pt padding, 16 pt gaps, and the
+    // card's own 16 pt padding either side (the value Label has none).
+    let inner = |columns: f64| (pane - 32.0 - 16.0 * (columns - 1.0)) / columns - 32.0;
+    let needs = |size: f64| longest as f64 * STAT_GLYPH_EM * size;
+    let across = !compact && pane >= 720.0 && needs(20.0) <= inner(4.0);
+    let room = inner(if across { 4.0 } else { 2.0 });
+    let size_pt = if needs(22.0) <= room {
+        22.0
+    } else if needs(20.0) <= room {
+        20.0
+    } else {
+        (room / (longest.max(1) as f64 * STAT_GLYPH_EM)).floor().max(12.0)
+    };
+    StatFit { across, size_pt }
+}
+
 #[cfg(test)]
 mod layout_tests {
     use super::Layout;
@@ -1681,5 +1822,30 @@ mod layout_tests {
         assert_eq!(Layout::for_width(1200.0), Layout::Wide);
         assert!(!Layout::Compact.has_sidebar());
         assert!(Layout::Regular.has_sidebar());
+    }
+
+    /// The stats never clip: "-2.865,16 €" (11 characters) at the widget
+    /// width where the pane first reaches 720 pt stays in two columns, a
+    /// wide desk puts four across at 22, and a value too long for 20 shrinks.
+    #[test]
+    fn stat_values_fit_their_cards() {
+        use super::{stat_fit, STAT_GLYPH_EM};
+        let text = |fit: super::StatFit, width: f64, len: usize| {
+            let pane = width - 248.0;
+            let columns = if fit.across { 4.0 } else { 2.0 };
+            let inner = (pane - 32.0 - 16.0 * (columns - 1.0)) / columns - 32.0;
+            len as f64 * STAT_GLYPH_EM * fit.size_pt <= inner + 0.001
+        };
+        let near = stat_fit(968.0, false, 11);
+        assert!(!near.across, "{near:?}");
+        assert!(text(near, 968.0, 11));
+        let wide = stat_fit(1440.0, false, 11);
+        assert!(wide.across && wide.size_pt == 22.0, "{wide:?}");
+        let long = stat_fit(968.0, false, 30);
+        assert!(long.size_pt < 20.0 && text(long, 968.0, 30), "{long:?}");
+        // The phone: two per row, the whole width.
+        let phone = stat_fit(412.0, true, 11);
+        let inner = (412.0 - 32.0 - 16.0) / 2.0 - 32.0;
+        assert!(11.0 * STAT_GLYPH_EM * phone.size_pt <= inner, "{phone:?}");
     }
 }

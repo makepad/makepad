@@ -14,11 +14,14 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 # Feature passthrough: the headless node exposes exactly the library's
 # feature set, so box launch scripts keep their --features flags working.
 [features]
-default = ["flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"]
+default = ["localai", "flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"]
 python-backends = ["makepad-ai-hub/python-backends"]
 flux = ["makepad-ai-hub/flux"]
 paint = ["makepad-ai-hub/paint"]
 paint-cuda = ["makepad-ai-hub/paint-cuda"]
+# The local model runtime, under the name every AI crate and app uses for
+# it. On by default: this node is where local AI belongs.
+localai = ["makepad-ai-hub/localai"]
 llm = ["makepad-ai-hub/llm"]
 tts = ["makepad-ai-hub/tts"]
 indextts = ["makepad-ai-hub/indextts"]

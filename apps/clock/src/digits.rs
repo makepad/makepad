@@ -40,6 +40,13 @@ impl TabularLabel {
             self.redraw(cx);
         }
     }
+    /// Where the run sits across the box: 0 left, 0.5 centred, 1 right.
+    pub fn set_align_x(&mut self, cx: &mut Cx, align_x: f64) {
+        if self.align_x != align_x {
+            self.align_x = align_x;
+            self.redraw(cx);
+        }
+    }
     pub fn text(&self) -> &str {
         &self.text
     }

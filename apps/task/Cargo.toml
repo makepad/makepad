@@ -7,7 +7,19 @@ edition = "2021"
 name = "task"
 path = "src/main.rs"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-civil-time = { path = "../../libs/civil_time" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+
+[package.metadata.makepad.desktop]
+name = "Makepad Task Manager"
+identifier = "nl.makepad.task"
+icon = "resources/taskmanager-icon.png"

@@ -2,10 +2,10 @@
 //!
 //! The hub's pipelines are not an app, so no app registers them; the
 //! panel registers this service in-process beside whatever apps join.
-//! An `image` call runs the creator pipeline on a worker thread (the
-//! runner is blocking: node pick over the LAN fleet, request, poll,
-//! fetch), streams the node's progress into the card, writes the picture
-//! under the makepad home's `gen` folder and answers with the path — the
+//! An `image` call runs the hub's one-job runner on a worker thread (it
+//! is blocking: node pick over the LAN fleet, request, poll, fetch),
+//! streams the node's progress into the card, writes the picture under
+//! the makepad home's `gen` folder and answers with the path — the
 //! model then hands that path to `photos.add`, which puts it on the wall.
 //! Nothing goes through the asset store. Compiled only with the `gen`
 //! feature; a build without it does not advertise this service.
@@ -231,17 +231,22 @@ fn json_string(s: &str) -> String {
 }
 
 fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(&str, u16)) -> Result<GenDone, String> {
-    use makepad_asset_creator::makepad_ai_hub::home::makepad_home;
-    use makepad_asset_creator::makepad_strict_json as json;
-    use makepad_asset_creator::runner::generate_bytes;
-    let body = json::obj(vec![
-        ("prompt", json::s(args.prompt.clone())),
-        ("width", json::Value::Int(args.width as i64)),
-        ("height", json::Value::Int(args.height as i64)),
-    ]);
+    use makepad_ai_hub::generate::{generate, JobExpect};
+    use makepad_ai_hub::home::makepad_home;
+    use makepad_ai_hub::protocol::GenerateRequestJson;
+    use makepad_ai_hub::registry::Domain;
     let seed = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u64;
+    let wire = GenerateRequestJson {
+        prompt: Some(args.prompt.clone()),
+        width: Some(args.width),
+        height: Some(args.height),
+        seed: Some(seed),
+        ..Default::default()
+    };
     progress("finding an image node", 0);
-    let generated = generate_bytes("image.generate", &body, seed, cancel, progress)?;
+    let expect = JobExpect { label: "image.generate", artifact: Some(&["image/png"]) };
+    let generated = generate(Domain::Image, wire, &expect, &|| cancel.load(Ordering::Relaxed), progress, std::time::Duration::from_millis(500))
+        .map_err(|e| e.to_string())?;
     let artifact = generated.artifact.ok_or("the node returned no picture")?;
     let dir = makepad_home().join("gen");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;

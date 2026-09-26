@@ -180,6 +180,10 @@ impl Widget for HourlyStrip {
             }
             Hit::FingerUp(e) if e.is_primary_hit() => {
                 self.drag = None;
+                // Taken away: no coast; the strip stays where the finger left it.
+                if e.cancelled {
+                    self.velocity = 0.0;
+                }
                 self.animate(cx);
             }
             Hit::FingerScroll(e) => {

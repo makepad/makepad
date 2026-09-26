@@ -319,6 +319,8 @@ pub struct LayoutMetrics {
     pub op_pt: f64,
     pub sci_pt: f64,
     pub util_pt: f64,
+    /// The landscape header's height (0 where there is none).
+    pub short_bar_h: f64,
 }
 
 impl LayoutMetrics {
@@ -373,12 +375,13 @@ impl LayoutMetrics {
             op_pt: 34.0,
             sci_pt: 18.0,
             util_pt: 24.0,
+            short_bar_h: 0.0,
         }
     }
 
     fn compact(width: f64, height: f64) -> Self {
         let key_w = (width - 32.0 - 30.0) / 4.0;
-        let top = 8.0 + 44.0 + (147.0 - 52.0) + 136.0;
+        let top = 8.0 + 48.0 + (147.0 - 52.0) + 136.0;
         let bottom = 16.0;
         let available = (height - top - bottom).max(44.0);
         let v_gap = 10.0;
@@ -410,10 +413,17 @@ impl LayoutMetrics {
             op_pt: 34.0,
             sci_pt: 18.0,
             util_pt: 26.0,
+            short_bar_h: 0.0,
         }
     }
 
-    fn short_scientific(width: f64, _height: f64) -> Self {
+    fn short_scientific(width: f64, height: f64) -> Self {
+        // The phone's 332 pt landscape: 4 + 56 header + 8 + five 48 pt rows
+        // with 4 pt gaps + 8. Shorter windows give up the header's 12 pt
+        // first, then key height down to the 44 pt target.
+        let frame = 4.0 + 8.0 + 8.0 + 4.0 * 4.0;
+        let short_bar_h = if height >= frame + 56.0 + 5.0 * 44.0 { 56.0 } else { 44.0 };
+        let key_h = ((height - frame - short_bar_h) / 5.0).clamp(44.0, 48.0);
         let inner = (width - 16.0).max(0.0);
         let h_gap = 4.0;
         let sci_basic = 8.0;
@@ -429,23 +439,24 @@ impl LayoutMetrics {
             col_sep: 0.0,
             key: KeyMetrics {
                 width: key_w,
-                height: 44.0,
+                height: key_h,
                 h_gap,
                 v_gap: 4.0,
                 sci_basic_gap: sci_basic,
-                radius: 22.0,
+                radius: key_h * 0.5,
             },
             show_tape: false,
             show_scientific: true,
             show_short_bar: true,
             show_toolbar: false,
             show_display: false,
-            result_pt: 28.0,
-            expr_pt: 16.0,
+            result_pt: 32.0,
+            expr_pt: 12.0,
             digit_pt: 24.0,
-            op_pt: 26.0,
-            sci_pt: 16.0,
+            op_pt: 24.0,
+            sci_pt: 14.0,
             util_pt: 18.0,
+            short_bar_h,
         }
     }
 
@@ -1889,6 +1900,11 @@ mod tests {
         assert!(short.class.short && short.class.scientific());
         assert!(!short.show_tape && short.show_short_bar && short.show_scientific);
         assert!((short.key.height - 44.0).abs() < 0.01);
+        assert_eq!(short.short_bar_h, 44.0);
+        let phone = LayoutMetrics::for_size(892.0, 332.0);
+        assert_eq!(phone.short_bar_h, 56.0);
+        assert!((phone.key.height - 48.0).abs() < 0.01);
+        assert!((4.0_f64 + 56.0 + 8.0 + 5.0 * 48.0 + 4.0 * 4.0 + 8.0 - 332.0).abs() < 1e-9);
         assert!(short.keys_meet_target());
         let keypad = 5.0 * short.key.height + 4.0 * short.key.v_gap;
         let remaining = 300.0 - 4.0 - 8.0 - 44.0 - 8.0;

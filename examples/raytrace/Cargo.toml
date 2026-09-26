@@ -3,6 +3,12 @@ name = "makepad-example-raytrace"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
 makepad-raytrace = { path = "../../libs/raytrace" }

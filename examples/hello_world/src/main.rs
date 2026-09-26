@@ -152,8 +152,9 @@ mod tests {
         let image = ImageBuffer::from_gif(ANIMATED_GIF).unwrap();
         let animation = image.animation.unwrap();
 
-        assert_eq!(animation.width, 1);
-        assert_eq!(animation.height, 1);
-        assert_eq!(animation.num_frames, 2);
+        // The embedded giphy.gif is 480 x 265 with 31 image descriptors.
+        assert_eq!(animation.width, 480);
+        assert_eq!(animation.height, 265);
+        assert_eq!(animation.num_frames, 31);
     }
 }

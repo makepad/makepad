@@ -143,6 +143,13 @@ impl Engine {
         if affected != 0 {
             message.push_str(&format!(" This also detaches {affected} split lane{}; their history and shared media are kept.", if affected == 1 { "" } else { "s" }));
         }
+        let children = self
+            .terminal_origin(flow)
+            .map(|node| self.agent_children(Some(node)).len())
+            .unwrap_or(0);
+        if children != 0 && lane.successor.is_none() {
+            message.push_str(&format!(" Its {children} delegated agent lane{} keep running under a retained parent record; none is stopped or moved.", if children == 1 { "" } else { "s" }));
+        }
         Ok(message)
     }
     /// Membership is separate from immutable dependencies. A moved feedback

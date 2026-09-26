@@ -1,24 +1,35 @@
 //! task — the task manager / activity monitor of the Makepad app family.
 //!
-//! Resource summaries and live history above a sortable process list. Larger
-//! windows also show per-core, memory, and network detail; the process list
-//! can switch to a real parent/child tree.
+//! One compact toolbar, a shallow history band with a scrub cursor, a strip
+//! of system traces, pinned processes, the process table and an inspector.
+//! Everything is recorded: the band can be dragged back to any retained
+//! moment and every view — tiles, table, inspector — then shows that same
+//! sample while the worker keeps recording. History survives restarts in a
+//! bounded journal in the user's application-data directory.
 //!
-//! All numbers come from [`backend`], which is one trait with a native
+//! All numbers come from [`backend`], one trait with a native
 //! implementation per OS — never `ps`/`top` output.
 
 pub use makepad_widgets;
 
 use makepad_widgets::*;
-use makepad_widgets::makepad_platform::thread::TaskHandle;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::collections::HashMap;
 
 mod backend;
+mod clock;
+mod columns;
+mod history;
+mod metrics;
+mod model;
+mod persist;
 mod sampler;
+mod supp;
 mod widgets;
 
-use backend::Snapshot;
-use widgets::{AggregateGraph, GraphSeries, MeterBars, MeterRow, ProcessTable};
+use backend::ProcKey;
+use model::{Model, RANGES_MS};
+use sampler::{Command, Message, Worker};
+use widgets::{HistoryBand, InspectorBody, InspectorTab, ProcessTable, SeriesLegend, INSPECTOR_TABS};
 
 app_main!(App);
 
@@ -26,54 +37,79 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    let Panel = PanelView{
-        width: Fill
-        height: Fill
-        flow: Down
-        padding: 14
-        spacing: 10
+    // One control height (26) and one radius for every bar control; colours
+    // come from the app theme at runtime (App::style_toggle / apply_theme).
+    let ToolButton = ButtonFlat{
+        width: Fit
+        height: 26
+        padding: Inset{left: 10 right: 10 top: 0 bottom: 0}
+        draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+    }
+
+    let IconButton = ButtonFlat{
+        width: 26
+        height: 26
+        padding: 0
+        align: Align{x: 0.5 y: 0.5}
+        draw_text +: {text_style: theme.font_icons{font_size: 9.0}}
+    }
+
+    let ToolDrop = DropDown{
+        width: 76
+        height: 26
+        padding: Inset{left: 10 right: 20 top: 0 bottom: 0}
+        draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+    }
+
+    let Segments = SegmentedControl{
+        segment_height: 26
+        segment_padding: 12
+        draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+        draw_text_selected +: {text_style: theme.font_bold{font_size: 10.5}}
+    }
+
+    let Rule = View{width: Fill height: 1 show_bg: true draw_bg +: {color: #x2a2b2f}}
+    let ToolGap = View{width: 1 height: 18 show_bg: true margin: Inset{left: 4 right: 4} draw_bg +: {color: #x2a2b2f}}
+
+    let TabButton = ButtonFlat{
+        width: Fit
+        height: 30
+        padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
+        draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+    }
+
+    let SmallText = Label{
+        padding: 0
+        draw_text +: {color: #x9b9ea6 text_style: theme.font_regular{font_size: 10.0}}
+    }
+
+    let MonoText = Label{
+        padding: 0
+        draw_text +: {color: #xe3e4e6 text_style: theme.font_code{font_size: 10.5}}
+    }
+
+    // A quiet 1 px divider with a wider grab strip; hover and drag light it.
+    let QuietSplitter = Splitter{
+        size: 7.0
         draw_bg +: {
-            color: theme.color_bg_container
-            border_color: theme.color_bevel_outset_2
-            border_size: 0.0
+            color_bg: uniform(#x1b1c1f)
+            color: uniform(#x2a2b2f)
+            color_hover: uniform(#x4f9dff)
+            color_drag: uniform(#x4f9dff)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.clear(self.color_bg)
+                let emphasis = max(self.hover, self.drag)
+                let thickness = mix(1.0, 2.0, emphasis)
+                if self.is_vertical > 0.5 {
+                    sdf.rect((self.rect_size.x - thickness) * 0.5, 0.0, thickness, self.rect_size.y)
+                }
+                else {
+                    sdf.rect(0.0, (self.rect_size.y - thickness) * 0.5, self.rect_size.x, thickness)
+                }
+                return sdf.fill(mix(self.color, mix(self.color_hover, self.color_drag, self.drag), emphasis * 0.7))
+            }
         }
-    }
-
-    let PanelTitle = Label{
-        padding: 0
-        width: Fill
-        height: 18
-        draw_text +: {
-            color: theme.color_text
-            text_style: theme.font_regular{font_size: 11.0}
-        }
-    }
-
-    let MetricText = Label{
-        padding: 0
-        draw_text +: {
-            color: #xa9b1d6
-            text_style: theme.font_regular{font_size: 9.0}
-        }
-    }
-
-    // Line only: the series line on the panel well, muted gridlines and the
-    // dashed last-value rule. `color_fill` is fully transparent, which makes
-    // TrendChart's area pass draw nothing — no gradient, no glow.
-    let TelemetryChart = TrendChart{
-        width: Fill
-        height: Fill
-        color_bg: #x16161e
-        color_grid: #x41486859
-        color_line: #x7aa2f7
-        color_fill: #x00000000
-        color_up: #x9ece6a
-        color_down: #xf7768e
-        color_text: #x565f89
-        color_accent: #xe0af68
-        line_width: 1.5
-        sparkline: true
-        draw_text +: {text_style: theme.font_code{font_size: 7.0}}
     }
 
     startup() do #(App::script_component(vm)){
@@ -81,150 +117,200 @@ script_mod! {
             main_window := Window{
                 window.title: "Task Manager"
                 window.inner_size: vec2(1400 900)
+                // Overlay: the menu layer after the app covers the whole window
+                // from its corner, where menus are placed from.
                 body +: {
+                    flow: Overlay
                     app_bg := RectView{
                         width: Fill
                         height: Fill
                         flow: Down
-                        padding: 16
-                        spacing: 14
+                        padding: 0
+                        spacing: 0
                         draw_bg +: {color: theme.color_bg_app}
 
-                        app_header := View{
-                            width: Fill height: 48 flow: Right spacing: 12 align: Align{y: 0.5}
-                            app_icon := AppIcon{name: "task" width: 38 height: 38}
-                            View{
-                                width: Fill height: Fit flow: Down spacing: 3
-                                app_title := Label{padding: 0 text: "Task Manager" draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 19.0}}}
-                                host_status := Label{padding: 0 text: "Live system activity" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
-                            }
-                        }
-                        mobile_tabs := View{
-                            visible: false width: Fill height: 44 flow: Right spacing: 6
-                            overview_tab := Button{width: Fill height: 44 text: "Overview"}
-                            processes_tab := Button{width: Fill height: 44 text: "Processes"}
-                        }
-                        summary_row := Grid{
-                            width: Fill height: 88 column_gap: 10 row_gap: 10
-                            columns: ["repeat(auto-fit, minmax(150px, 1fr))"]
-                            implicit_row_size: 76
-                            cpu_summary := Panel{
-                                Label{padding: 0 text: "CPU" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
-                                cpu_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
-                            }
-                            memory_summary := Panel{
-                                Label{padding: 0 text: "Memory used" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
-                                memory_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
-                            }
-                            down_summary := Panel{
-                                Label{padding: 0 text: "Network receive" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
-                                down_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
-                            }
-                            up_summary := Panel{
-                                Label{padding: 0 text: "Network send" draw_text +: {color: theme.color_label_outer text_style: theme.font_regular{font_size: 9.0}}}
-                                up_value := Label{padding: 0 text: "—" draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}}
-                            }
-                        }
-
-                        top_row := View{
+                        // What to show: scope, list/tree, order and sampling on
+                        // the left; search and the inspector on the right.
+                        toolbar := RectView{
                             width: Fill
-                            height: 240
+                            height: Fit
+                            flow: Down
+                            draw_bg +: {color: theme.color_bg_app}
+                            tool_row := View{
+                                width: Fill
+                                height: 44
+                                flow: Right
+                                spacing: 8
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 12 right: 12}
+                                scope_seg := Segments{options: ["Processes" "Apps"]}
+                                view_seg := Segments{options: ["List" "Tree"]}
+                                freeze_toggle := ToolButton{text: "Freeze order"}
+                                // DropDown has no visibility of its own: a View
+                                // around it is what hides it.
+                                refresh_wrap := View{
+                                    width: Fit height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                                    refresh_label := SmallText{text: "Every"}
+                                    refresh_select := ToolDrop{
+                                        labels: ["0.1 s" "0.2 s" "0.5 s" "1 s" "2 s" "5 s" "10 s"]
+                                        selected_item: 0
+                                    }
+                                }
+                                // How much history the graphs show: separate
+                                // from how often a sample is taken.
+                                history_wrap := View{
+                                    width: Fit height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                                    history_label := SmallText{text: "History"}
+                                    range_select := ToolDrop{
+                                        width: 70
+                                        labels: ["60 s" "15 m" "1 h" "24 h"]
+                                        selected_item: 1
+                                    }
+                                }
+                                View{width: Fill height: 1}
+                                filter_input := TextInput{
+                                    width: 260
+                                    height: 26
+                                    empty_text: "Search processes"
+                                    padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                                    draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+                                }
+                                inspector_toggle := ToolButton{text: "Inspector"}
+                            }
+                            // Narrow windows: what did not fit the first row.
+                            tool_row_more := View{
+                                visible: false
+                                width: Fill
+                                height: 38
+                                flow: Right
+                                spacing: 8
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 12 right: 12 bottom: 6}
+                                freeze_toggle_more := ToolButton{text: "Freeze order"}
+                                refresh_label_more := SmallText{text: "Every"}
+                                refresh_wrap_more := View{
+                                    width: Fit height: Fit
+                                    refresh_select_more := ToolDrop{
+                                        labels: ["0.1 s" "0.2 s" "0.5 s" "1 s" "2 s" "5 s" "10 s"]
+                                        selected_item: 0
+                                    }
+                                }
+                                history_label_more := SmallText{text: "History"}
+                                history_wrap_more := View{
+                                    width: Fit height: Fit
+                                    range_select_more := ToolDrop{
+                                        width: 70
+                                        labels: ["60 s" "15 m" "1 h" "24 h"]
+                                        selected_item: 1
+                                    }
+                                }
+                                View{width: Fill height: 1}
+                                inspector_toggle_more := ToolButton{text: "Inspector"}
+                            }
+                        }
+                        rule_toolbar := Rule{}
+                        // Series chips on the left; stepping through recorded
+                        // samples, the shown time and the one Live control on
+                        // the right, on the same line.
+                        legend_row := View{
+                            width: Fill
+                            height: Fit
                             flow: Right
                             spacing: 8
-
-                            // The one panel that survives every breakpoint.
-                            aggregate_panel := Panel{
+                            align: Align{y: 0.0}
+                            padding: Inset{left: 12 right: 12 top: 6 bottom: 4}
+                            series_legend := SeriesLegend{}
+                            history_controls := View{
+                                width: Fit
+                                height: 26
+                                flow: Right
+                                spacing: 4
+                                align: Align{y: 0.5}
+                                step_back := IconButton{text: "\u{f053}"}
+                                time_label := MonoText{
+                                    padding: Inset{left: 4 right: 4}
+                                    text: "Live"
+                                }
+                                step_forward := IconButton{text: "\u{f054}"}
+                                live_button := ToolButton{text: "Live"}
+                            }
+                        }
+                        history_band := HistoryBand{}
+                        rule_band := Rule{}
+                        // Plain Views own the visibility: the custom strips
+                        // have no `visible` property of their own.
+                        metric_wrap := View{width: Fill height: Fit metric_strip := MetricStrip{}}
+                        rule_metrics := Rule{}
+                        pinned_wrap := View{visible: false width: Fill height: Fit pinned_strip := PinnedStrip{}}
+                        rule_pinned := Rule{visible: false}
+                        body_split := QuietSplitter{
+                            width: Fill
+                            height: Fill
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(250.0)
+                            min_horizontal: 80.0
+                            max_horizontal: 80.0
+                            a: View{width: Fill height: Fill process_table := ProcessTable{}}
+                            b: View{
                                 width: Fill
-                                aggregate_title := PanelTitle{text: "Activity history"}
-                                aggregate_graph := AggregateGraph{}
-                            }
-
-                            cpu_panel := Panel{
-                                width: 290
-                                cpu_title := PanelTitle{text: "CPU  --.-%"}
-                                cpu_cores := MeterBars{height: 105 columns: 2}
-                                cpu_chart := TelemetryChart{}
-                            }
-
-                            side_column := View{
-                                width: 330
                                 height: Fill
                                 flow: Down
-                                spacing: 8
-
-                                memory_panel := Panel{
-                                    height: 116
-                                    memory_title := PanelTitle{text: "MEMORY"}
-                                    View{
+                                // Tabs on the raised bar; the active one takes
+                                // the content colour so it reads as part of the
+                                // panel below. End process stands apart.
+                                inspector_tabs := RectView{
+                                    width: Fill
+                                    height: 36
+                                    flow: Right
+                                    spacing: 2
+                                    align: Align{y: 1.0}
+                                    padding: Inset{left: 8 right: 10 top: 0 bottom: 0}
+                                    draw_bg +: {color: theme.color_bg_app}
+                                    // The eight tabs scroll sideways when the
+                                    // panel is narrower than they are (a thin
+                                    // bar shows it); the actions stay put.
+                                    tab_scroll := ScrollXView{
                                         width: Fill
-                                        height: Fill
+                                        height: 36
                                         flow: Right
-                                        spacing: 8
-                                        memory_bars := MeterBars{
-                                            width: 175
-                                            height: Fill
-                                            columns: 1
-                                            gradient: false
-                                            label_width: 48.0
-                                            value_width: 66.0
-                                            bar_color: #x9ece6a
-                                        }
-                                        memory_chart := TelemetryChart{
-                                            color_line: #x9ece6a
-                                            color_accent: #x9ece6a
-                                        }
+                                        spacing: 2
+                                        align: Align{y: 1.0}
+                                        scroll_bars +: {scroll_bar_x +: {bar_size: 3.0}}
+                                        tab_info := TabButton{text: "Info"}
+                                        tab_activity := TabButton{text: "Activity"}
+                                        tab_history := TabButton{text: "History"}
+                                        tab_threads := TabButton{text: "Threads"}
+                                        tab_memory := TabButton{text: "Memory"}
+                                        tab_files := TabButton{text: "Files"}
+                                        tab_ports := TabButton{text: "Ports"}
+                                        tab_libraries := TabButton{text: "Libraries"}
+                                    }
+                                    View{width: 1 height: 20 margin: Inset{left: 6 right: 6 bottom: 8} show_bg: true draw_bg +: {color: #x2a2b2f}}
+                                    tab_actions := View{
+                                        width: Fit height: 36 flow: Right spacing: 8 align: Align{y: 0.5}
+                                        kill_button := ToolButton{text: "End process"}
+                                        close_inspector := IconButton{text: "\u{f00d}"}
                                     }
                                 }
-
-                                network_panel := Panel{
-                                    height: Fill
-                                    network_title := PanelTitle{text: "NETWORK"}
-                                    View{
-                                        width: Fill
-                                        height: 18
-                                        flow: Right
-                                        spacing: 18
-                                        network_down := MetricText{text: "DOWN 0 B/s"}
-                                        network_up := MetricText{text: "UP 0 B/s"}
-                                    }
-                                    View{
-                                        width: Fill
-                                        height: Fill
-                                        flow: Right
-                                        spacing: 6
-                                        down_chart := TelemetryChart{
-                                            color_line: #x7dcfff
-                                            color_accent: #x7dcfff
-                                        }
-                                        up_chart := TelemetryChart{
-                                            color_line: #xbb9af7
-                                            color_accent: #xbb9af7
-                                        }
-                                    }
-                                }
+                                inspector_body := InspectorBody{}
                             }
                         }
-
-                        process_panel := Panel{
-                            height: Fill
-                            process_header := View{
-                                width: Fill
-                                height: 30
-                                flow: Right
-                                spacing: 10
-                                align: Align{y: 0.5}
-                                process_title := PanelTitle{width: Fill text: "Processes"}
-                                refresh_label := MetricText{text: "Update every"}
-                                refresh_select := DropDown{
-                                    width: 90
-                                    height: 28
-                                    labels: ["0.1 s" "0.2 s" "0.5 s" "1 s" "2 s" "5 s" "10 s"]
-                                    selected_item: 0
-                                }
-                            }
-                            process_table := ProcessTable{}
+                        rule_status := Rule{}
+                        status_bar := RectView{
+                            width: Fill
+                            height: 26
+                            flow: Right
+                            spacing: 12
+                            align: Align{y: 0.5}
+                            padding: Inset{left: 12 right: 12}
+                            draw_bg +: {color: theme.color_bg_app}
+                            status_left := SmallText{width: Fill text: "Waiting for the first sample"}
+                            status_right := SmallText{text: ""}
                         }
                     }
+                    // Every menu the app raises (the column chooser) draws here,
+                    // over everything.
+                    menus := MenuLayer{}
                 }
             }
         }
@@ -235,17 +321,20 @@ script_mod! {
 
 /// The palette the whole app paints with. Sourced from the Makepad WM theme
 /// (`MAKEPAD_WM_THEME_SPLASH`) through `makepad_wm_theme::current()`, so task matches
-/// terminal/files/wm; the fallback is Tokyo Night.
+/// terminal/files/wm; the fallback is a neutral charcoal.
+///
+/// The app draws with three surface roles derived from the palette's
+/// background and foreground, so any WM theme gets the same structure:
+/// `background` for rows and content, [`Theme::raised`] for bars, headers
+/// and summaries, [`Theme::well`] for plots and grouped sections. Colour is
+/// kept for data and the accent.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub accent: Vec4f,
-    /// Window and cell background.
+    /// Window, rows and content.
     pub background: Vec4f,
-    /// Recessed controls and process-table headers.
-    pub surface: Vec4f,
-    /// Resource cards, graph surfaces, and process rows.
-    pub panel: Vec4f,
     pub foreground: Vec4f,
+    /// Secondary text.
     pub muted: Vec4f,
     pub red: Vec4f,
     pub green: Vec4f,
@@ -258,23 +347,57 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            accent: color("#7aa2f7"),
-            background: color("#1a1b26"),
-            surface: color("#16161e"),
-            panel: color("#24283b"),
-            foreground: color("#a9b1d6"),
-            muted: color("#565f89"),
-            red: color("#f7768e"),
-            green: color("#9ece6a"),
-            yellow: color("#e0af68"),
-            blue: color("#7aa2f7"),
-            cyan: color("#7dcfff"),
-            magenta: color("#bb9af7"),
+            accent: color("#4f9dff"),
+            background: color("#1b1c1f"),
+            foreground: color("#e3e4e6"),
+            muted: color("#9b9ea6"),
+            red: color("#f0657b"),
+            green: color("#5fd3a6"),
+            yellow: color("#f0b64b"),
+            blue: color("#5aa9ff"),
+            cyan: color("#56c2e6"),
+            magenta: color("#b48cf2"),
         }
     }
 }
 
 impl Theme {
+    /// Bars, headers and summaries: a step off the background.
+    pub fn raised(&self) -> Vec4f {
+        mix(self.background, self.foreground, 0.035)
+    }
+
+    /// Plots and grouped sections: a further step.
+    pub fn well(&self) -> Vec4f {
+        mix(self.background, self.foreground, 0.065)
+    }
+
+    /// Tiles that must stand out on a well (the kind glyph).
+    pub fn well_strong(&self) -> Vec4f {
+        mix(self.background, self.foreground, 0.13)
+    }
+
+    /// Quiet 1 px separators.
+    pub fn rule(&self) -> Vec4f {
+        with_alpha(self.foreground, 0.09)
+    }
+
+    pub fn secondary(&self) -> Vec4f {
+        self.muted
+    }
+
+    /// Notes, axis labels and other text that should recede.
+    pub fn tertiary(&self) -> Vec4f {
+        with_alpha(self.muted, 0.72)
+    }
+
+    /// Secondary text a step closer to the foreground: a palette's dim
+    /// foreground is meant for large type and goes faint at 10 pt.
+    fn legible(mut self) -> Self {
+        self.muted = mix(self.muted, self.foreground, 0.3);
+        self
+    }
+
     /// The WM palette if one is exported, else the built-in fallback. Uses the
     /// same scanner `makepad_wm_theme::apply` retints `mod.theme` with, so the stock
     /// widgets and task's own drawing can never disagree.
@@ -304,8 +427,6 @@ impl Theme {
         Self {
             accent: pick("accent", fallback.accent),
             background: pick("background", fallback.background),
-            surface: pick("darker_background", fallback.surface),
-            panel: pick("lighter_background", fallback.panel),
             foreground: pick("foreground", fallback.foreground),
             muted: pick("dark_foreground", fallback.muted),
             red: hue("red", "term.color1", fallback.red),
@@ -315,6 +436,7 @@ impl Theme {
             cyan: hue("cyan", "term.color6", fallback.cyan),
             magenta: hue("magenta", "term.color5", fallback.magenta),
         }
+        .legible()
     }
 }
 
@@ -344,16 +466,20 @@ fn parse_color(value: &str) -> Option<Vec4f> {
     Some(Vec4f::from_u32(rgba))
 }
 
-fn with_alpha(mut value: Vec4f, alpha: f32) -> Vec4f {
+pub fn with_alpha(mut value: Vec4f, alpha: f32) -> Vec4f {
     value.w = alpha;
     value
 }
 
+pub fn mix(a: Vec4f, b: Vec4f, t: f32) -> Vec4f {
+    vec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t)
+}
+
 // ---- app ----
 
-/// Samples the graphs keep. The window is a sample count, not a wall-clock
-/// span, so raising the refresh rate makes the graphs scroll faster instead of
-/// squashing the same minute into fewer pixels.
+/// Sample-collection costs the status line averages. The window is a sample
+/// count, not a wall-clock span: the last six seconds at the default
+/// 0.1 s interval, or the last minute at 1 s.
 const HISTORY: usize = 60;
 
 /// The refresh-rate picker, in the order the drop-down lists them.
@@ -361,34 +487,28 @@ const REFRESH_CHOICES_MS: [u64; 7] = [100, 200, 500, 1000, 2000, 5000, 10_000];
 /// Index of the default (0.1 s) — must match `selected_item` in the DSL.
 const DEFAULT_REFRESH: usize = 0;
 
-/// Height of the metrics band when the process table is on screen. Matches
-/// `top_row`'s height in the DSL.
-const TOP_ROW_HEIGHT: f64 = 240.0;
-/// The metrics band never shrinks past this, or the graph stops reading.
-const MIN_TOP_ROW_HEIGHT: f64 = 140.0;
+/// How long after a SIGTERM the next End press escalates to SIGKILL.
+const FORCE_WINDOW_SECS: f64 = 5.0;
 
-/// How the window is laid out at the current size. One place, three states.
+/// How the window is laid out at the current size.
 ///
 /// The thresholds are in layout points and are compared against the window's
 /// *inner* size, so the app behaves the same whether it is a free window or an
 /// wm tile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Density {
-    /// Aggregate graph + per-metric panels + the process table.
+    /// Band, metric strip, pins, table and inspector.
     #[default]
     Full,
-    /// Aggregate graph + the process table.
+    /// The same with a shallower band and fewer columns and tiles.
     Medium,
-    /// The aggregate graph alone, filling the window.
+    /// The history band alone, filling the window.
     Small,
-    /// Phone portrait or a short landscape viewport: summaries and processes.
+    /// Phone portrait or a short landscape tile: band and table.
     Phone,
 }
 
 impl Density {
-    /// Full adds per-core and network detail beside the shared history.
-    /// Medium keeps summaries and the process list; very small windows keep
-    /// the history alone so neither labels nor process rows are clipped.
     pub fn for_size(size: Vec2d) -> Self {
         if size.y < 260.0 {
             Density::Small
@@ -406,7 +526,7 @@ impl Density {
 /// `WmEvent::Adopted`). wm pre-spawns hidden warm instances of this app
 /// (`MAKEPAD_WM_WARM_START=1`); a cached task manager must not burn CPU sampling
 /// in the background before anyone is looking at it. A warm instance starts
-/// `Dormant` — no sampler thread, no snapshots, empty graphs — and wakes
+/// `Dormant` — no sampler thread, no journal, empty graphs — and wakes
 /// exactly once: either wm adopts it into a real tile (`WmEvent::Adopted`
 /// on the studio `Custom` channel), or, defensively, a human touches the
 /// window directly (a key or pointer/touch event, in case an `Adopted`
@@ -455,20 +575,31 @@ fn is_wake_input(event: &Event) -> bool {
     )
 }
 
+impl Default for Model {
+    fn default() -> Self {
+        Model::new(Theme::default(), REFRESH_CHOICES_MS[DEFAULT_REFRESH])
+    }
+}
+
+/// A process that was just sent SIGTERM: End again inside
+/// [`FORCE_WINDOW_SECS`] escalates to SIGKILL.
+#[derive(Clone, Copy, Debug)]
+struct Armed {
+    key: ProcKey,
+    since: f64,
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
-    snapshot_rx: Option<Receiver<Snapshot>>,
+    model: Model,
     #[rust]
-    sampler_started: bool,
+    worker: Option<Worker>,
+    /// Warm-pool dormancy — see `Dormancy`.
     #[rust]
-    sampler_interval_tx: Option<Sender<u64>>,
-    #[rust]
-    sampler_task: Option<TaskHandle<()>>,
-    #[rust]
-    theme: Theme,
+    dormancy: Dormancy,
     #[rust]
     density: Density,
     #[rust]
@@ -476,50 +607,75 @@ pub struct App {
     #[rust]
     layout_size: Vec2d,
     #[rust]
-    phone_processes: bool,
+    budget_set: bool,
+    /// Per-sample collection cost (ms), the last [`HISTORY`] samples.
     #[rust]
-    cpu_history: Vec<f64>,
+    sample_costs: Vec<f64>,
     #[rust]
-    memory_history: Vec<f64>,
+    armed: Option<Armed>,
+    /// Control looks last written, so a script eval runs only on change.
     #[rust]
-    down_history: Vec<f64>,
+    styled: HashMap<LiveId, Look>,
+    /// (apps only, tree) last pushed to the segmented controls.
     #[rust]
-    up_history: Vec<f64>,
-    /// Warm-pool dormancy — see `Dormancy`.
+    segments: Option<(bool, bool)>,
     #[rust]
-    dormancy: Dormancy,
+    visible: HashMap<LiveId, bool>,
+    #[rust]
+    kill_state: Option<(bool, bool)>,
+    /// The inspector fold last applied to the body splitter.
+    #[rust]
+    inspector_applied: Option<SplitterCollapse>,
+    /// Drives the live graphs between samples — see `animate`.
+    #[rust]
+    motion: Motion,
+}
+
+/// The live edge of the graphs moves with the UI's monotonic clock, anchored
+/// to the samples' own timestamps, so every trace glides left instead of
+/// stepping once per sample. Only translation happens per frame: the folded
+/// geometry is cached by store generation in each widget.
+#[derive(Default)]
+struct Motion {
+    next_frame: NextFrame,
+    requested: bool,
+    /// Sample time minus UI clock (ms) — smoothed, snapped on a jump.
+    offset_ms: Option<f64>,
+    /// Live edge at the last redraw of the band, the strips and the table.
+    band_end: f64,
+    strips_end: f64,
+    table_end: f64,
+    inspector_end: f64,
+}
+
+impl Motion {
+    /// A sample arrived: its timestamp says where "now" is on the data's
+    /// clock. Small disagreements are eased in so the edge never lurches.
+    fn anchor(&mut self, sample_ms: f64, clock_ms: f64) {
+        let offset = sample_ms - clock_ms;
+        self.offset_ms = Some(match self.offset_ms {
+            Some(previous) if (offset - previous).abs() < 1000.0 => previous + (offset - previous) * 0.2,
+            _ => offset,
+        });
+    }
 }
 
 impl App {
-    /// Starts the sampler thread, unless a warm-pool instance is still
-    /// dormant — a cached task manager must not sample at its 0.1s default
+    /// Starts the sampler worker, unless a warm-pool instance is still
+    /// dormant — a cached task manager must not sample (or touch its journal)
     /// while nobody is looking at it.
     fn start_sampler(&mut self, cx: &mut Cx) {
-        if self.sampler_started || self.dormancy.is_dormant() {
+        if self.worker.is_some() || self.dormancy.is_dormant() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let (interval_tx, interval_rx) = mpsc::channel();
-        match sampler::spawn(
-            &cx.thread_spawner(),
-            tx,
-            interval_rx,
-            REFRESH_CHOICES_MS[DEFAULT_REFRESH],
-        ) {
-            Ok(task) => {
-                self.sampler_started = true;
-                self.snapshot_rx = Some(rx);
-                self.sampler_interval_tx = Some(interval_tx);
-                self.sampler_task = Some(task);
-            }
+        match Worker::spawn(&cx.thread_spawner(), self.model.interval_ms) {
+            Ok(worker) => self.worker = Some(worker),
             Err(error) => log!("task: could not start sampler worker: {error}"),
         }
     }
 
     /// Wakes a dormant warm instance: `WmEvent::Adopted`, or defensively the
-    /// first real key/pointer input in case that message was lost. A no-op
-    /// past the first call (`Dormancy::wake` only fires once), so mashing
-    /// keys after `Adopted` already woke it never restarts the sampler.
+    /// first real key/pointer input in case that message was lost.
     fn wake(&mut self, cx: &mut Cx) {
         if self.dormancy.wake() {
             log!("task: warm instance woken, starting sampler");
@@ -527,239 +683,523 @@ impl App {
         }
     }
 
-    /// Drain to the newest snapshot: if the UI was busy we want the latest
-    /// reading, not a backlog replayed one frame at a time.
-    fn drain_snapshots(&mut self, cx: &mut Cx) {
-        let mut newest = None;
-        if let Some(rx) = &self.snapshot_rx {
-            while let Ok(snapshot) = rx.try_recv() {
-                newest = Some(snapshot);
+    fn send(&mut self, command: Command) {
+        if let Some(worker) = &mut self.worker {
+            if !worker.send(command) {
+                self.model.notice = Some("the sampler is busy; try again".to_string());
+                self.model.requests.redraw = true;
             }
         }
-        if let Some(snapshot) = newest {
-            self.apply_snapshot(cx, snapshot);
+    }
+
+    /// Take what the worker published. Never waits.
+    fn poll_worker(&mut self, cx: &mut Cx) {
+        let Some(worker) = &mut self.worker else { return };
+        let messages = worker.poll();
+        if messages.is_empty() {
+            return;
+        }
+        let model = &mut self.model;
+        let now = backend::now_ms();
+        for message in messages {
+            match message {
+                Message::Sample(sample) => {
+                    self.motion.anchor(sample.time_ms as f64, cx.seconds_since_app_start() * 1000.0);
+                    model.remember_pins(&sample);
+                    if !self.budget_set {
+                        self.budget_set = true;
+                        model.store.set_budget_from_ram(sample.system.mem_total);
+                        model.supp.set_budget(supp::budget_for_ram(sample.system.mem_total));
+                    }
+                    push_history(&mut self.sample_costs, sample.cost_us as f64 / 1000.0);
+                    model.store.push(sample);
+                    model.store.thin(now, false);
+                    if model.live {
+                        if let Some(key) = model.selected {
+                            if let Some(meta) = model.store.latest().and_then(|s| s.process(key)).map(|r| r.meta.clone()) {
+                                model.selected_meta = Some(meta);
+                            }
+                        }
+                    }
+                    model.changed();
+                }
+                Message::Loaded(batch) => {
+                    for sample in &batch {
+                        model.remember_pins(sample);
+                    }
+                    model.store.ingest_loaded(batch, now);
+                    model.changed();
+                }
+                Message::Pins(pins) => {
+                    for pin in pins {
+                        if !model.is_pinned(pin.key) {
+                            model.pins.push(pin);
+                        }
+                    }
+                    model.changed();
+                }
+                Message::Columns(text) => {
+                    if model.columns.parse(&text) {
+                        model.changed();
+                    }
+                }
+                Message::Detail(detail) => {
+                    model.details.push(detail, now);
+                    model.requests.redraw = true;
+                }
+                // Not a `changed()`: the process table's order does not
+                // depend on it; the inspector's caches key on the store's
+                // generation.
+                Message::Supp(events) => {
+                    model.supp.apply(events, now);
+                    model.requests.redraw = true;
+                }
+                Message::Terminated { key, force, result } => {
+                    let pid = key.pid;
+                    model.notice = Some(match result {
+                        Ok(()) if force || cfg!(windows) => {
+                            self.armed = None;
+                            if cfg!(windows) { format!("PID {pid} terminated") } else { format!("SIGKILL sent to PID {pid}") }
+                        }
+                        Ok(()) => {
+                            self.armed = Some(Armed { key, since: Cx::monotonic_now() });
+                            format!("SIGTERM sent to PID {pid} · End again within 5 s to force (SIGKILL)")
+                        }
+                        Err(error) => {
+                            self.armed = None;
+                            format!("could not signal PID {pid}: {error}")
+                        }
+                    });
+                    model.requests.redraw = true;
+                }
+                Message::Status(status) => {
+                    log!("task: {status}");
+                    model.journal_status = status;
+                    model.requests.redraw = true;
+                }
+            }
+        }
+        let _ = cx;
+    }
+
+    /// End the selected process: SIGTERM first, SIGKILL on a second press
+    /// within [`FORCE_WINDOW_SECS`] or with shift. The worker re-verifies the
+    /// identity right before signalling.
+    fn terminate(&mut self, force_requested: bool) {
+        if let Some(reason) = self.model.terminate_refusal() {
+            self.model.notice = Some(reason);
+            return;
+        }
+        let Some(key) = self.model.selected else { return };
+        let force = force_requested
+            || self.armed.is_some_and(|armed| armed.key == key && Cx::monotonic_now() - armed.since <= FORCE_WINDOW_SECS);
+        self.model.notice = Some(format!("signalling PID {}…", key.pid));
+        self.send(Command::Terminate { key, force });
+    }
+
+    fn force_armed(&self) -> bool {
+        match (self.armed, self.model.selected) {
+            (Some(armed), Some(key)) => armed.key == key && Cx::monotonic_now() - armed.since <= FORCE_WINDOW_SECS,
+            _ => false,
         }
     }
 
-    fn apply_snapshot(&mut self, cx: &mut Cx, snapshot: Snapshot) {
-        self.ui.label(cx, ids!(cpu_value)).set_text(cx, &format!("{:.1}%", snapshot.cpu_total));
-        self.ui.label(cx, ids!(memory_value)).set_text(cx, &format_bytes(snapshot.mem.used));
-        self.ui.label(cx, ids!(down_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.rx_per_second as u64)));
-        self.ui.label(cx, ids!(up_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.tx_per_second as u64)));
-        let status = if self.density == Density::Phone {
-            format!(
-                "{} · {} processes · {} cores · load {:.2}",
-                snapshot.backend,
-                snapshot.processes.len(),
-                snapshot.cpu_cores.len(),
-                snapshot.load_avg[0],
-            )
-        } else {
-            format!(
-                "{} · {} processes · {} cores · load {:.2} {:.2} {:.2} · rx {} tx {} · Uptime {}",
-                snapshot.backend,
-                snapshot.processes.len(),
-                snapshot.cpu_cores.len(),
-                snapshot.load_avg[0],
-                snapshot.load_avg[1],
-                snapshot.load_avg[2],
-                format_bytes(snapshot.net.rx_total),
-                format_bytes(snapshot.net.tx_total),
-                format_uptime(snapshot.uptime_seconds),
-            )
-        };
-        self.ui.label(cx, ids!(host_status)).set_text(cx, &status);
-        let cores = snapshot.cpu_cores.len();
-        self.ui.label(cx, ids!(cpu_title)).set_text(cx, &format!("CPU cores · {cores}"));
-
-        // Keep the bars readable: more cores means more columns, not thinner rows.
-        let columns = if cores > 24 {
-            4
-        } else if cores > 8 {
-            2
-        } else {
-            1
-        };
-        let core_rows = snapshot
-            .cpu_cores
-            .iter()
-            .enumerate()
-            .map(|(index, percent)| MeterRow {
-                label: format!("CPU{index}"),
-                value: format!("{percent:>5.1}%"),
-                fraction: percent / 100.0,
-            })
-            .collect();
-        if let Some(mut meter) = self.ui.widget(cx, ids!(cpu_cores)).borrow_mut::<MeterBars>() {
-            meter.set_rows(cx, core_rows, columns);
+    /// Act on what widgets asked for during this event.
+    fn after_event(&mut self, cx: &mut Cx) {
+        let requests = std::mem::take(&mut self.model.requests);
+        if requests.inspect {
+            let key = if self.model.inspector_open { self.model.selected } else { None };
+            if self.armed.is_some_and(|armed| Some(armed.key) != self.model.selected) {
+                self.armed = None;
+            }
+            self.send(Command::Inspect(key));
         }
-
-        let memory = snapshot.mem;
-        let total = memory.total.max(1) as f64;
-        self.ui.label(cx, ids!(memory_title)).set_text(cx, "Memory allocation");
-        let memory_rows = [
-            ("TOTAL", memory.total),
-            ("USED", memory.used),
-            ("AVAIL", memory.available),
-            ("CACHE", memory.cache),
-            ("FREE", memory.free),
-        ]
-        .into_iter()
-        .map(|(label, bytes)| MeterRow {
-            label: label.to_string(),
-            value: format_bytes(bytes),
-            fraction: bytes as f64 / total,
-        })
-        .collect();
-        if let Some(mut meter) = self.ui.widget(cx, ids!(memory_bars)).borrow_mut::<MeterBars>() {
-            meter.set_rows(cx, memory_rows, 1);
+        if requests.pins {
+            let pins = self.model.pins.clone();
+            self.send(Command::SavePins(pins));
         }
-
-        self.ui
-            .label(cx, ids!(network_down))
-            .set_text(cx, &format!("DOWN {:>10}/s", format_bytes(snapshot.net.rx_per_second as u64)));
-        self.ui
-            .label(cx, ids!(network_up))
-            .set_text(cx, &format!("UP {:>10}/s", format_bytes(snapshot.net.tx_per_second as u64)));
-        self.ui.label(cx, ids!(network_title)).set_text(cx, "Network throughput");
-
-        push_history(&mut self.cpu_history, snapshot.cpu_total);
-        push_history(&mut self.memory_history, memory.used as f64 / total * 100.0);
-        // Graphs are in KiB/s: a byte-per-second axis is unreadable on a LAN.
-        push_history(&mut self.down_history, snapshot.net.rx_per_second / 1024.0);
-        push_history(&mut self.up_history, snapshot.net.tx_per_second / 1024.0);
-        self.ui.trend_chart(cx, ids!(cpu_chart)).set_series(cx, &self.cpu_history);
-        self.ui.trend_chart(cx, ids!(memory_chart)).set_series(cx, &self.memory_history);
-        self.ui.trend_chart(cx, ids!(down_chart)).set_series(cx, &self.down_history);
-        self.ui.trend_chart(cx, ids!(up_chart)).set_series(cx, &self.up_history);
-        self.update_aggregate(cx, &snapshot);
-
-        self.ui.label(cx, ids!(process_title)).set_text(cx, "Processes");
-        if let Some(mut table) = self.ui.widget(cx, ids!(process_table)).borrow_mut::<ProcessTable>() {
-            table.set_processes(cx, snapshot.processes, memory.total);
+        if requests.columns {
+            let text = self.model.columns.serialize();
+            self.send(Command::SaveColumns(text));
         }
-        self.ui.redraw(cx);
+        if let Some(force) = requests.terminate {
+            self.terminate(force);
+        }
+        // Selection may have opened the inspector on its own.
+        self.apply_inspector(cx);
+        self.request_motion(cx);
+        if requests.redraw || requests.terminate.is_some() || requests.pins {
+            self.update_chrome(cx);
+            self.ui.redraw(cx);
+        }
     }
 
-    /// Put every metric on the one always-visible graph.
-    ///
-    /// CPU and memory are already percentages. The two network rates share one
-    /// scale — the largest rate seen in the window — so up and down stay
-    /// comparable with each other and the legend carries the real figure.
-    fn update_aggregate(&mut self, cx: &mut Cx, snapshot: &Snapshot) {
-        let peak = self
-            .down_history
-            .iter()
-            .chain(self.up_history.iter())
-            .fold(0.0f64, |peak, value| peak.max(*value));
-        let scale = |history: &Vec<f64>| {
-            if peak <= 0.0 {
-                vec![0.0; history.len()]
+    /// Frames run only while there is something moving: live, sampling,
+    /// adopted and with data. Scrubbing or going dormant stops them.
+    fn moving(&self) -> bool {
+        self.model.live && self.worker.is_some() && !self.dormancy.is_dormant() && self.motion.offset_ms.is_some() && !self.model.store.is_empty()
+    }
+
+    fn request_motion(&mut self, cx: &mut Cx) {
+        if !self.motion.requested && self.moving() {
+            self.motion.requested = true;
+            self.motion.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Advances the live edge to the presentation clock and redraws the
+    /// graphs — never the rest of the window, and never a table rebuild
+    /// (rows rebuild only on a model version change). The edge trails the
+    /// clock by one interval, so the newest sample is reached as the next
+    /// one arrives; a stalled sampler shows as the real gap it is.
+    fn animate(&mut self, cx: &mut Cx) {
+        if !self.moving() {
+            return;
+        }
+        let Some(offset) = self.motion.offset_ms else { return };
+        let lag = (self.model.interval_ms as f64).clamp(100.0, 2000.0);
+        let target = cx.seconds_since_app_start() * 1000.0 + offset - lag;
+        let previous = self.model.live_end_ms;
+        // Monotonic, except after a clock jump (sleep, clock change).
+        let end = if previous > 0.0 && target < previous && previous - target < 1000.0 { previous } else { target };
+        self.model.live_end_ms = end;
+        let width = self.layout_size.x.max(1.0);
+        // Redraw once the band would move by a quarter pixel: every frame at
+        // 60 s, a few times a minute at 24 h.
+        let band_step = self.model.range_ms() as f64 / width * 0.25;
+        if (end - self.motion.band_end).abs() >= band_step {
+            self.motion.band_end = end;
+            self.ui.widget(cx, ids!(history_band)).redraw(cx);
+        }
+        // The 60 s strips are ~100–300 px wide: 30 Hz is under a pixel a step.
+        if (end - self.motion.strips_end).abs() >= 33.0 {
+            self.motion.strips_end = end;
+            self.ui.widget(cx, ids!(metric_strip)).redraw(cx);
+            self.ui.widget(cx, ids!(pinned_strip)).redraw(cx);
+        }
+        // The table's sparklines are 110 px over 60 s; 15 Hz keeps its
+        // redraw cost bounded with hundreds of rows.
+        if (end - self.motion.table_end).abs() >= 66.0 {
+            self.motion.table_end = end;
+            self.ui.widget(cx, ids!(process_table)).redraw(cx);
+        }
+        // The inspector's graphs share the band's window (Activity's
+        // sparklines a minute): redraw only while one is showing, at most
+        // 20 Hz and once it would move a quarter pixel. Its rows and points
+        // are cached, so this is drawing only.
+        if self.model.inspector_open && self.model.selected.is_some() {
+            let tab = self.ui.widget(cx, ids!(inspector_body)).borrow::<InspectorBody>().map(|body| body.tab).unwrap_or_default();
+            let span = match tab {
+                InspectorTab::Activity => Some(history::MINUTE_MS as f64),
+                InspectorTab::History | InspectorTab::Threads | InspectorTab::Memory => Some(self.model.range_ms() as f64),
+                _ => None,
+            };
+            if let Some(span) = span {
+                let step = (span / width * 0.25).max(50.0);
+                if (end - self.motion.inspector_end).abs() >= step {
+                    self.motion.inspector_end = end;
+                    self.ui.widget(cx, ids!(inspector_body)).redraw(cx);
+                }
+            }
+        }
+        self.request_motion(cx);
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, id: LiveId, path: &[LiveId], visible: bool) {
+        if self.visible.get(&id) != Some(&visible) {
+            self.visible.insert(id, visible);
+            self.ui.widget(cx, path).set_visible(cx, visible);
+        }
+    }
+
+    /// Give a button one of the app's looks — only when that changed.
+    fn style_button(&mut self, cx: &mut Cx, id: LiveId, path: &[LiveId], look: Look) {
+        if self.styled.get(&id) == Some(&look) {
+            return;
+        }
+        self.styled.insert(id, look);
+        let t = self.model.theme;
+        let clear = with_alpha(t.background, 0.0);
+        let flat = vec4(-1.0, -1.0, -1.0, -1.0);
+        let (fill, hover, down, ink, border, border_size) = match look {
+            Look::Plain => (clear, with_alpha(t.foreground, 0.07), with_alpha(t.foreground, 0.12), t.foreground, clear, 0.0),
+            Look::On => (with_alpha(t.accent, 0.18), with_alpha(t.accent, 0.26), with_alpha(t.accent, 0.32), t.accent, clear, 0.0),
+            Look::TabActive => (t.background, t.background, t.background, t.foreground, clear, 0.0),
+            Look::TabIdle => (clear, with_alpha(t.foreground, 0.06), with_alpha(t.foreground, 0.10), t.secondary(), clear, 0.0),
+            Look::Danger => (clear, with_alpha(t.red, 0.14), with_alpha(t.red, 0.22), t.red, with_alpha(t.red, 0.55), 1.0),
+            Look::DangerOff => (clear, clear, clear, t.tertiary(), t.rule(), 1.0),
+        };
+        let muted = t.tertiary();
+        let tab = matches!(look, Look::TabActive | Look::TabIdle);
+        let bottom_radius = if tab { 0.0 } else { 5.0 };
+        let mut button = self.ui.button(cx, path);
+        script_apply_eval!(cx, button, {
+            draw_bg +: {
+                color: #(fill)
+                color_hover: #(hover)
+                color_down: #(down)
+                color_focus: #(fill)
+                color_2_hover: #(flat)
+                color_2_down: #(flat)
+                color_2_focus: #(flat)
+                border_size: #(border_size)
+                border_color: #(border)
+                border_color_hover: #(border)
+                border_color_down: #(border)
+                border_color_focus: #(border)
+                border_radius: 5.0
+                border_radius_bl: #(bottom_radius)
+                border_radius_br: #(bottom_radius)
+            }
+            draw_text +: {color: #(ink) color_hover: #(ink) color_down: #(ink) color_focus: #(ink) color_disabled: #(muted)}
+        });
+    }
+
+    /// The history readout, control states, End button and status line.
+    fn update_chrome(&mut self, cx: &mut Cx) {
+        let live = self.model.live;
+        let wide = self.layout_size.x >= 1180.0;
+        let time_text = if live {
+            match self.model.store.newest_ms() {
+                Some(ms) => {
+                    let time = clock::LocalTime::from_epoch_ms(ms);
+                    format!("{}{}", time.hms(), if time.zoned { "" } else { " UTC" })
+                }
+                None => "—".to_string(),
+            }
+        } else {
+            // The date only where there is room; HH:MM:SS otherwise.
+            let time = clock::LocalTime::from_epoch_ms(self.model.cursor_ms);
+            let when = if wide {
+                time.date_hms()
+            } else if time.zoned {
+                time.hms()
             } else {
-                history.iter().map(|value| value / peak * 100.0).collect()
+                format!("{} UTC", time.hms())
+            };
+            let tier = self.model.view_tier();
+            if self.model.cursor_expired() {
+                format!("{when} · aged out of retention")
+            } else if tier == history::Tier::Raw || !wide {
+                when
+            } else {
+                format!("{when} · {}", tier.label())
             }
         };
-        let series = vec![
-            GraphSeries {
-                label: "CPU".to_string(),
-                value: format!("{:.1}%", snapshot.cpu_total),
-                color: self.theme.blue,
-                points: self.cpu_history.clone(),
-            },
-            GraphSeries {
-                label: "Memory".to_string(),
-                value: format!("{:.1}%", self.memory_history.last().copied().unwrap_or(0.0)),
-                color: self.theme.green,
-                points: self.memory_history.clone(),
-            },
-            GraphSeries {
-                label: "Receive".to_string(),
-                value: format!("{}/s", format_bytes(snapshot.net.rx_per_second as u64)),
-                color: self.theme.cyan,
-                points: scale(&self.down_history),
-            },
-            GraphSeries {
-                label: "Send".to_string(),
-                value: format!("{}/s", format_bytes(snapshot.net.tx_per_second as u64)),
-                color: self.theme.magenta,
-                points: scale(&self.up_history),
-            },
-        ];
-        if let Some(mut graph) = self.ui.widget(cx, ids!(aggregate_graph)).borrow_mut::<AggregateGraph>() {
-            graph.set_series(cx, series);
+        self.ui.label(cx, ids!(time_label)).set_text(cx, &time_text);
+        if self.styled.get(&live_id!(time_label)) != Some(&if live { Look::Plain } else { Look::On }) {
+            self.styled.insert(live_id!(time_label), if live { Look::Plain } else { Look::On });
+            let ink = if live { self.model.theme.secondary() } else { self.model.theme.accent };
+            let mut label = self.ui.label(cx, ids!(time_label));
+            script_apply_eval!(cx, label, {draw_text +: {color: #(ink)}});
         }
-        self.ui.label(cx, ids!(aggregate_title)).set_text(cx, "Activity history");
+        self.style_button(cx, live_id!(live_button), ids!(live_button), if live { Look::On } else { Look::Plain });
+        self.style_button(cx, live_id!(step_back), ids!(step_back), Look::Plain);
+        self.style_button(cx, live_id!(step_forward), ids!(step_forward), Look::Plain);
+        let freeze = if self.model.freeze { Look::On } else { Look::Plain };
+        self.style_button(cx, live_id!(freeze_toggle), ids!(freeze_toggle), freeze);
+        self.style_button(cx, live_id!(freeze_toggle_more), ids!(freeze_toggle_more), freeze);
+        let inspector = if self.model.inspector_open { Look::On } else { Look::Plain };
+        self.style_button(cx, live_id!(inspector_toggle), ids!(inspector_toggle), inspector);
+        self.style_button(cx, live_id!(inspector_toggle_more), ids!(inspector_toggle_more), inspector);
+        self.style_button(cx, live_id!(close_inspector), ids!(close_inspector), Look::Plain);
+        let segments = (self.model.apps_only, self.model.tree);
+        if self.segments != Some(segments) {
+            self.segments = Some(segments);
+            self.ui.segmented_control(cx, ids!(scope_seg)).set_selected(cx, segments.0 as usize);
+            self.ui.segmented_control(cx, ids!(view_seg)).set_selected(cx, segments.1 as usize);
+        }
+        let tab = self.ui.widget(cx, ids!(inspector_body)).borrow::<InspectorBody>().map(|body| body.tab).unwrap_or_default();
+        for (index, (id, path)) in TAB_IDS.iter().enumerate() {
+            self.style_button(cx, *id, path, if INSPECTOR_TABS[index] == tab { Look::TabActive } else { Look::TabIdle });
+        }
+
+        // The End button says what the next press does, is set apart from
+        // the tabs in red, and goes quiet when there is nothing it may signal.
+        let killable = self.model.can_terminate();
+        let armed = self.force_armed();
+        if self.kill_state != Some((killable, armed)) {
+            self.kill_state = Some((killable, armed));
+            let button = self.ui.button(cx, ids!(kill_button));
+            button.set_text(cx, if armed && !cfg!(windows) { "Force stop" } else { "End process" });
+            button.set_enabled(cx, killable);
+        }
+        self.style_button(cx, live_id!(kill_button), ids!(kill_button), if killable { Look::Danger } else { Look::DangerOff });
+
+        let show_pins = !self.model.pins.is_empty() && self.density != Density::Small;
+        self.set_visible(cx, live_id!(pinned_wrap), ids!(pinned_wrap), show_pins);
+        self.set_visible(cx, live_id!(rule_pinned), ids!(rule_pinned), show_pins);
+
+        // Status: what is shown on the left, the machine and the recording
+        // on the right.
+        let view = self.model.view_sample().cloned();
+        let left = match (&self.model.notice, &view) {
+            (Some(notice), _) => notice.clone(),
+            (None, Some(sample)) => {
+                let selected = self
+                    .model
+                    .selected
+                    .and_then(|key| self.model.find_meta(key))
+                    .map(|meta| format!(" · {} selected", meta.name))
+                    .unwrap_or_default();
+                format!("{} processes{selected}", sample.processes.len())
+            }
+            (None, None) => "Waiting for the first sample".to_string(),
+        };
+        self.ui.label(cx, ids!(status_left)).set_text(cx, &left);
+        // Compact: the machine and the retained span. A journal problem is
+        // named briefly; load/budget counters go to the log, not the chrome.
+        let right = match &view {
+            Some(sample) => {
+                let retained = persist::format_span_ms(self.model.store.retained_ms());
+                let average_cost = if self.sample_costs.is_empty() { 0.0 } else { self.sample_costs.iter().sum::<f64>() / self.sample_costs.len() as f64 };
+                // Only worth a word when collection eats a real share of the interval.
+                let cost = if average_cost > self.model.interval_ms as f64 * 0.25 {
+                    format!(" · sampling takes {average_cost:.0} ms of every {}", interval_text(self.model.interval_ms))
+                } else {
+                    String::new()
+                };
+                let journal = if self.model.journal_status.contains("in memory only") { " · history not saved" } else { "" };
+                format!(
+                    "System {:.1}% · {} cores · up {} · {retained} retained{cost}{journal}",
+                    sample.system.cpu_total,
+                    sample.system.cores.len(),
+                    format_uptime(sample.system.uptime_secs),
+                )
+            }
+            None => String::new(),
+        };
+        self.ui.label(cx, ids!(status_right)).set_text(cx, &right);
     }
 
-    /// Fold the layout down as the window shrinks. Panels are hidden whole —
-    /// never clipped in half — so nothing ever needs a scrollbar for chrome.
+    /// Keyboard shortcuts that are not the focused widget's own.
+    fn handle_key(&mut self, cx: &mut Cx, key: &KeyEvent) {
+        if self.ui.text_input(cx, ids!(filter_input)).key_focus(cx) || key.modifiers.logo || key.modifiers.control {
+            return;
+        }
+        let model = &mut self.model;
+        match key.key_code {
+            KeyCode::Escape => {
+                if self.armed.take().is_some() {
+                    model.notice = Some("force cancelled".to_string());
+                    model.requests.redraw = true;
+                } else {
+                    model.go_live();
+                }
+            }
+            KeyCode::KeyL => model.go_live(),
+            KeyCode::Comma => model.step(-1),
+            KeyCode::Period => model.step(1),
+            KeyCode::KeyP => {
+                if let Some(key) = model.selected {
+                    let name = model.find_meta(key).map(|meta| meta.name.clone()).unwrap_or_default();
+                    model.toggle_pin(key, &name);
+                }
+            }
+            KeyCode::KeyK | KeyCode::Delete | KeyCode::Backspace => model.requests.terminate = Some(key.modifiers.shift),
+            KeyCode::KeyT => {
+                model.tree = !model.tree;
+                model.changed();
+            }
+            KeyCode::KeyI => self.toggle_inspector(cx),
+            KeyCode::Space => {
+                if let Some(key) = model.selected.filter(|_| model.tree) {
+                    if !model.collapsed.remove(&key) {
+                        model.collapsed.insert(key);
+                    }
+                    model.changed();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_inspector(&mut self, cx: &mut Cx) {
+        // An explicit choice: selection no longer opens it by itself.
+        self.model.inspector_auto = false;
+        self.model.inspector_open = !self.model.inspector_open;
+        self.model.requests.inspect = true;
+        self.apply_inspector(cx);
+        self.model.changed();
+    }
+
+    /// Wide enough: the inspector shares the body with the table. On a
+    /// phone-sized tile it takes the body over while open (Hide or the
+    /// Inspector button gives the table back); nowhere is it unreachable.
+    fn apply_inspector(&mut self, cx: &mut Cx) {
+        let collapse = if !self.model.inspector_open {
+            SplitterCollapse::B
+        } else if self.density == Density::Phone {
+            SplitterCollapse::A
+        } else {
+            SplitterCollapse::None
+        };
+        if self.inspector_applied == Some(collapse) {
+            return;
+        }
+        self.inspector_applied = Some(collapse);
+        self.ui.splitter(cx, ids!(body_split)).set_collapse(cx, collapse);
+    }
+
+    /// Fold the layout down as the window shrinks. Strips are hidden whole;
+    /// toolbar controls that no longer fit move to a second toolbar row, so
+    /// nothing becomes unreachable.
     fn apply_layout(&mut self, cx: &mut Cx, size: Vec2d) {
         let density = Density::for_size(size);
         let changed = !self.density_applied || self.density != density || self.layout_size != size;
+        if !changed {
+            return;
+        }
         self.layout_size = size;
         self.density = density;
         self.density_applied = true;
-        let details = density == Density::Full;
-        let table = density != Density::Small;
+        let small = density == Density::Small;
         let phone = density == Density::Phone;
-        let short = size.y < 460.0;
-        let overview = !phone || !self.phone_processes;
-        if changed {
-            self.ui.view(cx, ids!(app_header)).set_visible(cx, table);
-            self.ui.view(cx, ids!(mobile_tabs)).set_visible(cx, phone);
-            self.ui.widget(cx, ids!(refresh_label)).set_visible(cx, !phone);
-            self.ui.widget(cx, ids!(summary_row)).set_visible(cx, table && overview);
-            self.ui.view(cx, ids!(top_row)).set_visible(cx, overview);
-            let mut bg=self.ui.view(cx,ids!(app_bg));
-            let padding=16.0;
-            script_apply_eval!(cx,bg,{padding: #(padding) spacing: 10});
-            let header_height = if short {32.0} else {52.0};
-            self.ui.label(cx, ids!(host_status)).set_visible(cx, !short);
-            let summary_height = if phone && size.x < 620.0 {170.0} else if details {88.0} else {80.0};
-            let mut header = self.ui.view(cx, ids!(app_header));
-            script_apply_eval!(cx, header, {height: #(header_height)});
-            let mut summary = self.ui.widget(cx, ids!(summary_row));
-            script_apply_eval!(cx, summary, {height: #(summary_height)});
-            let summary_padding = if details { 14.0 } else { 12.0 };
-            let font_size = if phone {19.0} else {22.0};
-            for path in [ids!(cpu_value), ids!(memory_value), ids!(down_value), ids!(up_value)] {
-                let mut value = self.ui.label(cx, path);
-                script_apply_eval!(cx, value, {draw_text +: {text_style +: {font_size: #(font_size)}}});
-            }
-            for path in [ids!(cpu_summary), ids!(memory_summary), ids!(down_summary), ids!(up_summary)] {
-                let mut card = self.ui.view(cx, path);
-                script_apply_eval!(cx, card, {padding: #(summary_padding) spacing: 6});
-            }
-            self.ui.view(cx, ids!(cpu_panel)).set_visible(cx, details);
-            self.ui.view(cx, ids!(side_column)).set_visible(cx, details);
-            self.ui.view(cx, ids!(process_panel)).set_visible(cx, table && (!phone || self.phone_processes));
-            let accent = self.theme.accent;
-            let muted = self.theme.muted;
-            for (path, selected) in [(ids!(overview_tab), !self.phone_processes), (ids!(processes_tab), self.phone_processes)] {
-                let mut tab = self.ui.button(cx, path);
-                let ink = if selected {accent} else {muted};
-                let background = if selected {self.theme.panel} else {self.theme.background};
-                script_apply_eval!(cx, tab, {draw_bg +: {color: #(background) color_hover: #(background) border_size: 0.0 border_radius: 10.0} draw_text +: {color: #(ink)}});
-            }
-            if let Some(mut table) = self.ui.widget(cx, ids!(process_table)).borrow_mut::<ProcessTable>() {
-                table.set_compact(cx, !details);
-            }
-            log!("task: layout {density:?} at {:.0}x{:.0}", size.x, size.y);
+        let roomy = matches!(density, Density::Full | Density::Medium);
+        self.model.compact = phone;
+        let narrow = size.x < 760.0;
+        // Below this the interval, History range and Freeze move to the
+        // toolbar's second row; nothing is hidden.
+        let wrap = size.x < 1000.0;
+        for (id, path, visible) in [
+            (live_id!(toolbar), ids!(toolbar), !small),
+            (live_id!(rule_toolbar), ids!(rule_toolbar), !small),
+            (live_id!(metric_wrap), ids!(metric_wrap), roomy),
+            (live_id!(rule_metrics), ids!(rule_metrics), roomy),
+            (live_id!(rule_band), ids!(rule_band), !small),
+            (live_id!(body_split), ids!(body_split), !small),
+            (live_id!(status_bar), ids!(status_bar), !small),
+            (live_id!(rule_status), ids!(rule_status), !small),
+            (live_id!(inspector_toggle), ids!(inspector_toggle), !narrow),
+            (live_id!(freeze_toggle), ids!(freeze_toggle), !wrap),
+            (live_id!(refresh_wrap), ids!(refresh_wrap), !wrap),
+            (live_id!(history_wrap), ids!(history_wrap), !wrap),
+            (live_id!(tool_row_more), ids!(tool_row_more), wrap),
+            (live_id!(inspector_toggle_more), ids!(inspector_toggle_more), narrow),
+        ] {
+            self.set_visible(cx, id, path, visible);
         }
-        // With the table gone the graph takes the whole window; with it there
-        // the metrics band keeps at most 31% so the table always has rows to
-        // show. The walk is set on the widget directly — `Fill` is a DSL name
-        // and does not resolve inside a `script_apply_eval!` body.
-        if let Some(mut top_row) = self.ui.widget(cx, ids!(top_row)).borrow_mut::<View>() {
-            top_row.walk.height = if phone { Size::fill() } else if table {
-                Size::Fixed(if details {
-                    TOP_ROW_HEIGHT.min(size.y * 0.31).max(MIN_TOP_ROW_HEIGHT)
-                } else if phone {112.0} else { (size.y * 0.22).clamp(128.0, 190.0) })
-            } else {
-                Size::fill()
-            };
+        let band_height = if small { Size::fill() } else if phone { Size::Fixed(84.0) } else if density == Density::Medium { Size::Fixed(92.0) } else { Size::Fixed(100.0) };
+        // The chips share their row with the stepping controls and wrap onto
+        // more rows only when that row is too narrow.
+        let controls = if size.x >= 1180.0 { 300.0 } else { 200.0 };
+        let rows = SeriesLegend::rows_for((size.x - 24.0 - 8.0 - controls).max(120.0));
+        if let Some(mut legend) = self.ui.widget(cx, ids!(series_legend)).borrow_mut::<SeriesLegend>() {
+            legend.set_height(rows as f64 * 24.0 + 2.0);
         }
+        if let Some(mut band) = self.ui.widget(cx, ids!(history_band)).borrow_mut::<HistoryBand>() {
+            band.set_height(band_height);
+        }
+        let filter_width = if narrow { 140.0 } else if size.x < 900.0 { 170.0 } else if size.x < 1180.0 { 200.0 } else { 260.0 };
+        let mut filter = self.ui.widget(cx, ids!(filter_input));
+        script_apply_eval!(cx, filter, {width: #(filter_width)});
+        // The inspector's share follows the window: ~250 at 900 tall, ~180 at 650.
+        let inspector_height = (size.y * 0.3).clamp(180.0, 320.0);
+        self.ui.splitter(cx, ids!(body_split)).set_align(cx, SplitterAlign::FromB(inspector_height));
+        self.apply_inspector(cx);
+        self.update_chrome(cx);
         self.ui.redraw(cx);
+        log!("task: layout {density:?} at {:.0}x{:.0}", size.x, size.y);
     }
 
     fn layout_from_window(&mut self, cx: &mut Cx) {
@@ -771,93 +1211,164 @@ impl App {
         }
     }
 
+    /// Paint the chrome in the app's surface roles: the caption, toolbar,
+    /// tab bar, table header and status bar raised; content on the
+    /// background; rules quiet; the splitter a 1 px line.
     fn apply_theme(&mut self, cx: &mut Cx) {
-        let classic = matches!(cx.with_vm(desktop_style::current_style), desktop_style::DesktopStyle::Windows2000 | desktop_style::DesktopStyle::NextStep);
-        if classic { self.theme.panel = self.theme.background; }
-        let theme = self.theme;
+        let theme = self.model.theme;
         let background = theme.background;
+        let raised = theme.raised();
+        let well = theme.well();
+        let pill = theme.well_strong();
+        let rule = theme.rule();
         let foreground = theme.foreground;
-        let surface = theme.surface;
-        let panel = theme.panel;
-        let border = with_alpha(theme.foreground, 0.16);
-        let muted = theme.muted;
-
+        let secondary = theme.secondary();
+        let accent = theme.accent;
         let mut app_bg = self.ui.view(cx, ids!(app_bg));
         script_apply_eval!(cx, app_bg, {draw_bg +: {color: #(background)}});
-        for path in [ids!(aggregate_panel), ids!(cpu_panel), ids!(memory_panel), ids!(network_panel), ids!(process_panel), ids!(cpu_summary), ids!(memory_summary), ids!(down_summary), ids!(up_summary)] {
+        // Makepad's own caption bar (a SolidView on theme.color_app_caption_bar)
+        // takes the toolbar's surface so the two read as one header.
+        let mut caption = self.ui.view(cx, ids!(caption_bar));
+        script_apply_eval!(cx, caption, {draw_bg +: {color: #(raised)}});
+        for path in [ids!(toolbar), ids!(inspector_tabs), ids!(status_bar)] {
             let mut view = self.ui.view(cx, path);
-            script_apply_eval!(cx, view, {draw_bg +: {color: #(panel) border_color: #(border)}});
+            script_apply_eval!(cx, view, {draw_bg +: {color: #(raised)}});
         }
-        for path in [ids!(aggregate_title), ids!(cpu_title), ids!(memory_title), ids!(network_title), ids!(process_title)] {
-            let mut label = self.ui.label(cx, path);
-            script_apply_eval!(cx, label, {draw_text +: {color: #(foreground)}});
+        for path in [ids!(rule_toolbar), ids!(rule_band), ids!(rule_metrics), ids!(rule_pinned), ids!(rule_status)] {
+            let mut view = self.ui.view(cx, path);
+            script_apply_eval!(cx, view, {draw_bg +: {color: #(rule)}});
         }
-        for path in [ids!(network_down), ids!(network_up), ids!(refresh_label)] {
-            let mut label = self.ui.label(cx, path);
-            script_apply_eval!(cx, label, {draw_text +: {color: #(foreground)}});
-        }
-        let mut aggregate = self.ui.widget(cx, ids!(aggregate_graph));
-        let grid = with_alpha(muted, 0.20);
-        script_apply_eval!(cx, aggregate, {color_bg: #(panel) color_grid: #(grid) color_text: #(muted)});
-        self.apply_chart_theme(cx, ids!(cpu_chart), theme.blue);
-        self.apply_chart_theme(cx, ids!(memory_chart), theme.green);
-        self.apply_chart_theme(cx, ids!(down_chart), theme.cyan);
-        self.apply_chart_theme(cx, ids!(up_chart), theme.magenta);
-
-        for (path, bar_color) in [(ids!(cpu_cores), theme.accent), (ids!(memory_bars), theme.green)] {
-            let mut meter = self.ui.widget(cx, path);
-            let warn = theme.yellow;
-            let crit = theme.red;
-            script_apply_eval!(cx, meter, {
-                bar_color: #(bar_color)
-                warn_color: #(warn)
-                crit_color: #(crit)
-                track_color: #(surface)
-                text_color: #(foreground)
-                muted_color: #(muted)
-                draw_text +: {color: #(foreground)}
+        let mut split = self.ui.widget(cx, ids!(body_split));
+        script_apply_eval!(cx, split, {draw_bg +: {color_bg: #(background) color: #(rule) color_hover: #(accent) color_drag: #(accent)}});
+        for path in [ids!(scope_seg), ids!(view_seg)] {
+            let mut segments = self.ui.widget(cx, path);
+            script_apply_eval!(cx, segments, {
+                draw_bg +: {color: #(well) border_color: #(rule)}
+                draw_pill +: {color: #(pill) border_color: #(rule)}
+                draw_text +: {color: #(secondary)}
+                draw_text_selected +: {color: #(foreground)}
             });
+        }
+        for path in [ids!(status_left), ids!(status_right), ids!(refresh_label), ids!(refresh_label_more), ids!(history_label), ids!(history_label_more)] {
+            let mut label = self.ui.label(cx, path);
+            script_apply_eval!(cx, label, {draw_text +: {color: #(secondary)}});
         }
         if let Some(mut table) = self.ui.widget(cx, ids!(process_table)).borrow_mut::<ProcessTable>() {
             table.apply_theme(cx, theme);
         }
+        self.styled.clear();
+        self.segments = None;
+        self.kill_state = None;
+        self.update_chrome(cx);
         self.ui.redraw(cx);
-    }
-
-    fn apply_chart_theme(&self, cx: &mut Cx, path: &[LiveId], series: Vec4f) {
-        let mut chart = self.ui.trend_chart(cx, path);
-        let background = self.theme.panel;
-        let grid = with_alpha(self.theme.muted, 0.35);
-        let text = self.theme.muted;
-        // Transparent: TrendChart's area pass paints nothing, leaving the bare
-        // line the reference asks for.
-        let fill = with_alpha(series, 0.0);
-        script_apply_eval!(cx, chart, {
-            color_bg: #(background)
-            color_grid: #(grid)
-            color_line: #(series)
-            color_fill: #(fill)
-            color_text: #(text)
-            color_accent: #(series)
-        });
     }
 }
 
+/// The looks a button can take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Look {
+    Plain,
+    On,
+    TabActive,
+    TabIdle,
+    Danger,
+    DangerOff,
+}
+
+const TAB_IDS: [(LiveId, &[LiveId]); 8] = [
+    (live_id!(tab_info), ids!(tab_info)),
+    (live_id!(tab_activity), ids!(tab_activity)),
+    (live_id!(tab_history), ids!(tab_history)),
+    (live_id!(tab_threads), ids!(tab_threads)),
+    (live_id!(tab_memory), ids!(tab_memory)),
+    (live_id!(tab_files), ids!(tab_files)),
+    (live_id!(tab_ports), ids!(tab_ports)),
+    (live_id!(tab_libraries), ids!(tab_libraries)),
+];
+
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let page = if self.ui.button(cx, ids!(overview_tab)).clicked(actions) {Some(false)}
-            else if self.ui.button(cx, ids!(processes_tab)).clicked(actions) {Some(true)} else {None};
-        if let Some(processes) = page {
-            self.phone_processes = processes;
-            self.density_applied = false;
-            self.layout_from_window(cx);
+        if let Some(index) = self.ui.segmented_control(cx, ids!(scope_seg)).selected(actions) {
+            self.model.apps_only = index == 1;
+            self.segments = None;
+            self.model.changed();
         }
-        if let Some(choice) = self.ui.drop_down(cx, ids!(refresh_select)).changed(actions) {
-            let millis = REFRESH_CHOICES_MS.get(choice).copied().unwrap_or(1000);
-            if let Some(tx) = &self.sampler_interval_tx {
-                let _ = tx.send(millis);
-            }
+        if let Some(index) = self.ui.segmented_control(cx, ids!(view_seg)).selected(actions) {
+            self.model.tree = index == 1;
+            self.segments = None;
+            self.model.changed();
+        }
+        if self.ui.button(cx, ids!(freeze_toggle)).clicked(actions) || self.ui.button(cx, ids!(freeze_toggle_more)).clicked(actions) {
+            let model = &mut self.model;
+            model.freeze = !model.freeze;
+            model.notice = Some(if model.freeze { "Row order frozen; values keep updating".to_string() } else { "Row order follows the sort again".to_string() });
+            model.changed();
+        }
+        // The interval picker exists in both toolbar rows; keep them agreeing.
+        let picked = self
+            .ui
+            .drop_down(cx, ids!(refresh_select))
+            .changed(actions)
+            .or_else(|| self.ui.drop_down(cx, ids!(refresh_select_more)).changed(actions));
+        if let Some(choice) = picked {
+            let millis = REFRESH_CHOICES_MS.get(choice).copied().unwrap_or(REFRESH_CHOICES_MS[DEFAULT_REFRESH]);
+            self.model.interval_ms = millis;
+            self.model.changed();
+            self.ui.drop_down(cx, ids!(refresh_select)).set_selected_item(cx, choice);
+            self.ui.drop_down(cx, ids!(refresh_select_more)).set_selected_item(cx, choice);
+            self.send(Command::Interval(millis));
             log!("task: refresh interval now {millis} ms");
+        }
+        let model = &mut self.model;
+        let range = self
+            .ui
+            .drop_down(cx, ids!(range_select))
+            .changed(actions)
+            .or_else(|| self.ui.drop_down(cx, ids!(range_select_more)).changed(actions));
+        if let Some(choice) = range {
+            model.range = choice.min(RANGES_MS.len() - 1);
+            model.custom_span_ms = None;
+            if !model.live {
+                model.window_end_ms = Some(model.cursor_ms + model.range_ms() / 10);
+            }
+            model.changed();
+            self.ui.drop_down(cx, ids!(range_select)).set_selected_item(cx, choice);
+            self.ui.drop_down(cx, ids!(range_select_more)).set_selected_item(cx, choice);
+        }
+        let model = &mut self.model;
+        if self.ui.button(cx, ids!(step_back)).clicked(actions) {
+            model.step(-1);
+        }
+        if self.ui.button(cx, ids!(step_forward)).clicked(actions) {
+            model.step(1);
+        }
+        if self.ui.button(cx, ids!(live_button)).clicked(actions) {
+            model.go_live();
+        }
+        if let Some(filter) = self.ui.text_input(cx, ids!(filter_input)).changed(actions) {
+            model.filter = filter;
+            model.notice = None;
+            model.changed();
+        }
+        if let Some(modifiers) = self.ui.button(cx, ids!(kill_button)).clicked_modifiers(actions) {
+            model.requests.terminate = Some(modifiers.shift);
+        }
+        let toggle = self.ui.button(cx, ids!(inspector_toggle)).clicked(actions)
+            || self.ui.button(cx, ids!(inspector_toggle_more)).clicked(actions)
+            || self.ui.button(cx, ids!(close_inspector)).clicked(actions);
+        if toggle {
+            self.toggle_inspector(cx);
+        }
+        for (index, (_, path)) in TAB_IDS.iter().enumerate() {
+            if self.ui.button(cx, path).clicked(actions) {
+                if let Some(mut body) = self.ui.widget(cx, ids!(inspector_body)).borrow_mut::<InspectorBody>() {
+                    body.set_tab(cx, INSPECTOR_TABS[index]);
+                }
+                if !self.model.inspector_open {
+                    self.toggle_inspector(cx);
+                }
+                self.model.requests.redraw = true;
+            }
         }
     }
 }
@@ -867,15 +1378,15 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         // The Makepad WM palette retints the stock widgets before anything is built.
         makepad_wm_theme::apply(vm);
-        // MeterBars/ProcessTable must exist in mod.widgets before the UI below
+        // The custom widgets must exist in mod.widgets before the UI below
         // does `use mod.widgets.*`.
         crate::widgets::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if matches!(event,Event::LiveEdit) {
-            self.theme=Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
+        if matches!(event, Event::LiveEdit) {
+            self.model.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
             self.apply_theme(cx);
             self.density_applied = false;
             self.layout_from_window(cx);
@@ -884,7 +1395,7 @@ impl AppMain for App {
             // Checked once: a warm-pool instance stays dormant until
             // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
             self.dormancy = Dormancy::start(makepad_wm_api::warm_start());
-            self.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
+            self.model.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
             self.apply_theme(cx);
             // `--size WxH` lets a test drive the breakpoints without a WM.
             if let Some(size) = size_from_args() {
@@ -900,7 +1411,11 @@ impl AppMain for App {
             self.apply_layout(cx, geom.new_geom.inner_size);
         }
         if let Event::Signal = event {
-            self.drain_snapshots(cx);
+            self.poll_worker(cx);
+        }
+        if self.motion.next_frame.is_event(event).is_some() {
+            self.motion.requested = false;
+            self.animate(cx);
         }
         // `StudioToApp::Custom` from wm reaches a hosted app as
         // `Event::Custom(json)`; `Adopted` is what wakes a warm instance.
@@ -914,8 +1429,12 @@ impl AppMain for App {
         if self.dormancy.is_dormant() && is_wake_input(event) {
             self.wake(cx);
         }
+        if let Event::KeyDown(key) = event {
+            self.handle_key(cx, key);
+        }
         self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.model));
+        self.after_event(cx);
     }
 }
 
@@ -942,6 +1461,10 @@ fn push_history(history: &mut Vec<f64>, value: f64) {
     }
 }
 
+fn interval_text(ms: u64) -> String {
+    if ms < 1000 { format!("{:.1} s", ms as f64 / 1000.0) } else { format!("{} s", ms / 1000) }
+}
+
 /// Binary units, because that is what a process manager's RSS is measured in.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -966,6 +1489,19 @@ pub fn format_uptime(seconds: u64) -> String {
         format!("{days}d {hours:02}h {minutes:02}m")
     } else {
         format!("{hours:02}h {minutes:02}m")
+    }
+}
+
+/// CPU time as `h:mm:ss.ss` (or `m:ss.ss`).
+pub fn format_duration_ns(ns: u64) -> String {
+    let centis = ns / 10_000_000;
+    let seconds = centis / 100;
+    let hours = seconds / 3600;
+    let minutes = seconds % 3600 / 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{:02}.{:02}", seconds % 60, centis % 100)
+    } else {
+        format!("{minutes}:{:02}.{:02}", seconds % 60, centis % 100)
     }
 }
 

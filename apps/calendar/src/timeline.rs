@@ -172,7 +172,7 @@ impl Widget for TimelineGrid {
                 cx,
                 rect(
                     r.pos.x + self.frame.gutter,
-                    y,
+                    snap_px(cx, y),
                     width - self.frame.gutter,
                     line,
                 ),
@@ -182,7 +182,7 @@ impl Widget for TimelineGrid {
                 cx,
                 rect(
                     r.pos.x + self.frame.gutter,
-                    y + 32.0,
+                    snap_px(cx, y + 32.0),
                     width - self.frame.gutter,
                     line,
                 ),
@@ -200,7 +200,7 @@ impl Widget for TimelineGrid {
             self.draw_rule.draw_abs(
                 cx,
                 rect(
-                    r.pos.x + self.frame.gutter + i as f64 * col_w,
+                    snap_px(cx, r.pos.x + self.frame.gutter + i as f64 * col_w),
                     r.pos.y,
                     line,
                     r.size.y,

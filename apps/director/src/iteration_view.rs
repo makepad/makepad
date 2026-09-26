@@ -142,8 +142,35 @@ pub enum IterationViewAction {
         preview_id: String,
         open: bool,
     },
+    /// The camera settled (drag end, zoom, fit, or the first zoom of a
+    /// presentation). `pan_x` belongs to `level`; `zoom` is the one zoom every
+    /// level shares, so the host saves it with every level's pan.
+    LevelCamera {
+        level: Option<String>,
+        pan_x: f64,
+        zoom: f64,
+    },
     #[default]
     None,
+}
+
+/// The AI test a lane is running, as its worker reports it. The lane shows
+/// it as a watch-only item keyed by that run: it is never one of the lane's
+/// builds or artifacts, and a shared-source child has none of those.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveTest {
+    pub run: String,
+    pub artifact: String,
+    pub commit: Option<String>,
+    /// (grant id, owner agent) when the executable is a parent's.
+    pub granted_by: Option<(String, String)>,
+    pub demo: Option<String>,
+    /// Waiting for the host registration; no process exists yet.
+    pub pending: bool,
+    pub hosted: bool,
+    pub first_frame: bool,
+    /// Why automation let go of the app, once a person took it over.
+    pub handed_off: Option<String>,
 }
 
 #[derive(Clone)]
@@ -307,6 +334,10 @@ pub struct StudioIterationView {
     scroll_target: BTreeMap<String, f64>,
     #[rust]
     follow_tail: BTreeSet<String>,
+    /// Flows that were a lane before. Only a never-seen flow starts at its
+    /// tail; a lane that returns with its level keeps its scroll anchor.
+    #[rust]
+    seen_lanes: BTreeSet<String>,
     #[rust]
     scroll_frame: NextFrame,
     #[rust]
@@ -333,6 +364,9 @@ pub struct StudioIterationView {
     apps: BTreeMap<String, LiveHost>,
     #[rust]
     app_artifacts: BTreeMap<String, String>,
+    /// Live AI tests per lane, from the worker's own run ownership.
+    #[rust]
+    live_tests: BTreeMap<String, LiveTest>,
     #[rust]
     terminal_heights: BTreeMap<String, f64>,
     #[rust]
@@ -413,7 +447,31 @@ pub struct StudioIterationView {
     history_drag: Option<(String, f64)>,
     #[rust]
     pressed: Option<IterationViewAction>,
+    /// Selected tree level: the lanes shown are this agent's own lane, then
+    /// its direct children (None: the root agents). Separate from `selected`,
+    /// the actionable lane.
+    #[rust]
+    level: Option<String>,
+    /// Saved (pan_x, zoom) per level key. Only the pan is a level's own: the
+    /// zoom next to it is the unit that pan was saved in, used to carry the
+    /// pan over to the shared `zoom`, and is never applied.
+    #[rust]
+    cameras: BTreeMap<String, (f64, f64)>,
+    /// Level keys whose camera was saved in this run. A camera that only came
+    /// from the persisted presentation may predate the agent's own lane being
+    /// the first column, so it is checked once when it is first applied.
+    #[rust]
+    session_cameras: BTreeSet<String>,
+    /// A restored camera was applied: on the next draw the level's first lane
+    /// is brought into view if that camera leaves it outside the viewport.
+    #[rust]
+    expose_own_lane: bool,
 }
+
+/// Hosted app views held at once; matches the worker's active-agent budget so
+/// every admitted lane can present its own app. Test thumbnails and pending
+/// embed slots keep their own separate limits.
+const HOSTED_APP_VIEWS: usize = crate::iteration::MAX_HOSTED_APPS;
 
 const COLUMN_WIDTH: f64 = 800.0;
 const GAP: f64 = 20.0;
@@ -626,6 +684,7 @@ impl StudioIterationView {
         if !same_project {
             self.scroll.clear();
             self.scroll_target.clear();
+            self.seen_lanes.clear();
             self.lane_widths.clear();
             self.width_hover = None;
             self.expanded.clear();
@@ -651,6 +710,7 @@ impl StudioIterationView {
             self.terminals.clear();
             self.apps.clear();
             self.app_artifacts.clear();
+            self.live_tests.clear();
             self.body_capture = None;
             self.body_touch_capture = None;
             self.body_hover = None;
@@ -741,8 +801,9 @@ impl StudioIterationView {
         if let Some(old) = self.terminals.remove(&flow) {
             Self::anchor_terminal(cx, &old.widget, None);
         }
+        // Every admitted lane keeps its terminal resident, drawn only while
+        // its level is shown; the worker bounds how many lanes exist.
         if !widget.is_empty()
-            && self.terminals.len() < 4
             && !self
                 .terminals
                 .values()
@@ -857,7 +918,7 @@ impl StudioIterationView {
             self.clear_app(cx, &flow);
             return;
         }
-        if (!self.apps.contains_key(&flow) && self.apps.len() >= 4)
+        if (!self.apps.contains_key(&flow) && self.apps.len() >= HOSTED_APP_VIEWS)
             || self
                 .terminals
                 .values()
@@ -908,6 +969,24 @@ impl StudioIterationView {
             cx.widget_tree_mark_dirty(self.uid);
             self.area.redraw(cx);
         }
+    }
+
+    /// The AI tests the worker currently owns, hosted or standalone. A newly
+    /// seen run opens unfolded, since watching it is its whole point; nothing
+    /// is selected or focused.
+    pub fn set_live_tests(&mut self, cx: &mut Cx, tests: BTreeMap<String, LiveTest>) {
+        if self.live_tests == tests {
+            return;
+        }
+        for (flow, test) in &tests {
+            if self.live_tests.get(flow).map(|old| &old.run) != Some(&test.run) {
+                self.expanded.insert(format!("{flow}/test/{}", test.run));
+            }
+        }
+        self.live_tests = tests;
+        self.rebuild();
+        cx.widget_tree_mark_dirty(self.uid);
+        self.area.redraw(cx);
     }
 
     fn sync_app_artifacts(&mut self) {
@@ -1369,12 +1448,17 @@ impl StudioIterationView {
             })
         });
         if self.archived_flow == flow {
-            return;
+            if flow.is_none() {
+                return;
+            }
+            // Asked for again, possibly after its level was shown again:
+            // bring it back into view below.
+        } else {
+            self.archived_flow = flow;
+            self.cut_flow = None;
+            self.cut_hover = None;
+            self.rebuild();
         }
-        self.archived_flow = flow;
-        self.cut_flow = None;
-        self.cut_hover = None;
-        self.rebuild();
         if let Some(id) = &self.archived_flow {
             if let Some(index) = self.lanes.iter().position(|lane| &lane.id == id) {
                 self.pan.x = 12.0 - (self.lane_x(index)) * self.zoom.max(0.2);
@@ -1397,6 +1481,164 @@ impl StudioIterationView {
         self.needs_fit = true;
         self.area.redraw(cx);
     }
+
+    fn level_key(level: Option<&str>) -> String {
+        level.unwrap_or("").to_owned()
+    }
+
+    pub fn level(&self) -> Option<&str> {
+        self.level.as_deref()
+    }
+
+    /// Bring every saved camera to one zoom, keeping what each pan shows at
+    /// the left edge. Returns whether anything changed.
+    pub fn share_zoom(cameras: &mut BTreeMap<String, (f64, f64)>, zoom: f64) -> bool {
+        let mut changed = false;
+        if zoom > 0.0 {
+            for (pan_x, saved) in cameras.values_mut() {
+                if *saved != zoom && *saved > 0.0 {
+                    *pan_x *= zoom / *saved;
+                    *saved = zoom;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Saved cameras from the persisted presentation, applied once at
+    /// startup, after the restored level was set. This is the only place a
+    /// saved zoom becomes the shared zoom: the restored level's own, else
+    /// Director's, else the first saved one. A presentation written with one
+    /// zoom per level is reduced to that zoom here, and the host saves every
+    /// level with it, so another level's old zoom never comes back. Without
+    /// any saved camera the zoom in force stands (the first draw chooses one).
+    pub fn restore_cameras(&mut self, cx: &mut Cx, cameras: BTreeMap<String, (f64, f64)>) {
+        self.cameras = cameras;
+        self.session_cameras.clear();
+        let key = Self::level_key(self.level.as_deref());
+        let saved = self
+            .cameras
+            .get(&key)
+            .or_else(|| self.cameras.get(""))
+            .or_else(|| self.cameras.values().next())
+            .map(|(_, zoom)| *zoom);
+        if let Some(zoom) = saved {
+            self.zoom = zoom.clamp(0.20, 3.0);
+        }
+        self.enter_level_camera();
+        if self.zoom > 0.0 {
+            self.emit_camera(cx);
+        }
+        self.area.redraw(cx);
+    }
+
+    /// The pan of the level now shown, under the shared zoom, which a level
+    /// never changes. A saved pan is carried over from the zoom it was saved
+    /// in, so the same part of the level is at the left edge; a level
+    /// without one starts at its first lane. Nothing is fitted, and a fit of
+    /// the level that was left no longer follows a resize.
+    fn enter_level_camera(&mut self) {
+        self.needs_fit = false;
+        self.fitted = false;
+        self.expose_own_lane = false;
+        self.pan = dvec2(0.0, 0.0);
+        if self.zoom <= 0.0 {
+            return;
+        }
+        let key = Self::level_key(self.level.as_deref());
+        if let Some((pan_x, saved)) = self.cameras.get(&key).copied() {
+            if saved > 0.0 {
+                self.pan.x = pan_x * self.zoom / saved;
+                self.expose_own_lane = !self.session_cameras.contains(&key);
+            }
+        }
+    }
+
+    fn emit_camera(&mut self, cx: &mut Cx) {
+        let key = Self::level_key(self.level.as_deref());
+        self.session_cameras.insert(key.clone());
+        self.cameras.insert(key, (self.pan.x, self.zoom));
+        cx.widget_action(
+            self.uid,
+            IterationViewAction::LevelCamera {
+                level: self.level.clone(),
+                pan_x: self.pan.x,
+                zoom: self.zoom,
+            },
+        );
+    }
+
+    /// Show another level: the lanes become that agent's own lane followed
+    /// by its direct children (the root lanes for Director). The zoom is
+    /// shared by every level and stays as it is; only the horizontal pan is
+    /// kept per level. Hidden terminals and apps lose key focus, IME and
+    /// pointer capture, and nothing is started, stopped or reactivated.
+    pub fn set_level(&mut self, cx: &mut Cx, level: Option<String>) {
+        if self.level == level {
+            return;
+        }
+        if self.zoom > 0.0 {
+            let key = Self::level_key(self.level.as_deref());
+            self.cameras.insert(key.clone(), (self.pan.x, self.zoom));
+            self.session_cameras.insert(key);
+        }
+        self.level = level;
+        // The menu belongs to a lane of the level being left, and it holds
+        // the sweep lock.
+        if self.agent_menu_flow.is_some() {
+            self.close_agent_menu(cx);
+        }
+        self.rebuild();
+        let visible: BTreeSet<String> = self.lanes.iter().map(|lane| lane.id.clone()).collect();
+        for (flow, host) in &self.terminals {
+            if visible.contains(flow) {
+                continue;
+            }
+            Self::anchor_terminal(cx, &host.widget, None);
+            if Self::terminal_focused(cx, &host.widget) {
+                cx.set_key_focus(Area::Empty);
+                cx.hide_text_ime();
+            }
+        }
+        for (flow, host) in &self.apps {
+            if visible.contains(flow) {
+                continue;
+            }
+            if let Some(mut app) = host.widget.borrow_mut::<IterationRunView>() {
+                app.clear_pointer_hover();
+                app.release_keyboard(cx);
+            }
+        }
+        let hidden = |body: &LiveBody| !visible.contains(body.flow());
+        if self.body_capture.as_ref().is_some_and(hidden) {
+            self.body_capture = None;
+        }
+        if self
+            .body_touch_capture
+            .as_ref()
+            .is_some_and(|(_, body)| hidden(body))
+        {
+            self.body_touch_capture = None;
+        }
+        if self.body_hover.as_ref().is_some_and(hidden) {
+            self.body_hover = None;
+        }
+        self.navigation_drag = None;
+        self.drag = None;
+        self.history_drag = None;
+        self.pressed = None;
+        self.width_hover = None;
+        self.minimap_open = None;
+        self.cut_flow = None;
+        self.cut_hover = None;
+        if self.pixel_view.is_some() {
+            self.close_pixel_view(cx);
+        }
+        self.enter_level_camera();
+        cx.widget_tree_mark_dirty(self.uid);
+        self.area.redraw(cx);
+    }
     pub fn zoom_by(&mut self, cx: &mut Cx, factor: f64) {
         if factor.is_finite() && factor > 0.0 {
             self.zoom_at(
@@ -1412,30 +1654,32 @@ impl StudioIterationView {
             self.lanes.clear();
             return;
         };
-        // Numeric creation IDs keep established columns stable when flow-10
-        // arrives after flow-2; BTreeMap's lexical order would move the latter.
-        let mut flows: Vec<_> = engine
-            .flows
-            .values()
-            .filter(|flow| flow.lifecycle != FlowLifecycle::Archived)
-            .collect();
-        flows.sort_by_key(|flow| {
-            flow.id
-                .strip_prefix("flow-")
-                .and_then(|id| id.parse::<u64>().ok())
-                .unwrap_or(u64::MAX)
-        });
-        let old: BTreeSet<_> = self.lanes.iter().map(|lane| lane.id.clone()).collect();
-        self.lanes = flows
+        // The selected agent's own lane first, then its direct children in
+        // stable sibling order; the Director root shows the root lanes. An
+        // agent's current flow keeps its column across history splits, and
+        // columns never reshuffle when a later child appears. Every admitted
+        // lane is drawn; the viewport scrolls and culls, nothing is truncated.
+        // An archived own lane is drawn read-only like any archived lane.
+        self.lanes = engine
+            .agent_level_flows(self.level.as_deref())
             .into_iter()
-            .take(4)
             .map(|flow| self.make_lane(flow))
             .collect();
+        // An opened archived lane belongs where its agent's lane is shown:
+        // on that agent's own level and on its parent's. It is never listed
+        // twice when it already is the level's own lane.
         if let Some(flow) = self
             .archived_flow
             .as_ref()
             .and_then(|id| engine.flows.get(id))
             .filter(|flow| flow.lifecycle == FlowLifecycle::Archived)
+            .filter(|flow| !self.lanes.iter().any(|lane| lane.id == flow.id))
+            .filter(|flow| {
+                engine.agent_node(&flow.id).is_some_and(|node| {
+                    node.parent.as_deref() == self.level.as_deref()
+                        || Some(node.id.as_str()) == self.level.as_deref()
+                })
+            })
         {
             self.lanes.push(self.make_lane(flow));
         }
@@ -1449,14 +1693,17 @@ impl StudioIterationView {
             self.cut_hover = None;
         }
         for lane in &self.lanes {
-            if !old.contains(&lane.id) {
+            if self.seen_lanes.insert(lane.id.clone()) {
                 self.follow_tail.insert(lane.id.clone());
             }
         }
+        self.seen_lanes.retain(|id| engine.flows.contains_key(id));
         self.scroll.retain(|id, _| engine.flows.contains_key(id));
         if self.selected.as_ref().is_some_and(|id| {
             !engine.flows.get(id).is_some_and(|flow| {
-                flow.lifecycle != FlowLifecycle::Archived || self.archived_flow.as_ref() == Some(id)
+                flow.lifecycle != FlowLifecycle::Archived
+                    || self.archived_flow.as_ref() == Some(id)
+                    || self.lanes.iter().any(|lane| &lane.id == id)
             })
         }) {
             self.selected = None;
@@ -1687,6 +1934,9 @@ impl StudioIterationView {
                 }
             }
         }
+        if let Some(test) = self.live_tests.get(&flow.id) {
+            self.live_test_item(&mut lane, flow, test, text_columns);
+        }
         if let Some(job) = &flow.job {
             if !matches!(job.phase, BuildPhase::Succeeded | BuildPhase::Superseded)
                 && self.engine.as_ref().is_some_and(|engine| {
@@ -1866,6 +2116,89 @@ impl StudioIterationView {
             }
         }
         lane
+    }
+
+    /// The lane's running AI test: a watch-only item keyed by the run, with
+    /// the executable's real provenance (the lane's own retained build, or a
+    /// parent's granted one). It carries no close, freeze or pop-out control
+    /// while the agent owns the run; once a person took the app over, the one
+    /// control is their own Close.
+    fn live_test_item(&self, lane: &mut Lane, flow: &Flow, test: &LiveTest, columns: usize) {
+        let key = format!("test/{}", test.run);
+        let expanded = self.expanded.contains(&format!("{}/{key}", flow.id));
+        let hosted_here = test.hosted && self.apps.contains_key(&flow.id);
+        let state = if test.handed_off.is_some() {
+            "Handed to you"
+        } else if test.pending {
+            "Starting"
+        } else if !test.hosted {
+            "Running in its own window"
+        } else if !test.first_frame {
+            "Waiting for first frame"
+        } else {
+            "Running · watch only"
+        };
+        let title = match &test.demo {
+            Some(demo) => format!("AI test  ·  {state}  ·  {}", short(demo, 48)),
+            None => format!("AI test  ·  {state}"),
+        };
+        let mut lines = vec![];
+        if expanded {
+            let commit = test.commit.as_deref().map(|commit| short(commit, 12));
+            let commit = commit.as_deref().unwrap_or("unknown checkpoint");
+            lines.extend(wrap(
+                &match &test.granted_by {
+                    Some((grant, owner)) => format!(
+                        "Granted build of agent {owner} ({grant}) · {} · {commit}",
+                        test.artifact
+                    ),
+                    None => format!("This lane's retained build · {} · {commit}", test.artifact),
+                },
+                3,
+                columns,
+            ));
+            lines.extend(wrap(&format!("Run {}", test.run), 2, columns));
+            if let Some(reason) = &test.handed_off {
+                lines.extend(wrap(
+                    &format!("Automation stopped: {reason}. Close it when you are done."),
+                    4,
+                    columns,
+                ));
+            } else {
+                lines.push("The agent owns this run's input; your input is not forwarded.".into());
+            }
+        }
+        push_item(
+            lane,
+            key.clone(),
+            title,
+            lines,
+            Some(IterationViewAction::FoldItem {
+                flow: flow.id.clone(),
+                key,
+            }),
+            false,
+        );
+        let live = hosted_here && expanded;
+        if let Some(item) = Arc::make_mut(&mut lane.items).last_mut() {
+            if test.handed_off.is_some() {
+                item.controls.push(FrameControl {
+                    label: "Close",
+                    action: IterationViewAction::CloseFreeze {
+                        flow: flow.id.clone(),
+                        run_id: test.run.clone(),
+                    },
+                });
+            }
+            if live {
+                item.live_app = true;
+                item.height += APP_HEIGHT + 8.0;
+                item.content_height = item.height;
+            }
+        }
+        if live {
+            lane.height += APP_HEIGHT + 8.0;
+        }
     }
 
     fn add_preview(lane: &mut Lane, preview: String, height: f64) {
@@ -2419,6 +2752,7 @@ impl StudioIterationView {
             }
         }
         self.fitted = false;
+        self.emit_camera(cx);
         self.area.redraw(cx);
     }
     fn lane_at(&self, abs: DVec2) -> Option<String> {
@@ -3574,16 +3908,41 @@ impl Widget for StudioIterationView {
             self.minimap_open = None;
         }
         if self.zoom <= 0.0 && !self.needs_fit {
+            // The first zoom of a presentation that saved none. From here on
+            // it is the shared zoom, so it is saved like a chosen one.
             self.zoom =
                 ((view.size.x - 24.0) / (self.lane_width_at(0) + LEFT * 2.0)).clamp(0.25, 1.0);
             self.pan = dvec2(0.0, 0.0);
             self.fitted = false;
+            self.emit_camera(cx);
         } else if self.needs_fit || (resized && self.fitted) {
+            // Fit is the person's own request (and follows a resize until the
+            // camera or the level changes). Its zoom is the shared zoom like
+            // any other, so it is saved each time it changes.
             let scene_width = self.scene_width();
             self.zoom = ((view.size.x - 24.0) / scene_width).clamp(0.20, 1.15);
             self.pan = dvec2((view.size.x - scene_width * self.zoom) * 0.5, 0.0);
             self.fitted = true;
             self.needs_fit = false;
+            self.emit_camera(cx);
+        }
+        if std::mem::take(&mut self.expose_own_lane) {
+            // A camera from the persisted presentation may have framed this
+            // agent's children only. Its own lane is now the first column:
+            // when that pan cuts it off on the left or leaves less than half
+            // of it in view, the view starts at it. Zoom is kept, and from
+            // here on this level's camera is the person's own again.
+            self.session_cameras
+                .insert(Self::level_key(self.level.as_deref()));
+            if self.level.is_some() && self.zoom > 0.0 && !self.lanes.is_empty() {
+                let left = self.pan.x + self.lane_x(0) * self.zoom;
+                let width = (self.lane_width_at(0) * self.zoom).min(view.size.x);
+                if left < -1.0 || left + width * 0.5 > view.size.x {
+                    self.pan.x = 12.0 - self.lane_x(0) * self.zoom;
+                    self.fitted = false;
+                    self.emit_camera(cx);
+                }
+            }
         }
         self.targets.clear();
         cx.push_clip_rect(view);
@@ -4255,10 +4614,17 @@ impl Widget for StudioIterationView {
                 // Native key-focus filtering selects the actual focused child.
                 // A tray submission is an actual terminal Enter, never an
                 // application/editor key or Shift+Enter multiline input.
-                for host in self.terminals.values().filter(|_| self.terminals_enabled) {
+                // Only the shown level's residents take input; a lane on
+                // another level keeps running without it.
+                let shown = |flow: &String| self.lanes.iter().any(|lane| &lane.id == flow);
+                for (_, host) in self
+                    .terminals
+                    .iter()
+                    .filter(|(flow, _)| self.terminals_enabled && shown(flow))
+                {
                     host.widget.handle_event(cx, delivered, scope);
                 }
-                for host in self.apps.values() {
+                for (_, host) in self.apps.iter().filter(|(flow, _)| shown(flow)) {
                     host.widget.handle_event(cx, delivered, scope);
                 }
             } else if let Some(host) = target.and_then(|body| self.host(body)) {
@@ -4453,10 +4819,11 @@ impl Widget for StudioIterationView {
                     }
                     _ => {}
                 }
-                let click = self
-                    .drag
-                    .take()
-                    .is_some_and(|(start, _)| (event.abs - start).length() < 4.0);
+                let dragged = self.drag.take();
+                let click = dragged.is_some_and(|(start, _)| (event.abs - start).length() < 4.0);
+                if dragged.is_some() && !click {
+                    self.emit_camera(cx);
+                }
                 self.release_history_drag(cx);
                 if click {
                     if let Some(action) = self
@@ -4544,6 +4911,7 @@ impl Widget for StudioIterationView {
                         event.scroll.y
                     };
                     self.fitted = false;
+                    self.emit_camera(cx);
                     self.area.redraw(cx);
                 } else if let Some(id) = self.lane_at(event.abs) {
                     let offset = self

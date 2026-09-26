@@ -223,6 +223,12 @@ pub fn ends_text(now: LocalTime, remaining: f64) -> String {
     format!("Ends {:02}:{:02}", total / 3600, (total / 60) % 60)
 }
 
+/// One of two side-by-side columns `gap` apart in `page_w`, at most `max`:
+/// they always fit, from the 650 pt landscape breakpoint up.
+pub fn column_width(page_w: f64, gap: f64, max: f64) -> f64 {
+    ((page_w - gap) * 0.5).min(max).max(0.0)
+}
+
 const SHEET_OPEN_SECS: f64 = 0.30;
 const SHEET_CLOSE_SECS: f64 = 0.22;
 const PRESETS: [f64; 3] = [60.0, 300.0, 900.0];
@@ -269,6 +275,25 @@ script_mod! {
             }
         }
     }
+    // A 48 pt icon target: a 24 pt glyph and a round press wash.
+    let IconAction = Button{
+        width: 48 height: 48 padding: 0 margin: 0 text: "" spacing: 0 align: Align{x: 0.5 y: 0.5}
+        icon_walk: Walk{width: 24 height: 24}
+        draw_icon +: {color: theme.color_text}
+        draw_bg +: {
+            pixel: fn(){
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5)
+                sdf.fill(vec4(theme.color_text.xyz, 0.08 * self.hover + 0.06 * self.down))
+                return sdf.result
+            }
+        }
+    }
+    let MenuItem = ButtonFlat{
+        width: Fill height: 48 padding: Inset{left: 16 right: 16} margin: 0 align: Align{x: 0.0 y: 0.5}
+        draw_text +: {color: theme.color_text color_hover: theme.color_text color_down: theme.color_text text_style: theme.font_regular{font_size: 10.5}}
+        draw_bg +: {pixel: fn(){ return Pal.premul(vec4(theme.color_text.xyz, 0.06 * self.hover + 0.06 * self.down)) }}
+    }
     let Pill = Action{width: Fill height: 48 draw_bg.border_radius: 12.0}
     let ModalAction = Action{width: Fill height: 56 draw_bg.border_radius: 14.0}
     let SheetRow = View{width: Fill height: 44 flow: Right align: Align{y: 0.5} padding: Inset{left: 20 right: 20} spacing: 12}
@@ -280,84 +305,109 @@ script_mod! {
         app_view := HostedView{
             full: View{width: Fill height: Fill flow: Overlay
                 show_bg: true draw_bg.color: theme.color_bg_app
+                // The pages sit above a reserved band for the tab bar (64 pt,
+                // 8 pt off the bottom, 8 pt clear above it), so nothing
+                // scrolls or rests underneath it.
                 content := View{width: Fill height: Fill flow: Down
-                    padding: Inset{left: 20 right: 20 top: 8}
-                    toolbar := View{width: Fill height: 44 flow: Right align: Align{y: 0.5}
-                        tile_face_action := TextAction{text: "Digital tile"}
+                    padding: Inset{left: 16 right: 16 top: 0 bottom: 80}
+                    // One heading row: the title, and the page's one action
+                    // at the trailing edge (the overflow on Clock, Add on
+                    // Alarms). The 48 pt targets hang 12 pt past the margin
+                    // so their 24 pt glyphs line up with it.
+                    head := View{width: Fill height: 56 flow: Right align: Align{y: 0.5} margin: Inset{right: -12}
+                        title := Text{text: "Clock" draw_text.text_style: theme.font_bold{font_size: 21}}
                         View{width: Fill height: Fill}
-                        alarm_add := glass.GlassButton{visible: false width: 44 height: 44 text: "" padding: 0 spacing: 0
-                            icon_walk: Walk{width: 22 height: 22}
-                            draw_icon +: {svg: crate_resource("self:resources/icons/plus.svg") color: theme.color_text}
+                        alarm_add := IconAction{visible: false icon_walk: Walk{width: 16 height: 16}
+                            draw_icon +: {svg: crate_resource("self:resources/icons/plus.svg")}
+                        }
+                        more_action := IconAction{icon_walk: Walk{width: 18 height: 18}
+                            draw_icon +: {svg: crate_resource("self:resources/icons/more.svg")}
                         }
                     }
-                    title := Text{text: "Clock" margin: Inset{top: 8} draw_text.text_style: theme.font_bold{font_size: 25.5}}
-                    View{width: Fill height: 16}
                     modes := PageFlip{width: Fill height: Fill active_page: @clock_page
+                        // Portrait: dial over the readout; landscape: the two
+                        // side by side (`apply_sizing` turns the flow).
                         clock_page := ScrollYView{width: Fill height: Fill flow: Down align: Align{x: 0.5}
-                            padding: Inset{top: 8 bottom: 88}
+                            padding: Inset{top: 8 bottom: 16}
                             face_full := ClockFace{width: 292 height: 292}
-                            time_full := TabularLabel{width: Fill height: 68 margin: Inset{top: 20} draw_text.text_style: Light{font_size: 42}}
-                            date_full := Secondary{margin: Inset{top: 6}}
-                            next_alarm := RoundedView{width: Fill height: 68 margin: Inset{top: 30} flow: Right spacing: 12
-                                padding: 16 align: Align{y: 0.5} cursor: MouseCursor.Hand
-                                draw_bg +: {color: theme.color_inset border_radius: 10.0}
-                                Icon{width: 20 height: 20 icon_walk: Walk{width: 20 height: 20}
-                                    draw_icon +: {svg: crate_resource("self:resources/icons/bell.svg") color: theme.color_text}}
-                                View{width: Fill height: Fit flow: Down spacing: 2
-                                    na_time := Text{draw_text.text_style: theme.font_bold{font_size: 12.75}}
-                                    na_repeat := Secondary{draw_text.text_style.font_size: 9.75}
+                            clock_info := View{width: Fill height: Fit flow: Down align: Align{x: 0.5}
+                                time_full := TabularLabel{width: Fill height: 64 margin: Inset{top: 16} draw_text.text_style: Light{font_size: 42}}
+                                date_full := Secondary{margin: Inset{top: 8} draw_text.text_style.font_size: 10.5}
+                                next_alarm := RoundedView{width: Fill height: 68 margin: Inset{top: 24} flow: Right spacing: 16
+                                    padding: Inset{left: 16 right: 16} align: Align{y: 0.5} cursor: MouseCursor.Hand
+                                    draw_bg +: {color: theme.color_inset border_radius: 8.0}
+                                    Icon{width: 24 height: 24 icon_walk: Walk{width: 24 height: 24}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/bell.svg") color: theme.color_text}}
+                                    View{width: Fill height: Fit flow: Down spacing: 2
+                                        na_time := Text{draw_text.text_style: theme.font_bold{font_size: 12}}
+                                        na_repeat := Secondary{draw_text.text_style.font_size: 10.5}
+                                    }
+                                    Icon{width: 20 height: 20 icon_walk: Walk{width: 20 height: 20}
+                                        draw_icon +: {svg: crate_resource("self:resources/icons/chevron.svg") color: theme.color_text_disabled}}
                                 }
-                                Icon{width: 16 height: 16 icon_walk: Walk{width: 16 height: 16}
-                                    draw_icon +: {svg: crate_resource("self:resources/icons/chevron.svg") color: theme.color_text_disabled}}
                             }
                         }
                         alarm_page := View{width: Fill height: Fill flow: Down
                             alarm_list := AlarmList{width: Fill height: Fill footer: "Sounds while Clock is running."}
                         }
                         stopwatch_page := View{width: Fill height: Fill flow: Down
-                            View{width: Fill height: 72}
-                            sw_readout := TabularLabel{width: Fill height: 96 draw_text.text_style: Light{font_size: 57}}
-                            View{width: Fill height: 80 margin: Inset{top: 46} flow: Right padding: Inset{left: 4 right: 4}
-                                sw_left := Action{text: "Lap"}
-                                View{width: Fill height: Fill}
-                                sw_right := Action{text: "Start"}
+                            sw_top := View{width: Fill height: Fit flow: Down
+                                sw_gap := View{width: Fill height: 56}
+                                sw_readout := TabularLabel{width: Fill height: 96 draw_text.text_style: Light{font_size: 57}}
+                                sw_buttons := View{width: Fill height: 80 margin: Inset{top: 40} flow: Right padding: Inset{left: 4 right: 4}
+                                    sw_left := Action{text: "Lap"}
+                                    View{width: Fill height: Fill}
+                                    sw_right := Action{text: "Start"}
+                                }
                             }
-                            laps := LapList{width: Fill height: Fill margin: Inset{top: 24 bottom: 88}}
+                            laps_wrap := View{width: Fill height: Fill
+                                laps := LapList{width: Fill height: Fill margin: Inset{top: 24}}
+                            }
                         }
                         timer_page := PageFlip{width: Fill height: Fill active_page: @setup
-                            setup := ScrollYView{width: Fill height: Fill flow: Down align: Align{x: 0.5} padding: Inset{bottom: 88}
-                                View{width: Fill height: 14}
-                                duration_wheel := DurationWheel{width: Fill height: 220}
-                                timer_label := TextInput{width: Fill height: 52 margin: Inset{top: 18} empty_text: "Label"}
-                                View{width: Fill height: 48 margin: Inset{top: 16} flow: Right spacing: 8
-                                    preset_1 := Pill{text: "1 min"}
-                                    preset_5 := Pill{text: "5 min"}
-                                    preset_15 := Pill{text: "15 min"}
+                            setup := ScrollYView{width: Fill height: Fill flow: Down align: Align{x: 0.5} padding: Inset{bottom: 16}
+                                setup_wheel := View{width: Fill height: Fit flow: Down align: Align{x: 0.5} padding: Inset{top: 14}
+                                    duration_wheel := DurationWheel{width: Fill height: 220}
                                 }
-                                timer_start := Action{width: 96 height: 64 margin: Inset{top: 32} text: "Start" draw_bg.border_radius: 16.0}
+                                setup_form := View{width: Fill height: Fit flow: Down align: Align{x: 0.5}
+                                    timer_label := TextInput{width: Fill height: 52 margin: Inset{top: 18} empty_text: "Label"}
+                                    presets := View{width: Fill height: 48 margin: Inset{top: 16} flow: Right spacing: 8
+                                        preset_1 := Pill{text: "1 min"}
+                                        preset_5 := Pill{text: "5 min"}
+                                        preset_15 := Pill{text: "15 min"}
+                                    }
+                                    timer_start := Action{width: 96 height: 64 margin: Inset{top: 32} text: "Start" draw_bg.border_radius: 16.0}
+                                }
                             }
                             running := View{width: Fill height: Fill flow: Down align: Align{x: 0.5}
                                 ring := TimerRing{width: 308 height: 308 margin: Inset{top: 18}}
-                                View{width: Fill height: 80 margin: Inset{top: 42} flow: Right padding: Inset{left: 4 right: 4}
-                                    timer_cancel := Action{text: "Cancel"}
-                                    View{width: Fill height: Fill}
-                                    timer_pause := Action{text: "Pause"}
+                                run_controls := View{width: Fill height: Fit flow: Down align: Align{x: 0.5}
+                                    run_buttons := View{width: Fill height: 80 margin: Inset{top: 42} flow: Right padding: Inset{left: 4 right: 4}
+                                        timer_cancel := Action{text: "Cancel"}
+                                        View{width: Fill height: Fill}
+                                        timer_pause := Action{text: "Pause"}
+                                    }
+                                    timer_reset := TextAction{text: "Reset" visible: false margin: Inset{top: 8}}
                                 }
-                                timer_reset := TextAction{text: "Reset" visible: false margin: Inset{top: 8}}
                             }
                         }
                     }
                 }
-                chrome := glass.Layer{width: Fill height: Fill flow: Overlay
-                    View{width: Fill height: Fill align: Align{x: 0.5 y: 1.0} padding: Inset{bottom: 8}
-                        tabs_glass := View{width: 370 height: 64 flow: Overlay
-                            glass := GlassPanel{width: Fill height: Fill padding: 0
-                                // The design's tab glass: white 0.06 light / black 0.10 dark
-                                // (the app background's ink), rim 0.35-0.45 at width 1; without
-                                // a backdrop capture (a plain window) it falls back to Surface.
-                                draw_bg +: {corner_radius: 16.0 blur_level: 3.0 tint_color: theme.color_bg_app tint_alpha: 0.08 lensing_strength: 8.0 lensing_width: 12.0 specular_strength: 0.12 border_alpha: 0.35 fallback_color: theme.color_inset}
-                            }
-                            tabs := PhoneTabs{width: Fill height: Fill}
+                // The navigation bar: one opaque tonal surface (16 pt corners,
+                // one soft shadow) centred 8 pt above the bottom.
+                View{width: Fill height: Fill align: Align{x: 0.5 y: 1.0} padding: Inset{bottom: 8}
+                    tabs_bar := RoundedShadowView{width: 370 height: 64
+                        draw_bg +: {color: theme.color_inset border_radius: 8.0 shadow_color: #0000001f shadow_radius: 8.0 shadow_offset: vec2(0.0, 2.0)}
+                        tabs := PhoneTabs{width: Fill height: Fill}
+                    }
+                }
+                // The overflow menu under the heading's trailing action.
+                menu_layer := View{visible: false width: Fill height: Fill flow: Overlay
+                    menu_scrim := View{width: Fill height: Fill show_bg: true draw_bg.color: #0000 cursor: MouseCursor.Default}
+                    View{width: Fill height: Fill align: Align{x: 1.0 y: 0.0} padding: Inset{top: 52 right: 12}
+                        menu := RoundedShadowView{width: 224 height: Fit flow: Down padding: Inset{top: 8 bottom: 8}
+                            draw_bg +: {color: theme.color_inset border_radius: 6.0 shadow_color: #00000029 shadow_radius: 10.0 shadow_offset: vec2(0.0, 3.0)}
+                            tile_face_action := MenuItem{text: "Digital home tile"}
                         }
                     }
                 }
@@ -471,6 +521,19 @@ pub struct ClockView {
     last_face: HostedViewMode,
     #[rust]
     tile_face: TileFace,
+    /// The last sizing was landscape (the stopwatch reads it for its split).
+    #[rust]
+    landscape: bool,
+    /// The pages' width inside the side margins, at the last sizing.
+    #[rust]
+    page_w: f64,
+    /// The theme ink the secondary text was last derived from.
+    #[rust]
+    last_ink: Vec4f,
+    /// The stopwatch column width last applied (None = Fill), to re-lay it
+    /// only when laps appear or go.
+    #[rust]
+    sw_split: Option<Option<f64>>,
     #[rust]
     tile_face_load: Option<StorageRequestId>,
     /// The editor sheet's slide, 0 closed … 1 open, and its direction.
@@ -553,10 +616,24 @@ impl ClockView {
         if let Some(mut tabs) = self.view.widget(cx, ids!(tabs)).borrow_mut::<PhoneTabs>() {
             tabs.set_active(cx, self.mode, animate);
         }
-        // Contextual toolbar actions: the tile face on Clock, Add on Alarms.
-        self.view.widget(cx, ids!(tile_face_action)).set_visible(cx, self.mode == 0);
+        // The heading's trailing action: the overflow on Clock, Add on Alarms.
+        self.view.widget(cx, ids!(more_action)).set_visible(cx, self.mode == 0);
         self.view.widget(cx, ids!(alarm_add)).set_visible(cx, self.mode == 1);
+        self.set_menu(cx, false);
         self.view.redraw(cx);
+    }
+
+    /// The heading's overflow menu (the home tile's face).
+    fn set_menu(&mut self, cx: &mut Cx, open: bool) {
+        let layer = self.view.widget(cx, ids!(menu_layer));
+        if layer.visible() != open {
+            layer.set_visible(cx, open);
+            self.view.redraw(cx);
+        }
+    }
+
+    fn menu_open(&self, cx: &Cx) -> bool {
+        self.view.widget(cx, ids!(menu_layer)).visible()
     }
 
     // ---- the alarm editor sheet ----
@@ -617,7 +694,9 @@ impl ClockView {
         let sheet_h = self.view.widget(cx, ids!(sheet)).area().rect(cx).size.y.max(560.0);
         let offset = (1.0 - self.sheet_pos) * sheet_h;
         let mut sheet = self.view.widget(cx, ids!(sheet));
-        script_apply_eval!(cx, sheet, { margin: Inset{top: #(offset)} });
+        // Top and bottom margins paired: the bottom-anchored sheet moves
+        // down by `offset` without its layout extent changing.
+        script_apply_eval!(cx, sheet, { margin.top: #(offset) margin.bottom: #(-offset) });
         let alpha = (0.4 * self.sheet_pos) as f32;
         let mut scrim = self.view.widget(cx, ids!(scrim));
         script_apply_eval!(cx, scrim, { draw_bg.color: #(vec4(0.0, 0.0, 0.0, alpha)) });
@@ -756,6 +835,13 @@ impl ClockView {
         if !force && self.last_time == Some(now) {
             return;
         }
+        // Showing only the tile (no second hand, minutes on the digital
+        // face): a new second changes nothing it shows, and redrawing the
+        // full face behind it made the app (and its host) repaint every
+        // second at rest. The full face catches up when it shows (`force`).
+        if !force && !self.countdown.running() && self.face(cx) == HostedViewMode::Tile && self.last_time.is_some_and(|t| t.hour == now.hour && t.minute == now.minute && t.date_text() == now.date_text()) {
+            return;
+        }
         self.last_time = Some(now);
         for id in [ids!(face_full), ids!(face_tile)] {
             if let Some(mut face) = self.view.widget(cx, id).borrow_mut::<ClockFace>() {
@@ -796,6 +882,7 @@ impl ClockView {
         let has_time = self.stopwatch.elapsed() > 0.0;
         self.set_action(cx, ids!(sw_left), if running { "Lap" } else { "Reset" }, None, running || has_time);
         self.set_action(cx, ids!(sw_right), if running { "Stop" } else { "Start" }, Some(if running { stop } else { start }), true);
+        self.layout_stopwatch(cx);
         let laps = self.stopwatch.laps();
         if let Some(mut list) = self.view.widget(cx, ids!(laps)).borrow_mut::<LapList>() {
             list.set(cx, &laps, self.stopwatch.current_lap().filter(|_| !laps.is_empty() || running));
@@ -878,13 +965,30 @@ impl ClockView {
                 self.view.label(cx, ids!(extra_tile)).set_text(cx, &extra);
             }
         }
-        self.view.button(cx, ids!(tile_face_action)).set_text(cx, if self.tile_face == TileFace::Analog { "Digital tile" } else { "Analog tile" });
+        self.view.button(cx, ids!(tile_face_action)).set_text(cx, if self.tile_face == TileFace::Analog { "Digital home tile" } else { "Analog home tile" });
         let mut face = self.view.widget(cx, ids!(face_tile));
         // Tile dials step once a second; the second hand stays on the full face only.
         if let Some(mut f) = face.borrow_mut::<ClockFace>() {
             f.set_show_seconds(cx, false);
         }
         let _ = &mut face;
+    }
+
+    /// Landscape: with laps, the readout and buttons in a 360 pt column
+    /// left of them; without, that column alone, centred at 400 pt.
+    fn layout_stopwatch(&mut self, cx: &mut Cx) {
+        let split = self.landscape && self.stopwatch.current_lap().is_some();
+        let width = if !self.landscape { None } else if split { Some((self.page_w * 0.5).min(360.0)) } else { Some(self.page_w.min(400.0)) };
+        if self.sw_split == Some(width) {
+            return;
+        }
+        self.sw_split = Some(width);
+        let mut top = self.view.widget(cx, ids!(sw_top));
+        match width {
+            Some(width) => script_apply_eval!(cx, top, { width: #(width) }),
+            None => script_apply_eval!(cx, top, { width: mod.turtle.Fill }),
+        }
+        self.view.widget(cx, ids!(laps_wrap)).set_visible(cx, !self.landscape || split);
     }
 
     fn sync_fast_timer(&mut self, cx: &mut Cx) {
@@ -897,24 +1001,151 @@ impl ClockView {
         }
     }
 
+    /// The date and the alarm card's caption in the theme's ink at 72 %:
+    /// the theme's disabled grey reads at under 3:1 on the inset surfaces
+    /// (1.2:1 dark), this keeps ≥ 4.5:1 in both appearances. Re-derived
+    /// whenever a restyle changes the ink.
+    fn apply_secondary_ink(&mut self, cx: &mut Cx) {
+        let Some(ink) = self.view.widget(cx, ids!(time_full)).borrow::<TabularLabel>().map(|t| t.ink()) else {
+            return;
+        };
+        if ink == self.last_ink {
+            return;
+        }
+        self.last_ink = ink;
+        let secondary = vec4(ink.x, ink.y, ink.z, 0.72);
+        for id in [ids!(date_full), ids!(na_repeat)] {
+            let mut w = self.view.widget(cx, id);
+            script_apply_eval!(cx, w, { draw_text.color: #(secondary) });
+        }
+    }
+
     /// Face sizing off this widget's own draw rect: the tile viewport
     /// under a module host, the window's inner size standalone.
     fn apply_sizing(&mut self, cx: &mut Cx, size: Vec2d) {
         let landscape = size.x >= 650.0 && size.y < 500.0;
-        // The full dial and ring.
-        let dial = if landscape { (size.y - 150.0).clamp(120.0, 220.0) } else { 292.0 };
+        // Type in makepad points: the design's logical sizes times 3/4.
+        // Heading row 56 pt with a 28 pt title; 48 pt with 22 pt landscape.
+        let (head_h, title_size) = if landscape { (48.0, 16.5) } else { (56.0, 21.0) };
+        let mut head = self.view.widget(cx, ids!(head));
+        script_apply_eval!(cx, head, { height: #(head_h) });
+        let mut title = self.view.widget(cx, ids!(title));
+        script_apply_eval!(cx, title, { draw_text.text_style.font_size: #(title_size) });
+        // What the pages get: the viewport less the heading and the tab band,
+        // and less the 16 pt side margins.
+        let page_h = (size.y - head_h - 80.0).max(120.0);
+        let page_w = (size.x - 32.0).max(120.0);
+        let set_layout = |view: &mut View, flow: Flow, spacing: f64, align: Align| {
+            view.layout.flow = flow;
+            view.layout.spacing = spacing;
+            view.layout.align = align;
+        };
+        let set_width = |cx: &mut Cx, mut w: WidgetRef, width: Option<f64>| match width {
+            Some(width) => script_apply_eval!(cx, w, { width: #(width) }),
+            None => script_apply_eval!(cx, w, { width: mod.turtle.Fill }),
+        };
+
+        // Clock: the 292 pt dial over a 56/64 time, a 14/20 date and the
+        // 68 pt alarm card; landscape, a 192 pt dial left of a 40/48 time,
+        // the date and a 64 pt card, 24 pt apart, the pair centred.
+        let dial = if landscape { (page_h - 12.0).clamp(120.0, 192.0) } else { 292.0 };
         let mut full = self.view.widget(cx, ids!(face_full));
         script_apply_eval!(cx, full, { width: #(dial) height: #(dial) });
-        let ring = if landscape { (size.y - 150.0).clamp(120.0, 236.0) } else { 308.0 };
+        if let Some(mut page) = self.view.view(cx, ids!(clock_page)).borrow_mut() {
+            if landscape {
+                set_layout(&mut page, Flow::right(), 24.0, Align { x: 0.5, y: 0.5 });
+                page.layout.padding = Inset { top: 0.0, bottom: 8.0, left: 0.0, right: 0.0 };
+            } else {
+                set_layout(&mut page, Flow::Down, 0.0, Align { x: 0.5, y: 0.0 });
+                page.layout.padding = Inset { top: 8.0, bottom: 16.0, left: 0.0, right: 0.0 };
+            }
+        }
+        if let Some(mut info) = self.view.view(cx, ids!(clock_info)).borrow_mut() {
+            info.layout.align = Align { x: if landscape { 0.0 } else { 0.5 }, y: 0.0 };
+        }
+        set_width(cx, self.view.widget(cx, ids!(clock_info)), landscape.then_some((page_w - dial - 24.0).min(320.0)));
+        let (time_size, time_h, time_top, card_h, card_top) = if landscape { (30.0, 48.0, 0.0, 64.0, 16.0) } else { (42.0, 64.0, 16.0, 68.0, 24.0) };
+        let mut time = self.view.widget(cx, ids!(time_full));
+        script_apply_eval!(cx, time, { height: #(time_h) margin.top: #(time_top) draw_text.text_style.font_size: #(time_size) });
+        if let Some(mut t) = time.borrow_mut::<TabularLabel>() {
+            t.set_align_x(cx, if landscape { 0.0 } else { 0.5 });
+        }
+        let mut card = self.view.widget(cx, ids!(next_alarm));
+        script_apply_eval!(cx, card, { height: #(card_h) margin.top: #(card_top) });
+
+        // Stopwatch: landscape puts the readout and its buttons left of the laps.
+        if let Some(mut page) = self.view.view(cx, ids!(stopwatch_page)).borrow_mut() {
+            if landscape {
+                set_layout(&mut page, Flow::right(), 24.0, Align { x: 0.5, y: 0.0 });
+            } else {
+                set_layout(&mut page, Flow::Down, 0.0, Align { x: 0.0, y: 0.0 });
+            }
+        }
+        self.landscape = landscape;
+        self.page_w = page_w;
+        self.sw_split = None;
+        self.layout_stopwatch(cx);
+        let (gap, readout_size, readout_h, buttons_top) = if landscape { (8.0, 42.0, 72.0, 16.0) } else { (56.0, 57.0, 96.0, 40.0) };
+        let mut sw_gap = self.view.widget(cx, ids!(sw_gap));
+        script_apply_eval!(cx, sw_gap, { height: #(gap) });
+        let mut readout = self.view.widget(cx, ids!(sw_readout));
+        script_apply_eval!(cx, readout, { height: #(readout_h) draw_text.text_style.font_size: #(readout_size) });
+        let mut sw_buttons = self.view.widget(cx, ids!(sw_buttons));
+        script_apply_eval!(cx, sw_buttons, { margin.top: #(buttons_top) });
+        let laps_top = if landscape { 8.0 } else { 24.0 };
+        let mut laps = self.view.widget(cx, ids!(laps));
+        script_apply_eval!(cx, laps, { margin.top: #(laps_top) });
+
+        // Timer setup: landscape puts the wheel left of the label, presets and Start.
+        if let Some(mut page) = self.view.view(cx, ids!(setup)).borrow_mut() {
+            if landscape {
+                set_layout(&mut page, Flow::right(), 24.0, Align { x: 0.5, y: 0.0 });
+            } else {
+                set_layout(&mut page, Flow::Down, 0.0, Align { x: 0.5, y: 0.0 });
+            }
+        }
+        // Two columns of at most 320 pt, 24 apart, sharing whatever is there.
+        let setup_col = column_width(page_w, 24.0, 320.0);
+        set_width(cx, self.view.widget(cx, ids!(setup_wheel)), landscape.then_some(setup_col));
+        set_width(cx, self.view.widget(cx, ids!(setup_form)), landscape.then_some(setup_col));
+        let (wheel_h, wheel_top, label_top, start_top) = if landscape { ((page_h - 16.0).clamp(140.0, 220.0), 8.0, 8.0, 12.0) } else { (220.0, 14.0, 18.0, 32.0) };
+        let mut wheel = self.view.widget(cx, ids!(duration_wheel));
+        script_apply_eval!(cx, wheel, { height: #(wheel_h) });
+        if let Some(mut v) = self.view.view(cx, ids!(setup_wheel)).borrow_mut() {
+            v.layout.padding = Inset { top: wheel_top, bottom: 0.0, left: 0.0, right: 0.0 };
+        }
+        let (label_h, presets_top, start_h) = if landscape { (48.0, 12.0, 56.0) } else { (52.0, 16.0, 64.0) };
+        let mut label = self.view.widget(cx, ids!(timer_label));
+        script_apply_eval!(cx, label, { height: #(label_h) margin.top: #(label_top) });
+        let mut presets = self.view.widget(cx, ids!(presets));
+        script_apply_eval!(cx, presets, { margin.top: #(presets_top) });
+        let mut start = self.view.widget(cx, ids!(timer_start));
+        script_apply_eval!(cx, start, { height: #(start_h) margin.top: #(start_top) });
+
+        // The alarm sheet: its wheel gives way so Label stays on a short screen.
+        let sheet_wheel = (size.y - 210.0).clamp(120.0, 220.0);
+        let mut alarm_wheel = self.view.widget(cx, ids!(alarm_wheel));
+        script_apply_eval!(cx, alarm_wheel, { height: #(sheet_wheel) });
+
+        // Timer running: the ring, and landscape its controls beside it.
+        if let Some(mut page) = self.view.view(cx, ids!(running)).borrow_mut() {
+            if landscape {
+                set_layout(&mut page, Flow::right(), 32.0, Align { x: 0.5, y: 0.5 });
+            } else {
+                set_layout(&mut page, Flow::Down, 0.0, Align { x: 0.5, y: 0.0 });
+            }
+        }
+        let ring = if landscape { (page_h - 12.0).clamp(120.0, 200.0) } else { 308.0 };
+        set_width(cx, self.view.widget(cx, ids!(run_controls)), landscape.then_some((page_w - ring - 32.0).min(320.0)));
+        let ring_top = if landscape { 0.0 } else { 18.0 };
         let mut ring_w = self.view.widget(cx, ids!(ring));
-        script_apply_eval!(cx, ring_w, { width: #(ring) height: #(ring) });
+        script_apply_eval!(cx, ring_w, { width: #(ring) height: #(ring) margin.top: #(ring_top) });
         if let Some(mut r) = ring_w.borrow_mut::<TimerRing>() {
             r.set_stroke(cx, if landscape { 4.0 } else { 6.0 });
         }
-        // Type in makepad points: the design's logical sizes times 3/4.
-        let title_size = if landscape { 18.0 } else { 25.5 };
-        let mut title = self.view.widget(cx, ids!(title));
-        script_apply_eval!(cx, title, { draw_text.text_style.font_size: #(title_size) });
+        let run_top = if landscape { 0.0 } else { 42.0 };
+        let mut run_buttons = self.view.widget(cx, ids!(run_buttons));
+        script_apply_eval!(cx, run_buttons, { margin.top: #(run_top) });
         // The tile: the dial centred at 154, enlarged to 162 at 178, or a
         // landscape strip that puts the digital face beside a small dial.
         let tile_landscape = size.y < 120.0 && size.x > size.y * 1.4;
@@ -961,13 +1192,21 @@ impl ClockView {
                 self.select_mode(cx, index, false);
             }
         }
+        if self.view.button(cx, ids!(more_action)).clicked(actions) {
+            self.set_menu(cx, true);
+        }
         if self.view.button(cx, ids!(tile_face_action)).clicked(actions) {
             self.toggle_tile_face(cx);
+            self.set_menu(cx, false);
         }
-        if self.view.view(cx, ids!(next_alarm)).finger_up(actions).is_some() {
+        if self.view.view(cx, ids!(menu_scrim)).finger_down(actions).is_some() {
+            self.set_menu(cx, false);
+        }
+        // A press taken away (a list or the host took the finger) is no tap.
+        if self.view.view(cx, ids!(next_alarm)).finger_up(actions).is_some_and(|e| !e.cancelled) {
             self.select_mode(cx, 1, true);
         }
-        if self.view.widget(cx, ids!(alarm_add)).borrow::<GlassButton>().is_some_and(|b| b.clicked(actions)) {
+        if self.view.button(cx, ids!(alarm_add)).clicked(actions) {
             self.open_editor(cx, None);
         }
         if self.view.button(cx, ids!(alarm_cancel)).clicked(actions) {
@@ -1107,6 +1346,10 @@ impl Widget for ClockView {
                 self.set_sheet(cx, false);
                 return;
             }
+            if self.menu_open(cx) && event.back_pressed() {
+                self.set_menu(cx, false);
+                return;
+            }
         }
         if let Event::Actions(actions) = event {
             self.handle_actions(cx, actions);
@@ -1119,6 +1362,9 @@ impl Widget for ClockView {
             self.view.widget(cx, ids!(sheet_layer)).handle_event(cx, event, scope);
             self.view.widget(cx, ids!(modal)).handle_event(cx, event, scope);
             self.view.widget(cx, ids!(app_view)).borrow::<HostedView>();
+        } else if self.menu_open(cx) && input {
+            // The open menu takes every press: an item, or anywhere else to dismiss.
+            self.view.widget(cx, ids!(menu_layer)).handle_event(cx, event, scope);
         } else {
             self.view.handle_event(cx, event, scope);
         }
@@ -1126,6 +1372,8 @@ impl Widget for ClockView {
         let face = self.face(cx);
         if face != self.last_face {
             self.last_face = face;
+            // The full face was left behind while only the tile showed.
+            self.refresh_clock(cx, true);
             if face == HostedViewMode::Full {
                 match activity(self.alarm.ringing(), self.countdown_alert, self.countdown.active(), self.stopwatch.running()) {
                     Activity::AlarmRinging => self.select_mode(cx, 1, false),
@@ -1139,6 +1387,7 @@ impl Widget for ClockView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ensure_started(cx);
+        self.apply_secondary_ink(cx);
         let size = cx.turtle().rect().size;
         if size.x >= 1.0 && (size.x - self.last_size.x).abs() + (size.y - self.last_size.y).abs() > 0.5 {
             self.last_size = size;
@@ -1192,6 +1441,17 @@ mod tests {
         assert!(!cd.active());
         cd.start(0.0);
         assert!(!cd.running() && !cd.finished(), "a zero duration never starts or reports done");
+    }
+
+    #[test]
+    fn landscape_timer_columns_fit_from_the_breakpoint_up() {
+        for width in [650.0, 700.0, 892.0, 1400.0] {
+            let page_w = width - 32.0;
+            let col = column_width(page_w, 24.0, 320.0);
+            assert!(col * 2.0 + 24.0 <= page_w + 1e-9, "{width}: {col}");
+        }
+        assert_eq!(column_width(892.0 - 32.0, 24.0, 320.0), 320.0);
+        assert_eq!(column_width(650.0 - 32.0, 24.0, 320.0), 297.0);
     }
 
     #[test]

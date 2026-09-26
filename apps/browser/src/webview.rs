@@ -693,6 +693,9 @@ impl WebView {
     fn send_key(&mut self, key_event: &KeyEvent, event_type: i32) {
         let modifiers = BrowserKeys::key_event_modifiers(key_event);
         let windows_key_code = BrowserKeys::windows_key_code(key_event.key_code);
+        // The platform code beside the VK, never the VK twice: on a Mac the
+        // two ranges overlap and VK_L is the keypad Enter.
+        let native_key_code = BrowserKeys::native_key_code(key_event.key_code);
         let character = if key_event.modifiers.control
             || key_event.modifiers.alt
             || key_event.modifiers.logo
@@ -714,7 +717,7 @@ impl WebView {
                 event_type,
                 modifiers,
                 windows_key_code,
-                windows_key_code,
+                native_key_code,
                 character,
                 character,
                 false,
@@ -724,7 +727,7 @@ impl WebView {
                     makepad_cef::KEY_EVENT_CHAR,
                     modifiers,
                     windows_key_code,
-                    windows_key_code,
+                    native_key_code,
                     character,
                     character,
                     false,
@@ -872,11 +875,17 @@ impl Widget for WebView {
                     if text_event.was_paste || text_event.replace_last || char_data.is_none() {
                         let _ = browser.ime_commit_text(&text_event.input);
                     } else if let Some((windows_key_code, character)) = char_data {
+                        let native_key_code = text_event
+                            .input
+                            .chars()
+                            .next()
+                            .map(BrowserKeys::native_key_code_for_char)
+                            .unwrap_or(windows_key_code);
                         let _ = browser.send_key_event(
                             makepad_cef::KEY_EVENT_CHAR,
                             modifiers,
                             windows_key_code,
-                            windows_key_code,
+                            native_key_code,
                             character,
                             character,
                             false,

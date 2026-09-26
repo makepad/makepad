@@ -607,7 +607,7 @@ impl NotesView {
                 tap.nav_name = count.collection.label().into();
                 tap.reduced_motion = self.reduced_motion;
             }
-            let h = if compact { 52.0 } else { 44.0 };
+            let h = if compact { 56.0 } else { 44.0 };
             let font = if compact { 12.75 } else { 10.5 };
             script_apply_eval!(cx,row,{use mod.prelude.widgets.* height:#(h) tap +: {name +: {draw_text.text_style.font_size:#(font)}}});
             let mut count_widget = row.widget(cx, ids!(tap.count));
@@ -915,7 +915,7 @@ impl NotesView {
         self.set_path_visible(cx, ids!(wide.notes_list.short_header), !decision.is_three());
         self.set_path_visible(cx, ids!(wide.notes_list.count), !decision.short_chrome);
         let width = engine::list_column_width(decision, size.x);
-        let toolbar_height = if decision.short_chrome { 44.0 } else { 56.0 };
+        let toolbar_height = if decision.short_chrome { 48.0 } else { 56.0 };
         let mut list = self.view.widget(cx, ids!(wide.notes_list));
         let search_height = if decision.short_chrome { 44.0 } else { 48.0 };
         let pad = if decision.short_chrome { 8.0 } else { 12.0 };
@@ -1792,7 +1792,7 @@ mod tests {
                 live_id!(scroll), live_id!(group), live_id!(rows), id]);
             let row = item.area().rect(&cx);
             let rule = item.widget(&mut cx, ids!(rule)).area().rect(&cx);
-            assert_eq!(row.size.y, 52.0);
+            assert_eq!(row.size.y, 56.0);
             assert!(rule.pos.x >= row.pos.x + 52.0);
             assert!((rule.pos.y + rule.size.y - row.pos.y - row.size.y).abs() < 0.01,
                 "folder rule must follow its own row: {row:?} {rule:?}");

@@ -551,6 +551,9 @@ script_mod! {
                                     friction: 0.7
                                     restitution: 0.08
                                     pos: vec3(-0.23 + col * 0.22 + if row % 2 == 0 {0.0} else {0.08}, 0.08 + row * 0.22, -0.10)
+                                    // Not in the repository (3 MB): put Khronos' DamagedHelmet.glb
+                                    // (glTF-Sample-Assets, CC BY 4.0) in resources/ to see it;
+                                    // without it the helmets are invisible bodies.
                                     src: crate_resource("self://resources/DamagedHelmet.glb")
                                     mesh_scale: vec3(0.38, 0.38, 0.38)
                                     mesh_rotation: vec3(0.0, 1.5708, 0.0)

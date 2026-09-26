@@ -117,10 +117,8 @@ fn resize_preserves_raw_fields_selection_filter_and_scroll_then_cancel_discards(
         .set_selected_item(&mut cx, 3);
     form.check_box(&mut cx, ids!(fields.organization.flag))
         .set_active(&mut cx, false, Animate::No);
-    form.widget(&mut cx, ids!(fields.organization.priority))
-        .borrow_mut::<GlassSegmented>()
-        .unwrap()
-        .set_selected(&mut cx, 1);
+    view.priority_sel = 1;
+    view.show_priority(&mut cx, &form);
     view.list_parent(&mut cx, false)
         .portal_list(&mut cx, ids!(rows))
         .set_first_id_and_scroll(3, -12.0);
@@ -158,13 +156,13 @@ fn resize_preserves_raw_fields_selection_filter_and_scroll_then_cancel_discards(
         assert!(!form
             .check_box(&mut cx, ids!(fields.organization.flag))
             .active(&mut cx));
-        assert_eq!(
-            form.widget(&mut cx, ids!(fields.organization.priority))
-                .borrow::<GlassSegmented>()
-                .unwrap()
-                .selected(),
-            1
-        );
+        assert_eq!(view.priority_sel, 1);
+        assert!(form
+            .widget(&mut cx, ids!(fields.organization.priority.p1.pill))
+            .visible());
+        assert!(!form
+            .widget(&mut cx, ids!(fields.organization.priority.p0.pill))
+            .visible());
         let list = view
             .list_parent(&mut cx, view.nav.layout.is_compact())
             .portal_list(&mut cx, ids!(rows));

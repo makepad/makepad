@@ -281,6 +281,65 @@ fn os_open(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Hand `path` to the platform's own file manager, selected in its folder
+/// (Finder, Explorer; on Linux the desktop's folder window for its parent).
+/// Deleting and trashing happen there — this app has neither.
+pub fn show_in_file_manager(path: &Path) -> String {
+    let name = crate::model::display_name(path);
+    let label = crate::menu::file_manager_label();
+    let Ok(real) = crate::vfs::vfs().native_path(path) else {
+        return format!("{label} is not available on this filesystem");
+    };
+    match os_reveal(&real) {
+        Ok(()) => format!("Showing {name} in the file manager"),
+        Err(error) => format!("Could not show {name} in the file manager: {error}"),
+    }
+}
+
+/// No shell anywhere: the path is one argument to the file manager's own
+/// executable, never text a shell parses.
+#[cfg(not(target_arch = "wasm32"))]
+fn os_reveal(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg("-R").arg(path).spawn().map(|_| ())
+    }
+    #[cfg(windows)]
+    {
+        // Explorer parses `/select,<path>` itself and does not understand
+        // the quoting Rust adds around an argument with spaces, so the flag
+        // and the quoted path go over as one raw argument. A Windows path
+        // cannot contain `"`, so the quotes cannot be broken out of.
+        use std::os::windows::process::CommandExt;
+        Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open has no "select this item": open the folder it is in.
+        let folder = path.parent().unwrap_or(path);
+        Command::new("xdg-open").arg(folder).spawn().map(|_| ())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "there is no file manager on this platform",
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn os_reveal(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "there is no file manager in this demo",
+    ))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn os_open(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(

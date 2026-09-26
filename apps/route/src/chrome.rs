@@ -395,7 +395,7 @@ script_mod! {
                 flow: Down
                 width: Fit
                 height: Fit
-                margin: Inset{left: 14, bottom: 6}
+                margin: Inset{left: 16, bottom: 8}
                 padding: Inset{left: 18, right: 22, top: 14, bottom: 14}
                 spacing: 2
                 draw_bg +: {
@@ -442,7 +442,7 @@ script_mod! {
                 visible: false
                 width: Fit
                 height: Fit
-                margin: Inset{left: 14, bottom: 6}
+                margin: Inset{left: 16, bottom: 8}
                 padding: Inset{left: 12, right: 12, top: 7, bottom: 7}
                 draw_bg +: {
                     color: theme.color_bg_container
@@ -455,19 +455,39 @@ script_mod! {
                     }
                 }
             }
+            // Layers, locate and (in the side panel) chat share one line:
+            // 48 pt tall, 16 pt in from the edges and the bottom, 8 apart,
+            // pills with 24 pt corners (the box radius is half of that).
             location_controls := View{
                 width: Fit
                 height: Fit
                 flow: Right
                 spacing: 8
-                margin: Inset{left: 14, bottom: 16}
+                margin: Inset{left: 16, bottom: 16}
                 layers_button := AppButton{
-                    padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
-                    text: "▤"
+                    width: 48
+                    height: 48
+                    margin: 0
+                    padding: 0
+                    spacing: 0
+                    align: Align{x: 0.5 y: 0.5}
+                    text: ""
+                    draw_bg +: {border_radius: 12.0}
+                    icon_walk: Walk{width: 24, height: 24}
+                    draw_icon +: {
+                        svg: crate_resource("self://resources/icons/layers.svg")
+                        color: theme.color_text
+                    }
                 }
                 location_button := AppButton{
-                    padding: Inset{left: 14, right: 14, top: 12, bottom: 12}
-                    text: "Fetch current location"
+                    width: 128
+                    height: 48
+                    margin: 0
+                    padding: Inset{left: 16, right: 16}
+                    align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {border_radius: 12.0}
+                    draw_text +: {text_style: theme.font_regular{font_size: 10.5}}
+                    text: "Locate me"
                 }
             }
         }

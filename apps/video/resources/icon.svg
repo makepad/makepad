@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- video: a film frame with a play triangle -->
+  <rect x="176" y="272" width="672" height="480" rx="64" fill="#ff7ab6"/>
+  <g fill="#0e1d33">
+    <rect x="216" y="306" width="48" height="36" rx="10"/><rect x="216" y="400" width="48" height="36" rx="10"/><rect x="216" y="494" width="48" height="36" rx="10"/><rect x="216" y="588" width="48" height="36" rx="10"/><rect x="216" y="682" width="48" height="36" rx="10"/>
+    <rect x="760" y="306" width="48" height="36" rx="10"/><rect x="760" y="400" width="48" height="36" rx="10"/><rect x="760" y="494" width="48" height="36" rx="10"/><rect x="760" y="588" width="48" height="36" rx="10"/><rect x="760" y="682" width="48" height="36" rx="10"/>
+  </g>
+  <path d="M438 390 C438 372 456 362 472 371 L636 494 C650 504 650 520 636 530 L472 653 C456 662 438 652 438 634 Z" fill="#e8eef6"/>
+</svg>

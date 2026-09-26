@@ -23,14 +23,21 @@ path = "src/lib.rs"
 
 [features]
 dynamic-module = []
-default = ["standalone"]
+default = ["tweaker", "standalone"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
 demo = []
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-wm) leaves this off and gets the lib only.
 standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
+# The machine's own model in this window's chat (Qwen on the local
+# runtime). Off by default: the chat offers the Claude Code / Codex CLIs,
+# Claude Desktop (MCP) and the Claude API. `--features localai` adds it.
+localai = ["makepad-aichat?/localai"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the bounded sheet tools
 # exposed to it (src/ai.rs).

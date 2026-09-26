@@ -88,7 +88,7 @@ script_mod! {
         width: Fill height: Fill
         app_view := HostedView{
             full: View{width: Fill height: Fill flow: Overlay
-                sky_full := SkyView{width: Fill height: Fill draw_sky +: {border_radius: 0.0 feather: 56.0}}
+                sky_full := SkyView{width: Fill height: Fill draw_sky +: {border_radius: 0.0 feather: 96.0}}
                 forecast_scroll := ScrollYView{width: Fill height: Fill flow: Down
                     // The phone gets no desktop scroll bar: the handle is
                     // painted only when the scroller is wide (its clip rect
@@ -108,11 +108,17 @@ script_mod! {
                         align: Align{x: 0.5}
                         hero_city := SkyText{draw_text.text_style.font_size: 21}
                         hero_temp := SkyText{draw_text.text_style: Light{font_size: 75}}
-                        hero_cond := SkyText{margin: Inset{top: 6} draw_text.text_style: theme.font_bold{font_size: 15}}
-                        hero_hilo := SkyText{margin: Inset{top: 6}}
+                        // Portrait stacks the condition over H/L; the short
+                        // landscape face puts them on one line.
+                        hero_line := View{width: Fit height: Fit flow: Down spacing: 6 margin: Inset{top: 6} align: Align{x: 0.5}
+                            hero_cond := SkyText{draw_text.text_style: theme.font_bold{font_size: 15}}
+                            hero_hilo := SkyText{}
+                        }
                     }
+                    // The bottom 80: the 64 pt control bar plus a gap, so
+                    // the last card clears it.
                     panels := View{width: Fill height: Fit flow: Down spacing: 12
-                        padding: Inset{left: 16 right: 16 bottom: 88}
+                        padding: Inset{left: 16 right: 16 bottom: 80}
                         hourly := ForecastPanel{
                             summary := SkyText{width: Fill max_lines: 2 draw_text.text_style: theme.font_regular{font_size: 11.25}}
                             Hairline{margin: Inset{top: 8}}
@@ -157,8 +163,9 @@ script_mod! {
                         footer := SkyDim{width: Fill draw_text.text_style.font_size: 9}
                     }
                 }
-                // The compact header pins in once the hero has scrolled away.
-                header := View{visible: false width: Fill height: 92 flow: Overlay
+                // The compact header pins in once the hero has scrolled away:
+                // a glass layer, so it composites above the glass panels.
+                header := glass.Layer{visible: false width: Fill height: 92 flow: Overlay
                     scrim := View{width: Fill height: Fill show_bg: true
                         draw_bg +: {
                             color: #102b48
@@ -170,15 +177,42 @@ script_mod! {
                         header_line := SkyText{draw_text.text_style.font_size: 9.75}
                     }
                 }
-                chrome := glass.Layer{width: Fill height: Fill flow: Overlay
-                    View{width: Fill height: Fill align: Align{x: 1.0 y: 1.0} padding: Inset{right: 16 bottom: 20}
-                        locations := glass.GlassButton{width: 44 height: 44 text: "" padding: 0 spacing: 0
-                            icon_walk: Walk{width: 22 height: 22}
-                            draw_icon +: {svg: crate_resource("self:resources/icons/locations.svg")}
+                // The controls sit on a 64 pt bar of the sky's own dark
+                // tone, not loose over the forecast rows. A glass layer, so it
+                // composites above the glass panels it overlaps.
+                chrome := glass.Layer{width: Fill height: Fill flow: Down
+                    View{width: Fill height: Fill}
+                    // Symmetric: a 48 pt spacer mirrors the locations
+                    // button, so the dots sit on the true centre.
+                    bar := View{width: Fill height: 64 flow: Right align: Align{y: 0.5}
+                        padding: Inset{left: 16 right: 16} show_bg: true
+                        draw_bg +: {
+                            color: #0d1f33
+                            pixel: fn(){
+                                let hairline = 1.0 - step(0.5, self.pos.y * self.rect_size.y)
+                                return mix(vec4(self.color.rgb * 0.9, 0.9), vec4(0.14, 0.14, 0.14, 0.14), hairline)
+                            }
                         }
-                    }
-                    View{width: Fill height: Fill align: Align{x: 0.5 y: 1.0} padding: Inset{bottom: 42}
-                        dots := PageDots{width: 44 height: 16}
+                        View{width: 48 height: 48}
+                        View{width: Fill height: Fit align: Align{x: 0.5}
+                            dots := PageDots{width: 44 height: 16}
+                        }
+                        View{width: Fit height: Fit
+                            locations := View{width: 48 height: 48 align: Align{x: 0.5 y: 0.5}
+                                cursor: MouseCursor.Hand show_bg: true
+                                draw_bg +: {
+                                    pixel: fn(){
+                                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                        sdf.circle(24.0, 24.0, 24.0)
+                                        sdf.fill(vec4(1.0, 1.0, 1.0, 0.14))
+                                        return sdf.result
+                                    }
+                                }
+                                Icon{icon_walk: Walk{width: 24 height: 24}
+                                    draw_icon +: {svg: crate_resource("self:resources/icons/locations.svg") color: #ffffff}
+                                }
+                            }
+                        }
                     }
                 }
                 sheet_layer := View{visible: false width: Fill height: Fill flow: Overlay
@@ -200,7 +234,7 @@ script_mod! {
                 }
             }
             tile: View{width: Fill height: Fill flow: Overlay
-                sky_tile := SkyView{width: Fill height: Fill draw_sky +: {border_radius: 0.0 feather: 20.0}}
+                sky_tile := SkyView{width: Fill height: Fill draw_sky +: {border_radius: 0.0 feather: 64.0}}
                 tile_text := View{width: Fill height: Fill flow: Down
                     padding: Inset{left: 16 right: 16 top: 14}
                     tile_city := SkyText{width: Fill max_lines: 1 draw_text.text_style: theme.font_bold{font_size: 12}}
@@ -263,6 +297,10 @@ pub struct WeatherView {
     /// Whether the pinned header is up, so scroll changes redraw once.
     #[rust]
     header_shown: bool,
+    /// The hero's height when last drawn: where the pinned header's band
+    /// ends and how far the face has scrolled.
+    #[rust]
+    hero_h: f64,
     #[rust]
     sheet_open: bool,
     /// A dev override of the sky's inputs (the standalone's `--sky` flag),
@@ -681,24 +719,69 @@ impl WeatherView {
             text.layout.padding.right = if landscape_tile { 12.0 } else { 16.0 };
         }
         // Type in makepad points: the design's logical sizes times 3/4.
-        let temp_size = if landscape_tile { 22.5 } else if size.y < 176.0 && size.y < 200.0 && size.x < 300.0 { 30.0 } else { 39.0 };
+        // The short landscape tile: 12/8 pt padding, city 16/20, temperature
+        // 28/32, H/L 12/16, no condition row, H/L well clear of the bottom.
+        if landscape_tile {
+            if let Some(mut text) = self.view.view(cx, ids!(tile_text)).borrow_mut() {
+                text.layout.padding.top = 8.0;
+            }
+        }
+        let temp_size = if landscape_tile { 21.0 } else if size.y < 176.0 && size.y < 200.0 && size.x < 300.0 { 30.0 } else { 39.0 };
         let mut temperature = self.view.widget(cx, ids!(tile_temp));
         script_apply_eval!(cx, temperature, { draw_text.text_style.font_size: #(temp_size) });
+        let hilo_size = if landscape_tile { 9.0 } else { 9.75 };
+        let hilo_top = if landscape_tile { 2.0 } else { 6.0 };
+        let mut hilo = self.view.widget(cx, ids!(tile_hilo));
+        script_apply_eval!(cx, hilo, { margin.top: #(hilo_top) draw_text.text_style.font_size: #(hilo_size) });
         self.view.widget(cx, ids!(condition)).set_visible(cx, !landscape_tile);
         self.view.widget(cx, ids!(tile_hilo)).set_visible(cx, size.y >= 60.0);
-        // The full face in landscape: the hero shrinks so the panels get room.
+        // The full face in landscape: a compact 136 pt hero (city 22/28,
+        // temperature 48/56, condition and H/L on one 14/20 line) so the
+        // forecast shows on entry.
         let landscape_full = size.x >= 650.0 && size.y < 500.0;
+        let (city_size, temp_full, cond_size, top, bottom) = if landscape_full {
+            (16.5, 36.0, 10.5, 8.0, 8.0)
+        } else {
+            (21.0, 75.0, 15.0, 24.0, 22.0)
+        };
+        if let Some(mut hero) = self.view.view(cx, ids!(hero)).borrow_mut() {
+            hero.layout.padding.top = top;
+            hero.layout.padding.bottom = bottom;
+        }
+        if let Some(mut line) = self.view.view(cx, ids!(hero_line)).borrow_mut() {
+            line.layout.flow = if landscape_full { Flow::right() } else { Flow::Down };
+            line.layout.spacing = if landscape_full { 8.0 } else { 6.0 };
+        }
+        let line_top = if landscape_full { 2.0 } else { 6.0 };
+        let hilo_full = if landscape_full { 10.5 } else { 12.75 };
+        let mut hero_city = self.view.widget(cx, ids!(hero_city));
+        script_apply_eval!(cx, hero_city, { draw_text.text_style.font_size: #(city_size) });
         let mut hero_temp = self.view.widget(cx, ids!(hero_temp));
-        let temp_full = if landscape_full { 60.0 } else { 75.0 };
         script_apply_eval!(cx, hero_temp, { draw_text.text_style.font_size: #(temp_full) });
+        let mut hero_line = self.view.widget(cx, ids!(hero_line));
+        script_apply_eval!(cx, hero_line, { margin.top: #(line_top) });
+        let mut hero_cond = self.view.widget(cx, ids!(hero_cond));
+        script_apply_eval!(cx, hero_cond, { draw_text.text_style.font_size: #(cond_size) });
+        let mut hero_hilo = self.view.widget(cx, ids!(hero_hilo));
+        script_apply_eval!(cx, hero_hilo, { draw_text.text_style.font_size: #(hilo_full) });
     }
 
     /// The compact header pins in as the hero scrolls out.
     fn sync_header(&mut self, cx: &mut Cx) {
-        let hero = self.view.widget(cx, ids!(hero)).area().rect(cx);
+        // The scroll is read off the panels, which are always on screen:
+        // the hero stops being drawn once it has scrolled away, and its
+        // stale rect would drop the header just when it is needed. The pin
+        // band ends where the hero does (the landscape hero is ~130 pt).
+        let hero_area = self.view.widget(cx, ids!(hero)).area();
+        if hero_area.is_valid(cx) {
+            self.hero_h = hero_area.rect(cx).size.y;
+        }
+        let panels = self.view.widget(cx, ids!(panels)).area().rect(cx);
         let root = self.view.widget(cx, ids!(forecast_scroll)).area().rect(cx);
-        let scrolled = (root.pos.y - hero.pos.y).max(0.0);
-        let t = ((scrolled - HEADER_PIN_START) / (HEADER_PIN_END - HEADER_PIN_START)).clamp(0.0, 1.0);
+        let scrolled = (root.pos.y + self.hero_h - panels.pos.y).max(0.0);
+        let end = HEADER_PIN_END.min(self.hero_h.max(HEADER_PIN_END - HEADER_PIN_START));
+        let start = end - (HEADER_PIN_END - HEADER_PIN_START);
+        let t = ((scrolled - start) / (end - start)).clamp(0.0, 1.0);
         let shown = t > 0.0;
         if shown != self.header_shown {
             self.header_shown = shown;
@@ -706,14 +789,21 @@ impl WeatherView {
         }
         if shown {
             let alpha = t as f32;
-            let mut header = self.view.widget(cx, ids!(header));
-            script_apply_eval!(cx, header, { header_city.draw_text.color: #(vec4(1.0, 1.0, 1.0, alpha)) header_line.draw_text.color: #(vec4(1.0, 1.0, 1.0, alpha)) });
+            let c = vec4(1.0, 1.0, 1.0, alpha);
+            for id in [ids!(header_city), ids!(header_line)] {
+                let mut label = self.view.widget(cx, id);
+                script_apply_eval!(cx, label, { draw_text.color: #(c) });
+            }
         }
         // The hero fades as the header arrives, never both at full ink.
+        // Each label on its own: the condition and H/L sit one level down,
+        // in `hero_line`.
         let hero_alpha = (1.0 - t) as f32;
-        let mut hero = self.view.widget(cx, ids!(hero));
         let c = vec4(1.0, 1.0, 1.0, hero_alpha);
-        script_apply_eval!(cx, hero, { hero_city.draw_text.color: #(c) hero_temp.draw_text.color: #(c) hero_cond.draw_text.color: #(c) hero_hilo.draw_text.color: #(c) });
+        for id in [ids!(hero_city), ids!(hero_temp), ids!(hero_cond), ids!(hero_hilo)] {
+            let mut label = self.view.widget(cx, id);
+            script_apply_eval!(cx, label, { draw_text.color: #(c) });
+        }
     }
 
     /// Start on the first event or draw, whichever comes first: a window
@@ -797,14 +887,15 @@ impl Widget for WeatherView {
             }
         }
         if let Event::Actions(actions) = event {
-            if self.view.widget(cx, ids!(locations)).borrow::<GlassButton>().is_some_and(|b| b.clicked(actions)) {
+            if self.view.view(cx, ids!(locations)).finger_up(actions).is_some_and(|fe| fe.is_over) {
                 self.set_sheet(cx, true);
             }
             if self.view.widget(cx, ids!(scrim_sheet)).view(cx, &[]).finger_down(actions).is_some() {
                 self.set_sheet(cx, false);
             }
             for (i, row) in [ids!(city_0), ids!(city_1), ids!(city_2), ids!(city_3)].iter().enumerate() {
-                if self.view.view(cx, *row).finger_up(actions).is_some() {
+                // A press taken away (a list or the host took the finger) is no tap.
+                if self.view.view(cx, *row).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
                     self.select_city(cx, i);
                     if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
                         dots.set(cx, CITIES.len(), self.state.city);
@@ -812,7 +903,7 @@ impl Widget for WeatherView {
                     self.set_sheet(cx, false);
                 }
             }
-            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some() {
+            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
                 self.fetch(cx);
                 self.set_sheet(cx, false);
             }

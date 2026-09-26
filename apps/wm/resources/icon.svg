@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- wm: overlapping windows on a desktop -->
+  <rect x="200" y="220" width="420" height="330" rx="40" fill="#4aa3e0"/>
+  <rect x="200" y="220" width="420" height="74" rx="40" fill="#7cc4ff"/>
+  <rect x="200" y="264" width="420" height="30" fill="#7cc4ff"/>
+  <rect x="404" y="444" width="420" height="360" rx="40" fill="#e8eef6" stroke="#0e1d33" stroke-width="14"/>
+  <path d="M404 484 A40 40 0 0 1 444 444 L784 444 A40 40 0 0 1 824 484 L824 520 L404 520 Z" fill="url(#orange)"/>
+  <g fill="#0e1d33">
+    <circle cx="450" cy="482" r="14"/><circle cx="496" cy="482" r="14"/>
+    <rect x="450" y="570" width="220" height="30" rx="15" fill-opacity="0.25"/>
+    <rect x="450" y="630" width="310" height="30" rx="15" fill-opacity="0.25"/>
+    <rect x="450" y="690" width="170" height="30" rx="15" fill-opacity="0.25"/>
+  </g>
+</svg>

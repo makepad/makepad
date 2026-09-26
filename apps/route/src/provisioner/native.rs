@@ -1,7 +1,7 @@
 use crate::overlays::{
     overlay_source, OverlaySelection, OCEAN_OVERLAY_LAYERS, OVERLAY_LAYERS,
 };
-#[cfg(feature = "bake")]
+#[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
 use crate::testmap::{Stage, TestMapBuild};
 use makepad_widgets::{Cx, MapViewRef, NetworkResponse, OverlaySource, TileSourceConfig};
 use std::fs;
@@ -15,7 +15,7 @@ const WORLD_ARCHIVE: &str = "world.mkmap";
 /// first-run test-map build the popup card drives.
 pub struct MapProvisioner {
     maps_root: PathBuf,
-    #[cfg(feature = "bake")]
+    #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
     build: Option<TestMapBuild>,
 }
 
@@ -26,7 +26,7 @@ impl Default for MapProvisioner {
         );
         Self {
             maps_root: PathBuf::new(),
-            #[cfg(feature = "bake")]
+            #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
             build: None,
         }
     }
@@ -65,7 +65,7 @@ impl MapProvisioner {
         maps_root: &Path,
     ) -> Option<String> {
         self.maps_root = maps_root.to_path_buf();
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         {
             self.build = Some(TestMapBuild::new(maps_root));
         }
@@ -109,7 +109,7 @@ impl MapProvisioner {
     /// Poll the bake. A finished one is adopted into the map and its nav
     /// basename returned for loading.
     pub fn handle_event(&mut self, cx: &mut Cx, map: &MapViewRef) -> ProvisionerUpdate {
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         if let Some(build) = &mut self.build {
             let changed = build.poll();
             let nav_basename = if matches!(build.stage, Stage::Done) {
@@ -132,7 +132,7 @@ impl MapProvisioner {
     /// The extract download rides the platform's HTTP stack. True when
     /// the response was the build's and the card should refresh.
     pub fn handle_network(&mut self, cx: &mut Cx, response: &NetworkResponse) -> bool {
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         if let Some(build) = &mut self.build {
             return match response {
                 NetworkResponse::HttpProgress {
@@ -155,7 +155,7 @@ impl MapProvisioner {
 
     /// The card, while there is something to show.
     pub fn card(&self) -> Option<TestMapCard> {
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         if let Some(build) = &self.build {
             if !build.is_active() {
                 return None;
@@ -185,7 +185,7 @@ impl MapProvisioner {
 
     /// The card's first button.
     pub fn start(&mut self, cx: &mut Cx) {
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         if let Some(build) = &mut self.build {
             build.start(cx);
         }
@@ -194,7 +194,7 @@ impl MapProvisioner {
 
     /// The card's second button.
     pub fn dismiss(&mut self) {
-        #[cfg(feature = "bake")]
+        #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
         if let Some(build) = &mut self.build {
             build.dismiss();
         }
@@ -238,7 +238,7 @@ impl MapProvisioner {
         sources
     }
 
-    #[cfg(feature = "bake")]
+    #[cfg(all(feature = "bake", not(target_arch = "wasm32")))]
     fn adopt_completed_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
         let build = self.build.as_ref()?;
         let archive = build.paths.archive.to_string_lossy().into_owned();

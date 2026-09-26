@@ -11,16 +11,21 @@
 //! next frame so streaming, deadlines and the cloud provider's polling all
 //! advance without a host timer.
 
+use crate::attach::{self, Attachment, Source};
 use crate::bus::ServiceBus;
 #[cfg(feature = "gen")]
 use crate::gen::GenService;
 use crate::settings::AiSettings;
 #[cfg(feature = "engine")]
-use makepad_ai_services::engine::models::{build_model, provider_rows};
+use makepad_ai_services::engine::models::{build_model, fallback_choice, provider_rows};
 use makepad_ai_services::engine::NoModelWithReason;
-use makepad_ai_services::engine::{EngineCore, EngineEvent, ServiceRegistry};
+use makepad_ai_services::engine::{EngineCore, EngineEvent, ModelImage, ServiceRegistry};
+use makepad_ai_services::mcp::host::{McpActivity, McpHost};
+use makepad_ai_services::mcp::mcpb;
 use makepad_ai_services::state::*;
 use makepad_ai_services::wire::ToolOutcome;
+use makepad_widgets::ai_slot::AiSlotRequests;
+use makepad_widgets::makepad_platform::mcp_relay::{self, CLAUDE_DESKTOP};
 use makepad_widgets::*;
 
 script_mod! {
@@ -74,7 +79,39 @@ script_mod! {
                     text_style: theme.font_regular{font_size: 8.5}
                 }
             }
+            // Which model answers: the choices that exist on this machine.
+            provider_pick := DropDown{
+                width: 150
+                labels: ["Model"]
+            }
             clear_button := ButtonFlatter{ text: "Clear" }
+        }
+
+        // Claude Desktop is the provider: this app's tools are served to it.
+        mcp_row := View{
+            visible: false
+            width: Fill
+            height: Fit
+            flow: Down
+            spacing: 4
+            padding: Inset{left: 14 right: 14 top: 8 bottom: 4}
+            mcp_connect := Button{ text: "Connect to Claude Desktop" }
+            mcp_status := Label{
+                width: Fill
+                text: ""
+                draw_text +: {
+                    color: theme.color_text
+                    text_style: theme.font_regular{font_size: 8.5}
+                }
+            }
+            mcp_hint := Label{
+                width: Fill
+                text: "Type in Claude Desktop; its calls show here."
+                draw_text +: {
+                    color: theme.color_text_meta
+                    text_style: theme.font_regular{font_size: 8.5}
+                }
+            }
         }
 
         apps_row := Label{
@@ -204,6 +241,27 @@ script_mod! {
             }
         }
 
+        // Pictures dropped on the panel, sent with the next line.
+        attach_row := View{
+            visible: false
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: 8
+            padding: Inset{left: 12 right: 12 top: 4 bottom: 0}
+            align: Align{y: 0.5}
+            attach_thumb := Image{width: 44 height: 32 fit: ImageFit.Smallest}
+            attach_label := Label{
+                width: Fill
+                text: ""
+                draw_text +: {
+                    color: theme.color_text_meta
+                    text_style: theme.font_regular{font_size: 8.5}
+                }
+            }
+            attach_clear := ButtonFlatter{ text: "Remove" }
+        }
+
         composer := View{
             width: Fill
             height: Fit
@@ -244,6 +302,30 @@ pub struct AiChatPanel {
     source: ScriptObjectRef,
     #[deref]
     view: View,
+    /// The host's model for this panel, by provider slug (`claude-cli`,
+    /// `codex-cli`, `local`, …); empty keeps the person's saved choice.
+    /// `MAKEPAD_AI_PROVIDER` overrides both.
+    #[live]
+    provider: String,
+    /// Pictures waiting for the next line.
+    #[rust]
+    attachments: Vec<Attachment>,
+    /// Dropped pictures being decoded on the task pool.
+    #[rust]
+    loading: Vec<TaskHandle<Result<Attachment, String>>>,
+    /// The attachment chip shows this many pictures.
+    #[rust]
+    attach_shown: Option<(usize, usize)>,
+    /// The choices the provider menu lists, in its order.
+    #[rust]
+    provider_rows: Vec<ProviderRow>,
+    /// The provider menu shows these rows with this one picked.
+    #[rust]
+    pick_shown: Option<(usize, usize)>,
+    /// A line for the status row until the next send (a picture that
+    /// could not be read, a provider that is not installed).
+    #[rust]
+    notice: Option<String>,
     #[rust]
     engine: Option<EngineCore>,
     #[rust]
@@ -257,6 +339,12 @@ pub struct AiChatPanel {
     gen: Option<GenService>,
     #[rust]
     settings: Option<AiSettings>,
+    /// This app's tools served to Claude Desktop, while it is the provider.
+    #[rust]
+    mcp: Option<McpHost>,
+    /// The connection as the panel last drew it.
+    #[rust]
+    mcp_shown: McpActivity,
     #[rust]
     drawn_generation: u64,
     #[rust]
@@ -294,7 +382,25 @@ impl AiChatPanel {
     fn ensure_engine(&mut self) -> &mut EngineCore {
         if self.engine.is_none() {
             let lease_id = self.widget_uid().0;
-            let settings = self.settings().clone();
+            let mut settings = self.settings().clone();
+            // A host (or the environment) naming its model picks it for
+            // this panel: that is the person's explicit choice for the app.
+            let host = std::env::var("MAKEPAD_AI_PROVIDER").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| self.provider.clone());
+            if !host.trim().is_empty() {
+                settings.provider = ProviderChoice::from_slug(&host);
+                settings.local_only = settings.provider.is_local() || settings.provider.slug() == "none";
+            } else {
+                // The saved (or default) choice is not built into this app
+                // (Local without `localai`): start on the first provider
+                // that can answer here. Only this panel's copy changes, so
+                // a `localai` build still starts on Local; the lock guards
+                // a local model this build does not have.
+                #[cfg(feature = "engine")]
+                if let Some(choice) = fallback_choice(&settings.provider) {
+                    settings.provider = choice;
+                    settings.local_only = false;
+                }
+            }
             // The real models ride the `engine` feature; a build without a
             // runtime (the web page) says so and keeps the tool console.
             #[cfg(feature = "engine")]
@@ -303,7 +409,7 @@ impl AiChatPanel {
                     Ok(m) => m,
                     Err(reason) => Box::new(NoModelWithReason::new(reason)),
                 },
-                provider_rows(settings.local_only),
+                provider_rows(false),
             );
             #[cfg(not(feature = "engine"))]
             let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) =
@@ -311,14 +417,113 @@ impl AiChatPanel {
             let mut core = EngineCore::new(self.registry.clone(), model, None, lease_id);
             // The state is the panel's window into the core; the core owns
             // it, so provider facts go in through the core.
+            self.provider_rows = rows.clone();
             core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
             self.engine = Some(core);
             #[cfg(feature = "gen")]
             {
                 self.gen = GenService::open(&self.registry);
             }
+            self.apply_mcp();
         }
         self.engine.as_mut().unwrap()
+    }
+
+    /// Serve this app's tools to Claude Desktop exactly while it is the
+    /// provider: started on the switch to it, stopped (and the discovery
+    /// file removed) on the switch away.
+    fn apply_mcp(&mut self) {
+        let wanted = self.engine.as_ref().is_some_and(|e| e.state().provider.slug() == CLAUDE_DESKTOP);
+        if !wanted {
+            if self.mcp.take().is_some() {
+                // Its waiting clients are answered before the server stops.
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.cancel_external();
+                }
+            }
+            return;
+        }
+        if self.mcp.is_none() {
+            match McpHost::start(self.registry.clone(), &self.app_title()) {
+                Ok(host) => self.mcp = Some(host),
+                Err(e) => self.notice = Some(format!("the Claude Desktop connection could not start: {e}")),
+            }
+        }
+    }
+
+    /// The app as Claude Desktop names it: its own service's label (not
+    /// the assistant's built-in ones), else the executable's name.
+    fn app_title(&self) -> String {
+        self.registry
+            .services()
+            .into_iter()
+            .find(|s| s.connected && !Self::own_service(&s.id))
+            .map(|s| s.label)
+            .unwrap_or_else(mcp_relay::app_id)
+    }
+
+    fn own_service(id: &str) -> bool {
+        #[cfg(feature = "gen")]
+        if id == crate::gen::SERVICE_ID {
+            return true;
+        }
+        let _ = id;
+        false
+    }
+
+    /// Hand Claude Desktop's waiting calls to the engine; keep the title
+    /// in the discovery file current. True when the panel should redraw.
+    fn pump_mcp(&mut self, cx: &mut Cx, now: f64) -> bool {
+        if self.mcp.is_none() {
+            return false;
+        }
+        let title = self.app_title();
+        let Some(mcp) = self.mcp.as_mut() else { return false };
+        if let Err(e) = mcp.set_title(&title) {
+            error!("aichat: the Claude Desktop discovery file: {e}");
+        }
+        let calls = mcp.take_calls();
+        let activity = mcp.activity();
+        let mut changed = activity != self.mcp_shown;
+        for call in calls {
+            if let Some(EngineEvent::Confirm { .. }) = self.ensure_engine().call_external(&call.name, &call.args, call.reply, now) {
+                // The person confirms in the pane: bring it up.
+                cx.global::<AiSlotRequests>().open = Some(true);
+                cx.new_next_frame();
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// Write this app's Claude Desktop extension and open it: Claude
+    /// Desktop shows its install dialog.
+    fn connect_claude_desktop(&mut self, cx: &mut Cx) {
+        let Some(mcp) = self.mcp.as_ref() else { return };
+        let written = std::env::current_exe()
+            .map_err(|e| format!("cannot find this app's executable: {e}"))
+            .and_then(|exe| mcpb::write(&mcp_relay::discovery_dir(), mcp.app_id(), &mcp.title(), &exe, &mcp.tools()))
+            .and_then(|path| mcpb::open_in_claude_desktop(&path).map(|_| path));
+        match written {
+            Ok(_) => self.note(cx, "Claude Desktop asks to install it: click Install, then type in Claude Desktop".into()),
+            Err(e) => self.note(cx, e),
+        }
+    }
+
+    fn mcp_status(activity: &McpActivity) -> String {
+        if activity.requests == 0 {
+            return "Waiting for Claude Desktop…".into();
+        }
+        let calls = match activity.calls {
+            0 => "no calls yet".to_string(),
+            1 => "1 call".to_string(),
+            n => format!("{n} calls"),
+        };
+        if activity.recent.is_empty() {
+            format!("Claude Desktop connected · {calls}")
+        } else {
+            format!("Claude Desktop connected · {calls} · last: {}", activity.recent.join(", "))
+        }
     }
 
     fn now(cx: &Cx) -> f64 {
@@ -330,8 +535,119 @@ impl AiChatPanel {
         self.send(cx, text);
     }
 
+    /// Images the model sees with its next input — for a host's tool that
+    /// captured something while a tool round is in flight (its results
+    /// carry the pictures). `Err` when the model cannot see images.
+    pub fn attach_for_model(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
+        self.ensure_engine().model_mut().attach_images(images)
+    }
+
+    /// A picture for the person's next line, as if dropped on the panel.
+    pub fn attach(&mut self, cx: &mut Cx, source: Source) {
+        match cx.task_pool().submit(Lane::Light, move || attach::load(source)) {
+            Ok(handle) => self.loading.push(handle),
+            Err(e) => self.note(cx, format!("could not read the picture ({e:?})")),
+        }
+    }
+
+    /// Switch the model; the conversation restarts.
+    pub fn set_provider(&mut self, cx: &mut Cx, slug: &str) {
+        let choice = ProviderChoice::from_slug(slug);
+        let _ = self.ensure_engine();
+        let _ = &choice;
+        #[cfg(feature = "engine")]
+        {
+            let model: Box<dyn makepad_ai_services::Model> = match build_model(&choice, false) {
+                Ok(m) => m,
+                Err(reason) => Box::new(NoModelWithReason::new(reason)),
+            };
+            let rows = self.provider_rows.clone();
+            let engine = self.engine.as_mut().unwrap();
+            engine.set_model(model);
+            engine.set_provider_facts(choice, rows, false);
+        }
+        self.apply_mcp();
+        self.view.redraw(cx);
+    }
+
+    fn note(&mut self, cx: &mut Cx, text: String) {
+        self.notice = Some(text);
+        self.view.redraw(cx);
+    }
+
+    fn poll_loading(&mut self, cx: &mut Cx) {
+        let mut i = 0;
+        while i < self.loading.len() {
+            match self.loading[i].try_take() {
+                Some(result) => {
+                    self.loading.remove(i).detach();
+                    match result {
+                        Ok(Ok(picture)) => {
+                            self.attachments.push(picture);
+                            // At most four pictures ride with one line.
+                            if self.attachments.len() > 4 {
+                                self.attachments.remove(0);
+                            }
+                        }
+                        Ok(Err(e)) => self.note(cx, e),
+                        Err(e) => self.note(cx, format!("could not read the picture ({e:?})")),
+                    }
+                    self.view.redraw(cx);
+                }
+                None => i += 1,
+            }
+        }
+    }
+
+    fn handle_drop(&mut self, cx: &mut Cx, event: &Event) {
+        if !matches!(event, Event::Drag(_) | Event::Drop(_)) {
+            return;
+        }
+        match event.drag_hits(cx, self.view.area()) {
+            DragHit::Drag(drag) => {
+                let accept = drag.items.iter().any(|item| Source::from_drag_item(item).is_some());
+                if let Ok(mut response) = drag.response.try_lock() {
+                    *response = if accept { DragResponse::Copy } else { DragResponse::None };
+                }
+            }
+            DragHit::Drop(drop) => {
+                let sources: Vec<Source> = drop.items.iter().filter_map(Source::from_drag_item).collect();
+                if sources.is_empty() {
+                    self.note(cx, "drop a PNG, JPEG or WebP picture".into());
+                }
+                for source in sources.into_iter().take(4) {
+                    self.attach(cx, source);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn send(&mut self, cx: &mut Cx, text: String) {
         let now = Self::now(cx);
+        self.notice = None;
+        // A pasted path to a picture is an attachment, not a line.
+        if let Some(source) = Source::from_pasted_text(&text) {
+            self.attach(cx, source);
+            self.view.text_input(cx, ids!(input)).set_text(cx, "");
+            return;
+        }
+        let mut text = text;
+        if !self.attachments.is_empty() && !text.trim().starts_with('/') {
+            let pictures = std::mem::take(&mut self.attachments);
+            let names: Vec<String> = pictures.iter().map(|p| p.name.clone()).collect();
+            let images = pictures.into_iter().map(|p| ModelImage { label: format!("reference: {}", p.name), png: p.png }).collect();
+            match self.ensure_engine().model_mut().attach_images(images) {
+                Ok(()) => {
+                    if text.trim().is_empty() {
+                        text = "Use the attached picture as the reference.".into();
+                    }
+                    text.push_str(&format!("\n[attached: {}]", names.join(", ")));
+                }
+                Err(e) => self.note(cx, format!("the pictures were not sent: {e}")),
+            }
+            self.attach_shown = None;
+        }
         self.ensure_engine().send(&text, now);
         let input = self.view.text_input(cx, ids!(input));
         input.set_text(cx, "");
@@ -378,6 +694,9 @@ impl Drop for AiChatPanel {
         // The engine only enqueues Unsubscribe frames. Flush them while the
         // hosted bus and registry still exist; field destruction is too late.
         if let Some(engine) = self.engine.as_mut() {
+            // Claude Desktop's waiting calls are answered before the MCP
+            // server (a field, dropped after this) stops.
+            engine.cancel_external();
             engine.shutdown();
         }
         self.bus.relay_down(&self.registry);
@@ -388,6 +707,10 @@ impl Widget for AiChatPanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Custom(json) = event {
             self.on_custom(json);
+        }
+        self.handle_drop(cx, event);
+        if !self.loading.is_empty() {
+            self.poll_loading(cx);
         }
         // Esc: stop a running turn; with nothing running and an empty
         // composer, ask the host to hide the pane.
@@ -410,9 +733,14 @@ impl Widget for AiChatPanel {
         if let Some(gen) = self.gen.as_mut() {
             gen.handle_event(cx, event);
         }
+        // An app started for Claude Desktop runs its engine from the start,
+        // with the pane closed.
+        if self.engine.is_none() && cx.global::<AiSlotRequests>().engine_at_start {
+            self.ensure_engine();
+        }
         // Drive the engine on every event; the bus relays what it sent.
         let now = Self::now(cx);
-        let mut changed = false;
+        let mut changed = self.pump_mcp(cx, now);
         let mut busy = false;
         if let Some(engine) = self.engine.as_mut() {
             for ev in engine.pump(now) {
@@ -443,7 +771,54 @@ impl Widget for AiChatPanel {
         self.drawn_generation = state.generation;
         self.view.label(cx, ids!(provider)).set_text(cx, &format!("{}{}", state.provider_label, if state.local_only { "  ·  local only" } else { "" }));
         self.view.label(cx, ids!(apps_row)).set_text(cx, &self.apps_line(&state));
-        self.view.label(cx, ids!(status)).set_text(cx, &Self::status_line(&state));
+        let mcp_row = self.view.view(cx, ids!(mcp_row));
+        mcp_row.set_visible(cx, self.mcp.is_some());
+        if let Some(mcp) = &self.mcp {
+            self.mcp_shown = mcp.activity();
+            self.view.label(cx, ids!(mcp_status)).set_text(cx, &Self::mcp_status(&self.mcp_shown));
+        }
+        let status = match &self.notice {
+            Some(notice) => notice.clone(),
+            None => Self::status_line(&state),
+        };
+        self.view.label(cx, ids!(status)).set_text(cx, &status);
+        let shown = (self.attachments.len(), self.loading.len());
+        if self.attach_shown != Some(shown) {
+            self.attach_shown = Some(shown);
+            self.view.view(cx, ids!(attach_row)).set_visible(cx, shown.0 + shown.1 > 0);
+            let mut names: Vec<String> = self.attachments.iter().map(|a| format!("{} ({}×{})", a.name, a.width, a.height)).collect();
+            if !self.loading.is_empty() {
+                names.push("reading…".into());
+            }
+            self.view.label(cx, ids!(attach_label)).set_text(cx, &names.join(", "));
+            if let Some(thumb) = self.attachments.last().and_then(|a| a.thumb.clone()) {
+                let _ = self.view.image(cx, ids!(attach_thumb)).load_png_from_data(cx, &thumb);
+            }
+        }
+        if !self.provider_rows.is_empty() {
+            let labels: Vec<String> = self
+                .provider_rows
+                .iter()
+                .map(|r| match &r.unavailable {
+                    Some(_) => format!("{} (unavailable)", r.label),
+                    None => r.label.clone(),
+                })
+                .collect();
+            // A choice with no row (Local in a build without local AI)
+            // answers with no model, so the menu shows that row.
+            let at = self
+                .provider_rows
+                .iter()
+                .position(|r| r.choice == state.provider)
+                .or_else(|| self.provider_rows.iter().position(|r| r.choice.slug() == "none"))
+                .unwrap_or(0);
+            if self.pick_shown != Some((labels.len(), at)) {
+                self.pick_shown = Some((labels.len(), at));
+                let pick = self.view.drop_down(cx, ids!(provider_pick));
+                pick.set_labels(cx, labels);
+                pick.set_selected_item(cx, at);
+            }
+        }
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             let Some(mut list) = item.borrow_mut::<PortalList>() else { continue };
             let total = state.entries.len();
@@ -556,6 +931,23 @@ impl WidgetMatchEvent for AiChatPanel {
             let text = input.text();
             self.send(cx, text);
         }
+        if self.view.button(cx, ids!(attach_clear)).clicked(actions) {
+            self.attachments.clear();
+            self.attach_shown = None;
+            self.view.redraw(cx);
+        }
+        if let Some(at) = self.view.drop_down(cx, ids!(provider_pick)).changed(actions) {
+            if let Some(row) = self.provider_rows.get(at).cloned() {
+                if let Some(why) = &row.unavailable {
+                    self.note(cx, format!("{}: {why}", row.label));
+                } else {
+                    self.set_provider(cx, &row.choice.slug());
+                }
+            }
+        }
+        if self.view.button(cx, ids!(mcp_connect)).clicked(actions) {
+            self.connect_claude_desktop(cx);
+        }
         if self.view.button(cx, ids!(clear_button)).clicked(actions) {
             let now = Self::now(cx);
             self.ensure_engine().clear(now);
@@ -584,7 +976,8 @@ impl WidgetMatchEvent for AiChatPanel {
                 } else if item.button(cx, ids!(deny_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, false, now);
                     self.view.redraw(cx);
-                } else if item.view(cx, ids!(tool_head)).finger_up(actions).is_some() {
+                // A press taken away (the list scrolled under it) toggles nothing.
+                } else if item.view(cx, ids!(tool_head)).finger_up(actions).is_some_and(|e| !e.cancelled) {
                     self.ensure_engine().toggle_tool(&call_id);
                     self.view.redraw(cx);
                 }

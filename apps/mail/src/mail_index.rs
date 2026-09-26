@@ -6,7 +6,10 @@ use makepad_strict_json::{obj, parse, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -55,7 +58,9 @@ pub struct MailboxSummary {
 }
 #[derive(Clone, Debug, Default)]
 pub struct SearchPage {
-    pub hits: Vec<MessageSummary>,
+    /// The matches in result order. Shared with the index's records, so a
+    /// page of every match in a large mailbox copies pointers, not strings.
+    pub hits: Vec<Arc<MessageSummary>>,
     pub total: usize,
     pub indexed: usize,
     pub elapsed_ms: f64,
@@ -142,7 +147,7 @@ pub struct MailIndex {
     db: Connection,
     source: String,
     next_id: u64,
-    pub records: BTreeMap<u64, MessageSummary>,
+    pub records: BTreeMap<u64, Arc<MessageSummary>>,
     pub keys: HashMap<String, (u64, String)>,
     terms: Vec<TextIndex>,
     term_limits: Vec<u64>,
@@ -152,7 +157,7 @@ pub struct MailIndex {
 }
 #[derive(Default)]
 pub struct CachePartition {
-    records: BTreeMap<u64, MessageSummary>,
+    records: BTreeMap<u64, Arc<MessageSummary>>,
     keys: HashMap<String, (u64, String)>,
     terms: TextIndex,
     mailbox_counts: BTreeMap<Vec<String>, usize>,
@@ -219,7 +224,7 @@ impl CachePartition {
                         *loaded.mailbox_counts.entry(path[..n].to_vec()).or_default() += 1;
                     }
                 }
-                loaded.records.insert(id, summary);
+                loaded.records.insert(id, Arc::new(summary));
                 after = id;
             }
             loaded.build_time += began.elapsed();
@@ -373,7 +378,7 @@ impl MailIndex {
             self.count_summary(&old, false);
         }
         self.count_summary(&summary, true);
-        self.records.insert(id, summary);
+        self.records.insert(id, Arc::new(summary));
         Ok(())
     }
     pub fn remove(&mut self, key: &str) -> Result<(), String> {

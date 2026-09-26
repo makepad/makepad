@@ -67,28 +67,29 @@ pub fn layout_for(width: f64, height: f64) -> LayoutMetrics {
     } else {
         let three = width >= 1100.0 && !short;
         let sidebar_w = if three { 220.0 } else { 0.0 };
-        let list_w = if three { 360.0 } else { 310.0 };
+        let list_w = if three { 360.0 } else { 320.0 };
         let divider = if three { 2.0 } else { 1.0 };
         let reader_w = (width - sidebar_w - list_w - divider).max(0.0);
-        // Selector/title, seven 44-point actions, search, padding, and the
+        // Selector/title, seven 48-point actions, search, padding, and the
         // nine gaps around the flexible spacer must all fit on one row.
         let full_toolbar_w = if three { 220.0 } else { 140.0 }
-            + 7.0 * 44.0 + 240.0 + 12.0 + 9.0 * 8.0;
+            + 7.0 * 48.0 + 220.0 + 32.0 + 9.0 * 8.0;
         LayoutMetrics {
             kind: if three { LayoutKind::WideThree } else { LayoutKind::WideTwo },
             short,
-            toolbar_h: if short { 48.0 } else { 56.0 },
+            toolbar_h: 56.0,
             sidebar_w,
             list_w,
             reader_w,
             show_sidebar: three,
-            row_h: if short { 76.0 } else { 84.0 },
+            // The phone's landscape keeps the desktop's two-line rows.
+            row_h: 84.0,
             list_header_h: if short { 44.0 } else { 64.0 },
             bottom_reserve: if short { 0.0 } else { 24.0 },
             compose_w: 680.0,
             compose_h: (height - 16.0).max(0.0).min(600.0),
             date_w: 68.0,
-            preview_lines: if short { 1 } else { 2 },
+            preview_lines: 2,
             collapse_extra_actions: short || width < full_toolbar_w,
             status_visible: !short,
             text_left: 28.0,
@@ -1250,15 +1251,16 @@ mod tests {
     #[test]
     fn short_and_compact_metrics_are_applied_and_compose_follows_width() {
         let landscape = layout_for(874.0, 300.0);
-        assert_eq!(landscape.toolbar_h, 48.0);
-        assert_eq!(landscape.row_h, 76.0);
+        assert_eq!(landscape.toolbar_h, 56.0);
+        assert_eq!(landscape.row_h, 84.0);
         assert_eq!(landscape.list_header_h, 44.0);
-        assert_eq!(landscape.list_w, 310.0);
+        assert_eq!(landscape.list_w, 320.0);
         assert_eq!(landscape.compose_w, 680.0);
         assert_eq!(landscape.compose_h, 284.0);
         assert!(landscape.collapse_extra_actions);
         assert!(!landscape.status_visible);
-        assert_eq!(landscape.preview_lines, 1);
+        assert_eq!(landscape.preview_lines, 2);
+        assert_eq!(layout_for(402.0, 300.0).preview_lines, 1);
         let compact = layout_for(402.0, 780.0);
         assert_eq!(compact.compose_w, 402.0);
         assert_eq!(compact.row_h, 104.0);

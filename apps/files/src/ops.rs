@@ -1,7 +1,12 @@
-//! The file-operations engine: copy, cut/paste, rename, new folder, and
-//! move-to-Trash, all run on a single worker thread so a big copy never
-//! stalls the UI. Progress and results come back through [`Ops::drain`];
-//! everything that can be undone goes on the [`Journal`] as an [`Undo`].
+//! The file-operations engine: copy, cut/paste, rename and new folder, all
+//! run on a single worker thread so a big copy never stalls the UI. Progress
+//! and results come back through [`Ops::drain`]; everything that can be
+//! undone goes on the [`Journal`] as an [`Undo`].
+//!
+//! Nothing here removes or overwrites anything. There is no delete and no
+//! Trash (the browser hands that to the platform's own file manager), a move
+//! is a same-volume rename that refuses an occupied target, a copy writes only
+//! to a name nothing has, and no undo ever erases what an operation made.
 //!
 //! Pure `std`, on purpose: this module is unit-tested standalone (see the
 //! command in the crate's contributing notes) and is meant to be dropped
@@ -39,13 +44,8 @@ use std::time::Duration;
 pub enum OpKind {
     Copy,
     Move,
-    Trash,
     Rename,
     NewFolder,
-    /// Erase, with no Trash behind it. Deliberately has no undo: that is what
-    /// makes it different from Trash, and pretending otherwise would be a lie
-    /// the user finds out about at the worst moment.
-    Delete,
 }
 
 impl OpKind {
@@ -55,16 +55,14 @@ impl OpKind {
         match self {
             OpKind::Copy => "Copying",
             OpKind::Move => "Moving",
-            OpKind::Trash => "Moving to Trash",
             OpKind::Rename => "Renaming",
             OpKind::NewFolder => "Creating",
-            OpKind::Delete => "Deleting",
         }
     }
 }
 
 /// One job handed to the worker. A single request can carry many sources
-/// (a multi-select copy/move/trash) but exactly one destination, because a
+/// (a multi-select copy/move) but exactly one destination, because a
 /// paste always lands in one folder at a time.
 #[derive(Clone, Debug)]
 pub struct OpRequest {
@@ -77,28 +75,21 @@ pub struct OpRequest {
     /// creates rather than consumes.
     pub sources: Vec<PathBuf>,
     /// Where they land (Copy/Move), the folder the new folder is made in
-    /// (NewFolder), or the folder the rename happens in (Rename). Unused
-    /// by Trash, which always has one true destination: the Trash itself.
+    /// (NewFolder), or the folder the rename happens in (Rename).
     pub dest_dir: PathBuf,
     /// Rename's new name / NewFolder's name. Ignored otherwise.
     pub new_name: Option<String>,
-    /// Trash needs the user's home to find `~/.Trash`; pass it in rather
-    /// than reading the environment on a worker thread, which is a habit
-    /// worth keeping even where it wouldn't currently race anything.
-    pub home: PathBuf,
 }
 
 /// How to undo one finished operation. The [`Journal`] stores these; the
-/// engine hands one back on every successful (or partially-cancelled)
-/// [`OpUpdate::Done`].
+/// engine hands one back on every successful (or partially-cancelled) move
+/// or rename. A copy or a new folder has no undo: reversing one would mean
+/// deleting, and this app does not delete.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Undo {
-    /// Put `to` back as `from` (rename and move — and a trash, which is
-    /// just a move into a special folder — are all the same undo).
+    /// Put `to` back as `from` (rename and move are the same undo). Refused
+    /// when something now occupies `from`.
     Moved { pairs: Vec<(PathBuf, PathBuf)> },
-    /// Delete what the copy (or new-folder) created. Kept separate from
-    /// `Moved` because undoing a copy must never touch the original.
-    Created { paths: Vec<PathBuf> },
 }
 
 impl Undo {
@@ -110,10 +101,6 @@ impl Undo {
             Undo::Moved { pairs } => match pairs.as_slice() {
                 [(_, to)] => format!("Undo move of \"{}\"", display_name(to)),
                 pairs => format!("Undo move of {} items", pairs.len()),
-            },
-            Undo::Created { paths } => match paths.as_slice() {
-                [path] => format!("Undo creation of \"{}\"", display_name(path)),
-                paths => format!("Undo creation of {} items", paths.len()),
             },
         }
     }
@@ -127,21 +114,11 @@ fn moved_undo(pairs: Vec<(PathBuf, PathBuf)>) -> Option<Undo> {
     }
 }
 
-fn created_undo(paths: Vec<PathBuf>) -> Option<Undo> {
-    if paths.is_empty() {
-        None
-    } else {
-        Some(Undo::Created { paths })
-    }
-}
-
 /// What the worker sends back. Drained on the UI thread via [`Ops::drain`].
 #[derive(Clone, Debug)]
 pub enum OpUpdate {
-    /// `done`/`total` are bytes for Copy/Move/Trash (and their undos, which
-    /// are just moves in the other direction); for undoing a Copy — which
-    /// deletes rather than transfers — they are an item count instead,
-    /// since there is no byte stream to measure.
+    /// `done`/`total` are bytes for Copy/Move (and a move's undo, which is
+    /// just a move in the other direction).
     Progress {
         id: u64,
         kind: OpKind,
@@ -206,22 +183,6 @@ fn split_stem_ext(name: &str) -> (String, String) {
     }
 }
 
-/// Where `~/.Trash` is on this platform (macOS: `<home>/.Trash`, elsewhere
-/// `<home>/.local/share/Trash/files`, the freedesktop.org convention).
-/// This module cannot reuse the crate's own copy of this logic (see the
-/// module doc comment on why), so it is duplicated deliberately rather
-/// than imported.
-pub fn trash_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join(".Trash")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        home.join(".local/share/Trash/files")
-    }
-}
-
 /// Recursive byte total of a path — the size a folder reports in the
 /// properties panel and the total a copy is measured against. Never
 /// follows symlinks (a link's target is not this path's content, and
@@ -254,16 +215,20 @@ pub fn total_bytes(path: &Path, cancel: &AtomicBool) -> u64 {
 /// Copy a file or a whole tree. Reports bytes as it goes through `on_bytes`
 /// (called with the number of bytes just written, not the running total)
 /// and gives up when `cancel` is raised, leaving whatever has already been
-/// written in place — the caller decides whether to keep or discard a
-/// cancelled copy's partial output. Symlinks are recreated as symlinks,
-/// not followed, so copying a folder can never walk out of that folder and
-/// copy the rest of the disk.
+/// written in place: nothing here removes a cancelled copy's partial output.
+/// Symlinks are recreated as symlinks, not followed, so copying a folder can
+/// never walk out of that folder and copy the rest of the disk.
+///
+/// Never writes over anything: every file, folder and link is created new,
+/// and a name that already exists at `dst` (or inside it) fails the copy
+/// with `AlreadyExists` instead of being truncated or merged into.
 pub fn copy_tree(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(u64)) -> io::Result<()> {
     if cancel.load(Ordering::SeqCst) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
     let meta = fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
+        #[cfg(any(unix, windows))]
         let link_target = fs::read_link(src)?;
         #[cfg(unix)]
         {
@@ -281,7 +246,7 @@ pub fn copy_tree(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(
         return Ok(());
     }
     if meta.is_dir() {
-        fs::create_dir_all(dst)?;
+        fs::create_dir(dst)?;
         for entry in fs::read_dir(src)? {
             if cancel.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -300,7 +265,9 @@ pub fn copy_tree(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(
 /// checked between chunks instead of only between whole files.
 fn copy_file_with_progress(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(u64)) -> io::Result<()> {
     let mut reader = fs::File::open(src)?;
-    let mut writer = fs::File::create(dst)?;
+    // `create_new`: an existing file at `dst` fails the copy rather than
+    // being truncated, even if it appeared after the name was chosen.
+    let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
     let mut buf = [0u8; 256 * 1024];
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -321,37 +288,37 @@ fn copy_file_with_progress(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes
     Ok(())
 }
 
-/// Move by rename when the two sit on the same volume — instant, and
-/// atomic from the filesystem's point of view — otherwise copy then
-/// delete, which is the fallback macOS needs whenever the Trash (or a
-/// paste target) is on another disk than the source.
+/// Move by renaming — instant, and atomic from the filesystem's point of
+/// view. Only ever a rename: a move to another volume fails (with the
+/// platform's error) instead of copying and then deleting the source, so the
+/// source is never removed by this app; copy it across instead.
+///
+/// Refuses an occupied `dst`. `rename` itself silently replaces an existing
+/// file on Unix, so the target is checked first (without following links);
+/// what remains is the instant between that check and the rename.
 pub fn move_path(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(u64)) -> io::Result<()> {
     if cancel.load(Ordering::SeqCst) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
-    // Measured before the attempt: after a successful rename `src` is gone,
-    // and a failed one still wants an honest size for the fallback below.
+    if fs::symlink_metadata(dst).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("\"{}\" already exists", display_name(dst)),
+        ));
+    }
+    // Measured before the rename: afterwards `src` is gone.
     let size = total_bytes(src, cancel);
-    if fs::rename(src, dst).is_ok() {
-        on_bytes(size);
-        return Ok(());
-    }
-    // `ErrorKind::CrossesDevices` is not stable across every target this
-    // app builds for, so — per the module's contract — ANY rename error
-    // takes the copy-then-delete path rather than trying to distinguish
-    // "wrong device" from, say, "permission denied". A real permission
-    // problem simply fails again inside `copy_tree`, with a clearer error.
-    copy_tree(src, dst, cancel, on_bytes)?;
-    remove_path(src)
-}
-
-/// Delete a file or a whole directory tree, whichever `path` is.
-fn remove_path(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
+    fs::rename(src, dst).map_err(|error| {
+        // EXDEV on Unix, ERROR_NOT_SAME_DEVICE on Windows.
+        let cross_device = if cfg!(windows) { 17 } else { 18 };
+        if error.raw_os_error() == Some(cross_device) {
+            io::Error::new(error.kind(), "it is on another disk — copy it there instead")
+        } else {
+            error
+        }
+    })?;
+    on_bytes(size);
+    Ok(())
 }
 
 /// The last path component, falling back to the whole path for something
@@ -474,7 +441,7 @@ impl Progress {
 
 enum Job {
     Run(OpRequest, Arc<AtomicBool>),
-    Undo(u64, Undo, PathBuf, Arc<AtomicBool>),
+    Undo(u64, Undo, Arc<AtomicBool>),
 }
 
 /// The engine: one worker thread, a queue, a cancel flag per job.
@@ -538,11 +505,11 @@ impl Ops {
 
     /// Queue the reversal of a finished operation, under a fresh id so it
     /// gets its own progress row and its own `Done`/`Failed` update.
-    pub fn submit_undo(&self, id: u64, undo: Undo, home: PathBuf) {
+    pub fn submit_undo(&self, id: u64, undo: Undo) {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flags.lock().unwrap().insert(id, cancel.clone());
         self.busy_count.fetch_add(1, Ordering::SeqCst);
-        let _ = self.request_tx.send(Job::Undo(id, undo, home, cancel));
+        let _ = self.request_tx.send(Job::Undo(id, undo, cancel));
     }
 
     /// Everything the worker finished or progressed since the last call.
@@ -591,7 +558,7 @@ fn worker_loop(
     while let Ok(job) = request_rx.recv() {
         let (id, update) = match job {
             Job::Run(request, cancel) => (request.id, run_request(&request, &cancel, &updates, &notify)),
-            Job::Undo(id, undo, home, cancel) => (id, run_undo(id, &undo, &home, &cancel, &updates, &notify)),
+            Job::Undo(id, undo, cancel) => (id, run_undo(id, &undo, &cancel, &updates, &notify)),
         };
         push_update(&updates, &notify, update);
         cancel_flags.lock().unwrap().remove(&id);
@@ -615,39 +582,6 @@ fn run_request(
         OpKind::Rename => run_rename(request),
         OpKind::Copy => run_copy(request, cancel, updates, notify),
         OpKind::Move => run_move(request, cancel, updates, notify),
-        OpKind::Trash => run_trash(request, cancel, updates, notify),
-        OpKind::Delete => run_delete(request),
-    }
-}
-
-/// Erase every source outright. No undo entry comes back — there is nothing
-/// to put back.
-fn run_delete(request: &OpRequest) -> OpUpdate {
-    let mut gone = 0usize;
-    for source in &request.sources {
-        let result = if source.is_dir() && !source.is_symlink() {
-            fs::remove_dir_all(source)
-        } else {
-            fs::remove_file(source)
-        };
-        if let Err(error) = result {
-            return OpUpdate::Failed {
-                id: request.id,
-                kind: request.kind,
-                message: format!("Could not delete {}: {error}", display_name(source)),
-            };
-        }
-        gone += 1;
-    }
-    OpUpdate::Done {
-        id: request.id,
-        kind: request.kind,
-        message: format!(
-            "Deleted {gone} item{} permanently",
-            if gone == 1 { "" } else { "s" }
-        ),
-        undo: None,
-        touched: Vec::new(),
     }
 }
 
@@ -659,7 +593,7 @@ fn run_new_folder(request: &OpRequest) -> OpUpdate {
             id: request.id,
             kind: OpKind::NewFolder,
             message: format!("Created \"{}\"", display_name(&path)),
-            undo: created_undo(vec![path.clone()]),
+            undo: None,
             touched: vec![path],
         },
         Err(error) => OpUpdate::Failed {
@@ -686,7 +620,9 @@ fn run_rename(request: &OpRequest) -> OpUpdate {
         };
     };
     let new_path = request.dest_dir.join(new_name);
-    if &new_path != old_path && new_path.exists() {
+    // `symlink_metadata`, not `exists`: a dangling link is still a name that
+    // `rename` would silently replace.
+    if &new_path != old_path && fs::symlink_metadata(&new_path).is_ok() {
         return OpUpdate::Failed {
             id: request.id,
             kind: OpKind::Rename,
@@ -742,9 +678,8 @@ fn run_copy(
         };
         let target = unique_path(&request.dest_dir, &name);
         progress.set_current(&name);
-        // Recorded before the copy runs: even a cancelled or failed copy
-        // may have written a partial tree at `target` that a caller's undo
-        // needs to know about to fully clean up.
+        // Recorded before the copy runs: even a cancelled or failed copy may
+        // have written a partial tree at `target`, and the map should know.
         touched.push(target.clone());
         if let Err(error) = copy_tree(source, &target, cancel, &|delta| progress.on_bytes(delta)) {
             if cancel.load(Ordering::SeqCst) {
@@ -760,8 +695,12 @@ fn run_copy(
         return OpUpdate::Done {
             id: request.id,
             kind: OpKind::Copy,
-            message: format!("Cancelled: copied {} of {} item(s)", touched.len(), request.sources.len()),
-            undo: created_undo(touched.clone()),
+            message: format!(
+                "Cancelled: copied {} of {} item(s) — anything partly copied was kept",
+                touched.len(),
+                request.sources.len()
+            ),
+            undo: None,
             touched,
         };
     }
@@ -776,7 +715,7 @@ fn run_copy(
         id: request.id,
         kind: OpKind::Copy,
         message: format!("Copied {} item(s)", touched.len()),
-        undo: created_undo(touched.clone()),
+        undo: None,
         touched,
     }
 }
@@ -886,98 +825,15 @@ fn run_move(
     }
 }
 
-fn run_trash(
-    request: &OpRequest,
-    cancel: &AtomicBool,
-    updates: &Arc<Mutex<VecDeque<OpUpdate>>>,
-    notify: &Arc<dyn Fn() + Send + Sync>,
-) -> OpUpdate {
-    let trash = trash_dir(&request.home);
-    if let Err(error) = fs::create_dir_all(&trash) {
-        return OpUpdate::Failed {
-            id: request.id,
-            kind: OpKind::Trash,
-            message: format!("Could not reach Trash: {error}"),
-        };
-    }
-
-    let total: u64 = request.sources.iter().map(|s| total_bytes(s, cancel)).sum();
-    let progress = Progress::new(request.id, OpKind::Trash, total, updates.clone(), notify.clone());
-
-    let mut pairs = Vec::new();
-    let mut touched = Vec::new();
-    let mut cancelled = false;
-    let mut failure = None;
-    for source in &request.sources {
-        if cancel.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
-        }
-        let Some(name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        // Collisions in the trash go through the same disambiguation as
-        // everywhere else — two different "notes.txt" trashed on the same
-        // day must not clobber one another.
-        let target = unique_path(&trash, &name);
-        progress.set_current(&name);
-        match move_path(source, &target, cancel, &|delta| progress.on_bytes(delta)) {
-            Ok(()) => {
-                pairs.push((source.clone(), target.clone()));
-                touched.push(target);
-            }
-            Err(_) if cancel.load(Ordering::SeqCst) => {
-                cancelled = true;
-                break;
-            }
-            Err(error) => {
-                failure = Some(format!("{name}: {error}"));
-                break;
-            }
-        }
-    }
-
-    if cancelled {
-        return OpUpdate::Done {
-            id: request.id,
-            kind: OpKind::Trash,
-            message: format!("Cancelled: moved {} of {} item(s) to Trash", pairs.len(), request.sources.len()),
-            undo: moved_undo(pairs),
-            touched,
-        };
-    }
-    if let Some(message) = failure {
-        return OpUpdate::Failed {
-            id: request.id,
-            kind: OpKind::Trash,
-            message: format!("Could not move to Trash: {message}"),
-        };
-    }
-    OpUpdate::Done {
-        id: request.id,
-        kind: OpKind::Trash,
-        message: format!("Moved {} item(s) to Trash", pairs.len()),
-        undo: moved_undo(pairs),
-        touched,
-    }
-}
-
-/// `home` is accepted for symmetry with [`OpRequest`] (and in case a
-/// future `Undo` variant needs to relocate something relative to it), but
-/// neither current variant needs it: both already carry fully-resolved
-/// paths, which is exactly what makes them reversible without recomputing
-/// anything about where they came from.
 fn run_undo(
     id: u64,
     undo: &Undo,
-    _home: &Path,
     cancel: &AtomicBool,
     updates: &Arc<Mutex<VecDeque<OpUpdate>>>,
     notify: &Arc<dyn Fn() + Send + Sync>,
 ) -> OpUpdate {
     match undo {
         Undo::Moved { pairs } => run_undo_moved(id, pairs, cancel, updates, notify),
-        Undo::Created { paths } => run_undo_created(id, paths, cancel, updates, notify),
     }
 }
 
@@ -989,8 +845,8 @@ fn run_undo_moved(
     notify: &Arc<dyn Fn() + Send + Sync>,
 ) -> OpUpdate {
     let total: u64 = pairs.iter().map(|(_, to)| total_bytes(to, cancel)).sum();
-    // Reported as a Move: undoing a rename, a move, or a trash is always
-    // itself a move, in the other direction.
+    // Reported as a Move: undoing a rename or a move is itself a move, in
+    // the other direction.
     let progress = Progress::new(id, OpKind::Move, total, updates.clone(), notify.clone());
 
     let mut restored = Vec::new();
@@ -1033,72 +889,6 @@ fn run_undo_moved(
         message: format!("Undid move of {} item(s)", restored.len()),
         undo: None,
         touched: restored,
-    }
-}
-
-fn run_undo_created(
-    id: u64,
-    paths: &[PathBuf],
-    cancel: &AtomicBool,
-    updates: &Arc<Mutex<VecDeque<OpUpdate>>>,
-    notify: &Arc<dyn Fn() + Send + Sync>,
-) -> OpUpdate {
-    // Undoing a creation deletes rather than transfers bytes, so progress
-    // here counts items, not bytes — see the note on `OpUpdate::Progress`.
-    // Reported under `OpKind::Copy`: today the only source of a `Created`
-    // undo the UI offers to reverse this way is a finished Copy (a
-    // NewFolder's own undo is rarely surfaced as a re-doable action), and
-    // there is no dedicated `OpKind` for "delete" to report instead.
-    let total = paths.len() as u64;
-    let mut done = 0u64;
-    let mut last_emit = Cx::monotonic_now();
-    let mut removed = Vec::new();
-    let mut cancelled = false;
-    let mut failure = None;
-    for path in paths {
-        if cancel.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
-        }
-        match remove_path(path) {
-            Ok(()) => {
-                removed.push(path.clone());
-                done += 1;
-                let now = Cx::monotonic_now();
-                if done == total || now - last_emit >= 0.032 {
-                    last_emit = now;
-                    push_update(
-                        updates,
-                        notify,
-                        OpUpdate::Progress { id, kind: OpKind::Copy, done, total, current: display_name(path) },
-                    );
-                }
-            }
-            Err(error) => {
-                failure = Some(format!("{}: {error}", display_name(path)));
-                break;
-            }
-        }
-    }
-
-    if cancelled {
-        return OpUpdate::Done {
-            id,
-            kind: OpKind::Copy,
-            message: format!("Cancelled undo: removed {} of {} item(s)", removed.len(), paths.len()),
-            undo: None,
-            touched: removed,
-        };
-    }
-    if let Some(message) = failure {
-        return OpUpdate::Failed { id, kind: OpKind::Copy, message: format!("Undo failed: {message}") };
-    }
-    OpUpdate::Done {
-        id,
-        kind: OpKind::Copy,
-        message: format!("Undid creation of {} item(s)", removed.len()),
-        undo: None,
-        touched: removed,
     }
 }
 
@@ -1295,25 +1085,26 @@ mod tests {
         cleanup(&root);
     }
 
+    fn moved(tag: &str, i: usize) -> Undo {
+        Undo::Moved { pairs: vec![(PathBuf::from(format!("/{tag}/{i}")), PathBuf::from(format!("/{tag}/{i}-to")))] }
+    }
+
     #[test]
     fn journal_is_bounded_lifo() {
         let mut journal = Journal::new();
         assert!(Journal::DEPTH >= 10);
         for i in 0..(Journal::DEPTH + 5) {
-            journal.push(Undo::Created { paths: vec![PathBuf::from(format!("/x/{i}"))] });
+            journal.push(moved("x", i));
         }
         assert_eq!(journal.len(), Journal::DEPTH);
 
         // Most recently pushed comes back first...
-        match journal.pop().unwrap() {
-            Undo::Created { paths } => assert_eq!(paths[0], PathBuf::from(format!("/x/{}", Journal::DEPTH + 4))),
-            other => panic!("wrong variant: {other:?}"),
-        }
+        assert_eq!(journal.pop().unwrap(), moved("x", Journal::DEPTH + 4));
         assert_eq!(journal.len(), Journal::DEPTH - 1);
         // ...and the oldest 5 were dropped, not the newest.
         let mut journal2 = Journal::new();
         for i in 0..(Journal::DEPTH + 5) {
-            journal2.push(Undo::Created { paths: vec![PathBuf::from(format!("/y/{i}"))] });
+            journal2.push(moved("y", i));
         }
         for _ in 0..Journal::DEPTH {
             journal2.pop().unwrap();
@@ -1322,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn ops_copy_end_to_end_then_undo() {
+    fn ops_copy_end_to_end_has_no_undo() {
         let root = fresh_dir("e2e-copy");
         let src_dir = root.join("src");
         fs::create_dir_all(src_dir.join("nested")).unwrap();
@@ -1338,7 +1129,6 @@ mod tests {
             sources: vec![src_dir.clone()],
             dest_dir: dest_dir.clone(),
             new_name: None,
-            home: std::env::temp_dir(),
         });
 
         let (undo, touched) = match wait_for_done(&ops, 1, Duration::from_secs(5)) {
@@ -1349,38 +1139,29 @@ mod tests {
         let copied = touched[0].clone();
         assert!(copied.join("a.txt").exists());
         assert_eq!(fs::read(copied.join("nested/b.txt")).unwrap(), b"bbb");
-
-        let undo = match undo {
-            Some(Undo::Created { paths }) => paths,
-            other => panic!("expected Created undo, got {other:?}"),
-        };
-        assert_eq!(undo, touched);
-
-        ops.submit_undo(2, Undo::Created { paths: undo }, std::env::temp_dir());
-        wait_for_done(&ops, 2, Duration::from_secs(5));
-        assert!(!copied.exists(), "undoing the copy must remove what it created");
+        // Undoing a copy would mean deleting it, and nothing here deletes.
+        assert!(undo.is_none());
 
         cleanup(&root);
     }
 
     #[test]
-    fn ops_trash_into_fake_home_then_undo() {
-        let root = fresh_dir("e2e-trash");
-        let fake_home = root.join("fakehome");
-        fs::create_dir_all(&fake_home).unwrap();
-        let victim_dir = root.join("victim_dir");
-        fs::create_dir_all(&victim_dir).unwrap();
-        let file = victim_dir.join("doomed.txt");
+    fn ops_move_then_undo_refuses_an_occupied_origin() {
+        let root = fresh_dir("e2e-move");
+        let from_dir = root.join("from");
+        fs::create_dir_all(&from_dir).unwrap();
+        let to_dir = root.join("to");
+        fs::create_dir_all(&to_dir).unwrap();
+        let file = from_dir.join("moved.txt");
         fs::write(&file, b"bye").unwrap();
 
         let ops = Ops::default();
         ops.submit(OpRequest {
             id: 10,
-            kind: OpKind::Trash,
+            kind: OpKind::Move,
             sources: vec![file.clone()],
-            dest_dir: victim_dir.clone(),
+            dest_dir: to_dir.clone(),
             new_name: None,
-            home: fake_home.clone(), // never the real home
         });
 
         let undo = match wait_for_done(&ops, 10, Duration::from_secs(5)) {
@@ -1388,11 +1169,18 @@ mod tests {
             other => panic!("expected Done with undo, got {other:?}"),
         };
         assert!(!file.exists());
-        assert!(trash_dir(&fake_home).join("doomed.txt").exists());
+        assert!(to_dir.join("moved.txt").exists());
 
-        ops.submit_undo(11, undo, fake_home.clone());
-        wait_for_done(&ops, 11, Duration::from_secs(5));
-        assert!(file.exists());
+        // Something new took the old name: the undo must not replace it.
+        fs::write(&file, b"newer").unwrap();
+        ops.submit_undo(11, undo.clone());
+        assert!(matches!(wait_for_done(&ops, 11, Duration::from_secs(5)), OpUpdate::Failed { .. }));
+        assert_eq!(fs::read(&file).unwrap(), b"newer");
+        assert_eq!(fs::read(to_dir.join("moved.txt")).unwrap(), b"bye");
+
+        fs::rename(&file, root.join("aside.txt")).unwrap();
+        ops.submit_undo(12, undo);
+        wait_for_done(&ops, 12, Duration::from_secs(5));
         assert_eq!(fs::read(&file).unwrap(), b"bye");
 
         cleanup(&root);
@@ -1413,7 +1201,6 @@ mod tests {
             sources: vec![file.clone()],
             dest_dir: dir.clone(),
             new_name: None,
-            home: std::env::temp_dir(),
         });
         match wait_for_done(&ops, 20, Duration::from_secs(5)) {
             OpUpdate::Done { undo, .. } => assert!(undo.is_none(), "a no-op paste must not produce an undo entry"),
@@ -1439,7 +1226,6 @@ mod tests {
             sources: vec![file.clone()],
             dest_dir: dir.clone(),
             new_name: None,
-            home: std::env::temp_dir(),
         });
         match wait_for_done(&ops, 30, Duration::from_secs(5)) {
             OpUpdate::Done { touched, .. } => {

@@ -40,6 +40,13 @@ struct IterationHttp {
     capabilities: BTreeMap<String, FlowHttpCapability>,
     next_sync: Instant,
     next_peer: usize,
+    /// Lane heads whose capability URL and screen lane binding were both
+    /// published by the last sync. A provider may start only for these.
+    bound: BTreeSet<String>,
+    /// Lane heads whose publication was attempted at least once. A new head
+    /// is published at once, ahead of its first snapshot; a failed one is
+    /// repaired by the periodic sync, not on every worker poll.
+    attempted: BTreeSet<String>,
 }
 
 impl IterationHttp {
@@ -55,7 +62,64 @@ impl IterationHttp {
             capabilities: BTreeMap::new(),
             next_sync: Instant::now(),
             next_peer: 0,
+            bound: BTreeSet::new(),
+            attempted: BTreeSet::new(),
         })
+    }
+
+    fn bound_flows(&self) -> BTreeSet<String> {
+        self.bound.clone()
+    }
+
+    /// Publish bindings for any head that has none yet, ahead of the periodic
+    /// sync. Called before a snapshot leaves the worker so the UI never sees
+    /// a lane whose callback is not ready.
+    fn ensure_bound(&mut self, host: &mut Host) {
+        if host.storage_error.is_some() {
+            return;
+        }
+        let fresh = host.engine.flows.values().any(|flow| {
+            flow.successor.is_none()
+                && !self.bound.contains(&flow.id)
+                && !self.attempted.contains(&flow.id)
+        });
+        if fresh {
+            self.sync(host);
+        }
+    }
+
+    /// One publication pass. Readiness is part of every snapshot, so any
+    /// change of it (a repaired binding as much as a lost one) marks the host
+    /// changed on its own, independent of the note text.
+    fn sync(&mut self, host: &mut Host) {
+        const UNAVAILABLE: &str = "Lane HTTP discovery unavailable";
+        self.next_sync = Instant::now() + Duration::from_secs(1);
+        let before = self.bound.clone();
+        let result = self.sync_capabilities(host);
+        self.attempted = host
+            .engine
+            .flows
+            .values()
+            .filter(|flow| flow.successor.is_none())
+            .map(|flow| flow.id.clone())
+            .collect();
+        if self.bound != before {
+            host.changed = true;
+        }
+        match result {
+            Err(error) => {
+                let note = format!("{UNAVAILABLE}: {error}");
+                if host.note != note {
+                    host.note = note;
+                    host.changed = true;
+                }
+            }
+            Ok(()) if host.note.starts_with(UNAVAILABLE) => {
+                host.note = "Lane callbacks are published again".into();
+                host.changed = true;
+            }
+            Ok(()) => {}
+        }
     }
 
     fn sync_capabilities(&mut self, host: &Host) -> Result<(), String> {
@@ -128,30 +192,48 @@ impl IterationHttp {
                 ),
             ])
             .to_json();
-            if bindings.insert(session, text).is_some() {
+            if bindings.insert(session, (flow.id.clone(), text)).is_some() {
                 return Err("More than one lane claims the same persistent terminal origin".into());
             }
         }
+        let mut bound = BTreeSet::new();
+        let mut failure = None;
         if !bindings.is_empty() {
-            cli_private_dir(&sessions, true)?;
-            for (session, text) in bindings {
-                cli_publish_lane_binding(&sessions.join(format!("{session}.lane.json")), &text)?;
+            match cli_private_dir(&sessions, true) {
+                Ok(()) => {
+                    for (session, (flow, text)) in bindings {
+                        match cli_publish_lane_binding(
+                            &sessions.join(format!("{session}.lane.json")),
+                            &text,
+                        ) {
+                            Ok(()) => {
+                                bound.insert(flow);
+                            }
+                            // One lane's broken binding does not hold the
+                            // others back; the first error is reported.
+                            Err(error) => {
+                                failure.get_or_insert(error);
+                            }
+                        }
+                    }
+                }
+                Err(error) => failure = Some(error),
             }
         }
-        Ok(())
+        // Only lanes whose binding actually landed are reported ready.
+        self.bound = bound;
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn poll(&mut self, host: &mut Host) {
+        self.ensure_bound(host);
         if Instant::now() >= self.next_sync {
             self.next_sync = Instant::now() + Duration::from_secs(1);
             if host.storage_error.is_none() {
-                if let Err(error) = self.sync_capabilities(host) {
-                    let note = format!("Lane HTTP discovery unavailable: {error}");
-                    if host.note != note {
-                        host.note = note;
-                        host.changed = true;
-                    }
-                }
+                self.sync(host);
             }
         }
         for _ in 0..4 {
@@ -579,8 +661,10 @@ fn flow_http_manifest(flow: &str) -> Result<String, (u16, String)> {
     Ok(json::obj(vec![("schema_version", Value::Int(1)), ("flow_id", s(flow)), ("tools", Value::Arr(tools)),
         ("call", s("POST call with application/json {id,tool,args}. Omit flow/f; the capability supplies it. Use a unique 1-96 character alphanumeric, hyphen or underscore ID for each distinct call.")),
         ("result", s("GET result/<id>. 202 is pending; 200 returns the durable CLI reply. An identical repeated POST reuses its ID; changed arguments reject. Uncertain results must be inspected, never blindly repeated.")),
-        ("asynchronous_work", s("A successful tool reply may only admit work. flow_test status observes its operation; flow_inspect observes builds and feedback. The human must close the evaluation app before checks or compilation.")),
+        ("asynchronous_work", s("A successful tool reply may only admit work. flow_test status observes its operation; flow_inspect observes builds and feedback. You may code, check and build while this workflow's app is open; once the replacement is ready, gracefully restart it with the same workspace and state without separate confirmation.")),
+        ("testing", s("POST call tool flow_test: start {artifact_id,demo?,mode?,grant?} tries the Director-hosted read-only preview first so a person can watch, and returns a run_id at once; poll status {run_id} until the start operation completes (a hosted start also waits for the first frame presented through the host: first_frame, waiting_for) and read requested_mode/observed_mode. When hosting is unavailable or the hosted app never becomes ready, that attempt is closed and one standalone replacement runs under a new run_id named by replaced_by/attempt_run_id with its fallback_reason; mode standalone skips hosting. An active test is never rerun. At most 4 apps run or wait across all lanes; a full budget is an error to report, not to work around. input carries the app's human-input counter for each bounded sequence. Native user input does not revoke authorization to continue or restart this workflow's app. Inspect whether an interrupted action applied before reading a fresh counter and retrying; never replay an applied toggle or edit blindly. The host may still mark the run handed_off and refuse operations: report that implementation limitation and use supported lifecycle operations. stop closes the app and lists only the recordings and final frames found on disk.")),
         ("feedback", s("GET brief on startup/resume. POST feedback {i:unique_id,v:todo_revision,q?:request_scope,k?:existing_requirement_id,u:[[todo_id,state,text?],...]}. Success is exactly {v,r}. Omit q for status-only deltas; k amends q. Stale v rejects both scope and todos. 202 {i,pending:true} means poll GET feedback/i. Same i/body reuses its original result.")),
+        ("delegation", s("POST call tool flow_agent: action start {provider,title,task,repo?,source?} launches a visible child lane in its own repository screen terminal with its own callback and conversation; the call id is the durable launch request, so a retried id reports the existing child, and a lane that used all 64 retained requests is refused new ones. A child may delegate further, to depth 6. Omit repo for shared read-only source; pass an existing repo/worktree for a child that edits and builds its own source. list/status/result inspect direct children; message/inbox exchange bounded text with a direct child or the parent; the inbox is the durable channel and prompt typing is best effort. grant {child,artifact_id} lets a direct child test one retained artifact of this lane with flow_test start grant=<grant id>. brief lists agent, agent_parent, children, grants and unread inbox entries.")),
         ("state", s("GET state reads this lane's requirements, todos, builds, artifacts, runs, captures, operation reports and recording paths/errors. GET events/0 pages durable activity; continue with next_after while more is true.")),
         ("scope", s("Only the listed per-lane tools are callable. Root lifecycle, account recovery, agent terminal controls and human close stay on Studio's UI/app service; this endpoint cannot forge those observations.")),
         ("discovery", s("Read control/http-url again after Studio restarts. Treat the URL as a local secret and do not share or log it."))]).to_json())
@@ -728,6 +812,64 @@ fn flow_http_brief(host: &Host, flow_id: &str) -> Result<String, (u16, String)> 
     if let Some(previous) = &flow.predecessor {
         fields.push(("flow", s(flow_id)));
         fields.push(("from", s(previous)));
+    }
+    if let Some(node) = host.engine.agent_node(flow_id) {
+        fields.push(("agent", s(&node.id)));
+        fields.push((
+            "agent_parent",
+            node.parent.as_deref().map(s).unwrap_or(Value::Null),
+        ));
+        fields.push(("source", s(node.source.as_str())));
+        let children: Vec<Value> = host
+            .engine
+            .agent_children(Some(&node.id))
+            .iter()
+            .filter_map(|child| {
+                let status = host.engine.agent_status(&child.id, 48)?;
+                Some(Value::Arr(vec![
+                    s(&child.id),
+                    status.get("title").cloned().unwrap_or(Value::Null),
+                    status.get("status").cloned().unwrap_or(Value::Null),
+                    status.get("launch").cloned().unwrap_or(Value::Null),
+                    status.get("unread").cloned().unwrap_or(Value::Null),
+                ]))
+            })
+            .collect();
+        if !children.is_empty() {
+            fields.push(("children", Value::Arr(children)));
+        }
+        // Parent artifacts this lane may test: [grant, artifact, commit].
+        let grants: Vec<Value> = host
+            .engine
+            .agent_grants_of(&node.id)
+            .iter()
+            .map(|grant| Value::Arr(vec![s(&grant.id), s(&grant.artifact), s(&grant.commit)]))
+            .collect();
+        if !grants.is_empty() {
+            fields.push(("grants", Value::Arr(grants)));
+        }
+        let unread = host.engine.agent_unread(&node.id);
+        if !unread.is_empty() {
+            fields.push(("inbox_unread", Value::Int(unread.len() as i64)));
+            fields.push((
+                "inbox",
+                Value::Arr(
+                    unread
+                        .iter()
+                        .take(8)
+                        .map(|message| {
+                            Value::Arr(vec![
+                                Value::Int(message.id.min(i64::MAX as u64) as i64),
+                                s(&message.from),
+                                s(message.kind.as_str()),
+                                s(message.text.chars().take(512).collect::<String>()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ));
+        }
+        fields.push(("agent_ops", s("flow_agent start|list|status|result|message|inbox|grant; CLI alias: director-flow agent '{\"action\":...}'. Children get their own terminal, callback and conversation; shared source is read-only. children tuples are [agent, title, status, launch, unread]; launch is observed terminal evidence (pending/starting/running/ended/failed, unverified after a Director restart until seen again). grants tuples are [grant, artifact, commit]: test one with flow_test start {artifact_id,grant}; the run and its evidence are this lane's. A queued message is typed into the recipient's prompt only when that prompt is provably empty; otherwise it stays queued until the recipient reads its inbox.")));
     }
     if !omitted.is_empty() {
         fields.push(("q_omitted", Value::Arr(omitted)));
@@ -984,7 +1126,7 @@ fn flow_http_publish_discovery(control: &Path, url: &str) -> Result<(), String> 
     if url.len() > 255 {
         return Err("Lane HTTP discovery exceeds its bound".into());
     }
-    makepad_screen::protocol::write_private(
+    makepad_agents::protocol::write_private(
         &control.join("http-url"),
         format!("{url}\n").as_bytes(),
     )

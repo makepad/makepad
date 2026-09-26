@@ -11,10 +11,6 @@ pub struct CalculatorModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static CALCULATOR_MODULE: CalculatorModule = CalculatorModule;
 
-// The engine dylib must be an upstream crate of this dylib for rustc to
-// bind widgets/std to the host's copy; an unnamed `--extern` is never loaded.
-#[cfg(feature = "dynamic-module")]
-extern crate makepad_wm_engine;
 #[cfg(feature = "dynamic-module")]
 makepad_app_module::export_app_module!(CALCULATOR_MODULE);
 

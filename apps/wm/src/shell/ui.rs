@@ -250,11 +250,11 @@ script_mod! {
             text_style: TextStyle{
                 font_family: FontFamily{
                     latin := FontMember{
-                        res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                        res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")
                         asc: 0.0 desc: 0.0 weight: 400.0
                     }
                     emoji := FontMember{
-                        res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                        res: crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")
                         asc: 0.0 desc: 0.0
                     }
                 }
@@ -267,11 +267,11 @@ script_mod! {
             text_style: TextStyle{
                 font_family: FontFamily{
                     latin := FontMember{
-                        res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                        res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")
                         asc: 0.0 desc: 0.0 weight: 700.0
                     }
                     emoji := FontMember{
-                        res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                        res: crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")
                         asc: 0.0 desc: 0.0
                     }
                 }
@@ -557,8 +557,11 @@ pub struct ShellDraw {
     pub text: DrawText,
     #[live]
     pub text_bold: DrawText,
+    /// Boxed: the ~110 KB of icon shaders would otherwise sit in every
+    /// ShellDraw by value, and the desk builds several nested ones in
+    /// stack frames at startup (overflowing Windows' 1 MB main stack).
     #[live]
-    pub icons: ShellIcons,
+    pub icons: Box<ShellIcons>,
 }
 
 /// Makepad sizes text in POINTS; the QML scale is in pixels.

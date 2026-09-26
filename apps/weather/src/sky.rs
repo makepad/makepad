@@ -50,11 +50,14 @@ script_mod! {
             let d = self.hash(i + vec2(1.0, 1.0))
             return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
         }
+        // Full inside the zone, falling off with the distance from its
+        // edge over `f`: a rounded, continuous shade rather than a box
+        // whose corners and sides show as lines.
         zone_mask: fn(z: vec4, p: vec2, f: float) -> float {
             if z.z <= 0.0 { return 0.0 }
-            let mx = smoothstep(z.x - f, z.x, p.x) * (1.0 - smoothstep(z.x + z.z, z.x + z.z + f, p.x))
-            let my = smoothstep(z.y - f, z.y, p.y) * (1.0 - smoothstep(z.y + z.w, z.y + z.w + f, p.y))
-            return mx * my
+            let half = vec2(z.z, z.w) * 0.5
+            let d = length(max(abs(p - vec2(z.x, z.y) - half) - half, vec2(0.0, 0.0)))
+            return 1.0 - smoothstep(0.0, f, d)
         }
         fbm: fn(p: vec2) -> float {
             return self.noise(p) * 0.55 + self.noise(p * 2.03 + vec2(1.7, 9.2)) * 0.30 + self.noise(p * 4.01 + vec2(8.3, 2.8)) * 0.15
