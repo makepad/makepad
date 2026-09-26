@@ -139,3 +139,7 @@ target-*/
 /scratchpad/
 /.grok/
 /*.log
+
+# Generated or downloaded locally, never shipped in the repository
+/libs/csg/output/
+/examples/xr/resources/DamagedHelmet.glb

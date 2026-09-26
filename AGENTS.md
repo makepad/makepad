@@ -13,7 +13,7 @@ use current source for API signatures and working examples.
 - When adding an example crate, update its Cargo workspace and
   `makepad.splash`.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
-  `widgets/src/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
+  `widgets/core/src/`, `widgets/families/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
 ## Current agent workflow
@@ -89,7 +89,9 @@ use current source for API signatures and working examples.
   is running. When the replacement is ready, gracefully close and restart
   that workflow's app without asking the user to close it. Verify the old
   process exits and launch the replacement with the same workspace and state.
-  This applies to Studio flows and standalone evaluations.
+  This applies to Studio flows and standalone evaluations. An app being open
+  is not a reason to defer a build, ask for permission, or require the user
+  to close it.
 - A validated revision requires `cargo check` for its supported platforms with
   zero warnings/errors, the existing native tests on the current host, and a
   release build/runtime check when applicable. Use the repository's actual
@@ -114,6 +116,21 @@ use current source for API signatures and working examples.
   workspace, then launch the resulting standalone executable from this
   checkout. Check the target directory and resource working directory;
   some apps have their own workspace.
+- Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
+  release is incremental without LTO. cargo-makepad's packaging commands
+  build release non-incrementally.
+- A private app repository cloned into `apps/<name>` (Stage) has no
+  workspace of its own: its root `Cargo.toml` is a package whose
+  `cfg(any())` path dependencies make its crates members of this workspace
+  (matched by `apps/*/src/..`), so they share its profiles, patches and
+  `target/`, and every Makepad crate compiles once for all apps. Nothing is
+  required when it is absent. `Cargo.lock` is not committed.
+- The parallel rustc frontend is a local opt-in, never for CI or shipped
+  builds. It needs `RUSTC_BOOTSTRAP` on stable and roughly halves a clean
+  dev build. Put it in the user config, `~/.cargo/config.toml`, so every
+  build on the machine gets the same flags (a flag difference rebuilds
+  every crate); do not set it per shell with `RUSTFLAGS`:
+  `[env]` `RUSTC_BOOTSTRAP = "1"` and `[build]` `rustflags = ["-Zthreads=8"]`.
 - Use the WM’s Cargo launch path for its hosted apps: `cargo run --release`
   builds each app on demand, and the WM shows compilation while it starts.
   Do not collect prebuilt app binaries for a WM session.
@@ -138,6 +155,12 @@ use current source for API signatures and working examples.
   on the native backend is the normal pixel-proof rig; `/g` forces a present
   (about 2 s per grab on a hidden window). Only rest/settle timing proofs
   need a window that presents on its own. Close it with `/gq`.
+- Apps that embed the AI chat build only its CLI/MCP/cloud backends. The
+  local model runtimes (Qwen on Metal/CUDA, the metallib and kernel builds)
+  come in through the app's own `localai` cargo feature
+  (`cargo build --release -p <app> --features localai`, or in a Builder
+  catalog entry's `features`). It is on by default only where the app's own
+  job runs local models: `apps/ai-hub`, route and files.
 
 ## App ownership, focus, and screenshots
 
@@ -148,19 +171,32 @@ use current source for API signatures and working examples.
   gracefully close the previous workflow instance and verify its exit.
 - Remote windows stay visible but unfocused. Do not activate them or use
   `MAKEPAD_FOCUS=1` unless the user explicitly asks to bring one forward.
-- Before remote automation, read `/activity` and preserve its `user_seq` as
-  `if_user_seq` on mutating requests. HTTP 409 or a changed response
-  `X-Makepad-User-Seq` means the human intervened: stop the test and leave
-  that instance running. Do not refresh the counter and retry, force-quit,
-  or restart it automatically. Resume with a fresh counter only after the
-  user hands control back. See [App remote control](docs/agents/app-remote.md).
+- User interaction with an app in the active development workflow does not
+  suspend agent testing or require a handoff. Continue inspecting, driving,
+  closing and restarting that app as needed, preserving its workspace and
+  saved state. This is the user's standing authorization (2026-09-22).
+- Read `/activity` and use `if_user_seq` for each bounded input sequence.
+  A changed counter or HTTP 409 invalidates that sequence's evidence, not
+  authorization to continue: inspect whether the action was applied, read a
+  fresh counter and retry or restart the sequence without asking permission.
+  Never replay an already-applied toggle or edit blindly. See
+  [App remote control](docs/agents/app-remote.md).
 - Subagent verification runs use `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote`.
   Only the main session opens a visible inspection window; avoid duplicates.
+- CEF apps keep their browser profile (cookies, logins) at
+  `$HOME/.makepad-cef/<executable name>` unless `MAKEPAD_CEF_PROFILE_DIR`
+  names one, so a renamed or hash-pinned binary silently starts empty. When
+  replacing a user's CEF app, launch it with `MAKEPAD_CEF_PROFILE_DIR` set to
+  the profile the user's instance was already using. Hidden native tests set
+  their own distinct test profile. Never run two instances on the user's
+  profile at once. `MAKEPAD_HOME` and asset roots are separate state; keep
+  them as they were.
 - Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
   or an app-provided capture hook. OS/window/display screenshots are forbidden.
   If native chrome or another app matters, ask the user for an image.
-- A `user closed` log entry means the human dismissed the window. Do not
-  interpret it as a crash or relaunch it.
+- A `user closed` log entry means the human dismissed the window, not a crash.
+  Continue the active workflow, including launching a needed replacement,
+  unless the user has asked to stop.
 - Finish test sessions with `GET /gq` (grab and quit). If grabbing is
   unavailable, use `/close` and/or `/quit`. Verify your process exits;
   only fall back to stopping its exact owned PID if graceful cleanup fails.
@@ -202,6 +238,20 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - `lock_from_ui` is allowed only for state provably touched by the UI alone.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
+
+## Platform changes stay application-neutral
+
+- `platform/`, `widgets/`, `draw/`, and the other shared layers serve every
+  app. A change made there to speed up or fix one particular application is
+  not landed on the agent's own judgment: state the proposed platform change
+  and the app that motivated it, and get the user's feedback and checks
+  first.
+- Never leak application specifics into these layers: no app names, app
+  data shapes, app-only flags, or code paths that exist for one caller.
+  Express the need as a general facility with a general name, or keep the
+  code in the app.
+- Prove a platform optimisation on more than the app that asked for it
+  before it lands, and say in the commit which apps were checked.
 
 ## Splash and shader essentials
 

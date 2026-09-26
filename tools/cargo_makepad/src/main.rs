@@ -10,6 +10,8 @@ mod check;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
+mod desktop_bundle;
+#[cfg(not(target_arch = "wasm32"))]
 mod font_assets;
 #[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
@@ -255,6 +257,16 @@ fn show_help() {
     println!(
         "    desktop sign [sign opts] <cargo args>        Sign a built macOS desktop artifact"
     );
+    println!(
+        "    desktop bundle [bundle opts] -p <crate>      Build a self-contained, signed macOS .app (see [package.metadata.makepad.desktop])"
+    );
+    println!("    [bundle opts]:");
+    println!(
+        "       --install[=DIR]                            Also install it into DIR (default ~/.makepad/apps), outside target/"
+    );
+    println!(
+        "       --cert='<IDENTITY>' | --adhoc                Signing identity; defaults to the Apple Development identity (or MAKEPAD_CODESIGN_IDENTITY)"
+    );
     println!("    [sign opts]:");
     println!(
         "       --sign                                     Enable post-build signing for `desktop build`"
@@ -298,6 +310,19 @@ fn show_help() {
 fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
 
+    // `RUSTC_WRAPPER` mode for the Android super-app pack: cargo runs the
+    // `makepad-dyn-rustc` link to this binary as `makepad-dyn-rustc <rustc>
+    // <args…>`. Both the name and the env var must say so: a bare inherited
+    // env var never diverts an ordinary `cargo makepad` command.
+    let invoked_as_wrapper = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .map(|stem| stem == "makepad-dyn-rustc")
+        .unwrap_or(false);
+    if invoked_as_wrapper && std::env::var_os("MAKEPAD_DYN_RUSTC_WRAPPER").is_some() && args.len() > 1 {
+        android_rustc_wrapper(&args[1..]);
+    }
+
     // Skip the first argument if it's the binary path or 'cargo'
     let args = if args.len() > 1
         && (args[0].ends_with("cargo-makepad")
@@ -318,6 +343,16 @@ fn main() -> Result<(), Cow<'static, str>> {
         show_help();
         return Err("not enough arguments; expected at least one command.".into());
     }
+    // The workspace's release profile is incremental for fast agent
+    // rebuilds; packaged builds are shipped, so they are built whole
+    // (every cargo this process spawns inherits the override). An explicit
+    // CARGO_PROFILE_RELEASE_INCREMENTAL in the environment still wins.
+    let packaging = matches!(args[0].as_str(), "android" | "apple" | "wasm" | "ohos")
+        || (args[0] == "desktop" && args.get(1).map(String::as_str) == Some("build"));
+    if packaging && std::env::var_os("CARGO_PROFILE_RELEASE_INCREMENTAL").is_none() {
+        std::env::set_var("CARGO_PROFILE_RELEASE_INCREMENTAL", "false");
+    }
+
     let result = match args[0].as_ref() {
         "android" => handle_android(&args[1..]),
         "desktop" => handle_desktop(&args[1..]),
