@@ -1828,6 +1828,7 @@ impl GlShader {
     ) -> PendingGlShader {
         static GL_INFO_ONCE: std::sync::Once = std::sync::Once::new();
         GL_INFO_ONCE.call_once(|| {
+            crate::system_info::note_gpu_adapter(&get_gl_string(gl, gl_sys::RENDERER));
             crate::log!(
                 "Makepad GL: vendor={:?} renderer={:?} version={:?} glsl={:?} sampler_objects={}",
                 get_gl_string(gl, gl_sys::VENDOR),

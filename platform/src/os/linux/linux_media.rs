@@ -33,8 +33,9 @@ impl Cx {
                 .get_updated_descs();
             if pulse_enabled {
                 if let Some(pulse_audio) = self.os.media.pulse_audio() {
-                    let descs2 = pulse_audio.lock().unwrap().get_updated_descs();
-                    descs.extend(descs2);
+                    let mut pulse_audio = pulse_audio.lock().unwrap();
+                    descs.extend(pulse_audio.get_updated_descs());
+                    self.os.media.pulse_server = pulse_audio.server().map(str::to_owned);
                 }
             }
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent { descs }));
@@ -71,12 +72,46 @@ pub struct CxLinuxMedia {
     /// Set when connecting to a PulseAudio server failed, so we don't retry
     /// (and re-log) on every audio device change on machines without one.
     pub(crate) pulse_audio_unavailable: bool,
+    /// The PulseAudio-protocol server as it names itself, for `audio_stack`.
+    pub(crate) pulse_server: Option<String>,
     pub(crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess>>>,
     pub(crate) audio_change: SignalToUI,
     pub(crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess>>>,
     pub(crate) alsa_midi_change: SignalToUI,
     pub(crate) v4l2_camera: Option<Arc<Mutex<V4l2CameraAccess>>>,
     pub(crate) v4l2_change: SignalToUI,
+}
+
+impl Cx {
+    /// The audio stack this process plays through: the PulseAudio-protocol
+    /// server it connected to (PipeWire's or PulseAudio's own), or ALSA
+    /// when there is none or it is disabled (`MAKEPAD_DISABLE_PULSE_AUDIO`).
+    /// Makepad does not speak JACK.
+    pub fn audio_stack(&self) -> String {
+        let media = &self.os.media;
+        if pulse_audio_enabled() && media.pulse_audio.is_some() {
+            return match media.pulse_server.as_deref() {
+                Some(server) if server.contains("PipeWire") => {
+                    // "PulseAudio (on PipeWire 1.0.5) 15.0.0" -> "PipeWire 1.0.5"
+                    let pipewire = server
+                        .split_once("PipeWire")
+                        .map(|(_, rest)| {
+                            let version = rest.trim().split(|c: char| c == ')' || c.is_whitespace()).next().unwrap_or("");
+                            if version.is_empty() { "PipeWire".to_string() } else { format!("PipeWire {version}") }
+                        })
+                        .unwrap_or_else(|| "PipeWire".to_string());
+                    format!("{pipewire} (PulseAudio API)")
+                }
+                Some(server) => server.replacen("pulseaudio", "PulseAudio", 1),
+                None => "PulseAudio".to_string(),
+            };
+        }
+        if media.alsa_audio.is_some() {
+            "ALSA".to_string()
+        } else {
+            "not started".to_string()
+        }
+    }
 }
 
 impl CxLinuxMedia {

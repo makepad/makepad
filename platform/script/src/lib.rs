@@ -48,6 +48,7 @@ pub mod function;
 pub mod gc;
 pub mod handle;
 pub mod json;
+mod key_code;
 pub mod numeric;
 pub mod opcode;
 pub mod opcodes;

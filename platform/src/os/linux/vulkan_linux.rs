@@ -281,6 +281,7 @@ impl DesktopInit {
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
         let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
         crate::log!("Vulkan: {name}, graphics/present queue {queue_family_index}");
+        crate::system_info::note_gpu_adapter(&name);
         let recycle_pass_resources =
             std::env::var("MAKEPAD_VULKAN_RECYCLE").ok().as_deref() != Some("0");
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };

@@ -2584,6 +2584,10 @@ impl D3d11Cx {
             // adapter that went away. Recovery always starts from a fresh factory.
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
             let adapter = factory.EnumAdapters(0)?;
+            if let Ok(desc) = adapter.GetDesc() {
+                let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
+                crate::system_info::note_gpu_adapter(&String::from_utf16_lossy(&desc.Description[..len]));
+            }
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut query: Option<ID3D11Query> = None;

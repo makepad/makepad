@@ -22,3 +22,4 @@ makepad-script-derive = {path = "./derive", version = "1.0.0" }
 smallvec = { version = "1.15", path = "../../libs/smallvec" }
 makepad-regex = {path = "../../libs/regex", version = "0.1.0" }
 makepad-html = {path = "../../libs/html", version = "1.0.0" }
+makepad-key-code = {path = "../key_code", version = "0.1.0" }

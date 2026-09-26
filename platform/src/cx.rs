@@ -237,7 +237,7 @@ pub struct Cx {
     /// The same by reason: instances not yet presentable, no compiled
     /// shader, pipeline still compiling.
     pub(crate) skip_reasons: [u64; 3],
-    #[cfg(target_vendor = "apple")]
+    #[cfg(all(target_vendor = "apple", not(gpusim)))]
     pub(crate) pipeline_skip_repaint: Option<u64>,
     /// Until then (seconds since start), a window frame with a draw skipped
     /// for a compiling pipeline is not presented: the last whole frame stays.
@@ -272,7 +272,7 @@ pub struct Cx {
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
     pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
-    /// The tweaker overlay's remote dispatcher (widgets/src/tweaker.rs).
+    /// The tweaker overlay's remote dispatcher (widgets/families/tweaker/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
@@ -544,7 +544,7 @@ fn memory_budget_from_physical_memory(
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn apple_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn apple_physical_memory_bytes() -> Option<u64> {
     use makepad_objc_sys::{class, msg_send, runtime::Object, sel, sel_impl};
 
     unsafe {
@@ -559,7 +559,7 @@ fn apple_physical_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-fn linux_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn linux_physical_memory_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = meminfo.lines().find(|line| {
         line.split_once(':')
@@ -573,7 +573,7 @@ fn linux_physical_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn windows_physical_memory_bytes() -> Option<u64> {
     #[allow(non_snake_case)]
     #[repr(C)]
     struct MemoryStatusEx {
@@ -1001,7 +1001,7 @@ impl Cx {
             window_snapshots: Vec::new(),
             pipeline_skips: 0,
             skip_reasons: [0; 3],
-            #[cfg(target_vendor = "apple")]
+            #[cfg(all(target_vendor = "apple", not(gpusim)))]
             pipeline_skip_repaint: None,
             whole_frames_until: 0.0,
             whole_hold_began: None,

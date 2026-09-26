@@ -3202,6 +3202,7 @@ pub struct SlErr {
 impl MetalCx {
     pub(crate) fn new() -> MetalCx {
         let device = get_default_metal_device().expect("Cannot get default metal device");
+        crate::system_info::note_gpu_adapter(&nsstring_to_string(unsafe { msg_send![device, name] }));
         let recommended: u64 = unsafe {
             let available: bool =
                 msg_send![device, respondsToSelector: sel!(recommendedMaxWorkingSetSize)];
