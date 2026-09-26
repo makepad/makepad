@@ -284,10 +284,15 @@ impl Cx {
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     self.os.native_window_geom = new_geom.clone();
                     if let Some(id_zero) = self.windows.current_id_zero() {
-                        let window = &mut self.windows[id_zero];
-                        window.os_dpi_factor = Some(new_geom.dpi_factor);
-                        new_geom = window.native_window_geom_to_layout(new_geom);
-                        window.window_geom = new_geom.clone();
+                        // CHROME63: index panics on a stale id, and on the web a
+                        // resize can be processed before/after the window is
+                        // registered, so the id is not always live here.
+                        if self.windows.is_valid(id_zero) {
+                            let window = &mut self.windows[id_zero];
+                            window.os_dpi_factor = Some(new_geom.dpi_factor);
+                            new_geom = window.native_window_geom_to_layout(new_geom);
+                            window.window_geom = new_geom.clone();
+                        }
                     }
                     self.os.window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
