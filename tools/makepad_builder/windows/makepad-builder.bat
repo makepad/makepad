@@ -177,7 +177,7 @@ rem its files carry the ZIP's timestamps, which Cargo would take as older
 rem than the last build.
 if defined NEED_BUILD if exist "%STATE%\target\builder\built-from" rmdir /s /q "%STATE%\target\builder"
 if defined NEED_BUILD (
-    set "T=%C%●%N% compiling from builder\source %D%· about a minute%N%"
+    set "T=%C%●%N% compiling from builder\source"
     call :row 7 "Makepad Builder"
     call :status "Compiling the Builder from its source."
     call :place 8
