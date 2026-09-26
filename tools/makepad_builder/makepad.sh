@@ -1775,16 +1775,18 @@ exec 1>&3
 tui=1
 e=$(printf '\033')
 dim="${e}[2m" b="${e}[1m" ok="${e}[32m" acc="${e}[36m" warn="${e}[33m" red="${e}[31m" inv="${e}[7m" r0="${e}[0m"
-# Makepad orange, only ever one character: the ▌ on the selected row. The
+# Makepad orange: the ▌ on the selected row and the filled part of progress
+# bars; never a background or an action. The
 # selection band and the logo behind the rows are faint greys, for a dark or
 # a light background (asked once at the start, see light_background).
 mark="${e}[38;2;255;92;57m"
 band_dark="${e}[48;2;42;44;48m" band_light="${e}[48;2;228;229;231m"
 logo_dark="${e}[38;2;44;47;52m" logo_light="${e}[38;2;226;227;229m"
 band=$band_dark logo_color=$logo_dark
-# The Makepad mark (tools/makepad_builder/logo.txt, which the Windows
+# The Makepad mark, large (44 x 13) and small (30 x 9), with the column each
+# line's dots start at (tools/makepad_builder/logo.txt, which the Windows
 # Builder draws the same way).
-logo_art='             ⢀⣾⡄            ⣰⣷⡀
+logo_big='             ⢀⣾⡄            ⣰⣷⡀
             ⢠⣿⣿⣿⣆          ⣰⣿⣿⣷⡀
            ⢠⣿⣿⣿⣿⣿⣆        ⣴⣿⣿⣿⣿⣿⡄
           ⣰⣿⣿⣿⣿⣿⣿⣿⣧      ⣼⣿⣿⣿⣿⣿⣿⣿⡄
@@ -1797,6 +1799,17 @@ logo_art='             ⢀⣾⡄            ⣰⣷⡀
   ⢠⣿⣿⣿⣿⣿⣿⣿⣿⣎⢿⣿⣿⣿⣿⠋        ⠹⣿⣿⣿⣿⡿⣱⣿⣿⣿⣿⣿⣿⣿⣷⡄
  ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣎⢿⣿⣿⠃          ⠘⣿⣿⡟⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡄
 ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠻⠁            ⠘⢟⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣆'
+logo_big_ink='13 12 11 10 9 8 7 5 4 3 2 1 0'
+logo_small='         ⣼⣆        ⣼⣆
+        ⣼⣿⣿⣧      ⣼⣿⣿⣧
+      ⢀⣾⣿⣿⣿⣿⣧⡀  ⢀⣾⣿⣿⣿⣿⣧
+     ⢀⣾⣿⣿⣿⣿⣿⣿⣷⡀⢀⣾⣿⣿⣿⣿⣿⣿⣷⡀
+    ⢀⣼⣿⣿⣿⣿⣿⣿⣿⣿⡇⢼⣿⣿⣿⣿⣿⣿⣿⣿⣇⡀
+   ⢠⣿⣯⣻⣿⣿⣿⣿⣿⣿⡟ ⠈⢻⣿⣿⣿⣿⣿⣿⣟⣾⣷⡀
+  ⢠⣿⣿⣿⣷⣻⣿⣿⣿⣿⡟    ⢻⣿⣿⣿⣿⢟⣾⣿⣿⣿⡄
+ ⣰⣿⣿⣿⣿⣿⣷⡿⣿⣿⠏      ⠻⣿⣿⢯⣿⣿⣿⣿⣿⣿⡄
+⣰⣿⣿⣿⣿⣿⣿⣿⣿⡽⠏        ⠹⣯⣿⣿⣿⣿⣿⣿⣿⣿⣆'
+logo_small_ink='9 8 6 5 4 3 2 1 0'
 tty_saved=$(stty -g <&3)
 # The window is titled "Makepad Builder" while it runs; the terminal's own
 # title comes back afterwards.
@@ -1897,7 +1910,7 @@ message= choice= footer_override=
 screen_meta() {
     back=1 crumb= sub=
     case "$screen" in
-        main) back=0 sub='Makepad apps ship as source, so your own coding agent can customize them.' ;;
+        main) back=0 sub='Shipped as source code, so your coding agent can customize everything.' ;;
         free) crumb=' › Makepad experiments' sub='From our open source repository: experiments, not finished applications.' ;;
         terms) crumb=' › License agreements' sub='Return opens an agreement in your browser.' ;;
         consent) crumb=" › $consent_title" sub='Please read what you are agreeing to.' ;;
@@ -1965,7 +1978,7 @@ step_line() { # step_line LABEL -> sl
                 done
                 sl_pct=$((sl_a * 100 / sl_b)); [ "$sl_pct" -le 100 ] || sl_pct=100
                 sl_p="   $sl_pct"; sl_p=${sl_p#"${sl_p%???}"}
-                sl="${sl}${acc}${sl_on}${r0}${dim}${sl_off}${r0} ${sl_p}%"
+                sl="${sl}${mark}${sl_on}${r0}${dim}${sl_off}${r0} ${sl_p}%"
                 if [ "$sl_unit" = crates ]; then
                     sl_detail="$sl_a / $sl_b crates"
                 elif [ "$sl_unit" = MB ] && [ "${sl_bytes:-0}" -gt 0 ]; then
@@ -2001,58 +2014,113 @@ step_line() { # step_line LABEL -> sl
 
 # logo_lines LINES BAND -> ll_out: LINES as screen lines, each ending in an
 # erase to the end of the line; line BAND (0-based, -1 for none) on the
-# selection band; the Makepad mark faintly at the right of the window (up to
-# 100 columns), centred over the stretch, each of its lines only right of
-# that line's text with two columns of air and never on the band. Plain sh
-# (no bash) draws neither.
+# selection band. The Makepad mark goes faintly at the right of the window
+# (up to 100 columns), in the middle of the stretch or as near to it as it
+# fits beside every line's text with two columns of air: the large one when
+# it fits somewhere, else the small one, else none, so it is never cut into.
+# The selected row's "<action> ⏎" does not count (it moves with the
+# selection); where it reaches into the mark, the text wins. Plain sh (no
+# bash) draws no band and no mark.
 logo_lines() {
-    ll_out= ll_count=0
-    while IFS= read -r ll_line; do ll_count=$((ll_count + 1)); done <<EOF
-$1
+    ll_out= ll_lines=$1 ll_band=$2
+    if [ -z "${BASH_VERSION:-}" ]; then
+        while IFS= read -r ll_line; do ll_out="$ll_out$ll_line$e[K
+"; done <<EOF
+$ll_lines
 EOF
-    ll_art=0 ll_x0=0 ll_y0=0
-    if [ -n "${BASH_VERSION:-}" ]; then
-        ll_cols=$(stty size <&3 2>/dev/null); ll_cols=${ll_cols#* }; ll_cols=${ll_cols:-80}
-        [ "$ll_cols" -le 100 ] || ll_cols=100
-        ll_x0=$((ll_cols - 2 - 44))
-        [ "$ll_x0" -lt 30 ] || ll_art=13
-        ll_y0=$(( (ll_count - ll_art) / 2 )); [ "$ll_y0" -ge 0 ] || ll_y0=0
+        return 0
+    fi
+    # Where each line's own text ends, plus two columns of air.
+    ll_clear= ll_count=0
+    while IFS= read -r ll_line; do
+        if [ "$ll_count" = "$ll_band" ]; then
+            case "$ll_line" in *"⏎$r0") ll_line=${ll_line%"$ok"*} ;; esac
+        fi
+        ll_plain=${ll_line//$e\[*([0-9;])m/}
+        ll_plain=${ll_plain%%+( )}
+        if [ -n "$ll_plain" ]; then ll_clear="$ll_clear $(( ${#ll_plain} + 2 ))"; else ll_clear="$ll_clear 0"; fi
+        ll_count=$((ll_count + 1))
+    done <<EOF
+$ll_lines
+EOF
+    ll_cols=$(stty size <&3 2>/dev/null); ll_cols=${ll_cols#* }; ll_cols=${ll_cols:-80}
+    [ "$ll_cols" -le 100 ] || ll_cols=100
+    ll_art= ll_y0=-1 ll_x0=0
+    for ll_size in big small; do
+        if [ "$ll_size" = big ]; then ll_h=13 ll_w=44 ll_ink=$logo_big_ink; else ll_h=9 ll_w=30 ll_ink=$logo_small_ink; fi
+        ll_x0=$((ll_cols - 2 - ll_w))
+        [ "$ll_x0" -ge 30 ] && [ "$ll_h" -le "$ll_count" ] || continue
+        ll_mid=$(( (ll_count - ll_h) / 2 )) ll_d=0
+        while [ "$ll_d" -le "$ll_count" ]; do
+            for ll_y in $((ll_mid - ll_d)) $((ll_mid + ll_d)); do
+                [ "$ll_y" -ge 0 ] && [ $((ll_y + ll_h)) -le "$ll_count" ] || continue
+                # shellcheck disable=SC2086
+                set -- $ll_clear
+                shift "$ll_y"
+                ll_fit=1
+                for ll_i in $ll_ink; do
+                    [ "$1" -le $((ll_x0 + ll_i)) ] || { ll_fit=0; break; }
+                    shift
+                done
+                if [ "$ll_fit" = 1 ]; then ll_y0=$ll_y; break 3; fi
+            done
+            ll_d=$((ll_d + 1))
+        done
+    done
+    if [ "$ll_y0" -ge 0 ]; then
+        if [ "$ll_size" = big ]; then ll_art=$logo_big; else ll_art=$logo_small; fi
     fi
     ll_i=0
     while IFS= read -r ll_line; do
-        if [ -n "${BASH_VERSION:-}" ] && [ "$ll_i" = "$2" ]; then
-            # The band: every colour reset goes back to the band, which
-            # reaches the rule's right end.
-            ll_plain=${ll_line//$e\[*([0-9;])m/}
-            ll_pad=$((width - 2 - ${#ll_plain})); ll_fill=
-            while [ "$ll_pad" -gt 0 ]; do ll_fill="$ll_fill "; ll_pad=$((ll_pad - 1)); done
-            ll_line="${ll_line:0:2}$band${ll_line:2}$ll_fill"
-            ll_line="${ll_line//$r0/$r0$band}$r0"
-        elif [ "$ll_art" -gt 0 ] && [ "$ll_i" -ge "$ll_y0" ] && [ "$ll_i" -lt $((ll_y0 + ll_art)) ]; then
-            ll_n=$((ll_i - ll_y0)) ll_art_line=
+        ll_piece=
+        if [ -n "$ll_art" ] && [ "$ll_i" -ge "$ll_y0" ] && [ "$ll_i" -lt $((ll_y0 + ll_h)) ]; then
+            ll_n=$((ll_i - ll_y0))
             while IFS= read -r ll_a; do
-                [ "$ll_n" -gt 0 ] || { ll_art_line=$ll_a; break; }
+                [ "$ll_n" -gt 0 ] || { ll_piece=$ll_a; break; }
                 ll_n=$((ll_n - 1))
             done <<EOF
-$logo_art
+$ll_art
 EOF
-            # The text without its trailing blanks, then air, then the art.
-            ll_line=${ll_line%"$r0"}; ll_line=${ll_line%%+( )}
-            ll_plain=${ll_line//$e\[*([0-9;])m/}
-            [ "$ll_line" = "$ll_plain" ] || ll_line="$ll_line$r0"
+        fi
+        ll_line=${ll_line%"$r0"}; ll_line=${ll_line%%+( )}
+        ll_plain=${ll_line//$e\[*([0-9;])m/}
+        [ "$ll_line" = "$ll_plain" ] || ll_line="$ll_line$r0"
+        # The mark's part of this line: from two columns after the text.
+        ll_at=$ll_x0
+        if [ -n "${ll_piece// /}" ]; then
             ll_skip=$(( ${#ll_plain} + 2 - ll_x0 )); [ "$ll_skip" -ge 0 ] || ll_skip=0
-            ll_piece=${ll_art_line:$ll_skip}
-            if [ -n "${ll_piece// /}" ]; then
-                ll_pad=$((ll_x0 + ll_skip - ${#ll_plain})); ll_fill=
-                while [ "$ll_pad" -gt 0 ]; do ll_fill="$ll_fill "; ll_pad=$((ll_pad - 1)); done
-                ll_line="$ll_line$ll_fill$logo_color$ll_piece$r0"
+            ll_piece=${ll_piece:$ll_skip}; ll_at=$((ll_x0 + ll_skip))
+            [ -n "${ll_piece// /}" ] || ll_piece=
+        else
+            ll_piece=
+        fi
+        if [ "$ll_i" = "$ll_band" ]; then
+            # The band: every colour reset goes back to the band, which
+            # reaches the rule's right end; the mark's dots lie on it.
+            ll_band_end=$((width - 2))
+            ll_line="${ll_line:0:2}$band${ll_line:2}"
+            ll_line=${ll_line//$r0/$r0$band}
+            ll_used=${#ll_plain}
+            if [ -n "$ll_piece" ]; then
+                ll_pad=$((ll_at - ll_used)); while [ "$ll_pad" -gt 0 ]; do ll_line="$ll_line "; ll_pad=$((ll_pad - 1)); done
+                ll_on=$((ll_band_end - ll_at)); [ "$ll_on" -ge 0 ] || ll_on=0
+                ll_line="$ll_line$logo_color${ll_piece:0:$ll_on}$r0"
+                ll_rest=${ll_piece:$ll_on}
+                ll_used=$((ll_at + ${#ll_piece}))
+                if [ -n "$ll_rest" ]; then ll_line="$ll_line$logo_color$ll_rest"
+                else ll_line="$ll_line$band"; fi
             fi
+            ll_pad=$((ll_band_end - ll_used)); while [ "$ll_pad" -gt 0 ]; do ll_line="$ll_line "; ll_pad=$((ll_pad - 1)); done
+            ll_line="$ll_line$r0"
+        elif [ -n "$ll_piece" ]; then
+            ll_pad=$((ll_at - ${#ll_plain})); while [ "$ll_pad" -gt 0 ]; do ll_line="$ll_line "; ll_pad=$((ll_pad - 1)); done
+            ll_line="$ll_line$logo_color$ll_piece$r0"
         fi
         ll_out="$ll_out$ll_line$e[K
 "
         ll_i=$((ll_i + 1))
     done <<EOF
-$1
+$ll_lines
 EOF
 }
 draw() {
@@ -2094,13 +2162,13 @@ EOF
         fi
         [ "$top" -le $((nbody - room)) ] || top=$((nbody - room))
     fi
-    d_left="Makepad commercial apps$crumb"
+    d_left="Makepad Apps$crumb"
     d_email=${email:-not logged in}
     d_pad=$((width - 2 - $(dwidth "$d_left") - $(dwidth "$d_email") - 2))
     [ "$d_pad" -ge 1 ] || d_pad=1
     d_gap=; d_i=0; while [ "$d_i" -lt "$d_pad" ]; do d_gap="$d_gap "; d_i=$((d_i + 1)); done
     out="${e}[H${e}[K
-  ${b}Makepad${r0} commercial apps${crumb}${d_gap}${dim}${d_email}${r0}${e}[K
+  ${b}Makepad${r0} Apps${crumb}${d_gap}${dim}${d_email}${r0}${e}[K
   ${dim}${sub}${r0}${e}[K
 "
     # The rows shown, then the lines down to the rule; the selected row
@@ -2124,6 +2192,11 @@ EOF
 "; fi
     elif [ "$back" = 1 ]; then d_lines="$d_lines
 "; fi
+    # The rule, status, choice and footer keep to the bottom of the window,
+    # so the mark has the height between them and the header.
+    d_n=$(printf '%s' "$d_lines" | wc -l | tr -d ' ')
+    while [ "$d_n" -lt $((height - 8)) ]; do d_lines="$d_lines
+"; d_n=$((d_n + 1)); done
     logo_lines "$d_lines " "$d_band"
     out="$out$ll_out"
     d_rule=; d_i=4; while [ "$d_i" -lt "$width" ]; do d_rule="${d_rule}─"; d_i=$((d_i + 1)); done
