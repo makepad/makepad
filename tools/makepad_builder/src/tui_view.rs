@@ -680,6 +680,9 @@ pub(super) fn working_page() -> bool {
 /// Close the work page. A failure stays on screen, the step marked ✗ with
 /// the short reason, until Return or Escape.
 pub(super) fn work_end<T>(result: Result<T, String>) -> Result<T, String> {
+    // Keys pressed and trackpad scrolls (arrow keys in a terminal) during
+    // the work are not answers: the menu keeps the row it was on.
+    console::drain();
     if let Err(error) = &result {
         let reason = clean(error.lines().next().unwrap_or_default());
         WORK.with(|w| {

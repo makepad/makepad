@@ -42,7 +42,7 @@ const CUDA_LICENSE_URL: &str = "https://docs.nvidia.com/cuda/eula/";
 const GPU_NOTICE_READ: &str = "graphics-notice-read";
 
 /// The GPU driver notice (Windows and Linux, until it is read).
-const GPU_NOTICE: &str = "Makepad heavily relies on your GPU to draw its UI and implement AI functionality. Old hardware and broken drivers can cause your computer to reboot unexpectedly.";
+const GPU_NOTICE: &str = "Makepad relies on your GPU to draw its UI and implement AI functionality just like a videogame does. Old hardware and broken drivers can cause your computer to reboot unexpectedly.";
 
 /// Windows Defender and similar tools briefly lock a freshly unpacked rustc.
 const STILL_SCANNING: &str = "Windows security software is still scanning the staged Rust compiler. Select the app again to check again.";
@@ -417,12 +417,18 @@ impl Setup {
 
 /// The main menu: rows, and what Return does on each.
 impl Setup {
-    /// YOUR APPS first, then the experiments, the coding agents and setup.
+    /// Update, then YOUR APPS, the experiments, the coding agents and setup.
     /// There are no compiler rows: an app sets up what it needs when it is
     /// first built, and on Windows with an NVIDIA GPU building Makepad Amp
     /// asks once whether to turn on local AI (see `local_ai_screen`).
     fn main_view(&self) -> View {
-        let mut rows = vec![Row::Head("YOUR APPS".into())];
+        // Update sits above everything; the menu still opens on the first app.
+        let mut rows = vec![Row::Note(Vec::new()), match &self.checked {
+            None => item("updates", "Update", "", text("check for updates", DIM), "⏎"),
+            Some((false, time)) => item("updates", "Update", "", done(format!("up to date · {time}")), "check again"),
+            Some((true, time)) => item("updates", "Update", "", text(format!("updates downloaded · {time}"), PLAIN), "check again"),
+        }];
+        rows.push(Row::Head("YOUR APPS".into()));
         rows.extend(self.license_rows());
         let free = free_apps().unwrap_or_default();
         let built = free.iter().filter(|(id, _)| self.app_state(id, self.app_release(id).as_ref()) == State::Ready).count();
@@ -440,11 +446,6 @@ impl Setup {
         }
         rows.push(self.agreements_row());
         rows.push(self.disk_row());
-        rows.push(match &self.checked {
-            None => item("updates", "Update", "", text("check for updates", DIM), "⏎"),
-            Some((false, time)) => item("updates", "Update", "", done(format!("up to date · {time}")), "check again"),
-            Some((true, time)) => item("updates", "Update", "", text(format!("updates downloaded · {time}"), PLAIN), "check again"),
-        });
         View {
             subtitle: ABOUT.trim().into(),
             email: self.shown_email(),
@@ -2325,6 +2326,15 @@ mod console {
             Ok(Self)
         }
     }
+    /// Throw away keys typed while no menu was reading them.
+    pub fn drain() {
+        for _ in 0..4096 {
+            if unsafe { _kbhit() } == 0 {
+                break;
+            }
+            unsafe { _getwch() };
+        }
+    }
     pub fn key() -> Result<Key, String> {
         // Returning periodically lets the caller redraw after a ConPTY resize.
         for _ in 0..10 {
@@ -2447,6 +2457,14 @@ mod console {
     fn byte() -> Option<u8> {
         let mut value = 0u8;
         (unsafe { read(0, &mut value, 1) } == 1).then_some(value)
+    }
+    /// Throw away keys typed while no menu was reading them.
+    pub fn drain() {
+        for _ in 0..4096 {
+            if !waiting(0) || byte().is_none() {
+                break;
+            }
+        }
     }
     pub fn key() -> Result<Key, String> {
         // Poll, so a quiet terminal returns Other for redraws and child
