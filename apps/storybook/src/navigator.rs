@@ -22,6 +22,8 @@
 //! search that finds nothing says why. The new-only switch hides rows in
 //! both modes, so it holds every folder open the way filtering does: a
 //! folder closed earlier would otherwise keep the new stories folded away.
+//! The starred-only switch works the same way over the stories the person
+//! starred, whose rows carry a star in front of their name.
 use crate::makepad_widgets::file_tree::*;
 use crate::makepad_widgets::*;
 use crate::registry::{self, Story};
@@ -123,6 +125,12 @@ pub struct StoryNavigator {
     cursor: Option<usize>,
     #[rust]
     new_only: bool,
+    /// The stories the person starred, by live key, and whether only they
+    /// are listed.
+    #[rust]
+    starred: BTreeSet<String>,
+    #[rust]
+    starred_only: bool,
     #[rust(registry::DEFAULT_BASELINE.to_string())]
     baseline: String,
     /// Row id to story key.
@@ -142,7 +150,7 @@ pub struct StoryNavigator {
     /// The switches and the text the last draw was made under. A change
     /// puts every folder back to what the new state wants.
     #[rust]
-    drawn_under: Option<(bool, bool, String)>,
+    drawn_under: Option<(bool, bool, bool, String)>,
     #[rust]
     selected: Option<String>,
     /// How many stories the last draw listed, so a log line can say so.
@@ -232,6 +240,7 @@ impl StoryNavigator {
         registry::all()
             .filter(|s| registry::matches(s, &self.filter))
             .filter(|s| !self.new_only || registry::is_new(s, &self.baseline))
+            .filter(|s| !self.starred_only || self.starred.contains(s.key))
             .map(|s| s.key)
             .collect()
     }
@@ -298,6 +307,55 @@ impl StoryNavigator {
         self.file_tree.redraw(cx);
     }
 
+    /// The starred stories, as the settings keep them (keys, comma
+    /// separated). Keys that moved are carried to the page they went to;
+    /// keys that name nothing are dropped.
+    pub fn set_starred(&mut self, cx: &mut Cx, line: &str) {
+        self.starred = settings::parse_folded(line)
+            .into_iter()
+            .filter_map(|key| registry::find(&key).map(|story| story.key.to_string()))
+            .collect();
+        self.file_tree.redraw(cx);
+    }
+
+    pub fn starred_line(&self) -> String {
+        settings::format_folded(&self.starred)
+    }
+
+    pub fn is_starred(&self, key: &str) -> bool {
+        let key = registry::find(key).map_or(key, |story| story.key);
+        self.starred.contains(key)
+    }
+
+    /// Stars the story, or takes its star away; true when it is starred now.
+    pub fn toggle_starred(&mut self, cx: &mut Cx, key: &str) -> bool {
+        let key = registry::find(key).map_or(key, |story| story.key).to_string();
+        let on = !self.starred.remove(&key);
+        if on {
+            self.starred.insert(key);
+        }
+        self.file_tree.redraw(cx);
+        on
+    }
+
+    pub fn set_starred_only(&mut self, cx: &mut Cx, on: bool) {
+        self.starred_only = on;
+        self.file_tree.redraw(cx);
+    }
+
+    /// Matches of the search text the starred-only switch keeps out (after
+    /// the new-only switch has had its say).
+    pub fn hidden_by_starred(&self) -> usize {
+        if self.filter.is_empty() || !self.starred_only {
+            return 0;
+        }
+        registry::all()
+            .filter(|s| registry::matches(s, &self.filter))
+            .filter(|s| !self.new_only || registry::is_new(s, &self.baseline))
+            .filter(|s| !self.starred.contains(s.key))
+            .count()
+    }
+
     pub fn set_baseline(&mut self, cx: &mut Cx, baseline: &str) {
         self.baseline = baseline.to_string();
         self.file_tree.redraw(cx);
@@ -350,6 +408,7 @@ impl StoryNavigator {
         registry::all().find(|s| {
             registry::matches(s, &self.filter)
                 && (!self.new_only || registry::is_new(s, &self.baseline))
+                && (!self.starred_only || self.starred.contains(s.key))
         })
     }
 
@@ -367,12 +426,22 @@ impl StoryNavigator {
         // out rather than taking the others away.
         (!self.filtering || registry::matches(story, &self.filter))
             && (!self.new_only || registry::is_new(story, &self.baseline))
+            && (!self.starred_only || self.starred.contains(story.key))
     }
 
-    /// True while the new-only switch or the search text is taking rows
-    /// away, which holds every folder open.
+    /// True while the new-only or starred-only switch or the search text is
+    /// taking rows away, which holds every folder open.
     fn hiding(&self) -> bool {
-        self.new_only || (self.filtering && !self.filter.is_empty())
+        self.new_only || self.starred_only || (self.filtering && !self.filter.is_empty())
+    }
+
+    /// A story row's name: starred ones wear a star in front.
+    fn row_name(&self, key: &str, name: &str) -> String {
+        if self.starred.contains(key) {
+            format!("\u{2605} {name}")
+        } else {
+            name.to_string()
+        }
     }
 
     fn outline(&self) -> Vec<Category> {
@@ -421,7 +490,7 @@ impl StoryNavigator {
         // The switches or the text changing puts every folder back to
         // what the new state wants: open while New only or the text is
         // hiding rows, and the way the person left it otherwise.
-        let under = (self.new_only, self.filtering, self.filter.clone());
+        let under = (self.new_only, self.starred_only, self.filtering, self.filter.clone());
         let reopen = self.drawn_under.as_ref() != Some(&under);
         self.drawn_under = Some(under);
         self.keys.clear();
@@ -447,7 +516,8 @@ impl StoryNavigator {
                     } else {
                         StatusDotKind::None
                     };
-                    self.file_tree.file_with_status(cx, id, component.name, dot);
+                    let name = self.row_name(only.key, component.name);
+                    self.file_tree.file_with_status(cx, id, &name, dot);
                     self.listed += 1;
                     continue;
                 }
@@ -465,7 +535,8 @@ impl StoryNavigator {
                     } else {
                         StatusDotKind::None
                     };
-                    self.file_tree.file_with_status(cx, id, story.name, dot);
+                    let name = self.row_name(story.key, story.name);
+                    self.file_tree.file_with_status(cx, id, &name, dot);
                     self.listed += 1;
                 }
                 self.file_tree.end_folder();
@@ -556,6 +627,34 @@ impl StoryNavigatorRef {
         }
     }
 
+    pub fn set_starred(&self, cx: &mut Cx, line: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_starred(cx, line);
+        }
+    }
+
+    pub fn starred_line(&self) -> String {
+        self.borrow().map(|inner| inner.starred_line()).unwrap_or_default()
+    }
+
+    pub fn is_starred(&self, key: &str) -> bool {
+        self.borrow().is_some_and(|inner| inner.is_starred(key))
+    }
+
+    /// Stars the story or takes its star away; true when it is starred now.
+    pub fn toggle_starred(&self, cx: &mut Cx, key: &str) -> bool {
+        match self.borrow_mut() {
+            Some(mut inner) => inner.toggle_starred(cx, key),
+            None => false,
+        }
+    }
+
+    pub fn set_starred_only(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_starred_only(cx, on);
+        }
+    }
+
     pub fn folded(&self) -> String {
         self.borrow().map(|inner| inner.folded()).unwrap_or_default()
     }
@@ -604,7 +703,23 @@ impl StoryNavigatorRef {
 
     /// The line under the tree saying what the switches keep out.
     pub fn hidden_line(&self) -> String {
-        self.borrow().map(|inner| inner.hidden().line()).unwrap_or_default()
+        self.borrow()
+            .map(|inner| {
+                let mut line = inner.hidden().line();
+                let starred = match inner.hidden_by_starred() {
+                    0 => String::new(),
+                    1 => "1 match hidden by Starred only".to_string(),
+                    n => format!("{n} matches hidden by Starred only"),
+                };
+                if !starred.is_empty() {
+                    if !line.is_empty() {
+                        line.push('\n');
+                    }
+                    line.push_str(&starred);
+                }
+                line
+            })
+            .unwrap_or_default()
     }
 
     pub fn match_count(&self) -> usize {

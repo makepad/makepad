@@ -119,7 +119,7 @@ use crate::makepad_draw::makepad_platform::DrawShaderId;
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_micro_serde::*;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -319,6 +319,38 @@ const NOTE_STORE: &str = ".makepad-notes.txt";
 /// not about a widget: nothing keys it, and a person editing it by hand
 /// should not have to find it among a hundred paths.
 const RULES_STORE: &str = ".makepad-rules.txt";
+
+/// The palette's starred widget types: one name per line, kept per person
+/// (not beside the app, as the notes are) because a favourite is a habit
+/// of the person's, whichever app the panel rides in.
+fn palette_favourites_path() -> std::path::PathBuf {
+    crate::makepad_platform::home::makepad_home().join("palette-favourites.txt")
+}
+
+fn palette_favourites_load() -> BTreeSet<String> {
+    std::fs::read_to_string(palette_favourites_path())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn palette_favourites_save(starred: &BTreeSet<String>) {
+    let path = palette_favourites_path();
+    if starred.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text: String = starred.iter().map(|n| format!("{n}\n")).collect();
+    if let Err(error) = std::fs::write(&path, text) {
+        log!("TWEAK palette favourites write failed: {error}");
+    }
+}
 
 /// Read the app-wide rules back. A missing file is an empty document, not
 /// an error -- most apps will never have one.
@@ -9400,6 +9432,20 @@ pub struct Tweaker {
     palette_open: Vec<String>,
     #[rust]
     palette_filter: String,
+    /// The widget types the person starred, by name (kept in
+    /// `makepad_home()/palette-favourites.txt`, read on the first draw).
+    #[rust]
+    palette_starred: BTreeSet<String>,
+    #[rust]
+    palette_starred_loaded: bool,
+    /// Show the starred widgets only.
+    #[rust]
+    palette_starred_only: bool,
+    #[rust]
+    palette_starred_uid: u64,
+    /// Star buttons drawn this frame: (button uid, entry index).
+    #[rust]
+    palette_stars: Vec<(u64, usize)>,
     /// A tree row being dragged over: (target widget uid, where relative
     /// to it), for the drop indicator and the drop.
     #[rust]
@@ -11729,11 +11775,21 @@ impl Tweaker {
                             op_down := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Down" draw_text +: { text_style +: { font_size: 8.0 } } }
                             op_out := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "Out" draw_text +: { text_style +: { font_size: 8.0 } } }
                         }
-                        palette_filter := PanelInput {
+                        // The filter, and the star that shows the starred
+                        // widgets only.
+                        palette_filter_row := View {
                             width: Fill
-                            height: 22
-                            margin: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            empty_text: "filter widgets"
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            palette_filter := PanelInput {
+                                width: Fill
+                                height: 22
+                                empty_text: "filter widgets"
+                            }
+                            palette_starred := PanelButton { width: Fit height: 22 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "\u{2605}" draw_text +: { text_style +: { font_size: 9.0 } } }
                         }
                         palette := PortalList {
                             width: Fill
@@ -11741,7 +11797,17 @@ impl Tweaker {
                             margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
                             drag_scrolling: false
                             PaletteHead := PanelButton { width: Fill height: 20 padding: Inset{left: 6 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 3 bottom: 1} text: "" draw_bg +: { color: fab.color_panel_sub } draw_text +: { text_style +: { font_size: 8.0 } } }
-                            PaletteRow := PanelButton { width: Fill height: 20 padding: Inset{left: 16 right: 8 top: 2 bottom: 2} margin: Inset{left: 0 right: 0 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            // A widget: its name (click inserts, press and
+                            // drag places it) and its star.
+                            PaletteRow := View {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 1
+                                margin: Inset{left: 0 right: 0 top: 1 bottom: 1}
+                                name := PanelButton { width: Fill height: 20 padding: Inset{left: 16 right: 8 top: 2 bottom: 2} text: "" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                star := PanelButton { width: 24 height: 20 padding: Inset{left: 6 right: 4 top: 2 bottom: 2} text: "\u{2606}" draw_text +: { text_style +: { font_size: 9.0 } } }
+                            }
                         }
                         patch_text := PanelInput {
                             width: Fill
@@ -12017,7 +12083,11 @@ impl Tweaker {
             ops_row.child(live_id!(op_out)).widget_uid().0,
         ];
         self.palette_list_uid = build_wrap.child(live_id!(palette)).widget_uid().0;
-        self.palette_filter_uid = build_wrap.child(live_id!(palette_filter)).widget_uid().0;
+        let filter_row = build_wrap.child(live_id!(palette_filter_row));
+        self.palette_filter_uid = filter_row.child(live_id!(palette_filter)).widget_uid().0;
+        let starred = filter_row.child(live_id!(palette_starred));
+        self.palette_starred_uid = starred.widget_uid().0;
+        set_button_fill(cx, starred, self.palette_starred_only);
         self.palette_entries.clear();
         self.shader_list_uid = sidebar
             .child(live_id!(shader_col))
@@ -12794,7 +12864,8 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 40] = [
+        let chrome: [(&[LiveId], &str); 41] = [
+            (&[live_id!(build_wrap), live_id!(palette_filter_row), live_id!(palette_starred)], "show the starred widgets only \u{00b7} star one with the \u{2606} on its row"),
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -16786,6 +16857,24 @@ impl Tweaker {
                                 None => self.palette_open.push(group),
                             }
                             self.redraw_sidebar(cx);
+                        }
+                    } else if uid == self.palette_starred_uid {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            self.palette_starred_only = !self.palette_starred_only;
+                            self.redraw_sidebar(cx);
+                        }
+                    } else if let Some(&(_, index)) =
+                        self.palette_stars.iter().find(|(u, _)| *u == uid)
+                    {
+                        if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                            if let Some(entry) = self.palette_entries.get(index) {
+                                let name = entry.name.clone();
+                                if !self.palette_starred.remove(&name) {
+                                    self.palette_starred.insert(name);
+                                }
+                                palette_favourites_save(&self.palette_starred);
+                                self.redraw_sidebar(cx);
+                            }
                         }
                     } else if let Some(&(_, index)) =
                         self.palette_visible.iter().find(|(u, _)| *u == uid)
@@ -25439,7 +25528,12 @@ impl Tweaker {
             self.palette_entries = crate::designer::palette(cx);
             self.palette_open = vec!["Common".to_string()];
         }
+        if !self.palette_starred_loaded {
+            self.palette_starred_loaded = true;
+            self.palette_starred = palette_favourites_load();
+        }
         let filter = self.palette_filter.trim().to_lowercase();
+        let starred_only = self.palette_starred_only;
         enum Row {
             Head(&'static str, usize, bool),
             Entry(usize),
@@ -25452,12 +25546,15 @@ impl Tweaker {
                 .enumerate()
                 .filter(|(_, e)| e.group == *group)
                 .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
+                .filter(|(_, e)| !starred_only || self.palette_starred.contains(&e.name))
                 .map(|(i, _)| i)
                 .collect();
             if members.is_empty() {
                 continue;
             }
-            let open = !filter.is_empty() || self.palette_open.iter().any(|g| g == group);
+            // Filtering or showing the starred only: every folder with a
+            // row in it is open, or the rows kept are folded away.
+            let open = !filter.is_empty() || starred_only || self.palette_open.iter().any(|g| g == group);
             rows.push(Row::Head(group, members.len(), open));
             if open {
                 rows.extend(members.into_iter().map(Row::Entry));
@@ -25469,6 +25566,7 @@ impl Tweaker {
         list.set_item_range(cx, 0, rows.len());
         self.palette_visible.clear();
         self.palette_heads.clear();
+        self.palette_stars.clear();
         while let Some(entry_id) = list.next_visible_item(cx) {
             let Some(row) = rows.get(entry_id) else {
                 continue;
@@ -25493,8 +25591,14 @@ impl Tweaker {
                     if item.is_empty() {
                         continue;
                     }
-                    item.set_text(cx, &self.palette_entries[*index].name);
-                    self.palette_visible.push((item.widget_uid().0, *index));
+                    let entry = &self.palette_entries[*index];
+                    let starred = self.palette_starred.contains(&entry.name);
+                    let name = item.child(live_id!(name));
+                    name.set_text(cx, &entry.name);
+                    let star = item.child(live_id!(star));
+                    star.set_text(cx, if starred { "\u{2605}" } else { "\u{2606}" });
+                    self.palette_visible.push((name.widget_uid().0, *index));
+                    self.palette_stars.push((star.widget_uid().0, *index));
                     item.draw_all(cx, &mut Scope::empty());
                 }
             }

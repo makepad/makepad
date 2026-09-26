@@ -26,6 +26,10 @@ pub const NEW_ONLY: &str = "new_only";
 pub const SEARCH_FILTER: &str = "search_filter";
 /// The navigator folders the person closed, as [`format_folded`] writes them.
 pub const FOLDED: &str = "folded";
+/// The stories the person starred (keys, as [`format_folded`] writes them),
+/// and whether the navigator lists only those.
+pub const STARRED: &str = "starred";
+pub const STARRED_ONLY: &str = "starred_only";
 
 pub fn path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MAKEPAD_STORYBOOK_SETTINGS") {

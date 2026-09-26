@@ -120,6 +120,17 @@ script_mod! {
                 width: Fill
                 height: Fill
                 flow: Down
+                // Star the story on the canvas; list the starred ones only.
+                star_row := View{
+                    width: Fill
+                    height: Fit
+                    flow: Right{wrap: true}
+                    spacing: theme.space_1
+                    padding: theme.mspace_1
+                    align: Align{x: 0. y: 0.5}
+                    star_story := ButtonFlat{text: "\u{2606} Star"}
+                    starred_only := Toggle{text: "Starred only"}
+                }
                 navigator := mod.storybook.StoryNavigator{}
                 // What the switches keep out of the tree for the search
                 // in the box, so a search that finds nothing says why.
@@ -250,6 +261,7 @@ impl App {
         self.ui
             .label(cx, ids!(story_title))
             .set_text(cx, &format!("{} / {}", story.component, story.name));
+        self.refresh_star(cx);
         settings::set(settings::LAST_STORY, story.key);
         remote::set_current(story.key);
         log!("storybook: story {}", story.key);
@@ -337,6 +349,16 @@ impl App {
         note.set_visible(cx, !hidden.is_empty());
     }
 
+    /// The star button says what a press would do to the story on the canvas.
+    fn refresh_star(&self, cx: &mut Cx) {
+        let starred = self
+            .current
+            .as_deref()
+            .is_some_and(|key| self.ui.story_navigator(cx, ids!(navigator)).is_starred(key));
+        let text = if starred { "\u{2605} Starred" } else { "\u{2606} Star" };
+        self.ui.button(cx, ids!(star_story)).set_text(cx, text);
+    }
+
     fn refresh_new_count(&self, cx: &mut Cx) {
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         let n = navigator.new_count();
@@ -415,6 +437,14 @@ impl MatchEvent for App {
         self.ui
             .check_box(cx, ids!(search_filter))
             .set_active(cx, filtering, Animate::No);
+        navigator.set_starred(cx, &settings::get(settings::STARRED).unwrap_or_default());
+        if settings::get(settings::STARRED_ONLY).as_deref() == Some("1") {
+            navigator.set_starred_only(cx, true);
+            // Told to the switch too, for the reason given for New only.
+            self.ui
+                .check_box(cx, ids!(starred_only))
+                .set_active(cx, true, Animate::No);
+        }
         if settings::get(settings::NEW_ONLY).as_deref() == Some("1") {
             navigator.set_new_only(cx, true);
             // The switch has to be told as well as the navigator. Setting
@@ -481,6 +511,21 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(cx, ids!(search_filter)).changed(actions) {
             self.ui.story_navigator(cx, ids!(navigator)).set_filtering(cx, on);
             settings::set(settings::SEARCH_FILTER, if on { "1" } else { "0" });
+            self.refresh_match_count(cx);
+        }
+        if self.ui.button(cx, ids!(star_story)).clicked(actions) {
+            if let Some(key) = self.current.clone() {
+                let navigator = self.ui.story_navigator(cx, ids!(navigator));
+                let on = navigator.toggle_starred(cx, &key);
+                settings::set(settings::STARRED, &navigator.starred_line());
+                log!("storybook: {} {}", if on { "starred" } else { "unstarred" }, key);
+                self.refresh_star(cx);
+                self.refresh_match_count(cx);
+            }
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(starred_only)).changed(actions) {
+            self.ui.story_navigator(cx, ids!(navigator)).set_starred_only(cx, on);
+            settings::set(settings::STARRED_ONLY, if on { "1" } else { "0" });
             self.refresh_match_count(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(new_only)).changed(actions) {
