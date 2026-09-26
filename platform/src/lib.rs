@@ -118,6 +118,9 @@ pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
 pub mod audio_output_tap;
+pub mod log_ring;
+pub mod midi_inject;
+pub mod audio_output_fence;
 pub mod shader_error;
 pub use crate::app_main::{
     new_cx_with_font_set, resolve_studio_http, should_run_stdin_loop_from_env,

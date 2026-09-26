@@ -39,6 +39,7 @@ impl Regex {
                 dot_star: true,
                 ignore_caps: true,
                 byte_based: true,
+                ascii_word_boundary: options.ascii_word_boundary,
                 ..compile::Options::default()
             },
             &mut compile_cache,
@@ -49,11 +50,19 @@ impl Regex {
                 ignore_caps: true,
                 byte_based: true,
                 reversed: true,
+                ascii_word_boundary: options.ascii_word_boundary,
                 ..compile::Options::default()
             },
             &mut compile_cache,
         );
-        let nfa_prog = compile::compile(&ast, compile::Options::default(), &mut compile_cache);
+        let nfa_prog = compile::compile(
+            &ast,
+            compile::Options {
+                ascii_word_boundary: options.ascii_word_boundary,
+                ..compile::Options::default()
+            },
+            &mut compile_cache,
+        );
         let dfa_cache = dfa::Cache::new(&dfa_prog);
         let rev_dfa_cache = dfa::Cache::new(&rev_dfa_prog);
         let nfa_cache = nfa::Allocs::new(&nfa_prog);
@@ -67,6 +76,62 @@ impl Regex {
             rev_dfa_cache: RefCell::new(rev_dfa_cache),
             nfa_cache: RefCell::new(nfa_cache),
         })
+    }
+
+    /// The match that ends first: its end is the earliest position where any
+    /// match completes, its start the leftmost start of a match ending there.
+    /// A scan resumes after it; `run` reports the match that ends last.
+    pub fn earliest_match<'a, I: Input<'a>>(&self, input: I) -> Option<(usize, usize)> {
+        let forward = {
+            let mut dfa_cache = self.dfa_cache.borrow_mut();
+            dfa::run(
+                &self.shared.dfa_prog,
+                input.cursor_start(),
+                dfa::Options {
+                    want_first_match: true,
+                    ..dfa::Options::default()
+                },
+                &mut *dfa_cache,
+            )
+        };
+        let end = match forward {
+            Ok(Some(end)) => end,
+            Ok(None) => return None,
+            Err(_) => {
+                // The DFA gave up (cache pressure, or a word boundary next to
+                // a non-ASCII byte): the NFA answers with the same semantics.
+                let mut slots = [None; 2];
+                let mut nfa_cache = self.nfa_cache.borrow_mut();
+                let matched = nfa::run(
+                    &self.shared.nfa_prog,
+                    input.cursor_start(),
+                    nfa::Options {
+                        want_first_match: true,
+                    },
+                    &mut slots,
+                    &mut *nfa_cache,
+                );
+                return if matched {
+                    Some((slots[0]?, slots[1]?))
+                } else {
+                    None
+                };
+            }
+        };
+        let mut rev_dfa_cache = self.rev_dfa_cache.borrow_mut();
+        let start = dfa::run(
+            &self.shared.rev_dfa_prog,
+            input.slice(0..end).cursor_end().rev(),
+            dfa::Options {
+                want_last_match: true,
+                ..dfa::Options::default()
+            },
+            &mut *rev_dfa_cache,
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(end);
+        Some((start.min(end), end))
     }
 
     pub fn run<'a, I: Input<'a>>(&self, input: I, slots: &mut [Option<usize>]) -> bool {

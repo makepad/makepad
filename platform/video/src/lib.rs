@@ -230,6 +230,32 @@ impl VideoFileEncoder {
     /// [`VideoFileEncoder::finish`]; dropping without `finish` attempts a
     /// best-effort finalize but reports no errors.
     pub fn new(path: &str, options: VideoFileEncoderOptions) -> Result<Self, VideoFileError> {
+        Self::new_with(path, options, None)
+    }
+
+    /// The same encoder, writing the container in movie fragments
+    /// `fragment_interval_secs` apart, so the file on disk is a readable
+    /// movie while it is still being written: a recorder that a reader
+    /// follows behind, opening the file afresh to see what has been
+    /// fragmented so far. `finish` still indexes the whole movie. Apple
+    /// honours the interval; the other platforms write one movie, readable
+    /// only once finished.
+    pub fn new_fragmented(
+        path: &str,
+        options: VideoFileEncoderOptions,
+        fragment_interval_secs: f64,
+    ) -> Result<Self, VideoFileError> {
+        if !(fragment_interval_secs > 0.0) || !fragment_interval_secs.is_finite() {
+            return Err(VideoFileError::new("invalid movie fragment interval"));
+        }
+        Self::new_with(path, options, Some(fragment_interval_secs))
+    }
+
+    fn new_with(
+        path: &str,
+        options: VideoFileEncoderOptions,
+        fragment_interval_secs: Option<f64>,
+    ) -> Result<Self, VideoFileError> {
         if options.width == 0
             || options.height == 0
             || options.width % 2 != 0
@@ -251,14 +277,20 @@ impl VideoFileEncoder {
                 )));
             }
         }
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(target_vendor = "apple")]
         {
+            let os = OsVideoFileEncoder::new_with(path, &options, fragment_interval_secs)?;
+            return Ok(Self { options, os });
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            let _ = fragment_interval_secs;
             let os = OsVideoFileEncoder::new(path, &options)?;
             return Ok(Self { options, os });
         }
         #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
-            let _ = path;
+            let _ = (path, fragment_interval_secs);
             return Err(VideoFileError::new(UNSUPPORTED));
         }
     }
@@ -475,11 +507,42 @@ pub struct VideoFileDecoder {
 }
 
 impl VideoFileDecoder {
-    /// Open an mp4 (or any container the platform demuxes) for decoding.
+    /// Open a container for decoding, picture and sound. Every platform
+    /// opener here wants a picture and refuses a file with none; for a
+    /// file that has only sound, see [`Self::open_audio`].
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             let os = OsVideoFileDecoder::open(path)?;
+            return Ok(Self {
+                os,
+                pending_video: None,
+                pending_audio: None,
+            });
+        }
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        {
+            let _ = path;
+            return Err(VideoFileError::new(UNSUPPORTED));
+        }
+    }
+
+    /// Open a container for its SOUND alone: the audio stream is
+    /// configured and no picture is negotiated at all.
+    ///
+    /// Every platform opener behind [`Self::open`] demands a video track
+    /// before it looks at an audio one, so a file that has no picture
+    /// cannot be opened for the sound it does have. `info()` reports
+    /// width 0, height 0 and no video codec; `next_frame` is
+    /// end-of-stream from the first call.
+    pub fn open_audio(path: &str) -> Result<Self, VideoFileError> {
+        // The same split as every other entry point in this file: the Apple
+        // decoder is built for every Apple target, not macOS alone. Guarded
+        // by `target_os = "macos"` this fell through to `UNSUPPORTED` on
+        // iOS and tvOS, a constant those targets do not have.
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        {
+            let os = OsVideoFileDecoder::open_audio(path)?;
             return Ok(Self {
                 os,
                 pending_video: None,

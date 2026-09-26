@@ -1,7 +1,16 @@
 [package]
 name = "makepad-stitch"
 version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
+description = "Makepad stitch, a WebAssembly interpreter"
+# The same terms as the rest of the repository. The text lives once, at the
+# repository root; `license-file` points there, and `cargo package` copies a
+# license file from outside the package root into the published crate.
+license = "MIT OR Apache-2.0"
+license-file = "../../LICENSE"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 
 [profile.dev]
 opt-level = 1  
