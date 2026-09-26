@@ -2,9 +2,11 @@
 //! are playing, one at a time on a timeline you can scrub.
 //!
 //! The top lists each host's top-level animations (click one to inspect
-//! it). Under it: Play / Pause, Restart and the speed, then a seconds ruler
-//! with the timeline's labels, one lane per animation inside it (indented
-//! by depth, a bar per iteration, lighter for repeats) and the playhead.
+//! it). Under it: Play / Pause, Restart, the speed, Loop (repeat forever)
+//! and Yoyo (every other pass mirrored), wrapping when the panel narrows; then the lane names
+//! and, past a divider that drags, a seconds ruler with the timeline's
+//! labels, one lane per animation inside it (indented by depth, a bar per
+//! iteration, lighter for repeats) and the playhead.
 //! Press or drag on the ruler or the lanes to scrub: the animation pauses
 //! and the playhead follows the pointer, with its callbacks suppressed; on
 //! release it plays on if it was playing.
@@ -46,6 +48,7 @@ script_mod! {
         color_ruler: theme.color_shadow
         color_label: theme.color_warning
         color_playhead: theme.color_error
+        color_stripe: theme.color_shadow
     }
 }
 
@@ -57,7 +60,13 @@ const LANE_MIN: f64 = 7.0;
 const RULER: f64 = 18.0;
 /// One row of label names under the ruler (there are two).
 const LABEL_ROW: f64 = 11.0;
-const NAME_W: f64 = 118.0;
+/// The name column's default width (the divider drags it).
+const NAME_W: f64 = 180.0;
+/// The narrowest name column and the narrowest timeline beside it.
+const NAME_MIN: f64 = 60.0;
+const TRACK_MIN: f64 = 100.0;
+/// The divider's grab zone, left of the timeline.
+const GRIP_W: f64 = 8.0;
 /// The most animations listed in the picker before "+N more".
 const PICKER_ROWS: usize = 8;
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
@@ -67,6 +76,10 @@ enum Chip {
     PlayPause,
     Restart,
     Speed(usize),
+    /// Repeat forever (GSAP `repeat(-1)`), toggled.
+    Loop,
+    /// Mirror every other pass (GSAP `yoyo`), toggled.
+    Yoyo,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +131,9 @@ pub struct TweenInspector {
     color_label: Vec4f,
     #[live]
     color_playhead: Vec4f,
+    /// Every other lane row, under the names.
+    #[live]
+    color_stripe: Vec4f,
 
     /// The inspected animation: (host, top-level animation).
     #[rust]
@@ -134,6 +150,21 @@ pub struct TweenInspector {
     span: (f64, f64, f64),
     #[rust]
     scrub: Option<Scrub>,
+    /// The name column's width (0 until first drawn: the default).
+    #[rust]
+    name_w: f64,
+    /// The divider's grab zone, and a drag of it in progress (the grab's
+    /// offset from the divider).
+    #[rust]
+    grip_rect: Rect,
+    #[rust]
+    grip_drag: Option<f64>,
+    /// Where the name column starts (its left edge) and the widest it may be.
+    #[rust]
+    name_span: (f64, f64),
+    /// The repeat count each looped animation had before Loop: (host, id, repeat).
+    #[rust]
+    loop_restore: Vec<(u64, TweenId, i32)>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -274,18 +305,40 @@ impl Widget for TweenInspector {
                 let Some((host, id)) = self.selected else {
                     return;
                 };
-                let paused = self.lanes.first().is_none_or(|n| n.paused);
+                if self.grip_rect.contains(fe.abs) {
+                    self.grip_drag = Some(fe.abs.x - (self.name_span.0 + self.name_w));
+                    return;
+                }
+                let Some(root) = self.lanes.first().copied() else {
+                    return;
+                };
+                let paused = root.paused;
                 // A completed (detached) animation plays again from the start.
-                let done = self.lanes.first().is_some_and(|n| !n.linked);
+                let done = !root.linked;
                 if let Some((_, chip)) = self.chips.iter().find(|(r, _)| r.contains(fe.abs)) {
-                    let cmd = match *chip {
-                        Chip::PlayPause if done => InspectCommand::Restart(id),
-                        Chip::PlayPause if paused => InspectCommand::Resume(id),
-                        Chip::PlayPause => InspectCommand::Pause(id),
-                        Chip::Restart => InspectCommand::Restart(id),
-                        Chip::Speed(i) => InspectCommand::TimeScale { id, scale: SPEEDS[i] },
-                    };
-                    self.command(cx, host, cmd);
+                    match *chip {
+                        Chip::PlayPause if done => self.command(cx, host, InspectCommand::Restart(id)),
+                        Chip::PlayPause if paused => self.command(cx, host, InspectCommand::Resume(id)),
+                        Chip::PlayPause => self.command(cx, host, InspectCommand::Pause(id)),
+                        Chip::Restart => self.command(cx, host, InspectCommand::Restart(id)),
+                        Chip::Speed(i) => self.command(cx, host, InspectCommand::TimeScale { id, scale: SPEEDS[i] }),
+                        Chip::Loop if root.repeat < 0 => {
+                            // Back to the count it had (none, for one it never had).
+                            let ix = self.loop_restore.iter().position(|r| r.0 == host && r.1 == id);
+                            let count = ix.map_or(0, |ix| self.loop_restore.swap_remove(ix).2);
+                            self.command(cx, host, InspectCommand::Repeat { id, count });
+                        }
+                        Chip::Loop => {
+                            self.loop_restore.retain(|r| !(r.0 == host && r.1 == id));
+                            self.loop_restore.push((host, id, root.repeat));
+                            self.command(cx, host, InspectCommand::Repeat { id, count: -1 });
+                            if done {
+                                // A completed animation loops from the start.
+                                self.command(cx, host, InspectCommand::Restart(id));
+                            }
+                        }
+                        Chip::Yoyo => self.command(cx, host, InspectCommand::Yoyo { id, on: !root.yoyo }),
+                    }
                     return;
                 }
                 if self.track_rect.contains(fe.abs) {
@@ -294,9 +347,16 @@ impl Widget for TweenInspector {
                 }
             }
             Hit::FingerMove(fe) => {
+                if let Some(grab) = self.grip_drag {
+                    let (left, widest) = self.name_span;
+                    self.name_w = (fe.abs.x - grab - left).clamp(NAME_MIN, widest.max(NAME_MIN));
+                    self.draw_bg.redraw(cx);
+                    return;
+                }
                 self.scrub_to(cx, fe.abs.x);
             }
             Hit::FingerUp(_) => {
+                self.grip_drag = None;
                 if let Some(s) = self.scrub.take() {
                     if s.was_playing {
                         self.command(cx, s.host, InspectCommand::Resume(s.id));
@@ -308,6 +368,8 @@ impl Widget for TweenInspector {
                     || self.chips.iter().any(|(r, _)| r.contains(fe.abs));
                 if hand {
                     cx.set_cursor(MouseCursor::Hand);
+                } else if self.grip_rect.contains(fe.abs) {
+                    cx.set_cursor(MouseCursor::ColResize);
                 } else if self.track_rect.contains(fe.abs) {
                     cx.set_cursor(MouseCursor::EwResize);
                 } else {
@@ -383,6 +445,7 @@ impl Widget for TweenInspector {
         self.picker.clear();
         self.chips.clear();
         self.track_rect = Rect::default();
+        self.grip_rect = Rect::default();
         if rows.is_empty() {
             self.text(cx, dvec2(x0, y), "No tweens are running.", ink);
             let hint = self.fit(cx, "Hosts appear while their widget gets events.", w);
@@ -411,34 +474,54 @@ impl Widget for TweenInspector {
         };
         let (len, head) = view_of(&root);
 
-        // Transport.
+        // Transport: a row that wraps when the panel narrows, the readout
+        // right-aligned after the last chip (on a line of its own when it
+        // does not fit beside it).
         let mut cx_x = x0;
-        let chips: [(Chip, String); 6] = [
-            (Chip::PlayPause, if root.paused || !root.linked { "Play".into() } else { "Pause".into() }),
-            (Chip::Restart, "Restart".into()),
-            (Chip::Speed(0), "0.25x".into()),
-            (Chip::Speed(1), "0.5x".into()),
-            (Chip::Speed(2), "1x".into()),
-            (Chip::Speed(3), "2x".into()),
+        let chips: [(Chip, &str); 8] = [
+            (Chip::PlayPause, if root.paused || !root.linked { "Play" } else { "Pause" }),
+            (Chip::Restart, "Restart"),
+            (Chip::Speed(0), "0.25x"),
+            (Chip::Speed(1), "0.5x"),
+            (Chip::Speed(2), "1x"),
+            (Chip::Speed(3), "2x"),
+            (Chip::Loop, "Loop"),
+            (Chip::Yoyo, "Yoyo"),
         ];
         for (chip, label) in chips {
-            let tw = crate::badge::measure(&self.draw_text, cx, &label) + 10.0;
+            let tw = crate::badge::measure(&self.draw_text, cx, label) + 10.0;
+            if cx_x > x0 && cx_x + tw > x0 + w {
+                cx_x = x0;
+                y += ROW + 3.0;
+            }
             let r = Rect { pos: dvec2(cx_x, y), size: dvec2(tw, ROW) };
-            let on = matches!(chip, Chip::Speed(i) if (SPEEDS[i] - root.time_scale).abs() < 1e-6);
+            let on = match chip {
+                Chip::Speed(i) => (SPEEDS[i] - root.time_scale).abs() < 1e-6,
+                Chip::Loop => root.repeat < 0,
+                Chip::Yoyo => root.yoyo,
+                _ => false,
+            };
             self.rect(cx, r, if on { face_on } else { face });
-            self.text(cx, dvec2(cx_x + 5.0, y + 2.0), &label, ink);
+            self.text(cx, dvec2(cx_x + 5.0, y + 2.0), label, ink);
             self.chips.push((r, chip));
             cx_x += tw + 4.0;
         }
         let readout = format!("{:.3}s / {:.3}s", head, len);
         let rw = crate::badge::measure(&self.draw_text, cx, &readout);
-        if cx_x + rw < x0 + w {
-            self.text(cx, dvec2(x0 + w - rw, y + 2.0), &readout, meta);
+        if cx_x + rw + 6.0 > x0 + w {
+            y += ROW + 3.0;
         }
+        self.text(cx, dvec2((x0 + w - rw).max(x0), y + 2.0), &readout, meta);
         y += ROW + 6.0;
 
-        // The ruler, the lanes and the playhead.
-        let bx0 = x0 + NAME_W;
+        // The ruler, the lanes and the playhead, right of the name column.
+        let widest = (w - TRACK_MIN - GRIP_W).max(NAME_MIN);
+        if self.name_w <= 0.0 {
+            self.name_w = NAME_W.min(w * 0.4);
+        }
+        let name_w = self.name_w.clamp(NAME_MIN, widest);
+        self.name_span = (x0, widest);
+        let bx0 = x0 + name_w + GRIP_W;
         let bx1 = x0 + w - 4.0;
         self.span = (bx0, bx1, len);
         let to_x = |t: f64| bx0 + (t / len).clamp(0.0, 1.0) * (bx1 - bx0);
@@ -488,15 +571,21 @@ impl Widget for TweenInspector {
         let reserve = if count * LANE_MIN > room { ROW } else { 0.0 };
         let lane = ((room - reserve) / count).clamp(LANE_MIN, LANE);
         let named = lane >= 11.0;
+        let stripe = self.color_stripe;
+        let mut row_ix = 0usize;
         let mut hidden = 0usize;
         for n in &lanes {
             if y + lane > bottom - reserve {
                 hidden += 1;
                 continue;
             }
-            let indent = (8.0 * n.depth as f64).min(NAME_W - 24.0);
+            if row_ix % 2 == 1 {
+                self.rect(cx, Rect { pos: dvec2(x0, y), size: dvec2(name_w, lane) }, stripe);
+            }
+            row_ix += 1;
+            let indent = (8.0 * n.depth as f64).min((name_w - 24.0).max(0.0));
             if named {
-                let name = self.fit(cx, &node_name(n), NAME_W - indent - 4.0);
+                let name = self.fit(cx, &node_name(n), name_w - indent - 4.0);
                 self.text(cx, dvec2(x0 + indent, y + (lane - 11.0) * 0.5), &name, if n.depth == 0 { ink } else { meta });
             }
             let base = kind_color(n.kind);
@@ -537,6 +626,15 @@ impl Widget for TweenInspector {
             self.text(cx, dvec2(x0, y + 1.0), &format!("+{hidden} more lanes"), meta);
         }
         self.track_rect = Rect { pos: dvec2(bx0, top), size: dvec2(bx1 - bx0, (y - top).max(RULER)) };
+        // The divider: a rule and a three-dot grip in the middle of its zone.
+        let (gx, gh) = (x0 + name_w + GRIP_W * 0.5, (y - top).max(RULER));
+        self.grip_rect = Rect { pos: dvec2(x0 + name_w, top), size: dvec2(GRIP_W, gh) };
+        let rule = if self.grip_drag.is_some() { face_on } else { face };
+        self.rect(cx, Rect { pos: dvec2(gx - 0.5, top), size: dvec2(1.0, gh) }, rule);
+        let mid = top + gh * 0.5;
+        for k in -1..=1 {
+            self.rect(cx, Rect { pos: dvec2(gx - 1.0, mid + k as f64 * 4.0 - 1.0), size: dvec2(2.0, 2.0) }, meta);
+        }
         let hx = to_x(head);
         self.rect(cx, Rect { pos: dvec2(hx - 0.5, top), size: dvec2(1.5, y - top) }, playhead);
         DrawStep::done()

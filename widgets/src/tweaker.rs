@@ -6890,6 +6890,11 @@ fn motion_remote(cx: &mut Cx, args: &[(String, String)]) -> Result<String, Strin
             InspectCommand::Scrub { id, time }
         } else if let Some(scale) = num(&["scale"]) {
             InspectCommand::TimeScale { id, scale }
+        } else if let Some(on) = arg(args, &["loop"]) {
+            let on = !matches!(on, "0" | "false" | "off" | "no");
+            InspectCommand::Repeat { id, count: if on { -1 } else { 0 } }
+        } else if let Some(on) = arg(args, &["yoyo"]) {
+            InspectCommand::Yoyo { id, on: !matches!(on, "0" | "false" | "off" | "no") }
         } else if arg(args, &["pause"]).is_some() {
             InspectCommand::Pause(id)
         } else if arg(args, &["resume"]).is_some() {
@@ -6897,7 +6902,7 @@ fn motion_remote(cx: &mut Cx, args: &[(String, String)]) -> Result<String, Strin
         } else if arg(args, &["restart"]).is_some() {
             InspectCommand::Restart(id)
         } else {
-            return Err("host given without seek, scale, pause, resume or restart".to_string());
+            return Err("host given without seek, scale, loop, yoyo, pause, resume or restart".to_string());
         };
         queued = reg.command(host, cmd);
         cx.redraw_all();
@@ -6931,13 +6936,15 @@ fn motion_remote(cx: &mut Cx, args: &[(String, String)]) -> Result<String, Strin
                 .map(|l| format!("[{},{:.4}]", json_str(&crate::widget_tree::live_id_token(LiveId(l.1 .0))), l.2))
                 .collect();
             out.push_str(&format!(
-                "{{\"name\":{},\"kind\":\"{:?}\",\"len\":{:.4},\"time\":{:.4},\"paused\":{},\"linked\":{},\"scale\":{},\"lanes\":{},\"labels\":[{}]}}",
+                "{{\"name\":{},\"kind\":\"{:?}\",\"len\":{:.4},\"time\":{:.4},\"paused\":{},\"linked\":{},\"repeat\":{},\"yoyo\":{},\"scale\":{},\"lanes\":{},\"labels\":[{}]}}",
                 json_str(&node_name(root)),
                 root.kind,
                 len,
                 head,
                 root.paused as u8,
                 root.linked as u8,
+                root.repeat,
+                root.yoyo as u8,
                 root.time_scale,
                 h.subtree(root.id).len(),
                 labels.join(",")
@@ -11763,6 +11770,7 @@ impl Tweaker {
                             color_ruler: #x202020
                             color_label: #xe8b53a
                             color_playhead: #xf05050
+                            color_stripe: #x1c1c1c
                         }
                     }
                     props_wrap := View {

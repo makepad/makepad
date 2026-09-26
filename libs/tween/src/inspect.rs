@@ -139,7 +139,7 @@ impl TweenEngine {
             time: h.time,
             total_time: h.ttime,
             repeat: c.repeat,
-            yoyo: c.yoyo.is_some() || h.flags & crate::engine::F_YOYO != 0,
+            yoyo: h.flags & crate::engine::F_YOYO != 0,
             paused: h.flags & crate::engine::F_PAUSED != 0,
             reversed: c.rts < 0.0,
             linked: h.flags & F_LINKED != 0,

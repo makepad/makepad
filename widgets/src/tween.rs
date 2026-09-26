@@ -829,6 +829,12 @@ impl TweenHost {
                         InspectCommand::TimeScale { id, scale } => {
                             self.engine.anim(id).set_time_scale(scale);
                         }
+                        InspectCommand::Repeat { id, count } => {
+                            self.engine.anim(id).set_repeat(count);
+                        }
+                        InspectCommand::Yoyo { id, on } => {
+                            self.engine.anim(id).set_yoyo(on);
+                        }
                     }
                 }
             }

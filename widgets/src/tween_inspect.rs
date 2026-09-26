@@ -52,6 +52,10 @@ pub enum InspectCommand {
     /// Back to the start and play (delay included), events suppressed.
     Restart(TweenId),
     TimeScale { id: TweenId, scale: f64 },
+    /// GSAP `repeat(count)`: -1 loops forever.
+    Repeat { id: TweenId, count: i32 },
+    /// GSAP `yoyo(on)`.
+    Yoyo { id: TweenId, on: bool },
 }
 
 /// One host as last published.

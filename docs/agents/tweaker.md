@@ -83,13 +83,16 @@ Splash `tween` driver, stack navigation, the widgets and stories built on
 the tween engine) and shows the chosen one on a timeline: its labels on
 the ruler, one lane per child indented by depth, and the playhead. Drag on
 the timeline to scrub (the animation pauses, callbacks stay quiet, and it
-plays on at release if it was playing); the chips pause, restart and set
-the speed. Hosts publish only while the tab is up.
+plays on at release if it was playing); the chips pause, restart, set
+the speed, loop (repeat forever) and yoyo; the divider between the
+lane names and the timeline drags. Hosts publish only while the tab is up.
 
 `/tweak/op?op=motion` answers the same data as JSON: `open`, and per host
 `id`, `name`, `age` and `roots` (`name`, `kind`, `len`, `time`, `paused`,
-`linked` (0 once a kept animation completed), `scale`, `lanes`, `labels`). Add `host=<id>&root=<k>` with one of
-`seek=<seconds>`, `pause=1`, `resume=1`, `restart=1` or `scale=<x>` to
+`linked` (0 once a kept animation completed), `repeat`, `yoyo`, `scale`,
+`lanes`, `labels`). Add `host=<id>&root=<k>` with one of
+`seek=<seconds>`, `pause=1`, `resume=1`, `restart=1`, `scale=<x>`,
+`loop=1|0` (repeat forever, or none) or `yoyo=1|0` to
 control the k-th top-level animation of that host; the host applies it on
 its next event, so read again after a frame. `open=1` publishes without
 the tab.
