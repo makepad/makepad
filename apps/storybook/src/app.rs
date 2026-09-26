@@ -395,7 +395,8 @@ impl App {
         }
     }
 
-    fn apply_control(&self, cx: &mut Cx, control: &registry::Control, value: &ControlValue) {
+    fn apply_edit(&self, cx: &mut Cx, edit: &Edit) {
+        let (control, value) = (edit.control, &edit.value);
         let canvas = self.ui.story_canvas(cx, ids!(canvas));
         if let registry::ControlKind::Disabled { .. } = control.kind {
             if let (Some(root), ControlValue::Bool(on)) = (canvas.shown_root(), value) {
@@ -409,10 +410,10 @@ impl App {
             }
             return;
         }
-        let Some(chunk) = chunk_for(control, value) else {
+        let Some((prop, chunk)) = &edit.write else {
             return;
         };
-        if let Err(e) = canvas.apply(cx, control.target, prop_of(control), &chunk) {
+        if let Err(e) = canvas.apply(cx, control.target, prop, chunk) {
             log!("storybook: control {} on {}: {}", control.label, control.target, e);
         }
     }
@@ -564,8 +565,8 @@ impl MatchEvent for App {
             self.ui.controls_panel(cx, ids!(controls)).reset(cx);
             self.ui.actions_panel(cx, ids!(actions)).clear(cx);
         }
-        for (control, value) in self.ui.controls_panel(cx, ids!(controls)).changed(actions) {
-            self.apply_control(cx, control, &value);
+        for edit in self.ui.controls_panel(cx, ids!(controls)).edits(actions) {
+            self.apply_edit(cx, &edit);
         }
         if let Some(story) = self.current() {
             if let Some(on_actions) = story.on_actions {

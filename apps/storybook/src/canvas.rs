@@ -286,23 +286,35 @@ impl StoryCanvas {
         result
     }
 
+    /// `target` is one id path, or several separated by spaces that each
+    /// take the same chunk; every one is tried, and the errors are joined.
     fn apply_to(cx: &mut Cx, root: &WidgetRef, target: &str, chunk: &str) -> Result<(), String> {
-        let widget = if target.is_empty() {
-            root.clone()
-        } else {
-            let w = root.widget(cx, &id_path(target));
-            if w.is_empty() {
-                return Err(format!("no widget at {target}"));
+        if target.trim().is_empty() {
+            return apply_chunk(cx, root, chunk);
+        }
+        let mut errors = Vec::new();
+        for path in target.split_whitespace() {
+            let widget = root.widget(cx, &id_path(path));
+            if widget.is_empty() {
+                errors.push(format!("no widget at {path}"));
+            } else if let Err(e) = apply_chunk(cx, &widget, chunk) {
+                errors.push(format!("{path}: {e}"));
             }
-            w
-        };
-        apply_chunk(cx, &widget, chunk)
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
-    /// Whether the story's widget at this path can be reached.
+    /// Whether the story's widget at this path, or every one of several
+    /// paths separated by spaces, can be reached.
     pub fn has_target(&self, cx: &Cx, target: &str) -> bool {
         match &self.shown {
-            Some((_, root)) => target.is_empty() || !root.widget(cx, &id_path(target)).is_empty(),
+            Some((_, root)) => target
+                .split_whitespace()
+                .all(|path| !root.widget(cx, &id_path(path)).is_empty()),
             None => false,
         }
     }
