@@ -650,6 +650,17 @@ impl Default for ScriptObjectData {
 }
 
 impl ScriptObjectData {
+    /// Backing allocation retained by this object's dynamic property storage
+    /// (map buckets plus the ordered vector), excluding the struct itself.
+    /// Used by the retained-heap estimate.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.map.retained_bytes().saturating_add(
+            self.vec
+                .capacity()
+                .saturating_mul(::std::mem::size_of::<ScriptVecValue>()),
+        )
+    }
+
     pub fn add_type_methods(native: &mut ScriptNative, heap: &mut ScriptHeap) {
         native.add_type_method(
             heap,
@@ -969,6 +980,13 @@ impl ScriptObjectData {
                 },
             );
         } else {
+            // Updating an existing field keeps its original insertion order,
+            // matching the tracked path above; re-inserting would move it to
+            // the end and reorder iteration, JSON output and equality.
+            if let Some(existing) = self.map.get_mut(&key) {
+                existing.value = value;
+                return;
+            }
             self.map.insert(
                 key,
                 ScriptMapValue {

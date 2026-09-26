@@ -361,6 +361,20 @@ impl ScriptNative {
         self.type_table[ty_redux.to_index()].insert(method, fn_obj);
     }
 
+    /// Removes every native method registered for one value type.
+    ///
+    /// A host that embeds the raw VM normally leaves this surface intact. A
+    /// restricted embedding can clear it during trusted setup, then install a
+    /// smaller owned method surface before any script is evaluated.
+    pub fn clear_type_methods(&mut self, ty_redux: ScriptTypeRedux) -> usize {
+        let Some(methods) = self.type_table.get_mut(ty_redux.to_index()) else {
+            return 0;
+        };
+        let removed = methods.len();
+        methods.clear();
+        removed
+    }
+
     pub fn add_shared(&mut self, heap: &mut ScriptHeap) {
         self.add_type_method(heap, ScriptValueType::REDUX_NUMBER, id!(ty), &[], |_, _| {
             id!(number).escape()

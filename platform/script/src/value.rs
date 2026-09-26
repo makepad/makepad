@@ -1128,6 +1128,16 @@ impl ScriptValue {
         self.0 < Self::TYPE_NAN
     }
 
+    /// Checked index for language reads and writes; unlike `as_index`, this
+    /// cannot truncate, saturate, or turn a non-number into item zero.
+    pub fn checked_index(&self) -> Option<usize> {
+        let value = self.as_number()?;
+        // The cast saturates and maps NaN to zero, so only a finite,
+        // non-negative, integral value in range survives the round trip.
+        let index = value as usize;
+        (index as f64 == value && index != usize::MAX).then_some(index)
+    }
+
     pub const fn as_index(&self) -> usize {
         if let Some(f) = self.as_f64() {
             return f as usize;
