@@ -467,6 +467,11 @@ pub fn checkout(
     if !release.supported() {
         return Err("This release does not support this platform".into());
     }
+    // A build and an update run side by side on their own threads (never
+    // the terminal's): one checkout at a time, so two never write the same
+    // snapshot; the second finds it installed.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if release.installed(root) {
         return Ok(release.source(root));
     }

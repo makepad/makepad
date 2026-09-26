@@ -16,8 +16,11 @@ pub(super) const DIM: &str = "2";
 pub(super) const BOLD: &str = "1";
 pub(super) const OK: &str = "32";
 pub(super) const WARN: &str = "33";
-pub(super) const ACC: &str = "36";
+/// The accent: Makepad orange, for markers, spinners and progress bars.
+pub(super) const ACC: &str = "38;2;255;92;57";
 const INV: &str = "7";
+/// A key letter in the footer: bold Makepad orange.
+const KEY: &str = "1;38;2;255;92;57";
 /// Makepad orange: the ▌ on the selected row and the filled part of
 /// progress bars; never a background or an action.
 const MARK: &str = "38;2;255;92;57";
@@ -53,6 +56,10 @@ pub(super) struct Item {
     pub status: Text,
     /// Shown on the selected row only, as `<action> ⏎`.
     pub action: String,
+    /// A row inside an open tree node (the experiments): indented.
+    pub child: bool,
+    /// Said on the line under the rule while the row is selected.
+    pub info: String,
 }
 #[derive(Clone)]
 pub(super) enum Row {
@@ -80,6 +87,43 @@ pub(super) enum Nav {
     /// Something changed in the background (an app exited, disk measured):
     /// rebuild the view and call `menu` again.
     Refresh,
+    /// A letter key on the main menu (c cancel, s start when done) and the
+    /// selected row's id.
+    Key(char, String),
+}
+
+/// What runs in the background, as the menu shows it: set by the session
+/// whenever it changes, the progress on every tick.
+#[derive(Clone, Default)]
+pub(super) struct Background {
+    /// The app compiling now.
+    pub building: Option<Building>,
+    /// Waiting their turn, in order: (row id, opens when done).
+    pub queue: Vec<(String, bool)>,
+    /// Experiments Compile all queued that still wait to compile only.
+    pub batch: usize,
+    /// The update check and its progress.
+    pub update: Option<Doing>,
+}
+#[derive(Clone)]
+pub(super) struct Building {
+    pub id: String,
+    pub title: String,
+    /// Opens by itself when it is done (Return on its row; s turns it off).
+    pub open: bool,
+    /// Cancelled; its compiler is being stopped.
+    pub stopping: bool,
+    pub doing: Doing,
+}
+/// A step on a row: what it does, how far when known, and the amount.
+#[derive(Clone, Default)]
+pub(super) struct Doing {
+    pub step: String,
+    pub fraction: Option<f64>,
+    pub amount: String,
+}
+pub(super) fn set_background(background: Background) {
+    BACKGROUND.with(|b| *b.borrow_mut() = background);
 }
 
 thread_local! {
@@ -89,11 +133,11 @@ thread_local! {
     static MESSAGE: RefCell<Text> = const { RefCell::new(Vec::new()) };
     static CHOICE: RefCell<Text> = const { RefCell::new(Vec::new()) };
     static FOOTER: StdCell<Option<&'static str>> = const { StdCell::new(None) };
-    static LOG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static COLOR: StdCell<bool> = const { StdCell::new(false) };
     static LIGHT: StdCell<bool> = const { StdCell::new(false) };
     /// The row last worked on; `menu` starts its selection there once.
     static WORKED_ON: RefCell<Option<String>> = const { RefCell::new(None) };
+    static BACKGROUND: RefCell<Background> = RefCell::new(Background::default());
 }
 
 /// Setup detail (stages, compiler output summaries, errors) goes to this file.
@@ -102,10 +146,13 @@ pub(super) fn set_log(path: PathBuf) {
     if fs::metadata(&path).is_ok_and(|m| m.len() > 4 * 1024 * 1024) {
         let _ = fs::File::create(&path);
     }
-    LOG_PATH.with(|log| *log.borrow_mut() = Some(path));
+    let _ = LOG_PATH.set(path);
 }
+/// One log for the session, written from the terminal's thread and from the
+/// threads that build and update in the background.
+static LOG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 pub(super) fn log_path() -> Option<PathBuf> {
-    LOG_PATH.with(|log| log.borrow().clone())
+    LOG_PATH.get().cloned()
 }
 pub(super) fn activity(value: &str) {
     let lines: String = value.lines().map(clean).filter(|s| !s.is_empty()).map(|s| s + "\n").collect();
@@ -155,7 +202,9 @@ pub(super) fn working(id: &str, label: &str) {
         for row in v.borrow_mut().rows.iter_mut() {
             if let Row::Item(item) = row {
                 if item.id == id {
-                    item.status = text(label, WARN);
+                    // An orange spinner (animated as the screen redraws)
+                    // and what is going on.
+                    item.status = vec![Span(SPINNER[0].to_string(), ACC), Span(format!(" {label}"), PLAIN)];
                     item.action.clear();
                     SELECTED.with(|s| s.set(Some(index)));
                 }
@@ -167,6 +216,10 @@ pub(super) fn working(id: &str, label: &str) {
     MESSAGE.with(|m| m.borrow_mut().clear());
     FOOTER.with(|f| f.set(Some("working · ctrl+c stops")));
     draw();
+}
+/// The full-screen view is on (a terminal); otherwise plain lines.
+pub(super) fn full_screen() -> bool {
+    COLOR.with(StdCell::get)
 }
 pub(super) fn set_view(view: View) {
     VIEW.with(|v| *v.borrow_mut() = view);
@@ -269,14 +322,17 @@ fn band(y: usize, x0: usize, x1: usize) {
 /// so it is never cut into. The selected
 /// row's `<action> ⏎` does not count (it moves with the selection); where it
 /// reaches into the mark, the text wins there and the mark goes on around it.
-fn logo(top: usize, bottom: usize, right: usize) {
+///
+/// `sizes`: which of the two to try, in order (0 large, 1 small). With
+/// `paint` false nothing is drawn; the answer says whether it would fit.
+fn logo(top: usize, bottom: usize, right: usize, sizes: &[usize], paint: bool) -> bool {
     let height = (bottom + 1).saturating_sub(top);
     let style = if LIGHT.with(StdCell::get) { LOGO_LIGHT } else { LOGO_DARK };
     CANVAS.with(|canvas| {
         let mut c = canvas.borrow_mut();
         let width = c.width;
         if top == 0 || width == 0 {
-            return;
+            return false;
         }
         let row_cells = |c: &Canvas, y: usize| -> Vec<Cell> { c.cells.get((y - 1) * width..y * width).map(<[Cell]>::to_vec).unwrap_or_default() };
         // Where each row's own text ends (plus two columns of air).
@@ -291,7 +347,8 @@ fn logo(top: usize, bottom: usize, right: usize) {
             }
             if end == 0 { 0 } else { end + 2 }
         };
-        for art in LOGO.split("\n\n").map(|art| art.lines().collect::<Vec<&str>>()) {
+        let arts: Vec<Vec<&str>> = LOGO.split("\n\n").map(|art| art.lines().collect()).collect();
+        for art in sizes.iter().filter_map(|&size| arts.get(size)) {
             let art_width = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
             if art.len() > height || right < art_width + 30 || right > width {
                 continue;
@@ -308,6 +365,9 @@ fn logo(top: usize, bottom: usize, right: usize) {
             }) else {
                 continue;
             };
+            if !paint {
+                return true;
+            }
             for (i, line) in art.iter().enumerate() {
                 let y = y0 + i;
                 let before = row_cells(&c, y);
@@ -321,9 +381,10 @@ fn logo(top: usize, bottom: usize, right: usize) {
                     }
                 }
             }
-            return;
+            return true;
         }
-    });
+        false
+    })
 }
 /// `value` in at most `max` lines of `width` columns, broken at spaces and
 /// keeping each span's style; the last line ends in "…" when text is left.
@@ -402,6 +463,9 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
     let mut item = 0;
     let mut selected_line = None;
     let name_width = view.name_width.max(15);
+    // A screen with a license column gives every row one, so the status
+    // column lines up (the main menu: status at column 30).
+    let licenses = view.rows.iter().any(|r| matches!(r, Row::Item(i) if !i.license.is_empty()));
     for (i, row) in view.rows.iter().enumerate() {
         match row {
             Row::Head(title) => {
@@ -418,25 +482,40 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
                     lines.push((Vec::new(), None));
                 }
                 let chosen = selected == Some(item);
+                // Rows of an open node sit two columns in, the name column
+                // two shorter, so the columns after it stay where they are.
+                let (indent, width) = if entry.child { ("  ", name_width - 2) } else { ("", name_width) };
                 let mut spans = if chosen {
-                    vec![Span("  ".into(), PLAIN), Span("▌".into(), MARK), Span(" ".into(), PLAIN), Span(padded(&entry.name, name_width), BOLD), Span(" ".into(), PLAIN)]
+                    vec![Span("  ".into(), PLAIN), Span("▌".into(), MARK), Span(format!(" {indent}"), PLAIN), Span(padded(&entry.name, width), BOLD), Span(" ".into(), PLAIN)]
                 } else {
-                    vec![Span(format!("    {} ", padded(&entry.name, name_width)), PLAIN)]
+                    vec![Span(format!("    {indent}{} ", padded(&entry.name, width)), PLAIN)]
                 };
                 let license = match entry.license {
-                    "commercial" => Some(("commercial license", BOLD)),
-                    "beta" => Some(("beta access", WARN)),
-                    "free" => Some(("free, open source", DIM)),
+                    "commercial" => Some(("licensed", PLAIN)),
+                    "beta" => Some(("beta", WARN)),
+                    "free" => Some(("free", DIM)),
+                    _ if licenses => Some(("", PLAIN)),
                     _ => None,
                 };
                 if let Some((label, style)) = license {
-                    spans.push(Span(padded(label, 20), style));
+                    spans.push(Span(padded(label, 10), style));
                 }
-                spans.extend(entry.status.iter().cloned());
-                if chosen && entry.action == "⏎" {
+                let live = live_status(&entry.id);
+                let mut status = live.clone().unwrap_or_else(|| entry.status.clone());
+                if let Some(first) = status.first_mut() {
+                    if SPINNER.iter().any(|c| first.0 == c.to_string()) {
+                        first.0 = spinner_frame().to_string();
+                    }
+                }
+                spans.extend(status);
+                // Work in progress on the row: no action; its keys are in the footer.
+                let chosen_idle = chosen && live.is_none();
+                if chosen_idle && entry.action == "⏎" {
                     spans.push(Span(" ⏎".into(), OK));
-                } else if chosen && !entry.action.is_empty() {
-                    let gap = if entry.status.is_empty() && entry.license.is_empty() { "" } else { "  " };
+                } else if chosen_idle && !entry.action.is_empty() {
+                    // Right after the name or the license column, else two
+                    // columns after the status.
+                    let gap = if entry.status.is_empty() { "" } else { "  " };
                     spans.push(Span(format!("{gap}{} ⏎", entry.action), OK));
                 }
                 if chosen { selected_line = Some(lines.len()); }
@@ -446,6 +525,102 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
         }
     }
     (lines, selected_line)
+}
+
+/// The spinner, the step, a short bar when the share is known and the amount.
+fn doing_text(doing: &Doing) -> Text {
+    let mut spans = vec![Span(spinner_frame().to_string(), ACC), Span(format!(" {}", doing.step), PLAIN)];
+    if let Some(fraction) = doing.fraction {
+        let filled = ((fraction.clamp(0.0, 1.0) * 12.0).round() as usize).min(12);
+        spans.push(Span(" ".into(), PLAIN));
+        spans.push(Span("━".repeat(filled), MARK));
+        spans.push(Span("─".repeat(12 - filled), DIM));
+    }
+    if !doing.amount.is_empty() {
+        spans.push(Span(format!(" {}", doing.amount), DIM));
+    }
+    spans
+}
+/// A row's status while background work involves it: compiling (or
+/// downloading) with its progress, its place in the queue, or the update
+/// check. None: the row's own status.
+fn live_status(id: &str) -> Option<Text> {
+    BACKGROUND.with(|b| {
+        let b = b.borrow();
+        if id == "updates" {
+            return b.update.as_ref().map(doing_text);
+        }
+        if let Some(building) = b.building.as_ref().filter(|x| x.id == id) {
+            if building.stopping {
+                return Some(vec![Span(spinner_frame().to_string(), ACC), Span(" stopping…".into(), PLAIN)]);
+            }
+            return Some(doing_text(&building.doing));
+        }
+        let place = b.queue.iter().position(|(queued, _)| queued == id)?;
+        let after = if place == 0 { " · next".to_owned() } else { format!(" · {} to go", place + 1) };
+        Some(vec![Span("◌".into(), ACC), Span(" queued".into(), PLAIN), Span(after, DIM)])
+    })
+}
+/// The line under the rule when no message is showing: what the selected
+/// row does, or, while an app compiles, what happens with it.
+fn info_line(item: &Item) -> Text {
+    BACKGROUND.with(|b| {
+        let b = b.borrow();
+        if let Some(building) = &b.building {
+            let queued = b.queue.iter().find(|(id, _)| *id == item.id);
+            if building.id == item.id {
+                return if building.stopping {
+                    text("Stopping the compiler; what was downloaded and compiled is kept.", PLAIN)
+                } else if building.open {
+                    text("Compiling from source. It opens by itself when it is done.", PLAIN)
+                } else {
+                    text("Compiling from source. It only compiles; press s or ⏎ to open it when done.", PLAIN)
+                };
+            }
+            if let Some((_, open)) = queued {
+                return if *open {
+                    text(format!("Queued behind {}; it compiles and opens after it.", building.title), PLAIN)
+                } else {
+                    text(format!("Queued behind {}; it only compiles. Press s or ⏎ to open it when done.", building.title), PLAIN)
+                };
+            }
+            if building.stopping {
+                return text(format!("{} is stopping.", building.title), DIM);
+            }
+            return if building.open {
+                text(format!("{} opens by itself when it is done compiling.", building.title), DIM)
+            } else {
+                text(format!("{} is compiling; it only compiles and does not open.", building.title), DIM)
+            };
+        }
+        text(item.info.clone(), PLAIN)
+    })
+}
+/// The main menu's keys: s and c only where the selected row has work to
+/// change, their letters in orange.
+fn menu_keys(item: Option<&Item>) -> Text {
+    let (open, cancel) = BACKGROUND.with(|b| {
+        let b = b.borrow();
+        let Some(item) = item else { return (None, false) };
+        if let Some(building) = b.building.as_ref().filter(|x| x.id == item.id) {
+            if building.stopping { (None, false) } else { (Some(building.open), true) }
+        } else if let Some((_, open)) = b.queue.iter().find(|(id, _)| *id == item.id) {
+            (Some(*open), true)
+        } else {
+            (None, item.id == "all" && b.batch > 0)
+        }
+    });
+    let mut spans = vec![Span("↑↓ move   ⏎ select   ".into(), DIM)];
+    if let Some(open) = open {
+        spans.push(Span("s".into(), KEY));
+        spans.push(Span(if open { " don't start   ".into() } else { " start when done   ".into() }, DIM));
+    }
+    if cancel {
+        spans.push(Span("c".into(), KEY));
+        spans.push(Span(" cancel   ".into(), DIM));
+    }
+    spans.push(Span("q quit".into(), DIM));
+    spans
 }
 
 fn draw() {
@@ -461,77 +636,102 @@ fn draw() {
     let width = cols.min(80);
     VIEW.with(|view| {
         let view = view.borrow();
-        let mut x = put(2, 2, "Makepad", BOLD);
-        x = put(2, x, " Apps", PLAIN);
-        x = put(2, x, &view.crumb, PLAIN);
-        // The email shows on the Account row, not in the header.
-        let _ = (x, &view.email);
-        put(3, 2, &view.subtitle, DIM);
         let work = work_rows().map(|rows| View { rows, back: true, ..View::default() });
-        let (lines, selected_line) = match &work {
+        let selected = SELECTED.with(StdCell::get);
+        let (body, selected_line) = match &work {
             Some(page) => body_lines(page, None),
-            None => body_lines(&view, SELECTED.with(StdCell::get)),
+            None => body_lines(&view, selected),
         };
-        let top = 4;
-        let mut room = rows.saturating_sub(top + 4 + usize::from(view.back));
+        // Everything above the footer scrolls as one: the header, then the
+        // rows. The email shows on the Account row, not in the header.
+        let _ = &view.email;
+        let mut lines: Vec<(Text, Option<usize>)> = vec![
+            (Vec::new(), None),
+            (vec![Span("  ".into(), PLAIN), Span("Makepad".into(), BOLD), Span(" Apps".into(), PLAIN), Span(view.crumb.clone(), PLAIN)], None),
+            (vec![Span("  ".into(), PLAIN), Span(view.subtitle.clone(), DIM)], None),
+        ];
+        let head = lines.len();
+        lines.extend(body);
+        let selected_line = selected_line.map(|line| line + head);
+        // The footer (the rule, two status lines, the keys) takes the last
+        // four lines at most; one line above it stays empty or says what is
+        // scrolled out of view.
+        let room = rows - 5;
         let mut offset = SCROLL.with(StdCell::get);
         if lines.len() <= room {
             offset = 0;
         } else {
-            if !view.back { room -= 1; } // the "more" indicator
             if let Some(line) = selected_line {
-                // Keep the heading above the first item in view.
+                // The first row brings the header back into view.
                 let first_item = lines.iter().position(|l| l.1 == Some(0)).unwrap_or(0);
-                if line == first_item { offset = 0; }
+                if line <= first_item { offset = 0; }
                 if line < offset { offset = line; }
                 if line >= offset + room { offset = line + 1 - room; }
             }
             offset = offset.min(lines.len() - room);
         }
         SCROLL.with(|s| s.set(offset));
-        let mut y = top;
+        let shown = lines.len().min(room);
         for (index, (spans, _)) in lines.iter().enumerate().skip(offset).take(room) {
+            let y = index - offset + 1;
             if selected_line == Some(index) {
                 band(y, 2, width.saturating_sub(2));
             }
             put_text(y, 0, spans);
-            y += 1;
         }
-        // Sub-screens keep a line for the scroll hint, as the main screen
-        // does when it has to scroll.
-        if lines.len() > room || view.back {
-            y += 1;
-        }
+        let mut y = shown + 2;
         if lines.len() > room {
-            let below = lines[(offset + room).min(lines.len())..].iter().filter(|l| l.1.is_some()).count();
+            let below = lines[offset + room..].iter().filter(|l| l.1.is_some()).count();
             let above = lines[..offset].iter().filter(|l| l.1.is_some()).count();
-            let more = if below > 0 { format!("↓ {below} more") } else if above > 0 { format!("↑ {above} above") } else { String::new() };
+            let more = match (above, below) {
+                (0, below) => format!("↓ {below} more"),
+                (above, 0) => format!("↑ {above} above"),
+                (above, below) => format!("↑ {above} above · ↓ {below} more"),
+            };
             put(y - 1, 4, &more, DIM);
         }
-        // The rule, status, choice and footer follow the rows directly.
-        // The rule, status, choice and footer keep to the bottom of the
-        // window, so the mark has the height between them and the header.
-        let _ = y;
-        let y = rows - 3;
-        // The mark sits at the right of the window (up to 100 columns),
-        // beside the rows rather than under them.
-        logo(top, y - 1, cols.min(100).saturating_sub(2));
+        // The mark sits at the right of the window (up to 100 columns)
+        // beside the rows: the large one or the small one where either
+        // fits, else the rule moves down just far enough for the small one
+        // (a short page like Log in gets it under its text), else none.
+        let right = cols.min(100).saturating_sub(2);
+        let top = if offset == 0 { head + 1 } else { 1 };
+        if logo(top, y - 2, right, &[0, 1], false) {
+            logo(top, y - 2, right, &[0, 1], true);
+        } else if let Some(rule) = (y + 1..=rows - 3).find(|&rule| logo(top, rule - 2, right, &[1], false)) {
+            y = rule;
+            logo(top, y - 2, right, &[1], true);
+        }
         put(y, 2, &"─".repeat(width.saturating_sub(4)), DIM);
         // A status message longer than the line wraps onto the choice line
-        // when that is free; what still does not fit ends in "…".
+        // when that is free; what still does not fit ends in "…". With no
+        // message, the main menu says what the selected row does.
         let room = width.saturating_sub(4);
         let choice = CHOICE.with(|c| c.borrow().clone());
-        let lines = MESSAGE.with(|m| wrap_text(&m.borrow(), room, if choice.is_empty() { 2 } else { 1 }));
+        let mut message = MESSAGE.with(|m| m.borrow().clone());
+        let item = selected.and_then(|n| view.rows.iter().filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None }).nth(n));
+        let main = work.is_none() && !view.back;
+        if message.is_empty() && choice.is_empty() && main {
+            if let Some(item) = item {
+                message = info_line(item);
+            }
+        }
+        let lines = wrap_text(&message, room, if choice.is_empty() { 2 } else { 1 });
         for (i, line) in lines.iter().enumerate() {
             put_text(y + 1 + i, 2, line);
         }
         put_text(y + 2, 2, &choice);
-        let footer = FOOTER.with(StdCell::get).or(view.footer).unwrap_or(if view.back {
-            "↑↓ move   ⏎ select   esc back   q quit"
-        } else {
-            "↑↓ move   ⏎ select   q quit"
-        });
-        put(y + 3, 2, footer, DIM);
+        match FOOTER.with(StdCell::get).or(view.footer) {
+            Some(footer) => {
+                put(y + 3, 2, footer, DIM);
+            }
+            None if view.back => {
+                put(y + 3, 2, "↑↓ move   ⏎ select   esc back   q quit", DIM);
+            }
+            None => {
+                put_text(y + 3, 2, &menu_keys(item));
+            }
+        }
     });
     let _ = present();
 }
@@ -567,6 +767,7 @@ pub(super) fn menu(view: View, selected: &mut usize, changed: &dyn Fn() -> bool)
     if ids.is_empty() {
         return Ok(Nav::Back);
     }
+    let main = !view.back;
     VIEW.with(|v| *v.borrow_mut() = view);
     FOOTER.with(|f| f.set(None));
     // Only the screen that has the worked-on row takes it over.
@@ -600,8 +801,13 @@ pub(super) fn menu(view: View, selected: &mut usize, changed: &dyn Fn() -> bool)
             Key::Enter => return Ok(Nav::Select(ids[sel].clone())),
             Key::Back => return Ok(Nav::Back),
             Key::Quit | Key::Char('q') | Key::Char('Q') => return Ok(Nav::Quit),
+            // Background work: s (start when done) and c (cancel).
+            Key::Char(c @ ('c' | 's')) if main => return Ok(Nav::Key(c, ids[sel].clone())),
             Key::Other => {
-                if super::reap_apps() || changed() {
+                // Background builds report on every tick, each tick redraws.
+                let exited = super::reap_apps();
+                let finished = super::poll_background();
+                if exited || finished || changed() {
                     return Ok(Nav::Refresh);
                 }
             }
@@ -658,7 +864,7 @@ pub(super) fn choose(question: &str, note: &str, options: &[&str], default: usiz
                     break Some((*option).to_owned());
                 }
             }
-            Key::Other => { super::reap_apps(); }
+            Key::Other => { super::reap_apps(); super::poll_background(); }
             _ => {}
         }
     };
@@ -695,6 +901,7 @@ pub(super) fn edit(prompt: &str, initial: &str, hint: Text, footer: &'static str
             Key::Back | Key::Quit => break None,
             Key::Backspace => { value.pop(); }
             Key::Char(c) if !c.is_control() && value.chars().count() < 200 => value.push(c),
+            Key::Other => { super::poll_background(); }
             _ => {}
         }
     };
@@ -938,6 +1145,67 @@ impl Drop for Screen {
 }
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// The spinner's frame for now: one step every 100 ms.
+fn spinner_frame() -> char {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    SPINNER[(START.get_or_init(Instant::now).elapsed().as_millis() / 100) as usize % SPINNER.len()]
+}
+
+/// Background work's progress events, read on the terminal's thread: the
+/// log gets the phases and Cargo's lines (as `with_progress` logs them), the
+/// row gets what it is doing now.
+pub(super) struct Follow {
+    identity: String,
+    logged_line: String,
+    pub doing: Doing,
+}
+impl Follow {
+    pub(super) fn new(starting: &str) -> Self {
+        Follow { identity: String::new(), logged_line: String::new(), doing: Doing { step: starting.into(), ..Doing::default() } }
+    }
+    pub(super) fn event(&mut self, p: &progress::Progress) {
+        if !p.row.is_empty() {
+            if p.stage == "Working" {
+                activity(&format!("{}: {}", p.row, p.detail.trim()));
+            }
+            return;
+        }
+        let phase = format!("{}:{}:{}", p.package.group, p.package.index, p.stage);
+        if self.identity != phase {
+            self.identity = phase;
+            let group = if p.package.group.is_empty() { String::new() } else { format!("{} {}: ", p.package.group, p.package.name) };
+            activity(&format!("{group}{}: {}", p.stage, p.detail));
+        } else if p.stage == "Compiling Rust" && !p.detail.trim().is_empty() && p.detail != self.logged_line {
+            activity(&p.detail);
+        }
+        if p.stage == "Compiling Rust" {
+            self.logged_line = p.detail.clone();
+        }
+        let mb = |bytes: f64| bytes / 1048576.;
+        match (p.stage.as_str(), &p.overall) {
+            ("Working", _) => {}
+            (stage, Some(overall)) => {
+                // A component with its one forward-only bar (the source).
+                let step = if stage == "Download" { "downloading" } else { "unpacking" };
+                self.doing = Doing {
+                    step: step.into(),
+                    fraction: Some(overall.fraction),
+                    amount: format!("{:.0} / {:.0} MB", mb(overall.fraction * overall.bytes as f64), mb(overall.bytes as f64)),
+                };
+            }
+            ("Compiling Rust", None) => {
+                let (fraction, amount) = match p.unit {
+                    progress::Unit::Crates if p.total > 0 => (Some((p.loaded as f64 / p.total as f64).clamp(0.0, 1.0)), format!("{} / {} crates", p.loaded, p.total)),
+                    progress::Unit::Crates if p.loaded > 0 => (None, format!("{} crates", p.loaded)),
+                    _ => (self.doing.fraction.filter(|_| self.doing.step == "compiling"), if self.doing.step == "compiling" { self.doing.amount.clone() } else { String::new() }),
+                };
+                self.doing = Doing { step: "compiling".into(), fraction, amount };
+            }
+            ("Finishing", None) => self.doing = Doing { step: "finishing".into(), ..Doing::default() },
+            _ => {}
+        }
+    }
+}
 
 /// Run blocking setup work with its progress as one self-rewriting bar on the
 /// status line: a short label, the bar, a percentage and a dim amount. Every
