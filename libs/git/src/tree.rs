@@ -31,6 +31,27 @@ pub struct Tree {
     pub entries: Vec<TreeEntry>,
 }
 
+/// Refuse a tree entry name that could escape or corrupt a working tree
+/// when it is checked out: "", ".", "..", ".git" in any case (".GIT" is
+/// the same folder on case-insensitive disks), and any name holding a path
+/// separator ('/' or '\\') or NUL. Real git never writes such names; a
+/// crafted tree with one could make a checkout write or delete outside the
+/// working tree or inside `.git`.
+pub fn validate_entry_name(name: &str) -> Result<(), GitError> {
+    let bad = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.eq_ignore_ascii_case(".git")
+        || name.contains(['/', '\\', '\0']);
+    if bad {
+        return Err(GitError::InvalidObject(format!(
+            "tree entry: unsafe name {:?}",
+            name
+        )));
+    }
+    Ok(())
+}
+
 /// Parse the binary content of a tree object.
 ///
 /// Format: repeated entries of `<mode-ascii> <name>\0<20-byte-sha1>`
@@ -63,6 +84,9 @@ pub fn parse_tree(data: &[u8]) -> Result<Tree, GitError> {
         let name = std::str::from_utf8(&data[space_pos + 1..null_pos])
             .map_err(|_| GitError::InvalidObject("tree entry: invalid UTF-8 name".into()))?
             .to_string();
+        // Every checkout path is built from these names: refuse unsafe ones
+        // here, before anything can write or remove with them.
+        validate_entry_name(&name)?;
 
         // Read 20-byte SHA-1 after the null
         let sha_start = null_pos + 1;
@@ -155,5 +179,33 @@ mod tests {
         assert_eq!(parsed.entries[2].name, "subdir");
         assert_eq!(parsed.entries[2].mode, 0o040000);
         assert!(parsed.entries[2].is_tree());
+    }
+
+    #[test]
+    fn unsafe_entry_names_are_rejected() {
+        for name in [
+            "", ".", "..", ".git", ".GIT", ".Git", "a/b", "../x", "a\\b", "..\\x", "a\0b",
+        ] {
+            assert!(validate_entry_name(name).is_err(), "{name:?} should be rejected");
+        }
+        for name in ["file.txt", ".gitignore", ".github", "..a", "git", "a.git"] {
+            assert!(validate_entry_name(name).is_ok(), "{name:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn parse_tree_refuses_unsafe_names() {
+        let oid = ObjectId::from_hex("2015f8e40c38d86ca88808c6f031bb22544e92cf").unwrap();
+        for name in ["..", ".git", ".GiT", ".", "a/b", "a\\b"] {
+            let mut data = b"100644 ".to_vec();
+            data.extend_from_slice(name.as_bytes());
+            data.push(0);
+            data.extend_from_slice(oid.as_bytes());
+            assert!(parse_tree(&data).is_err(), "{name:?} should be refused");
+        }
+        // An empty name: the mode's space is followed directly by NUL.
+        let mut data = b"100644 \0".to_vec();
+        data.extend_from_slice(oid.as_bytes());
+        assert!(parse_tree(&data).is_err());
     }
 }

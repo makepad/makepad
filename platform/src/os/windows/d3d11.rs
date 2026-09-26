@@ -712,13 +712,18 @@ impl Cx {
     /// `target_alloc` is the allocated size of `first_target` when it is a
     /// texture the caller chose (the WM's shared textures are power-of-two
     /// allocations larger than the pass); the depth buffer must match it.
+    ///
+    /// False when the pass has nothing to draw into: an empty or not yet
+    /// sized pass (a hosted child's texture passes are drawn before its
+    /// window has a geometry, at dpi 0, which makes the size NaN), or a
+    /// colour target the device could not create.
     pub fn setup_pass_render_targets(
         &mut self,
         pass_id: DrawPassId,
         first_target: &Option<ID3D11RenderTargetView>,
         target_alloc: Option<(usize, usize)>,
         d3d11_cx: &D3d11Cx,
-    ) {
+    ) -> bool {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
 
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
@@ -745,8 +750,9 @@ impl Cx {
         unsafe {
             d3d11_cx.context.RSSetViewports(Some(&[viewport]));
         }
-        if viewport.Width < 1.0 || viewport.Height < 1.0 {
-            return;
+        // Written to also refuse NaN.
+        if !(viewport.Width >= 1.0 && viewport.Height >= 1.0) {
+            return false;
         }
         // set up the color texture array
         let mut color_textures = Vec::<Option<ID3D11RenderTargetView>>::new();
@@ -771,7 +777,10 @@ impl Cx {
                 } else {
                     cxtexture.os.render_target_view.clone()
                 };
-                color_textures.push(Some(render_target.clone().unwrap()));
+                let Some(render_target) = render_target else {
+                    return false;
+                };
+                color_textures.push(Some(render_target.clone()));
                 // possibly clear it
                 match color_texture.clear_color {
                     DrawPassClearColor::InitWith(color) => {
@@ -780,7 +789,7 @@ impl Cx {
                             unsafe {
                                 d3d11_cx
                                     .context
-                                    .ClearRenderTargetView(render_target.as_ref().unwrap(), &color)
+                                    .ClearRenderTargetView(&render_target, &color)
                             }
                         }
                     }
@@ -789,7 +798,7 @@ impl Cx {
                         unsafe {
                             d3d11_cx
                                 .context
-                                .ClearRenderTargetView(render_target.as_ref().unwrap(), &color)
+                                .ClearRenderTargetView(&render_target, &color)
                         }
                     }
                 }
@@ -852,6 +861,7 @@ impl Cx {
             .os
             .pass_uniforms
             .update_with_f32_constant_data(&d3d11_cx, cxpass.pass_uniforms.as_slice());
+        true
     }
 
     /// Renders the pass and presents it to the window. Returns whether a frame was
@@ -993,9 +1003,11 @@ impl Cx {
                 .alloc
                 .as_ref()
                 .map(|alloc| (alloc.width, alloc.height));
-            self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx);
-        } else {
-            self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx);
+            if !self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx) {
+                return;
+            }
+        } else if !self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx) {
+            return;
         }
 
         let mut zbias = 0.0;
@@ -1008,42 +1020,73 @@ impl Cx {
         }
     }
 
-    pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        let pending = &mut self.os.async_hlsl_compile.pending;
-        let mut adopted = false;
-        pending.retain(|id, (device, task)| {
+    /// Installs the background compiles that have finished, and redraws so the draw calls
+    /// they were holding back appear. Each finished task raises the internal signal, and the
+    /// signal handler calls this, as does every paint tick before it draws. When it ran only
+    /// after a redraw, a window at rest never took its shaders: a popup opened for the first
+    /// time stayed an empty panel (its background drawn, its rows skipped) until the next input.
+    pub(crate) fn hlsl_adopt_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+        let mut finished = Vec::new();
+        self.os.async_hlsl_compile.pending.retain(|id, (device, task)| {
             // A completed shader belongs to the device that compiled it. Device
             // recovery must never install objects from the retired device.
             if device != &d3d11_cx.device {
-                self.draw_shaders.compile_set.insert(*id);
+                finished.push((*id, None));
                 return false;
             }
             let Some(result) = task.try_take() else {
                 return true;
             };
-            match result {
-                Ok(Ok(shader)) => {
-                    self.draw_shaders.shaders[*id].os_shader_id =
-                        Some(self.draw_shaders.os_shaders.len());
-                    self.draw_shaders.os_shaders.push(shader);
-                    adopted = true;
-                }
-                Ok(Err(D3dShaderError::Device(error))) => {
-                    d3d11_cx.note_error("background shader creation", &error);
-                    self.draw_shaders.compile_set.insert(*id);
-                }
-                Ok(Err(D3dShaderError::Compile)) => {}
-                Err(error) => crate::error!("Background shader {}: {:?}", id, error),
-            }
+            finished.push((*id, Some(result)));
             false
         });
+        let mut adopted = false;
+        for (id, result) in finished {
+            match result {
+                None => {
+                    self.draw_shaders.compile_set.insert(id);
+                }
+                Some(Ok(result)) => adopted |= self.hlsl_install_shader(id, result, d3d11_cx),
+                Some(Err(error)) => crate::error!("Background shader {}: {:?}", id, error),
+            }
+        }
         if adopted {
             self.redraw_all();
         }
+    }
+
+    /// Compiles the shaders created since the last frame.
+    ///
+    /// Until the startup set has been installed they compile on the pool, where the cost of
+    /// a first launch (every shader of the app, each a D3DCompile of 100 ms or more with a cold
+    /// cache) stays off the UI thread. After that a new shader belongs to something that is
+    /// about to draw, a popup or menu opened for the first time: those compile here, before the
+    /// frame renders, as Metal does, so it draws complete with at most a one-time hitch instead
+    /// of an empty panel that waits behind whatever the app has queued on the heavy lane. A
+    /// cached shader costs a file read and the device objects. `INLINE_BUDGET` bounds the hitch;
+    /// what is left over goes to the pool.
+    pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+        const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+        if self.os.async_hlsl_compile.pending.is_empty()
+            && !self.draw_shaders.os_shaders.is_empty()
+        {
+            self.os.async_hlsl_compile.startup_installed = true;
+        }
+        let inline_until = self
+            .os
+            .async_hlsl_compile
+            .startup_installed
+            .then(|| std::time::Instant::now() + INLINE_BUDGET);
         let pool = self.task_pool();
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
         for id in compile_set {
             if self.os.async_hlsl_compile.pending.contains_key(&id) {
+                continue;
+            }
+            if inline_until.is_some_and(|until| std::time::Instant::now() < until) {
+                let mapping = D3dShaderInputs::from(&self.draw_shaders.shaders[id].mapping);
+                let result = CxOsDrawShader::from_inputs(&d3d11_cx.device, &mapping);
+                self.hlsl_install_shader(id, result, d3d11_cx);
                 continue;
             }
             // Reserve before cloning a mapping. A full queue leaves its source
@@ -1056,22 +1099,9 @@ impl Cx {
             let device = d3d11_cx.device.clone();
             let compile_device = device.clone();
             let task = slot.submit_internal_named("renderer.hlsl-pipeline", move || {
-                let CxDrawShaderCode::Combined { code } = &mapping.code else {
-                    crate::error!("D3D11 does not support separate vertex/fragment sources");
-                    return Err(D3dShaderError::Compile);
-                };
-                if mapping.flags.debug_code {
-                    crate::log!("{}", code);
-                }
                 // Cache I/O, D3DCompile AND device shader/layout/sampler
                 // creation all run here. The immediate context stays on UI.
-                CxOsDrawShader::new(
-                    &compile_device,
-                    code,
-                    shader_cache_dir(),
-                    &mapping,
-                    &mapping.uniform_buffer_bindings,
-                )
+                CxOsDrawShader::from_inputs(&compile_device, &mapping)
             });
             self.os
                 .async_hlsl_compile
@@ -1082,6 +1112,29 @@ impl Cx {
             || !self.draw_shaders.compile_set.is_empty()
         {
             self.demo_time_repaint = true;
+        }
+    }
+
+    /// Installs one compile's outcome; true when the shader can now draw.
+    fn hlsl_install_shader(
+        &mut self,
+        id: usize,
+        result: Result<CxOsDrawShader, D3dShaderError>,
+        d3d11_cx: &D3d11Cx,
+    ) -> bool {
+        match result {
+            Ok(shader) => {
+                self.draw_shaders.shaders[id].os_shader_id =
+                    Some(self.draw_shaders.os_shaders.len());
+                self.draw_shaders.os_shaders.push(shader);
+                true
+            }
+            Err(D3dShaderError::Device(error)) => {
+                d3d11_cx.note_error("shader creation", &error);
+                self.draw_shaders.compile_set.insert(id);
+                false
+            }
+            Err(D3dShaderError::Compile) => false,
         }
     }
 
@@ -1369,10 +1422,10 @@ impl Cx {
         }
     }
 
-    // HLSL shaders compile synchronously via `hlsl_compile_shaders`, so a shader
-    // is "window-ready" iff its OS-level shader entry has been allocated.
-    // Used by the shared SLUG helper path that also runs on Linux (where GL may
-    // async-compile) to decide whether to draw or fall back to raster.
+    // A shader is "window-ready" once `hlsl_compile_shaders` or `hlsl_adopt_shaders`
+    // has installed its OS-level shader. Used by the shared SLUG helper path that
+    // also runs on Linux (where GL may async-compile) to decide whether to draw or
+    // fall back to raster.
     pub fn is_draw_shader_window_ready(&self, shader_id: DrawShaderId) -> bool {
         self.draw_shaders.shaders[shader_id.index]
             .os_shader_id
@@ -1383,7 +1436,8 @@ impl Cx {
 fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
     match pix {
         TexturePixel::BGRAu8 => DXGI_FORMAT_B8G8R8A8_UNORM,
-        TexturePixel::RGBAf16 => DXGI_FORMAT_R16_FLOAT,
+        // Four half floats (the trimmed bindings lack the named constant).
+        TexturePixel::RGBAf16 => DXGI_FORMAT(10), // R16G16B16A16_FLOAT
         TexturePixel::RGBAf32 => DXGI_FORMAT_R32G32B32A32_FLOAT,
         TexturePixel::Ru8 => DXGI_FORMAT_R8_UNORM,
         TexturePixel::RGu8 => DXGI_FORMAT_R8G8_UNORM,
@@ -2041,8 +2095,7 @@ impl D3d11Window {
 
             // Set the maximum frame latency on the swap chain (not the device) and, for a main
             // window, take its waitable object: the beat the event loop waits on, one credit
-            // per retired present. Registration order decides the primary window (index 0),
-            // whose beat drives the whole app tick.
+            // per retired present.
             if self.waitable_swap_chain {
                 let handle = match swap_chain.cast::<IDXGISwapChain2>() {
                     Ok(swap_chain2) => {
@@ -2108,17 +2161,23 @@ impl D3d11Window {
         // changed while the user was dragging across monitors).
         self.alloc_size = Vec2d::default();
         self.alloc_dpi = 0.0;
-        // Live-resize presents without vsync and skips the frame-latency wait, but
-        // every retired Present still credits the waitable semaphore, so a credit
-        // is almost certainly waiting. Claim it rather than waiting for the next
-        // one: the first frame after the drag then goes out immediately instead of
-        // sitting out a whole refresh (the old code drained the semaphore to zero
-        // here, which made every resize end with a visible stall). Any surplus
-        // credits are capped by the chain's maximum frame latency, so pacing
-        // re-establishes itself within a frame or two by itself.
+        // Live-resize presents skip the frame-latency wait, but every one of them
+        // still credits the waitable semaphore when it retires, and nothing takes
+        // those credits back: kept, they are a permanent surplus, so the window's
+        // beat wait returns at once forever after, it runs deeper than its latency
+        // with `Present` blocking the one UI thread for a refresh, and every other
+        // window loses beats to it. Drain the surplus, keeping one credit in hand
+        // when there was any, so the first frame after the drag still goes out
+        // immediately instead of sitting out a refresh.
         if !self.frame_latency_waitable.is_invalid() {
             let (window_id, handle) = (self.window_id, self.frame_latency_waitable);
-            try_with_win32_app(|app| app.register_beat_handle(window_id, handle, true));
+            let mut drained = 0u32;
+            // One credit per unpaced present, so a long drag leaves hundreds; the
+            // bound only guards against a handle that never stops being signalled.
+            while drained < 1 << 16 && unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+                drained += 1;
+            }
+            try_with_win32_app(|app| app.register_beat_handle(window_id, handle, drained > 0));
         }
     }
 
@@ -2867,6 +2926,16 @@ impl D3d11Buffer {
         len_slots: usize,
         data: *const std::ffi::c_void,
     ) {
+        // D3D11 has no zero-byte buffer: `CreateBuffer` answers E_INVALIDARG, which
+        // was logged as a GPU error every time a draw item emptied (Amp at startup).
+        // An empty upload draws nothing (`render_view` skips zero instances), so
+        // just let the old buffer go.
+        if len_slots == 0 {
+            self.buffer = None;
+            self.last_size = 0;
+            self.retained_publication = None;
+            return;
+        }
         let buffer_desc = D3D11_BUFFER_DESC {
             Usage: D3D11_USAGE_DYNAMIC,
             ByteWidth: (len_slots * 4) as u32,
@@ -4234,6 +4303,9 @@ pub struct AsyncHlslCompile {
             crate::thread::TaskHandle<Result<CxOsDrawShader, D3dShaderError>>,
         ),
     >,
+    /// Set once the shaders created at startup are all installed; from then on new
+    /// shaders compile inline (see `hlsl_compile_shaders`).
+    startup_installed: bool,
 }
 
 #[derive(Clone)]
@@ -4260,6 +4332,28 @@ pub struct CxOsDrawShader {
 }
 
 impl CxOsDrawShader {
+    /// Cache I/O, D3DCompile and device shader/layout/sampler creation; the immediate
+    /// context is not touched, so this runs on a pool worker or the UI thread alike.
+    fn from_inputs(
+        device: &ID3D11Device,
+        mapping: &D3dShaderInputs,
+    ) -> Result<Self, D3dShaderError> {
+        let CxDrawShaderCode::Combined { code } = &mapping.code else {
+            crate::error!("D3D11 does not support separate vertex/fragment sources");
+            return Err(D3dShaderError::Compile);
+        };
+        if mapping.flags.debug_code {
+            crate::log!("{}", code);
+        }
+        Self::new(
+            device,
+            code,
+            shader_cache_dir(),
+            mapping,
+            &mapping.uniform_buffer_bindings,
+        )
+    }
+
     fn new(
         device: &ID3D11Device,
         hlsl: &str,

@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use std::os::unix::fs::MetadataExt;
 
 use crate::error::GitError;
+use crate::ignore::{GitIgnore, IgnoreError};
 use crate::index::{Index, IndexEntry};
 use crate::object::{write_loose_object, ObjectKind};
 use crate::oid::{hash_object, ObjectId};
@@ -50,22 +51,6 @@ pub struct StatusOptions {
     pub skip_worktree_content_compare: bool,
 }
 
-#[derive(Debug, Clone)]
-struct IgnoreRule {
-    base_rel: String,
-    pattern: String,
-    negated: bool,
-    dir_only: bool,
-    anchored: bool,
-    has_slash: bool,
-}
-
-#[derive(Debug, Default)]
-struct IgnoreStack {
-    rules: Vec<IgnoreRule>,
-    repo_exclude_loaded: bool,
-}
-
 /// Compute full working tree status by comparing HEAD tree, index, and worktree.
 ///
 /// - `head_files`: flat map of path -> OID from the HEAD commit's tree (recursively flattened).
@@ -86,6 +71,18 @@ pub fn compute_status_with_options(
     index: &Index,
     workdir: &Path,
     options: StatusOptions,
+) -> Result<Status, GitError> {
+    compute_status_cancellable(head_files, index, workdir, options, &|| false)
+}
+
+/// [`compute_status_with_options`] that stops with [`GitError::Cancelled`]
+/// as soon as `cancel` returns true; it is polled per file and per folder.
+pub fn compute_status_cancellable(
+    head_files: &HashMap<String, ObjectId>,
+    index: &Index,
+    workdir: &Path,
+    options: StatusOptions,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<Status, GitError> {
     let mut entries = Vec::new();
 
@@ -129,45 +126,27 @@ pub fn compute_status_with_options(
 
     // 2. Compare worktree vs index (unstaged changes)
     for (path, idx_entry) in &index_map {
-        let file_path = workdir.join(path);
-        if !file_path.exists() {
-            // File deleted from worktree but still in index
+        if cancel() {
+            return Err(GitError::Cancelled);
+        }
+        if let Some(status) = worktree_vs_index_status_for_path(idx_entry, workdir, path, options)? {
             entries.push(StatusEntry {
                 path: path.to_string(),
-                status: FileStatus::Deleted,
+                status,
             });
-        } else {
-            if options.skip_worktree_content_compare {
-                continue;
-            }
-            // Quick stat check: if mtime/size match the index, skip content hashing
-            let metadata = fs::metadata(&file_path)?;
-            let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
-                && metadata.len() as u32 == idx_entry.file_size;
-
-            if !stat_matches {
-                // Content may have changed — hash and compare
-                let content = fs::read(&file_path)?;
-                let worktree_oid = hash_object("blob", &content);
-                if worktree_oid != idx_entry.oid {
-                    entries.push(StatusEntry {
-                        path: path.to_string(),
-                        status: FileStatus::Modified,
-                    });
-                }
-            }
         }
     }
 
     // 3. Untracked files
-    let mut ignore_stack = IgnoreStack::default();
+    let mut ignore = status_ignore(workdir)?;
     collect_untracked(
         workdir,
         workdir,
         &index_map,
         &mut entries,
         options,
-        &mut ignore_stack,
+        &mut ignore,
+        cancel,
     )?;
 
     // Sort by path for deterministic output
@@ -196,6 +175,17 @@ pub fn compute_status_worktree_only_with_options(
     workdir: &Path,
     options: StatusOptions,
 ) -> Result<Status, GitError> {
+    compute_status_worktree_only_cancellable(index, workdir, options, &|| false)
+}
+
+/// [`compute_status_worktree_only_with_options`] that stops with
+/// [`GitError::Cancelled`] as soon as `cancel` returns true.
+pub fn compute_status_worktree_only_cancellable(
+    index: &Index,
+    workdir: &Path,
+    options: StatusOptions,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Status, GitError> {
     let mut entries = Vec::new();
 
     // Build index map (only stage 0 entries)
@@ -208,45 +198,27 @@ pub fn compute_status_worktree_only_with_options(
 
     // Compare worktree vs index (unstaged changes)
     for (path, idx_entry) in &index_map {
-        let file_path = workdir.join(path);
-        if !file_path.exists() {
+        if cancel() {
+            return Err(GitError::Cancelled);
+        }
+        if let Some(status) = worktree_vs_index_status_for_path(idx_entry, workdir, path, options)? {
             entries.push(StatusEntry {
                 path: path.to_string(),
-                status: FileStatus::Deleted,
+                status,
             });
-            continue;
-        }
-
-        if options.skip_worktree_content_compare {
-            continue;
-        }
-
-        // Quick stat check: if mtime/size match the index, skip content hashing
-        let metadata = fs::metadata(&file_path)?;
-        let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
-            && metadata.len() as u32 == idx_entry.file_size;
-
-        if !stat_matches {
-            let content = fs::read(&file_path)?;
-            let worktree_oid = hash_object("blob", &content);
-            if worktree_oid != idx_entry.oid {
-                entries.push(StatusEntry {
-                    path: path.to_string(),
-                    status: FileStatus::Modified,
-                });
-            }
         }
     }
 
     // Untracked files
-    let mut ignore_stack = IgnoreStack::default();
+    let mut ignore = status_ignore(workdir)?;
     collect_untracked(
         workdir,
         workdir,
         &index_map,
         &mut entries,
         options,
-        &mut ignore_stack,
+        &mut ignore,
+        cancel,
     )?;
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -333,6 +305,23 @@ fn normalize_status_path(path: &str) -> String {
         .to_string()
 }
 
+const GITLINK_MODE: u32 = 0o160000;
+const SYMLINK_MODE: u32 = 0o120000;
+
+/// The bytes git stores as a symlink's blob: its target path.
+fn symlink_text(path: &Path) -> Result<Vec<u8>, GitError> {
+    let target = fs::read_link(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(target.into_os_string().into_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(target.to_string_lossy().replace('\\', "/").into_bytes())
+    }
+}
+
 fn worktree_vs_index_status_for_path(
     idx_entry: &IndexEntry,
     workdir: &Path,
@@ -340,21 +329,50 @@ fn worktree_vs_index_status_for_path(
     options: StatusOptions,
 ) -> Result<Option<FileStatus>, GitError> {
     let file_path = workdir.join(path);
-    if !file_path.exists() {
+    // lstat, as git does: a tracked symlink is compared as its link text
+    // and a dangling one is not deleted.
+    let metadata = match fs::symlink_metadata(&file_path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(FileStatus::Deleted));
+        }
+        // A parent that became a file (ENOTDIR) also means the path is gone.
+        Err(_) if !file_path.parent().is_some_and(Path::is_dir) => {
+            return Ok(Some(FileStatus::Deleted));
+        }
+        Err(err) => return Err(GitError::Io(err)),
+    };
+    let file_type = metadata.file_type();
+    if idx_entry.mode == GITLINK_MODE {
+        // A submodule: its checked-out commit is not compared here.
+        return Ok((!file_type.is_dir()).then_some(FileStatus::Modified));
+    }
+    if file_type.is_dir() {
+        // A tracked file replaced by a folder is deleted; the folder's files
+        // are reported as untracked.
         return Ok(Some(FileStatus::Deleted));
     }
     if options.skip_worktree_content_compare {
         return Ok(None);
     }
+    let index_is_link = idx_entry.mode & 0o170000 == SYMLINK_MODE;
+    // Where symlinks are checked out as plain files holding the link text
+    // (Windows without symlink support) the content comparison decides.
+    if cfg!(unix) && file_type.is_symlink() != index_is_link {
+        return Ok(Some(FileStatus::Modified));
+    }
 
-    let metadata = fs::metadata(&file_path)?;
     let stat_matches = metadata_mtime_sec(&metadata) == idx_entry.mtime_sec
         && metadata.len() as u32 == idx_entry.file_size;
     if stat_matches {
         return Ok(None);
     }
 
-    let content = fs::read(&file_path)?;
+    let content = if file_type.is_symlink() {
+        symlink_text(&file_path)?
+    } else {
+        fs::read(&file_path)?
+    };
     let worktree_oid = hash_object("blob", &content);
     if worktree_oid != idx_entry.oid {
         Ok(Some(FileStatus::Modified))
@@ -414,24 +432,22 @@ fn compute_untracked_status_for_path(
 }
 
 fn is_ignored_path(root: &Path, rel_path: &str, is_dir: bool) -> Result<bool, GitError> {
-    let mut ignore_stack = IgnoreStack::default();
-    ignore_stack.ensure_repo_exclude_loaded(root)?;
+    status_ignore(root)?
+        .ignored(rel_path, is_dir)
+        .map_err(ignore_error)
+}
 
-    let mut base_dir = root.to_path_buf();
-    ignore_stack.push_ignore_file(root, &base_dir, &base_dir.join(".gitignore"))?;
-    let mut components = rel_path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            break;
-        }
-        base_dir.push(component);
-        ignore_stack.push_ignore_file(root, &base_dir, &base_dir.join(".gitignore"))?;
+/// The ignore rules `git status` applies: per-directory `.gitignore`,
+/// `info/exclude` and the user's excludes file.
+fn status_ignore(root: &Path) -> Result<GitIgnore, GitError> {
+    GitIgnore::with_user_excludes(root).map_err(ignore_error)
+}
+
+fn ignore_error(error: IgnoreError) -> GitError {
+    match error {
+        IgnoreError::Io(message) => GitError::Io(std::io::Error::other(message)),
+        IgnoreError::Git(message) => GitError::InvalidIndex(message),
     }
-
-    Ok(ignore_stack.is_ignored(rel_path, is_dir))
 }
 
 fn path_to_rel_slash(root: &Path, path: &Path) -> Result<String, GitError> {
@@ -451,275 +467,6 @@ fn path_to_rel_slash(root: &Path, path: &Path) -> Result<String, GitError> {
     Ok(out)
 }
 
-fn parse_ignore_line(line: &str) -> Option<(String, bool, bool, bool, bool)> {
-    let mut raw = line.trim_end_matches('\r');
-    if raw.is_empty() {
-        return None;
-    }
-
-    if raw.starts_with('#') {
-        return None;
-    }
-
-    let mut negated = false;
-    if raw.starts_with("\\#") || raw.starts_with("\\!") {
-        raw = &raw[1..];
-    } else if raw.starts_with('!') {
-        negated = true;
-        raw = &raw[1..];
-    }
-
-    if raw.is_empty() {
-        return None;
-    }
-
-    let mut anchored = false;
-    if raw.starts_with('/') {
-        anchored = true;
-        raw = raw.trim_start_matches('/');
-    }
-
-    if raw.is_empty() {
-        return None;
-    }
-
-    let mut dir_only = false;
-    if raw.ends_with('/') {
-        dir_only = true;
-        raw = raw.trim_end_matches('/');
-    }
-
-    if raw.is_empty() {
-        return None;
-    }
-
-    let mut pattern = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                pattern.push(next);
-            } else {
-                pattern.push('\\');
-            }
-        } else {
-            pattern.push(ch);
-        }
-    }
-
-    if pattern.is_empty() {
-        return None;
-    }
-
-    let has_slash = pattern.contains('/');
-    Some((pattern, negated, dir_only, anchored, has_slash))
-}
-
-fn strip_rule_base<'a>(base_rel: &str, rel_path: &'a str) -> Option<&'a str> {
-    if base_rel.is_empty() {
-        return Some(rel_path);
-    }
-    if rel_path == base_rel {
-        return Some("");
-    }
-    rel_path
-        .strip_prefix(base_rel)
-        .and_then(|rest| rest.strip_prefix('/'))
-}
-
-fn glob_match(pattern: &str, text: &str, slash_sensitive: bool) -> bool {
-    fn rec(
-        p: &[u8],
-        t: &[u8],
-        slash_sensitive: bool,
-        pi: usize,
-        ti: usize,
-        memo: &mut [Option<bool>],
-    ) -> bool {
-        let width = t.len() + 1;
-        let key = pi * width + ti;
-        if let Some(cached) = memo[key] {
-            return cached;
-        }
-
-        let result = if pi == p.len() {
-            ti == t.len()
-        } else {
-            match p[pi] {
-                b'*' => {
-                    let mut next_pi = pi + 1;
-                    let is_double = next_pi < p.len() && p[next_pi] == b'*';
-                    if is_double {
-                        while next_pi < p.len() && p[next_pi] == b'*' {
-                            next_pi += 1;
-                        }
-                        let mut matched = false;
-                        let mut k = ti;
-                        while k <= t.len() {
-                            if rec(p, t, slash_sensitive, next_pi, k, memo) {
-                                matched = true;
-                                break;
-                            }
-                            k += 1;
-                        }
-                        matched
-                    } else {
-                        let mut matched = false;
-                        let mut k = ti;
-                        loop {
-                            if rec(p, t, slash_sensitive, next_pi, k, memo) {
-                                matched = true;
-                                break;
-                            }
-                            if k == t.len() {
-                                break;
-                            }
-                            if slash_sensitive && t[k] == b'/' {
-                                break;
-                            }
-                            k += 1;
-                        }
-                        matched
-                    }
-                }
-                b'?' => {
-                    if ti < t.len() && (!slash_sensitive || t[ti] != b'/') {
-                        rec(p, t, slash_sensitive, pi + 1, ti + 1, memo)
-                    } else {
-                        false
-                    }
-                }
-                ch => {
-                    if ti < t.len() && ch == t[ti] {
-                        rec(p, t, slash_sensitive, pi + 1, ti + 1, memo)
-                    } else {
-                        false
-                    }
-                }
-            }
-        };
-
-        memo[key] = Some(result);
-        result
-    }
-
-    let p = pattern.as_bytes();
-    let t = text.as_bytes();
-    let mut memo = vec![None; (p.len() + 1) * (t.len() + 1)];
-    rec(p, t, slash_sensitive, 0, 0, &mut memo)
-}
-
-fn path_matches_rule_pattern(rule: &IgnoreRule, rel_in_base: &str) -> bool {
-    if rule.anchored {
-        return glob_match(&rule.pattern, rel_in_base, true);
-    }
-
-    if rule.has_slash {
-        if glob_match(&rule.pattern, rel_in_base, true) {
-            return true;
-        }
-        let mut tail = rel_in_base;
-        while let Some(pos) = tail.find('/') {
-            tail = &tail[pos + 1..];
-            if glob_match(&rule.pattern, tail, true) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    rel_in_base
-        .split('/')
-        .any(|seg| glob_match(&rule.pattern, seg, false))
-}
-
-fn rule_matches(rule: &IgnoreRule, rel_path: &str, is_dir: bool) -> bool {
-    let Some(rel_in_base) = strip_rule_base(&rule.base_rel, rel_path) else {
-        return false;
-    };
-    if rel_in_base.is_empty() {
-        return false;
-    }
-
-    if rule.dir_only {
-        if is_dir && path_matches_rule_pattern(rule, rel_in_base) {
-            return true;
-        }
-        let mut idx = 0usize;
-        while let Some(pos) = rel_in_base[idx..].find('/') {
-            let end = idx + pos;
-            let candidate = &rel_in_base[..end];
-            if path_matches_rule_pattern(rule, candidate) {
-                return true;
-            }
-            idx = end + 1;
-        }
-        return false;
-    }
-
-    path_matches_rule_pattern(rule, rel_in_base)
-}
-
-impl IgnoreStack {
-    fn push_ignore_file(
-        &mut self,
-        root: &Path,
-        base_dir: &Path,
-        file_path: &Path,
-    ) -> Result<(), GitError> {
-        let content = match fs::read_to_string(file_path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(GitError::Io(err)),
-        };
-
-        let base_rel = path_to_rel_slash(root, base_dir)?;
-        for line in content.lines() {
-            let Some((pattern, negated, dir_only, anchored, has_slash)) = parse_ignore_line(line)
-            else {
-                continue;
-            };
-            self.rules.push(IgnoreRule {
-                base_rel: base_rel.clone(),
-                pattern,
-                negated,
-                dir_only,
-                anchored,
-                has_slash,
-            });
-        }
-        Ok(())
-    }
-
-    fn ensure_repo_exclude_loaded(&mut self, root: &Path) -> Result<(), GitError> {
-        if self.repo_exclude_loaded {
-            return Ok(());
-        }
-        self.repo_exclude_loaded = true;
-        let exclude_path = repo_exclude_path(root);
-        self.push_ignore_file(root, root, &exclude_path)
-    }
-
-    fn is_ignored(&self, rel_path: &str, is_dir: bool) -> bool {
-        let mut ignored = false;
-        for rule in &self.rules {
-            if rule_matches(rule, rel_path, is_dir) {
-                ignored = !rule.negated;
-            }
-        }
-        ignored
-    }
-}
-
-/// `info/exclude` of the repository `root` belongs to; a linked worktree's
-/// exclude file lives in the shared common dir.
-fn repo_exclude_path(root: &Path) -> PathBuf {
-    match crate::repo::repository_paths(root) {
-        Ok(Some(paths)) => paths.common_dir.join("info").join("exclude"),
-        _ => root.join(".git").join("info").join("exclude"),
-    }
-}
-
 /// Recursively collect untracked files.
 fn collect_untracked(
     root: &Path,
@@ -727,15 +474,14 @@ fn collect_untracked(
     index_map: &HashMap<&str, &IndexEntry>,
     entries: &mut Vec<StatusEntry>,
     options: StatusOptions,
-    ignore_stack: &mut IgnoreStack,
+    ignore: &mut GitIgnore,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<(), GitError> {
-    let saved_rules_len = ignore_stack.rules.len();
-    if dir == root {
-        ignore_stack.ensure_repo_exclude_loaded(root)?;
+    if cancel() {
+        return Err(GitError::Cancelled);
     }
-    ignore_stack.push_ignore_file(root, dir, &dir.join(".gitignore"))?;
 
-    let mut dir_entries: Vec<(std::ffi::OsString, std::path::PathBuf)> = Vec::new();
+    let mut dir_entries: Vec<(std::ffi::OsString, std::path::PathBuf, fs::FileType)> = Vec::new();
     let read_dir = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -743,11 +489,13 @@ fn collect_untracked(
     };
     for entry in read_dir {
         let entry = entry?;
-        dir_entries.push((entry.file_name(), entry.path()));
+        // The entry's own type: a symlink is never followed, as in git.
+        let file_type = entry.file_type()?;
+        dir_entries.push((entry.file_name(), entry.path(), file_type));
     }
 
     // Iterate over plain paths so read_dir handles are dropped before recursion.
-    for (name, path) in dir_entries {
+    for (name, path, file_type) in dir_entries {
         let name_str = name.to_string_lossy();
 
         // Skip .git directory
@@ -757,23 +505,38 @@ fn collect_untracked(
         if options.skip_hidden && name_str.starts_with('.') {
             continue;
         }
-        if options.skip_target_dirs && path.is_dir() && name_str == "target" {
+        let is_dir = file_type.is_dir();
+        let is_file = file_type.is_file() || file_type.is_symlink();
+        if options.skip_target_dirs && is_dir && name_str == "target" {
             continue;
         }
-
-        let is_dir = path.is_dir();
-        let is_file = path.is_file();
         if !is_dir && !is_file {
             continue;
         }
 
         let rel_str = path_to_rel_slash(root, &path)?;
-        if ignore_stack.is_ignored(&rel_str, is_dir) {
+        if ignore.ignored(&rel_str, is_dir).map_err(ignore_error)? {
             continue;
         }
 
         if is_dir {
-            collect_untracked(root, &path, index_map, entries, options, ignore_stack)?;
+            if index_map.contains_key(rel_str.as_str()) {
+                // A tracked submodule; its files belong to its own repository.
+                continue;
+            }
+            if fs::symlink_metadata(path.join(".git")).is_ok() {
+                // A nested repository nothing of ours is tracked in is one
+                // untracked entry, "dir/", as git reports it.
+                let prefix = format!("{rel_str}/");
+                if !index_map.keys().any(|tracked| tracked.starts_with(&prefix)) {
+                    entries.push(StatusEntry {
+                        path: prefix,
+                        status: FileStatus::Untracked,
+                    });
+                    continue;
+                }
+            }
+            collect_untracked(root, &path, index_map, entries, options, ignore, cancel)?;
         } else if is_file {
             if !index_map.contains_key(rel_str.as_str()) {
                 entries.push(StatusEntry {
@@ -783,7 +546,43 @@ fn collect_untracked(
             }
         }
     }
-    ignore_stack.rules.truncate(saved_rules_len);
+    Ok(())
+}
+
+/// The on-disk path for a repository-relative `path` that is about to be
+/// written or removed, refusing anything that could land outside `workdir`
+/// or inside `.git`: every '/'-separated component must pass
+/// [`crate::tree::validate_entry_name`], and no parent folder below
+/// `workdir` may be a symlink (writing through one would touch whatever it
+/// points at). A symlink as the final component is the caller's business:
+/// removing it removes the link, and writers unlink it before writing.
+pub fn checked_worktree_path(workdir: &Path, path: &str) -> Result<PathBuf, GitError> {
+    let mut file_path = workdir.to_path_buf();
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        crate::tree::validate_entry_name(part)
+            .map_err(|_| GitError::InvalidObject(format!("unsafe worktree path {:?}", path)))?;
+        file_path.push(part);
+        if parts.peek().is_some() {
+            if let Ok(meta) = fs::symlink_metadata(&file_path) {
+                if meta.file_type().is_symlink() {
+                    return Err(GitError::InvalidObject(format!(
+                        "{path}: folder {part} is a symlink; refusing to write or remove through it"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(file_path)
+}
+
+/// Replace a symlink at `file_path` (the link itself, never its target) so
+/// a following `fs::write` creates a plain file instead of writing
+/// through the link.
+pub(crate) fn unlink_if_symlink(file_path: &Path) -> Result<(), GitError> {
+    if fs::symlink_metadata(file_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        fs::remove_file(file_path)?;
+    }
     Ok(())
 }
 
@@ -836,7 +635,7 @@ pub fn checkout_tree(
 
         if entry.is_tree() {
             let sub_tree = read_tree(&entry.oid)?;
-            let dir_path = workdir.join(&path);
+            let dir_path = checked_worktree_path(workdir, &path)?;
             fs::create_dir_all(&dir_path)?;
             let sub_prefix = format!("{}/", path);
             checkout_tree(
@@ -851,10 +650,11 @@ pub fn checkout_tree(
         } else {
             // Write file
             let data = read_blob(&entry.oid)?;
-            let file_path = workdir.join(&path);
+            let file_path = checked_worktree_path(workdir, &path)?;
             if let Some(parent) = file_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            unlink_if_symlink(&file_path)?;
             fs::write(&file_path, &data)?;
 
             // Set executable permission if needed
@@ -906,10 +706,11 @@ pub fn write_worktree_file(
     mode: u32,
     data: &[u8],
 ) -> Result<IndexEntry, GitError> {
-    let file_path = workdir.join(path);
+    let file_path = checked_worktree_path(workdir, path)?;
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    unlink_if_symlink(&file_path)?;
     fs::write(&file_path, data)?;
     #[cfg(unix)]
     {
@@ -1009,16 +810,21 @@ pub fn remove_worktree_files(
     old_files: &HashMap<String, ObjectId>,
     new_files: &HashMap<String, ObjectId>,
 ) -> Result<(), GitError> {
+    // Check every path before removing any, so an unsafe one stops the
+    // whole clean-up instead of leaving it half done.
+    let mut doomed = Vec::new();
     for path in old_files.keys() {
         if !new_files.contains_key(path) {
-            let file_path = workdir.join(path);
-            if file_path.exists() {
-                fs::remove_file(&file_path)?;
-            }
-            // Try to remove empty parent directories
-            if let Some(parent) = file_path.parent() {
-                remove_empty_dirs(parent, workdir);
-            }
+            doomed.push(checked_worktree_path(workdir, path)?);
+        }
+    }
+    for file_path in doomed {
+        if file_path.exists() {
+            fs::remove_file(&file_path)?;
+        }
+        // Try to remove empty parent directories
+        if let Some(parent) = file_path.parent() {
+            remove_empty_dirs(parent, workdir);
         }
     }
     Ok(())
@@ -1390,5 +1196,127 @@ mod tests {
             .entries
             .iter()
             .any(|e| e.path == "ignored.tmp" && e.status == FileStatus::Untracked));
+    }
+
+    #[test]
+    fn unsafe_worktree_paths_are_refused_before_writing() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        let oid = ObjectId::from_hex("2015f8e40c38d86ca88808c6f031bb22544e92cf").unwrap();
+        for path in [
+            "", "..", "../escape.txt", "a/../../escape.txt", ".git/config", "sub/.GIT/HEAD",
+            "a//b", "a/./b", "a\\..\\b", "trailing/",
+        ] {
+            assert!(checked_worktree_path(workdir, path).is_err(), "{path:?}");
+            assert!(write_worktree_file(workdir, path, oid, 0o100644, b"x").is_err(), "{path:?}");
+        }
+        assert!(checked_worktree_path(workdir, "dir/file.txt").is_ok());
+        assert!(!workdir.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_parent_folder_is_refused() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let outside = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        std::os::unix::fs::symlink(outside.path(), workdir.join("link")).unwrap();
+        let oid = ObjectId::from_hex("2015f8e40c38d86ca88808c6f031bb22544e92cf").unwrap();
+        assert!(write_worktree_file(workdir, "link/file.txt", oid, 0o100644, b"x").is_err());
+        assert!(!outside.path().join("file.txt").exists());
+
+        // Removing through the link is refused too, and nothing is removed.
+        fs::write(outside.path().join("keep.txt"), "keep").unwrap();
+        let mut old_files = HashMap::new();
+        old_files.insert("link/keep.txt".to_string(), oid);
+        assert!(remove_worktree_files(workdir, &old_files, &HashMap::new()).is_err());
+        assert!(outside.path().join("keep.txt").exists());
+
+        // A symlink as the file itself is replaced, not written through.
+        fs::write(outside.path().join("target.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("target.txt"), workdir.join("f.txt"))
+            .unwrap();
+        write_worktree_file(workdir, "f.txt", oid, 0o100644, b"inside").unwrap();
+        assert_eq!(fs::read_to_string(outside.path().join("target.txt")).unwrap(), "outside");
+        assert_eq!(fs::read_to_string(workdir.join("f.txt")).unwrap(), "inside");
+    }
+
+    /// What `git status` reports for symlinks, nested repositories, tracked
+    /// submodules and root-level `**/dir/` rules.
+    #[cfg(unix)]
+    #[test]
+    fn status_lstat_symlinks_nested_repos_and_submodules() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::test_support::tempdir().unwrap();
+        let workdir = dir.path();
+        fs::create_dir_all(workdir.join(".git")).unwrap();
+        fs::write(workdir.join(".gitignore"), "**/target/\n").unwrap();
+        fs::create_dir_all(workdir.join("target/debug")).unwrap();
+        fs::write(workdir.join("target/debug/out"), "x").unwrap();
+        fs::create_dir_all(workdir.join("real/deep")).unwrap();
+        fs::write(workdir.join("real/deep/file.txt"), "x").unwrap();
+        // Untracked symlink to a folder: one entry, never followed.
+        symlink(workdir.join("real"), workdir.join("link_dir")).unwrap();
+        // Tracked symlink to a folder, unchanged, and a dangling tracked one.
+        symlink("real", workdir.join("tracked_link")).unwrap();
+        symlink("missing", workdir.join("dangling")).unwrap();
+        // A nested repository and a tracked submodule.
+        fs::create_dir_all(workdir.join("nested/.git")).unwrap();
+        fs::write(workdir.join("nested/inner.txt"), "x").unwrap();
+        fs::create_dir_all(workdir.join("sub")).unwrap();
+        fs::write(workdir.join("sub/.git"), "gitdir: elsewhere\n").unwrap();
+        fs::write(workdir.join("sub/inner.txt"), "x").unwrap();
+
+        let link_entry = |name: &str, target: &str| {
+            let meta = fs::symlink_metadata(workdir.join(name)).unwrap();
+            index_entry_from_metadata(
+                name.to_string(),
+                hash_object("blob", target.as_bytes()),
+                SYMLINK_MODE,
+                &meta,
+            )
+        };
+        let mut sub = link_entry("tracked_link", "real");
+        sub.path = "sub".into();
+        sub.mode = GITLINK_MODE;
+        let mut stale = link_entry("dangling", "missing");
+        stale.mtime_sec = 0; // force the content comparison
+        let index = Index {
+            version: 2,
+            entries: vec![link_entry("tracked_link", "real"), stale, sub],
+        };
+        let head_files: HashMap<String, ObjectId> =
+            index.entries.iter().map(|e| (e.path.clone(), e.oid)).collect();
+        let status = compute_status(&head_files, &index, workdir).unwrap();
+        let got: Vec<(&str, &FileStatus)> =
+            status.entries.iter().map(|e| (e.path.as_str(), &e.status)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (".gitignore", &FileStatus::Untracked),
+                ("link_dir", &FileStatus::Untracked),
+                ("nested/", &FileStatus::Untracked),
+                ("real/deep/file.txt", &FileStatus::Untracked),
+            ]
+        );
+
+        // Retargeting a tracked symlink is a modification.
+        fs::remove_file(workdir.join("tracked_link")).unwrap();
+        symlink("real/deep", workdir.join("tracked_link")).unwrap();
+        let status = compute_status(&head_files, &index, workdir).unwrap();
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "tracked_link" && e.status == FileStatus::Modified));
+    }
+
+    #[test]
+    fn status_stops_when_cancelled() {
+        let dir = crate::test_support::tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "x").unwrap();
+        let index = Index { version: 2, entries: vec![] };
+        let result =
+            compute_status_cancellable(&HashMap::new(), &index, dir.path(), StatusOptions::default(), &|| true);
+        assert!(matches!(result, Err(GitError::Cancelled)));
     }
 }
