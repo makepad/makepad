@@ -10,35 +10,83 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "N0YGjn7dnhc4DEHmww9lwuYwMVI="
 
 [dependencies]
-makepad-draw = { path = "../draw", version = "2.0.0" }
-
-makepad-derive-widget = {path = "./derive_widget", version="2.0.0"}
-makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
-i_overlay = { path = "../libs/i_overlay", version = "7.0.3", optional = true, default-features = false }
-makepad-fast-inflate = { path = "../libs/fast_inflate", optional = true }
-# Silero VAD (the speech gate) from the speech model family; only that module.
-makepad-ai-speech = { path = "../libs/ai/models/speech", default-features = false, features = ["vad"], optional = true }
-# Speech-to-text sessions (Whisper here / machine / LAN, else the OS engine).
-# No default features: only the speech pipes, never the image/video backends.
-makepad-ai-hub = { path = "../libs/ai/hub", default-features = false, features = ["stt"], optional = true }
-makepad-cef = { path = "../libs/cef", optional = true }
-
-makepad-html = { path = "../libs/html", version = "1.0.0" }
-unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
-pulldown-cmark = { version = "0.12.2", path = "../libs/pulldown-cmark", default-features = false, features = ["simd"] }
-makepad-latex-math = { path = "../libs/latex_math", version = "0.1.0" }
-makepad-pdf-parse = { path = "../libs/pdf_parse", version = "1.0.0", optional = true }
-ttf-parser = { path = "../libs/ttf-parser" }
-
-serde = { version = "1.0", optional = true, features = ["derive"] }
+# The library is makepad-widgets-core plus one crate per widget family
+# (widgets/families). None of them has features, so each compiles once per
+# profile whatever mix of families the apps in a target dir pick; this crate
+# is the thin front that every app names, and its features only choose which
+# family crates it links, re-exports and registers.
+makepad-widgets-core = { path = "./core", version = "2.0.0" }
+makepad-widgets-tweaker = { path = "./families/tweaker", version = "2.0.0", optional = true }
+makepad-widgets-data = { path = "./families/data", version = "2.0.0", optional = true }
+makepad-widgets-rich-text = { path = "./families/rich_text", version = "2.0.0", optional = true }
+makepad-widgets-menus = { path = "./families/menus", version = "2.0.0", optional = true }
+makepad-widgets-extras = { path = "./families/extras", version = "2.0.0", optional = true }
+makepad-widgets-maps = { path = "./families/maps", version = "2.0.0", optional = true }
+makepad-widgets-pdf = { path = "./families/pdf", version = "2.0.0", optional = true }
+makepad-widgets-voice = { path = "./families/voice", version = "2.0.0", optional = true }
+makepad-widgets-cef = { path = "./families/cef", version = "2.0.0", optional = true }
+makepad-widgets-ai = { path = "./families/ai", version = "2.0.0", optional = true }
 
 [features]
-default = []
+# The big widget families, each a feature and all on by default. An app that
+# wants a smaller build takes `default-features = false` and names the
+# families it uses; the core (views, window, labels, buttons, inputs, menus,
+# lists, tabs, popups and the like) is always there. A feature only links its
+# family crate: the crates themselves never change with the features.
+default = [
+    "tweaker",
+    "charts",
+    "color",
+    "data",
+    "dates",
+    "chat",
+    "dock",
+    "rich_text",
+    "dropzone",
+    "vector",
+    "glass",
+    "nav_menus",
+    "command_palette",
+]
 
-voice = ["dep:makepad-ai-speech", "dep:makepad-ai-hub"]
-maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate", "dep:i_overlay"]
-pdf = ["dep:makepad-pdf-parse"]
-cef = ["dep:makepad-cef"]
+# The design-feedback overlay every Window carries (Shift+F10 with the dev
+# overlays on), with the reflection and saved-theme store it reads and writes.
+tweaker = ["dep:makepad-widgets-tweaker", "dock", "data"]
+# Chart, chart shapes and the waveform lane.
+charts = ["dep:makepad-widgets-extras", "color"]
+# The colour picker family.
+color = ["dep:makepad-widgets-extras"]
+# Data grid, tree view and file tree.
+data = ["dep:makepad-widgets-data"]
+# Calendar, date picker and time picker.
+dates = ["dep:makepad-widgets-extras"]
+# Chat bubbles and the chat list.
+chat = ["dep:makepad-widgets-extras"]
+# The docking layout.
+dock = ["dep:makepad-widgets-data"]
+# Text flow, rich text, HTML, Markdown, LaTeX maths and the log list.
+rich_text = ["dep:makepad-widgets-rich-text"]
+# The file drop target and upload list.
+dropzone = ["dep:makepad-widgets-extras"]
+# The vector drawing widget.
+vector = ["dep:makepad-widgets-extras"]
+# The glass panel family.
+glass = ["dep:makepad-widgets-extras"]
+# Floating action, radial, pill-nav, line and hamburger menus.
+nav_menus = ["dep:makepad-widgets-menus"]
+# The command palette.
+command_palette = ["dep:makepad-widgets-menus"]
+
+voice = ["dep:makepad-widgets-voice"]
+maps = ["dep:makepad-widgets-maps"]
+pdf = ["dep:makepad-widgets-pdf"]
+cef = ["dep:makepad-widgets-cef"]
+# The AI chat slot (F10) in every Window. Not a default: `makepad-aichat`
+# turns it on, so exactly the apps that link the chat get the slot.
+ai = ["dep:makepad-widgets-ai"]
 
 ## Enables certain public-facing types to derive serde serialization traits.
-serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]
+## The one feature that reaches the core (and the dock's layout types): it
+## forwards into makepad-draw, so an app that turns it on builds its own
+## copy of draw and the core.
+serde = ["makepad-widgets-core/serde", "makepad-widgets-data?/serde"]
