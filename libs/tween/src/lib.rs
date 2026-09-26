@@ -26,7 +26,9 @@
 //!
 //! The engine, [`TweenEngine`], is GSAP's global timeline: build tweens and
 //! timelines on it, control them through [`AnimMut`] / [`TimelineMut`],
-//! inspect them through [`AnimRef`], step it once per frame with
+//! inspect them through [`AnimRef`] (whose [`AnimRef::kind`],
+//! [`AnimRef::children`] and [`AnimRef::labels`] walk a timeline's tree, as
+//! a timeline editor does), step it once per frame with
 //! [`TweenEngine::advance`] and drain callbacks with
 //! [`TweenEngine::swap_events`].
 //!
@@ -138,7 +140,7 @@ pub mod stagger;
 pub mod ticker;
 pub mod value;
 
-pub use control::{AnimMut, AnimRef, TimelineMut};
+pub use control::{AnimKind, AnimMut, AnimRef, ChildIter, LabelIter, TimelineMut};
 pub use easing::*;
 pub use engine::TweenEngine;
 pub use event::*;

@@ -905,3 +905,360 @@ fn tween_id_bits_round_trip() {
     e.anim(TweenId::from_bits(12_345)).pause();
     assert!(!e.anim_ref(u).paused());
 }
+
+// ---------------------------------------------------------------------------
+// Inspection for timeline editors (the widgets' Sequencer): kinds, the tree,
+// labels, the getters a bar needs, and `refresh` after an edit.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn children_iterate_in_start_order_and_report_kinds() {
+    let mut e = TweenEngine::new();
+    seed_all(&mut e, 6, X, 0.0);
+    seed_all(&mut e, 6, Y, 0.0);
+    let tl = e.timeline(TimelineOpts::new().paused(true));
+    let nested = e.timeline(TimelineOpts::new());
+    e.tl(nested)
+        .to(one(5), &[to(Y, 1.0)], lin(0.5), Position::END);
+    let x1 = [to(X, 1.0)];
+    let steps = [
+        KeyStep {
+            props: &x1,
+            opts: lin(0.25),
+        },
+        KeyStep {
+            props: &x1,
+            opts: lin(0.25),
+        },
+    ];
+    // Built out of start order: the iterator answers start order.
+    e.tl(tl)
+        .to(one(0), &[to(X, 1.0)], lin(1.0), Position::at(2.0));
+    let tween = e.tl(tl).last();
+    e.tl(tl).to(
+        Targets::Range { first: 1, count: 4 },
+        &[to(Y, 1.0)],
+        lin(0.5).stagger(Stagger::each(0.1)),
+        Position::at(0.0),
+    );
+    let group = e.tl(tl).last();
+    e.tl(tl)
+        .keyframes(one(4), &steps, TweenOpts::new(), Position::at(3.0));
+    let keys = e.tl(tl).last();
+    e.tl(tl)
+        .add(nested, Position::at(1.0))
+        .call(Tag(7), Position::at(0.5))
+        .add_pause(Position::at(3.5), Tag(8));
+
+    let kids: Vec<TweenId> = e.anim_ref(tl).children().collect();
+    let kinds: Vec<AnimKind> = kids
+        .iter()
+        .map(|&c| e.anim_ref(c).kind().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            AnimKind::Stagger,
+            AnimKind::Call,
+            AnimKind::Timeline,
+            AnimKind::Tween,
+            AnimKind::Keyframes,
+            AnimKind::Pause
+        ]
+    );
+    let starts: Vec<f64> = kids.iter().map(|&c| e.anim_ref(c).start_time()).collect();
+    assert_eq!(starts, [0.0, 0.5, 1.0, 2.0, 3.0, 3.5]);
+    assert_eq!(kids.len() as u32, e.anim_ref(tl).child_count());
+    assert_eq!(
+        (kids[0], kids[2], kids[3], kids[4]),
+        (group, nested, tween, keys)
+    );
+    assert_eq!(e.anim_ref(kids[1]).tag(), Tag(7));
+    assert_eq!(e.anim_ref(kids[5]).tag(), Tag(8));
+    assert_eq!(e.anim_ref(tl).kind(), Some(AnimKind::Timeline));
+
+    // The group's per-target tweens, in stagger order.
+    let g: Vec<TweenId> = e.anim_ref(group).children().collect();
+    assert_eq!(g.len(), 4);
+    for (i, &c) in g.iter().enumerate() {
+        let a = e.anim_ref(c);
+        assert_eq!(a.kind(), Some(AnimKind::Tween));
+        close(a.start_time(), 0.1 * i as f64, TIME_TOL, "stagger start");
+    }
+    // Keyframe steps are the keyframes group's children; leaves have none.
+    assert_eq!(e.anim_ref(keys).children().count(), 2);
+    assert_eq!(e.anim_ref(nested).children().count(), 1);
+    assert_eq!(e.anim_ref(tween).children().count(), 0);
+    assert_eq!(e.anim_ref(kids[1]).children().count(), 0);
+
+    // A killed child is skipped.
+    e.anim(tween).kill();
+    let after: Vec<TweenId> = e.anim_ref(tl).children().collect();
+    assert_eq!(after.len(), 5);
+    assert!(!after.contains(&tween));
+}
+
+#[test]
+fn parent_links_up_to_the_root_level() {
+    let mut e = TweenEngine::new();
+    seed_all(&mut e, 10, X, 0.0);
+    let tl = e.timeline(TimelineOpts::new().paused(true));
+    let nested = e.timeline(TimelineOpts::new());
+    e.tl(nested)
+        .to(one(0), &[to(X, 1.0)], lin(1.0), Position::END);
+    let leaf = e.tl(nested).last();
+    e.tl(tl).add(nested, Position::at(0.5)).to(
+        Targets::Range { first: 1, count: 3 },
+        &[to(X, 1.0)],
+        lin(0.5).stagger(Stagger::each(0.1)),
+        Position::END,
+    );
+    let group = e.tl(tl).last();
+    let member = e.anim_ref(group).children().next().unwrap();
+    assert_eq!(e.anim_ref(leaf).parent(), Some(nested));
+    assert_eq!(e.anim_ref(nested).parent(), Some(tl));
+    assert_eq!(e.anim_ref(member).parent(), Some(group));
+    assert_eq!(e.anim_ref(group).parent(), Some(tl));
+    // Root level (the engine's own timeline) answers None.
+    assert_eq!(e.anim_ref(tl).parent(), None);
+    let solo = e.to(one(9), &[to(X, 1.0)], lin(1.0));
+    assert_eq!(e.anim_ref(solo).parent(), None);
+    // Walking up from the deepest leaf ends at the timeline in two steps.
+    let mut up = Vec::new();
+    let mut at = e.anim_ref(leaf).parent();
+    while let Some(p) = at {
+        up.push(p);
+        at = e.anim_ref(p).parent();
+    }
+    assert_eq!(up, [nested, tl]);
+    // Removed from its timeline: unparented (and still alive).
+    e.tl(tl).remove(nested);
+    assert!(e.anim_ref(nested).is_alive());
+    assert_eq!(e.anim_ref(nested).parent(), None);
+}
+
+#[test]
+fn labels_iterate_in_time_order() {
+    let mut e = TweenEngine::new();
+    let tl = e.timeline(TimelineOpts::new().paused(true));
+    let other = e.timeline(TimelineOpts::new().paused(true));
+    e.tl(other).add_label(Tag(9), 0.1);
+    e.tl(tl)
+        .add_label(Tag(3), 2.0)
+        .add_label(Tag(1), 0.5)
+        .add_label(Tag(2), 2.0)
+        .add_label(Tag(4), 1.0);
+    let l: Vec<(Tag, f64)> = e.anim_ref(tl).labels().collect();
+    // Ties keep the order they were added in.
+    assert_eq!(
+        l,
+        [(Tag(1), 0.5), (Tag(4), 1.0), (Tag(3), 2.0), (Tag(2), 2.0)]
+    );
+    assert_eq!(e.anim_ref(tl).labels().len(), 4);
+    // Re-adding moves a label.
+    e.tl(tl).add_label(Tag(1), 3.0);
+    let l: Vec<(Tag, f64)> = e.anim_ref(tl).labels().collect();
+    assert_eq!(
+        l,
+        [(Tag(4), 1.0), (Tag(3), 2.0), (Tag(2), 2.0), (Tag(1), 3.0)]
+    );
+    // Another timeline's labels are its own; a tween has none.
+    assert_eq!(
+        e.anim_ref(other).labels().collect::<Vec<_>>(),
+        [(Tag(9), 0.1)]
+    );
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    let t = e.to(one(0), &[to(X, 1.0)], lin(1.0));
+    assert_eq!(e.anim_ref(t).labels().count(), 0);
+}
+
+#[test]
+fn repeat_delay_inner_duration_and_ease_getters() {
+    let mut e = TweenEngine::new();
+    seed_all(&mut e, 5, X, 0.0);
+    let t = e.to(
+        one(0),
+        &[to(X, 1.0)],
+        TweenOpts::new()
+            .duration(1.0)
+            .ease(Easing::OutBack)
+            .repeat(2)
+            .repeat_delay(0.25),
+    );
+    let a = e.anim_ref(t);
+    assert_eq!(a.repeat_delay(), 0.25);
+    assert_eq!(a.ease(), Easing::OutBack);
+    assert_eq!(a.inner_duration(), 1.0);
+    assert_eq!(a.duration(), 1.0);
+
+    // A stagger group runs linear; its children carry the tween's ease. Its
+    // inner duration is the children's extent (last start 0.3 + 0.5).
+    let g = e.to(
+        Targets::Range { first: 1, count: 4 },
+        &[to(X, 1.0)],
+        TweenOpts::new()
+            .duration(0.5)
+            .ease(Easing::InQuad)
+            .stagger(Stagger::each(0.1)),
+    );
+    let ga = e.anim_ref(g);
+    assert_eq!(ga.ease(), Easing::Linear);
+    close(ga.inner_duration(), 0.8, TIME_TOL, "inner");
+    close(ga.duration(), 0.8, TIME_TOL, "duration");
+    let first = ga.children().next().unwrap();
+    assert_eq!(e.anim_ref(first).ease(), Easing::InQuad);
+    // Stretching the group changes its duration, not its content.
+    e.anim(g).set_duration(1.6);
+    close(e.anim_ref(g).duration(), 1.6, TIME_TOL, "stretched");
+    close(e.anim_ref(g).inner_duration(), 0.8, TIME_TOL, "inner kept");
+
+    // A timeline's inner duration is its duration.
+    let tl = e.timeline(TimelineOpts::new().paused(true).repeat_delay(0.5));
+    e.tl(tl)
+        .to(one(0), &[to(X, 2.0)], lin(2.0), Position::at(0.0));
+    assert_eq!(e.anim_ref(tl).inner_duration(), 2.0);
+    assert_eq!(e.anim_ref(tl).repeat_delay(), 0.5);
+}
+
+#[test]
+fn first_target_names_leaves_and_groups() {
+    let mut e = TweenEngine::new();
+    seed_all(&mut e, 12, X, 0.0);
+    seed_all(&mut e, 12, Y, 0.0);
+    let t = e.to(one(3), &[to(X, 1.0), to(Y, 1.0)], lin(1.0));
+    assert_eq!(e.anim_ref(t).first_target(), Some(tg(3)));
+    assert!(!e.anim_ref(t).has_path());
+    let g = e.to(
+        Targets::Range { first: 5, count: 3 },
+        &[to(X, 1.0)],
+        lin(0.5).stagger(Stagger::each(0.1)),
+    );
+    assert_eq!(e.anim_ref(g).first_target(), Some(tg(5)));
+    let members: Vec<Option<TargetId>> = e
+        .anim_ref(g)
+        .children()
+        .map(|c| e.anim_ref(c).first_target())
+        .collect();
+    assert_eq!(members, [Some(tg(5)), Some(tg(6)), Some(tg(7))]);
+    let x1 = [to(X, 1.0)];
+    let k = e.keyframes(
+        one(9),
+        &[KeyStep {
+            props: &x1,
+            opts: lin(0.5),
+        }],
+        TweenOpts::new(),
+    );
+    assert_eq!(e.anim_ref(k).first_target(), Some(tg(9)));
+    // A timeline and a call animate nothing themselves.
+    let tl = e.timeline(TimelineOpts::new().paused(true));
+    e.tl(tl)
+        .to(one(10), &[to(X, 1.0)], lin(1.0), Position::at(0.0))
+        .call(Tag(1), Position::at(0.5));
+    assert_eq!(e.anim_ref(tl).first_target(), None);
+    let call = e.delayed_call(1.0, Tag(2));
+    assert_eq!(e.anim_ref(call).first_target(), None);
+    // A killed track still names its target until the storage compacts.
+    e.kill_tweens_of(one(3), Some(&[X]));
+    assert!(e.anim_ref(t).is_alive());
+    assert_eq!(e.anim_ref(t).first_target(), Some(tg(3)));
+    // A motion path tween.
+    let path = e.add_path(MotionPath::polyline(&[[0.0, 0.0], [10.0, 0.0]], false).unwrap());
+    let p = e.to(
+        one(11),
+        &[PropTo::path(X, Y, path, PathOpts::new())],
+        lin(1.0),
+    );
+    e.release_path(path);
+    assert!(e.anim_ref(p).has_path());
+    assert_eq!(e.anim_ref(p).first_target(), Some(tg(11)));
+}
+
+#[test]
+fn refresh_shows_moved_children_at_the_playhead() {
+    let mut e = TweenEngine::new();
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    e.seed(tg(0), Y, TweenValue::F64(0.0));
+    let tl = e.timeline(
+        TimelineOpts::new()
+            .paused(true)
+            .watch_labels()
+            .events(EventMask::ALL),
+    );
+    e.tl(tl).add_label(Tag(1), 1.2).to(
+        one(0),
+        &[to(X, 100.0)],
+        lin(1.0).events(CBS),
+        Position::at(0.0),
+    );
+    let a = e.tl(tl).last();
+    e.tl(tl).to(
+        one(0),
+        &[to(Y, 100.0)],
+        lin(1.0).events(CBS),
+        Position::at(1.0),
+    );
+    let b = e.tl(tl).last();
+    e.anim(tl).seek(Seek::Time(1.5), Emit::Suppress);
+    e.clear_events();
+    close(val(&e, 0, X), 100.0, 1e-9, "x at 1.5");
+    close(val(&e, 0, Y), 50.0, 1e-9, "y at 1.5");
+
+    // B moved past the playhead shows its start value.
+    e.anim(b).set_start_time(3.0);
+    e.anim(tl).refresh();
+    close(val(&e, 0, Y), 0.0, 1e-9, "y after B moved to 3");
+    close(val(&e, 0, X), 100.0, 1e-9, "x unchanged");
+    assert_eq!(e.anim_ref(tl).total_time(), 1.5, "the playhead stays");
+    assert!(e.anim_ref(tl).paused());
+
+    // A moved under the playhead shows its value there.
+    e.anim(a).set_start_time(1.0);
+    e.anim(tl).refresh();
+    close(val(&e, 0, X), 50.0, 1e-9, "x after A moved to 1");
+    close(val(&e, 0, Y), 0.0, 1e-9, "y still at its start");
+
+    // A resized child: B back to 1..3 at the playhead 1.5 is a quarter in.
+    e.anim(b).set_start_time(1.0);
+    e.anim(b).set_duration(2.0);
+    e.anim(tl).refresh();
+    close(val(&e, 0, Y), 25.0, 1e-9, "y after B resized");
+    assert!(
+        e.events().is_empty(),
+        "refresh reports nothing: {:?}",
+        e.events()
+    );
+    // A stale handle is a no-op.
+    e.anim(TweenId::NONE).refresh();
+}
+
+#[test]
+fn stale_handles_answer_defaults_for_the_new_getters() {
+    let mut e = TweenEngine::new();
+    e.seed(tg(0), X, TweenValue::F64(0.0));
+    let tl = e.timeline(TimelineOpts::new().paused(true));
+    e.tl(tl)
+        .add_label(Tag(1), 0.5)
+        .to(one(0), &[to(X, 1.0)], lin(1.0), Position::at(0.0));
+    let t = e.tl(tl).last();
+    e.anim(tl).kill();
+    for id in [
+        tl,
+        t,
+        TweenId::NONE,
+        TweenId::from_bits(0x0000_0007_0000_0003),
+    ] {
+        let a = e.anim_ref(id);
+        assert!(!a.is_alive());
+        assert_eq!(a.kind(), None);
+        assert_eq!(a.parent(), None);
+        assert_eq!(a.children().count(), 0);
+        assert_eq!(a.labels().count(), 0);
+        assert_eq!(a.repeat_delay(), 0.0);
+        assert_eq!(a.inner_duration(), 0.0);
+        assert_eq!(a.ease(), Easing::Linear);
+        assert_eq!(a.first_target(), None);
+        assert!(!a.has_path());
+        e.anim(id).refresh();
+    }
+}

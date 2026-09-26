@@ -21,6 +21,7 @@ pub mod tween;
 pub mod ease_editor;
 pub mod tween_script;
 pub mod motion_path;
+pub mod sequencer;
 pub mod layout;
 pub mod grid;
 pub mod masonry;
@@ -179,6 +180,7 @@ static FILES: &[StoryModule] = &[
     file(ease_editor::script_mod, ease_editor::STORIES),
     file(tween_script::script_mod, tween_script::STORIES),
     file(motion_path::script_mod, motion_path::STORIES),
+    file(sequencer::script_mod, sequencer::STORIES),
     // 2 Layout
     file(layout::script_mod, layout::STORIES),
     file(grid::script_mod, grid::STORIES),

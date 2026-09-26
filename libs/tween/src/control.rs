@@ -6,6 +6,7 @@
 //! land in the engine's queue and are read with
 //! [`TweenEngine::swap_events`].
 
+use crate::easing::Easing;
 use crate::engine::*;
 use crate::ids::{PropKey, Tag, TargetId, TweenId};
 use crate::spec::{Emit, EventMask, KeyStep, Position, PropTo, Reduce, Seek, Targets, TweenOpts};
@@ -1069,6 +1070,22 @@ impl<'a> AnimMut<'a> {
         self.run(|e, n| e.invalidate_node(n))
     }
 
+    /// Re-renders from 0 to the current total time, events suppressed and
+    /// forced (GSAP `render(0, true, true)` then `render(totalTime, true,
+    /// true)`): after a child's start or duration changed on a paused,
+    /// scrubbed timeline, the values at the playhead are right again (a child
+    /// moved past the playhead shows its start value). Captured start values
+    /// are NOT re-captured (GSAP neither; use [`AnimMut::invalidate`]).
+    pub fn refresh(&mut self) -> &mut Self {
+        self.run(|e, n| {
+            let t = e.hot[n as usize].ttime;
+            e.render(n, 0.0, true, true, NIL);
+            if e.hot[n as usize].flags & (F_FREE | F_KILLED) == 0 {
+                e.render(n, t, true, true, NIL);
+            }
+        })
+    }
+
     /// Replaces the callbacks this animation reports (GSAP
     /// `eventCallback(type, fn)` after creation: a script layer that
     /// attaches `onComplete` to a built timeline). Events already queued
@@ -1380,4 +1397,195 @@ impl<'a> AnimRef<'a> {
         }
         k
     }
+
+    /// What this animation is (`None` for a stale handle): a timeline, a
+    /// stagger or keyframes group, a call, a pause, or a plain tween.
+    pub fn kind(&self) -> Option<AnimKind> {
+        if !self.live() {
+            return None;
+        }
+        let f = self.e.hot[self.n as usize].flags;
+        Some(match f & K_MASK {
+            K_TIMELINE => AnimKind::Timeline,
+            K_GROUP if f & F_KEYFRAMES != 0 => AnimKind::Keyframes,
+            K_GROUP => AnimKind::Stagger,
+            _ if f & F_CALL != 0 => AnimKind::Call,
+            _ if f & F_PAUSE_NODE != 0 => AnimKind::Pause,
+            _ => AnimKind::Tween,
+        })
+    }
+
+    /// The linked parent (GSAP `parent`): a timeline or a stagger /
+    /// keyframes group. `None` at root level (built with `TweenEngine::to`,
+    /// `timeline`, ..., or removed from its timeline) and for a stale
+    /// handle.
+    pub fn parent(&self) -> Option<TweenId> {
+        if !self.live() {
+            return None;
+        }
+        let p = self.e.cold[self.n as usize].parent;
+        if p == NIL || p == self.e.root {
+            None
+        } else {
+            Some(self.e.id_of(p))
+        }
+    }
+
+    /// The linked children in start order (GSAP `getChildren(false)`): a
+    /// timeline's tweens, timelines, calls and pauses, or a group's
+    /// per-target tweens (stagger) or steps (keyframes). Empty for a leaf
+    /// and for a stale handle. Allocation-free.
+    pub fn children(&self) -> ChildIter<'a> {
+        let c = if self.live() {
+            self.e.cold[self.n as usize].first
+        } else {
+            NIL
+        };
+        ChildIter { e: self.e, c }
+    }
+
+    /// The labels as `(tag, time)` in time order, ties in the order they
+    /// were added (GSAP `tl.labels`). Empty for anything but a timeline.
+    /// Allocation-free.
+    pub fn labels(&self) -> LabelIter<'a> {
+        let s: &'a [Label] = if self.live() {
+            self.e.labels_of(self.n)
+        } else {
+            &[]
+        };
+        LabelIter { it: s.iter() }
+    }
+
+    /// GSAP `repeatDelay()`.
+    pub fn repeat_delay(&self) -> f64 {
+        if self.live() {
+            self.e.cold[self.n as usize].rdelay
+        } else {
+            0.0
+        }
+    }
+
+    /// A group's content duration (its children's extent in the group's
+    /// inner time, which its outer ease maps onto [`AnimRef::duration`]);
+    /// [`AnimRef::duration`] for everything else.
+    pub fn inner_duration(&self) -> f64 {
+        if self.live() && self.e.kind(self.n) == K_GROUP {
+            self.e.cold[self.n as usize].inner_dur
+        } else {
+            self.duration()
+        }
+    }
+
+    /// The ease (GSAP `vars.ease`; a group's children carry the tween
+    /// ease, the group itself runs linear). `Easing::Linear` for a stale
+    /// handle.
+    pub fn ease(&self) -> Easing {
+        if self.live() {
+            self.e.cold[self.n as usize].ease
+        } else {
+            Easing::Linear
+        }
+    }
+
+    /// The target a tween animates: the target of its first track (a
+    /// killed track counts until the storage is compacted). A group
+    /// answers its first child's target; a timeline, a call, a pause and a
+    /// stale handle `None`.
+    pub fn first_target(&self) -> Option<TargetId> {
+        if !self.live() {
+            return None;
+        }
+        self.e.first_target_of(self.n)
+    }
+
+    /// Whether this tween follows a motion path (`PropTo::path`).
+    pub fn has_path(&self) -> bool {
+        self.live() && self.e.has(self.n, F_PATH)
+    }
 }
+
+impl TweenEngine {
+    fn first_target_of(&self, n: u32) -> Option<TargetId> {
+        match self.kind(n) {
+            K_TIMELINE => None,
+            K_GROUP => {
+                let mut c = self.cold[n as usize].first;
+                while c != NIL {
+                    if self.hot[c as usize].flags & (F_KILLED | F_FREE) == 0 {
+                        return self.first_target_of(c);
+                    }
+                    c = self.hot[c as usize].next;
+                }
+                None
+            }
+            _ => {
+                let cold = &self.cold[n as usize];
+                if cold.n_tracks == 0 {
+                    return None;
+                }
+                let s = *self.tr_slot.get(cold.tracks as usize)?;
+                self.sl_target.get(s as usize).copied()
+            }
+        }
+    }
+}
+
+/// What an animation is ([`AnimRef::kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimKind {
+    /// A plain tween (zero-duration `set()` tweens included).
+    Tween,
+    /// A timeline (GSAP `gsap.timeline()`).
+    Timeline,
+    /// A stagger group: one tween per target, spread in time.
+    Stagger,
+    /// A keyframes group (array or percent keyframes).
+    Keyframes,
+    /// A call marker (`tl.call()`, `delayed_call`).
+    Call,
+    /// A pause marker (`tl.add_pause()`).
+    Pause,
+}
+
+/// The linked children of an animation, in start order
+/// ([`AnimRef::children`]). Killed children are skipped.
+pub struct ChildIter<'a> {
+    e: &'a TweenEngine,
+    c: u32,
+}
+
+impl<'a> Iterator for ChildIter<'a> {
+    type Item = TweenId;
+
+    fn next(&mut self) -> Option<TweenId> {
+        while self.c != NIL {
+            let c = self.c;
+            let h = &self.e.hot[c as usize];
+            self.c = h.next;
+            if h.flags & (F_KILLED | F_FREE) == 0 {
+                return Some(self.e.id_of(c));
+            }
+        }
+        None
+    }
+}
+
+/// A timeline's labels as `(tag, time)` in time order
+/// ([`AnimRef::labels`]).
+pub struct LabelIter<'a> {
+    it: std::slice::Iter<'a, Label>,
+}
+
+impl<'a> Iterator for LabelIter<'a> {
+    type Item = (Tag, f64);
+
+    fn next(&mut self) -> Option<(Tag, f64)> {
+        self.it.next().map(|l| (l.tag, l.time))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.it.size_hint()
+    }
+}
+
+impl ExactSizeIterator for LabelIter<'_> {}
