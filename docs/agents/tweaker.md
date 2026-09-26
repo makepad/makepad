@@ -3,7 +3,7 @@
 Read this when the user is giving visual feedback or when applying a live
 style change. Follow [AGENTS.md](../../AGENTS.md) for instance ownership and
 capture policy. The overlay implementation is
-[widgets/src/tweaker.rs](../../widgets/src/tweaker.rs).
+[widgets/families/tweaker/src/tweaker.rs](../../widgets/families/tweaker/src/tweaker.rs).
 
 ## Interaction and routes
 

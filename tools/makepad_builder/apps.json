@@ -5,7 +5,10 @@
     "package": "makepad-aichat",
     "binary": "aichat",
     "workspace": "makepad/apps/aichat",
-    "features": []
+    "features": [
+      "engine",
+      "gen"
+    ]
   },
   {
     "id": "ai-hub",
@@ -13,23 +16,32 @@
     "package": "makepad-app-ai-hub",
     "binary": "makepad-ai-hub",
     "workspace": "makepad/apps/ai-hub",
-    "features": []
-  },
-  {
-    "id": "asset-ui",
-    "title": "Asset Library",
-    "package": "makepad-app-asset-ui",
-    "binary": "makepad-app-asset-ui",
-    "workspace": "makepad/apps/asset-ui",
-    "features": []
-  },
-  {
-    "id": "asset-server",
-    "title": "Asset Server",
-    "package": "makepad-app-asset-server",
-    "binary": "makepad-asset-server",
-    "workspace": "makepad/apps/asset-server",
-    "features": []
+    "features": [
+      "localai",
+      "flux",
+      "paint",
+      "paint-cuda",
+      "llm",
+      "tts",
+      "indextts",
+      "speech",
+      "stt",
+      "video",
+      "interpolate",
+      "audio",
+      "mesh",
+      "matte-native",
+      "depth-native",
+      "segment-native",
+      "body-native",
+      "upscale-native",
+      "motion-native",
+      "rig-native",
+      "splat-native",
+      "stems-native",
+      "beats-native",
+      "notes-native"
+    ]
   },
   {
     "id": "browser",
@@ -87,7 +99,9 @@
     "package": "makepad-fab",
     "binary": "makepad-fab",
     "workspace": "makepad/apps/fab",
-    "features": [],
+    "features": [
+      "gltf"
+    ],
     "menu": "other"
   },
   {
@@ -105,7 +119,9 @@
     "package": "makepad-files",
     "binary": "files",
     "workspace": "makepad/apps/files",
-    "features": [],
+    "features": [
+      "standalone"
+    ],
     "menu": "other"
   },
   {
@@ -118,14 +134,6 @@
       "standalone"
     ],
     "menu": "other"
-  },
-  {
-    "id": "flow-server",
-    "title": "Flow Server",
-    "package": "makepad-flow-server",
-    "binary": "makepad-flow-server",
-    "workspace": "makepad/apps/flow-server",
-    "features": []
   },
   {
     "id": "gltf",
@@ -212,7 +220,8 @@
     "binary": "route",
     "workspace": "makepad/apps/route",
     "features": [
-      "standalone"
+      "standalone",
+      "localai"
     ],
     "menu": "other"
   },
@@ -261,15 +270,6 @@
     "binary": "video",
     "workspace": "makepad/apps/video",
     "features": []
-  },
-  {
-    "id": "vj",
-    "title": "VJ",
-    "package": "makepad-vj",
-    "binary": "makepad-vj",
-    "workspace": "makepad/apps/vj",
-    "features": [],
-    "menu": "other"
   },
   {
     "id": "weather",

@@ -1,0 +1,12 @@
+[package]
+name = "makepad-agents"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-strict-json = { path = "../../libs/strict_json" }
+
+[[bin]]
+name = "agents"
+path = "src/main.rs"

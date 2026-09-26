@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- amp: a speaker driver with sound waves -->
+  <circle cx="430" cy="512" r="250" fill="url(#orange)"/>
+  <circle cx="430" cy="512" r="196" fill="#0e1d33"/>
+  <circle cx="430" cy="512" r="150" fill="#1f3a5e"/>
+  <circle cx="430" cy="512" r="72" fill="url(#orange)"/>
+  <g fill="none" stroke="#f5c84c" stroke-width="40" stroke-linecap="round">
+    <path d="M730 400 A160 160 0 0 1 730 624"/>
+    <path d="M800 330 A260 260 0 0 1 800 694"/>
+  </g>
+</svg>

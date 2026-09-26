@@ -14,40 +14,76 @@ const K: [u32; 64] = [
 ];
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h = [
-        0x6a09e667u32, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut block = [0u8; 64];
-    let mut filled = 0usize;
-    for &b in data {
-        block[filled] = b;
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finish()
+}
+
+/// Incremental SHA-256: whole blocks are compressed straight from the
+/// input, only a partial block is buffered.
+#[derive(Clone)]
+pub struct Sha256 {
+    h: [u32; 8],
+    block: [u8; 64],
+    filled: usize,
+    len: u64,
+}
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Sha256 {
+    pub fn new() -> Self {
+        Sha256 {
+            h: [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19],
+            block: [0; 64],
+            filled: 0,
+            len: 0,
+        }
+    }
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+        if self.filled > 0 {
+            let take = (64 - self.filled).min(data.len());
+            self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
+            self.filled += take;
+            data = &data[take..];
+            if self.filled < 64 {
+                return;
+            }
+            let block = self.block;
+            compress(&mut self.h, &block);
+            self.filled = 0;
+        }
+        let mut blocks = data.chunks_exact(64);
+        for block in &mut blocks {
+            compress(&mut self.h, block.try_into().unwrap());
+        }
+        let rest = blocks.remainder();
+        self.block[..rest.len()].copy_from_slice(rest);
+        self.filled = rest.len();
+    }
+    pub fn finish(mut self) -> [u8; 32] {
+        let bit_len = self.len.wrapping_mul(8);
+        let mut block = self.block;
+        let mut filled = self.filled;
+        block[filled] = 0x80;
         filled += 1;
-        if filled == 64 {
-            compress(&mut h, &block);
+        if filled > 56 {
+            block[filled..].fill(0);
+            compress(&mut self.h, &block);
             filled = 0;
         }
-    }
-    let bit_len = (data.len() as u64).saturating_mul(8);
-    block[filled] = 0x80;
-    filled += 1;
-    if filled > 56 {
-        for b in block.iter_mut().skip(filled) {
-            *b = 0;
+        block[filled..56].fill(0);
+        block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        compress(&mut self.h, &block);
+        let mut out = [0u8; 32];
+        for (i, word) in self.h.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
         }
-        compress(&mut h, &block);
-        filled = 0;
+        out
     }
-    for b in block.iter_mut().take(56).skip(filled) {
-        *b = 0;
-    }
-    block[56..64].copy_from_slice(&bit_len.to_be_bytes());
-    compress(&mut h, &block);
-    let mut out = [0u8; 32];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {

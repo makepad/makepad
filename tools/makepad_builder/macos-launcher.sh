@@ -4,6 +4,9 @@
 set -eu
 app_dir=$(cd -P -- "$(dirname -- "$0")" && pwd)
 install_dir=$(cd -P -- "$app_dir/../../.." && pwd)
+# The Builder keeps its records in the installation's builder folder
+# (installations from before that layout kept them in the folder itself).
+if [ -d "$install_dir/builder/installed" ]; then install_dir=$install_dir/builder; fi
 unset MAKEPAD_LOADER_EMAIL MAKEPAD_PACKAGE_DIR
 has_project=0
 for arg in "$@"; do

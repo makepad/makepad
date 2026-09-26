@@ -309,7 +309,7 @@ def build(release):
     env.update(CARGO_TERM_COLOR="never", CARGO_TERM_PROGRESS_WHEN="never", MAKEPAD_PACKAGE_DIR=".")
     PROGRESS.package("Build " + release["title"], "Cargo release build", 0, 0)
     artifacts = []
-    run_logged([str(rust / "bin/cargo"), "build", "--release", "--message-format=json-render-diagnostics", "-p", release["package"], "--bin", release["binary"]] + (["--locked"] if (source / "Cargo.lock").is_file() else []) + (["--features", ",".join(release["features"])] if release.get("features") else []), "Compiling Rust", artifacts=artifacts, cwd=source, env=env)
+    run_logged([str(rust / "bin/cargo"), "build", "--release", "--message-format=json-render-diagnostics", "-p", release["package"], "--bin", release["binary"], "--no-default-features"] + (["--locked"] if (source / "Cargo.lock").is_file() else []) + (["--features", ",".join(release["features"])] if release.get("features") else []), "Compiling Rust", artifacts=artifacts, cwd=source, env=env)
     PROGRESS.update("Finishing", "Linking resources to the downloaded source", force=True)
     paths = {}
     for artifact in artifacts:

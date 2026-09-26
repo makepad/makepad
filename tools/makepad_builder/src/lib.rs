@@ -1,12 +1,18 @@
+#[cfg(any(target_os = "macos", windows))]
+pub mod app_icon;
 pub mod cab;
 pub mod catalog;
 pub mod command;
 #[cfg(target_os = "macos")]
 pub mod desktop;
 pub mod cuda;
+pub mod curl_http;
+pub mod implib;
 pub mod extract;
+pub mod fetch;
 pub mod gitclone;
 pub mod http;
+pub mod jobs;
 pub mod lzx;
 pub mod msi;
 pub mod msvc;
@@ -15,6 +21,7 @@ pub mod publish;
 pub mod runtime;
 pub mod rustc;
 pub mod sha256;
+pub mod timing;
 pub mod tui;
 pub mod agent;
 
@@ -51,12 +58,95 @@ impl Default for InstallOpts {
     }
 }
 
+/// The folder people see holds only the entry point (makepad-builder.bat and
+/// makepad-builder.exe on Windows, `makepad` on macOS and Linux) and the apps
+/// built there; everything else the Builder keeps (toolchains, sources,
+/// caches, records) lives in this subfolder of it. Inside the Builder,
+/// `root` is that subfolder.
+pub const STATE_DIR: &str = "builder";
+
+/// The Builder's folder inside the installation `home`, with the files an
+/// earlier Builder kept in `home` itself moved into it first.
+pub fn state_dir(home: &Path) -> PathBuf {
+    let state = home.join(STATE_DIR);
+    migrate_legacy_layout(home, &state);
+    state
+}
+
+/// The installation folder people see: the parent of the Builder's folder.
+pub fn home_of(root: &Path) -> PathBuf {
+    match root.parent() {
+        Some(parent) if root.file_name().is_some_and(|name| name == STATE_DIR) => parent.to_path_buf(),
+        _ => root.to_path_buf(),
+    }
+}
+
+/// Entries earlier Builders kept directly in the installation folder.
+const LEGACY_ENTRIES: &[&str] = &[
+    "installed", "available", "sources", "target", "cache", "toolchain", "cargo-home", "rustup-home",
+    "tmp", "changes", "sdk", "releases", "selected-app", "selected-rust", "selected-compiler",
+    "latest.json", "installed-release.json", "agreements-accepted", ".login-asked", ".builder-version",
+    "makepad-builder.json", "makepad-loader.json", "builder.log", "agent-context.txt", "rustc-threads",
+    "graphics-notice-read", "makepad-env.bat", ".setup-lock",
+];
+
+/// Move an earlier Builder's files from `home` into `state` (a rename within
+/// one folder, so nothing is copied), and point the resource maps of apps
+/// built then at the new place. Only entries `state` lacks move; an entry
+/// that cannot move (open in another program) stays and is tried again next
+/// start.
+fn migrate_legacy_layout(home: &Path, state: &Path) {
+    if !home.join("installed").is_dir() && !home.join("toolchain").is_dir() && !home.join("sources").is_dir() {
+        return;
+    }
+    if fs::create_dir_all(state).is_err() {
+        return;
+    }
+    for name in LEGACY_ENTRIES {
+        let from = home.join(name);
+        let to = state.join(name);
+        if fs::symlink_metadata(&from).is_ok() && fs::symlink_metadata(&to).is_err() {
+            let _ = fs::rename(&from, &to);
+        }
+    }
+    let Ok(entries) = fs::read_dir(home) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.file_name().is_some_and(|n| n.to_string_lossy().ends_with("makepad-package-paths")) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let moved: String = text
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(name, dir)| {
+                if dir.starts_with(&format!("{STATE_DIR}/")) { format!("{name}\t{dir}\n") } else { format!("{name}\t{STATE_DIR}/{dir}\n") }
+            })
+            .collect();
+        if moved != text {
+            let _ = fs::write(&path, moved);
+        }
+    }
+}
+
+/// The Builder's folder (see [`STATE_DIR`]) of this installation.
 pub fn default_root() -> PathBuf {
+    state_dir(&default_home())
+}
+
+fn default_home() -> PathBuf {
     if let Ok(p) = env::var("MAKEPAD_LOADER_ROOT") {
         return PathBuf::from(p);
     }
     if let Ok(Some((directory, _))) = makepad_loader_bundle::load() {
         return directory;
+    }
+    // The Windows download: makepad-builder.bat puts makepad-builder.exe
+    // beside itself, and that folder is the installation.
+    if let Some(dir) = env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        if dir.join("makepad-builder.bat").is_file() {
+            return dir;
+        }
     }
     env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
@@ -69,18 +159,61 @@ pub fn default_root() -> PathBuf {
 /// where Builder would scatter its files into the user's home or filesystem
 /// root. Missing tail components are retained, so a new dedicated folder is
 /// still accepted and can be created by the caller after this check.
+/// A path as people read it: without the verbatim `\\?\` prefix Windows
+/// canonical paths carry (`\\?\C:\x` shows as `C:\x`, `\\?\UNC\srv\x` as
+/// `\\srv\x`). Internally the canonical form stays.
+pub fn shown(path: &Path) -> String {
+    plain_paths(&path.display().to_string())
+}
+/// `text` with every verbatim path prefix removed (see [`shown`]), for
+/// messages and log lines that may carry such paths.
+pub fn plain_paths(text: &str) -> String {
+    if !text.contains(r"\\?\") {
+        return text.to_owned();
+    }
+    text.replace(r"\\?\UNC\", r"\\").replace(r"\\?\", "")
+}
+
 pub fn validate_install_root(root: &Path) -> Result<PathBuf, String> {
     let root = canonical_install_path(root)?;
     let home_var = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .ok_or("Missing home directory")?;
     let home = canonical_install_path(Path::new(&home_var))?;
-    if root.parent().is_none() || root == home {
+    // The home folder, any folder above it and the filesystem root hold
+    // other people's files; Builder deletes inside its root (see `remove_inside`).
+    if root.parent().is_none() || home.starts_with(&root) {
         return Err(format!(
-            "Builder needs a dedicated installation subfolder; {} is the home folder or filesystem root",
+            "Builder needs a dedicated installation subfolder; {} is the home folder, a folder above it or the filesystem root",
             root.display()
         ));
     }
     Ok(root)
+}
+
+/// The one way the Builder deletes files and folders it made. `path` must lie
+/// strictly inside `root`, and `root` must be an acceptable installation
+/// folder (never the filesystem root, the home folder or a folder above it).
+/// Both are compared after resolving links; the last component of `path` is
+/// not followed, so a link is removed, never what it points to. A path
+/// that does not exist is already gone.
+pub fn remove_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let root = validate_install_root(root)?;
+    // Nothing can be inside a root that does not exist yet.
+    let Ok(root) = fs::canonicalize(&root) else { return Ok(()) };
+    let refuse = || format!("Refusing to delete {}: it is not inside {}", path.display(), root.display());
+    let name = path.file_name().ok_or_else(refuse)?;
+    let Ok(parent) = fs::canonicalize(path.parent().ok_or_else(refuse)?) else { return Ok(()) };
+    let target = parent.join(name);
+    if target == root || !target.starts_with(&root) {
+        return Err(refuse());
+    }
+    let result = match fs::symlink_metadata(&target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => Err(error),
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(&target),
+        Ok(_) => fs::remove_file(&target),
+    };
+    result.map_err(|e| format!("Delete {}: {e}", target.display()))
 }
 
 fn canonical_install_path(path: &Path) -> Result<PathBuf, String> {
@@ -134,10 +267,13 @@ pub fn run_install(
 ) -> Result<Vec<AppInfo>, String> {
     let mut opts = opts.clone();
     opts.root = validate_install_root(&opts.root)?;
+    timing::reset();
     progress::scope(progress, || run_install_inner(&opts))
 }
 
 fn run_install_inner(opts: &InstallOpts) -> Result<Vec<AppInfo>, String> {
+    // The legacy CLI takes any --root; refuse the home folder and above.
+    validate_install_root(&opts.root)?;
     fs::create_dir_all(&opts.root).map_err(|e| e.to_string())?;
     let tmp = tmp_dir(&opts.root)?;
     let _ = tmp;
@@ -151,31 +287,24 @@ fn run_install_inner(opts: &InstallOpts) -> Result<Vec<AppInfo>, String> {
 
     #[cfg(windows)]
     {
-        dwell("Rust", "stable rustc / cargo / rust-std", 0.08);
-        rustc::install(&cache, &rust_dir)?;
-        dwell("Rust", "ready", 0.22);
-        dwell("MSVC", "Build Tools + Windows SDK", 0.28);
-        msvc::install(&cache, &msvc_dir)?;
-        dwell("MSVC", "ready", 0.48);
-        dwell("CUDA", "NVIDIA toolkit", 0.55);
+        // Rust, Build tools, Windows SDK and (asked for) CUDA side by side.
+        let catalog = msvc::Catalog::default();
+        let mut jobs = vec![jobs::Job::new("Rust", || rustc::install(&cache, &rust_dir))];
+        jobs.extend(msvc::install_jobs(&cache, &msvc_dir, &catalog, true));
         if cuda_dir.join("bin").join("nvcc.exe").is_file() {
-            dwell("CUDA", "already extracted", 0.72);
+            dwell("CUDA", "already extracted", 0.1);
         } else if !opts.skip_cuda {
-            match cuda::install(&cache, &cuda_dir) {
-                Ok(()) => dwell("CUDA", "ready", 0.72),
+            jobs.push(jobs::Job::new("CUDA", || match cuda::install(&cache, &cuda_dir) {
+                Ok(()) => Ok(()),
                 Err(e) => {
-                    dwell(
-                        "CUDA",
-                        &format!("redist unavailable ({e}); copying local NVIDIA runtime"),
-                        0.62,
-                    );
-                    cuda::harvest_runtime(&cuda_dir)?;
-                    dwell("CUDA", "runtime ready", 0.72);
+                    setup_note!("CUDA redist unavailable ({e}); copying local NVIDIA runtime");
+                    cuda::harvest_runtime(&cuda_dir)
                 }
-            }
+            }));
         } else {
-            dwell("CUDA", "not requested", 0.72);
+            dwell("CUDA", "not requested", 0.1);
         }
+        jobs::run(jobs)?;
         write_env_scripts(&opts.root, &rust_dir, &msvc_dir, &cuda_dir, &src_dir)?;
     }
     #[cfg(not(windows))]
@@ -214,13 +343,11 @@ fn dwell(stage: &str, detail: &str, frac: f32) {
 }
 
 const APP_CATALOG: &[(&str, &str)] = &[
-    ("makepad-vj", "VJ"),
     ("makepad-director", "Director"),
     ("makepad-wm", "Desktop"),
     ("makepad-files", "Files"),
     ("makepad-browser", "Browser"),
     ("makepad-terminal", "Terminal"),
-    ("makepad-app-asset-ui", "Assets"),
     ("makepad-example-counter", "Counter"),
     ("makepad-example-splash", "Splash"),
     ("makepad-example-todo", "Todo"),
@@ -500,6 +627,10 @@ pub fn cli_main() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("launch-scope") {
         return command::launch_scope();
     }
+    if std::env::args().nth(1).as_deref() == Some("build") {
+        let app = std::env::args().nth(2).ok_or("Usage: makepad-builder build APP")?;
+        return runtime::build_local(&app);
+    }
     if std::env::args().nth(1).as_deref() == Some("rebuild") {
         return runtime::rebuild_local();
     }
@@ -508,6 +639,9 @@ pub fn cli_main() -> Result<(), String> {
     }
     if std::env::args().nth(1).as_deref() == Some("windows-sdk") {
         return msvc::cli_install();
+    }
+    if std::env::args().nth(1).as_deref() == Some("rust") {
+        return rustc::cli_install();
     }
     if std::env::args().nth(1).as_deref() == Some("publish") {
         return publish::main();
@@ -539,7 +673,11 @@ pub fn cli_main() -> Result<(), String> {
         src: args.src,
         package: args.package,
     };
-    run_install(&opts, |_| {})?;
+    let result = run_install(&opts, progress::printer());
+    for line in timing::report() {
+        println!("{line}");
+    }
+    result?;
     Ok(())
 }
 
@@ -571,7 +709,7 @@ fn parse_args() -> Result<CliArgs, String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--root" => {
-                root = PathBuf::from(args.next().ok_or("--root needs a path")?);
+                root = state_dir(Path::new(&args.next().ok_or("--root needs a path")?));
             }
             "--git" => {
                 git_url = args.next().ok_or("--git needs a url")?;
@@ -597,7 +735,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-h" | "--help" => {
                 println!(
-                    "makepad-builder-cli [--root DIR] [--git URL] [--branch NAME] [-p PKG]\n\
+                    "makepad-builder [--root DIR] [--git URL] [--branch NAME] [-p PKG]\n\
                      [--skip-build] [--skip-cuda|--cuda] [--skip-git]"
                 );
                 std::process::exit(0);

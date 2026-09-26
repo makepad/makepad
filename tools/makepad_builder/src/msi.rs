@@ -74,6 +74,55 @@ pub fn dump(msi: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The files an MSI installs, as (cabinet member name in lower case, path
+/// relative to the install root), without the ones setup skips (.pdb).
+pub fn msi_files(msi: &[u8]) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut span = crate::timing::span(crate::timing::Phase::Decompress);
+    span.bytes(msi.len() as u64);
+    let cfb = Cfb::open(msi)?;
+    let (strings, long_str) = read_string_pool(&cfb)?;
+    let schemas = read_columns_schema(&cfb, &strings, long_str)?;
+    let file_rows = read_table(&cfb, &strings, &schemas, "File", long_str)?;
+    let dir_rows = read_table(&cfb, &strings, &schemas, "Directory", long_str)?;
+    let comp_rows = read_table(&cfb, &strings, &schemas, "Component", long_str)?;
+    let dirs = build_directories(&dir_rows);
+    let mut comp_dir: HashMap<String, PathBuf> = HashMap::new();
+    for row in &comp_rows {
+        let id = row.first().cloned().unwrap_or_default();
+        let dir_id = row.get(2).cloned().unwrap_or_default();
+        comp_dir.insert(id, dirs.get(&dir_id).cloned().unwrap_or_default());
+    }
+    let mut out = Vec::new();
+    for row in &file_rows {
+        let file_id = row.first().cloned().unwrap_or_default();
+        let component = row.get(1).cloned().unwrap_or_default();
+        let file_name = pretty_name(row.get(2).map(String::as_str).unwrap_or(""));
+        if file_id.is_empty() || skip_sdk_file(file_name) {
+            continue;
+        }
+        let dir = comp_dir.get(&component).cloned().unwrap_or_default();
+        out.push((file_id.to_ascii_lowercase(), dir.join(file_name)));
+    }
+    Ok(out)
+}
+
+/// The external cabinets an MSI's files are in: its Media table's Cabinet
+/// column (an embedded one, `#name`, is not a download).
+pub fn msi_cabinets(msi: &[u8]) -> Result<Vec<String>, String> {
+    let cfb = Cfb::open(msi)?;
+    let (strings, long_str) = read_string_pool(&cfb)?;
+    let schemas = read_columns_schema(&cfb, &strings, long_str)?;
+    let media = read_table(&cfb, &strings, &schemas, "Media", long_str)?;
+    let mut out: Vec<String> = Vec::new();
+    for row in &media {
+        let cab = row.get(3).map(|s| s.trim()).unwrap_or_default();
+        if !cab.is_empty() && !cab.starts_with('#') && !out.iter().any(|c| c.eq_ignore_ascii_case(cab)) {
+            out.push(cab.to_string());
+        }
+    }
+    Ok(out)
+}
+
 pub fn unpack_msi(
     msi: &[u8],
     cabs: &HashMap<String, Vec<u8>>,

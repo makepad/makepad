@@ -7,8 +7,27 @@ fn xml(value: &str) -> String {
         .replace('"', "&quot;").replace('\'', "&apos;")
 }
 
-/// Return the bundle's launch wrapper. The original root binary and command
-/// remain available; resources stay in the downloaded source repositories.
+/// The bundle's file name without `.app`: the catalog title ("Makepad Scope"),
+/// kept to characters that are safe in a file name.
+pub fn bundle_name(release: &Release) -> String {
+    let name: String = release.title.chars().filter(|c| c.is_alphanumeric() || " -_.".contains(*c)).collect();
+    let name = name.trim().trim_start_matches('.').to_owned();
+    if name.is_empty() { capitalized(&release.binary) } else { name }
+}
+fn capitalized(binary: &str) -> String {
+    let mut chars = binary.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+}
+/// A bundle an earlier Builder named after the binary ("Scope.app"). It is
+/// left alone; the caller mentions it once.
+pub fn older_bundle(root: &Path, release: &Release) -> Option<PathBuf> {
+    let old = capitalized(&release.binary);
+    (old != bundle_name(release)).then(|| crate::home_of(root).join(format!("{old}.app"))).filter(|path| path.is_dir())
+}
+
+/// Return the bundle's launch wrapper. The bundle is in the installation
+/// folder; `root` is the Builder's folder in it, which keeps the binary, and
+/// resources stay in the downloaded source repositories.
 pub fn prepare(root: &Path, release: &Release, project: &Path) -> Result<PathBuf, String> {
     let root = crate::validate_install_root(root)?;
     prepare_inner(&root, release, project).map_err(|e| format!("Prepare macOS application: {e}"))
@@ -19,9 +38,9 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     let root = root.canonicalize()?;
     let project = project.canonicalize()?;
     let binary = &release.binary;
-    let mut chars = binary.chars();
-    let name = chars.next().unwrap().to_uppercase().collect::<String>() + chars.as_str();
-    let bundle = root.join(format!("{name}.app"));
+    let name = bundle_name(release);
+    let home = crate::home_of(&root);
+    let bundle = home.join(format!("{name}.app"));
     let executable = bundle.join("Contents/MacOS").join(binary);
     fs::create_dir_all(root.join("installed"))?;
     // User state lives outside the bundle. It is relative for projects inside
@@ -41,11 +60,13 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
         return Ok(executable);
     }
 
-    let stage = root.join(format!(".{name}.app.next"));
-    if stage.exists() { fs::remove_dir_all(&stage)?; }
-    struct Stage(PathBuf);
-    impl Drop for Stage { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
-    let _stage = Stage(stage.clone());
+    let stage = home.join(format!(".{name}.app.next"));
+    // A bundle staged by an interrupted run is rebuilt from scratch.
+    crate::remove_inside(&home, &stage).map_err(std::io::Error::other)?;
+    // Whatever happens below, the staging copy does not outlive this call.
+    struct Stage(PathBuf, PathBuf);
+    impl Drop for Stage { fn drop(&mut self) { let _ = crate::remove_inside(&self.1, &self.0); } }
+    let _stage = Stage(stage.clone(), home.clone());
     let macos = stage.join("Contents/MacOS");
     let resources = stage.join("Contents/Resources");
     fs::create_dir_all(&macos)?;
@@ -56,22 +77,20 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     // The resource loader intentionally accepts only normal path components.
     // A relative installation link preserves that contract without hardcoding
     // the original folder or copying all fonts/icons into the application.
-    symlink("../../..", macos.join("installation"))?;
+    symlink(format!("../../../{}", crate::STATE_DIR), macos.join("installation"))?;
     let paths: String = map.lines().filter_map(|line| line.split_once('\t'))
         .map(|(name, path)| format!("{name}\tinstallation/{path}\n")).collect();
     fs::write(macos.join(format!("{binary}-bin.makepad-package-paths")), paths)?;
 
-    let app_resources = release.source(&root).join("resources");
-    let icon = if release.id == "scope" {
-        fs::write(resources.join("AppIcon.icns"), include_bytes!("../resources/scope.icns"))?;
-        "AppIcon.icns"
-    } else if app_resources.join("icon.icns").is_file() {
-        fs::copy(app_resources.join("icon.icns"), resources.join("AppIcon.icns"))?;
-        "AppIcon.icns"
-    } else if app_resources.join("icon_1024.png").is_file() {
-        fs::copy(app_resources.join("icon_1024.png"), resources.join("AppIcon.png"))?;
-        "AppIcon.png"
-    } else { "" };
+    // The same source as the Windows executable's icon (app_icon.rs).
+    let icon = match crate::app_icon::source(&root, release) {
+        Some(source) => {
+            let name = if source.is_png() { "AppIcon.png" } else { "AppIcon.icns" };
+            fs::write(resources.join(name), source.read()?)?;
+            name
+        }
+        None => "",
+    };
     let icon = if icon.is_empty() { String::new() } else {
         format!("<key>CFBundleIconFile</key><string>{icon}</string>")
     };
@@ -96,14 +115,15 @@ fn prepare_inner(root: &Path, release: &Release, project: &Path) -> std::io::Res
     fs::write(stage.join("Contents/Info.plist"), plist)?;
     fs::write(stage.join("Contents/PkgInfo"), b"APPL????")?;
     fs::write(resources.join("build-receipt"), stamp)?;
-    let previous = root.join(format!(".{name}.app.previous"));
-    if previous.exists() { fs::remove_dir_all(&previous)?; }
+    let previous = home.join(format!(".{name}.app.previous"));
+    crate::remove_inside(&home, &previous).map_err(std::io::Error::other)?;
     let existed = bundle.exists();
     if existed { fs::rename(&bundle, &previous)?; }
     if let Err(error) = fs::rename(&stage, &bundle) {
         if existed { let _ = fs::rename(&previous, &bundle); }
         return Err(error);
     }
-    if existed { fs::remove_dir_all(previous)?; }
+    // The old bundle was only kept to roll back a failed swap.
+    if existed { crate::remove_inside(&home, &previous).map_err(std::io::Error::other)?; }
     Ok(executable)
 }
