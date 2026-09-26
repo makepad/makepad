@@ -2040,12 +2040,15 @@ screen_meta() {
         main) back=0 sub='Shipped as source code, so your coding agent can customize everything.' ;;
         terms) crumb=' › License agreements' sub='Return opens an agreement in your browser.' ;;
         signin) crumb=' › Log in' sub='Welcome to the Makepad Builder.' ;;
+        xcode) crumb=' › Apple developer tools' sub='Needed to compile on macOS.' ;;
+        rustpick) crumb=' › Rust' sub='Which Rust compiles your apps.' ;;
+        packages) crumb=' › System packages' sub='Installed outside this folder, so please check them.' ;;
         folder) crumb=' › Folder' sub='Everything the Builder installs goes into one folder.' ;;
         gpu) crumb=' › Graphics' sub='Before you continue.' ;;
     esac
     default_footer='↑↓ move   ⏎ select   esc back   q quit'
     [ "$back" = 1 ] || default_footer='↑↓ move   ⏎ select   q quit'
-    case "$screen" in gpu) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
+    case "$screen" in gpu | xcode | packages | rustpick) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
 }
 screen_rows() {
     case "$screen" in
@@ -2054,6 +2057,9 @@ screen_rows() {
         signin) signin_rows ;;
         folder) folder_rows ;;
         gpu) gpu_rows ;;
+        xcode) xcode_rows ;;
+        rustpick) rustpick_rows ;;
+        packages) packages_rows ;;
     esac
 }
 # item_line NAME LICENSE STATUS ACTION SELECTED CHILD -> il. A row of an
@@ -2592,6 +2598,42 @@ gpu_rows() {
     wrap '' "$gpu_notice"
     printf '%s\n' 'item|continue|I understand|||' 'item|cancel|Cancel|||'
 }
+xcode_rows() {
+    printf 'note|\n'
+    if [ "$tools_problem" = license ]; then
+        wrap '' "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run."
+        printf 'note|\n'
+        wrap "$dim" 'Apple shows the license here in the terminal and asks for your password; type agree at the end to accept it.'
+        pad 'Read and accept the Xcode license' 34
+        printf 'item|license|%s|||sudo xcodebuild -license\n' "$padded"
+    else
+        wrap '' "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet."
+        printf 'note|\n'
+        wrap "$dim" "Apple's installer opens in its own window (about 1 GB); the app then builds by itself."
+        pad 'Install the developer tools' 34
+        printf "item|install|%s|||opens Apple's installer\n" "$padded"
+    fi
+    printf '%s\n' 'item|check|Check again|||' 'item|cancel|Cancel|||'
+}
+packages_rows() {
+    printf 'note|\n'
+    set -- $packages_cmd
+    pr_manager=$1 pr_list= pr_count=0 pr_on=
+    for pr_word in "$@"; do
+        case "$pr_word" in
+            install | -S) pr_on=1 ;;
+            -*) ;;
+            *) if [ -n "$pr_on" ]; then pr_list="$pr_list $pr_word"; pr_count=$((pr_count + 1)); fi ;;
+        esac
+    done
+    wrap '' "Makepad compiles from source and needs $pr_count development packages from $distro_name. They are installed system-wide by your package manager:"
+    printf 'note|\n'
+    printf '%s\n' $pr_list | paste -d' ' - - - - - | sed "s/^/note|${dim}  /; s/\$/${r0}/"
+    printf 'note|\n'
+    printf 'item|install|Install with sudo|||sudo %s\n' "$pr_manager"
+    printf 'item|cancel|Cancel|||\n'
+}
+
 # ------------------------------------------------------------ agreements ---
 agreements='makepad|Makepad commercial license|https://makepad.nl/commercial-license
 rust|Rust|https://www.rust-lang.org/policies/licenses'
@@ -2612,10 +2654,10 @@ terms_rows() {
     while IFS='|' read -r tr_id tr_name tr_url; do
         host_of "$tr_url"; pad "$tr_name" 36
         case "$tr_id" in
-            makepad) tr_state="${dim}applies by downloading  ${host}${r0}" ;;
+            makepad) tr_state="${dim}by downloading  ${host}${r0}" ;;
             *) tr_state="${dim}nothing to accept  ${host}${r0}" ;;
         esac
-        printf 'item|url:%s|%s||%s|open in browser\n' "$tr_id" "$padded" "$tr_state"
+        printf 'item|url:%s|%s||%s|open\n' "$tr_id" "$padded" "$tr_state"
     done <<EOF
 $agreements
 EOF
@@ -2965,10 +3007,10 @@ choose_rust() {
     esac
     if rust_check --probe "$1"; then
         cr_candidate=$rust_sysroot
-        choose "Use your installed Rust, or a private Rust $1 in this folder?" "installed: $(short "$cr_candidate") (not modified)" private private installed || return 1
+        rust_page "$1" "$cr_candidate" || return 1
         if [ "$chosen" = installed ]; then record_rust "$cr_candidate"; log 'Using the installed Rust.'; else record_rust private; log 'Using a private Rust in this folder.'; fi
     elif [ -n "$cr_stale" ]; then
-        choose "The selected Rust at $(short "$cr_stale") cannot be used. Switch to a private Rust in this folder?" '' switch switch keep || return 1
+        rust_page "$1" '' "$cr_stale" || return 1
         [ "$chosen" = switch ] || { message="${warn}Kept the selected Rust at $(short "$cr_stale"). Make it available again, or select the app again to switch.${r0}"; return 1; }
         record_rust private
     else
@@ -2990,47 +3032,100 @@ change_rust() {
     scan
     message="${ok}✓${r0} Rust changed; the next compile uses it."
 }
-# xcode_screen: Apple's developer tools are missing or their license is not
-# accepted; asked where every question is (see choose). 0 when the tools
-# are ready or Apple's installer was started (the build waits for it on
-# the app's row).
-xcode_screen() {
-    xs_again=
+# rust_page VERSION CANDIDATE [STALE] -> chosen: the Rust question as a page
+# of its own, the explanation and the choice together (asked only when a
+# Rust is already installed on this machine, or the recorded one broke):
+# private or installed, or with STALE switch or keep. 1 on Escape.
+rust_page() {
+    rp_screen=$screen rp_sel=$sel
+    rust_page_version=$1 rust_page_candidate=$2 rust_page_stale=${3:-}
+    screen=rustpick sel=0 top=0 message=
+    rp_result=1
     while :; do
-        if [ "$tools_problem" = license ]; then
-            choose "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run." "${xs_again}Apple shows the license in the terminal and asks for your password; type agree at the end." 'accept the license' 'accept the license' 'check again' cancel || return 1
-        else
-            choose "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet." "${xs_again}Apple's installer opens in its own window (about 1 GB); the app then builds by itself." 'install them' 'install them' 'check again' cancel || return 1
-        fi
-        case "$chosen" in
-            'install them') /usr/bin/xcode-select --install >/dev/null 2>&1 || :; xcode_waiting=1; return 0 ;;
-            'accept the license')
-                pause_screen
-                printf "\n  Apple's Xcode license follows. Type agree at the end to accept it.\n\n"
-                sudo xcodebuild -license </dev/tty || :
-                resume_screen ;;
-            'check again') busy 'Checking clang, the macOS SDK, the linker and git' ;;
-            *) return 1 ;;
+        draw; key
+        case "$key" in
+            up) sel=0 ;;
+            down) sel=1 ;;
+            enter)
+                select_row
+                chosen=$id rp_result=0; break ;;
+            esc | q) break ;;
         esac
-        tools_check && return 0
-        xs_again='Still not ready. '
     done
+    screen=$rp_screen sel=$rp_sel
+    return "$rp_result"
 }
-# packages_screen: the distribution's development packages, asked where
-# every question is; sudo then asks for the password on the real terminal
-# and the packages install on the app's row. 0 when sudo is ready.
-packages_screen() {
-    set -- $packages_cmd
-    ps_list= ps_count=0 ps_on=
-    for ps_word in "$@"; do
-        case "$ps_word" in
-            install | -S) ps_on=1 ;;
-            -*) ;;
-            *) if [ -n "$ps_on" ]; then ps_list="$ps_list $ps_word"; ps_count=$((ps_count + 1)); fi ;;
+rustpick_rows() {
+    printf 'note|\n'
+    if [ -n "$rust_page_stale" ]; then
+        wrap '' "Makepad compiles with Rust $rust_page_version. The Rust this folder was set to use, $(short "$rust_page_stale"), cannot be used any more."
+        printf 'note|\n'
+        pad "Switch to a private Rust $rust_page_version" 34
+        printf 'item|switch|%s|||installs in this folder only\n' "$padded"
+        pad 'Keep the selected Rust' 34
+        printf 'item|keep|%s|||make it available again first\n' "$padded"
+    else
+        wrap '' "Makepad compiles with Rust $rust_page_version. A Rust that can build it is already installed on this machine. The Builder can use it as it is, without changing it, or install a private Rust in this folder only."
+        printf 'note|\n'
+        wrap "$dim" "installed: $(short "$rust_page_candidate")"
+        printf 'note|\n'
+        pad "Private Rust $rust_page_version" 34
+        printf 'item|private|%s|||install in this folder\n' "$padded"
+        pad 'Your installed Rust' 34
+        printf 'item|installed|%s|||use it as it is\n' "$padded"
+    fi
+}
+# xcode_screen: Apple's installer or its license prompt, Check again or
+# Cancel. 0 when the tools are ready or Apple's installer was started.
+xcode_screen() {
+    x_screen=$screen x_sel=$sel
+    screen=xcode sel=0 top=0 message=
+    x_result=1
+    while :; do
+        draw; key; message=
+        case "$key" in
+            up) sel=$(( (sel + items - 1) % items )) ;;
+            down) sel=$(( (sel + 1) % items )) ;;
+            esc | q) break ;;
+            enter)
+                select_row
+                case "$id" in
+                    install) /usr/bin/xcode-select --install >/dev/null 2>&1 || :; x_result=0; xcode_waiting=1; break ;;
+                    license)
+                        pause_screen
+                        printf "\n  Apple's Xcode license follows. Type agree at the end to accept it.\n\n"
+                        sudo xcodebuild -license </dev/tty || :
+                        resume_screen
+                        if tools_check; then x_result=0; break; fi
+                        message="${warn}Still not ready.${r0}" ;;
+                    check)
+                        busy 'Checking clang, the macOS SDK, the linker and git'
+                        if tools_check; then x_result=0; break; fi
+                        message="${warn}Still not ready.${r0}" ;;
+                    cancel) break ;;
+                esac ;;
         esac
     done
-    choose "Makepad compiles from source and needs $ps_count development packages from $distro_name, installed system-wide by your package manager:$ps_list" "sudo ${packages_cmd%% *} asks for your password in the terminal." 'install with sudo' 'install with sudo' cancel || return 1
-    [ "$chosen" = 'install with sudo' ] || return 1
+    screen=$x_screen sel=$x_sel
+    return "$x_result"
+}
+packages_screen() { # 0 when sudo is ready to install the packages
+    p_screen=$screen p_sel=$sel
+    screen=packages sel=0 top=0 message=
+    p_result=1
+    while :; do
+        draw; key
+        case "$key" in
+            up) sel=0 ;;
+            down) sel=1 ;;
+            enter) [ "$sel" != 0 ] || p_result=0; break ;;
+            esc | q) break ;;
+        esac
+    done
+    screen=$p_screen sel=$p_sel
+    [ "$p_result" = 0 ] || return 1
+    # sudo asks for the password on the real terminal; the packages then
+    # install beside the Rust download.
     pause_screen
     printf '\n  Makepad installs development packages from %s with:\n\n    sudo %s\n\n' "$distro_name" "$packages_cmd"
     if sudo -v </dev/tty; then resume_screen; return 0; fi

@@ -1010,6 +1010,73 @@ fn spinner_frame() -> char {
     SPINNER[(START.get_or_init(Instant::now).elapsed().as_millis() / 100) as usize % SPINNER.len()]
 }
 
+/// A component installing beside others (Build tools, Windows SDK, Rust,
+/// CUDA), as the app's row counts it.
+pub(super) struct Part {
+    pub label: String,
+    pub done: bool,
+    pub running: bool,
+    pub fraction: Option<f64>,
+    /// Its payload size; 0 until its manifest is read.
+    pub bytes: u64,
+}
+/// The row's one bar over components installing side by side: the work
+/// done over the work expected, each weighted by its payload bytes. It never
+/// goes back (a component that starts or learns its size adds to the
+/// whole; `shown` is what the row showed) and reaches 100% only when every
+/// one is done. The step names what runs: "installing Build tools, CUDA +2".
+pub(super) fn combined_install(parts: &[Part], shown: f64) -> (String, f64) {
+    let total: f64 = parts.iter().map(|p| p.bytes.max(1) as f64).sum();
+    let done: f64 = parts.iter().map(|p| p.bytes.max(1) as f64 * if p.done { 1.0 } else { p.fraction.unwrap_or(0.0).clamp(0.0, 1.0) }).sum();
+    let all_done = !parts.is_empty() && parts.iter().all(|p| p.done);
+    let mut fraction = if total > 0.0 { done / total } else { 0.0 };
+    if !all_done {
+        fraction = fraction.min(0.99);
+    }
+    let fraction = fraction.max(shown.min(if all_done { 1.0 } else { 0.99 }));
+    let running: Vec<&str> = parts.iter().filter(|p| p.running).map(|p| p.label.as_str()).collect();
+    let step = match running.as_slice() {
+        [] => "installing".to_owned(),
+        [one] => format!("installing {one}"),
+        [a, b] => format!("installing {a}, {b}"),
+        [a, b, rest @ ..] => format!("installing {a}, {b} +{}", rest.len()),
+    };
+    (step, fraction)
+}
+
+#[cfg(test)]
+mod combined_install_tests {
+    use super::{combined_install, Part};
+    fn part(label: &str, done: bool, fraction: Option<f64>, bytes: u64) -> Part {
+        Part { label: label.into(), done, running: !done, fraction, bytes }
+    }
+    #[test]
+    fn weighted_by_bytes_forward_only_and_full_only_when_all_done() {
+        // Build tools 1000 MB at 50 %, CUDA 3000 MB at 10 %: (500 + 300) / 4000.
+        let (step, f) = combined_install(&[part("Build tools", false, Some(0.5), 1000), part("CUDA", false, Some(0.1), 3000)], 0.0);
+        assert_eq!(step, "installing Build tools, CUDA");
+        assert!((f - 0.2).abs() < 1e-9);
+        // Weighted, not averaged: Rust (300 MB) done and CUDA at 10 % is
+        // (300 + 300) / 3300 = 18 %, not 55 %; below what was shown, the bar holds.
+        let (_, g) = combined_install(&[part("Rust", true, Some(1.0), 300), part("CUDA", false, Some(0.1), 3000)], 0.0);
+        assert!((g - 600.0 / 3300.0).abs() < 1e-9);
+        let (_, g) = combined_install(&[part("Rust", true, Some(1.0), 300), part("CUDA", false, Some(0.1), 3000)], f);
+        assert_eq!(g, f);
+        // A new component with a large size lowers the share: the bar holds.
+        let (step, h) = combined_install(
+            &[part("Build tools", false, Some(0.5), 1000), part("Windows SDK", false, Some(0.0), 2000), part("Rust", false, None, 0), part("CUDA", false, Some(0.1), 3000)],
+            0.3,
+        );
+        assert_eq!(step, "installing Build tools, Windows SDK +2");
+        assert!((h - 0.3).abs() < 1e-9);
+        // Nearly done is not done; all done is 100 %.
+        let (_, i) = combined_install(&[part("Rust", true, Some(1.0), 300), part("CUDA", false, Some(1.0), 3000)], 0.0);
+        assert!(i < 1.0);
+        let (step, j) = combined_install(&[part("Rust", true, Some(1.0), 300), part("CUDA", true, Some(1.0), 3000)], 0.99);
+        assert_eq!((step.as_str(), j), ("installing", 1.0));
+    }
+}
+
 /// Background work's progress events, read on the terminal's thread: the
 /// log gets the phases and Cargo's lines (as `with_progress` logs them), the
 /// row gets what it is doing now.
@@ -1034,18 +1101,15 @@ impl Follow {
                     activity(&format!("{}: {}", row.label, progress::Rows::end_line(row)));
                 }
             }
-            // "installing Rust", or "installing build tools" for several,
-            // with one bar over them all.
-            let running: Vec<&progress::Row> = self.rows.rows.iter().filter(|r| r.state == progress::RowState::Running).collect();
-            let shares: Vec<f64> = self.rows.rows.iter().map(|r| match r.state {
-                progress::RowState::Done => 1.0,
-                _ => r.fraction.unwrap_or(0.0),
+            let parts: Vec<Part> = self.rows.rows.iter().map(|r| Part {
+                label: r.label.clone(),
+                done: r.state == progress::RowState::Done,
+                running: r.state == progress::RowState::Running,
+                fraction: r.fraction,
+                bytes: r.bytes,
             }).collect();
-            let fraction = shares.iter().sum::<f64>() / shares.len().max(1) as f64;
-            let step = match running.as_slice() {
-                [one] => format!("installing {}", one.label),
-                _ => "installing build tools".to_owned(),
-            };
+            let shown = if self.doing.step.starts_with("installing") { self.doing.fraction.unwrap_or(0.0) } else { 0.0 };
+            let (step, fraction) = combined_install(&parts, shown);
             self.doing = Doing { step, fraction: Some(fraction), amount: format!("{:.0}%", fraction * 100.0) };
             return;
         }
