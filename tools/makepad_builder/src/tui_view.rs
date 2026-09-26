@@ -464,10 +464,8 @@ fn draw() {
         let mut x = put(2, 2, "Makepad", BOLD);
         x = put(2, x, " Apps", PLAIN);
         x = put(2, x, &view.crumb, PLAIN);
-        let email = view.email.chars().count();
-        if !view.email.is_empty() && width >= email + 2 && width - 2 - email > x {
-            put(2, width - 2 - email, &view.email, DIM);
-        }
+        // The email shows on the Account row, not in the header.
+        let _ = (x, &view.email);
         put(3, 2, &view.subtitle, DIM);
         let work = work_rows().map(|rows| View { rows, back: true, ..View::default() });
         let (lines, selected_line) = match &work {

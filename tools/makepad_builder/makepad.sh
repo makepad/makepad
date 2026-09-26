@@ -2162,13 +2162,9 @@ EOF
         fi
         [ "$top" -le $((nbody - room)) ] || top=$((nbody - room))
     fi
-    d_left="Makepad Apps$crumb"
-    d_email=${email:-not logged in}
-    d_pad=$((width - 2 - $(dwidth "$d_left") - $(dwidth "$d_email") - 2))
-    [ "$d_pad" -ge 1 ] || d_pad=1
-    d_gap=; d_i=0; while [ "$d_i" -lt "$d_pad" ]; do d_gap="$d_gap "; d_i=$((d_i + 1)); done
+    # The email shows on the Account row, not in the header.
     out="${e}[H${e}[K
-  ${b}Makepad${r0} Apps${crumb}${d_gap}${dim}${d_email}${r0}${e}[K
+  ${b}Makepad${r0} Apps${crumb}${e}[K
   ${dim}${sub}${r0}${e}[K
 "
     # The rows shown, then the lines down to the rule; the selected row
