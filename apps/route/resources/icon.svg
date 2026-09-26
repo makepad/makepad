@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <g transform="translate(0 30)">
+  <!-- route: a winding road from a start dot to a map pin -->
+  <path d="M300 760 C300 600 700 660 700 520 C700 400 420 430 400 330" fill="none" stroke="#5ee0c8" stroke-width="44" stroke-linecap="round" stroke-dasharray="0 0"/>
+  <path d="M300 760 C300 600 700 660 700 520 C700 400 420 430 400 330" fill="none" stroke="#0b1627" stroke-width="12" stroke-linecap="round" stroke-dasharray="36 34"/>
+  <circle cx="300" cy="760" r="46" fill="#e8eef6"/>
+  <circle cx="300" cy="760" r="20" fill="#0e1d33"/>
+  <path d="M600 470 C520 390 480 330 480 270 C480 204 534 150 600 150 C666 150 720 204 720 270 C720 330 680 390 600 470 Z" fill="url(#orange)" stroke="#0e1d33" stroke-width="10" stroke-linejoin="round"/>
+  <circle cx="600" cy="268" r="44" fill="#0e1d33"/>
+  </g>
+</svg>

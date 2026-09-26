@@ -13,13 +13,16 @@ use makepad_ai_services::{
     port::{AiServicePort, PortEvent},
     wire::ToolResult,
 };
-use makepad_diskmap::{DiskMapWidgetRefExt, MapProjection};
-use makepad_strict_json::{self as json, Value};
+use makepad_director::agent_tree::{AgentTreeAction, StudioAgentTree};
 use makepad_director::appearance::{self, StyleChoice};
 use makepad_director::architecture::{ArchitectureView, ArchitectureViewAction};
 use makepad_director::iteration::{self, Command as FlowCommand};
 use makepad_director::iteration_view::{IterationViewAction, StudioIterationView};
-use makepad_director::iteration_worker::{IterationWorker, Request as IterationRequest};
+use makepad_director::iteration_worker::{
+    IterationWorker, Request as IterationRequest, TreePresentation,
+};
+use makepad_director::agent_arguments::{self, AgentLaunchSettings};
+use makepad_director::agent_session::AgentProvider;
 use makepad_director::state::{self, Args, Settings};
 use makepad_director::usage_history_view::StudioUsageHistoryView;
 use makepad_director::usage_stall::UsageStalls;
@@ -37,6 +40,8 @@ use makepad_director::{
     disk::{self, DiskWorker, Snapshot},
     disk_graph::DiskGraph,
 };
+use makepad_diskmap::{DiskMapWidgetRefExt, MapProjection};
+use makepad_strict_json::{self as json, Value};
 use makepad_terminal::widget::{MpTerm, MpTermAction};
 pub use makepad_widgets;
 use makepad_widgets::desktop_style;
@@ -59,6 +64,7 @@ app_main!(
         "makepad_widgets/resources/NotoColorEmoji.ttf",
         INTER_FONT_ASSET,
         ROBOTO_FLEX_FONT_ASSET,
+        MATH_VIEW_FONT_ASSET,
     ]
 );
 
@@ -525,6 +531,17 @@ script_mod! {
                                         astra_recover := ProviderControl{draw_icon +: {svg: crate_resource("self:resources/icons/login.svg")}}
                                     }
                                 }
+                                grok_island := ProviderGroup{
+                                    padding: Inset{right: 3}
+                                    grok_usage := ProviderIsland{
+                                        provider_name := ProviderText{text: "Grok"}
+                                        usage_limit := ProviderPercent{visible: false text: "LIMIT"}
+                                        scope_week := ProviderQuiet{text: "W"}
+                                        percent_week := ProviderPercent{text: "—"}
+                                        reset_week := ProviderQuiet{text: "—"}
+                                        usage_stale := ProviderQuiet{visible: false text: "stale"}
+                                    }
+                                }
                                 status_state := StatusText{
                                     width: Fit{max: FitBound.Abs(240)} text: ""
                                     draw_text +: {max_lines: 1 text_overflow: TextOverflow.Ellipsis}
@@ -642,7 +659,12 @@ script_mod! {
                                 }
                             }
                             flow_note := StatusText{visible: false width: Fill padding: Inset{left: 12 right: 12 top: 10 bottom: 6} text: "No lanes yet · start a Claude or Codex lane with the icons in the title bar" max_lines: 2}
-                            flow_scene := StudioIterationView{}
+                            flow_tree_split := StudioSplitter{
+                                width: Fill height: Fill
+                                axis: SplitterAxis.Horizontal align: SplitterAlign.FromA(232.0)
+                                a: View{width: Fill height: Fill flow_tree := StudioAgentTree{}}
+                                b: View{width: Fill height: Fill flow_scene := StudioIterationView{}}
+                            }
                             View{
                                 visible: false width: 0 height: 0
                                 event_order: #(EventOrder::List(Vec::new()))
@@ -773,6 +795,40 @@ const TAB_KINDS: [LiveId; 8] = [
     id!(ProjectTreeTab),
 ];
 
+/// The serialized global status reply never exceeds this, which keeps it
+/// inside the router's 16 KiB result budget with room to spare.
+const STATUS_BUDGET: usize = 12 * 1024;
+
+/// The leading rows that fit `budget` bytes of JSON, and how many did not.
+/// Rows are whole or absent; once one does not fit, the rest is counted.
+fn bounded_rows(rows: Vec<Value>, budget: usize) -> (Vec<Value>, usize) {
+    let total = rows.len();
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for row in rows {
+        let size = row.to_json().len() + 1;
+        if used + size > budget {
+            break;
+        }
+        used += size;
+        kept.push(row);
+    }
+    let omitted = total - kept.len();
+    (kept, omitted)
+}
+
+/// At most `max` bytes of `text`, cut at a character boundary.
+fn status_excerpt(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 #[derive(Clone, SerRon, DeRon)]
 struct Design {
     id: u64,
@@ -801,6 +857,10 @@ pub struct App {
     agent_sessions: AgentSessionAppState,
     #[rust]
     settings: Settings,
+    /// Settings → Coding agents: bypass flag and custom arguments per
+    /// provider, saved as `agent_arguments.ron` beside `settings.ron`.
+    #[rust]
+    agent_launch: AgentLaunchSettings,
     /// Numbering for terminal tab ids allocated at runtime.
     #[rust]
     terminal_seq: u64,
@@ -1219,6 +1279,66 @@ impl App {
         self.ui
             .label(cx, ids!(state_dir_label))
             .set_text(cx, &self.state_dir().display().to_string());
+        self.refresh_agent_launch_panel(cx);
+    }
+
+    /// The Settings widgets of each coding agent provider, in panel order.
+    fn agent_launch_widgets() -> [(AgentProvider, LiveId, LiveId, LiveId); 3] {
+        [
+            (AgentProvider::Fable, id!(agent_claude_bypass), id!(agent_claude_args), id!(agent_claude_note)),
+            (AgentProvider::Codex, id!(agent_codex_bypass), id!(agent_codex_args), id!(agent_codex_note)),
+            (AgentProvider::Grok, id!(agent_grok_bypass), id!(agent_grok_args), id!(agent_grok_note)),
+        ]
+    }
+
+    /// Push the saved coding agent choices into the Settings tab. A text
+    /// field is only rewritten when it differs, so typing keeps its cursor.
+    fn refresh_agent_launch_panel(&self, cx: &mut Cx) {
+        for (provider, bypass, args, note) in Self::agent_launch_widgets() {
+            let launch = self.agent_launch.get(provider);
+            self.ui
+                .check_box(cx, &[bypass])
+                .set_active(cx, launch.bypass_permissions, Animate::No);
+            let input = self.ui.text_input(cx, &[args]);
+            if input.text() != launch.arguments {
+                input.set_text(cx, &launch.arguments);
+            }
+            let text = match agent_arguments::split_arguments(&launch.arguments) {
+                Err(error) => format!(
+                    "These arguments cannot be used: {error}. Launches of {} fail until this is fixed.",
+                    agent_arguments::provider_label(provider)
+                ),
+                Ok(_) => format!(
+                    "e.g. {} (lets the agent act without asking — use with care)",
+                    agent_arguments::bypass_flag(provider).unwrap_or("--help")
+                ),
+            };
+            self.ui.label(cx, &[note]).set_text(cx, &text);
+        }
+    }
+
+    /// Save a changed tick or custom argument text immediately.
+    fn handle_agent_launch_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let mut changed = false;
+        for (provider, bypass, args, _) in Self::agent_launch_widgets() {
+            let mut launch = self.agent_launch.get(provider);
+            if let Some(active) = self.ui.check_box(cx, &[bypass]).changed(actions) {
+                launch.bypass_permissions = active;
+            }
+            if let Some(text) = self.ui.text_input(cx, &[args]).changed(actions) {
+                launch.arguments = text;
+            }
+            if launch != self.agent_launch.get(provider) {
+                self.agent_launch.set(provider, launch);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(err) = self.agent_launch.save(&self.state_dir()) {
+                log!("director: could not save coding agent settings: {err}");
+            }
+            self.refresh_agent_launch_panel(cx);
+        }
     }
 }
 
@@ -1365,14 +1485,20 @@ impl App {
             .and_then(|id| self.code_tabs.get(&id))
             .and_then(|path| path.strip_prefix(&root).ok())
             .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-        let Some(widget) = self.architecture_view(cx) else { return };
+        let Some(widget) = self.architecture_view(cx) else {
+            return;
+        };
         let (report, status) = {
-            let Some(mut view) = widget.borrow_mut::<ArchitectureView>() else { return };
+            let Some(mut view) = widget.borrow_mut::<ArchitectureView>() else {
+                return;
+            };
             view.configure(cx, root);
             view.set_context_path(cx, context);
             (view.report(), view.status_line())
         };
-        self.ui.label(cx, ids!(plan_report)).set_text(cx, &report.join("\n"));
+        self.ui
+            .label(cx, ids!(plan_report))
+            .set_text(cx, &report.join("\n"));
         self.ui.label(cx, ids!(plan_status)).set_text(cx, &status);
     }
 
@@ -1487,6 +1613,13 @@ impl App {
         Ok(dock.item(LiveId(id)).widget(cx, ids!(term)))
     }
 
+    /// The global status is one tool reply, and the router carries at most
+    /// 16 KiB of it. It is therefore a bounded index: for as many lanes as
+    /// fit, the stable ids, parent, session, conversation, lifecycle and
+    /// state; then the smaller lists. The bound holds for the serialized
+    /// reply, escaping included. A row is listed whole or counted as
+    /// omitted, how many fit depends on their content, and the reply always
+    /// says where the full detail is. Serialized JSON is never cut.
     fn status_json(&self, cx: &mut Cx) -> Value {
         let items = self
             .ui
@@ -1497,51 +1630,207 @@ impl App {
             let DockItem::Tab { name, kind, .. } = item else { return None; };
             let active = items.values().any(|item| matches!(item, DockItem::Tabs { tabs, selected, .. } if tabs.get(*selected) == Some(id)));
             let kind = if *kind == id!(TerminalTab) { "terminal" } else if *kind == id!(SettingsTab) { "settings" } else if *kind == id!(CodeTab) { "code" } else if *kind == id!(DesignTab) { "design" } else if *kind == id!(ActivityTab) { "activity" } else if *kind == id!(UsageTab) { "usage" } else if *kind == id!(ProjectTreeTab) { "project" } else { "disk" };
-            Some((*id, json::obj(vec![("id", json::s(format!("{:x}", id.0))), ("name", json::s(name)), ("kind", json::s(kind)), ("selected", Value::Bool(active))])))
+            Some((*id, json::obj(vec![("id", json::s(format!("{:x}", id.0))), ("name", json::s(status_excerpt(name, 64))), ("kind", json::s(kind)), ("selected", Value::Bool(active))])))
         }).collect();
         tabs.sort_by_key(|(id, _)| id.0);
-        json::obj(vec![
-            (
-                "tabs",
-                Value::Arr(tabs.into_iter().map(|(_, t)| t).collect()),
-            ),
+        let engine = &self.iterations.snapshot.engine;
+        let (counts, lanes) = engine.status_index();
+        let lane_tabs: HashSet<u64> = engine
+            .flows
+            .keys()
+            .map(|flow| self.flow_terminal_id(flow))
+            .collect();
+        // Everything that may be listed, most important first within each
+        // list. A lane and its terminal row are one unit; an archived prefix
+        // shares its successor's terminal and has no row of its own.
+        let units: Vec<(Value, Option<(String, Value)>)> = lanes
+            .into_iter()
+            .map(|lane| {
+                let terminal = lane
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|_| lane.get("successor").is_none())
+                    .map(|flow| {
+                        (
+                            flow.to_owned(),
+                            self.terminal_status_row(self.flow_terminal_id(flow)),
+                        )
+                    });
+                (lane, terminal)
+            })
+            .collect();
+        let sessions = self.session_status_rows(&lane_tabs);
+        let tabs: Vec<Value> = tabs.into_iter().map(|(_, tab)| tab).collect();
+        let activity: Vec<Value> = self
+            .activity
+            .iter()
+            .rev()
+            .map(|line| json::s(status_excerpt(line, 120)))
+            .collect();
+        let layout = json::s(state::encode_dock(&items));
+        let layout_bytes = layout.to_json().len();
+        let totals = [
+            units.len(),
+            units
+                .iter()
+                .filter(|(_, terminal)| terminal.is_some())
+                .count(),
+            sessions.len(),
+            tabs.len(),
+            activity.len(),
+        ];
+        // The sections whose size does not depend on how many lanes, tabs or
+        // sessions exist. Their texts are excerpts, so they always fit.
+        let fixed = vec![
+            ("workspace", self.workspace_json(cx)),
+            ("usage", self.usage_status_json()),
             (
                 "style",
-                json::s(Self::current_style_name(cx).unwrap_or_default()),
+                json::s(status_excerpt(
+                    &Self::current_style_name(cx).unwrap_or_default(),
+                    64,
+                )),
             ),
             ("hosted", Value::Bool(Self::hosted(cx))),
-            ("layout", json::s(state::encode_dock(&items))),
             (
                 "project_tree",
-                json::s(
-                    self.project_tree_ref
+                json::s(status_excerpt(
+                    &self
+                        .project_tree_ref
                         .borrow::<StudioProjectTree>()
                         .map(|tree| tree.status())
                         .unwrap_or_default(),
-                ),
+                    256,
+                )),
             ),
-            ("disk", json::s(self.disk_snapshot.summary())),
-            ("usage", self.usage_json()),
-            ("agent_sessions", self.agent_sessions_json()),
             (
-                "flow_terminals",
-                Value::Obj(
-                    self.iterations
-                        .snapshot
-                        .engine
-                        .flows
-                        .keys()
-                        .map(|flow| (flow.clone(), self.flow_terminal_info(flow)))
-                        .collect(),
+                "disk",
+                json::s(status_excerpt(&self.disk_snapshot.summary(), 256)),
+            ),
+        ];
+        let session_rules = self.agent_session_rules();
+        let assemble = |lanes: Vec<Value>,
+                        terminals: Vec<(String, Value)>,
+                        sessions: Vec<Value>,
+                        tabs: Vec<Value>,
+                        activity: Vec<Value>,
+                        layout: Option<Value>| {
+            let omitted = |total: usize, listed: usize| Value::Int((total - listed) as i64);
+            let mut rules = session_rules.clone();
+            rules.push(("omitted_sessions", omitted(totals[2], sessions.len())));
+            rules.push(("sessions", Value::Arr(sessions)));
+            let mut fields = vec![
+                (
+                    "flows",
+                    json::obj(vec![
+                        ("counts", counts.clone()),
+                        ("omitted_lanes", omitted(totals[0], lanes.len())),
+                        (
+                            "detail",
+                            json::s("flow_list lists every lane; flow_inspect and flow_agent status return one lane in full"),
+                        ),
+                        ("lanes", Value::Arr(lanes)),
+                    ]),
                 ),
-            ),
-            ("flows", self.iterations.snapshot.engine.list()),
-            (
-                "recent_activity",
-                Value::Arr(self.activity.iter().map(json::s).collect()),
-            ),
-            ("workspace", self.workspace_json(cx)),
-        ])
+                (
+                    "omitted_flow_terminals",
+                    omitted(totals[1], terminals.len()),
+                ),
+                ("flow_terminals", Value::Obj(terminals)),
+                ("agent_sessions", json::obj(rules)),
+                ("omitted_tabs", omitted(totals[3], tabs.len())),
+                ("tabs", Value::Arr(tabs)),
+                ("omitted_activity", omitted(totals[4], activity.len())),
+                ("recent_activity", Value::Arr(activity)),
+                (
+                    "omitted_layout_bytes",
+                    Value::Int(if layout.is_some() { 0 } else { layout_bytes as i64 }),
+                ),
+                ("layout", layout.unwrap_or(Value::Null)),
+            ];
+            fields.extend(fixed.clone());
+            json::obj(fields)
+        };
+        // The reply with nothing listed is the floor; every counter in it
+        // already has its widest value. Rows are then admitted whole, by
+        // their serialized size (escaping included), while the reply stays
+        // inside the budget. Tabs get a first share because other tools need
+        // their ids; lanes with their terminals come next, active ones first.
+        let floor = assemble(vec![], vec![], vec![], vec![], vec![], None);
+        let mut used = floor.to_json().len();
+        let first_share = (used + 2048).min(STATUS_BUDGET);
+        let mut admit = |bytes: usize, limit: usize| {
+            let fits = used + bytes <= limit;
+            if fits {
+                used += bytes;
+            }
+            fits
+        };
+        let size = |value: &Value| value.to_json().len() + 1;
+        let mut listed_tabs = Vec::new();
+        let mut tabs = tabs.into_iter().peekable();
+        while tabs.peek().is_some_and(|tab| admit(size(tab), first_share)) {
+            listed_tabs.extend(tabs.next());
+        }
+        let mut listed_lanes = Vec::new();
+        let mut listed_terminals = Vec::new();
+        for (lane, terminal) in units {
+            let bytes = size(&lane)
+                + terminal
+                    .as_ref()
+                    .map(|(flow, row)| json::s(flow).to_json().len() + 1 + size(row))
+                    .unwrap_or(0);
+            if !admit(bytes, STATUS_BUDGET) {
+                break;
+            }
+            listed_lanes.push(lane);
+            listed_terminals.extend(terminal);
+        }
+        let mut listed_sessions = Vec::new();
+        for session in sessions {
+            if !admit(size(&session), STATUS_BUDGET) {
+                break;
+            }
+            listed_sessions.push(session);
+        }
+        while tabs
+            .peek()
+            .is_some_and(|tab| admit(size(tab), STATUS_BUDGET))
+        {
+            listed_tabs.extend(tabs.next());
+        }
+        let mut listed_activity = Vec::new();
+        for line in activity.into_iter().take(6) {
+            if !admit(size(&line), STATUS_BUDGET) {
+                break;
+            }
+            listed_activity.push(line);
+        }
+        let layout = admit(layout_bytes, STATUS_BUDGET).then_some(layout);
+        let status = assemble(
+            listed_lanes,
+            listed_terminals,
+            listed_sessions,
+            listed_tabs,
+            listed_activity,
+            layout,
+        );
+        // The serialized reply is the contract. Should the accounting above
+        // ever be off, the complete floor is returned rather than a larger
+        // or a cut reply.
+        if status.to_json().len() <= STATUS_BUDGET {
+            status
+        } else if floor.to_json().len() <= STATUS_BUDGET {
+            floor
+        } else {
+            json::obj(vec![
+                ("flows", json::obj(vec![("counts", counts)])),
+                (
+                    "error",
+                    json::s("The status sections exceed one reply; use flow_list, flow_inspect, flow_agent status and inspect_usage"),
+                ),
+            ])
+        }
     }
 
     fn ui_action(&mut self, cx: &mut Cx, action: Action) {
@@ -2012,6 +2301,7 @@ impl MatchEvent for App {
                 .resize(cx, dvec2(w as f64, h as f64));
         }
         self.settings = Settings::load(&self.state_dir());
+        self.agent_launch = AgentLaunchSettings::load(&self.state_dir());
         makepad_wm_api::set_title(cx, "Director");
         self.restore_dock(cx);
         self.restore_items(cx);
@@ -2111,6 +2401,7 @@ impl MatchEvent for App {
                 );
             }
         }
+        self.handle_agent_launch_actions(cx, actions);
         if let Some(dark) = self.ui.check_box(cx, ids!(dark_toggle)).changed(actions) {
             if !Self::hosted(cx) {
                 self.ui_action(
@@ -2147,8 +2438,10 @@ impl MatchEvent for App {
             && [
                 id!(fable_usage),
                 id!(astra_usage),
+                id!(grok_usage),
                 id!(fable_island),
                 id!(astra_island),
+                id!(grok_island),
             ]
             .into_iter()
             .any(|id| {
@@ -2159,7 +2452,7 @@ impl MatchEvent for App {
             })
         {
             // always queue: the worker coalesces; a click during a fetch
-            // re-polls both providers as soon as it ends (the user:
+            // re-polls every provider as soon as it ends (the user:
             // "clicking the fable thing doesn't refresh its usage")
             self.ui_action(cx, Action::RefreshUsage);
         }
@@ -2259,7 +2552,10 @@ impl MatchEvent for App {
             if let StudioCodeEditorAction::Changed(_) = wa.cast::<StudioCodeEditorAction>() {
                 self.refresh_workspace(cx);
             }
-            if !matches!(wa.cast::<ArchitectureViewAction>(), ArchitectureViewAction::None) {
+            if !matches!(
+                wa.cast::<ArchitectureViewAction>(),
+                ArchitectureViewAction::None
+            ) {
                 self.refresh_architecture_panel(cx);
             }
             if let MpTermAction::PromptSubmitted = wa.cast::<MpTermAction>() {
@@ -2326,6 +2622,7 @@ impl AppMain for App {
         makepad_director::architecture::script_mod(vm);
         makepad_director::surface::script_mod(vm);
         makepad_director::iteration_view::script_mod(vm);
+        makepad_director::agent_tree::script_mod(vm);
         makepad_director::iteration_host_view::script_mod(vm);
         makepad_director::usage_history_view::script_mod(vm);
         makepad_director::disk_graph::script_mod(vm);

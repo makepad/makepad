@@ -33,6 +33,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ("key", 32),
         ("text", 4096),
         ("demo", 120),
+        ("grant", 256),
     ] {
         properties.push((
             name.to_owned(),
@@ -47,6 +48,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             "action",
             vec!["start", "input", "snapshot", "stop", "status"],
         ),
+        ("mode", vec!["embedded", "standalone"]),
         (
             "input",
             vec![
@@ -107,7 +109,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         ),
         ("additionalProperties", Value::Bool(false)),
     ]);
-    tools.push(ToolDef::new("flow_test", "Test a retained artifact in an owned hidden app with recording tiles. start requires artifact_id, a human-closed lane and no pending build; optional demo names a demonstration (1-120 characters, no controls, start only). input uses run_id and mouse x/y, key or text. snapshot saves widget rectangles and PNG; stop finalizes this test's MP4. Poll status with run_id/operation_id before another input; status lists results. Demo titles survive restart. Never controls human apps or infers pass or acceptance.", &schema.to_json(), Risk::Act));
+    tools.push(ToolDef::new("flow_test", "Test this lane's retained artifact, or a direct parent's grant, in an owned recorded app. start defaults to an embedded watch-only preview, with one pre-test standalone fallback. Poll status before input, snapshot or stop; use the observed run_id and mode. Human intervention stops automation and leaves the app running. demo names a recording. Stop reports actual finalized evidence. No human-app control or inferred pass/acceptance. Read apps/director/AGENTS.md for ownership and limits.", &schema.to_json(), Risk::Act));
     tools
 }
 pub fn handles(name: &str) -> bool {

@@ -274,6 +274,7 @@ pub fn along(ctx: &mut ToolCtx, args: &JsonValue) -> Result<String, String> {
         return Err("kinds must not be empty".into());
     }
     let max_detour_min = arg_f64(args, "max_detour_min").unwrap_or(10.0).clamp(1.0, 60.0);
+    #[cfg(not(target_arch = "wasm32"))]
     let min_kw = arg_f64(args, "min_kw").unwrap_or(0.0);
     let limit = arg_usize(args, "limit").unwrap_or(12).clamp(1, 30);
 
@@ -290,6 +291,11 @@ pub fn along(ctx: &mut ToolCtx, args: &JsonValue) -> Result<String, String> {
         for kind in &kinds {
             let lk = kind.to_ascii_lowercase();
             let is_charger = lk.contains("charg") || lk.contains("laad") || lk == "ev";
+            #[cfg(target_arch = "wasm32")]
+            if is_charger {
+                return Err("local charger queries are unavailable on the web".to_string());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             if is_charger && nav.chargers.is_some() {
                 let chargers = nav.chargers.as_mut().unwrap();
                 for &(lon, lat, along_m) in &samples {
@@ -328,7 +334,9 @@ pub fn along(ctx: &mut ToolCtx, args: &JsonValue) -> Result<String, String> {
                         });
                     }
                 }
-            } else {
+                continue;
+            }
+            {
                 for &(lon, lat, along_m) in &samples {
                     let results = nav.search(kind, Some(LonLat { lon, lat }), 6);
                     for r in results {

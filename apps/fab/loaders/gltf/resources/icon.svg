@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- isometric cube: three shaded faces -->
+  <g stroke="#0e1d33" stroke-width="12" stroke-linejoin="round">
+    <path d="M512 232 L754 372 L512 512 L270 372 Z" fill="#c9b8ff"/>
+    <path d="M270 372 L512 512 L512 792 L270 652 Z" fill="#a98bff"/>
+    <path d="M754 372 L754 652 L512 792 L512 512 Z" fill="#7a5fd6"/>
+  </g>
+  <g fill="#7cc4ff">
+    <circle cx="512" cy="232" r="30"/><circle cx="270" cy="372" r="30"/><circle cx="754" cy="372" r="30"/>
+    <circle cx="512" cy="512" r="30"/><circle cx="270" cy="652" r="30"/><circle cx="754" cy="652" r="30"/><circle cx="512" cy="792" r="30"/>
+  </g>
+</svg>

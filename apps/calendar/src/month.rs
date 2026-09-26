@@ -276,7 +276,12 @@ impl CalendarMonthCanvas {
             let mark = child.widget(cx, ids!(date_mark));
             // Child positions are absolute in the current allocation, never last frame's bounds.
             let origin = r.pos + dvec2((i % 7) as f64 * w, (i / 7) as f64 * h);
-            place(&mark, cx, rect(origin.x + x, origin.y + y, size, size));
+            // Lining digits have no descenders, so their ink sits about a
+            // fifth of the font size above the centre of the line box they
+            // are centred in; the today/selected disc rides up by that much
+            // to centre on them (20 pt phone numerals, 13 pt desktop).
+            let mark_lift = if self.phone { 4.0 } else { 2.5 };
+            place(&mark, cx, rect(origin.x + x, origin.y + y - mark_lift, size, size));
             let color = if day.day == self.frame.today {
                 colors.action
             } else if day.day == self.frame.selected {
@@ -514,6 +519,8 @@ impl Widget for CalendarMonthCanvas {
         match event {
             Event::MouseDown(e) if r.contains(e.abs) => self.swipe_origin = Some(e.abs),
             Event::MouseUp(e) => finish = Some(e.abs),
+            // The press itself taken away swipes nowhere.
+            Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id) => self.swipe_origin = None,
             Event::TouchUpdate(e) => {
                 for t in &e.touches {
                     match t.state {

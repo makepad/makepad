@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- document page with a folded corner and a red-orange band -->
+  <path d="M312 232 L602 232 L742 372 L742 752 Q742 792 702 792 L312 792 Q272 792 272 752 L272 272 Q272 232 312 232 Z" fill="#e8eef6"/>
+  <path d="M602 232 L602 332 Q602 372 642 372 L742 372 Z" fill="#b7c4d6"/>
+  <rect x="222" y="530" width="420" height="150" rx="30" fill="url(#orange)"/>
+  <g fill="#ffffff">
+    <rect x="262" y="582" width="70" height="46" rx="12"/>
+    <rect x="364" y="582" width="70" height="46" rx="12"/>
+    <rect x="466" y="582" width="130" height="46" rx="12"/>
+  </g>
+  <g fill="#b7c4d6">
+    <rect x="336" y="318" width="200" height="30" rx="15"/>
+    <rect x="336" y="410" width="340" height="30" rx="15"/>
+    <rect x="336" y="722" width="260" height="30" rx="15"/>
+  </g>
+</svg>

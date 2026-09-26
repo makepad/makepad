@@ -1,0 +1,24 @@
+// CI smoke test for apps/finance. Run by tools/ci, which finds every `ci.splash`
+// in the checkout. The script decides every input; the vision model only
+// judges the grab against the acceptance text below. Basic on purpose: does
+// it check everywhere, build and come up here, and look like what it is.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-finance"] targets: ci.host.targets})
+})
+
+let app = ci.launch({package: "makepad-finance" binary: "finance" cwd: "."})
+
+ci.step("comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window taken from a Mac. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The application is a personal finance ledger with accounts and transactions. It came up when these are true: 1. The picture is not blank: it is not one flat colour from edge to edge, and it is not entirely black or entirely white. 2. Some user interface is visible: at least two different things among text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture. 3. No error panel covers the window: there is no large block of text with words such as panic, error, failed, backtrace or unwrap. Write one short bullet line for each numbered point saying what you see. YES means points 1, 2 and 3 are all satisfied. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO")
+})
+
+app.no_errors()
+app.quit()
+nil

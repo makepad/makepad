@@ -13,9 +13,11 @@
 
 pub use makepad_widgets;
 use makepad_widgets::ai_slot::AiSlotRequests;
+use makepad_widgets::makepad_platform::mcp_relay;
 use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
+pub mod attach;
 pub mod bus;
 #[cfg(feature = "gen")]
 pub mod gen;
@@ -32,7 +34,11 @@ pub use settings::AiSettings;
 /// Register the panel and the overlay, and give the bridge its `/ai`
 /// routes. Call once after `makepad_widgets::script_mod`.
 pub fn script_mod(vm: &mut ScriptVm) {
-    vm.cx_mut().global::<makepad_widgets::ai_slot::AiSlotRequests>().feedback_enabled = crate::feedback::enabled_from_env();
+    let requests = vm.cx_mut().global::<AiSlotRequests>();
+    requests.feedback_enabled = crate::feedback::enabled_from_env();
+    // Started for Claude Desktop (its `--mcp` relay sets the provider): the
+    // engine and its MCP endpoint come up now, not on the first F10.
+    requests.engine_at_start = std::env::var(mcp_relay::PROVIDER_ENV).is_ok_and(|p| p.trim() == mcp_relay::CLAUDE_DESKTOP);
     crate::panel::script_mod(vm);
     crate::feedback::script_mod(vm);
     crate::overlay::script_mod(vm);

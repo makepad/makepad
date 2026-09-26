@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <g transform="translate(0 16)">
+  <!-- task: a load gauge with a needle -->
+  <path d="M232 640 A280 280 0 0 1 792 640" fill="none" stroke="#e8eef6" stroke-opacity="0.18" stroke-width="84" stroke-linecap="round"/>
+  <path d="M232 640 A280 280 0 0 1 512 360" fill="none" stroke="#4fd18b" stroke-width="84" stroke-linecap="round"/>
+  <path d="M512 360 A280 280 0 0 1 710 442" fill="none" stroke="#f5c84c" stroke-width="84"/>
+  <path d="M490 650 L700 430 L534 690 Z" fill="#e8eef6" stroke="#e8eef6" stroke-width="16" stroke-linejoin="round"/>
+  <circle cx="512" cy="660" r="62" fill="#e8eef6"/>
+  <circle cx="512" cy="660" r="24" fill="#0e1d33"/>
+  </g>
+</svg>

@@ -3,7 +3,7 @@
 //! terminal, files and sheets are its siblings).
 //!
 //! The wall is the stock `TileGrid` from makepad-image-tiles over a baked
-//! library — the SMBC comic archive by default. Standalone the window
+//! library (the one named "photos", else the first found). Standalone the window
 //! carries the F10 assistant overlay and exposes the wall's tools to it
 //! (src/ai.rs); under the WM the same tools ride the bus.
 

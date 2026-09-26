@@ -21,9 +21,21 @@ default-run = "wm-all"
 name = "wm-all"
 path = "src/main.rs"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+# The pane's chat with the machine's own model (Qwen on the local runtime)
+# and the chat backends. Off by default: the in-process pane has no model
+# (NoModel and the tool console). `--features localai` adds both.
+localai = ["makepad-aichat/localai"]
+
 [dependencies]
-makepad-wm = { path = "../wm" }
-makepad-widgets = { path = "../../widgets" }
+# Without the window manager's defaults: the design overlay is this app's
+# own `tweaker` feature.
+makepad-wm = { path = "../wm", default-features = false }
+makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-app-module = { path = "../../libs/app_module" }
 # The apps, as modules only: no standalone window, no model runtime.
 makepad-sheets = { path = "../sheets", default-features = false }

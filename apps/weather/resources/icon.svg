@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- weather: a sun behind a cloud -->
+  <g fill="#f5c84c">
+    <circle cx="440" cy="420" r="130"/>
+    <g stroke="#f5c84c" stroke-width="40" stroke-linecap="round">
+      <path d="M230 420 L260 420"/><path d="M620 420 L650 420"/>
+      <path d="M292 272 L313 293"/><path d="M567 547 L588 568"/>
+      <path d="M567 293 L588 272"/>
+    </g>
+  </g>
+  <path d="M330 790 C250 790 200 736 200 672 C200 606 254 556 320 560 C340 480 410 432 490 432 C580 432 648 490 666 568 C748 564 824 620 824 702 C824 752 784 790 734 790 Z" fill="#e8eef6" stroke="#0e1d33" stroke-width="14"/>
+</svg>

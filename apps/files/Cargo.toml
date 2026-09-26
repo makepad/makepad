@@ -18,15 +18,21 @@ path = "src/lib.rs"
 
 [features]
 dynamic-module = []
-default = ["standalone"]
+default = ["tweaker", "standalone"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
 demo = []
 # The standalone window and the local model. A host that links the MODULE
 # (makepad-wm) leaves this off and gets the lib only.
-standalone = ["chat"]
+standalone = ["localai"]
+# The ask panel runs the machine's own model (Qwen on the local runtime):
+# files is one of the apps whose code needs it, so the window has it on.
+localai = ["chat"]
 chat = ["dep:makepad-ai-hub"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-diskmap = { path = "../../libs/diskmap" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
@@ -39,4 +45,4 @@ makepad-app-module = { path = "../../libs/app_module" }
 # The ask panel's local model: an in-process Qwen GGUF on makepad-ggml, loaded
 # only when the panel is first opened. Standalone only — a host that links the
 # MODULE leaves this off.
-makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["llm"], optional = true }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["localai"], optional = true }

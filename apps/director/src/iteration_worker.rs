@@ -34,6 +34,15 @@ pub struct Snapshot {
     pub full_preview_selection: Option<(String, String)>,
     pub full_preview_error: Option<String>,
     pub embedded: Vec<EmbeddedRun>,
+    /// AI test apps running or waiting to launch, hosted or standalone.
+    pub tests: Vec<LiveTestRun>,
+    /// Lane heads whose loopback capability and screen binding are published.
+    /// The UI starts a lane's provider only once its flow is listed here, so
+    /// the bootstrap's first `/brief` fetch never races the binding.
+    pub callback_ready: BTreeSet<String>,
+    /// Persisted agent-tree presentation: selected level, expansion, width
+    /// and per-level cameras.
+    pub tree: TreePresentation,
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -50,18 +59,31 @@ impl Default for Snapshot {
             full_preview_selection: None,
             full_preview_error: None,
             embedded: Vec::new(),
+            tests: Vec::new(),
+            callback_ready: BTreeSet::new(),
+            tree: TreePresentation::default(),
         }
     }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
-    TerminalNamed {
-        flow: String,
-        title: String,
-    },
     TerminalBusy {
         flow: String,
         busy: bool,
+    },
+    /// The session owner's observed terminal state for a lane.
+    TerminalObserved {
+        flow: String,
+        fact: iteration::AgentTerminalFact,
+    },
+    /// The UI typed an inbox message into the recipient's empty prompt.
+    AgentDelivered {
+        flow: String,
+        id: u64,
+    },
+    /// Agent-tree presentation to persist.
+    TreeState {
+        tree: TreePresentation,
     },
     ClearHistory {
         flow: String,
@@ -88,6 +110,15 @@ pub enum Request {
         port: u16,
     },
     HostRegistered {
+        client: u64,
+    },
+    /// A hosted app opened windows the host shows no view for.
+    HostWindows {
+        client: u64,
+        extra: usize,
+    },
+    /// The host transport presented a hosted app's first valid frame.
+    HostFrame {
         client: u64,
     },
     FullPreview {
@@ -199,16 +230,7 @@ impl IterationWorker {
                         name: Some("studio-iterations".into()),
                         ..Default::default()
                     },
-                    move || {
-                        host(
-                            directory,
-                            rx,
-                            tx,
-                            snap_tx,
-                            stopping,
-                            embedding_commands,
-                        )
-                    },
+                    move || host(directory, rx, tx, snap_tx, stopping, embedding_commands),
                 )
                 .map_err(|e| e.to_string())?;
             Ok(Self {
@@ -281,6 +303,7 @@ include!("iteration_http.rs");
 include!("iteration_embedding.rs");
 include!("iteration_testing.rs");
 include!("iteration_split.rs");
+include!("iteration_agents.rs");
 
 #[derive(Clone, PartialEq, Eq)]
 struct FullPreviewStamp {
@@ -330,6 +353,7 @@ struct Host {
     full_preview_stamp: Option<FullPreviewStamp>,
     full_preview_error: Option<String>,
     design_snapshots: BTreeMap<String, (u64, String)>,
+    tree: TreePresentation,
     note: String,
     changed: bool,
 }
@@ -372,6 +396,7 @@ impl Host {
                 ("complete", Value::Bool(true)),
             ]));
         }
+        self.handed_off_guard(flow)?;
         if current.runs.iter().any(|run| !run.closed)
             && !self.apps.get(flow).is_some_and(|owned| {
                 current
@@ -525,6 +550,16 @@ impl Host {
                 }
             }
             let app_stopped = !self.apps.contains_key(&flow);
+            if self.apps.get(&flow).is_some_and(|run| run.handed_off) {
+                // The close was refused because a person took the app over:
+                // nothing here closes or kills it; the lane waits for them.
+                self.lifecycle_report(
+                    &flow,
+                    pending.state,
+                    "waiting for the person to close the test app",
+                    None,
+                );
+            }
             let descendants_stopped = match if app_stopped {
                 retire_lane_app_group(&mut pending)
             } else {
@@ -854,6 +889,7 @@ fn host(
         full_preview_stamp: None,
         full_preview_error: None,
         design_snapshots: BTreeMap::new(),
+        tree: TreePresentation::default(),
         embedding_commands,
         embedding_port: None,
         embedding_pending: BTreeMap::new(),
@@ -936,6 +972,11 @@ fn host(
             source_at = Instant::now();
         }
         if host.changed {
+            // Bindings are published before the UI can learn about a new
+            // lane, so a provider never starts ahead of its callback.
+            if let Some(http) = &mut http {
+                http.ensure_bound(&mut host);
+            }
             let snapshot = Arc::new(Snapshot {
                 engine: host.engine.clone(),
                 operations: Value::Arr(host.projected_reports()),
@@ -949,6 +990,12 @@ fn host(
                 full_preview_selection: host.full_preview_selection.clone(),
                 full_preview_error: host.full_preview_error.clone(),
                 embedded: host.embed_summary(),
+                tests: host.test_summary(),
+                callback_ready: http
+                    .as_ref()
+                    .map(IterationHttp::bound_flows)
+                    .unwrap_or_default(),
+                tree: host.tree.clone(),
             });
             if snapshots.try_send(snapshot).is_ok() {
                 host.changed = false;
@@ -972,12 +1019,19 @@ fn host(
             let _ = child.wait();
         }
     }
-    let flows: Vec<_> = host.apps.keys().cloned().collect();
+    // A test app the person took over is theirs: it is neither closed nor
+    // killed on shutdown and its run is reconciled as lost on the next start.
+    let flows: Vec<_> = host
+        .apps
+        .iter()
+        .filter(|(_, run)| !run.handed_off)
+        .map(|(flow, _)| flow.clone())
+        .collect();
     for flow in flows {
         let _ = host.close(&flow);
     }
     let until = Instant::now() + Duration::from_secs(8);
-    while !host.apps.is_empty() && Instant::now() < until {
+    while host.apps.values().any(|run| !run.handed_off) && Instant::now() < until {
         host.poll_apps();
         host.poll_lifecycle();
         host.poll_embedding();
@@ -985,6 +1039,20 @@ fn host(
         std::thread::sleep(Duration::from_millis(50));
     }
     for run in host.apps.values_mut() {
+        if run.handed_off {
+            continue;
+        }
+        // The same ownership rule as any automatic close: a guarded test
+        // whose latest close reply did not prove the counter unchanged (or
+        // has not come back at all) is left running for the person.
+        if !may_force_kill(run) {
+            hand_off(
+                run,
+                "Director shut down before a close reply proved that no person was using the app"
+                    .into(),
+            );
+            continue;
+        }
         let _ = run.child.kill();
         if run.child.wait().is_ok() {
             if let Some(client) = run.embedding_client {
@@ -1017,6 +1085,9 @@ impl Host {
                 .and_then(Value::as_str)
                 .ok_or("Missing iteration engine")?,
         )?;
+        // This worker has observed no terminal yet: what was stored is the
+        // previous run's session metadata, not live evidence.
+        self.engine.invalidate_agent_terminals();
         if let Some(Value::Arr(ids)) = value.get("feedback_received") {
             for id in ids {
                 if let Some(id) = id.as_str() {
@@ -1120,6 +1191,7 @@ impl Host {
             ),
             ("presentation", self.presentation_json()),
             ("lane_widths", self.lane_widths_json()),
+            ("tree", self.tree.json()),
             (
                 "design_snapshots",
                 Value::Obj(
@@ -1218,9 +1290,9 @@ impl Host {
         let program = std::env::current_exe()
             .map_err(err)?
             .with_file_name(if cfg!(windows) {
-                "makepad-screen.exe"
+                "agents.exe"
             } else {
-                "makepad-screen"
+                "agents"
             });
         let output = Command::new(program)
             .arg("name")
@@ -1266,20 +1338,17 @@ impl Host {
             Request::Flow(
                 FlowCommand::Todos { flow, .. }
                 | FlowCommand::Prepared { flow, .. }
-                | FlowCommand::Build { flow, .. },
+                | FlowCommand::Build { flow, .. }
+                | FlowCommand::AgentMessage { flow, .. }
+                | FlowCommand::AgentInbox { flow, .. },
             ) => Some(flow.as_str()),
+            Request::Flow(FlowCommand::Spawn(launch)) => Some(launch.parent.as_str()),
             _ => None,
         };
         if mutating_flow.is_some_and(|flow| self.lifecycle_pending.contains_key(flow)) {
             return Err("Lane shutdown is in progress; code and Git commands are paused until its owned processes exit".into());
         }
         match request {
-            Request::TerminalNamed { flow, title } => {
-                if self.flow(&flow)?.title == title {
-                    return Ok(Value::Bool(true));
-                }
-                self.observe(Observation::TerminalNamed { flow, title })
-            }
             Request::TerminalBusy { flow, busy } => {
                 let owner = self.engine.resolve_active_flow(&flow)?.to_owned();
                 if busy {
@@ -1289,6 +1358,9 @@ impl Host {
                 }
                 Ok(Value::Bool(true))
             }
+            Request::TerminalObserved { flow, fact } => self.terminal_observed(&flow, fact),
+            Request::AgentDelivered { flow, id } => self.agent_delivered(&flow, id),
+            Request::TreeState { tree } => self.set_tree(tree),
             Request::SplitLane { flow, item, title } => self.split_lane(&flow, &item, &title),
             Request::ClearHistory { flow } => self.clear_lane_history(&flow),
             Request::FeedbackReport {
@@ -1300,6 +1372,8 @@ impl Host {
             Request::SetLifecycle { flow, state } => self.set_lifecycle(&flow, state),
             Request::HostPort { port } => self.host_port(port),
             Request::HostRegistered { client } => self.host_registered(client),
+            Request::HostWindows { client, extra } => self.host_windows(client, extra),
+            Request::HostFrame { client } => self.host_frame(client),
             Request::FullPreview { recording } => self.select_full_preview(recording),
             Request::OpenImage { flow, preview_id } => {
                 self.select_image_preview(&flow, &preview_id)
@@ -1357,11 +1431,19 @@ impl Host {
                 Ok(json::obj(vec![("requested", Value::Bool(true))]))
             }
             Request::Flow(command) => {
+                if matches!(command, FlowCommand::Spawn(_)) {
+                    return self.spawn_agent(command);
+                }
                 if let FlowCommand::Build { flow, .. }
                 | FlowCommand::Prepared { flow, .. }
-                | FlowCommand::Todos { flow, .. } = &command
+                | FlowCommand::Todos { flow, .. }
+                | FlowCommand::AgentMessage { flow, .. }
+                | FlowCommand::AgentInbox { flow, .. } = &command
                 {
                     self.require_active_lane(flow)?;
+                }
+                if let FlowCommand::Build { flow, .. } = &command {
+                    self.checkout_conflict(flow)?;
                 }
                 let previous = self.engine.clone();
                 // Validate before contacting the terminal, then persist the confirmed name.
@@ -1375,7 +1457,8 @@ impl Host {
                 Ok(value)
             }
             Request::Close { flow } => {
-                self.close(&flow)?;
+                // Only the Director UI sends this: the person's own request.
+                self.close_by_operator(&flow)?;
                 Ok(json::obj(vec![(
                     "state",
                     s("closing; build waits for observed process exit"),
@@ -1420,6 +1503,8 @@ impl Host {
                         "Close the flow app and finish compilation before source promotion".into(),
                     );
                 }
+                self.engine.source_mutation_allowed(&flow)?;
+                self.checkout_conflict(&flow)?;
                 let owned = self.owned(&flow)?;
                 let branch = if target == "dev" {
                     "work"
@@ -1472,6 +1557,8 @@ impl Host {
                 if self.apps.contains_key(&flow) || self.builds.contains_key(&flow) {
                     return Err("Close the flow app and finish compilation before sync".into());
                 }
+                self.engine.source_mutation_allowed(&flow)?;
+                self.checkout_conflict(&flow)?;
                 let owned = self.owned(&flow)?;
                 let preview = git::preview_sync(&owned.path, &source, &target)?;
                 if preview.source_oid != source_oid || preview.target_oid != target_oid {
@@ -1488,6 +1575,7 @@ impl Host {
                 Ok(json::obj(vec![("result", s(format!("{result:?}")))]))
             }
             Request::Fetch { flow } => {
+                self.engine.source_mutation_allowed(&flow)?;
                 let owned = self.owned(&flow)?;
                 git::fetch_public_refs(&owned.path)?;
                 Ok(json::obj(vec![
@@ -1986,7 +2074,17 @@ fn sync_json(p: &git::SyncPreview) -> Value {
 }
 
 impl Host {
+    /// Stopping, archiving or deleting a lane ends its processes. A test app
+    /// a person took over is theirs, so those operations wait for them.
+    fn handed_off_guard(&self, flow: &str) -> Result<(), String> {
+        if self.apps.get(flow).is_some_and(|run| run.handed_off) {
+            return Err("A person is using this lane's test app; close it from Director before stopping, archiving or deleting the lane".into());
+        }
+        Ok(())
+    }
+
     fn delete_lane(&mut self, flow: &str) -> Result<(), String> {
+        self.handed_off_guard(flow)?;
         let lane = self.flow(flow)?;
         let owns_terminal = lane.successor.is_none();
         let origin = self.engine.terminal_origin(flow)?.to_owned();
@@ -2233,6 +2331,12 @@ impl Host {
             .attachments
             .iter()
             .any(|attachment| attachment.path.starts_with(path))
+            // An executable granted to a child outlives its builder's lane
+            // until the grant itself is gone.
+            || self
+                .engine
+                .agent_grants_all()
+                .any(|grant| grant.path.starts_with(path))
             || self
                 .known_recording_runs()
                 .iter()
@@ -2780,6 +2884,16 @@ mod delete_lane_tests {
                 pop_out: false,
                 embedding_client: None,
                 embedding_port: None,
+                requested: iteration::LaunchMode::Standalone,
+                grant: None,
+                user_seq: None,
+                handed_off: false,
+                extra_windows: 0,
+                handoff_reason: None,
+                operator_close: false,
+                close_verified: false,
+                first_frame: false,
+                demo: None,
             },
         );
         host.delete_lane(&flow).unwrap();
@@ -2836,6 +2950,7 @@ impl Host {
             full_preview_stamp: None,
             full_preview_error: None,
             design_snapshots: BTreeMap::new(),
+            tree: TreePresentation::default(),
             embedding_commands,
             embedding_port: None,
             embedding_pending: BTreeMap::new(),

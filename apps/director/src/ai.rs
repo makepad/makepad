@@ -13,7 +13,11 @@ pub enum Action {
         flow: String,
         state: crate::iteration::FlowLifecycle,
     },
-    SplitLane { flow: String, item: String, title: String },
+    SplitLane {
+        flow: String,
+        item: String,
+        title: String,
+    },
     RecoverLane {
         flow: String,
     },
@@ -79,7 +83,7 @@ pub enum Action {
 pub fn manifest() -> ServiceManifest {
     let mut m = ServiceManifest::new("director", "Director", "AI work environment with Structured tabs, a tasks view of agent lanes with their terminals, and a Disk map, sharing the same live terminals and code editors. Read status first for current tab hex IDs and state. File changes and process observations do not by themselves identify an AI owner or prove a test passed. All terminal input goes to the live PTY, with the same consequences as typing. Disk inventory and cleanup previews never delete files.");
     for (name, description, props, required, risk) in [
-        ("status", "Current tabs (hex IDs), selections, the workspace mode, observed activity, appearance, and disk summary.", "", "", Risk::Read),
+        ("status", "Bounded index: tabs (hex IDs), workspace mode, appearance, disk summary, and per lane its ids, parent, lifecycle, launch evidence, terminal session and conversation. Rows that do not fit are counted; use flow_list, flow_inspect, flow_agent status and inspect_usage for full detail.", "", "", Risk::Read),
         ("open_flows", "Open the tasks view: agent lanes with their terminals, vertically stacked requirements, build checkpoints and feedback, with local/work/dev source controls. Normal wheel scrolls a lane; modifier-wheel zooms.", "", "", Risk::Act),
         ("flow_lane", "Manage a lane: active, stopped, archived, recover, split or clear_history. Split needs item/title and moves newer history with the same terminal; close apps/finish builds first. Clear history keeps terminal, current tasks, apps, files and checkpoints. Both require user authorization. Recovery saves the exact conversation before Fable /login or Codex logout/login/resume; Codex changes its shared account. Inspect status.flow_terminals for completion.", r#""flow":{"type":"string","maxLength":96},"state":{"type":"string","enum":["active","stopped","archived","recover","split","clear_history"]},"item":{"type":"string","maxLength":256},"title":{"type":"string","maxLength":240}"#, "flow,state", Risk::Destructive),
         ("new_terminal", "Open and select a new live terminal; optional absolute cwd. Returns its tab ID.", r#""cwd":{"type":"string"}"#, "", Risk::Act),
@@ -202,9 +206,13 @@ pub fn parse(call: &ServiceCall) -> Result<Action, String> {
                 return Err("Invalid flow ID".into());
             }
             match string("state")? {
-                "clear_history" => Action::Iteration(crate::iteration_worker::parse_clear_history_request(&args)?),
+                "clear_history" => {
+                    Action::Iteration(crate::iteration_worker::parse_clear_history_request(&args)?)
+                }
                 "split" => match crate::iteration_worker::parse_split_request(&args)? {
-                    crate::iteration_worker::Request::SplitLane { flow, item, title } => Action::SplitLane { flow, item, title },
+                    crate::iteration_worker::Request::SplitLane { flow, item, title } => {
+                        Action::SplitLane { flow, item, title }
+                    }
                     _ => return Err("Invalid split request".into()),
                 },
                 "recover" => Action::RecoverLane { flow: flow.into() },
@@ -214,7 +222,11 @@ pub fn parse(call: &ServiceCall) -> Result<Action, String> {
                         "active" => crate::iteration::FlowLifecycle::Active,
                         "stopped" => crate::iteration::FlowLifecycle::Stopped,
                         "archived" => crate::iteration::FlowLifecycle::Archived,
-                        _ => return Err("Lane state must be active, stopped, archived or recover".into()),
+                        _ => {
+                            return Err(
+                                "Lane state must be active, stopped, archived or recover".into()
+                            )
+                        }
                     },
                 },
             }

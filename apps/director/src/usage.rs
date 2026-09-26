@@ -22,18 +22,23 @@ pub enum UsageProvider {
     #[default]
     Claude,
     Codex,
+    Grok,
 }
 impl UsageProvider {
+    /// Every monitored provider, in the worker's snapshot order.
+    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Grok];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Grok => "grok",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Fable",
             Self::Codex => "Astra",
+            Self::Grok => "Grok",
         }
     }
 }
@@ -42,7 +47,8 @@ impl UsageProvider {
 pub struct UsageWindow {
     pub name: String,
     /// Only the requested account/session or weekly quota; unrelated buckets
-    /// (Spark, reserve, credits) intentionally have no display scope.
+    /// (Spark, reserve, credits) intentionally have no display scope. A
+    /// provider whose allowance runs per month reports "month", never "week".
     pub scope: Option<&'static str>,
     pub used_percent: Option<f64>,
     pub remaining_percent: Option<f64>,
@@ -172,6 +178,12 @@ impl ProviderUsage {
                 })
         })
     }
+    /// The long-period slot: the weekly limit, else the monthly period of a
+    /// provider that reports no weekly one. The window keeps its own scope, so
+    /// a month is never presented as a week.
+    pub fn period_limit(&self) -> Option<&UsageWindow> {
+        self.limits()[1].or_else(|| self.windows.iter().find(|w| w.scope == Some("month")))
+    }
     pub fn is_stale(&self, at: u64) -> bool {
         self.error.is_some()
             || self.observed_at == 0
@@ -277,10 +289,16 @@ impl UsageWorker {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
         Self::start_inner(spawner, None)
     }
-    pub fn start_with_history(spawner: &ThreadSpawner, path: &std::path::Path) -> Result<Self, String> {
+    pub fn start_with_history(
+        spawner: &ThreadSpawner,
+        path: &std::path::Path,
+    ) -> Result<Self, String> {
         Self::start_inner(spawner, Some(path.to_owned()))
     }
-    fn start_inner(spawner: &ThreadSpawner, history_path: Option<std::path::PathBuf>) -> Result<Self, String> {
+    fn start_inner(
+        spawner: &ThreadSpawner,
+        history_path: Option<std::path::PathBuf>,
+    ) -> Result<Self, String> {
         let (commands, rx) = mpsc::sync_channel(1);
         let (tx, snapshots) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
@@ -348,7 +366,11 @@ fn publish(tx: &SyncSender<Arc<UsageSnapshot>>, pending: &mut Option<Arc<UsageSn
 
 fn retain_last_success(previous: &mut ProviderUsage, mut incoming: ProviderUsage) {
     let previous_owner = previous.quota_account_email.clone().or_else(|| {
-        previous.error.is_none().then(|| previous.account_email.clone()).flatten()
+        previous
+            .error
+            .is_none()
+            .then(|| previous.account_email.clone())
+            .flatten()
     });
     // An unknown current identity may retain explicitly stale anonymous
     // display data, but later learning a different identity cannot relabel it.
@@ -365,7 +387,12 @@ fn retain_last_success(previous: &mut ProviderUsage, mut incoming: ProviderUsage
     *previous = incoming;
 }
 
-fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<AtomicBool>, history_path: Option<std::path::PathBuf>) {
+fn run(
+    commands: Receiver<()>,
+    tx: SyncSender<Arc<UsageSnapshot>>,
+    stop: Arc<AtomicBool>,
+    history_path: Option<std::path::PathBuf>,
+) {
     let mut snapshot = UsageSnapshot {
         providers: vec![
             ProviderUsage {
@@ -378,6 +405,11 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
                 source: "Codex CLI account/rateLimits/read".into(),
                 ..Default::default()
             },
+            ProviderUsage {
+                provider: UsageProvider::Grok,
+                source: crate::usage_grok::SOURCE.into(),
+                ..Default::default()
+            },
         ],
         ..Default::default()
     };
@@ -385,13 +417,13 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
     snapshot.account_history = history.accounts.clone();
     snapshot.history_error = history.error.clone();
     let mut claude = ClaudeTerminal::default();
-    let mut due = [Instant::now(); 2];
+    let mut due = [Instant::now(); UsageProvider::ALL.len()];
     let mut pending = None;
     while !stop.load(Ordering::Relaxed) {
         if !publish(&tx, &mut pending) {
             return;
         }
-        if let Some(index) = (0..2).find(|i| Instant::now() >= due[*i]) {
+        if let Some(index) = (0..due.len()).find(|i| Instant::now() >= due[*i]) {
             let provider = snapshot.providers[index].provider;
             snapshot.polling = Some(provider);
             pending = Some(Arc::new(snapshot.clone()));
@@ -401,6 +433,7 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
             let incoming = match provider {
                 UsageProvider::Claude => claude.fetch(&stop),
                 UsageProvider::Codex => crate::usage_codex::fetch(&stop),
+                UsageProvider::Grok => crate::usage_grok::fetch(&stop),
             };
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -435,7 +468,7 @@ fn run(commands: Receiver<()>, tx: SyncSender<Arc<UsageSnapshot>>, stop: Arc<Ato
             continue;
         }
         match commands.recv_timeout(Duration::from_millis(100)) {
-            Ok(()) => due = [Instant::now(); 2],
+            Ok(()) => due = [Instant::now(); UsageProvider::ALL.len()],
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -496,7 +529,10 @@ impl ClaudeTerminal {
                 self.account_email = current_email.clone();
                 usage.windows.clear();
                 usage.observed_at = 0;
-                usage.error = Some("Account identity changed or became unavailable during the usage refresh".into());
+                usage.error = Some(
+                    "Account identity changed or became unavailable during the usage refresh"
+                        .into(),
+                );
             } else if usage.error.is_none() && current_email.is_some() {
                 usage.quota_account_email = current_email.clone();
             }

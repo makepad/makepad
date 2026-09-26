@@ -9,7 +9,7 @@
 # Look.
 #
 # Nothing here parses or draws PDF: the parser is libs/pdf_parse and the
-# renderer is the `PdfView`/`PdfPageView` pair in widgets/src/pdf_view.rs
+# renderer is the `PdfView`/`PdfPageView` pair in widgets/families/pdf/src/pdf_view.rs
 # (feature `pdf`), which walks the page's content-stream ops straight into
 # DrawVector geometry and DrawText runs — no rasterization anywhere. This
 # crate is the viewer around them: an off-thread loader that streams parsed
@@ -30,8 +30,14 @@ path = "src/lib.rs"
 name = "pdf"
 path = "src/main.rs"
 
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", features = ["pdf"] }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["pdf"] }
 makepad-pdf-parse = { path = "../../libs/pdf_parse" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

@@ -180,6 +180,10 @@ pub struct Sheet {
     dependents: HashMap<Pos, HashSet<Pos>>,
     /// display column -> width in points, when the user resized it
     pub col_widths: HashMap<usize, f64>,
+    /// The file (or storage key) this sheet was opened from or last saved
+    /// to. Save only replaces an existing file without asking when it is
+    /// this one; any other existing target needs a second press.
+    pub file: Option<String>,
 }
 
 impl Sheet {
@@ -213,6 +217,12 @@ impl Sheet {
             return String::new();
         }
         display_value(&v, self.format(pos).num)
+    }
+
+    /// How many cells hold a formula. CSV stores what cells show, so Save
+    /// reports this many formulas written as their values.
+    pub fn formula_count(&self) -> usize {
+        self.cells.values().filter(|c| c.input.starts_with('=')).count()
     }
 
     /// Bounding box of every non-empty cell, or None when the sheet is blank.

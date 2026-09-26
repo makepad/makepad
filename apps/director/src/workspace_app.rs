@@ -128,14 +128,22 @@ impl App {
             (id!(mode_architecture), mode == Mode::Architecture),
             (id!(mode_disk), mode == Mode::Disk),
         ] {
-            self.ui.radio_button(cx, &[id]).set_active(cx, active, Animate::No);
+            self.ui
+                .radio_button(cx, &[id])
+                .set_active(cx, active, Animate::No);
         }
-        self.ui.view(cx, ids!(tasks_tools)).set_visible(cx, mode == Mode::Tasks);
-        self.ui.view(cx, ids!(arch_tools)).set_visible(cx, mode == Mode::Architecture);
+        self.ui
+            .view(cx, ids!(tasks_tools))
+            .set_visible(cx, mode == Mode::Tasks);
+        self.ui
+            .view(cx, ids!(arch_tools))
+            .set_visible(cx, mode == Mode::Architecture);
         if mode == Mode::Architecture {
             self.refresh_architecture_panel(cx);
         }
-        self.ui.view(cx, ids!(disk_tools)).set_visible(cx, mode == Mode::Disk);
+        self.ui
+            .view(cx, ids!(disk_tools))
+            .set_visible(cx, mode == Mode::Disk);
         if mode == Mode::Disk {
             self.refresh_disk_panel(cx);
         }
@@ -151,7 +159,11 @@ impl App {
     /// The one place a mode changes: the surface presents the Structured,
     /// Architecture or Disk Dock, and the tasks view covers it while Tasks is on.
     fn set_workspace_mode(&mut self, cx: &mut Cx, mode: Mode) {
-        if let Some(mut surface) = self.ui.widget(cx, ids!(workspace)).borrow_mut::<StudioSurface>() {
+        if let Some(mut surface) = self
+            .ui
+            .widget(cx, ids!(workspace))
+            .borrow_mut::<StudioSurface>()
+        {
             surface.set_mode(cx, mode);
         }
         self.set_flows_visible(cx, mode == Mode::Tasks);
@@ -168,7 +180,10 @@ impl App {
     fn workspace_json(&self, cx: &mut Cx) -> Value {
         json::obj(vec![
             ("mode", json::s(self.workspace_mode(cx).as_str())),
-            ("coverage", json::s(&self.activity_snapshot.coverage)),
+            (
+                "coverage",
+                json::s(status_excerpt(&self.activity_snapshot.coverage, 256)),
+            ),
             (
                 "active_item",
                 self.active_item
@@ -243,14 +258,13 @@ impl App {
             self.ensure_visible_host(cx);
         }
         if let Some((&id, _)) = self.code_tabs.iter().find(|(_, p)| {
-            **p == path
-                || {
-                    let documents = self.documents.borrow();
-                    documents
-                        .get(p)
-                        .zip(documents.get(&path))
-                        .is_some_and(|(a, b)| a.same_document(&b))
-                }
+            **p == path || {
+                let documents = self.documents.borrow();
+                documents
+                    .get(p)
+                    .zip(documents.get(&path))
+                    .is_some_and(|(a, b)| a.same_document(&b))
+            }
         }) {
             if focus {
                 self.ui.dock(cx, ids!(dock)).select_tab(cx, LiveId(id));
@@ -363,10 +377,9 @@ impl App {
             self.queue_document_save(document)?;
             queued += 1;
         }
-        self.ui.label(cx, ids!(status_state)).set_text(
-            cx,
-            &format!("Save all: {queued} queued"),
-        );
+        self.ui
+            .label(cx, ids!(status_state))
+            .set_text(cx, &format!("Save all: {queued} queued"));
         Ok(format!(
             "Save all queued {queued} document{}",
             if queued == 1 { "" } else { "s" }
@@ -438,8 +451,7 @@ impl App {
             match save.result {
                 Ok(()) => {
                     let doc = self.documents.borrow().get(&save.path);
-                    if let (Some(doc), Some(text), Some(revision)) =
-                        (doc, save.text, save.revision)
+                    if let (Some(doc), Some(text), Some(revision)) = (doc, save.text, save.revision)
                     {
                         let path = doc.path().to_owned();
                         doc.save_succeeded(text, revision);
@@ -467,7 +479,10 @@ impl App {
         for delivery in deliveries {
             let snapshot = delivery.snapshot;
             // the worker prepared the editor state: admission attaches it
-            let applied = self.documents.borrow_mut().apply_prepared(&snapshot, delivery.prepared);
+            let applied = self
+                .documents
+                .borrow_mut()
+                .apply_prepared(&snapshot, delivery.prepared);
             match applied {
                 Ok(handle) => {
                     log!("studio document: prepared {}", snapshot.path.display());
