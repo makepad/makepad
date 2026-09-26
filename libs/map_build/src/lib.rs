@@ -27,7 +27,7 @@ pub mod progress;
 pub mod render_check;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod repack;
-#[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod repack_remote;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testmap;

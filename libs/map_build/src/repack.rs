@@ -1552,7 +1552,7 @@ fn verify_in_place_partial(
     codec: &TileCodec,
     manifest: &ShardManifest,
 ) -> Result<(), String> {
-    use std::os::unix::fs::FileExt;
+    use crate::repack::ReadExactAt;
     let partial = shard_path(dir, shard).with_extension("partial");
     let file = File::open(&partial).map_err(|err| format!("open {}: {err}", partial.display()))?;
     let mut directory = vec![0_u8; manifest.dir_len as usize];
@@ -2175,7 +2175,7 @@ pub fn repack_in_place(
     options: &InPlaceOptions,
     host: &mut dyn InPlaceHost,
 ) -> Result<RepackReport, String> {
-    use std::os::unix::fs::FileExt;
+    use crate::repack::ReadExactAt;
     if options.jobs == 0 {
         return Err("--jobs must be at least 1".to_string());
     }
@@ -3246,5 +3246,52 @@ mod tests {
             }
         }
         println!("Amsterdam bake parity: {builds} builds renderer-equivalent");
+    }
+}
+
+/// `read_exact_at` and `write_all_at` on every platform: Unix's positioned
+/// reads and writes, and on Windows the same built from `seek_read` and
+/// `seek_write`, which also work at an offset.
+#[cfg(unix)]
+pub(crate) use std::os::unix::fs::FileExt as ReadExactAt;
+
+#[cfg(windows)]
+pub(crate) trait ReadExactAt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl ReadExactAt for File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 }

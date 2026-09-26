@@ -22,7 +22,7 @@ use crate::repack::{
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
+use crate::repack::ReadExactAt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
