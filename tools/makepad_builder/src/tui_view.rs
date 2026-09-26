@@ -662,17 +662,15 @@ fn draw() {
     let width = cols.min(80);
     VIEW.with(|view| {
         let view = view.borrow();
-        let work = work_rows().map(|rows| View { rows, back: true, ..View::default() });
         let selected = SELECTED.with(StdCell::get);
         let prompt = PROMPT.with(|p| p.borrow().as_ref().map(|p| (p.lines.clone(), p.active)));
-        let (mut body, mut selected_line) = match (&work, &prompt) {
-            (Some(page), _) => body_lines(page, None),
-            (None, Some(_)) => body_lines(&view, None),
-            (None, None) => body_lines(&view, selected),
+        let (mut body, mut selected_line) = match &prompt {
+            Some(_) => body_lines(&view, None),
+            None => body_lines(&view, selected),
         };
         // A question's rows follow the content; its active row is the one
         // selected.
-        if let (None, Some((prompt_lines, active))) = (&work, prompt.clone()) {
+        if let Some((prompt_lines, active)) = prompt.clone() {
             selected_line = Some(body.len() + active);
             body.extend(prompt_lines.into_iter().map(|line| (line, None)));
         }
@@ -745,7 +743,7 @@ fn draw() {
         let choice = CHOICE.with(|c| c.borrow().clone());
         let mut message = MESSAGE.with(|m| m.borrow().clone());
         let item = selected.and_then(|n| view.rows.iter().filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None }).nth(n));
-        let main = work.is_none() && !view.back && prompt.is_none();
+        let main = !view.back && prompt.is_none();
         if message.is_empty() && choice.is_empty() && main {
             if let Some(item) = item {
                 message = info_line(item);
@@ -946,183 +944,9 @@ pub(super) fn edit(prompt: &str, initial: &str, hint: Text, footer: &'static str
     Ok(result)
 }
 
-// ---- Work page ---------------------------------------------------------------
-
-/// While work runs (installing, downloading, compiling, updating) a page of
-/// its own shows the steps, one per line: ✓ done, ● now with its bar, ○ next,
-/// ✗ failed with the reason. Components that install side by side are all
-/// "now" at once, each with its own bar.
-#[derive(Clone, PartialEq)]
-enum StepState {
-    Next,
-    Now,
-    Done,
-    Failed(String),
-    /// Stopped because another step failed, or waiting to be retried.
-    Held(String),
-}
-struct Step {
-    name: String,
-    state: StepState,
-    /// Its bar and amount (running), or its summary (done).
-    line: Text,
-}
-struct Work {
-    steps: Vec<Step>,
-}
-thread_local! {
-    static WORK: RefCell<Option<Work>> = const { RefCell::new(None) };
-}
-const RED: &str = "31";
-
-/// Open the work page. `row` is the menu row the work belongs to; the menu
-/// selects it afterwards.
-pub(super) fn work_begin(crumb: &str, subtitle: &str, email: &str, row: &str, steps: &[&str]) {
-    set_view(View { crumb: format!(" › {crumb}"), subtitle: subtitle.into(), email: email.into(), back: true, ..View::default() });
-    WORK.with(|w| *w.borrow_mut() = Some(Work { steps: steps.iter().map(|s| Step { name: s.to_string(), state: StepState::Next, line: Vec::new() }).collect() }));
-    WORKED_ON.with(|w| *w.borrow_mut() = Some(row.to_owned()));
-    MESSAGE.with(|m| m.borrow_mut().clear());
-    CHOICE.with(|c| c.borrow_mut().clear());
-    FOOTER.with(|f| f.set(Some("working · ctrl+c stops")));
-    if COLOR.with(StdCell::get) {
-        draw();
-    } else {
-        println!("{crumb}: {}", steps.join(", "));
-    }
-}
-/// Make `name` the current step; the ones before it are done.
-pub(super) fn work_step(name: &str) {
-    let changed = WORK.with(|w| {
-        let mut w = w.borrow_mut();
-        let Some(work) = w.as_mut() else { return false };
-        let Some(index) = work.steps.iter().position(|s| s.name == name) else { return false };
-        if work.steps[index].state == StepState::Now {
-            return false;
-        }
-        for (i, step) in work.steps.iter_mut().enumerate() {
-            if i < index {
-                step.state = StepState::Done;
-                step.line.clear();
-            } else if i == index {
-                step.state = StepState::Now;
-                step.line.clear();
-            }
-        }
-        true
-    });
-    if changed {
-        if COLOR.with(StdCell::get) { draw(); } else { println!("{name}…"); }
-    }
-}
 /// The next menu keeps its own selection instead of the last work's row.
 pub(super) fn forget_worked_on() {
     WORKED_ON.with(|w| w.borrow_mut().take());
-}
-pub(super) fn working_page() -> bool {
-    WORK.with(|w| w.borrow().is_some())
-}
-/// Close the work page. A failure stays on screen, the step marked ✗ with
-/// the short reason, until Return or Escape.
-pub(super) fn work_end<T>(result: Result<T, String>) -> Result<T, String> {
-    // Keys pressed and trackpad scrolls (arrow keys in a terminal) during
-    // the work are not answers: the menu keeps the row it was on.
-    console::drain();
-    if let Err(error) = &result {
-        let reason = clean(error.lines().next().unwrap_or_default());
-        WORK.with(|w| {
-            if let Some(work) = w.borrow_mut().as_mut() {
-                // Side-by-side components mark their own failures; a single
-                // step fails where the work stood.
-                if !work.steps.iter().any(|s| matches!(s.state, StepState::Failed(_) | StepState::Held(_))) {
-                    let index = work.steps.iter().position(|s| s.state == StepState::Now)
-                        .or_else(|| work.steps.iter().position(|s| s.state == StepState::Next))
-                        .unwrap_or(0);
-                    if let Some(step) = work.steps.get_mut(index) {
-                        step.state = StepState::Failed(reason.clone());
-                        step.line.clear();
-                    }
-                }
-            }
-        });
-        if COLOR.with(StdCell::get) {
-            FOOTER.with(|f| f.set(Some("⏎ back")));
-            draw();
-            if let Ok(_input) = console::Input::enter() {
-                while !matches!(console::key(), Ok(Key::Enter | Key::Back | Key::Quit) | Err(_)) {}
-            }
-        } else {
-            println!("✗ {reason}");
-        }
-    }
-    WORK.with(|w| *w.borrow_mut() = None);
-    FOOTER.with(|f| f.set(None));
-    result
-}
-/// The work page's body, in place of the view's rows.
-fn work_rows() -> Option<Vec<Row>> {
-    WORK.with(|w| {
-        let w = w.borrow();
-        let work = w.as_ref()?;
-        let mut rows = vec![Row::Note(Vec::new())];
-        for step in &work.steps {
-            let name = &step.name;
-            let mut spans = match &step.state {
-                StepState::Done => vec![Span("✓ ".into(), OK), Span(padded(name, 16), PLAIN)],
-                StepState::Now => vec![Span("● ".into(), ACC), Span(padded(name, 16), BOLD)],
-                StepState::Next => vec![Span("○ ".into(), DIM), Span(padded(name, 16), DIM)],
-                StepState::Failed(_) => vec![Span("✗ ".into(), RED), Span(padded(name, 16), PLAIN)],
-                StepState::Held(_) => vec![Span("◌ ".into(), WARN), Span(padded(name, 16), PLAIN)],
-            };
-            match &step.state {
-                StepState::Now | StepState::Done => spans.extend(step.line.iter().cloned()),
-                StepState::Failed(reason) => spans.push(Span(reason.clone(), RED)),
-                StepState::Held(reason) => spans.push(Span(reason.clone(), DIM)),
-                StepState::Next => {}
-            }
-            rows.push(Row::Note(spans));
-        }
-        Some(rows)
-    })
-}
-/// A step's bar and amount, from the progress hook: the current step's
-/// when `name` is None.
-fn work_line(name: Option<&str>, line: Text) {
-    WORK.with(|w| {
-        if let Some(work) = w.borrow_mut().as_mut() {
-            let step = match name {
-                Some(name) => work.steps.iter_mut().find(|s| s.name == name),
-                None => work.steps.iter_mut().find(|s| s.state == StepState::Now),
-            };
-            if let Some(step) = step {
-                step.line = line;
-            }
-        }
-    });
-}
-/// Show a side-by-side component's row: its state and its line.
-fn work_row(row: &progress::Row, line: Text) {
-    WORK.with(|w| {
-        let mut w = w.borrow_mut();
-        let Some(work) = w.as_mut() else { return };
-        let step = match work.steps.iter_mut().find(|s| s.name == row.label) {
-            Some(step) => step,
-            None => {
-                work.steps.push(Step { name: row.label.clone(), state: StepState::Next, line: Vec::new() });
-                work.steps.last_mut().unwrap()
-            }
-        };
-        let detail = progress::Rows::detail(row);
-        step.state = match &row.state {
-            progress::RowState::Running => StepState::Now,
-            progress::RowState::Done => StepState::Done,
-            progress::RowState::Failed(reason) => StepState::Failed(clean(reason)),
-            progress::RowState::Stopped | progress::RowState::Waiting => StepState::Held(detail.clone()),
-        };
-        step.line = match &row.state {
-            progress::RowState::Done => vec![Span(detail, DIM)],
-            _ => line,
-        };
-    });
 }
 
 pub(super) struct Screen {
@@ -1192,17 +1016,37 @@ fn spinner_frame() -> char {
 pub(super) struct Follow {
     identity: String,
     logged_line: String,
+    /// Components installing side by side (Rust, the build tools, CUDA).
+    rows: progress::Rows,
     pub doing: Doing,
 }
 impl Follow {
     pub(super) fn new(starting: &str) -> Self {
-        Follow { identity: String::new(), logged_line: String::new(), doing: Doing { step: starting.into(), ..Doing::default() } }
+        Follow { identity: String::new(), logged_line: String::new(), rows: progress::Rows::default(), doing: Doing { step: starting.into(), ..Doing::default() } }
     }
     pub(super) fn event(&mut self, p: &progress::Progress) {
         if !p.row.is_empty() {
             if p.stage == "Working" {
                 activity(&format!("{}: {}", p.row, p.detail.trim()));
             }
+            if self.rows.update(p) {
+                if let Some(row) = self.rows.rows.iter().find(|r| r.label == p.row && r.state != progress::RowState::Running) {
+                    activity(&format!("{}: {}", row.label, progress::Rows::end_line(row)));
+                }
+            }
+            // "installing Rust", or "installing build tools" for several,
+            // with one bar over them all.
+            let running: Vec<&progress::Row> = self.rows.rows.iter().filter(|r| r.state == progress::RowState::Running).collect();
+            let shares: Vec<f64> = self.rows.rows.iter().map(|r| match r.state {
+                progress::RowState::Done => 1.0,
+                _ => r.fraction.unwrap_or(0.0),
+            }).collect();
+            let fraction = shares.iter().sum::<f64>() / shares.len().max(1) as f64;
+            let step = match running.as_slice() {
+                [one] => format!("installing {}", one.label),
+                _ => "installing build tools".to_owned(),
+            };
+            self.doing = Doing { step, fraction: Some(fraction), amount: format!("{:.0}%", fraction * 100.0) };
             return;
         }
         let phase = format!("{}:{}:{}", p.package.group, p.package.index, p.stage);
@@ -1288,9 +1132,7 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
                 let width = console::size().0.min(80);
                 for row in &rows.rows {
                     let line = row_line(row, &begun, width);
-                    if working_page() {
-                        work_row(row, line);
-                    } else if row.state == progress::RowState::Running {
+                    if row.state == progress::RowState::Running {
                         let mut spans = vec![Span(format!("{} ", padded(&row.label, 13)), PLAIN)];
                         spans.extend(line);
                         MESSAGE.with(|m| *m.borrow_mut() = spans);
@@ -1398,23 +1240,8 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
             if !what.is_empty() {
                 spans.push(Span(format!("  {what}"), DIM));
             }
-            if working_page() {
-                // The page lists the steps itself: the bar goes on the current
-                // step's line, without the label that line already has. A
-                // component is current from its first package, before its
-                // total is known (Rust reads its manifest first).
-                match &p.overall {
-                    Some(overall) => work_step(&overall.label),
-                    None if !p.package.group.is_empty() => work_step(&p.package.group),
-                    None => (),
-                }
-                let label_span = format!("{} ", padded(&label, 13));
-                let name = p.overall.as_ref().map(|o| o.label.clone());
-                work_line(name.as_deref(), spans.into_iter().filter(|s| s.0 != label_span).collect());
-            } else {
-                MESSAGE.with(|m| *m.borrow_mut() = spans);
-                CHOICE.with(|c| c.borrow_mut().clear());
-            }
+            MESSAGE.with(|m| *m.borrow_mut() = spans);
+            CHOICE.with(|c| c.borrow_mut().clear());
             FOOTER.with(|f| f.set(Some("working · ctrl+c stops")));
             draw();
         },
