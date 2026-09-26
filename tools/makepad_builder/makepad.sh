@@ -6,12 +6,12 @@
 # You can read this whole file before running it: it is one shell script and
 # nothing compiled. It opens the Builder in your terminal, which asks for your
 # email (the one identity; empty continues with the free apps), a folder
-# (default ~/makepad-commercial) and which Rust to use, then installs Rust
+# (default ~/makepad-builder) and which Rust to use, then installs Rust
 # into that folder only to compile the apps. It copies itself into the folder
 # as the `makepad` command:
 #
-#   ~/makepad-commercial/makepad             opens the Builder again
-#   ~/makepad-commercial/makepad build APP   compiles an app (for coding agents)
+#   ~/makepad-builder/makepad             opens the Builder again
+#   ~/makepad-builder/makepad build APP   compiles an app (for coding agents)
 #
 # Everything the Builder downloads, builds and records stays in that folder
 # (in its builder/ folder: beside `makepad` there are only the apps you
@@ -2894,7 +2894,7 @@ switch_account() {
 # copies this script there as the `makepad` command.
 folder_screen() {
     screen=folder sel=0 top=0 message=
-    fs_default=${MAKEPAD_LOADER_ROOT:-$HOME/makepad-commercial}
+    fs_default=$default_home
     fs_home=$(cd -P -- "$HOME" && pwd -P)
     while :; do
         choose "Install into $(short "$fs_default")?" '' install install 'other folder' quit || exit 0
@@ -2913,7 +2913,7 @@ folder_screen() {
         esac
         if mkdir -p -- "$fs_folder" 2>/dev/null && fs_root=$(cd -P -- "$fs_folder" && pwd -P); then
             if [ "$fs_root" = / ] || [ "$fs_root" = "$fs_home" ]; then
-                message="${warn}Please choose a folder of its own, such as $(short "$HOME/makepad-commercial").${r0}"
+                message="${warn}Please choose a folder of its own, such as $(short "$HOME/makepad-builder").${r0}"
             elif [ -e "$fs_root/builder/makepad-builder.json" ] || [ -e "$fs_root/makepad-builder.json" ] || [ -e "$fs_root/makepad-loader.json" ] || [ -z "$(ls -A "$fs_root")" ]; then
                 home=$fs_root root=$fs_root/builder
                 migrate_layout
@@ -3580,8 +3580,14 @@ screen=main sel=0 top=0
 # installation already in the default folder is opened as it is, with its
 # saved email, and its `makepad` command becomes this version. Only a folder
 # without one is a first run.
+# The default folder is ~/makepad-builder; an installation made before in
+# ~/makepad-commercial (the earlier default) stays where it is and is used.
+is_install() { [ -f "$1/builder/makepad-builder.json" ] || [ -f "$1/makepad-builder.json" ] || [ -f "$1/makepad-loader.json" ]; }
+if [ -n "${MAKEPAD_LOADER_ROOT:-}" ]; then default_home=$MAKEPAD_LOADER_ROOT
+elif ! is_install "$HOME/makepad-builder" && is_install "$HOME/makepad-commercial"; then default_home=$HOME/makepad-commercial
+else default_home=$HOME/makepad-builder; fi
 if [ -z "$root" ]; then
-    rr_home=${MAKEPAD_LOADER_ROOT:-$HOME/makepad-commercial}
+    rr_home=$default_home
     if [ -f "$rr_home/builder/makepad-builder.json" ] || [ -f "$rr_home/makepad-builder.json" ] || [ -f "$rr_home/makepad-loader.json" ]; then
         home=$(cd -P -- "$rr_home" && pwd -P) root=$home/builder
         migrate_layout
@@ -3594,7 +3600,7 @@ if [ -z "$root" ]; then
     steps_dir="$scratch/steps" slots="$scratch/slots" log_file="$scratch/builder.log"
     mkdir -p "$steps_dir" "$slots"
     saved_email=
-    for fr_root in "${MAKEPAD_LOADER_ROOT:-$HOME/makepad-commercial}/builder" "${MAKEPAD_LOADER_ROOT:-$HOME/makepad-commercial}"; do
+    for fr_root in "$default_home/builder" "$default_home"; do
         [ -f "$fr_root/makepad-builder.json" ] || continue
         root=$fr_root; read_email; saved_email=$email; root=
         break
