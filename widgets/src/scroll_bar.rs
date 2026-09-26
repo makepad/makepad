@@ -27,12 +27,18 @@ script_mod! {
         bar_side_margin: 3.0
         /** shortest the handle may shrink, in pixels 8..120 step 1 */
         min_handle_size: 30.0
+        /** fade the bar out once scrolling stops, like macOS overlay scrollers */
+        auto_hide: true
+        /** how long the bar stays after the last scroll, in seconds 0..10 step 0.1 */
+        hide_delay: 1.5
         /** The handle material: one rounded bar along the scroll axis. */
         draw_bg +: {
             /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** how visible the bar is 0..1 step 0.01 */
+            opacity: instance(0.0)
 
             /** drawn handle thickness in pixels 1..20 step 0.5 */
             size: uniform(6.0)
@@ -89,7 +95,7 @@ script_mod! {
                     )
                     self.hover
                 ) self.border_size)
-                return sdf.result
+                return sdf.result * self.opacity
             }
         }
 
@@ -126,6 +132,17 @@ script_mod! {
                     }
                 }
             }
+            show: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Play.Forward {duration: 0.3}}
+                    apply: {draw_bg: {opacity: 0.0}}
+                }
+                on: AnimatorState{
+                    from: {all: Play.Snap}
+                    apply: {draw_bg: {opacity: 1.0}}
+                }
+            }
         }
     }
 
@@ -137,6 +154,8 @@ script_mod! {
             drag: instance(0.0)
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** how visible the bar is 0..1 step 0.01 */
+            opacity: instance(0.0)
 
             /** drawn handle thickness in pixels 1..20 step 0.5 */
             size: uniform(6.0)
@@ -194,7 +213,7 @@ script_mod! {
                     self.hover
                 ) self.border_size)
 
-                return sdf.result
+                return sdf.result * self.opacity
             }
         }
     }
@@ -285,12 +304,26 @@ pub struct ScrollBar {
     /// Whether to enable drag scrolling
     #[live(false)]
     drag_scrolling: bool,
+    /// Whether the bar fades out once scrolling stops and the pointer leaves it.
+    #[live(true)]
+    auto_hide: bool,
+    /// How long the bar stays shown after the last scroll, in seconds.
+    #[live(1.5)]
+    hide_delay: f64,
 
     #[apply_default]
     animator: Animator,
 
     #[rust]
     next_frame: NextFrame,
+    #[rust]
+    hide_timer: Timer,
+    /// Whether the pointer is over the bar, which keeps it from hiding.
+    #[rust]
+    pointer_over: bool,
+    /// The scroll position and viewport size when the bar last appeared; moving far enough from them shows it again.
+    #[rust]
+    last_shown: Option<(f64, f64)>,
     #[rust(false)]
     visible: bool,
     #[rust]
@@ -440,6 +473,26 @@ impl ScrollBar {
     /// stretch or bounce.
     fn scrollable(&self) -> bool {
         self.view_total - self.view_visible > 0.5
+    }
+
+    /// Reveals an auto-hiding bar and starts its hide countdown afresh.
+    fn show(&mut self, cx: &mut Cx) {
+        if !self.auto_hide {
+            return;
+        }
+        if !self.animator_in_state(cx, ids!(show.on)) {
+            self.animator_play(cx, ids!(show.on));
+        }
+        self.restart_hide_timer(cx);
+    }
+
+    /// Restarts the hide countdown, unless the pointer is holding the bar shown.
+    fn restart_hide_timer(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.hide_timer);
+        self.hide_timer = Timer::default();
+        if self.auto_hide && !self.pointer_over && self.drag_point.is_none() {
+            self.hide_timer = cx.start_timeout(self.hide_delay);
+        }
     }
 
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
@@ -1006,8 +1059,21 @@ impl ScrollBar {
         self.handle_flick(cx, event, dispatch_action);
         self.handle_bounce(cx, event, dispatch_action);
 
+        if self.hide_timer.is_event(event).is_some() {
+            self.hide_timer = Timer::default();
+            if !self.pointer_over && self.drag_point.is_none() {
+                self.animator_play(cx, ids!(show.off));
+            }
+        }
+        if let Event::ClearHover = event {
+            if self.pointer_over {
+                self.pointer_over = false;
+                self.restart_hide_timer(cx);
+            }
+        }
+        self.animator_handle_event(cx, event);
+
         if self.visible {
-            self.animator_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
@@ -1016,6 +1082,13 @@ impl ScrollBar {
             }
 
             if !self.show_handle {
+                return;
+            }
+            // A hidden bar takes no presses, so a tap on its strip reaches the content beneath.
+            if matches!(event, Event::MouseDown(_) | Event::TouchUpdate(_))
+                && self.auto_hide
+                && !self.animator_in_state(cx, ids!(show.on))
+            {
                 return;
             }
 
@@ -1040,20 +1113,28 @@ impl ScrollBar {
                         // clicked on
                         self.drag_point = Some(rel - bar_start); // store the drag delta
                     }
+                    self.show(cx);
                 }
                 Hit::FingerHoverIn(_) => {
+                    self.pointer_over = true;
+                    self.show(cx);
                     self.animator_play(cx, ids!(hover.on));
                 }
                 Hit::FingerHoverOut(_) => {
+                    self.pointer_over = false;
                     self.animator_play(cx, ids!(hover.off));
+                    self.restart_hide_timer(cx);
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     self.drag_point = None;
-                    if fe.is_over && fe.device.has_hovers() {
+                    // Touch has no hover, so the bar can hide once a touch ends.
+                    self.pointer_over = fe.is_over && fe.device.has_hovers();
+                    if self.pointer_over {
                         self.animator_play(cx, ids!(hover.on));
                     } else {
                         self.animator_play(cx, ids!(hover.off));
                     }
+                    self.restart_hide_timer(cx);
                     return;
                 }
                 Hit::FingerMove(fe) => {
@@ -1228,70 +1309,55 @@ impl ScrollBar {
     ) -> f64 {
         self.axis = axis;
 
-        match self.axis {
-            ScrollAxis::Horizontal => {
-                self.visible = view_total.x > view_visible.x + 0.1;
-                self.scroll_size = if view_total.y > view_visible.y + 0.1 {
-                    track.size.x - self.bar_size
-                } else {
-                    track.size.x
-                } - self.bar_side_margin * 2.;
-                self.view_total = view_total.x;
-                self.view_visible = view_visible.x;
-                self.scroll_pos = self
-                    .scroll_pos
-                    .min(self.view_total - self.view_visible)
-                    .max(0.);
+        let vertical = matches!(axis, ScrollAxis::Vertical);
+        let (total, viewport, track_len, cross_overflows) = if vertical {
+            (view_total.y, view_visible.y, track.size.y, view_total.x > view_visible.x + 0.1)
+        } else {
+            (view_total.x, view_visible.x, track.size.x, view_total.y > view_visible.y + 0.1)
+        };
+        self.visible = total > viewport + 0.1;
+        // The other axis' bar, when it shows, takes the corner.
+        self.scroll_size =
+            if cross_overflows { track_len - self.bar_size } else { track_len } - self.bar_side_margin * 2.;
+        self.view_total = total;
+        self.view_visible = viewport;
+        self.scroll_pos = self.scroll_pos.min(total - viewport).max(0.);
 
-                if self.visible && self.show_handle {
-                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.draw_bg.is_vertical = 0.0;
-                    self.draw_bg.norm_scroll = norm_scroll as f32;
-                    self.draw_bg.norm_handle = norm_handle as f32;
-                    let scroll = cx.turtle().scroll();
-                    self.draw_bg.draw_rel(
-                        cx,
-                        Rect {
-                            pos: track.pos
-                                + dvec2(self.bar_side_margin, track.size.y - self.bar_size)
-                                + scroll,
-                            size: dvec2(self.scroll_size, self.bar_size),
-                        },
-                    );
-                }
+        if self.visible && self.show_handle {
+            // Drop a stale hover, since we miss the hover-out if the pointer left while the bar wasn't drawn.
+            if self.pointer_over && !cx.fingers.is_area_hovered(self.draw_bg.area()) {
+                self.pointer_over = false;
+                self.restart_hide_timer(cx);
             }
-            ScrollAxis::Vertical => {
-                // compute if we need a horizontal one
-                self.visible = view_total.y > view_visible.y + 0.1;
-                self.scroll_size = if view_total.x > view_visible.x + 0.1 {
-                    track.size.y - self.bar_size
-                } else {
-                    track.size.y
-                } - self.bar_side_margin * 2.;
-                self.view_total = view_total.y;
-                self.view_visible = view_visible.y;
-                self.scroll_pos = self
-                    .scroll_pos
-                    .min(self.view_total - self.view_visible)
-                    .max(0.);
+            match self.last_shown {
+                Some((pos, vis)) if (pos - self.scroll_pos).abs() > 0.5 || (vis - viewport).abs() > 0.5 => {
+                    self.last_shown = Some((self.scroll_pos, viewport));
+                    self.show(cx);
+                }
+                Some(_) => {}
+                None => self.last_shown = Some((self.scroll_pos, viewport)),
+            }
+            if !self.auto_hide && !self.animator_in_state(cx, ids!(show.on)) {
+                self.animator_cut(cx, ids!(show.on));
+            }
 
-                if self.visible && self.show_handle {
-                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.draw_bg.is_vertical = 1.0;
-                    self.draw_bg.norm_scroll = norm_scroll as f32;
-                    self.draw_bg.norm_handle = norm_handle as f32;
-                    let scroll = cx.turtle().scroll();
-                    self.draw_bg.draw_rel(
-                        cx,
-                        Rect {
-                            pos: track.pos
-                                + dvec2(track.size.x - self.bar_size, self.bar_side_margin)
-                                + scroll,
-                            size: dvec2(self.bar_size, self.scroll_size),
-                        },
-                    );
+            let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+            self.draw_bg.is_vertical = if vertical { 1.0 } else { 0.0 };
+            self.draw_bg.norm_scroll = norm_scroll as f32;
+            self.draw_bg.norm_handle = norm_handle as f32;
+            let scroll = cx.turtle().scroll();
+            let rect = if vertical {
+                Rect {
+                    pos: track.pos + dvec2(track.size.x - self.bar_size, self.bar_side_margin) + scroll,
+                    size: dvec2(self.bar_size, self.scroll_size),
                 }
-            }
+            } else {
+                Rect {
+                    pos: track.pos + dvec2(self.bar_side_margin, track.size.y - self.bar_size) + scroll,
+                    size: dvec2(self.scroll_size, self.bar_size),
+                }
+            };
+            self.draw_bg.draw_rel(cx, rect);
         }
 
         // see if we need to clamp

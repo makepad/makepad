@@ -335,7 +335,7 @@ impl HeightTree {
     }
 
     /// Resize the tree when range changes - extends efficiently, only recreates if shrinking
-    fn resize(&mut self, new_size: usize, default_height: f64) {
+    fn resize(&mut self, new_size: usize) {
         if new_size == self.size {
             return;
         }
@@ -347,17 +347,29 @@ impl HeightTree {
             self.tree.resize(new_size + 1, 0.0);
             self.measured.resize(new_size, false);
 
+            // New parent nodes start at zero, so first add in the old heights they cover.
+            let mut i = old_size;
+            while i > 0 {
+                let sum = self.tree[i];
+                let mut j = i + (i & i.wrapping_neg());
+                while j <= new_size {
+                    self.tree[j] += sum;
+                    j += j & j.wrapping_neg();
+                }
+                i -= i & i.wrapping_neg();
+            }
+
             // Add each new item to the tree
             for i in old_size..new_size {
                 let mut j = i + 1; // 1-indexed
                 while j <= new_size {
-                    self.tree[j] += default_height;
+                    self.tree[j] += self.default_height;
                     j += j & j.wrapping_neg();
                 }
             }
         } else {
             // Shrinking - rebuild (rare case, e.g., clearing chat)
-            *self = HeightTree::new(new_size, default_height);
+            *self = HeightTree::new(new_size, self.default_height);
         }
     }
 
@@ -1511,12 +1523,11 @@ impl PortalList {
 
             // Initialize or resize the height tree
             let size = range_end.saturating_sub(range_start);
-            let default_height = self.height_cache.average();
 
             if let Some(ref mut tree) = self.height_tree {
-                tree.resize(size, default_height);
+                tree.resize(size);
             } else {
-                self.height_tree = Some(HeightTree::new(size, default_height));
+                self.height_tree = Some(HeightTree::new(size, self.height_cache.average()));
             }
 
             if self.tail_range {
@@ -3664,5 +3675,52 @@ impl PortalListSet {
             list.items_with_actions_vec(actions, &mut set);
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod height_tree_tests {
+    use super::HeightTree;
+
+    /// Checks every prefix sum against a plain vector of the same heights.
+    fn assert_matches(tree: &HeightTree, heights: &[f64]) {
+        let mut sum = 0.0;
+        for (i, h) in heights.iter().enumerate() {
+            sum += h;
+            assert!((tree.prefix_sum(i) - sum).abs() < 1e-6, "prefix_sum({i}) = {} != {sum}", tree.prefix_sum(i));
+            assert!((tree.point_query(i) - h).abs() < 1e-6, "point_query({i})");
+        }
+        assert!((tree.total() - sum).abs() < 1e-6, "total {} != {sum}", tree.total());
+    }
+
+    /// Growing the tree must keep every height measured before the growth.
+    #[test]
+    fn resize_keeps_measured_heights() {
+        for (old_size, new_size) in [(50, 100), (20, 70), (100, 150), (127, 128), (5, 8), (5, 6), (9, 10), (1, 2), (3, 1000)] {
+            let mut tree = HeightTree::new(old_size, 80.0);
+            let mut heights = vec![80.0; old_size];
+            for i in (0..old_size).step_by(3) {
+                heights[i] = 20.0 + i as f64;
+                assert!(tree.update(i, heights[i]));
+            }
+            tree.resize(new_size);
+            heights.resize(new_size, 80.0);
+            assert_matches(&tree, &heights);
+
+            // Measuring after the growth still lands on the right item.
+            let i = new_size - 1;
+            heights[i] = 200.0;
+            tree.update(i, 200.0);
+            assert_matches(&tree, &heights);
+            assert_eq!(tree.find_position(heights[..i].iter().sum::<f64>() + 1.0).0, i);
+        }
+    }
+
+    #[test]
+    fn resize_shrink_rebuilds_with_the_default() {
+        let mut tree = HeightTree::new(10, 30.0);
+        tree.update(2, 100.0);
+        tree.resize(4);
+        assert_matches(&tree, &[30.0; 4]);
     }
 }
