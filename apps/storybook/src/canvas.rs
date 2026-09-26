@@ -123,6 +123,12 @@ pub struct StoryCanvas {
     /// What the story raised, newest last.
     #[rust]
     log: VecDeque<String>,
+    /// Scroll positions to put back once the rebuilt story has laid out:
+    /// the path from the story root and the offset, for every scrolled
+    /// view the last story had. A rebuild mid-drag that threw the page
+    /// back to the top took the pointer's target away with it.
+    #[rust]
+    restore_scroll: Vec<(Vec<LiveId>, DVec2)>,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
 }
@@ -147,11 +153,51 @@ impl WidgetNode for StoryCanvas {
     }
 }
 
+/// Every view under `root` (itself included) that is scrolled away from its
+/// origin: its id path from `root` and its offset.
+fn scrolled_views(cx: &Cx, root: &WidgetRef) -> Vec<(Vec<LiveId>, DVec2)> {
+    fn walk(cx: &Cx, widget: &WidgetRef, path: &mut Vec<LiveId>, out: &mut Vec<(Vec<LiveId>, DVec2)>) {
+        if let Some(view) = widget.borrow::<View>() {
+            if let Some(extent) = view.scroll_extent() {
+                if extent.pos.x != 0.0 || extent.pos.y != 0.0 {
+                    out.push((path.clone(), extent.pos));
+                }
+            }
+        }
+        widget.children(&mut |id, child| {
+            path.push(id);
+            walk(cx, &child, path, out);
+            path.pop();
+        });
+    }
+    let mut out = Vec::new();
+    walk(cx, root, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The widget at `path` of child ids under `root`, walked through the
+/// children directly (the widget tree may not have indexed a page that
+/// has not drawn yet).
+fn child_at(root: &WidgetRef, path: &[LiveId]) -> Option<WidgetRef> {
+    let mut cur = root.clone();
+    for id in path {
+        let mut next = None;
+        cur.children(&mut |child_id, child| {
+            if next.is_none() && child_id == *id {
+                next = Some(child.clone());
+            }
+        });
+        cur = next?;
+    }
+    Some(cur)
+}
+
 impl StoryCanvas {
     /// Show the template with this name. Switching stories forgets the
     /// previous story's edits and log.
     pub fn open(&mut self, cx: &mut Cx, dsl: &str) {
         if self.wanted.as_deref() != Some(dsl) {
+            self.restore_scroll.clear();
             self.wanted = Some(dsl.to_string());
             self.chunks.clear();
             self.log.clear();
@@ -169,6 +215,7 @@ impl StoryCanvas {
     /// Drop the shown story and build it afresh, keeping the edits to
     /// re-apply.
     pub fn rebuild(&mut self, cx: &mut Cx) {
+        self.restore_scroll = self.shown.as_ref().map(|(_, page)| scrolled_views(cx, page)).unwrap_or_default();
         self.shown = None;
         self.build(cx);
     }
@@ -195,6 +242,17 @@ impl StoryCanvas {
         cx.widget_tree_mark_dirty(self.uid);
         if let Some(dsl) = self.wanted.clone() {
             if let Some(page) = self.instantiate(cx, &dsl) {
+                // The first frame of the rebuilt story is drawn where the
+                // last one stood: anything that reads its layout before a
+                // second frame (a drag's target under the pointer) reads
+                // the page as it was, not scrolled back to the top.
+                for (path, pos) in &self.restore_scroll {
+                    if let Some(view) = child_at(&page, path) {
+                        if let Some(mut view) = view.borrow_mut::<View>() {
+                            view.set_scroll_pos_unclipped(cx, *pos);
+                        };
+                    }
+                }
                 self.shown = Some((dsl, page));
             }
         }
@@ -228,23 +286,35 @@ impl StoryCanvas {
         result
     }
 
+    /// `target` is one id path, or several separated by spaces that each
+    /// take the same chunk; every one is tried, and the errors are joined.
     fn apply_to(cx: &mut Cx, root: &WidgetRef, target: &str, chunk: &str) -> Result<(), String> {
-        let widget = if target.is_empty() {
-            root.clone()
-        } else {
-            let w = root.widget(cx, &id_path(target));
-            if w.is_empty() {
-                return Err(format!("no widget at {target}"));
+        if target.trim().is_empty() {
+            return apply_chunk(cx, root, chunk);
+        }
+        let mut errors = Vec::new();
+        for path in target.split_whitespace() {
+            let widget = root.widget(cx, &id_path(path));
+            if widget.is_empty() {
+                errors.push(format!("no widget at {path}"));
+            } else if let Err(e) = apply_chunk(cx, &widget, chunk) {
+                errors.push(format!("{path}: {e}"));
             }
-            w
-        };
-        apply_chunk(cx, &widget, chunk)
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
-    /// Whether the story's widget at this path can be reached.
+    /// Whether the story's widget at this path, or every one of several
+    /// paths separated by spaces, can be reached.
     pub fn has_target(&self, cx: &Cx, target: &str) -> bool {
         match &self.shown {
-            Some((_, root)) => target.is_empty() || !root.widget(cx, &id_path(target)).is_empty(),
+            Some((_, root)) => target
+                .split_whitespace()
+                .all(|path| !root.widget(cx, &id_path(path)).is_empty()),
             None => false,
         }
     }
@@ -361,6 +431,20 @@ impl Widget for StoryCanvas {
             page.draw_walk(cx, scope, w)?;
         }
         cx.end_turtle_with_area(&mut self.area);
+        // The rebuilt story has laid out, so its views know how far they
+        // can scroll: put the last story's offsets back and draw once more.
+        if !self.restore_scroll.is_empty() {
+            let restore = std::mem::take(&mut self.restore_scroll);
+            for (path, pos) in restore {
+                // Clamped now that the content is measured.
+                if let Some(target) = child_at(&page, &path) {
+                    if let Some(mut view) = target.borrow_mut::<View>() {
+                        view.set_scroll_pos(cx, pos);
+                    };
+                }
+            }
+            page.redraw(cx);
+        }
         DrawStep::done()
     }
 }

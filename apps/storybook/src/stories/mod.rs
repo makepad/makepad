@@ -17,6 +17,11 @@ use std::sync::Mutex;
 pub mod welcome;
 pub mod slug;
 pub mod foundations;
+pub mod tween;
+pub mod ease_editor;
+pub mod tween_script;
+pub mod motion_path;
+pub mod sequencer;
 pub mod layout;
 pub mod grid;
 pub mod masonry;
@@ -35,6 +40,8 @@ pub mod moving_panels;
 pub mod glasspanel;
 pub mod glass_surfaces;
 pub mod glass_controls;
+pub mod surface_material;
+pub mod knob_presets;
 pub mod splash;
 pub mod label;
 pub mod typography;
@@ -59,6 +66,7 @@ pub mod textinput;
 pub mod field_well;
 pub mod number_field;
 pub mod slider;
+pub mod slider_fader;
 pub mod range_slider;
 pub mod rotary;
 pub mod rating;
@@ -67,9 +75,12 @@ pub mod date_picker;
 pub mod calendar;
 pub mod time_picker;
 pub mod color;
+pub mod gradient_editor;
 pub mod dropzone;
 pub mod form;
 pub mod property_inspector;
+pub mod hotkeys;
+pub mod gizmo;
 pub mod checkbox;
 pub mod radio_group;
 pub mod select;
@@ -167,6 +178,11 @@ static FILES: &[StoryModule] = &[
     file(slug::script_mod, slug::STORIES),
     // 1 Foundations
     file(foundations::script_mod, foundations::STORIES),
+    file(tween::script_mod, tween::STORIES),
+    file(ease_editor::script_mod, ease_editor::STORIES),
+    file(tween_script::script_mod, tween_script::STORIES),
+    file(motion_path::script_mod, motion_path::STORIES),
+    file(sequencer::script_mod, sequencer::STORIES),
     // 2 Layout
     file(layout::script_mod, layout::STORIES),
     file(grid::script_mod, grid::STORIES),
@@ -187,6 +203,8 @@ static FILES: &[StoryModule] = &[
     file(glasspanel::script_mod, glasspanel::STORIES),
     file(glass_surfaces::script_mod, glass_surfaces::STORIES),
     file(glass_controls::script_mod, glass_controls::STORIES),
+    file(surface_material::script_mod, surface_material::STORIES),
+    file(knob_presets::script_mod, knob_presets::STORIES),
     file(splash::script_mod, splash::STORIES),
     // 4 Text
     file(label::script_mod, label::STORIES),
@@ -216,6 +234,7 @@ static FILES: &[StoryModule] = &[
     file(field_well::script_mod, field_well::STORIES),
     file(number_field::script_mod, number_field::STORIES),
     file(slider::script_mod, slider::STORIES),
+    file(slider_fader::script_mod, slider_fader::STORIES),
     file(range_slider::script_mod, range_slider::STORIES),
     file(rotary::script_mod, rotary::STORIES),
     file(rating::script_mod, rating::STORIES),
@@ -224,10 +243,13 @@ static FILES: &[StoryModule] = &[
     file(calendar::script_mod, calendar::STORIES),
     file(time_picker::script_mod, time_picker::STORIES),
     file(color::script_mod, color::STORIES),
+    file(gradient_editor::script_mod, gradient_editor::STORIES),
     file(dropzone::script_mod, dropzone::STORIES),
     file(dropzone_states::script_mod, dropzone_states::STORIES),
     file(form::script_mod, form::STORIES),
     file(property_inspector::script_mod, property_inspector::STORIES),
+    file(hotkeys::script_mod, hotkeys::STORIES),
+    file(gizmo::script_mod, gizmo::STORIES),
     // 8 Selection
     file(checkbox::script_mod, checkbox::STORIES),
     file(radio_group::script_mod, radio_group::STORIES),
@@ -373,6 +395,14 @@ fn evaluate(vm: &mut ScriptVm, index: usize) {
     (modules()[index].script_mod)(vm);
 }
 
+/// Forget which files were evaluated, without touching the module: the next
+/// page a canvas asks for evaluates its file again, on top of what is there.
+/// For a designer preview of one story file: its override is installed,
+/// the record dropped, and the canvas rebuilt, and no other file runs.
+pub fn forget_evaluated(cx: &mut Cx) {
+    cx.global::<Evaluated>().flags.clear();
+}
+
 /// How many story files this context has evaluated.
 pub fn evaluated_count(cx: &mut Cx) -> usize {
     cx.global::<Evaluated>().flags.iter().filter(|on| **on).count()
@@ -397,6 +427,42 @@ pub fn bump(key: LiveId) -> usize {
     let n = map.entry(key).or_insert(0);
     *n += 1;
     *n
+}
+
+#[cfg(test)]
+mod wiring {
+    //! A story file that nothing lists is dead code wearing live code's
+    //! clothes: it compiles, it reads well, and the app never sees a line of
+    //! it, because [`FILES`] is the one road from a file to the navigator. A
+    //! file sat here written and unreachable for a day, and what gave it away
+    //! was the story count not moving.
+
+    /// The one entry in [`super::FILES`] that is not a file in this
+    /// directory: the coverage page is written beside the count it draws.
+    const LISTED_FROM_ELSEWHERE: usize = 1;
+
+    #[test]
+    fn every_file_in_this_directory_is_listed() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/stories");
+        let written = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(".rs") && name != "mod.rs"
+            })
+            .count();
+        assert_eq!(
+            super::modules().len() - LISTED_FROM_ELSEWHERE,
+            written,
+            concat!(
+                "the table lists one number of story files and the directory holds ",
+                "another; a file nothing lists is evaluated by nothing, and its pages ",
+                "are in no tree, no search and no count"
+            )
+        );
+    }
 }
 
 #[cfg(test)]
