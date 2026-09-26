@@ -1,8 +1,9 @@
 //! Authenticated commercial releases. Credentials never enter Git configs or build commands.
-use crate::{http, progress, sha256};
+use crate::{http, progress, sha256, timing};
 use makepad_git::{
-    http_sync::{apply_pack_and_checkout, HttpSyncHooks},
-    ObjectId,
+    compute_status_with_options, flatten_tree,
+    http_sync::{apply_pack_and_checkout, HttpSyncHooks, ImportPhase},
+    FileStatus, ObjectId, StatusOptions,
 };
 use makepad_strict_json::{self as json, Value};
 use std::{
@@ -33,6 +34,8 @@ pub struct Release {
     pub platforms: Vec<String>,
     pub cuda: bool,
     pub public: bool,
+    /// The kind of access the catalog grants: "commercial" (default) or "beta".
+    pub license: String,
     pub features: Vec<String>,
     pub repositories: Vec<Repository>,
     raw: String,
@@ -85,6 +88,7 @@ impl Release {
             platforms: Vec::new(),
             cuda: v.get("cuda").and_then(Value::as_bool).unwrap_or(false),
             public: v.get("public").and_then(Value::as_bool).unwrap_or(false),
+            license: v.get("license").and_then(Value::as_str).filter(|s| identifier(s)).unwrap_or("commercial").to_owned(),
             features: v.get("features").and_then(Value::as_arr).unwrap_or(&[]).iter().map(|f| f.as_str().filter(|s| identifier(s)).map(str::to_owned).ok_or("Invalid app feature")).collect::<Result<_, _>>()?,
             repositories: Vec::new(),
             raw: v.to_json(),
@@ -145,6 +149,17 @@ impl Release {
         if r.repositories.is_empty() || r.repositories.len() > 8 {
             return Err("Invalid repository count".into());
         }
+        // One Cargo workspace for every app: private repositories are
+        // checked out inside the Makepad checkout (at apps/<name>, where
+        // Makepad's root makes their crates members) and the app builds from
+        // a directory inside it, so all apps of a snapshot share the Makepad
+        // crates' artifacts.
+        if let Some(makepad) = r.repositories.iter().find(|repo| repo.name == "makepad") {
+            let inside = |path: &str| path == makepad.path || path.starts_with(&format!("{}/", makepad.path));
+            if !inside(&r.workspace) || !r.repositories.iter().all(|repo| inside(&repo.path)) {
+                return Err("Release workspace and repositories must be inside the Makepad checkout".into());
+            }
+        }
         // Parents must be checked out before nested app repositories.
         r.repositories.sort_by_key(|r| r.path.len());
         Ok(r)
@@ -203,6 +218,46 @@ impl Release {
     pub fn mark_built(&self, root: &Path) -> Result<(), String> {
         fs::write(self.directory(root).join(BUILT_MARKER), format!("{} {}\n", self.id, self.release)).map_err(|e| e.to_string())
     }
+    /// Cargo's target directory for this release: one per source snapshot,
+    /// `target/sources/<label>`, shared by every app built from it. Cargo
+    /// names a path crate's artifacts by its path relative to the workspace
+    /// root, so two snapshots (two Makepad commits) in one target directory
+    /// would write the same files: each switch between them recompiles
+    /// everything, and a snapshot whose files are older than the other's
+    /// last build could even count as fresh and link the other commit's
+    /// crates. Snapshots at different commits never share artifacts anyway
+    /// (their checkouts are newer than any build), so this costs nothing but
+    /// the disk of an old snapshot until it is pruned.
+    pub fn target_dir(&self, root: &Path) -> PathBuf {
+        let directory = self.directory(root);
+        root.join("target").join("sources").join(directory.file_name().unwrap_or_default())
+    }
+    /// The target directory, created. An installation from before the
+    /// per-snapshot layout has Cargo's output directly in `target/`; the
+    /// snapshot that built last (the newest built marker) adopts it by
+    /// renaming, so its apps do not compile again. Others start empty.
+    pub fn prepare_target_dir(&self, root: &Path) -> Result<PathBuf, String> {
+        let target = self.target_dir(root);
+        if !target.exists() && self.adopts_legacy_target(root) {
+            fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(root.join("target")).map_err(|e| e.to_string())?.flatten() {
+                if entry.file_name() != "sources" {
+                    fs::rename(entry.path(), target.join(entry.file_name())).map_err(|e| format!("Moving the build output: {e}"))?;
+                }
+            }
+        }
+        fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+        Ok(target)
+    }
+    fn adopts_legacy_target(&self, root: &Path) -> bool {
+        let legacy = root.join("target");
+        if !["release", "debug", ".rustc_info.json"].iter().any(|name| legacy.join(name).exists()) {
+            return false;
+        }
+        let built = |directory: &Path| fs::metadata(directory.join(BUILT_MARKER)).and_then(|m| m.modified()).ok();
+        let newest = fs::read_dir(root.join("sources")).into_iter().flatten().flatten().filter_map(|entry| Some((built(&entry.path())?, entry.path()))).max_by_key(|(time, _)| *time);
+        newest.is_none_or(|(_, directory)| directory == self.directory(root))
+    }
     pub fn source(&self, root: &Path) -> PathBuf {
         self.directory(root).join(&self.workspace)
     }
@@ -213,23 +268,34 @@ impl Release {
     /// Makepad commit differs from the ones already installed, which is the
     /// case where dependencies legitimately compile again.
     pub fn describe_sources(&self, root: &Path) -> String {
+        let target = self.target_dir(root);
+        let build = if target.exists() {
+            format!("; builds into {}", crate::shown(&target))
+        } else if self.adopts_legacy_target(root) {
+            format!("; the earlier build output in target/ moves to {} and is reused", crate::shown(&target))
+        } else {
+            format!("; compiles into {}", crate::shown(&target))
+        };
+        format!("{}{build}", self.describe_snapshot(root))
+    }
+    fn describe_snapshot(&self, root: &Path) -> String {
         let directory = self.directory(root);
         let own = root.join("sources").join(&self.release);
         let label = |directory: &Path| directory.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if self.installed(root) {
             return if directory == own {
-                format!("Sources ready: {}", directory.display())
+                format!("Sources ready: {}", crate::shown(&directory))
             } else {
-                format!("Sources shared with release {} (same commits, same build artifacts): {}", label(&directory), directory.display())
+                format!("Sources shared with release {} (same commits, same build artifacts): {}", label(&directory), crate::shown(&directory))
             };
         }
         if directory != own {
             let missing: Vec<_> =
                 self.repositories.iter().filter(|r| !repository_installed(&directory, r)).map(|r| r.name.as_str()).collect();
             return if missing.is_empty() {
-                format!("Sources shared with release {}: {} lacks the workspace {}", label(&directory), directory.display(), self.workspace)
+                format!("Sources shared with release {}: {} lacks the workspace {}", label(&directory), crate::shown(&directory), self.workspace)
             } else {
-                format!("Sources shared with release {}: adding {} to {}", label(&directory), missing.join(", "), directory.display())
+                format!("Sources shared with release {}: adding {} to {}", label(&directory), missing.join(", "), crate::shown(&directory))
             };
         }
         let Some(makepad) = self.repositories.iter().find(|r| r.name == "makepad") else {
@@ -353,16 +419,39 @@ fn repository_installed(dest: &Path, repo: &Repository) -> bool {
         && dest.join(&repo.path).join(".git").is_dir()
 }
 
-/// The public `makepad-git` hook deliberately stays small: older published
-/// source packs only report checked-out paths. Keep the Builder compatible
-/// with that API and publish a determinate summary once the sync returns its
-/// report. During checkout the activity pane still advances for every file,
-/// while the final event supplies the total used by the progress bar.
-struct CheckoutProgress { files: u64 }
+/// Unpacking reports as one forward-only fraction of the step: the pack's
+/// import phases first, then writing the files, each with the totals the
+/// Git library gives, so the bar keeps moving through a large checkout.
+struct CheckoutProgress { files: usize, total_files: usize, shown: u64, writing: Option<std::time::Instant> }
+impl CheckoutProgress {
+    fn report(&mut self, stage: &str, fraction: f64) {
+        let permille = (fraction.clamp(0.0, 1.0) * 1000.0) as u64;
+        if permille > self.shown {
+            self.shown = permille;
+            progress::measured(stage, "Repository", permille, 1000, progress::Unit::None);
+        }
+    }
+}
 impl HttpSyncHooks for CheckoutProgress {
-    fn on_checkout_file(&mut self, path: &str) {
+    fn on_import_progress(&mut self, phase: ImportPhase, done: usize, total: usize) {
+        let (from, to) = match phase {
+            ImportPhase::Inflate => (0.0, 0.40),
+            ImportPhase::Resolve => (0.40, 0.55),
+            // A fresh pack is saved whole; otherwise its objects are written.
+            ImportPhase::SavePack | ImportPhase::Write => (0.55, 0.70),
+        };
+        let within = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+        self.report("Unpacking Git objects", from + (to - from) * within);
+    }
+    fn on_checkout_start(&mut self, total: usize) {
+        self.total_files = total;
+        self.writing = Some(std::time::Instant::now());
+        self.report("Writing source files", 0.70);
+    }
+    fn on_checkout_file(&mut self, _path: &str) {
         self.files += 1;
-        progress::measured("Writing source files", path, self.files, 0, progress::Unit::Files);
+        let within = if self.total_files > 0 { self.files as f64 / self.total_files as f64 } else { 0.0 };
+        self.report("Writing source files", 0.70 + 0.30 * within);
     }
 }
 
@@ -383,6 +472,10 @@ pub fn checkout(
     }
     let dest = release.directory(root);
     fs::create_dir_all(dest.join(".builder-repositories")).map_err(|e| e.to_string())?;
+    // One bar for the whole download: the missing packs' sizes are in the
+    // release, each counted when downloaded and when unpacked.
+    let missing = release.repositories.iter().filter(|r| !repository_installed(&dest, r)).map(|r| r.bytes).sum();
+    let _total = progress::total("Download source", missing);
     for (i, repo) in release.repositories.iter().enumerate() {
         if repository_installed(&dest, repo) { continue; }
         let checkout = dest.join(&repo.path);
@@ -396,15 +489,26 @@ pub fn checkout(
             let origin = service.trim_end_matches('/').strip_suffix("/api/loader").ok_or("Source service must end with /api/loader")?;
             (service_url(origin, &format!("{}/git?email={}&release={}&repository={}", release.id, makepad_loader_bundle::query_value(&address), release.release, repo.name))?, vec![("X-Makepad-Email".into(), address), ("Cache-Control".into(), "no-store".into())])
         };
+        progress::step(repo.bytes);
         let bytes = http::fetch_method_progress("GET", &url, &headers, &[], Some(&repo.name))?.body;
+        progress::step_done();
+        progress::step(repo.bytes);
         progress::stage("Verifying source", &repo.name, 0.0);
         if bytes.len() as u64 != repo.bytes || !sha256::sha256_hex(&bytes).eq_ignore_ascii_case(&repo.sha256) { return Err(format!("{} download failed size/hash verification", repo.name)); }
         let stage = dest.join(format!(".{}-{}-staging", repo.name, std::process::id()));
         fs::create_dir(&stage).map_err(|e| format!("Source staging: {e}"))?;
         let result = (|| {
             progress::stage("Unpacking Git objects", &repo.name, 0.0);
-            let mut hooks = CheckoutProgress { files: 0 };
+            let mut hooks = CheckoutProgress { files: 0, total_files: 0, shown: 0, writing: None };
+            let started = std::time::Instant::now();
             let report = apply_pack_and_checkout(&stage, &service_url(service, &format!("repository/{}", repo.name))?, ObjectId::from_hex(&repo.commit).map_err(|e| e.to_string())?, None, &bytes, &mut hooks).map_err(|e| e.to_string())?;
+            let done = std::time::Instant::now();
+            let writing = hooks.writing.unwrap_or(done);
+            let (import, write) = ((writing - started).as_secs_f64(), (done - writing).as_secs_f64());
+            crate::setup_note!("{}: {} objects unpacked in {import:.1} s, {} files ({:.0} MB) written in {write:.1} s ({:.0} files/s)",
+                repo.name, report.imported_objects, report.checked_out_files, report.checked_out_bytes as f64 / 1_048_576.0,
+                report.checked_out_files as f64 / write.max(0.001));
+            timing::note(format!("timing: source {}: unpack {import:.1} s, write {write:.1} s for {} files", repo.name, report.checked_out_files));
             progress::measured("Unpacking Git objects", "Repository objects", report.imported_objects as u64, report.imported_objects as u64, progress::Unit::Objects);
             progress::measured("Saving Git objects", "Repository pack", bytes.len() as u64, bytes.len() as u64, progress::Unit::Bytes);
             progress::measured("Writing source files", "Repository files", report.checked_out_files as u64, report.checked_out_files as u64, progress::Unit::Files);
@@ -412,8 +516,11 @@ pub fn checkout(
             fs::rename(&stage, &checkout).map_err(|e| e.to_string())?;
             fs::write(receipt_path(&dest, repo), receipt(repo)).map_err(|e| e.to_string())
         })();
-        if result.is_err() { let _ = fs::remove_dir_all(&stage); }
+        // The staging folder was created above by this process; a failed
+        // checkout leaves nothing behind and the previous sources untouched.
+        if result.is_err() { let _ = crate::remove_inside(root, &stage); }
         result?;
+        progress::step_done();
     }
     if !release.source(root).join("Cargo.toml").is_file() { return Err("Release is missing its Cargo workspace".into()); }
     release.save(&dest.join(format!("{}.json", release.id)))?;
@@ -421,6 +528,163 @@ pub fn checkout(
     Ok(release.source(root))
 }
 
+/// Remove the source snapshots nothing refers to any more: neither the
+/// releases in `keep` nor those recorded under `installed/` and
+/// `available/`. Every checkout a snapshot's receipts name must be there,
+/// with no local change, edited, deleted, new or staged: a snapshot the user
+/// or an agent worked in stays, and so does one whose layout this Builder
+/// does not recognise. Returns the labels removed, for the activity log.
+pub fn prune_snapshots(root: &Path, keep: &[Release]) -> Result<Vec<String>, String> {
+    let mut kept: Vec<PathBuf> = keep.iter().map(|release| release.directory(root)).collect();
+    for directory in ["installed", "available"] {
+        for entry in fs::read_dir(root.join(directory)).into_iter().flatten().flatten() {
+            if let Some(release) = fs::read(entry.path()).ok().and_then(|bytes| Release::parse(&json::parse(&bytes).ok()?).ok()) {
+                kept.push(release.directory(root));
+            }
+        }
+    }
+    let mut removed = Vec::new();
+    for entry in fs::read_dir(root.join("sources")).into_iter().flatten().flatten() {
+        let snapshot = entry.path();
+        let Some(label) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if !snapshot.is_dir() || kept.contains(&snapshot) || !snapshot_unchanged(&snapshot)? {
+            continue;
+        }
+        crate::remove_inside(root, &snapshot)?;
+        // Its build output, which no remaining snapshot can use.
+        crate::remove_inside(root, &root.join("target").join("sources").join(&label))?;
+        removed.push(label);
+    }
+    Ok(removed)
+}
+
+/// True when every repository the snapshot's receipts name is checked out
+/// at a known path without local changes. The paths come from the release
+/// files saved beside the checkouts; the bootstrap's own snapshot holds only
+/// Makepad, which it always checks out under `makepad`.
+fn snapshot_unchanged(snapshot: &Path) -> Result<bool, String> {
+    let mut paths = vec![("makepad".to_owned(), "makepad".to_owned())];
+    for entry in fs::read_dir(snapshot).map_err(|e| e.to_string())?.flatten() {
+        if entry.path().extension().is_some_and(|extension| extension == "json") {
+            if let Some(release) = fs::read(entry.path()).ok().and_then(|bytes| Release::parse(&json::parse(&bytes).ok()?).ok()) {
+                paths.extend(release.repositories.into_iter().map(|repo| (repo.name, repo.path)));
+            }
+        }
+    }
+    for receipt in fs::read_dir(snapshot.join(".builder-repositories")).map_err(|e| e.to_string())?.flatten() {
+        let name = receipt.file_name().to_string_lossy().into_owned();
+        let Some((_, path)) = paths.iter().find(|(known, _)| *known == name) else { return Ok(false) };
+        if !checkout_unchanged(&snapshot.join(path))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn checkout_unchanged(checkout: &Path) -> Result<bool, String> {
+    let describe = |error: makepad_git::GitError| format!("{}: {error}", crate::shown(&checkout));
+    let mut repository = makepad_git::Repository::open(checkout).map_err(describe)?;
+    let head = repository.head_oid().map_err(describe)?;
+    let commit = repository.read_commit(&head).map_err(describe)?;
+    let tree = repository.read_tree(&commit.tree).map_err(describe)?;
+    let files = flatten_tree(&tree, "", &mut |oid| repository.read_tree(oid)).map_err(describe)?;
+    let index = repository.read_index().map_err(describe)?;
+    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false };
+    let status = compute_status_with_options(&files, &index, &repository.workdir, options).map_err(describe)?;
+    // Makepad tracks a few symbolic links. The Builder's checkout does not
+    // create them, and Git's own checkout in the bootstrap leaves them
+    // dangling, so their absence is how every snapshot starts, not an edit.
+    let symbolic_link = |path: &str| index.entries.iter().any(|entry| entry.path == path && entry.mode & 0o170000 == 0o120000);
+    Ok(status.entries.iter().all(|entry| entry.status == FileStatus::Deleted && symbolic_link(&entry.path)))
+}
+
 pub fn email(value: &str) -> Result<String, String> {
     makepad_loader_bundle::email(value)
+}
+
+/// Before an update moves an app to a clean new source, save the edits made
+/// in the snapshot it was built from: `changes/<app>-<date>.diff` (unified,
+/// new files included) and `changes/<app>-<date>.files` (one "M|A|D path"
+/// line per changed file), and `changes/<app>.merge` naming the diff so the
+/// menu offers the merge. The edited snapshot itself stays on disk. Nothing
+/// is written for an unchanged snapshot. Returns the diff's file name.
+pub fn save_changes(root: &Path, app: &str, previous: &Release, date: &str) -> Result<Option<String>, String> {
+    let snapshot = previous.directory(root);
+    let mut diff = String::new();
+    let mut files = String::new();
+    for repo in &previous.repositories {
+        let checkout = snapshot.join(&repo.path);
+        if !checkout.join(".git").is_dir() {
+            continue;
+        }
+        // Nested repositories (an app checked out inside Makepad) report
+        // their own edits; the parent skips their folders.
+        let nested: Vec<String> = previous.repositories.iter()
+            .filter_map(|other| other.path.strip_prefix(&format!("{}/", repo.path)).map(|rest| format!("{rest}/")))
+            .collect();
+        local_changes(&checkout, &repo.path, &nested, &mut diff, &mut files)?;
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let changes = root.join("changes");
+    fs::create_dir_all(&changes).map_err(|e| e.to_string())?;
+    let mut name = format!("{app}-{date}");
+    let mut n = 2;
+    while changes.join(format!("{name}.diff")).exists() {
+        name = format!("{app}-{date}-{n}");
+        n += 1;
+    }
+    fs::write(changes.join(format!("{name}.diff")), diff).map_err(|e| e.to_string())?;
+    fs::write(changes.join(format!("{name}.files")), files).map_err(|e| e.to_string())?;
+    let diff_name = format!("{name}.diff");
+    fs::write(changes.join(format!("{app}.merge")), &diff_name).map_err(|e| e.to_string())?;
+    Ok(Some(diff_name))
+}
+
+fn local_changes(checkout: &Path, label: &str, skip: &[String], diff: &mut String, files: &mut String) -> Result<(), String> {
+    let describe = |error: makepad_git::GitError| format!("{}: {error}", crate::shown(&checkout));
+    let mut repository = makepad_git::Repository::open(checkout).map_err(describe)?;
+    let head = repository.head_oid().map_err(describe)?;
+    let commit = repository.read_commit(&head).map_err(describe)?;
+    let tree = repository.read_tree(&commit.tree).map_err(describe)?;
+    let tracked = flatten_tree(&tree, "", &mut |oid| repository.read_tree(oid)).map_err(describe)?;
+    let index = repository.read_index().map_err(describe)?;
+    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false };
+    let status = compute_status_with_options(&tracked, &index, &repository.workdir, options).map_err(describe)?;
+    let symbolic_link = |path: &str| index.entries.iter().any(|entry| entry.path == path && entry.mode & 0o170000 == 0o120000);
+    for entry in &status.entries {
+        let path = entry.path.as_str();
+        if skip.iter().any(|prefix| path.starts_with(prefix.as_str()) || format!("{path}/") == *prefix)
+            || (entry.status == FileStatus::Deleted && symbolic_link(path))
+        {
+            continue;
+        }
+        let kind = match entry.status {
+            FileStatus::Deleted | FileStatus::StagedDeleted => 'D',
+            FileStatus::Untracked | FileStatus::StagedNew => 'A',
+            _ => 'M',
+        };
+        let shown = format!("{label}/{path}");
+        files.push_str(&format!("{kind}|{shown}\n"));
+        let old = match tracked.get(path) {
+            Some(oid) if kind != 'A' => repository.read_blob(oid).map_err(describe)?,
+            _ => Vec::new(),
+        };
+        let new = if kind == 'D' { Vec::new() } else { fs::read(checkout.join(path)).unwrap_or_default() };
+        if old.contains(&0) || new.contains(&0) {
+            diff.push_str(&format!("Binary file {shown} differs\n"));
+            continue;
+        }
+        let file = makepad_git::diff_blobs(
+            &old,
+            &new,
+            (kind != 'A').then(|| shown.clone()),
+            (kind != 'D').then(|| shown.clone()),
+            None,
+            None,
+        );
+        diff.push_str(&makepad_git::format_unified_diff(&file, 3).replace("--- a//dev/null", "--- /dev/null").replace("+++ b//dev/null", "+++ /dev/null"));
+    }
+    Ok(())
 }

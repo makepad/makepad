@@ -26,4 +26,7 @@ if [ "$(uname -s)" = Darwin ]; then
         fi
     done
 fi
+# The binary is in the installation's builder folder (installations from
+# before that layout kept it beside this command).
+if [ -x "$builder_directory/builder/@APP_BINARY@.bin" ]; then exec "$builder_directory/builder/@APP_BINARY@.bin" "$@"; fi
 exec "$builder_directory/@APP_BINARY@.bin" "$@"

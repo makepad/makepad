@@ -74,6 +74,8 @@ EOF
 cat > /etc/profile.d/makepad-cuda.sh <<'EOF'
 export CUDA_HOME=/opt/cuda
 export CUDA_PATH=/opt/cuda
+# Builds link CUDA only from a root named here (never a scanned system install).
+export MAKEPAD_CUDA_ROOT=/opt/cuda
 export NVCC_CCBIN=/usr/bin/g++-15
 export CUDAHOSTCXX=/usr/bin/g++-15
 case :$PATH: in *:/opt/cuda/bin:*) ;; *) export PATH=/opt/cuda/bin:$PATH ;; esac
@@ -82,6 +84,7 @@ EOF
 cat >> /etc/environment <<'EOF'
 CUDA_HOME=/opt/cuda
 CUDA_PATH=/opt/cuda
+MAKEPAD_CUDA_ROOT=/opt/cuda
 NVCC_CCBIN=/usr/bin/g++-15
 CUDAHOSTCXX=/usr/bin/g++-15
 EOF
@@ -183,7 +186,7 @@ if test -f "$seed/clone.json"; then
     install -o arch -g arch -m 0644 "$seed/clone.json" /home/arch/makepad/CLONE-REVISION.json
 else
     stage 'Building release WM and CUDA AI Hub offline'
-    runuser -u arch -- env HOME=/home/arch MAKEPAD=linux_direct+vulkan CARGO_NET_OFFLINE=true MAKEPAD_CEF_OFFLINE=1 CUDA_HOME=/opt/cuda CUDA_PATH=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-wm -p makepad-app-ai-hub'
+    runuser -u arch -- env HOME=/home/arch MAKEPAD=linux_direct+vulkan CARGO_NET_OFFLINE=true MAKEPAD_CEF_OFFLINE=1 MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-wm -p makepad-app-ai-hub'
 fi
 sshd -t
 systemctl reload sshd
