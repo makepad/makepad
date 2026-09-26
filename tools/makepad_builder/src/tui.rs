@@ -1,8 +1,8 @@
 //! The setup process owns blocking work. On Windows MpTerm hosts this process
 //! and all of its children; Unix bootstraps use the matching terminal menu.
 //!
-//! One full-screen view in the terminal's own colours: SETUP, YOUR APPS,
-//! MAKEPAD EXPERIMENTS and CODING AGENTS rows, one status line where
+//! One full-screen view in the terminal's own colours: YOUR APPS, MAKEPAD
+//! EXPERIMENTS, CODING AGENTS and SETUP rows, one status line where
 //! questions, progress and results appear, and a key-hint footer. The file
 //! reads top to bottom: startup, the main menu, then one section per row
 //! group, then helpers and terminal input. Drawing lives in tui_view.rs.
@@ -45,7 +45,7 @@ const GPU_NOTICE_READ: &str = "graphics-notice-read";
 const GPU_NOTICE: &str = "Makepad heavily relies on your GPU to draw its UI and implement AI functionality. Old hardware and broken drivers can cause your computer to reboot unexpectedly.";
 
 /// Windows Defender and similar tools briefly lock a freshly unpacked rustc.
-const STILL_SCANNING: &str = "Windows security software is still scanning the staged Rust compiler. Select Build tools to check again.";
+const STILL_SCANNING: &str = "Windows security software is still scanning the staged Rust compiler. Select the app again to check again.";
 
 /// Returned as an error by sub-screens when the person pressed q.
 const QUIT: &str = "\u{1}quit";
@@ -55,7 +55,7 @@ mod view;
 pub use view::with_progress;
 use view::{activity, done, text, Item, Nav, Row, Screen, View, DIM, OK, PLAIN, WARN};
 
-// ---- Startup: log in, graphics, build tools, then the main menu ------------
+// ---- Startup: log in, graphics, then the main menu -------------------------
 
 /// `makepad-builder tui`: the whole session, from the first screen to quit.
 pub fn run() -> Result<(), String> {
@@ -96,25 +96,10 @@ pub fn run() -> Result<(), String> {
 fn show_menu(setup: &mut Setup) -> Result<(), String> {
     fs::write(setup.root.join("selected-app"), &setup.app).map_err(|e| e.to_string())?;
     setup.measure_disk();
-    // Every start refreshes the licenses and sets up missing build tools,
-    // then stops at the menu with the first app selected: which app to
-    // build and open is the person's choice. Success, cancellation and
-    // failure all return to the menu; never restart the sequence on redraw.
+    // Every start refreshes the licenses, then stops at the menu with the
+    // first app selected: which app to build and open is the person's
+    // choice. Build tools are set up when an app is first built.
     let startup = (|| -> Result<(), String> {
-        // Setup screens follow the Graphics screen directly: no main menu
-        // or license check is drawn before the build tools consent; the menu
-        // first appears after Agree (busy install) or Cancel.
-        let ready = setup.ready();
-        let mut tools_ready = ready.compiler();
-        if !tools_ready || setup.cuda_wanted() {
-            match setup.setup_tools() {
-                Err(error) if error == QUIT => return Err(error),
-                Err(error) => setup.report(error),
-                Ok(()) => {}
-            }
-            let ready = setup.ready();
-            tools_ready = ready.compiler();
-        }
         // The log-in screen may have checked already.
         if setup.licenses.is_none() {
             if let Err(error) = setup.check_licenses() {
@@ -129,8 +114,7 @@ fn show_menu(setup: &mut Setup) -> Result<(), String> {
         Err(error) => setup.report(error),
         Ok(()) => {}
     }
-    // The menu opens on the first of YOUR APPS, also after the start-up
-    // setup ran (which would otherwise select Build tools).
+    // The menu opens on the first of YOUR APPS.
     view::forget_worked_on();
     let mut selected = setup.first_license_row(&setup.main_view());
     loop {
@@ -433,25 +417,12 @@ impl Setup {
 
 /// The main menu: rows, and what Return does on each.
 impl Setup {
+    /// YOUR APPS first, then the experiments, the coding agents and setup.
+    /// There are no compiler rows: an app sets up what it needs when it is
+    /// first built, and on Windows with an NVIDIA GPU building Makepad Amp
+    /// asks once whether to turn on local AI (see `local_ai_screen`).
     fn main_view(&self) -> View {
-        let ready = self.ready();
-        let mut rows = vec![Row::Head("SETUP".into())];
-        rows.push(self.account_row());
-        if !cfg!(target_os = "macos") {
-            rows.push(self.graphics_row());
-        }
-        rows.push(self.agreements_row());
-        rows.extend(self.compiler_rows(ready));
-        if crate::cuda::supported() {
-            rows.push(self.cuda_row());
-        }
-        rows.push(self.disk_row());
-        rows.push(match &self.checked {
-            None => item("updates", "Update", "", text("check for updates", DIM), "⏎"),
-            Some((false, time)) => item("updates", "Update", "", done(format!("up to date · {time}")), "check again"),
-            Some((true, time)) => item("updates", "Update", "", text(format!("updates downloaded · {time}"), PLAIN), "check again"),
-        });
-        rows.push(Row::Head("YOUR APPS".into()));
+        let mut rows = vec![Row::Head("YOUR APPS".into())];
         rows.extend(self.license_rows());
         let free = free_apps().unwrap_or_default();
         let built = free.iter().filter(|(id, _)| self.app_state(id, self.app_release(id).as_ref()) == State::Ready).count();
@@ -462,6 +433,18 @@ impl Setup {
             rows.push(item(format!("agent-{command}"), *title, "", Vec::new(), "open"));
         }
         rows.push(item("agent-shell", "Shell", "", text("with this folder's Rust on PATH", DIM), "open"));
+        rows.push(Row::Head("SETUP".into()));
+        rows.push(self.account_row());
+        if !cfg!(target_os = "macos") {
+            rows.push(self.graphics_row());
+        }
+        rows.push(self.agreements_row());
+        rows.push(self.disk_row());
+        rows.push(match &self.checked {
+            None => item("updates", "Update", "", text("check for updates", DIM), "⏎"),
+            Some((false, time)) => item("updates", "Update", "", done(format!("up to date · {time}")), "check again"),
+            Some((true, time)) => item("updates", "Update", "", text(format!("updates downloaded · {time}"), PLAIN), "check again"),
+        });
         View {
             subtitle: ABOUT.trim().into(),
             email: self.shown_email(),
@@ -511,75 +494,6 @@ impl Setup {
             text("not accepted", WARN)
         };
         item("terms", "Agreements", "", status, "read")
-    }
-    /// Windows: one Build tools row. macOS/Linux: Rust, then Apple's tools or
-    /// the distribution's packages.
-    fn compiler_rows(&self, ready: Ready) -> Vec<Row> {
-        let version = self.pinned_rust().unwrap_or_default();
-        if cfg!(windows) {
-            let gnu = runtime::windows_chain(&self.root) == WindowsChain::Gnu;
-            let (status, action) = if self.compiler_retry {
-                (text("Windows security is still checking Rust", WARN), "check again")
-            } else if ready.compiler() && gnu {
-                (done(format!("Rust {version} GNU toolchain")), "change")
-            } else if ready.compiler() {
-                (done(format!("Visual Studio Build Tools, Windows SDK, Rust {version}")), "change")
-            } else if ready.tools && !version.is_empty() {
-                (text(format!("Rust {version} not installed"), WARN), "install")
-            } else {
-                (text("not installed", WARN), "install")
-            };
-            return vec![item("tools", "Build tools", "", status, action)];
-        }
-        let (rust_status, rust_action) = if !ready.rust {
-            (text("not set up", WARN), "set up")
-        } else if let Ok(RustChoice::External(sysroot)) = runtime::rust_choice(&self.root) {
-            (done(format!("installed Rust {}", short_path(Path::new(&sysroot)))), "change")
-        } else {
-            let status = vec![
-                view::Span("✓".into(), OK),
-                view::Span(format!(" private {version} "), PLAIN),
-                view::Span(format!("in {}", short_path(&self.root)), DIM),
-            ];
-            (status, "change")
-        };
-        let macos = cfg!(target_os = "macos");
-        let (tools_status, tools_action) = if ready.tools {
-            (done(if macos { "clang, SDK, git" } else { "compiler, linker, git" }), "recheck")
-        } else if macos && xcode_license_pending() {
-            (text("license not accepted", WARN), "accept")
-        } else if macos {
-            (text("not installed", WARN), "install")
-        } else {
-            (text("missing", WARN), "set up")
-        };
-        vec![
-            item("rust", "Rust", "", rust_status, rust_action),
-            item("system", if macos { "Xcode tools" } else { "System packages" }, "", tools_status, tools_action),
-        ]
-    }
-    fn cuda_row(&self) -> Row {
-        let (status, action) = if !crate::cuda::gpu_present() {
-            (text("needs an NVIDIA GPU", DIM), "")
-        } else if runtime::windows_chain(&self.root) == WindowsChain::Gnu {
-            (text("needs Microsoft's C++ tools · AI acceleration in Makepad Amp", DIM), "switch")
-        } else if self.cuda_installed() && crate::cuda::kernels_failed(&self.root).is_some() {
-            let status = vec![
-                view::Span(format!("CUDA {} ", crate::cuda::CUDA_VERSION), PLAIN),
-                view::Span("· kernels did not build here; AI features run on the CPU".into(), WARN),
-            ];
-            (status, "")
-        } else if self.cuda_installed() {
-            let status = vec![
-                view::Span("✓".into(), OK),
-                view::Span(format!(" CUDA {} ", crate::cuda::CUDA_VERSION), PLAIN),
-                view::Span("· AI features in Makepad Amp".into(), DIM),
-            ];
-            (status, "")
-        } else {
-            (text("not installed · AI features in Makepad Amp", WARN), "install")
-        };
-        item("cuda", "CUDA", "", status, action)
     }
     fn license_rows(&self) -> Vec<Row> {
         if self.email.is_empty() {
@@ -642,9 +556,6 @@ impl Setup {
         match id {
             "account" | "login" => self.switch_account(),
             "gpu" => self.graphics_screen(),
-            "tools" | "rust" => self.setup_tools(),
-            "system" => self.setup_system_tools(),
-            "cuda" => self.setup_cuda(),
             "updates" => self.check_updates(),
             "disk" => self.clear_build(),
             "terms" => self.agreements_screen(),
@@ -1049,46 +960,22 @@ impl Setup {
     fn pinned_rust(&self) -> Option<String> {
         self.release.as_ref().or(self.public.as_ref()).map(|r| r.rust.clone())
     }
-    /// The release that pins the compiler: the primary app's, else the public one.
-    fn compiler_release(&mut self) -> Result<Release, String> {
-        if let Some(release) = self.release.clone().or_else(|| self.public.clone()) {
-            return Ok(release);
-        }
-        // Small and silent: this can run before any menu is drawn.
-        let public = catalog::fetch_public(&self.service)?;
-        self.public = Some(public.clone());
-        Ok(public)
-    }
-    /// The Build tools row (Windows) or Rust row (macOS/Linux).
-    fn setup_tools(&mut self) -> Result<(), String> {
-        let ready = self.ready();
-        // Windows: the row always offers the choice, also while Microsoft's
-        // tools are chosen but not installed, so GNU is one step back.
-        if cfg!(windows) && !self.compiler_retry {
-            return self.change_chain();
-        }
-        if ready.compiler() && !self.compiler_retry && !self.cuda_wanted() {
-            return self.change_rust();
-        }
-        let release = self.compiler_release()?;
-        if self.install_compiler(&release)? {
-            self.measure_disk();
-            view::message(if cfg!(windows) && runtime::windows_chain(&self.root) == WindowsChain::Gnu {
-                done(format!("Rust {} with its GNU toolchain is ready; nothing outside this folder changed.", release.rust))
-            } else if cfg!(windows) {
-                done(format!("Build tools{} and Rust {} installed; nothing outside this folder changed.", if self.cuda { ", CUDA" } else { "" }, release.rust))
-            } else {
-                done(format!("Rust {} is ready. Caches and builds stay in {}.", release.rust, short_path(&self.root)))
-            });
-        }
-        Ok(())
-    }
     /// Everything compiling needs, set up in order: the consent screen for
     /// what is missing, Apple's tools on macOS, then the downloads. True when
     /// the compiler is ready; false when the person cancelled.
     fn install_compiler(&mut self, release: &Release) -> Result<bool, String> {
         if self.compiler_retry {
             return self.retry_compiler(release);
+        }
+        // Windows with an NVIDIA GPU: the first build of an app with AI
+        // features asks once, and the answer picks the compiler for good:
+        // Microsoft's tools with CUDA, or Rust's GNU toolchain without.
+        if self.local_ai_undecided(release) {
+            let Some(chain) = self.local_ai_screen()? else {
+                return Ok(self.nothing_installed());
+            };
+            runtime::record_windows_chain(&self.root, chain)?;
+            self.cuda = crate::cuda::build_with(&self.root);
         }
         let mut ready = self.ready();
         if !cfg!(windows) && !ready.rust && self.choose_rust(&release.rust)? {
@@ -1152,6 +1039,67 @@ impl Setup {
             other => other,
         };
         view::work_end(result)
+    }
+    /// The local AI question is due: Windows, an NVIDIA driver, an app that
+    /// uses CUDA, and no compiler chosen yet (older folders that already
+    /// have Microsoft's tools count as chosen).
+    fn local_ai_undecided(&self, release: &Release) -> bool {
+        cfg!(windows)
+            && release.cuda
+            && crate::cuda::gpu_present()
+            && !self.root.join("selected-compiler").is_file()
+            && !crate::msvc::ready(&self.root.join("toolchain/msvc"))
+    }
+    /// One page: the three agreements (Return opens one in the browser),
+    /// then "Agree and enable local AI" (selected) and "No local AI".
+    /// Agreeing records the agreements and Microsoft's tools with CUDA; No
+    /// keeps Rust's GNU toolchain. Neither is asked again. Escape goes back
+    /// to the menu without deciding.
+    fn local_ai_screen(&self) -> Result<Option<WindowsChain>, String> {
+        let ids = ["cuda", "vs", "sdk"];
+        let mut selected = ids.len();
+        loop {
+            let mut rows = vec![Row::Note(Vec::new()), Row::Note(done("NVIDIA GPU found")), Row::Note(Vec::new())];
+            rows.extend(
+                wrap("Local AI support requires Microsoft Build Tools and NVIDIA CUDA, which have their own license agreements you need to agree to.", 74)
+                    .into_iter()
+                    .map(|line| Row::Note(text(line, PLAIN))),
+            );
+            rows.push(Row::Note(Vec::new()));
+            rows.extend(agreement_rows(Some(&ids)));
+            rows.push(Row::Note(Vec::new()));
+            rows.push(item("agree", "Agree and enable local AI", "", Vec::new(), ""));
+            rows.push(item("no", "No local AI", "", Vec::new(), ""));
+            let view = View {
+                crumb: " › Local AI".into(),
+                subtitle: "You can run local AI functionality.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc back"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "agree" => {
+                    let mut all = self.accepted_agreements();
+                    for id in ["makepad", "rust", "vs", "sdk", "cuda"] {
+                        if !all.iter().any(|a| a == id) {
+                            all.push(id.into());
+                        }
+                    }
+                    self.record_agreements(&all.iter().map(String::as_str).collect::<Vec<_>>())?;
+                    activity("Local AI on: Microsoft's C++ tools and CUDA.");
+                    return Ok(Some(WindowsChain::Msvc));
+                }
+                Nav::Select(id) if id == "no" => {
+                    activity("No local AI: Rust's GNU toolchain.");
+                    return Ok(Some(WindowsChain::Gnu));
+                }
+                Nav::Select(id) => open_agreement(&id),
+                Nav::Back | Nav::Quit => return Ok(None),
+                Nav::Refresh => {}
+            }
+        }
     }
     fn nothing_installed(&self) -> bool {
         activity("Compiler installation cancelled.");
@@ -1231,48 +1179,6 @@ impl Setup {
         *cache = Some(RustCheck { recorded, version: version.to_owned(), sysroot });
         ready
     }
-    /// Windows: switch between the two compilers. Each keeps what it has
-    /// installed; the next compile uses the other one.
-    fn change_chain(&mut self) -> Result<(), String> {
-        let current = runtime::windows_chain(&self.root);
-        let question = "Compile with Rust's GNU toolchain, or Microsoft's C++ tools?";
-        let note = "Microsoft's tools (about 2 GB) are only needed for CUDA AI acceleration";
-        let chain = match view::choose(question, note, &["gnu", "microsoft"], usize::from(current == WindowsChain::Msvc))?.as_deref() {
-            Some("microsoft") => WindowsChain::Msvc,
-            Some(_) => WindowsChain::Gnu,
-            None => return Ok(()),
-        };
-        if chain == current && self.ready().compiler() && !self.cuda_wanted() {
-            view::message(done(if chain == WindowsChain::Gnu { "Rust's GNU toolchain is ready." } else { "Build tools, Windows SDK and Rust are ready." }));
-            return Ok(());
-        }
-        runtime::record_windows_chain(&self.root, chain)?;
-        self.cuda = crate::cuda::build_with(&self.root);
-        if self.ready().compiler() && !self.cuda_wanted() {
-            view::message(done("Compiler changed; your apps compile again with it."));
-            return Ok(());
-        }
-        let release = self.compiler_release()?;
-        let installed = self.install_compiler(&release);
-        if matches!(installed, Ok(true)) {
-            self.measure_disk();
-            view::message(done("Compiler changed; your apps compile again with it."));
-            return Ok(());
-        }
-        // Microsoft's agreements declined, or its tools did not install: back
-        // to Rust's GNU toolchain, which is here already.
-        if chain == WindowsChain::Msvc {
-            runtime::record_windows_chain(&self.root, WindowsChain::Gnu)?;
-            self.cuda = crate::cuda::build_with(&self.root);
-            view::set_view(self.main_view());
-            view::message(match &installed {
-                Err(error) => text(format!("Microsoft's tools did not install ({error}); still compiling with Rust's GNU toolchain."), WARN),
-                _ => text("Microsoft's tools were not installed; still compiling with Rust's GNU toolchain.", DIM),
-            });
-            return Ok(());
-        }
-        installed.map(|_| ())
-    }
     /// macOS/Linux only: repair a recorded installed Rust that stopped
     /// validating, or make the same one-time offer as the bootstrap. Every
     /// change of the recorded choice is an explicit answer; backing out keeps
@@ -1322,55 +1228,10 @@ impl Setup {
                     activity("Switching to a private Rust in this folder.");
                     Ok(true)
                 } else {
-                    Err(format!("Kept the selected Rust at {recorded}. Make it available again, or choose Rust to switch."))
+                    Err(format!("Kept the selected Rust at {recorded}. Make it available again, or select the app again to switch."))
                 }
             }
         }
-    }
-    /// macOS/Linux: switch explicitly between the private Rust and a
-    /// compatible installed one.
-    fn change_rust(&mut self) -> Result<(), String> {
-        let Some(version) = self.pinned_rust() else { return Ok(()) };
-        let candidate = match runtime::probe_rust(&version) {
-            Ok(candidate) => candidate,
-            Err(reason) => {
-                view::message(text(format!("No other compatible installed Rust was found: {reason}"), DIM));
-                return Ok(());
-            }
-        };
-        let current = matches!(runtime::rust_choice(&self.root)?, RustChoice::External(_));
-        let question = format!("Build with a private Rust {version} in this folder, or your installed Rust?");
-        let note = format!("installed: {} (not modified)", short_path(&candidate));
-        let choice = match view::choose(&question, &note, &["private", "installed"], usize::from(current))?.as_deref() {
-            Some("installed") => RustChoice::External(candidate.to_string_lossy().into_owned()),
-            Some(_) => RustChoice::Private,
-            None => return Ok(()),
-        };
-        runtime::record_rust_choice(&self.root, &choice)?;
-        self.rust_check.borrow_mut().take();
-        if self.ready().rust {
-            view::message(done("Rust changed; the next compile uses it."));
-            Ok(())
-        } else {
-            self.setup_tools()
-        }
-    }
-    fn setup_system_tools(&mut self) -> Result<(), String> {
-        if runtime::system_tools_ready().is_ok() {
-            view::message(done("Compiler, SDK, linker and git are ready."));
-            return Ok(());
-        }
-        if cfg!(target_os = "macos") {
-            if self.xcode_screen()? {
-                view::message(done("Apple developer tools are ready."));
-            }
-            return Ok(());
-        }
-        let release = self.compiler_release()?;
-        if self.install_compiler(&release)? {
-            view::message(done("Developer tools are ready."));
-        }
-        Ok(())
     }
     /// macOS: the "› Apple developer tools" screen when clang, the SDK or
     /// git are missing, or Xcode's license is not accepted. Installing opens
@@ -1441,48 +1302,6 @@ impl Setup {
     }
     fn cuda_installed(&self) -> bool {
         self.root.join("toolchain/cuda/bin").join(runtime::exe("nvcc")).is_file()
-    }
-    fn setup_cuda(&mut self) -> Result<(), String> {
-        if !crate::cuda::gpu_present() {
-            view::message(text("CUDA needs an NVIDIA graphics card; none was found.", DIM));
-            return Ok(());
-        }
-        if self.cuda_installed() && runtime::windows_chain(&self.root) != WindowsChain::Gnu {
-            view::message(done("CUDA is installed; apps build with it on this NVIDIA card."));
-            return Ok(());
-        }
-        if runtime::windows_chain(&self.root) == WindowsChain::Gnu {
-            let question = "CUDA AI acceleration needs Microsoft's C++ tools. Switch to them?";
-            let note = "Build Tools and Windows SDK, about 2 GB, in this folder only";
-            if view::choose(question, note, &["switch", "keep gnu"], 0)?.as_deref() != Some("switch") {
-                return Ok(());
-            }
-            runtime::record_windows_chain(&self.root, WindowsChain::Msvc)?;
-            activity("Compiling with Microsoft's C++ tools from now on.");
-            let release = self.compiler_release()?;
-            if !self.install_compiler(&release)? {
-                return Ok(());
-            }
-            if self.cuda_installed() {
-                self.measure_disk();
-                view::message(done("Microsoft's C++ tools are ready; apps build with CUDA on this NVIDIA card."));
-                return Ok(());
-            }
-        }
-        let detail = format!("Installed in this folder only: NVIDIA CUDA Toolkit {}", crate::cuda::CUDA_VERSION);
-        if !self.consent("Install CUDA", "CUDA adds the AI features in Makepad Amp.", &detail, &["cuda"], "install CUDA")? {
-            activity("CUDA installation cancelled.");
-            return Ok(());
-        }
-        let release = self.compiler_release()?;
-        view::work_begin("Install CUDA", "Into this folder only; Makepad Amp uses it for its AI features.", &self.shown_email(), "cuda", &["CUDA"]);
-        view::work_end(with_progress(|| {
-            runtime::dependency(&self.root, &release, Dependency::Cuda)
-        }))?;
-        self.cuda = crate::cuda::build_with(&self.root);
-        self.measure_disk();
-        view::message(done("CUDA installed. Makepad Amp gets its AI features on its next compile."));
-        Ok(())
     }
 }
 
@@ -1662,7 +1481,7 @@ impl Setup {
         // Resolve the release once so compiler setup and the following build
         // cannot disagree if a newer release appears while installing tools.
         let release = if self.compiler_retry {
-            self.release.clone().ok_or("The compiler retry has no release metadata; select Build tools to start again")?
+            self.release.clone().ok_or("The compiler retry has no release metadata; select the app again")?
         } else {
             self.release()?
         };
@@ -1675,7 +1494,7 @@ impl Setup {
     /// Download (when needed), compile and open an app on its work page.
     fn build_release(&mut self, release: Release) -> Result<(), String> {
         if !self.ready().compiler() {
-            return Err(format!("The latest source requires Rust {}. Select Build tools first.", release.rust));
+            return Err(format!("The latest source requires Rust {}; it could not be set up.", release.rust));
         }
         let mut steps = Vec::new();
         if !release.installed(&self.root) {
