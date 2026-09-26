@@ -51,7 +51,7 @@ chcp 65001 >nul
 for /f %%E in ('echo prompt $E ^| cmd') do set "ESC=%%E"
 set "B=%ESC%[0;1m"
 set "D=%ESC%[0;2m"
-set "C=%ESC%[0;36m"
+set "C=%ESC%[0;38;2;255;92;57m"
 set "G=%ESC%[0;32m"
 set "Y=%ESC%[0;33m"
 set "R=%ESC%[0;31m"
