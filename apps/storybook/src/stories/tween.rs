@@ -107,6 +107,8 @@ script_mod! {
             resume := Button{text: "Resume"}
             reverse := Button{text: "Reverse"}
             restart := Button{text: "Restart"}
+            loop_on := CheckBox{text: "Loop"}
+            yoyo_on := CheckBox{text: "Yoyo"}
             pause_at_grid := CheckBox{text: "addPause at grid"}
         }
         scrub := Slider{
@@ -541,6 +543,12 @@ pub struct StoryTweenStage {
     yoyo: bool,
     #[live(0.0)]
     repeat: f64,
+    /// The repeat count the Loop box replaced (restored when it clears).
+    #[rust]
+    repeat_before_loop: f64,
+    /// What the Loop and Yoyo boxes show: (loop, yoyo).
+    #[rust]
+    loop_row_shows: Option<(bool, bool)>,
     #[rust(TweenHost::new()
         .inspect_named("Story: Tween & Timeline")
         .inspect_tags(&["tl", "intro", "grid", "outro", "grid_done", "grid_pause"]))]
@@ -1042,6 +1050,22 @@ impl StoryTweenStage {
             .set_value(cx, tk.time_scale);
     }
 
+    /// Puts the Loop and Yoyo boxes in step with the knobs (the Controls
+    /// tab sets them too), only when they changed.
+    fn sync_loop_row(&mut self, cx: &mut Cx) {
+        let shown = (self.repeat < 0.0, self.yoyo);
+        if self.loop_row_shows == Some(shown) {
+            return;
+        }
+        self.loop_row_shows = Some(shown);
+        self.view
+            .check_box(cx, ids!(loop_on))
+            .set_active(cx, shown.0, Animate::No);
+        self.view
+            .check_box(cx, ids!(yoyo_on))
+            .set_active(cx, shown.1, Animate::No);
+    }
+
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let tl = self.tl;
         let v = &self.view;
@@ -1059,6 +1083,8 @@ impl StoryTweenStage {
             (v.button(cx, ids!(jump_outro)), OUTRO),
         ];
         let pause_at_grid = v.check_box(cx, ids!(pause_at_grid));
+        let loop_on = v.check_box(cx, ids!(loop_on));
+        let yoyo_on = v.check_box(cx, ids!(yoyo_on));
         let ease_pick = v.drop_down(cx, ids!(ease_pick));
         let tl_ease = v.ease_editor(cx, ids!(tl_ease));
         let from = v.segmented_control(cx, ids!(stagger_from));
@@ -1137,6 +1163,25 @@ impl StoryTweenStage {
         if let Some(b) = pause_at_grid.changed(actions) {
             picks.pause_at_grid = b;
         }
+        // Loop and Yoyo set the same knobs as the Controls tab (repeat -1,
+        // yoyo): the timeline rebuilds where it was on the next draw.
+        if let Some(b) = loop_on.changed(actions) {
+            if b && self.repeat >= 0.0 {
+                self.repeat_before_loop = self.repeat;
+                self.repeat = -1.0;
+            } else if !b && self.repeat < 0.0 {
+                self.repeat = self.repeat_before_loop.max(0.0);
+            }
+            self.setup_dirty = true;
+            self.view.redraw(cx);
+            acted = true;
+        }
+        if let Some(b) = yoyo_on.changed(actions) {
+            self.yoyo = b;
+            self.setup_dirty = true;
+            self.view.redraw(cx);
+            acted = true;
+        }
         if let Some(i) = ease_pick.selected(actions) {
             if i != picks.ease {
                 picks.ease = i;
@@ -1204,6 +1249,7 @@ impl Widget for StoryTweenStage {
         // redraw: this is where a changed knob rebuilds the timeline.
         self.ensure_built(cx.cx.cx);
         self.sync_editor(cx.cx.cx);
+        self.sync_loop_row(cx.cx.cx);
         self.motion.draw_check(cx.cx.cx);
         let epoch = tween_ticker_ref(cx.cx.cx).epoch;
         if self.seen_epoch != Some(epoch) {
@@ -1296,7 +1342,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "FoundationsMotionTween",
     added: "2026-09-24",
     tags: &["new", "tween", "timeline", "stagger", "gsap", "keyframes", "scrub", "yoyo"],
-    doc: "# Tweens and timelines\n\n`makepad_widgets::tween` is GSAP 3's model in Rust: tweens, timelines, positions and labels, staggers, eases, repeat and yoyo, callbacks and playback control. A widget keeps a `TweenHost` in a `#[rust]` field, builds on it, forwards its events to `handle_event` and pushes or pulls the values it reports.\n\n## This page\n\nOne timeline: `from_to` on the title at 0, the label `grid` at `prev_end(-0.1)` (GSAP `\"<-0.1\"` of the end), a staggered `from_to` of forty dots from that label, a `call` at the end, the label `outro` at `rel(0.4)` (GSAP `\"+=0.4\"`) and two colour tweens from it, one in sRGB and one in the space picked on the page.\n\n- **Play, Pause, Resume, Restart** are GSAP's `play()`, `pause()`, `resume()` and `restart()`. **Reverse** toggles the direction and resumes (GSAP's `reverse()` only sets it).\n- **The playhead** seeks the total progress with events suppressed while it is held, then resumes if the timeline was playing. While the timeline plays the slider follows it.\n- **Jump to label** is `seek(\"label\")`.\n- **addPause at grid** stops the playhead at the label and reports a `Pause` event.\n- **Stagger from / axis / spread** are GSAP's `stagger: {from, axis, each | amount, grid: [5, 8]}`.\n- **The ease picker** overrides the timeline's default ease with a GSAP ease string or a CSS preset; its first row uses the ease from the Controls tab.\n- **The ease editor** beside the stage (`tl_ease`) is an `EaseEditor` that always shows the timeline's ease: the picked row's curve, sampled without handles for an ease with no control points (elastic, bounce, steps), or the theme ease on the first row. When it commits (finger up, a preset pick, a field commit, a key nudge) its `Ease::Bezier` becomes the timeline's default ease (the picker's last row, `ease editor`) and the timeline is rebuilt. It rebuilds on commit only: following `changed` would rebuild the forty-dot timeline on every pointer move.\n- **Global ticker** is the app-wide `TweenTicker`: GSAP's `globalTimeline.pause()` and `timeScale()`, plus reduced motion, which finishes animations instead of playing them.\n\nChanging any knob rebuilds the timeline where it was: same total progress, same direction, still playing if it was.\n\n## The readout\n\nEvery line under the playhead is a label that is rewritten on each frame that changed something: time and total time, progress, iteration, state, the current label, a few current values and the last six events. The setup line also says `built #N with <ease>`: the ease the running timeline was built with, and a number that goes up on every rebuild. On the `--remote` surface `/snap?q=readout` reads it, and `/tweak/op?op=tween&scale=0.25&paused=1&reduced=0` sets the ticker.",
+    doc: "# Tweens and timelines\n\n`makepad_widgets::tween` is GSAP 3's model in Rust: tweens, timelines, positions and labels, staggers, eases, repeat and yoyo, callbacks and playback control. A widget keeps a `TweenHost` in a `#[rust]` field, builds on it, forwards its events to `handle_event` and pushes or pulls the values it reports.\n\n## This page\n\nOne timeline: `from_to` on the title at 0, the label `grid` at `prev_end(-0.1)` (GSAP `\"<-0.1\"` of the end), a staggered `from_to` of forty dots from that label, a `call` at the end, the label `outro` at `rel(0.4)` (GSAP `\"+=0.4\"`) and two colour tweens from it, one in sRGB and one in the space picked on the page.\n\n- **Play, Pause, Resume, Restart** are GSAP's `play()`, `pause()`, `resume()` and `restart()`. **Reverse** toggles the direction and resumes (GSAP's `reverse()` only sets it).\n- **The playhead** seeks the total progress with events suppressed while it is held, then resumes if the timeline was playing. While the timeline plays the slider follows it.\n- **Jump to label** is `seek(\"label\")`.\n- **Loop** repeats the timeline forever (GSAP `repeat: -1`; cleared, the repeat count comes back) and **Yoyo** mirrors every other pass (GSAP `yoyo`). They set the same knobs as the Controls tab.\n- **addPause at grid** stops the playhead at the label and reports a `Pause` event.\n- **Stagger from / axis / spread** are GSAP's `stagger: {from, axis, each | amount, grid: [5, 8]}`.\n- **The ease picker** overrides the timeline's default ease with a GSAP ease string or a CSS preset; its first row uses the ease from the Controls tab.\n- **The ease editor** beside the stage (`tl_ease`) is an `EaseEditor` that always shows the timeline's ease: the picked row's curve, sampled without handles for an ease with no control points (elastic, bounce, steps), or the theme ease on the first row. When it commits (finger up, a preset pick, a field commit, a key nudge) its `Ease::Bezier` becomes the timeline's default ease (the picker's last row, `ease editor`) and the timeline is rebuilt. It rebuilds on commit only: following `changed` would rebuild the forty-dot timeline on every pointer move.\n- **Global ticker** is the app-wide `TweenTicker`: GSAP's `globalTimeline.pause()` and `timeScale()`, plus reduced motion, which finishes animations instead of playing them.\n\nChanging any knob rebuilds the timeline where it was: same total progress, same direction, still playing if it was.\n\n## The readout\n\nEvery line under the playhead is a label that is rewritten on each frame that changed something: time and total time, progress, iteration, state, the current label, a few current values and the last six events. The setup line also says `built #N with <ease>`: the ease the running timeline was built with, and a number that goes up on every rebuild. On the `--remote` surface `/snap?q=readout` reads it, and `/tweak/op?op=tween&scale=0.25&paused=1&reduced=0` sets the ticker.",
     subject: "stage",
     feature: None,
     controls: &[
