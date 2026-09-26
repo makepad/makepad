@@ -363,6 +363,12 @@ debug = true
 [profile.test.package.makepad-stitch]
 opt-level = 1
 
+# stitch's interpreter needs its handlers' calls to become tail calls; built
+# incrementally (release has incremental = true) they are not, and the script
+# math AOT overflows the stack.
+[profile.release.package.makepad-stitch]
+incremental = false
+
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3
 #[profile.dev.package.makepad-live-compiler]
