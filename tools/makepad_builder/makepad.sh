@@ -61,13 +61,33 @@ esac
 
 self=$0
 case "$self" in /*) ;; *) self="$(pwd -P)/$self" ;; esac
-# The terminal UI reads keys with bash's read builtin; where dash or another
-# sh started it, the same script continues under /bin/bash when there is one.
-if [ "$#" = 0 ] && [ -z "${BASH_VERSION:-}" ] && [ -z "${MAKEPAD_BUILDER_SH:-}" ] && [ -x /bin/bash ] && [ -f "$self" ]; then
-    MAKEPAD_BUILDER_SH=1 exec /bin/bash "$self"
+# The terminal UI reads keys with the shell's own read, waiting a fraction
+# of a second between redraws while work runs, and starts no process while
+# it waits (a terminal's title shows the newest one). bash 4 can do that;
+# macOS has bash 3.2, whose read cannot wait less than a second, so there the
+# same script continues under /bin/zsh as sh; where dash or another sh
+# started it, under /bin/bash when there is one.
+if [ "$#" = 0 ] && [ -z "${MAKEPAD_BUILDER_SH:-}" ] && [ -z "${ZSH_VERSION:-}" ] && [ -f "$self" ]; then
+    if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_VERSINFO:-0}" -ge 4 ] 2>/dev/null; then :
+    elif [ -x /bin/zsh ] && [ "$(uname -s)" = Darwin ]; then MAKEPAD_BUILDER_SH=1 exec /bin/zsh --emulate sh "$self"
+    elif [ -z "${BASH_VERSION:-}" ] && [ -x /bin/bash ]; then MAKEPAD_BUILDER_SH=1 exec /bin/bash "$self"
+    fi
 fi
-# The screen's faint logo strips colour codes with an extended pattern.
-[ -z "${BASH_VERSION:-}" ] || shopt -s extglob
+# ext: bash or zsh, whose extended patterns, substrings and character counts
+# the screen's band, logo and line wrapping use (plain sh draws without
+# them). Under zsh a few file commands the background loops run every
+# moment are its builtins (zf_mv, zf_mkdir, zstat, zselect), so no process
+# starts for them.
+ext=
+if [ -n "${ZSH_VERSION:-}" ]; then
+    ext=zsh
+    setopt MULTIBYTE
+    zmodload zsh/datetime zsh/zselect 2>/dev/null || :
+    zmodload -F zsh/files b:zf_mv b:zf_mkdir b:zf_rmdir 2>/dev/null || :
+    zmodload -F zsh/stat b:zstat 2>/dev/null || :
+elif [ -n "${BASH_VERSION:-}" ]; then
+    ext=bash
+fi
 self_dir=$(cd -P -- "$(dirname -- "$self")" && pwd -P)
 # home: the folder people see, with this command and the apps built there;
 # root: the Builder's own folder in it (builder/), which holds everything
@@ -88,7 +108,16 @@ ifs_default=$(printf ' \t\n_'); ifs_default=${ifs_default%_}
 # type (UTF-8 text and widths) stays the person's.
 if [ -n "${LC_ALL:-}" ]; then LC_CTYPE=$LC_ALL; export LC_CTYPE; unset LC_ALL; fi
 LC_COLLATE=C; export LC_COLLATE
-now() { date +%s; }
+now() { if [ "$ext" = zsh ]; then printf '%s' "$EPOCHSECONDS"; else date +%s; fi; }
+# pause SECONDS (a fraction, "0.2"): wait, under zsh without a process.
+pause() { if [ "$ext" = zsh ]; then zselect -t "$(( ${1#0.} * 10 ))" || :; else sleep "$1"; fi; }
+# first_line FILE DEFAULT -> fl: the file's first line, DEFAULT when it has none.
+first_line() {
+    fl=
+    if [ -f "$1" ]; then IFS= read -r fl 2>/dev/null < "$1" || :; fi
+    [ -n "$fl" ] || fl=$2
+}
+make_dir() { if [ "$ext" = zsh ]; then zf_mkdir "$1" 2>/dev/null; else mkdir "$1" 2>/dev/null; fi; }
 short() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 # pad TEXT WIDTH -> $padded, without forking.
 pad() { padded=$1; while [ "${#padded}" -lt "$2" ]; do padded="$padded "; done; }
@@ -96,10 +125,21 @@ sha256() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{ print $1 }'
     else shasum -a 256 "$1" | awk '{ print $1 }'; fi
 }
-size_of() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else printf 0; fi; }
+size_of() {
+    if [ ! -f "$1" ]; then printf 0
+    elif [ "$ext" = zsh ] && zstat -A so_size +size -- "$1" 2>/dev/null; then printf '%s' "$so_size"
+    else wc -c < "$1" | tr -d ' '; fi
+}
 # put FILE TEXT: written through a temporary name, so readers never see half.
-put() { printf '%s\n' "$2" > "$1.$$.next" && mv -f "$1.$$.next" "$1"; }
-log() { [ -z "${log_file:-}" ] || printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >> "$log_file"; }
+put() {
+    printf '%s\n' "$2" > "$1.$$.next" || return 1
+    if [ "$ext" = zsh ]; then zf_mv -f "$1.$$.next" "$1"; else mv -f "$1.$$.next" "$1"; fi
+}
+log() {
+    [ -n "${log_file:-}" ] || return 0
+    if [ "$ext" = zsh ]; then lg_t=$(strftime '%H:%M:%S' "$EPOCHSECONDS"); else lg_t=$(date '+%H:%M:%S'); fi
+    printf '%s %s\n' "$lg_t" "$*" >> "$log_file"
+}
 # remove_inside PATH: deletes PATH only when it lies strictly inside the
 # Builder's installation folder; anything else is refused and left alone.
 remove_inside() {
@@ -320,7 +360,7 @@ http_get() {
     fi
 }
 # The service's {"error": "..."} as one line.
-http_error() { json flat < "$1" 2>/dev/null | awk -F'\t' '$1 == "error" { print $2; exit }'; }
+http_error() { [ -f "$1" ] || return 0; json flat < "$1" | awk -F'\t' '$1 == "error" { print $2; exit }'; }
 
 # The newest public Makepad release (free apps and the pinned Rust) from the
 # public catalog; kept in available/makepad.json.
@@ -406,7 +446,7 @@ EOF
 repo_installed() {
     [ -d "$1/$3/.git" ] || return 1
     ri_commit=
-    read -r ri_commit ri_rest < "$1/.builder-repositories/$2" 2>/dev/null || :
+    [ ! -f "$1/.builder-repositories/$2" ] || read -r ri_commit ri_rest < "$1/.builder-repositories/$2" || :
     [ "$ri_commit" = "$4" ]
 }
 # rel_dir: the snapshot folder this release builds from, as the Windows
@@ -681,10 +721,10 @@ slot_take() {
     while :; do
         st_i=0
         while [ "$st_i" -lt "$max_connections" ]; do
-            if mkdir "$slots/$st_i" 2>/dev/null; then slot=$st_i; return 0; fi
+            if make_dir "$slots/$st_i"; then slot=$st_i; return 0; fi
             st_i=$((st_i + 1))
         done
-        sleep 0.1
+        pause 0.1
     done
 }
 slot_give() { rmdir "$slots/$1" 2>/dev/null || :; }
@@ -783,7 +823,7 @@ head_size() {
 # line in a file, written by the step itself (background jobs included) and
 # drawn about ten times a second:
 #   now|DONE|TOTAL|UNIT|BYTES|DOING   done|SUMMARY   failed|REASON   held|REASON
-step_key() { step_key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'); }
+step_key() { if [ -n "$ext" ]; then step_key=${1//[!A-Za-z0-9]/_}; else step_key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'); fi; }
 step() { # step LABEL LINE
     step_key "$1"
     put "$steps_dir/$step_key" "$2"
@@ -836,7 +876,8 @@ job_rust() { # job_rust LABEL VERSION
             case "$jr_state" in
                 down)
                     eval "jr_parts=\$jr_parts_$jr_n"
-                    case "$(cat "$jr_archive.status" 2>/dev/null || echo running)" in
+                    first_line "$jr_archive.status" running
+                    case "$fl" in
                         running) jr_down=$((jr_down + 1)); fetch_bytes "$jr_archive" "$jr_parts"; jr_done=$((jr_done + fetch_bytes)) ;;
                         0)
                             fetch_join "$jr_archive" "$jr_parts" "$jr_size" || { step_fail "$jr_label" "Download failed: $jr_component"; return 1; }
@@ -866,7 +907,8 @@ job_rust() { # job_rust LABEL VERSION
                     jr_done=$((jr_done + jr_size)) ;;
                 unpack)
                     jr_done=$((jr_done + jr_size))
-                    case "$(cat "$root/tmp/rust-$jr_n.unpack")" in
+                    first_line "$root/tmp/rust-$jr_n.unpack" running
+                    case "$fl" in
                         running) jr_unpack=$((jr_unpack + 1)) ;;
                         0) eval "jr_state_$jr_n=done"; jr_done=$((jr_done + jr_size)) ;;
                         *) step_fail "$jr_label" "Unpacking $jr_component failed"; return 1 ;;
@@ -882,7 +924,7 @@ job_rust() { # job_rust LABEL VERSION
         else jr_doing=checking; fi
         step "$jr_label" "now|$jr_done|$jr_total|MB|$((jr_total / 2))|$jr_doing"
         [ "$jr_busy" = 1 ] || break
-        sleep 0.2
+        pause 0.2
     done
     wait
     prepare_host_tools "$jr_staging"
@@ -931,11 +973,11 @@ job_pack() { # job_pack LABEL DEST NAME PATH COMMIT SHA BYTES APP RELEASE PUBLIC
         fi
         jp_parts=$fetch_parts
         while :; do
-            jp_status=$(cat "$jp_pack.status" 2>/dev/null || echo running)
+            first_line "$jp_pack.status" running; jp_status=$fl
             fetch_bytes "$jp_pack" "$jp_parts"
             step "$jp_label" "now|$fetch_bytes|$((2 * jp_bytes))|MB|$jp_bytes|downloading"
             [ "$jp_status" = running ] || break
-            sleep 0.2
+            pause 0.2
         done
         if [ "$jp_status" != 0 ]; then
             if [ "$(cat "$jp_pack.code" 2>/dev/null || echo 200)" != 200 ] && [ -s "$jp_pack.part0" ] && [ "$(size_of "$jp_pack.part0")" -lt 2048 ]; then
@@ -958,11 +1000,12 @@ job_pack() { # job_pack LABEL DEST NAME PATH COMMIT SHA BYTES APP RELEASE PUBLIC
     if [ -n "$jp_parent" ]; then
         while [ ! -f "$jp_dest/.builder-repositories/$jp_parent" ]; do
             step_key "$jp_parent source"
-            case "$(cut -d'|' -f1 "$steps_dir/$step_key" 2>/dev/null || :)" in
+            first_line "$steps_dir/$step_key" ''
+            case "${fl%%|*}" in
                 failed | held) step "$jp_label" "held|stopped because $jp_parent failed"; return 1 ;;
             esac
             step "$jp_label" "now|$jp_bytes|$((2 * jp_bytes))|MB|$jp_bytes|waiting for $jp_parent"
-            sleep 0.2
+            pause 0.2
         done
     fi
     jp_checkout="$jp_dest/$jp_path"
@@ -1012,7 +1055,7 @@ jobs_wait() {
                 step 'Xcode tools' 'held|stopped waiting; select Xcode tools to check again'
             fi
         else
-            sleep 0.1
+            pause 0.1
         fi
     done
     for jw_pid in $running_jobs; do wait "$jw_pid" || jw_status=1; done
@@ -1200,11 +1243,25 @@ run_cargo_build() { # run_cargo_build APP THREADS -> status; ba_stalled
         exec "$CARGO" build --release --message-format=json-render-diagnostics -p "$rel_package" --bin "$rel_binary" $feature_args
     ) </dev/null > "$ba_log" 2>&1 &
     rb_pid=$!
-    rb_size=-1 rb_quiet=0 rb_ticks=0
+    # The log is read as it grows, by the shell itself (no grep, no wc):
+    # each compiler-artifact line is a crate, a "fresh" one did no work.
+    : >> "$ba_log"
+    exec 7< "$ba_log"
+    rb_quiet=0 rb_crates=0 rb_fresh=0 rb_part=
     while kill -0 "$rb_pid" 2>/dev/null; do
+        rb_heard=
+        while :; do
+            rb_line=
+            if IFS= read -r rb_line <&7; then rb_line="$rb_part$rb_line" rb_part=
+            else rb_part="$rb_part$rb_line"; [ -z "$rb_line" ] || rb_heard=1; break; fi
+            rb_heard=1
+            case "$rb_line" in
+                *'"reason":"compiler-artifact"'*)
+                    rb_crates=$((rb_crates + 1))
+                    case "$rb_line" in *'"fresh":true'*) rb_fresh=$((rb_fresh + 1)) ;; esac ;;
+            esac
+        done
         if [ -n "${jc_label:-}" ]; then
-            rb_crates=$(grep -c '"reason":"compiler-artifact"' "$ba_log" 2>/dev/null) || rb_crates=0
-            rb_fresh=$(grep '"reason":"compiler-artifact"' "$ba_log" 2>/dev/null | grep -c '"fresh":true') || rb_fresh=0
             rb_built=$((rb_crates - rb_fresh)) rb_of=0
             if [ "${jc_expected:-0}" -gt 0 ]; then
                 rb_of=$((jc_expected - rb_fresh))
@@ -1212,16 +1269,15 @@ run_cargo_build() { # run_cargo_build APP THREADS -> status; ba_stalled
             fi
             step "$jc_label" "now|$rb_built|$rb_of|crates|0|compiling"
         fi
-        sleep 0.3
-        rb_ticks=$((rb_ticks + 1))
-        [ $((rb_ticks % 3)) = 0 ] || continue
-        rb_now=$(size_of "$ba_log")
-        if [ "$rb_now" = "$rb_size" ]; then rb_quiet=$((rb_quiet + 1)); else rb_size=$rb_now rb_quiet=0; fi
-        if [ "$2" -gt 1 ] && [ "$rb_quiet" -ge 600 ]; then
+        pause 0.3
+        # Ten minutes without a line from Cargo: stalled.
+        if [ -n "$rb_heard" ]; then rb_quiet=0; else rb_quiet=$((rb_quiet + 1)); fi
+        if [ "$2" -gt 1 ] && [ "$rb_quiet" -ge 2000 ]; then
             kill_tree "$rb_pid"
             ba_stalled=1
         fi
     done
+    exec 7<&-
     wait "$rb_pid"
 }
 # Background jobs ignore Ctrl+C; stopping one stops its children too. Each
@@ -1826,7 +1882,12 @@ screen_off() { stty "$tty_saved" <&3 2>/dev/null || :; printf '%s[?25h%s[?1049l%
 # the next run.
 on_exit() {
     oe_status=$?
+    # Closed by a signal (the window closed, Ctrl+C in a pause, kill).
+    [ -z "${oe_signal:-}" ] || oe_status=$oe_signal
     for oe_pid in $running_jobs ${b_pid:-} ${u_pid:-}; do kill_tree "$oe_pid"; done
+    # The log says how it ended, with the line of the command that failed.
+    if [ "$oe_status" = 130 ]; then log 'The Builder was closed (a signal ended it).'
+    elif [ "$oe_status" != 0 ]; then log "The Builder stopped (exit status $oe_status${err_line:+; the last failed command was on line $err_line})."; fi
     screen_off
     if [ -n "${quiet_exit:-}" ]; then printf '%s\n' "$quiet_exit"
     elif [ "$oe_status" = 0 ]; then
@@ -1837,17 +1898,25 @@ on_exit() {
     fi
 }
 trap on_exit EXIT
-trap 'exit 130' INT TERM HUP
+trap 'oe_signal=130; exit 130' INT TERM HUP
+# A command that fails without a test around it ends the Builder (set -e);
+# bash and zsh say which line it was.
+[ "$ext" != bash ] || set -E
+[ -z "$ext" ] || trap 'err_line="$LINENO${FUNCNAME:+ in $FUNCNAME}${funcstack:+ in $funcstack}"' ERR
+# A resized window is measured again (stty runs only then).
+winched=1
+trap 'winched=1' WINCH
 screen_on
 
 # The terminal's background colour (OSC 11), or COLORFGBG: light terminals
 # get light greys for the band and the logo. Dark when nobody says.
 light_background() {
     case "${COLORFGBG:-}" in *';7' | *';15') band=$band_light logo_color=$logo_light; return 0 ;; *';'*) return 0 ;; esac
-    [ -n "${BASH_VERSION:-}" ] || return 0
+    [ -n "$ext" ] || return 0
     printf '%s]11;?\007' "$e"
     lb_reply=
-    IFS= read -rs -d "$(printf '\007')" -t 1 lb_reply <&3 || :
+    if [ "$ext" = zsh ]; then IFS= read -r -s -d "$(printf '\007')" -t 1 -u 3 lb_reply || :
+    else IFS= read -rs -d "$(printf '\007')" -t 1 lb_reply <&3 || :; fi
     case "$lb_reply" in *rgb:*) ;; *) return 0 ;; esac
     lb_rgb=${lb_reply#*rgb:}
     lb_r=${lb_rgb%%/*}; lb_rgb=${lb_rgb#*/}; lb_g=${lb_rgb%%/*}; lb_b=${lb_rgb#*/}
@@ -1861,8 +1930,12 @@ light_background() {
 light_background
 
 size() {
-    set -- $(stty size <&3 2>/dev/null || echo 24 80)
-    height=${1:-24} width=${2:-80}
+    if [ "$winched" = 1 ]; then
+        winched=0
+        set -- $(stty size <&3 2>/dev/null || echo 24 80)
+        term_rows=${1:-24} term_cols=${2:-80}
+    fi
+    height=$term_rows width=$term_cols
     [ "$width" -le 80 ] || width=80
 }
 # Display width of plain text (UTF-8 continuation bytes do not count).
@@ -1876,6 +1949,20 @@ key_cr=$(printf '\r') key_del=$(printf '\177') key_bs=$(printf '\010') key_nak=$
 # without bash at all reads one byte at a time with dd. Polling (a measurement still
 # running) returns key=none after about a second.
 key_read() { # key_read COUNT WAIT -> kr (WAIT: 0 blocks, tick a fifth of a second, else seconds)
+    # zsh (macOS): its read waits a fraction of a second itself. A timed
+    # read that took its time timed out; one that failed at once is closed
+    # input.
+    if [ "$ext" = zsh ]; then
+        kr= kr_t0=${EPOCHREALTIME:-0}
+        case "$2" in
+            0) IFS= read -r -s -k "$1" -u 3 kr && return 0 ;;
+            tick) IFS= read -r -s -t 0.2 -k "$1" -u 3 kr && return 0 ;;
+            *) IFS= read -r -s -t "$2" -k "$1" -u 3 kr && return 0 ;;
+        esac
+        [ -n "$kr" ] && return 0
+        [ "$2" != 0 ] && [ "$(( ${EPOCHREALTIME:-1} - kr_t0 >= 0.15 ))" = 1 ] && return 142
+        return 1
+    fi
     if [ "$2" = tick ]; then
         # bash 4 reads with a fractional timeout; bash 3.2 (macOS) and
         # plain sh let the terminal time the read out instead.
@@ -1893,10 +1980,12 @@ key_read() { # key_read COUNT WAIT -> kr (WAIT: 0 blocks, tick a fifth of a seco
         return 0
     fi
     if [ -n "${BASH_VERSION:-}" ]; then
-        kr=
+        kr= kr_s0=$SECONDS
         if [ "$2" = 0 ]; then IFS= read -rsn "$1" -d '' kr <&3; kr_status=$?
         else IFS= read -rsn "$1" -d '' -t "$2" kr <&3; kr_status=$?; fi
         [ "$kr_status" -le 128 ] || kr_status=142
+        # bash 3.2 answers a timeout with 1, like closed input; it waited.
+        if [ "$kr_status" = 1 ] && [ -z "$kr" ] && [ "$2" != 0 ] && [ $((SECONDS - kr_s0)) -ge 1 ]; then kr_status=142; fi
         return "$kr_status"
     fi
     if [ "$2" = 0 ]; then stty min 1 time 0 <&3 2>/dev/null; else stty min 0 time $(($2 * 10)) <&3 2>/dev/null; fi
@@ -1918,6 +2007,7 @@ key() {
         kr_status=$?
         if [ "$kr_status" = 142 ]; then key_fails=0; key=none; return; fi
         if [ "$kw" != 0 ] && [ "${key_fails:-0}" -lt 50 ]; then key_fails=$((${key_fails:-0} + 1)); key=none; return; fi
+        log 'The terminal stopped giving keys (closed input); the Builder closes.'
         exit 1
     }
     key_fails=0
@@ -2001,7 +2091,7 @@ spin() {
 # draws the same).
 doing_text() {
     dt_state= dt_a=0 dt_b=0 dt_unit= dt_bytes=0 dt_doing=
-    IFS='|' read -r dt_state dt_a dt_b dt_unit dt_bytes dt_doing 2>/dev/null < "$1" || :
+    if [ -f "$1" ]; then IFS='|' read -r dt_state dt_a dt_b dt_unit dt_bytes dt_doing < "$1" || :; fi
     spin
     ls="${acc}${spin_c}${r0} "
     if [ "$dt_state" != now ]; then ls="$ls$2"; return 0; fi
@@ -2076,14 +2166,25 @@ menu_keys() {
     [ -z "$mk_cancel" ] || mk="${mk}${key_c}c${r0}${dim} cancel   ${r0}"
     mk="${mk}${dim}q quit${r0}"
 }
+# plain TEXT -> pl: TEXT without its colour codes (ESC [ ... m), by the
+# shell's own pattern removal (the same in bash and zsh).
+plain() {
+    pl= pl_rest=$1
+    while :; do
+        case "$pl_rest" in
+            *"$e["*) pl="$pl${pl_rest%%"$e["*}"; pl_rest=${pl_rest#*"$e["}; pl_rest=${pl_rest#*m} ;;
+            *) pl="$pl$pl_rest"; break ;;
+        esac
+    done
+}
 # wrap_status TEXT WIDTH -> ws_1 ws_2: a status line longer than WIDTH
 # broken at a space onto a second line (after a leading ✓ or ✗ the second
 # line starts under the text); what still does not fit ends in "…". Plain
 # sh (no bash) leaves it as it is.
 wrap_status() {
     ws_1=$1 ws_2= ws_width=$2
-    [ -n "${BASH_VERSION:-}" ] || return 0
-    ws_plain=${1//$e\[*([0-9;])m/}
+    [ -n "$ext" ] || return 0
+    plain "$1"; ws_plain=$pl
     [ "${#ws_plain}" -gt "$2" ] || return 0
     ws_hang=
     case "$ws_plain" in '✓ '* | '✗ '*) ws_hang='  ' ;; esac
@@ -2093,7 +2194,7 @@ wrap_status() {
     set -- $1
     set +f
     for ws_word in "$@"; do
-        ws_wp=${ws_word//$e\[*([0-9;])m/}
+        plain "$ws_word"; ws_wp=$pl
         ws_add=${#ws_wp}; [ "$ws_n" = 0 ] || ws_add=$((ws_add + 1))
         if [ "$ws_line" = 1 ] && [ $((ws_n + ws_add)) -gt "$ws_width" ] && [ "$ws_n" -gt 0 ]; then
             ws_line=2 ws_n=${#ws_hang}
@@ -2118,7 +2219,8 @@ wrap_status() {
 step_line() { # step_line LABEL -> sl
     step_key "$1"
     sl_state= sl_a= sl_b= sl_unit= sl_bytes= sl_doing=
-    IFS='|' read -r sl_state sl_a sl_b sl_unit sl_bytes sl_doing < "$steps_dir/$step_key" 2>/dev/null || sl_state=next
+    if [ -f "$steps_dir/$step_key" ]; then IFS='|' read -r sl_state sl_a sl_b sl_unit sl_bytes sl_doing < "$steps_dir/$step_key" || :; fi
+    [ -n "$sl_state" ] || sl_state=next
     pad "$1 " 16
     case "$sl_state" in
         done) sl="    ${ok}✓${r0} ${padded}${dim}${sl_a}${r0}" ;;
@@ -2182,7 +2284,7 @@ step_line() { # step_line LABEL -> sl
 # bash) draws no band and no mark.
 logo_lines() { # logo_lines LINES BAND [SIZES] (the last line stays empty)
     ll_out= ll_lines=$1 ll_band=$2 ll_sizes=${3:-big small}
-    if [ -z "${BASH_VERSION:-}" ]; then
+    if [ -z "$ext" ]; then
         while IFS= read -r ll_line; do ll_out="$ll_out$ll_line$e[K
 "; done <<EOF
 $ll_lines
@@ -2195,14 +2297,14 @@ EOF
         if [ "$ll_count" = "$ll_band" ]; then
             case "$ll_line" in *"⏎$r0") ll_line=${ll_line%"$ok"*} ;; esac
         fi
-        ll_plain=${ll_line//$e\[*([0-9;])m/}
-        ll_plain=${ll_plain%%+( )}
+        plain "$ll_line"; ll_plain=$pl
+        while [ "${ll_plain% }" != "$ll_plain" ]; do ll_plain=${ll_plain% }; done
         if [ -n "$ll_plain" ]; then ll_clear="$ll_clear $(( ${#ll_plain} + 2 ))"; else ll_clear="$ll_clear 0"; fi
         ll_count=$((ll_count + 1))
     done <<EOF
 $ll_lines
 EOF
-    ll_cols=$(stty size <&3 2>/dev/null); ll_cols=${ll_cols#* }; ll_cols=${ll_cols:-80}
+    ll_cols=${term_cols:-80}
     [ "$ll_cols" -le 100 ] || ll_cols=100
     ll_art= ll_y0=-1 ll_x0=0
     ll_room=$((ll_count - 1))
@@ -2242,8 +2344,9 @@ EOF
 $ll_art
 EOF
         fi
-        ll_line=${ll_line%"$r0"}; ll_line=${ll_line%%+( )}
-        ll_plain=${ll_line//$e\[*([0-9;])m/}
+        ll_line=${ll_line%"$r0"}
+        while [ "${ll_line% }" != "$ll_line" ]; do ll_line=${ll_line% }; done
+        plain "$ll_line"; ll_plain=$pl
         [ "$ll_line" = "$ll_plain" ] || ll_line="$ll_line$r0"
         # The mark's part of this line: from two columns after the text.
         ll_at=$ll_x0
@@ -2259,7 +2362,7 @@ EOF
             # reaches the rule's right end; the mark's dots lie on it.
             ll_band_end=$((width - 2))
             ll_line="${ll_line:0:2}$band${ll_line:2}"
-            ll_line=${ll_line//$r0/$r0$band}
+            ll_line=${ll_line//"$r0"/"$r0$band"}
             ll_used=${#ll_plain}
             if [ -n "$ll_piece" ]; then
                 ll_pad=$((ll_at - ll_used)); while [ "$ll_pad" -gt 0 ]; do ll_line="$ll_line "; ll_pad=$((ll_pad - 1)); done
@@ -2370,7 +2473,7 @@ EOF
     # else the rule moves down just far enough for the small one (a short
     # page like Log in gets it under its text), else there is none.
     logo_lines "$d_lines$d_last" "$d_band"
-    if [ -n "${BASH_VERSION:-}" ] && [ -z "$ll_art" ]; then
+    if [ -n "$ext" ] && [ -z "$ll_art" ]; then
         d_more=$d_lines d_n=$d_shown
         while [ "$d_n" -lt "$room" ]; do
             d_more="$d_more
@@ -2521,7 +2624,8 @@ work_end() {
 work_failure() {
     wf=
     for wf_key in $work_labels_keys; do
-        IFS='|' read -r wf_state wf_reason wf_rest < "$steps_dir/$wf_key" 2>/dev/null || continue
+        [ -f "$steps_dir/$wf_key" ] || continue
+        IFS='|' read -r wf_state wf_reason wf_rest < "$steps_dir/$wf_key" || continue
         if [ "$wf_state" = failed ]; then wf=$wf_reason; return; fi
     done
 }
@@ -2595,7 +2699,8 @@ agreements='makepad|Makepad commercial license|https://makepad.nl/commercial-lic
 rust|Rust|https://www.rust-lang.org/policies/licenses'
 accepted_agreements() {
     if [ -f "$root/agreements-accepted" ]; then
-        accepted=$(tr '\n' ' ' < "$root/agreements-accepted")
+        accepted=
+        while IFS= read -r aa_id; do accepted="$accepted$aa_id "; done < "$root/agreements-accepted"
     elif [ "${m_rust_ok:-0}" = 1 ] && [ -z "${tools_problem:-}" ]; then
         # Folders set up before this record accepted them when installing.
         accepted='makepad rust'
@@ -2776,53 +2881,6 @@ state_texts() { # state_texts STATE BYTES -> st_text st_act (menu.txt)
 main_rows() {
     # Update sits above everything; the menu still opens on the first app.
     printf 'note|\n'
-    case "$checked" in
-        '') printf 'item|updates|Update||%scheck for updates%s|=\n' "$dim" "$r0" ;;
-        0*) printf 'item|updates|Update||%s✓%s up to date · %s|check again\n' "$ok" "$r0" "${checked#* }" ;;
-        *) printf 'item|updates|Update||updates downloaded · %s|check again\n' "${checked#* }" ;;
-    esac
-    printf 'head|YOUR APPS\n'
-    if [ -z "$email" ]; then printf 'item|login|Log in with your email address|||to see your licenses\n'
-    else
-        case "$lic_state" in
-            checking) printf 'note|%schecking licenses for %s…%s\n' "$dim" "$email" "$r0" ;;
-            ok) if [ -n "$m_license_rows" ]; then printf '%s' "$m_license_rows"; else printf 'note|%snone on this email yet · buy or request beta access at makepad.nl%s\n' "$dim" "$r0"; fi ;;
-            *) printf 'note|%slicenses not checked: %s%s\n' "$warn" "$lic_error" "$r0"; printf '%s' "$m_license_rows" ;;
-        esac
-    fi
-    printf 'head|MAKEPAD EXPERIMENTS\n'
-    printf 'item|free|Experiments|free|%s · %s ready|open list\n' "$m_free_total" "$m_free_ready"
-    printf 'head|CODING AGENTS\n'
-    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open\n' "$mr_cmd" "$mr_title"; done
-    printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open\n" "$dim" "$r0"
-    printf 'head|SETUP\n'
-    if [ -z "$email" ]; then printf 'item|account|Account||%snot logged in%s|log in\n' "$warn" "$r0"
-    else
-        case "$lic_state" in
-            ok) printf 'item|account|Account||%s✓%s %s|switch or log out\n' "$ok" "$r0" "$email" ;;
-            checking) printf 'item|account|Account||%s %schecking…%s|switch or log out\n' "$email" "$dim" "$r0" ;;
-            *) printf 'item|account|Account||%s %s· %s%s|switch or log out\n' "$email" "$warn" "$lic_error" "$r0" ;;
-        esac
-    fi
-    if [ "$plat" = linux ]; then
-        if [ -f "$root/graphics-notice-read" ]; then printf 'item|gpu|Graphics||%s✓%s driver notice read|\n' "$ok" "$r0"
-        else printf 'item|gpu|Graphics||%sread the driver notice%s|read\n' "$warn" "$r0"; fi
-    fi
-    accepted_agreements
-    if is_accepted makepad && is_accepted rust; then printf 'item|terms|Agreements||%s✓%s accepted %s· Makepad, Rust%s|read\n' "$ok" "$r0" "$dim" "$r0"
-    else printf 'item|terms|Agreements||%snot accepted%s|read\n' "$warn" "$r0"; fi
-    if [ -f "$scratch/disk" ]; then
-        read -r mr_total mr_build < "$scratch/disk"
-        mr_gb=$(awk -v t="$mr_total" -v b="$mr_build" 'BEGIN { printf "%.1f %.1f", t / 1048576, b / 1048576 }')
-        if [ "${mr_build:-0}" -gt 0 ]; then printf 'item|disk|Disk||%s GB used %s· build %s GB%s|clear build data\n' "${mr_gb% *}" "$dim" "${mr_gb#* }" "$r0"
-        else printf 'item|disk|Disk||%s GB used|\n' "${mr_gb% *}"; fi
-    else
-        printf 'item|disk|Disk||%smeasuring…%s|\n' "$dim" "$r0"
-    fi
-}
-main_rows() {
-    # Update sits above everything; the menu still opens on the first app.
-    printf 'note|\n'
     mr_info='Checks your licenses and downloads newer sources of your apps.'
     case "$checked" in
         '') printf 'item|updates|Update||%scheck for updates%s|=|%s\n' "$dim" "$r0" "$mr_info" ;;
@@ -2879,7 +2937,9 @@ main_rows() {
     mr_info='Clearing build data keeps your apps; the next compile starts from scratch.'
     if [ -f "$scratch/disk" ]; then
         read -r mr_total mr_build < "$scratch/disk"
-        mr_gb=$(awk -v t="$mr_total" -v b="$mr_build" 'BEGIN { printf "%.1f %.1f", t / 1048576, b / 1048576 }')
+        # Tenths of a GB from KB, in shell arithmetic.
+        mr_t=$(( (mr_total * 10 + 524288) / 1048576 )) mr_b=$(( (mr_build * 10 + 524288) / 1048576 ))
+        mr_gb="$((mr_t / 10)).$((mr_t % 10)) $((mr_b / 10)).$((mr_b % 10))"
         if [ "${mr_build:-0}" -gt 0 ]; then printf 'item|disk|Disk||%s GB used %s· build %s GB%s|clear build data|%s\n' "${mr_gb% *}" "$dim" "${mr_gb#* }" "$r0" "$mr_info"
         else printf 'item|disk|Disk||%s GB used||%s\n' "${mr_gb% *}" "$mr_info"; fi
     else
@@ -3392,9 +3452,9 @@ start_build() {
 # as one bar on STEP.
 checkout_wait() {
     mkdir -p "$root/tmp"
-    until mkdir "$root/tmp/checkout.lock" 2>/dev/null; do
+    until make_dir "$root/tmp/checkout.lock"; do
         step "$1" 'now|0|0|MB|0|waiting'
-        sleep 0.3
+        pause 0.3
     done
     rel_dir
     cw_list=
@@ -3419,7 +3479,7 @@ EOF
         while IFS='|' read -r cw_key cw_bytes; do
             [ -n "$cw_key" ] || continue
             cw_state= cw_a=0
-            IFS='|' read -r cw_state cw_a cw_b cw_unit cw_mb cw_now 2>/dev/null < "$steps_dir/$cw_key" || :
+            if [ -f "$steps_dir/$cw_key" ]; then IFS='|' read -r cw_state cw_a cw_b cw_unit cw_mb cw_now < "$steps_dir/$cw_key" || :; fi
             cw_total=$((cw_total + 2 * cw_bytes))
             case "$cw_state" in
                 now) cw_done=$((cw_done + cw_a)); [ "$cw_now" != downloading ] || cw_doing=downloading ;;
@@ -3431,7 +3491,7 @@ $cw_list
 EOF
         step "$1" "now|$cw_done|$cw_total|MB|$((cw_total / 2))|$cw_doing"
         [ -n "$cw_alive" ] || break
-        sleep 0.2
+        pause 0.2
     done
     for cw_pid in $running_jobs; do wait "$cw_pid" || cw_status=1; done
     running_jobs=
@@ -3468,7 +3528,7 @@ build_job() {
 finish_build() {
     wait "$b_pid" 2>/dev/null || :
     fb_state= fb_reason=
-    IFS='|' read -r fb_state fb_reason fb_rest 2>/dev/null < "$steps_dir/_build" || :
+    if [ -f "$steps_dir/_build" ]; then IFS='|' read -r fb_state fb_reason fb_rest < "$steps_dir/_build" || :; fi
     fb_app=$b_app fb_title=$b_title fb_open=$b_open fb_stopping=$b_stopping
     b_pid= b_app= b_title= b_open=0 b_batch=0 b_stopping=0
     measure_disk
@@ -3641,7 +3701,7 @@ update_job() {
         case "$cu_started" in *"<$cu_key>"*) cu_updated="$cu_updated${cu_updated:+, }$rel_title"; continue ;; esac
         cu_started="$cu_started<$cu_key>"
         if ! checkout_wait _update; then
-            IFS='|' read -r cu_state cu_reason 2>/dev/null < "$steps_dir/_update" || :
+            if [ -f "$steps_dir/_update" ]; then IFS='|' read -r cu_state cu_reason < "$steps_dir/_update" || :; fi
             put "$scratch/update-result" "failed|${cu_reason:-The update stopped.}"
             exit 1
         fi
@@ -3653,7 +3713,7 @@ finish_update() {
     wait "$u_pid" 2>/dev/null || :
     u_pid=
     fu_state= fu_what= fu_merges=
-    IFS='|' read -r fu_state fu_what fu_merges 2>/dev/null < "$scratch/update-result" || :
+    if [ -f "$scratch/update-result" ]; then IFS='|' read -r fu_state fu_what fu_merges < "$scratch/update-result" || :; fi
     measure_disk
     if [ "$fu_state" != ok ]; then message="${warn}${fu_what:-The update stopped (see builder.log).}${r0}"
     elif [ -z "$fu_what" ]; then checked="0 $(date +%H:%M)"; message="${ok}✓${r0} Licenses checked; everything is up to date."
@@ -3766,13 +3826,8 @@ while :; do
     service_background
     polling=idle
     if [ ! -f "$scratch/disk" ] || [ -n "$b_pid" ] || [ -n "$u_pid" ]; then polling=1; fi
-    if [ "$polling" = idle ] && [ "${key:-}" = none ]; then
-        ml_size=$(stty size <&3 2>/dev/null || :)
-        [ "$ml_size" = "${ml_drawn:-}" ] || { ml_drawn=$ml_size; draw; }
-    else
-        ml_drawn=$(stty size <&3 2>/dev/null || :)
-        draw
-    fi
+    # Idle, the screen is drawn again only when the window was resized.
+    if [ "$polling" != idle ] || [ "${key:-}" != none ] || [ "$winched" = 1 ]; then draw; fi
     key
     [ "$key" = none ] && continue
     message=
