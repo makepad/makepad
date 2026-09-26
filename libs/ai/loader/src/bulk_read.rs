@@ -140,14 +140,17 @@ fn read_sequential(path: &Path, arena: &mut [u8], placed: &[Placement]) -> Resul
 /// Raw arena pointer handed to reader threads. Each thread writes only the
 /// placements it owns, and `validate` has already proven those byte ranges
 /// are disjoint, so no two threads can touch the same byte.
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy)]
 struct ArenaPtr(*mut u8);
 
 // Safety: the pointer addresses a live `&mut [u8]` that outlives every
 // reader thread (they are joined before `read_threaded` returns), and the
 // ranges written through it are disjoint per `validate`.
+#[cfg(any(unix, windows))]
 unsafe impl Send for ArenaPtr {}
 
+#[cfg(any(unix, windows))]
 impl ArenaPtr {
     /// By-value `self` makes closures capture the wrapper (which is `Send`)
     /// rather than precision-capturing the raw pointer field (which is not).

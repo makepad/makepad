@@ -23,6 +23,6 @@ brotli = "8.0"
 makepad-fast-inflate = { path = "../fast_inflate" }
 makepad-map-nav = { path = "../map_nav" }
 makepad-mbtile-reader = { path = "../mbtile_reader" }
-makepad-widgets = { path = "../../widgets", features = ["maps"], optional = true }
+makepad-widgets = { path = "../../widgets", optional = true, default-features = false, features = ["maps"] }
 makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
 smallvec = { path = "../smallvec" }

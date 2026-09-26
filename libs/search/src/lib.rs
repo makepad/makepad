@@ -2,6 +2,9 @@
 //! Callers own worker scheduling, document storage and immutable result pages.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// Case folding only: for search over code, paths and mail, where
+/// punctuation and accents are part of what is searched. See [`fold_words`]
+/// for folding across spellings.
 pub fn fold(text: &str) -> String {
     text.chars().flat_map(char::to_lowercase).collect()
 }
@@ -180,5 +183,88 @@ impl TextIndex {
             documents.extend(self.postings[id as usize].iter().copied());
         }
         Some(documents)
+    }
+}
+
+/// Text folded for word search and matching across spellings: lower case
+/// without accents, and anything that is not a letter or a digit turned into
+/// a space: "Beyoncé — Déjà Vu" is "beyonce deja vu".
+/// Apostrophes join rather than split ("Don't" is "dont").
+pub fn fold_words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = true;
+    for c in text.chars() {
+        for c in c.to_lowercase() {
+            // A combining accent written apart from its letter (decomposed
+            // text, or the dot "İ" lower-cases to) is dropped, not turned
+            // into a word break; so is an apostrophe.
+            if ('\u{300}'..='\u{36f}').contains(&c) || matches!(c, '\'' | '\u{2019}' | '\u{2018}' | '\u{2bc}' | '`') {
+                continue;
+            }
+            if let Some(base) = unaccent(c) {
+                out.push_str(base);
+                space = false;
+            } else if c.is_alphanumeric() {
+                // Other scripts are matched as written.
+                out.push(c);
+                space = false;
+            } else if !space {
+                out.push(' ');
+                space = true;
+            }
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// The unaccented spelling of an accented lower-case Latin letter.
+fn unaccent(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'č' | 'ĉ' | 'ċ' => "c",
+        'ď' | 'đ' | 'ð' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
+        'ğ' | 'ĝ' | 'ġ' | 'ģ' => "g",
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' | 'ı' => "i",
+        'ķ' => "k",
+        'ł' | 'ĺ' | 'ļ' | 'ľ' => "l",
+        'ñ' | 'ń' | 'ň' | 'ņ' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ř' => "r",
+        'ś' | 'š' | 'ş' | 'ș' => "s",
+        'ß' => "ss",
+        'ť' | 'ţ' | 'ț' => "t",
+        'þ' => "th",
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'ų' => "u",
+        'ý' | 'ÿ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::fold_words as fold;
+
+    #[test]
+    fn folding_drops_case_accents_and_punctuation() {
+        assert_eq!(fold("Beyoncé — Déjà Vu!"), "beyonce deja vu");
+        assert_eq!(fold("  Mötley   Crüe "), "motley crue");
+        assert_eq!(fold("Straße"), "strasse");
+        assert_eq!(fold("坂本 龍一"), "坂本 龍一");
+        // Decomposed: the accents are marks of their own.
+        assert_eq!(fold("De\u{301}ja\u{300} Vu"), "deja vu");
+        // "İ" lower-cases to i and a combining dot: one word still.
+        assert_eq!(fold("İstanbul"), "istanbul");
+        // Apostrophes join: Don't, Don’t and Dont are one spelling.
+        assert_eq!(fold("Don't Stop"), "dont stop");
+        assert_eq!(fold("Don’t Stop"), fold("Dont Stop"));
+        assert_eq!(fold("STRASSE"), fold("Straße"));
+        assert_eq!(fold("GROẞ"), "gross");
     }
 }

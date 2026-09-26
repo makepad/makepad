@@ -169,7 +169,11 @@ fn promotion_rows() -> &'static [PromotionRow] {
                 piano.set_early_reflection_level(0.0);
                 piano.set_soft_clip(false);
                 let event = ev(0.0, PianoEvent::NoteOn { key: reference.note, velocity: reference.velocity });
-                let (l, r) = render(&mut piano, &[event], (4.0 * FS) as usize, 256);
+                // measure() reads at most 2.0 s after onset (RMS 0.0..2.0 and the
+                // late window 1.0..2.0) and onset() only searches the first 0.5 s,
+                // so 2.5 s includes every sample the previous 4.0 s render fed
+                // into a metric: 2.0 + 0.5 = 2.5.
+                let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
                 measure(&l, &r, reference.note)
             };
             let model = dry_measure(Piano::new(FS));

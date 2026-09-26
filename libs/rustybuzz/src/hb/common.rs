@@ -571,10 +571,10 @@ impl core::str::FromStr for Feature {
                     p.advance(1);
                     p.consume_i32().unwrap_or(-1) as u32 // negative value overflow is ok
                 } else {
-                    if start_opt.is_some() && start != core::u32::MAX {
+                    if start_opt.is_some() && start != u32::MAX {
                         start + 1
                     } else {
-                        core::u32::MAX
+                        u32::MAX
                     }
                 };
 
@@ -582,7 +582,7 @@ impl core::str::FromStr for Feature {
 
                 (start, end)
             } else {
-                (0, core::u32::MAX)
+                (0, u32::MAX)
             };
 
             // Parse postfix.
@@ -649,7 +649,7 @@ mod tests_features {
     test!(parse_13, "kern[3:5]=2", b"kern", 2, 3..=5);
     test!(parse_14, "kern[3;5]=2", b"kern", 2, 3..=5);
     test!(parse_15, "kern[:-1]", b"kern", 1, ..);
-    test!(parse_16, "kern[-1]", b"kern", 1, core::u32::MAX as usize..);
+    test!(parse_16, "kern[-1]", b"kern", 1, u32::MAX as usize..);
     test!(parse_17, "kern=on", b"kern", 1, ..);
     test!(parse_18, "kern=off", b"kern", 0, ..);
     test!(parse_19, "kern=oN", b"kern", 1, ..);

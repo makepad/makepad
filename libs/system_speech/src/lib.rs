@@ -356,6 +356,13 @@ pub mod tts {
 
 /// Split a bare ISO 639-1 code into the platform default region, or pass a
 /// BCP-47 tag through. Shared by the platform modules.
+#[cfg(any(
+    all(any(target_os = "macos", target_os = "ios"), apple_speech),
+    windows,
+    target_os = "android",
+    target_os = "linux",
+    test,
+))]
 pub(crate) fn bcp47(language: &str) -> String {
     let language = language.trim();
     if language.contains('-') || language.contains('_') {

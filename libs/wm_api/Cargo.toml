@@ -15,4 +15,4 @@ name = "makepad_wm_api"
 path = "src/lib.rs"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }

@@ -26,9 +26,9 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -1056,11 +1056,10 @@ impl DiskMap {
         let pool = cx.task_pool();
         let scan_pool = pool.clone();
         let scan = move || {
-            // The four scan threads all report through here, so the channel
-            // and the signal clock live behind one lock. Waking the UI is the
-            // expensive half and is what gets rate-limited; the steps
-            // themselves queue as fast as the disk produces them.
-            let gate = Mutex::new(Cx::monotonic_now());
+            // Steps queue as fast as the disk produces them. Waking the UI is
+            // the expensive half, so it is rate-limited on an atomic rather
+            // than a mutex the walkers would take turns on.
+            let next_signal = AtomicU64::new(0);
             let sink = |step: ScanStep| {
                 if sender
                     .send(ScanMessage {
@@ -1072,10 +1071,21 @@ impl DiskMap {
                 {
                     return;
                 }
-                let mut due = gate.lock().unwrap_or_else(|e| e.into_inner());
                 let now = Cx::monotonic_now();
-                if now >= *due {
-                    *due = now + SIGNAL_EVERY.as_secs_f64();
+                let due_bits = next_signal.load(Ordering::Relaxed);
+                if now < f64::from_bits(due_bits) {
+                    return;
+                }
+                let next_bits = (now + SIGNAL_EVERY.as_secs_f64()).to_bits();
+                if next_signal
+                    .compare_exchange(
+                        due_bits,
+                        next_bits,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
                     SignalToUI::set_ui_signal();
                 }
             };
@@ -3140,7 +3150,7 @@ impl DiskMap {
     #[cfg(test)]
     pub fn scan_root_for_test(cx: &mut Cx, path: &Path) -> Node {
         let cancel = AtomicBool::new(false);
-        let steps = Mutex::new(Vec::new());
+        let steps = std::sync::Mutex::new(Vec::new());
         let pool = cx.task_pool();
         let ok = std::thread::scope(|scope| {
             scope
@@ -3387,9 +3397,15 @@ impl Widget for DiskMap {
                     self.drag = Some(drag);
                 }
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fe) => {
                 if let Some(drag) = self.drag.take() {
-                    if !drag.moved {
+                    if fe.cancelled {
+                        // Taken away (a list or the host took the finger): no
+                        // pick and no context menu; a moved camera still settles.
+                        if drag.moved {
+                            self.settle(cx);
+                        }
+                    } else if !drag.moved {
                         self.press(cx, drag.from, drag.taps, !drag.secondary);
                         if drag.secondary {
                             // A clean secondary click: the context menu's

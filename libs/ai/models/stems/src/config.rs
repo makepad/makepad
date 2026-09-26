@@ -1,9 +1,14 @@
 //! BS-RoFormer 4-stem geometry — the pinned `config_bs_roformer_384_8_2_485100`
 //! shape that `model_bs_roformer_ep_17_sdr_9.6568.ckpt` was trained with.
 //!
-//! Nothing here is configurable at runtime on purpose: the checkpoint and the
-//! band table are one artifact. A future tier (a smaller RoFormer) gets its own
-//! constant table rather than a knob that can silently mismatch weights.
+//! The band table and the trunk widths are the checkpoint's and are not
+//! configurable: the checkpoint and the band table are one artifact. The
+//! chunk length is the one thing that is NOT baked into the weights — no
+//! weight depends on the frame count — so it is a runtime value,
+//! [`ChunkGeometry`], and the same checkpoint runs at the long chunk it was
+//! trained at and at a short one that answers faster.
+
+use makepad_ai_common::{DiffusionError, Result};
 
 /// Feature dimension of the transformer trunk.
 pub const DIM: usize = 384;
@@ -33,18 +38,109 @@ pub const HOP: usize = 441;
 pub const WIN: usize = 2048;
 pub const FREQ_BINS: usize = N_FFT / 2 + 1; // 1025
 
-/// Samples the model consumes in one forward pass.
-pub const CHUNK_SAMPLES: usize = 485_100;
 /// `config.inference.num_overlap`.
 pub const NUM_OVERLAP: usize = 2;
-/// Overlap-add hop between chunks.
-pub const CHUNK_STEP: usize = CHUNK_SAMPLES / NUM_OVERLAP;
-/// Linear fade length at each chunk edge (`chunk_size // 10`).
-pub const FADE_SAMPLES: usize = CHUNK_SAMPLES / 10;
-/// Reflect padding applied to the whole track before chunking.
-pub const BORDER: usize = CHUNK_SAMPLES - CHUNK_STEP;
-/// STFT frames in one chunk (1 + 485100/441).
-pub const CHUNK_FRAMES: usize = 1 + CHUNK_SAMPLES / HOP; // 1101
+
+/// How the track is cut into model forwards: the chunk the model consumes
+/// and everything the overlap-add derives from it.
+///
+/// Two geometries are named. [`FULL`](Self::FULL) is the 11-second chunk the
+/// checkpoint was trained and measured at; it is the separator's full
+/// quality and the grid the span cache is addressed in. [`BRIDGE`](Self::BRIDGE)
+/// is a 2.76-second chunk that runs a forward in a fraction of the time and
+/// so has stems for a playhead within a second of a load or a seek, at a
+/// measured cost of about 11 dB against the full output on the weakest stem.
+/// Any other size on the grain goes through [`new`](Self::new).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkGeometry {
+    /// Samples the model consumes in one forward pass.
+    pub samples: usize,
+    /// Overlap-add hop between chunks.
+    pub step: usize,
+    /// Linear fade length at each chunk edge (`chunk_size // 10`).
+    pub fade: usize,
+    /// Reflect padding applied to the whole track before chunking.
+    pub border: usize,
+    /// STFT frames in one chunk (`1 + samples / HOP`).
+    pub frames: usize,
+}
+
+impl ChunkGeometry {
+    /// The trained chunk: `config_bs_roformer_384_8_2_485100`.
+    pub const FULL: ChunkGeometry = ChunkGeometry::derive(485_100);
+    /// The short chunk: 276 STFT hops, 2.76 s.
+    pub const BRIDGE: ChunkGeometry = ChunkGeometry::derive(276 * HOP);
+    /// A chunk is a whole number of STFT hops split into two equal steps,
+    /// so its length is a multiple of this.
+    pub const GRAIN: usize = NUM_OVERLAP * HOP;
+
+    /// A geometry of `samples` per chunk, refused off the grain. A chunk
+    /// that is not a whole number of hops does not come back out of the
+    /// inverse transform at its own length, and one whose step is not its
+    /// border breaks the span arithmetic the stream is built on; either
+    /// demixed to silence rather than failing.
+    pub fn new(samples: usize) -> Result<ChunkGeometry> {
+        if samples == 0 || samples % Self::GRAIN != 0 {
+            return Err(DiffusionError::model(format!(
+                "stems: a chunk of {samples} samples is not a multiple of {}",
+                Self::GRAIN
+            )));
+        }
+        Ok(Self::derive(samples))
+    }
+
+    const fn derive(samples: usize) -> ChunkGeometry {
+        let step = samples / NUM_OVERLAP;
+        ChunkGeometry {
+            samples,
+            step,
+            fade: samples / 10,
+            border: samples - step,
+            frames: 1 + samples / HOP,
+        }
+    }
+
+    /// Seconds of audio one chunk holds.
+    pub fn secs(&self) -> f64 {
+        self.samples as f64 / SAMPLE_RATE as f64
+    }
+
+    /// Seconds of audio one forward finalizes.
+    pub fn step_secs(&self) -> f64 {
+        self.step as f64 / SAMPLE_RATE as f64
+    }
+
+    /// The reference only pads the track when it is longer than `2 * border`.
+    pub fn track_padding(&self, len: usize) -> usize {
+        if len > 2 * self.border {
+            self.border
+        } else {
+            0
+        }
+    }
+
+    /// Number of chunks the reference loop runs for a track of `len` samples.
+    pub fn chunk_count(&self, len: usize) -> usize {
+        let padded = len + 2 * self.track_padding(len);
+        if padded == 0 {
+            return 0;
+        }
+        padded.div_ceil(self.step)
+    }
+}
+
+/// Samples the model consumes in one forward pass, at the full geometry.
+pub const CHUNK_SAMPLES: usize = ChunkGeometry::FULL.samples;
+/// Overlap-add hop between chunks, at the full geometry. The span cache and
+/// every consumer of a 5.5-second span are on this grid.
+pub const CHUNK_STEP: usize = ChunkGeometry::FULL.step;
+/// Linear fade length at each chunk edge, at the full geometry.
+pub const FADE_SAMPLES: usize = ChunkGeometry::FULL.fade;
+/// Reflect padding applied to the whole track before chunking, at the full
+/// geometry.
+pub const BORDER: usize = ChunkGeometry::FULL.border;
+/// STFT frames in one chunk at the full geometry (1 + 485100/441).
+pub const CHUNK_FRAMES: usize = ChunkGeometry::FULL.frames; // 1101
 
 /// The model's stem order == `config.training.instruments`.
 pub const STEM_NAMES: [&str; NUM_STEMS] = ["drums", "bass", "other", "vocals"];
@@ -169,10 +265,52 @@ mod tests {
 
     #[test]
     fn chunk_geometry_matches_the_reference_demix_loop() {
+        assert_eq!(CHUNK_SAMPLES, 485_100);
         assert_eq!(CHUNK_STEP, 242_550);
         assert_eq!(BORDER, 242_550);
         assert_eq!(FADE_SAMPLES, 48_510);
         assert_eq!(CHUNK_FRAMES, 1101);
+        assert_eq!(ChunkGeometry::new(485_100).unwrap(), ChunkGeometry::FULL);
+    }
+
+    #[test]
+    fn the_bridge_geometry_is_a_whole_number_of_hops() {
+        let bridge = ChunkGeometry::BRIDGE;
+        assert_eq!(bridge.samples, 121_716);
+        assert_eq!(bridge.step, 60_858);
+        assert_eq!(bridge.border, bridge.step);
+        assert_eq!(bridge.fade, 12_171);
+        assert_eq!(bridge.frames, 277);
+        assert_eq!(ChunkGeometry::new(121_716).unwrap(), bridge);
+        assert!((bridge.secs() - 2.76).abs() < 1e-9);
+        assert!((bridge.step_secs() - 1.38).abs() < 1e-9);
+    }
+
+    /// 121 275 samples (275 hops) is not a multiple of the grain: its step is
+    /// not a whole number of hops and its border is one sample longer than
+    /// its step. Run, it demixed every span to silence; it must be refused.
+    #[test]
+    fn a_chunk_off_the_grain_is_refused() {
+        assert!(ChunkGeometry::new(121_275).is_err());
+        assert!(ChunkGeometry::new(0).is_err());
+        assert!(ChunkGeometry::new(441).is_err());
+        assert!(ChunkGeometry::new(882).is_ok());
+    }
+
+    #[test]
+    fn chunk_counts_cover_the_padded_track_at_both_geometries() {
+        let four_minutes = 240 * SAMPLE_RATE as usize;
+        for geometry in [ChunkGeometry::FULL, ChunkGeometry::BRIDGE] {
+            let padded = four_minutes + 2 * geometry.border;
+            assert_eq!(geometry.chunk_count(four_minutes), padded.div_ceil(geometry.step));
+            // A track no longer than twice the border is not padded at all,
+            // and one sample more is.
+            assert_eq!(geometry.track_padding(2 * geometry.border), 0);
+            assert_eq!(geometry.track_padding(2 * geometry.border + 1), geometry.border);
+            assert_eq!(geometry.chunk_count(1000), 1);
+            assert_eq!(geometry.chunk_count(0), 0);
+        }
+        assert_eq!(ChunkGeometry::FULL.chunk_count(four_minutes), 46);
     }
 
     #[test]

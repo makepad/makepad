@@ -269,7 +269,7 @@ fn geometry_hash(state:&State,metadata:&SoftBodyMetadata,limits:&Limits,ctx:&mut
     for object in objects{check_geometry(state,object)?;w.string(object)?;let mesh=&state.objects[object];w.raw(&crate::rig_control::topology(mesh))?;
         for (id,p) in world_points(state,object,ctx)?{w.u64(id.0)?;for v in p{w.f64(v)?;}}
     }
-    Ok(makepad_asset_data::sha256(&w.bytes).iter().map(|b|format!("{b:02x}")).collect())
+    Ok(makepad_core_util::sha256::sha256(&w.bytes).iter().map(|b|format!("{b:02x}")).collect())
 }
 
 pub(crate) fn validate(state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {

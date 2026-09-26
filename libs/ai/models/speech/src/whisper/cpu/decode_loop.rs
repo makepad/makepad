@@ -108,7 +108,7 @@ impl WhisperState {
         params: &WhisperParams,
         align: bool,
     ) -> Vec<AlignedSegment> {
-        let n_ctx = model.hparams.n_audio_ctx as usize;
+        let n_ctx = crate::whisper::audio_ctx(model.hparams.n_audio_ctx as usize);
         let n_mels = model.hparams.n_mels as usize;
 
         // 1. Compute mel spectrogram
@@ -445,7 +445,7 @@ impl WhisperState {
         if tokens.is_empty() || samples.is_empty() {
             return None;
         }
-        let n_ctx = model.hparams.n_audio_ctx as usize;
+        let n_ctx = crate::whisper::audio_ctx(model.hparams.n_audio_ctx as usize);
         let n_mels = model.hparams.n_mels as usize;
         let vocab = &model.vocab;
         let max_samples = mel::WHISPER_SAMPLE_RATE * mel::WHISPER_CHUNK_SIZE;

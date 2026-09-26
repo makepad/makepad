@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run -p makepad-ai-stems --release --bin stems_bench -- \
-//!     <checkpoint.ckpt> <chunk.npy> [repeats]
+//!     <checkpoint.ckpt> <chunk.npy> [repeats] [--bridge]
 //! ```
 //!
 //! `chunk.npy` is `oracle.py taps`' `00_input.npy` — a `(1, 2, 485100)` f32
@@ -11,14 +11,17 @@
 //! realtime factor uses the warm iterations only, which is what a track-long
 //! demix actually costs.
 //!
+//! `--bridge` times the short chunk geometry instead of the full one; the
+//! input is cut to that chunk's length.
+//!
 //! Passing the literal word `synth` instead of a path generates a fixed
 //! pseudo-musical chunk from a seeded integer recurrence. It is bit-identical
 //! on every machine and needs no fixture file, which makes it the input for
 //! cross-store agreement checks: run the same command on a Metal client and on
 //! a CUDA box and the per-stem statistics below must match.
 
-use makepad_ai_stems::config::{AUDIO_CHANNELS, CHUNK_SAMPLES, CHUNK_STEP, SAMPLE_RATE};
-use makepad_ai_stems::{StemsModel, StereoBuf};
+use makepad_ai_stems::config::{AUDIO_CHANNELS, SAMPLE_RATE};
+use makepad_ai_stems::{ChunkGeometry, StemsModel, StereoBuf};
 use std::path::Path;
 
 fn read_npy_f32(path: &Path) -> Vec<f32> {
@@ -32,25 +35,37 @@ fn read_npy_f32(path: &Path) -> Vec<f32> {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let bridge = args.iter().any(|arg| arg == "--bridge");
+    args.retain(|arg| arg != "--bridge");
     if args.len() < 3 {
-        eprintln!("usage: stems_bench <checkpoint.ckpt> <chunk.npy> [repeats]");
+        eprintln!("usage: stems_bench <checkpoint.ckpt> <chunk.npy> [repeats] [--bridge]");
         std::process::exit(2);
     }
     let repeats: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(4);
+    let geometry = if bridge { ChunkGeometry::BRIDGE } else { ChunkGeometry::FULL };
+    let samples = geometry.samples;
 
     let load = std::time::Instant::now();
-    let mut model = StemsModel::load(&args[1]).expect("load separator");
+    let mut model = StemsModel::load_with_geometry(&args[1], geometry).expect("load separator");
     println!("load+compile      {:>7.2} s", load.elapsed().as_secs_f64());
+    println!(
+        "chunk geometry    {samples} samples ({:.2} s, {} frames)",
+        geometry.secs(),
+        geometry.frames
+    );
 
     let chunk = if args[2] == "synth" {
-        synth_chunk()
+        synth_chunk(samples)
     } else {
         let input = read_npy_f32(Path::new(&args[2]));
-        assert!(input.len() >= AUDIO_CHANNELS * CHUNK_SAMPLES);
+        // The fixture is one full chunk per channel; a shorter geometry
+        // takes the head of each channel.
+        let stride = input.len() / AUDIO_CHANNELS;
+        assert!(stride >= samples, "fixture holds {stride} samples per channel, need {samples}");
         StereoBuf {
-            left: input[..CHUNK_SAMPLES].to_vec(),
-            right: input[CHUNK_SAMPLES..2 * CHUNK_SAMPLES].to_vec(),
+            left: input[..samples].to_vec(),
+            right: input[stride..stride + samples].to_vec(),
         }
     };
 
@@ -76,10 +91,10 @@ fn main() {
     }
     let mean = warm.iter().sum::<f64>() / warm.len() as f64;
     let best = warm.iter().cloned().fold(f64::INFINITY, f64::min);
-    // Each chunk finalizes CHUNK_STEP samples of output, not CHUNK_SAMPLES —
-    // 2x overlap means every sample is separated twice. The realtime factor a
+    // Each chunk finalizes one step of output, not a whole chunk — 2x
+    // overlap means every sample is separated twice. The realtime factor a
     // user experiences is therefore step/chunk_time.
-    let step_secs = CHUNK_STEP as f64 / SAMPLE_RATE as f64;
+    let step_secs = geometry.step_secs();
     println!(
         "warm mean         {mean:>7.3} s   best {best:.3} s\n\
          audio per chunk   {step_secs:>7.3} s (finalized)\n\
@@ -93,12 +108,12 @@ fn main() {
 /// noise bed, from an integer recurrence so it is identical everywhere.
 /// Rich enough that every band of the 62-band split sees real energy, which a
 /// pure tone would not do.
-fn synth_chunk() -> StereoBuf {
+fn synth_chunk(samples: usize) -> StereoBuf {
     let mut state: u64 = 0x9e3779b97f4a7c15;
-    let mut left = Vec::with_capacity(CHUNK_SAMPLES);
-    let mut right = Vec::with_capacity(CHUNK_SAMPLES);
+    let mut left = Vec::with_capacity(samples);
+    let mut right = Vec::with_capacity(samples);
     let rate = SAMPLE_RATE as f64;
-    for n in 0..CHUNK_SAMPLES {
+    for n in 0..samples {
         state = state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);

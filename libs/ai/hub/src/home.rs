@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 /// The shared per-user home for Makepad AI state.
 pub fn makepad_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
+    // every path below it relative to the current folder.
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
         return PathBuf::from(home);
     }
     // USERPROFILE on Windows, HOME elsewhere; temp dir as a last resort.
@@ -182,4 +184,25 @@ mod tests {
         std::env::set_var("MAKEPAD_HOME", &override_home);
         assert_eq!(makepad_home(), override_home);
     }
+}
+
+/// Where the device-local asset library lives, for the tests that read rig
+/// fixtures out of it. The rule is the asset client's own
+/// (`MAKEPAD_ASSET_LIBRARY`, else `MAKEPAD_ROOT` or this checkout, then
+/// `local/asset-library`); it is restated here, test-only, so the hub does
+/// not link the asset client to find a directory.
+#[cfg(test)]
+pub(crate) fn test_asset_library_root() -> PathBuf {
+    let from_env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+    from_env("MAKEPAD_ASSET_LIBRARY").unwrap_or_else(|| {
+        from_env("MAKEPAD_ROOT")
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(3)
+                    .expect("the AI hub lives under libs/ai/hub")
+                    .to_path_buf()
+            })
+            .join("local/asset-library")
+    })
 }

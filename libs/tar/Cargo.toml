@@ -2,7 +2,8 @@
 name = "makepad-tar"
 version = "0.1.0"
 edition = "2021"
-description = "A tar reader for the archives Makepad ships: ustar, GNU long names, pax headers, gzip through makepad-fast-inflate"
+description = "A streaming tar reader for the archives Makepad ships: ustar, GNU long names, pax headers; LZ4 frames through makepad-lz4, gzip through makepad-fast-inflate"
 
 [dependencies]
 makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-lz4 = { path = "../lz4" }

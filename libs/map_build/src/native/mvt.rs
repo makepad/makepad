@@ -101,7 +101,7 @@ impl Layer {
 }
 
 // Keep these byte-for-byte aligned with the renderer's DETAIL_WAY_KEYS and
-// DETAIL_POINT_EXTRA_KEYS in widgets/src/map/tile.rs. They are duplicated
+// DETAIL_POINT_EXTRA_KEYS in widgets/families/maps/src/map/tile.rs. They are duplicated
 // here because map_build deliberately has no renderer dependency unless its
 // optional `faces` feature is enabled.
 const DETAIL_WAY_KEYS: &[&str] = &[

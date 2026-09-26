@@ -7,7 +7,7 @@ description = "Worker-owned editable model documents and transactional polygon o
 
 [dependencies]
 makepad-mesh-edit = { path = "../mesh_edit" }
-makepad-asset-data = { path = "../asset/data" }
+makepad-core-util = { path = "../core_util" }
 makepad-gltf = { path = "../gltf" }
 makepad-zune-png = { path = "../zune/zune-png" }
 makepad-strict-json = { path = "../strict_json" }

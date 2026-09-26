@@ -252,7 +252,7 @@ impl<'a> hb_font_t<'a> {
     ) -> bool {
         let pixels_per_em = match self.pixels_per_em {
             Some(ppem) => ppem.0,
-            None => core::u16::MAX,
+            None => u16::MAX,
         };
 
         if let Some(img) = self.ttfp_face.glyph_raster_image(glyph, pixels_per_em) {

@@ -228,14 +228,6 @@ fn available_bytes(_path: &Path) -> io::Result<u64> {
     ))
 }
 
-#[cfg(not(any(unix, windows)))]
-fn available_bytes(_path: &Path) -> io::Result<u64> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "disk volume queries are unsupported on this native target",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

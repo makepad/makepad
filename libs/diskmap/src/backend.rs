@@ -66,8 +66,18 @@ pub trait ScanBackend: Send + Sync {
     ) -> bool {
         // This mutex belongs solely to scan workers, never to the UI.
         let kinds = std::sync::Mutex::new(SourceKinds::new(root));
+        // Kind-by-extension does not touch the gitignore cache, so it stays
+        // off the lock. A home full of photos used to serialise every file
+        // behind that mutex; only a source file still needs it.
         let classify = |p: &Path, is_dir: bool| {
-            kinds.lock().unwrap_or_else(|e| e.into_inner()).classify(p, is_dir)
+            let kind = kind_for(p, is_dir);
+            if kind != kind::FileKind::Code {
+                return kind as u8;
+            }
+            kinds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .classify(p, is_dir)
         };
         let home = kind::home_dir();
         let skip = |path: &Path| kind::skip_for_scan(path, &home);

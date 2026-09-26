@@ -449,6 +449,10 @@ struct Listing {
 /// mounted backup disk under the folder being measured is not that folder's
 /// bytes, and counting it would make every number on the map wrong. So is
 /// anything [`ScanRules::skip`] refuses.
+///
+/// On macOS the names, types, sizes and modification times come from one
+/// `getattrlistbulk` per directory. The per-file `lstat` walk is the
+/// fallback for other systems and for a volume that refuses the bulk call.
 fn read_listing(
     dir: &Path,
     rules: &ScanRules,
@@ -456,6 +460,17 @@ fn read_listing(
     growth: &mut Growth,
     pool: Option<&TaskPool>,
 ) -> Listing {
+    #[cfg(target_os = "macos")]
+    match list_directory_bulk(dir, device) {
+        BulkList::Ready(found) => return finish_listing(found, rules, growth),
+        BulkList::Denied => {
+            return Listing {
+                entries: Vec::new(),
+                denied: true,
+            };
+        }
+        BulkList::Fallback => {}
+    }
     let read_dir = match fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
         Err(error) => {
@@ -518,6 +533,10 @@ fn read_listing(
         stat_all(&mut found, device);
     }
 
+    finish_listing(found, rules, growth)
+}
+
+fn finish_listing(found: Vec<Found>, rules: &ScanRules, growth: &mut Growth) -> Listing {
     let mut entries = Vec::with_capacity(found.len());
     for item in found {
         if !item.keep {
@@ -546,6 +565,268 @@ fn read_listing(
         entries,
         denied: false,
     }
+}
+
+/// macOS reads a whole directory's metadata in a handful of `getattrlistbulk`
+/// calls. The record layout below was checked against `lstat`: common
+/// attributes come back as returned-set, error, name reference, then the
+/// remaining common bits low-to-high (device, type, mtime), then directory
+/// attributes, then file attributes, with the name bytes after the fixed
+/// fields. A volume that rejects the call falls back to per-file `lstat`.
+#[cfg(target_os = "macos")]
+enum BulkList {
+    Ready(Vec<Found>),
+    Denied,
+    Fallback,
+}
+
+#[cfg(target_os = "macos")]
+fn list_directory_bulk(dir: &Path, device: Option<u64>) -> BulkList {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    let file = match fs::File::open(dir) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => return BulkList::Denied,
+        Err(_) => return BulkList::Fallback,
+    };
+    let mut attr = AttrList {
+        bitmapcount: ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: ATTR_CMN_RETURNED_ATTRS
+            | ATTR_CMN_NAME
+            | ATTR_CMN_ERROR
+            | ATTR_CMN_OBJTYPE
+            | ATTR_CMN_DEVID
+            | ATTR_CMN_MODTIME,
+        volattr: 0,
+        dirattr: ATTR_DIR_MOUNTSTATUS,
+        fileattr: ATTR_FILE_DATALENGTH,
+        forkattr: 0,
+    };
+    // One record is a couple of hundred bytes even with a long name. 128 KB
+    // is a few thousand entries per syscall.
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut found: Vec<Found> = Vec::new();
+    loop {
+        let count = unsafe {
+            getattrlistbulk(
+                file.as_raw_fd(),
+                &mut attr,
+                buf.as_mut_ptr(),
+                buf.len(),
+                FSOPT_PACK_INVAL_ATTRS,
+            )
+        };
+        if count == 0 {
+            break;
+        }
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return BulkList::Fallback;
+        }
+        let mut offset = 0usize;
+        for _ in 0..count as usize {
+            let Some((next, entry)) = parse_bulk_record(&buf[offset..], dir, device) else {
+                // A record we cannot read must not become a silently short
+                // tree. Drop what this call gathered and stat the directory
+                // the slow way, which is still a correct answer.
+                return BulkList::Fallback;
+            };
+            offset += next;
+            if let Some(entry) = entry {
+                found.push(entry);
+            }
+        }
+    }
+    #[cfg(test)]
+    note_bulk_listing();
+    BulkList::Ready(found)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_bulk_record(buf: &[u8], dir: &Path, device: Option<u64>) -> Option<(usize, Option<Found>)> {
+    if buf.len() < 24 {
+        return None;
+    }
+    let total = read_u32(buf, 0)? as usize;
+    if total < 24 || total > buf.len() {
+        return None;
+    }
+    let record = &buf[..total];
+    let common = read_u32(record, 4)?;
+    let dirattr = read_u32(record, 12)?;
+    let fileattr = read_u32(record, 16)?;
+    let mut cursor = 24usize;
+    let mut error = 0u32;
+    if common & ATTR_CMN_ERROR != 0 {
+        error = read_u32(record, cursor)?;
+        cursor += 4;
+    }
+    let mut name_at = None;
+    if common & ATTR_CMN_NAME != 0 {
+        let rel = read_i32(record, cursor)?;
+        let len = read_u32(record, cursor + 4)?;
+        name_at = Some((cursor, rel, len));
+        cursor += 8;
+    }
+    let mut dev = None;
+    if common & ATTR_CMN_DEVID != 0 {
+        dev = Some(u64::from(read_u32(record, cursor)?));
+        cursor += 4;
+    }
+    let mut objtype = 0u32;
+    if common & ATTR_CMN_OBJTYPE != 0 {
+        objtype = read_u32(record, cursor)?;
+        cursor += 4;
+    }
+    let mut modified = 0u32;
+    if common & ATTR_CMN_MODTIME != 0 {
+        if cursor + 16 > record.len() {
+            return None;
+        }
+        let secs = read_i64(record, cursor)?;
+        cursor += 16;
+        if secs > 0 {
+            modified = (secs as u64 / 60).min(u32::MAX as u64) as u32;
+        }
+    }
+    let mut mount_point = false;
+    if dirattr & ATTR_DIR_MOUNTSTATUS != 0 {
+        let status = read_u32(record, cursor)?;
+        cursor += 4;
+        mount_point = status & DIR_MNTSTATUS_MNTPOINT != 0;
+    }
+    let mut size = 0u64;
+    if fileattr & ATTR_FILE_DATALENGTH != 0 {
+        size = read_u64(record, cursor)?;
+    }
+    if error != 0 {
+        return Some((total, None));
+    }
+    let Some((field, rel, len)) = name_at else {
+        return Some((total, None));
+    };
+    if rel < 0 {
+        return Some((total, None));
+    }
+    let start = field + rel as usize;
+    if start >= record.len() {
+        return Some((total, None));
+    }
+    let end = (start + len as usize).min(record.len());
+    let bytes = record[start..end].split(|byte| *byte == 0).next().unwrap_or(b"");
+    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes == b".DS_Store" {
+        return Some((total, None));
+    }
+    let name = String::from_utf8_lossy(bytes).into_owned();
+    let is_dir = objtype == VDIR;
+    let other_volume = match (device, dev) {
+        (Some(root_dev), Some(entry_dev)) => entry_dev != root_dev,
+        _ => false,
+    };
+    let path = dir.join(&name);
+    Some((
+        total,
+        Some(Found {
+            name,
+            path,
+            is_dir,
+            size: if is_dir { 0 } else { size },
+            modified,
+            keep: !(is_dir && (other_volume || mount_point)),
+        }),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn read_u32(buf: &[u8], at: usize) -> Option<u32> {
+    let bytes: [u8; 4] = buf.get(at..at + 4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn read_i32(buf: &[u8], at: usize) -> Option<i32> {
+    let bytes: [u8; 4] = buf.get(at..at + 4)?.try_into().ok()?;
+    Some(i32::from_le_bytes(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn read_i64(buf: &[u8], at: usize) -> Option<i64> {
+    let bytes: [u8; 8] = buf.get(at..at + 8)?.try_into().ok()?;
+    Some(i64::from_le_bytes(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn read_u64(buf: &[u8], at: usize) -> Option<u64> {
+    let bytes: [u8; 8] = buf.get(at..at + 8)?.try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+#[cfg(target_os = "macos")]
+const ATTR_BIT_MAP_COUNT: u16 = 5;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_NAME: u32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_DEVID: u32 = 0x0000_0002;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_ERROR: u32 = 0x2000_0000;
+#[cfg(target_os = "macos")]
+const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+#[cfg(target_os = "macos")]
+const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
+#[cfg(target_os = "macos")]
+const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
+const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
+#[cfg(target_os = "macos")]
+const FSOPT_PACK_INVAL_ATTRS: u64 = 0x0000_0008;
+#[cfg(target_os = "macos")]
+const VDIR: u32 = 2;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct AttrList {
+    bitmapcount: u16,
+    reserved: u16,
+    commonattr: u32,
+    volattr: u32,
+    dirattr: u32,
+    fileattr: u32,
+    forkattr: u32,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn getattrlistbulk(
+        dirfd: i32,
+        attr_list: *mut AttrList,
+        attr_buf: *mut u8,
+        attr_buf_size: usize,
+        options: u64,
+    ) -> i32;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static BULK_LISTINGS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn note_bulk_listing() {
+    BULK_LISTINGS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn bulk_listings() -> u32 {
+    BULK_LISTINGS.with(|count| count.get())
 }
 
 /// One entry between "the directory says it is there" and "we know how big it
@@ -698,16 +979,12 @@ const STAT_PARALLEL_MIN: usize = 1024;
 /// outstanding requests a disk stops going any faster.
 const STAT_THREADS: usize = 4;
 
-/// Threads the walk uses.
-///
-/// A single thread is not the answer: walking a tree is latency-bound on
-/// every filesystem worth the name. Neither is a thread per top-level folder,
-/// which is what this used to be — a home directory is one enormous `Library`
-/// and twenty small things, so within a second the "parallel" scan is one
-/// thread doing all of the work. Every folder is a work item and any idle
-/// thread takes the next one, so the threads stay busy right down to the
-/// last directory of the deepest build tree.
-const SCAN_THREADS: usize = 6;
+/// Upper bound on threads walking at once. The pool's heavy lane is usually
+/// smaller than this. Every folder is a work item — a home directory is one
+/// enormous tree and a handful of small ones, so splitting only the top
+/// level leaves one thread doing all the work — and past a dozen waiters a
+/// disk stops answering any faster.
+const SCAN_THREAD_CAP: usize = 12;
 
 /// Walk `root`, streaming the tree back through `sink` as it is discovered.
 ///
@@ -745,7 +1022,8 @@ pub fn scan_stream(
     // the caller-helping `fan_out` replacement for the `std::thread::scope`
     // this used to be. `scan_stream` only ever runs as a Heavy pool job
     // itself (see `treemap_view`), never on the UI thread.
-    pool.fan_out(Lane::Heavy, SCAN_THREADS, |_index| {
+    let threads = pool.heavy_workers().clamp(1, SCAN_THREAD_CAP);
+    pool.fan_out(Lane::Heavy, threads, |_index| {
         let mut growth = Growth::new(sink, &open);
         while let Some(job) = take(&queue, &wake, cancel) {
             let children = run_job(job, rules, device, cancel, sink, &mut growth, pool);
@@ -2489,7 +2767,16 @@ mod tests {
         let expected = sample_tree(&root);
 
         let cancel = AtomicBool::new(false);
+        #[cfg(target_os = "macos")]
+        let bulk_before = super::bulk_listings();
         let node = scan(&root, &open_rules(), &cancel, &|_| {}).expect("scan should complete");
+        // A silent fallback to per-file lstat still builds the right tree,
+        // which would hide the scan-speed regression this case is there for.
+        #[cfg(target_os = "macos")]
+        assert!(
+            super::bulk_listings() > bulk_before,
+            "directory scan fell back to per-file stat"
+        );
 
         assert_eq!(node.size, expected);
         assert_eq!(node.files, if cfg!(unix) { 4 } else { 3 });

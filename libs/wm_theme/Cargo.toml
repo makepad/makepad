@@ -18,4 +18,4 @@ name = "makepad_wm_theme"
 path = "src/lib.rs"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false }

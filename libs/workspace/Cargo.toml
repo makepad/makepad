@@ -10,5 +10,5 @@ name = "makepad_workspace"
 path = "src/lib.rs"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["dock"] }
 makepad-code-editor = { path = "../../code_editor" }

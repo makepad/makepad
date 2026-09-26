@@ -52,32 +52,32 @@ pub const DATA_POLICY: [PolicyRow; 8] = [
     PolicyRow {
         action: PolicyAction::Keep,
         item: "shortbread base layers (non-osm_*)",
-        reader_or_reason: "widgets/src/map/tile.rs: LayerParseFilter::BaseNoDetailLayers",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: LayerParseFilter::BaseNoDetailLayers",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "six osm_* detail layers: geometry + whitelisted tags",
-        reader_or_reason: "widgets/src/map/tile.rs: LayerParseFilter::DetailLayers/tag_key_whitelist",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: LayerParseFilter::DetailLayers/tag_key_whitelist",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 101 painter-cascade REGIONS",
-        reader_or_reason: "widgets/src/map/tile.rs: parse_baked_faces/bake.regions cascade hit",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: parse_baked_faces/bake.regions cascade hit",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 101 v4 building groups",
-        reader_or_reason: "widgets/src/map/tile.rs: bake.building_signature/bake.buildings substitution",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: bake.building_signature/bake.buildings substitution",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 100 baked fill triangulations",
-        reader_or_reason: "widgets/src/map/tile.rs: parse_baked_fills",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: parse_baked_fills",
     },
     PolicyRow {
         action: PolicyAction::Drop,
         item: "osm_* tags outside DETAIL_WAY_KEYS + DETAIL_POINT_EXTRA_KEYS",
-        reader_or_reason: "discarded by widgets/src/map/tile.rs: tag_key_whitelist",
+        reader_or_reason: "discarded by widgets/families/maps/src/map/tile.rs: tag_key_whitelist",
     },
     PolicyRow {
         action: PolicyAction::Drop,
@@ -87,7 +87,7 @@ pub const DATA_POLICY: [PolicyRow; 8] = [
     PolicyRow {
         action: PolicyAction::Drop,
         item: "field 101 shadow shapes + grounded footprints",
-        reader_or_reason: "widgets/src/map/view.rs: draw_shadow_mask_pass derives live shadows",
+        reader_or_reason: "widgets/families/maps/src/map/view.rs: draw_shadow_mask_pass derives live shadows",
     },
 ];
 

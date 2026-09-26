@@ -7,8 +7,15 @@
 //!
 //! Conversion is Howard Hinnant's `days_from_civil` / `civil_from_days`,
 //! exact for the whole proleptic Gregorian calendar.
+//!
+//! The one clock is [`local`]: an epoch second on the host's wall clock,
+//! by the operating system's own zone rules — the helper every app that
+//! shows the time uses, instead of its own `localtime_r`.
 
 use std::fmt;
+
+mod local;
+pub use local::{local, local_now, local_or_utc, now_secs, utc, LocalDateTime};
 
 /// Days since 1970-01-01. Negative reaches back before it.
 pub type Day = i32;

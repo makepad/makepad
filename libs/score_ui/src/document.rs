@@ -27,6 +27,42 @@ pub fn is_native_extension(path: &Path) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case(NATIVE_EXTENSION))
 }
 
+/// Write `bytes` to `path` so a crash or a full disk never leaves a
+/// half-written score: the bytes go to a temporary file in the same folder
+/// (same volume, so the rename is atomic), are flushed, and only then
+/// renamed over the target. On failure the target is untouched and the
+/// temporary file this call created is removed.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name")
+    })?;
+    let folder = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let temp = folder.join(format!(
+        ".{}.tmp.{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    // create_new: never write through something already at the temp name.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Give a Save As target the native extension, so a user who types
 /// `sonata` or keeps the imported `sonata.mid` name still gets a
 /// `sonata.mpscore` instead of a file that no longer matches its contents.
@@ -522,11 +558,27 @@ impl ScoreDocument {
     }
 
     pub fn save(&mut self, path: PathBuf) -> Result<(), DocumentError> {
-        std::fs::write(&path, self.workspace.to_bytes())
+        write_atomic(&path, &self.workspace.to_bytes())
             .map_err(|error| DocumentError::Io(error.to_string()))?;
         self.path = Some(path);
         self.dirty = false;
         Ok(())
+    }
+
+    /// Whether saving to `path` would replace a file other than the one this
+    /// document was opened from or last saved to. Save As asks before that.
+    pub fn would_replace_other_file(&self, path: &Path) -> bool {
+        if std::fs::symlink_metadata(path).is_err() {
+            return false;
+        }
+        match &self.path {
+            // Compare resolved paths so "./a.score" and "a.score" match.
+            Some(own) => match (std::fs::canonicalize(own), std::fs::canonicalize(path)) {
+                (Ok(own), Ok(target)) => own != target,
+                _ => own.as_path() != path,
+            },
+            None => true,
+        }
     }
 
     pub fn undo(&mut self) -> Result<(), DocumentError> {

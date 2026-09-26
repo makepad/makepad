@@ -6,8 +6,8 @@
 //! for fragment dedupe, coordinate downsampling, Douglas-Peucker
 //! simplification, endpoint stitching and polygon area thresholds.
 //!
-//! The schema below is derived from what `widgets/src/map/tile.rs` and
-//! `widgets/src/map/style.rs` actually parse (see the layer-name match in
+//! The schema below is derived from what `widgets/families/maps/src/map/tile.rs` and
+//! `widgets/families/maps/src/map/style.rs` actually parse (see the layer-name match in
 //! `normalize_mvt_tags` and the attribute reads in `stroke_style_for_tags`
 //! / `fill_color_for_tags` / `extract_point_label`), not from shortbread
 //! documentation:

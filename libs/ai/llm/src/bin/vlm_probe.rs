@@ -4,13 +4,37 @@
 // <|vision_end|> ChatML wrap -> M-RoPE prefill -> greedy generation.
 // Compare against: llama-mtmd-cli -m <model> --mmproj <mmproj> --image <img> -p <prompt>
 //
-// usage: vlm-probe <model.gguf> <mmproj.gguf> <image.ppm> <question> [--max-new-tokens N] [--max-context N]
+// usage: vlm-probe <model.gguf> <mmproj.gguf> <image.png|image.ppm> <question> [--max-new-tokens N] [--max-context N]
 
 use makepad_ai_llm::{
     preprocess_rgb8, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
 };
 use std::io::Write;
 use std::time::Instant;
+
+fn read_png(path: &str) -> (Vec<u8>, usize, usize) {
+    use makepad_zune_png::{makepad_zune_core::options::DecoderOptions, PngDecoder};
+
+    let data = std::fs::read(path).expect("cannot read image");
+    let options = DecoderOptions::default().png_set_strip_to_8bit(true);
+    let mut decoder = PngDecoder::new_with_options(std::io::Cursor::new(data), options);
+    decoder.decode_headers().expect("PNG headers");
+    let info = decoder.info().expect("PNG header info");
+    let (width, height) = (info.width, info.height);
+    let components = decoder.colorspace().expect("PNG colorspace").num_components();
+    assert!((1..=4).contains(&components), "unsupported PNG colorspace");
+    let pixels = decoder.decode_raw().expect("PNG pixels");
+    assert_eq!(pixels.len(), width * height * components);
+    let mut rgb = Vec::with_capacity(width * height * 3);
+    for pixel in pixels.chunks_exact(components) {
+        if components >= 3 {
+            rgb.extend_from_slice(&pixel[..3]);
+        } else {
+            rgb.extend_from_slice(&[pixel[0]; 3]);
+        }
+    }
+    (rgb, width, height)
+}
 
 fn read_ppm(path: &str) -> (Vec<u8>, usize, usize) {
     let data = std::fs::read(path).expect("cannot read image");
@@ -44,7 +68,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
         eprintln!(
-            "usage: {} <model.gguf> <mmproj.gguf> <image.ppm> <question> [--max-new-tokens N] [--max-context N]",
+            "usage: {} <model.gguf> <mmproj.gguf> <image.png|image.ppm> <question> [--max-new-tokens N] [--max-context N]",
             args[0]
         );
         std::process::exit(1);
@@ -72,7 +96,14 @@ fn main() {
     }
 
     // 1. vision leg
-    let (rgb, w, h) = read_ppm(image_path);
+    let (rgb, w, h) = if std::path::Path::new(image_path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    {
+        read_png(image_path)
+    } else {
+        read_ppm(image_path)
+    };
     let gguf = makepad_ai_llm::GgufFile::open(mmproj_path).expect("open mmproj");
     let vision_config = VisionConfig::from_gguf(&gguf).expect("vision config");
     let t0 = Instant::now();

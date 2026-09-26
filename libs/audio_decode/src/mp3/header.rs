@@ -274,14 +274,28 @@ pub fn find_frame(bytes: &[u8], from: usize) -> Option<(usize, FrameHeader)> {
     None
 }
 
+/// How far a frame scan looks. A sync past this is not the start of a
+/// stream, and two frames fit inside it many times over.
+pub const SNIFF_WINDOW: usize = 1 << 16;
+
 /// True when `bytes` plausibly holds an MP3 stream.
 pub fn looks_like_mp3(bytes: &[u8]) -> bool {
     if bytes.len() >= 3 && &bytes[0..3] == b"ID3" {
         return true;
     }
+    holds_mp3_frame(bytes)
+}
+
+/// True when a real Layer III frame is CONFIRMED in `bytes` -- the tag
+/// stripped first, and never the `ID3` prefix on its own.
+///
+/// The prefix is enough for a decoder, because a tag is nearly always in
+/// front of MP3 audio. It is exactly wrong for a caller deciding whether to
+/// take a file AWAY from a decoder that would otherwise get it: a tagged
+/// ADTS stream carries the same prefix and is not an MP3.
+pub fn holds_mp3_frame(bytes: &[u8]) -> bool {
     let audio = strip_containers(bytes);
-    // Only scan the head: a sync this far in is not the start of a stream.
-    let window = audio.len().min(1 << 16);
+    let window = audio.len().min(SNIFF_WINDOW);
     find_frame(&audio[..window], 0).is_some()
 }
 
@@ -490,6 +504,42 @@ mod tests {
         let (at, found) = find_frame(&data, 8).expect("stream start");
         assert_eq!(at, 8);
         assert_eq!(found, h);
+    }
+
+    /// The two questions this module answers, on the same buffers. The
+    /// loose one is right for a decoder, because a tag is nearly always in
+    /// front of MP3 audio; the strict one is what a caller needs before it
+    /// takes a file AWAY from another decoder, because a tagged stream of
+    /// another codec carries the very same three letters.
+    #[test]
+    fn a_confirmed_frame_is_not_a_tag() {
+        let h = FrameHeader::parse(MPEG1_JS).unwrap();
+        let id3_only = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        assert!(looks_like_mp3(&id3_only), "a tag is enough for a decoder");
+        assert!(!holds_mp3_frame(&id3_only), "and never enough to take a file away");
+        // The crate's own sniff is left exactly as its callers need it.
+        assert_eq!(crate::sniff(&id3_only), Some(crate::AudioFormat::Mp3));
+
+        let mut pair = vec![0u8; h.frame_bytes * 2];
+        pair[0..4].copy_from_slice(&MPEG1_JS.to_be_bytes());
+        pair[h.frame_bytes..h.frame_bytes + 4].copy_from_slice(&MPEG1_JS.to_be_bytes());
+        assert!(looks_like_mp3(&pair));
+        assert!(holds_mp3_frame(&pair), "two frames in a row is a stream");
+
+        let mut tagged = id3_only.clone();
+        tagged.extend_from_slice(&pair);
+        assert!(looks_like_mp3(&tagged));
+        assert!(holds_mp3_frame(&tagged), "and so is one behind a tag");
+
+        // A lone sync with nothing to confirm it, and a stream of another
+        // codec whose layer bits are reserved.
+        let lone = [0xffu8, 0xfb, 0x90, 0x00, 0, 0, 0, 0];
+        assert!(!looks_like_mp3(&lone));
+        assert!(!holds_mp3_frame(&lone));
+        assert!(FrameHeader::parse(0xfff1_5080).is_none(), "reserved layer bits");
+        let mut tagged_other = id3_only;
+        tagged_other.extend_from_slice(&[0xffu8, 0xf1, 0x50, 0x80, 0, 0, 0, 0]);
+        assert!(!holds_mp3_frame(&tagged_other));
     }
 
     #[test]
