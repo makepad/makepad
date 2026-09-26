@@ -80,6 +80,7 @@ script_mod! {
         width: Fill
         margin: 0
         pad_left_top: vec2(10.0, 10.0)
+        pad_right: 0.0
         scroll_bars: mod.widgets.ScrollBars {}
         draw_bg +: { color: theme.color_bg_container }
         draw_gutter +: {
@@ -253,6 +254,9 @@ pub struct CodeEditor {
     last_cursor_screen_pos: Option<Vec2d>,
     #[live]
     pad_left_top: Vec2d,
+    /// Space kept clear to the right of the text, e.g. for an overlaid scroll bar.
+    #[live]
+    pad_right: f64,
     #[rust]
     cell_size: Vec2d,
     #[rust]
@@ -819,6 +823,7 @@ impl CodeEditor {
         self.gutter_rect.size -= self.pad_left_top;
         self.viewport_rect.pos += self.pad_left_top;
         self.viewport_rect.size -= self.pad_left_top;
+        self.viewport_rect.size.x -= self.pad_right;
 
         session.set_wrap_column(if self.word_wrap {
             Some((self.viewport_rect.size.x / self.cell_size.x) as usize)
@@ -881,7 +886,7 @@ impl CodeEditor {
         // the cell size, then shift by the viewport origin.
 
         cx.turtle_mut().set_used(
-            session.layout().width() * self.cell_size.x + self.pad_left_top.x,
+            session.layout().width() * self.cell_size.x + self.pad_left_top.x + self.pad_right,
             self.height_scale * session.layout().height() * self.cell_size.y
                 + if height_is_fit || !self.empty_page_at_end {
                     0.0
