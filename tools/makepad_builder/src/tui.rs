@@ -946,43 +946,24 @@ impl Setup {
     /// installs and where, each agreement by name (Return opens it), then
     /// "Agree to all" (selected at the start) and Cancel. Escape cancels.
     /// Agreements already accepted are not asked again; agreeing records them.
-    fn consent(&self, title: &str, intro: &str, detail: &str, ids: &[&str], action: &str) -> Result<bool, String> {
+    fn consent(&self, _title: &str, intro: &str, detail: &str, ids: &[&str], action: &str) -> Result<bool, String> {
         let accepted = self.accepted_agreements();
         if ids.iter().all(|id| accepted.iter().any(|a| a == id)) {
             return Ok(true);
         }
-        let mut selected = agreement_rows(Some(ids)).len();
+        // Asked where every question is: what is installed, then agreeing,
+        // reading the agreements (in the browser) or cancelling.
+        let question = if detail.is_empty() { intro.to_owned() } else { format!("{intro} {detail}.") };
         loop {
-            let mut rows = vec![Row::Note(Vec::new())];
-            rows.extend(wrap(intro, 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
-            if !detail.is_empty() {
-                rows.push(Row::Note(text(detail, DIM)));
-            }
-            rows.push(Row::Head("READ THE AGREEMENTS".into()));
-            rows.extend(agreement_rows(Some(ids)));
-            rows.push(Row::Note(Vec::new()));
-            rows.push(item("agree", "Agree to all", "", Vec::new(), action));
-            rows.push(item("cancel", "Cancel", "", Vec::new(), ""));
-            let view = View {
-                crumb: format!(" › {title}"),
-                subtitle: "Please read what you are agreeing to.".into(),
-                email: self.shown_email(),
-                rows,
-                back: true,
-                footer: Some("↑↓ move   ⏎ select   esc cancel"),
-                ..View::default()
-            };
-            match view::menu(view, &mut selected, &|| false)? {
-                Nav::Select(id) if id == "agree" => {
+            match view::choose(&question, &agreements_note(ids), &[action, "read the agreements", "cancel"], 0)?.as_deref() {
+                Some("read the agreements") => open_agreements(ids),
+                Some("cancel") | None => return Ok(false),
+                Some(_) => {
                     let mut all: Vec<&str> = accepted.iter().map(String::as_str).collect();
                     all.extend(ids.iter().filter(|id| !accepted.iter().any(|a| a == *id)));
                     self.record_agreements(&all)?;
                     return Ok(true);
                 }
-                Nav::Select(id) if id == "cancel" => return Ok(false),
-                Nav::Select(id) => open_agreement(&id),
-                Nav::Back | Nav::Quit => return Ok(false),
-                Nav::Refresh | Nav::Key(..) => {}
             }
         }
     }
@@ -1034,19 +1015,23 @@ impl Setup {
     fn pinned_rust(&self) -> Option<String> {
         self.release.as_ref().or(self.public.as_ref()).map(|r| r.rust.clone())
     }
-    /// Everything compiling needs, set up in order: the consent screen for
-    /// what is missing, Apple's tools on macOS, then the downloads. True when
-    /// the compiler is ready; false when the person cancelled.
-    fn install_compiler(&mut self, release: &Release) -> Result<bool, String> {
+    /// What compiling needs, decided in front, before an app's first build:
+    /// the local AI question, the Rust choice (asked only when a Rust is
+    /// already installed on the machine), the vendors' consent and Apple's or
+    /// the distribution's tools. None when the person cancelled; else the
+    /// components still to install, which the build installs on the app's
+    /// own row (see `compile_only`), not on a page of their own.
+    fn prepare_compiler(&mut self, release: &Release) -> Result<Option<Vec<Dependency>>, String> {
         if self.compiler_retry {
-            return self.retry_compiler(release);
+            return self.retry_compiler(release).map(|ready| ready.then(Vec::new));
         }
         // Windows with an NVIDIA GPU: the first build of an app with AI
         // features asks once, and the answer picks the compiler for good:
         // Microsoft's tools with CUDA, or Rust's GNU toolchain without.
         if self.local_ai_undecided(release) {
             let Some(chain) = self.local_ai_screen()? else {
-                return Ok(self.nothing_installed());
+                self.nothing_installed();
+                return Ok(None);
             };
             runtime::record_windows_chain(&self.root, chain)?;
             self.cuda = crate::cuda::build_with(&self.root);
@@ -1057,62 +1042,50 @@ impl Setup {
         }
         let cuda = self.cuda_wanted();
         if ready.compiler() && !cuda {
-            return Ok(true);
+            return Ok(Some(Vec::new()));
         }
         if !self.compiler_consent(ready, release, cuda)? {
-            return Ok(self.nothing_installed());
+            self.nothing_installed();
+            return Ok(None);
         }
         if !cfg!(windows) && !ready.tools {
             if cfg!(target_os = "macos") {
                 // Apple's tools come right after the agreements.
                 if !self.xcode_screen()? {
-                    return Ok(self.nothing_installed());
+                    self.nothing_installed();
+                    return Ok(None);
                 }
             } else {
                 let _pause = Screen::pause();
                 runtime::setup_system_tools()?;
             }
         }
-        // The components that actually run, one line each on the work page;
-        // they install side by side, each row with its own bar.
-        let mut steps = Vec::new();
+        // The components still to install; they install side by side.
         let mut kinds = Vec::new();
         if cfg!(windows) && !ready.tools {
-            let msvc = self.root.join("toolchain/msvc");
-            if !crate::msvc::build_tools_ready(&msvc) {
-                steps.push("Build tools");
-            }
-            if !crate::msvc::sdk_ready(&msvc) {
-                steps.push("Windows SDK");
-            }
             kinds.push(Dependency::Msvc);
         }
         if !ready.rust {
-            steps.push("Rust");
             kinds.push(Dependency::Rust);
         }
         if cuda {
-            steps.push("CUDA");
             kinds.push(Dependency::Cuda);
         }
-        let row = if cfg!(windows) { "tools" } else { "rust" };
-        view::work_begin("Install build tools", "This takes a few minutes; everything goes into this folder.", &self.shown_email(), row, &steps);
+        Ok(Some(kinds))
+    }
+    /// Install the components `prepare_compiler` left, on the build's own
+    /// thread; their progress shows on the app's row ("installing Rust").
+    fn install_components(&mut self, release: &Release, kinds: &[Dependency]) -> Result<(), String> {
         crate::timing::reset();
-        let result: Result<bool, String> = with_progress(|| {
-            runtime::dependencies(&self.root, release, &kinds).map(|()| true)
-        });
+        let result = runtime::dependencies(&self.root, release, kinds);
         for line in crate::timing::report() {
             activity(&line);
         }
         self.cuda = crate::cuda::build_with(&self.root);
-        let result = match result {
-            Err(error) if rustc::needs_compiler_retry(&error) => {
-                self.compiler_retry = true;
-                Err(STILL_SCANNING.into())
-            }
+        match result {
+            Err(error) if rustc::needs_compiler_retry(&error) => Err(STILL_SCANNING.into()),
             other => other,
-        };
-        view::work_end(result)
+        }
     }
     /// The local AI question is due: Windows, an NVIDIA driver, an app that
     /// uses CUDA, and no compiler chosen yet (older folders that already
@@ -1131,30 +1104,10 @@ impl Setup {
     /// to the menu without deciding.
     fn local_ai_screen(&self) -> Result<Option<WindowsChain>, String> {
         let ids = ["cuda", "vs", "sdk"];
-        let mut selected = ids.len();
         loop {
-            let mut rows = vec![Row::Note(Vec::new()), Row::Note(done("NVIDIA GPU found")), Row::Note(Vec::new())];
-            rows.extend(
-                wrap("Local AI support requires Microsoft Build Tools and NVIDIA CUDA, which have their own license agreements you need to agree to.", 74)
-                    .into_iter()
-                    .map(|line| Row::Note(text(line, PLAIN))),
-            );
-            rows.push(Row::Note(Vec::new()));
-            rows.extend(agreement_rows(Some(&ids)));
-            rows.push(Row::Note(Vec::new()));
-            rows.push(item("agree", "Agree and enable local AI", "", Vec::new(), ""));
-            rows.push(item("no", "No local AI", "", Vec::new(), ""));
-            let view = View {
-                crumb: " › Local AI".into(),
-                subtitle: "You can run local AI functionality.".into(),
-                email: self.shown_email(),
-                rows,
-                back: true,
-                footer: Some("↑↓ move   ⏎ select   esc back"),
-                ..View::default()
-            };
-            match view::menu(view, &mut selected, &|| false)? {
-                Nav::Select(id) if id == "agree" => {
+            let question = "An NVIDIA GPU is here, so Makepad can run AI features on it. Local AI support requires Microsoft Build Tools and NVIDIA CUDA, which have their own license agreements you need to agree to.";
+            match view::choose(question, &agreements_note(&ids), &["agree and enable local AI", "no local AI", "read the agreements"], 0)?.as_deref() {
+                Some("agree and enable local AI") => {
                     let mut all = self.accepted_agreements();
                     for id in ["vs", "sdk", "cuda"] {
                         if !all.iter().any(|a| a == id) {
@@ -1165,13 +1118,12 @@ impl Setup {
                     activity("Local AI on: Microsoft's C++ tools and CUDA.");
                     return Ok(Some(WindowsChain::Msvc));
                 }
-                Nav::Select(id) if id == "no" => {
+                Some("no local AI") => {
                     activity("No local AI: Rust's GNU toolchain.");
                     return Ok(Some(WindowsChain::Gnu));
                 }
-                Nav::Select(id) => open_agreement(&id),
-                Nav::Back | Nav::Quit => return Ok(None),
-                Nav::Refresh | Nav::Key(..) => {}
+                Some(_) => open_agreements(&ids),
+                None => return Ok(None),
             }
         }
     }
@@ -1313,61 +1265,41 @@ impl Setup {
     /// `sudo xcodebuild -license` on the real terminal. Never accepts on the
     /// person's behalf. True once the tools are ready.
     fn xcode_screen(&mut self) -> Result<bool, String> {
-        let mut selected = 0;
+        let mut again = "";
         loop {
             if runtime::system_tools_ready().is_ok() {
                 return Ok(true);
             }
-            let license = xcode_license_pending();
-            let (intro, note, first) = if license {
-                (
+            // Asked where every question is.
+            let chosen = if xcode_license_pending() {
+                view::choose(
                     "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run.",
-                    "Apple shows the license here in the terminal and asks for your password; type agree at the end to accept it.",
-                    item("license", format!("{:<34}", "Read and accept the Xcode license"), "", Vec::new(), "sudo xcodebuild -license"),
-                )
+                    &format!("{again}Apple shows the license in the terminal and asks for your password; type agree at the end."),
+                    &["accept the license", "check again", "cancel"],
+                    0,
+                )?
             } else {
-                (
+                view::choose(
                     "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet.",
-                    "Apple's installer opens in its own window (about 1 GB); come back here when it has finished.",
-                    item("install", format!("{:<34}", "Install the developer tools"), "", Vec::new(), "opens Apple's installer"),
-                )
+                    &format!("{again}Apple's installer opens in its own window (about 1 GB); come back when it has finished."),
+                    &["install them", "check again", "cancel"],
+                    0,
+                )?
             };
-            let mut rows = vec![Row::Note(Vec::new())];
-            rows.extend(wrap(intro, 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
-            rows.push(Row::Note(Vec::new()));
-            rows.extend(wrap(note, 74).into_iter().map(|line| Row::Note(text(line, DIM))));
-            rows.push(Row::Note(Vec::new()));
-            rows.push(first);
-            rows.push(item("check", "Check again", "", Vec::new(), ""));
-            rows.push(item("cancel", "Cancel", "", Vec::new(), ""));
-            let view = View {
-                crumb: " › Apple developer tools".into(),
-                subtitle: "Needed to compile on macOS.".into(),
-                email: self.shown_email(),
-                rows,
-                back: true,
-                footer: Some("↑↓ move   ⏎ select   esc cancel"),
-                ..View::default()
-            };
-            match view::menu(view, &mut selected, &|| false)? {
-                Nav::Select(id) if id == "install" => {
+            match chosen.as_deref() {
+                Some("install them") => {
                     let _ = Command::new("/usr/bin/xcode-select").arg("--install").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
                     wait_for_apple_installer()?;
                 }
-                Nav::Select(id) if id == "license" => {
+                Some("accept the license") => {
                     let _pause = Screen::pause();
                     println!("Apple's Xcode license follows. Type agree at the end to accept it.\n");
                     let _ = Command::new("sudo").args(["/usr/bin/xcodebuild", "-license"]).status();
                 }
-                Nav::Select(id) if id == "check" => {
-                    view::busy("Checking clang, the macOS SDK, the linker and git");
-                    if runtime::system_tools_ready().is_err() {
-                        view::message(text("Still not ready.", WARN));
-                    }
-                }
-                Nav::Select(_) | Nav::Back | Nav::Quit => return Ok(false),
-                Nav::Refresh | Nav::Key(..) => {}
+                Some("check again") => view::busy("Checking clang, the macOS SDK, the linker and git"),
+                _ => return Ok(false),
             }
+            again = "Still not ready. ";
         }
     }
     /// An NVIDIA card without the toolkit: CUDA joins the build tools.
@@ -1590,23 +1522,21 @@ impl Setup {
             } else {
                 selected.release()?
             };
-            let ready = selected.install_compiler(&release)?;
-            Ok::<_, String>((release, ready))
+            let components = selected.prepare_compiler(&release)?;
+            Ok::<_, String>((release, components))
         })();
         let _ = fs::write(self.root.join("selected-app"), &self.app);
         self.adopt(app, selected.clone());
-        let (release, ready) = prepared?;
-        if !ready {
-            return Ok(());
-        }
-        if !selected.ready().compiler() {
+        let (release, components) = prepared?;
+        let Some(components) = components else { return Ok(()) };
+        if components.is_empty() && !selected.ready().compiler() {
             return Err(format!("The latest source requires Rust {}; it could not be set up.", release.rust));
         }
-        activity(&format!("Compiler ready. {} downloads and compiles in the background.", release.title));
+        activity(&format!("{} installs what it needs, downloads and compiles in the background.", release.title));
         let title = release.title.clone();
         let cuda_before = crate::cuda::kernels_failed(&self.root).is_some();
-        let starting = if release.installed(&self.root) { "compiling" } else { "downloading" };
-        let worker = Worker::start(starting, move || selected.compile_only(&release));
+        let starting = if !components.is_empty() { "installing" } else if release.installed(&self.root) { "compiling" } else { "downloading" };
+        let worker = Worker::start(starting, move || selected.compile_only(&release, &components));
         JOBS.with(|j| j.borrow_mut().build = Some(Build { app: app.into(), title, open, batch, stopping: false, cuda_before, worker }));
         publish();
         // Without a full-screen terminal (plain numbered menus) nothing
@@ -1623,8 +1553,15 @@ impl Setup {
     /// source when it is not here yet, then Cargo; the app is recorded as
     /// installed. Stopped between steps and inside downloads and Cargo when
     /// it is cancelled.
-    fn compile_only(&mut self, release: &Release) -> Result<(), String> {
+    fn compile_only(&mut self, release: &Release, components: &[Dependency]) -> Result<(), String> {
         let stop = || if crate::cancelled() { Err(crate::CANCELLED.to_owned()) } else { Ok(()) };
+        if !components.is_empty() {
+            self.install_components(release, components)?;
+            stop()?;
+            if !self.ready().compiler() {
+                return Err(format!("The latest source requires Rust {}; it could not be set up.", release.rust));
+            }
+        }
         // Say which snapshot builds, before anything downloads: shared
         // sources mean shared artifacts; a differing Makepad commit means
         // the dependencies compile again, and that is expected.
@@ -2099,14 +2036,6 @@ fn required_agreements() -> &'static [&'static str] {
 fn required_for(root: &Path) -> &'static [&'static str] {
     if cfg!(windows) && runtime::windows_chain(root) == WindowsChain::Gnu { &[] } else { required_agreements() }
 }
-/// Agreement rows: full name and host; Return opens the link.
-fn agreement_rows(ids: Option<&[&str]>) -> Vec<Row> {
-    agreements()
-        .into_iter()
-        .filter(|(id, _, _)| ids.is_none_or(|ids| ids.contains(id)))
-        .map(|(id, name, url)| item(format!("url:{id}"), format!("{name:<36}"), "", text(host(url), DIM), "open in browser"))
-        .collect()
-}
 
 /// Return on an agreement row: open it and confirm on the status line.
 fn open_agreement(id: &str) {
@@ -2114,6 +2043,25 @@ fn open_agreement(id: &str) {
     match open_url(url) {
         Ok(()) => view::message(done(format!("Opened {} in your browser.", url.trim_start_matches("https://")))),
         Err(error) => view::warn(&error),
+    }
+}
+
+/// The agreements a question is about, by name and host, for its note.
+fn agreements_note(ids: &[&str]) -> String {
+    let names: Vec<String> = agreements().into_iter().filter(|(id, _, _)| ids.contains(id)).map(|(_, name, url)| format!("{name} ({})", host(url))).collect();
+    format!("Agreements: {}.", names.join(", "))
+}
+/// "read the agreements": each one opens in the browser.
+fn open_agreements(ids: &[&str]) {
+    let mut failed = None;
+    for (_, _, url) in agreements().into_iter().filter(|(id, _, _)| ids.contains(id)) {
+        if let Err(error) = open_url(url) {
+            failed = Some(error);
+        }
+    }
+    match failed {
+        Some(error) => view::warn(&error),
+        None => view::message(done("The agreements opened in your browser.")),
     }
 }
 
@@ -2704,15 +2652,6 @@ mod console {
     pub fn light_background() -> bool {
         super::colorfgbg_light().unwrap_or(false)
     }
-    /// Throw away keys typed while no menu was reading them.
-    pub fn drain() {
-        for _ in 0..4096 {
-            if unsafe { _kbhit() } == 0 {
-                break;
-            }
-            unsafe { _getwch() };
-        }
-    }
     pub fn key() -> Result<Key, String> {
         // Returning periodically lets the caller redraw after a ConPTY resize.
         for _ in 0..5 {
@@ -2863,14 +2802,6 @@ mod console {
         let mut parts = rgb.split('/');
         let (r, g, b) = (channel(parts.next()), channel(parts.next()), channel(parts.next()));
         0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
-    }
-    /// Throw away keys typed while no menu was reading them.
-    pub fn drain() {
-        for _ in 0..4096 {
-            if !waiting(0) || byte().is_none() {
-                break;
-            }
-        }
     }
     pub fn key() -> Result<Key, String> {
         // Poll, so a quiet terminal returns Other for redraws and child
