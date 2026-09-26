@@ -1,12 +1,13 @@
 use makepad_map_build::repack::{
-    repack_archive, repack_status, RepackOptions, ShardRange, TileSelection,
+    repack_archive, repack_in_place, repack_status, InPlaceOptions, RepackOptions, ShardRange,
+    TileSelection,
 };
 use makepad_mbtile_reader::mkmap_tile_id;
 use std::collections::BTreeSet;
 use std::env;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: makepad-map-repack <in.mkmap dir> <out dir> [--tiles <hilbert range | z/x/y list>] [--jobs N] [--brotli-quality Q] [--resume] [--verify [--shards A..B]] [--status] [--log FILE] [--dry-run]\nDefaults: all available cores, Brotli q11, progress log <out>/repack.log; A..B is half-open.";
+const USAGE: &str = "Usage: makepad-map-repack <in.mkmap dir> <out dir> [--tiles <hilbert range | z/x/y list>] [--jobs N] [--brotli-quality Q] [--resume] [--verify [--shards A..B]] [--status] [--log FILE] [--dry-run]\n\n       makepad-map-repack <archive.mkmap dir> --in-place [--jobs N] [--brotli-quality Q] [--log FILE] [--dry-run] [--max-stash-mib M] [--remote user@host:/abs/archive.mkmap --streams S]\nDefaults: all available cores, Brotli q11, progress log <out>/repack.log; A..B is half-open.\nWith --remote the positional dir is a local mirror/work dir and the archive is converted on the remote host over ssh.\n--in-place rewrites the archive shard by shard over itself (needs room for one shard plus the cross-shard stash; resumable; do not serve the directory while it runs).";
 
 fn parse_selection(value: &str) -> Result<TileSelection, String> {
     if value.contains('/') {
@@ -87,6 +88,9 @@ fn run() -> Result<(), String> {
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         println!("{USAGE}");
         return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--in-place") {
+        return run_in_place(&args);
     }
     if args.len() < 2 || args[0].starts_with('-') || args[1].starts_with('-') {
         return Err(USAGE.to_string());
@@ -189,6 +193,88 @@ fn run() -> Result<(), String> {
         options.log = Some(options.output.join("repack.log"));
     }
     repack_archive(&options).map(|_| ())
+}
+
+fn run_in_place(args: &[String]) -> Result<(), String> {
+    if args.is_empty() || args[0].starts_with('-') {
+        return Err(USAGE.to_string());
+    }
+    let archive = PathBuf::from(&args[0]);
+    let mut options = InPlaceOptions {
+        log: Some(archive.join("repack.log")),
+        archive,
+        jobs: std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1),
+        brotli_quality: 11,
+        dry_run: false,
+        max_stash_bytes: 8 << 30,
+    };
+    let mut remote: Option<String> = None;
+    let mut streams = 4_usize;
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1);
+        match args[index].as_str() {
+            "--remote" => remote = Some(value.ok_or("--remote requires user@host:/dir")?.clone()),
+            "--streams" => {
+                streams = value
+                    .ok_or("--streams requires a value")?
+                    .parse()
+                    .map_err(|err| format!("invalid --streams: {err}"))?;
+            }
+            "--in-place" => {
+                index += 1;
+                continue;
+            }
+            "--dry-run" => {
+                options.dry_run = true;
+                options.log = None;
+                index += 1;
+                continue;
+            }
+            "--jobs" => {
+                options.jobs = value
+                    .ok_or("--jobs requires a value")?
+                    .parse()
+                    .map_err(|err| format!("invalid --jobs: {err}"))?;
+            }
+            "--brotli-quality" => {
+                options.brotli_quality = value
+                    .ok_or("--brotli-quality requires a value")?
+                    .parse()
+                    .map_err(|err| format!("invalid --brotli-quality: {err}"))?;
+            }
+            "--log" => options.log = Some(PathBuf::from(value.ok_or("--log requires a value")?)),
+            "--max-stash-mib" => {
+                let mib: u64 = value
+                    .ok_or("--max-stash-mib requires a value")?
+                    .parse()
+                    .map_err(|err| format!("invalid --max-stash-mib: {err}"))?;
+                options.max_stash_bytes = mib << 20;
+            }
+            other => return Err(format!("unknown argument '{other}' for --in-place\n{USAGE}")),
+        }
+        index += 2;
+    }
+    match remote {
+        Some(target) => {
+            let (ssh, dir) = target
+                .split_once(':')
+                .ok_or("--remote must be user@host:/abs/archive.mkmap")?;
+            let mut host = makepad_map_build::repack_remote::RemoteHost::connect(
+                ssh,
+                dir,
+                &options.archive,
+                streams,
+            )?;
+            repack_in_place(&options, &mut host).map(|_| ())
+        }
+        None => {
+            let mut host = makepad_map_build::repack::LocalHost { dir: options.archive.clone() };
+            repack_in_place(&options, &mut host).map(|_| ())
+        }
+    }
 }
 
 fn main() {

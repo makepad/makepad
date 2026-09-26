@@ -1425,6 +1425,18 @@ impl MatchEvent for App {
         // Debug: /tmp/mp_start_cam holds "lon lat zoom [rot] [tilt]" — boot
         // straight into a benchmark viewport (env vars don't reach
         // studio-launched runs; the file does).
+        // /tmp/mp_start_source holds a hosted .mkmap root URL or a local
+        // archive path, replacing the compiled-in sources for that run.
+        if let Ok(text) = std::fs::read_to_string("/tmp/mp_start_source") {
+            let source = text.trim();
+            if source.starts_with("http://") || source.starts_with("https://") {
+                self.map(cx)
+                    .set_source_config(cx, TileSourceConfig::http_archive(source));
+            } else if !source.is_empty() {
+                self.map(cx)
+                    .set_source_config(cx, TileSourceConfig::local_archive(source));
+            }
+        }
         if let Ok(text) = std::fs::read_to_string("/tmp/mp_start_cam") {
             let vals: Vec<f64> = text
                 .split_whitespace()
