@@ -1344,6 +1344,13 @@ fn run_build_logged(command: &mut Command, log: &Path, expected: &AtomicU64, qui
             if status.success() { progress::stage("Ready", "Release build complete", 1.0); }
             return Ok(BuildRun { status, crates: crates + fresh, stalled: false });
         }
+        // Stopped from the menu: Cargo and every compiler it started end
+        // here; what compiled so far stays in the target for next time.
+        if crate::cancelled() {
+            let mut stopped = child.0.take().unwrap();
+            kill_tree(&mut stopped, job.as_ref());
+            return Err(crate::CANCELLED.into());
+        }
         if quiet.is_some_and(|quiet| heard.elapsed() > quiet) {
             let mut stopped = child.0.take().unwrap();
             kill_tree(&mut stopped, job.as_ref());

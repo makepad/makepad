@@ -210,6 +210,11 @@ pub fn request_no_redirect(req: Request) -> Result<Response, Error> {
                 progress(loaded, total);
             }
         }
+        if crate::cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Other(crate::CANCELLED.into()));
+        }
         if start.elapsed() > req.limits.total_timeout + Duration::from_secs(5) {
             let _ = child.kill();
             let _ = child.wait();

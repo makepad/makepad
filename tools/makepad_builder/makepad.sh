@@ -1224,10 +1224,14 @@ run_cargo_build() { # run_cargo_build APP THREADS -> status; ba_stalled
     done
     wait "$rb_pid"
 }
-# Background jobs ignore Ctrl+C; stopping one stops its children too.
+# Background jobs ignore Ctrl+C; stopping one stops its children too. Each
+# process is paused first, so it cannot start another while its children
+# are stopped, then ended.
 kill_tree() {
+    kill -STOP "$1" 2>/dev/null || :
     for kt_child in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$kt_child"; done
     kill -TERM "$1" 2>/dev/null || :
+    kill -CONT "$1" 2>/dev/null || :
 }
 
 # publish_app: the built executable as builder/<binary>.bin with the map
@@ -1774,12 +1778,14 @@ exec 3<>/dev/tty || die 'The Makepad Builder needs an interactive terminal.'
 exec 1>&3
 tui=1
 e=$(printf '\033')
-dim="${e}[2m" b="${e}[1m" ok="${e}[32m" acc="${e}[36m" warn="${e}[33m" red="${e}[31m" inv="${e}[7m" r0="${e}[0m"
+dim="${e}[2m" b="${e}[1m" ok="${e}[32m" acc="${e}[38;2;255;92;57m" warn="${e}[33m" red="${e}[31m" inv="${e}[7m" r0="${e}[0m"
 # Makepad orange: the ▌ on the selected row and the filled part of progress
 # bars; never a background or an action. The
 # selection band and the logo behind the rows are faint greys, for a dark or
 # a light background (asked once at the start, see light_background).
 mark="${e}[38;2;255;92;57m"
+# A key letter in the footer (c cancel, s start when done): bold orange.
+key_c="${e}[1;38;2;255;92;57m"
 band_dark="${e}[48;2;42;44;48m" band_light="${e}[48;2;228;229;231m"
 logo_dark="${e}[38;2;44;47;52m" logo_light="${e}[38;2;226;227;229m"
 band=$band_dark logo_color=$logo_dark
@@ -1820,7 +1826,7 @@ screen_off() { stty "$tty_saved" <&3 2>/dev/null || :; printf '%s[?25h%s[?1049l%
 # the next run.
 on_exit() {
     oe_status=$?
-    for oe_pid in $running_jobs; do kill_tree "$oe_pid"; done
+    for oe_pid in $running_jobs ${b_pid:-} ${u_pid:-}; do kill_tree "$oe_pid"; done
     screen_off
     if [ -n "${quiet_exit:-}" ]; then printf '%s\n' "$quiet_exit"
     elif [ "$oe_status" = 0 ]; then
@@ -1869,7 +1875,23 @@ key_cr=$(printf '\r') key_del=$(printf '\177') key_bs=$(printf '\010') key_nak=$
 # takes it, so no process runs while the Builder waits; only a system
 # without bash at all reads one byte at a time with dd. Polling (a measurement still
 # running) returns key=none after about a second.
-key_read() { # key_read COUNT WAIT -> kr (WAIT: 0 blocks, else seconds)
+key_read() { # key_read COUNT WAIT -> kr (WAIT: 0 blocks, tick a fifth of a second, else seconds)
+    if [ "$2" = tick ]; then
+        # bash 4 reads with a fractional timeout; bash 3.2 (macOS) and
+        # plain sh let the terminal time the read out instead.
+        if [ "${BASH_VERSINFO:-0}" -ge 4 ] 2>/dev/null; then
+            kr=
+            IFS= read -rsn "$1" -d '' -t 0.2 kr <&3; kr_status=$?
+            [ "$kr_status" -le 128 ] || kr_status=142
+            return "$kr_status"
+        fi
+        stty min 0 time 2 <&3 2>/dev/null
+        kr=$(dd bs=1 count="$1" <&3 2>/dev/null; printf x)
+        kr=${kr%x}
+        stty min 1 time 0 <&3 2>/dev/null
+        [ -n "$kr" ] || return 142
+        return 0
+    fi
     if [ -n "${BASH_VERSION:-}" ]; then
         kr=
         if [ "$2" = 0 ]; then IFS= read -rsn "$1" -d '' kr <&3; kr_status=$?
@@ -1886,8 +1908,19 @@ key_read() { # key_read COUNT WAIT -> kr (WAIT: 0 blocks, else seconds)
     [ -n "$kr" ] || { [ "$2" = 0 ] && return 1; return 142; }
 }
 key() {
-    kw=0; [ "$polling" != 1 ] || kw=1
-    key_read 1 "$kw" || { [ "$?" = 142 ] && { key=none; return; }; exit 1; }
+    # Idle, the menu still looks up once a second (a resized window is
+    # drawn again); while work runs, a few times a second.
+    kw=0; [ "$polling" != 1 ] || kw=tick; [ "$polling" != idle ] || kw=1
+    # A timed wait also ends early when the window is resized (bash 3.2
+    # reports that like closed input); only input that keeps failing at
+    # once is closed.
+    key_read 1 "$kw" || {
+        kr_status=$?
+        if [ "$kr_status" = 142 ]; then key_fails=0; key=none; return; fi
+        if [ "$kw" != 0 ] && [ "${key_fails:-0}" -lt 50 ]; then key_fails=$((${key_fails:-0} + 1)); key=none; return; fi
+        exit 1
+    }
+    key_fails=0
     k=$kr
     case "$k" in
         "$e")
@@ -1911,7 +1944,6 @@ screen_meta() {
     back=1 crumb= sub=
     case "$screen" in
         main) back=0 sub='Shipped as source code, so your coding agent can customize everything.' ;;
-        free) crumb=' › Makepad experiments' sub='From our open source repository: experiments, not finished applications.' ;;
         terms) crumb=' › License agreements' sub='Return opens an agreement in your browser.' ;;
         consent) crumb=" › $consent_title" sub='Please read what you are agreeing to.' ;;
         work) crumb=" › $work_title" sub=$work_sub ;;
@@ -1928,7 +1960,6 @@ screen_meta() {
 screen_rows() {
     case "$screen" in
         main) main_rows ;;
-        free) free_rows ;;
         terms) terms_rows ;;
         consent) consent_rows ;;
         work) printf 'note|\n'; printf '%s' "$work_labels" | sed 's/^/step|/' ;;
@@ -1939,21 +1970,149 @@ screen_rows() {
         packages) packages_rows ;;
     esac
 }
-item_line() { # item_line NAME LICENSE STATUS ACTION SELECTED -> il
-    pad "$1" 15
-    if [ "$5" = 1 ]; then il="  ${mark}▌${r0} ${b}${padded}${r0} "; else il="    ${padded} "; fi
+# item_line NAME LICENSE STATUS ACTION SELECTED CHILD -> il. A row of an
+# open node (CHILD 1) sits two columns in with a name column two shorter;
+# on the main screen every row has the license column, so the statuses
+# line up.
+item_line() {
+    if [ "${6:-0}" = 1 ]; then il_in='  '; pad "$1" 13; else il_in=; pad "$1" 15; fi
+    if [ "$5" = 1 ]; then il="  ${mark}▌${r0} ${il_in}${b}${padded}${r0} "; else il="    ${il_in}${padded} "; fi
     case "$2" in
-        commercial) il="${il}${b}commercial license  ${r0}" ;;
-        beta) il="${il}${warn}beta access         ${r0}" ;;
-        free) il="${il}${dim}free, open source   ${r0}" ;;
+        commercial) il="${il}licensed  " ;;
+        beta) il="${il}${warn}beta      ${r0}" ;;
+        free) il="${il}${dim}free      ${r0}" ;;
+        *) [ "$screen" != main ] || il="${il}          " ;;
     esac
     il="${il}$3"
     if [ "$5" = 1 ]; then
         if [ "$4" = = ]; then il="${il} ${ok}⏎${r0}"
         elif [ -n "$4" ]; then
-            if [ -z "$3" ] && [ -z "$2" ]; then il="${il}${ok}$4 ⏎${r0}"; else il="${il}  ${ok}$4 ⏎${r0}"; fi
+            if [ -z "$3" ]; then il="${il}${ok}$4 ⏎${r0}"; else il="${il}  ${ok}$4 ⏎${r0}"; fi
         fi
     fi
+}
+spin_frame=0
+# spin -> spin_c: the spinner's frame, one step per redraw.
+spin() {
+    case $((spin_frame % 10)) in 0) spin_c=⠋ ;; 1) spin_c=⠙ ;; 2) spin_c=⠹ ;; 3) spin_c=⠸ ;; 4) spin_c=⠼ ;; 5) spin_c=⠴ ;; 6) spin_c=⠦ ;; 7) spin_c=⠧ ;; 8) spin_c=⠇ ;; *) spin_c=⠏ ;; esac
+}
+# doing_text STEP-FILE DEFAULT -> ls: the spinner, what the work does now,
+# a short bar when its share is known and the amount (the Windows Builder
+# draws the same).
+doing_text() {
+    dt_state= dt_a=0 dt_b=0 dt_unit= dt_bytes=0 dt_doing=
+    IFS='|' read -r dt_state dt_a dt_b dt_unit dt_bytes dt_doing 2>/dev/null < "$1" || :
+    spin
+    ls="${acc}${spin_c}${r0} "
+    if [ "$dt_state" != now ]; then ls="$ls$2"; return 0; fi
+    case "$dt_doing" in resolving | '') dt_doing=compiling ;; downloading | compiling | finishing) ;; *) [ "$dt_unit" != MB ] || dt_doing=unpacking ;; esac
+    ls="$ls$dt_doing"
+    if [ "${dt_b:-0}" -gt 0 ] 2>/dev/null; then
+        dt_fill=$(( (dt_a * 12 + dt_b / 2) / dt_b )); [ "$dt_fill" -le 12 ] || dt_fill=12
+        dt_on= dt_off= dt_i=0
+        while [ "$dt_i" -lt 12 ]; do
+            if [ "$dt_i" -lt "$dt_fill" ]; then dt_on="${dt_on}━"; else dt_off="${dt_off}─"; fi
+            dt_i=$((dt_i + 1))
+        done
+        ls="$ls ${mark}${dt_on}${r0}${dim}${dt_off}${r0}"
+        if [ "$dt_unit" = crates ]; then ls="$ls ${dim}$dt_a / $dt_b crates${r0}"
+        elif [ "$dt_unit" = MB ] && [ "${dt_bytes:-0}" -gt 0 ]; then
+            ls="$ls ${dim}$((dt_a * dt_bytes / dt_b / 1048576)) / $((dt_bytes / 1048576)) MB${r0}"
+        fi
+    elif [ "$dt_unit" = crates ] && [ "${dt_a:-0}" -gt 0 ]; then
+        ls="$ls ${dim}$dt_a crates${r0}"
+    fi
+}
+# live_status ID -> ls: the row's status while background work involves it
+# (compiling or downloading with its progress, its place in the queue, the
+# update check); fails for any other row.
+live_status() {
+    ls=
+    case "$1" in
+        updates) [ -n "$u_pid" ] || return 1; doing_text "$steps_dir/_update" 'checking for updates…' ;;
+        app:*)
+            if [ -n "$b_pid" ] && [ "$1" = "app:$b_app" ]; then
+                if [ "$b_stopping" = 1 ]; then spin; ls="${acc}${spin_c}${r0} stopping…"
+                else doing_text "$steps_dir/_build" "$b_starting"; fi
+            else
+                queue_place "${1#app:}" || return 1
+                if [ "$qp" = 0 ]; then ls="${acc}◌${r0} queued ${dim}· next${r0}"
+                else ls="${acc}◌${r0} queued ${dim}· $((qp + 1)) to go${r0}"; fi
+            fi ;;
+        *) return 1 ;;
+    esac
+}
+# info_line ID INFO -> li: the line under the rule when no message shows:
+# what the selected row does, or, while an app compiles, what happens with it.
+info_line() {
+    li=$2
+    [ -n "$b_pid" ] || return 0
+    if [ "$1" = "app:$b_app" ]; then
+        if [ "$b_stopping" = 1 ]; then li='Stopping the compiler; what was downloaded and compiled is kept.'
+        elif [ "$b_open" = 1 ]; then li='Compiling from source. It opens by itself when it is done.'
+        else li='Compiling from source. It only compiles; press s or ⏎ to open it when done.'; fi
+    elif case "$1" in app:*) queue_place "${1#app:}" ;; *) false ;; esac; then
+        if [ "$qp_open" = 1 ]; then li="Queued behind $b_title; it compiles and opens after it."
+        else li="Queued behind $b_title; it only compiles. Press s or ⏎ to open it when done."; fi
+    elif [ "$b_stopping" = 1 ]; then li="${dim}$b_title is stopping.${r0}"
+    elif [ "$b_open" = 1 ]; then li="${dim}$b_title opens by itself when it is done compiling.${r0}"
+    else li="${dim}$b_title is compiling; it only compiles and does not open.${r0}"; fi
+}
+# menu_keys ID -> mk: the main menu's keys; s and c only where the selected
+# row has work to change, their letters in orange.
+menu_keys() {
+    mk_open= mk_cancel=
+    if [ -n "$b_pid" ] && [ "$1" = "app:$b_app" ]; then
+        [ "$b_stopping" = 1 ] || mk_open=$b_open mk_cancel=1
+    elif case "$1" in app:*) queue_place "${1#app:}" ;; *) false ;; esac; then
+        mk_open=$qp_open mk_cancel=1
+    elif [ "$1" = all ]; then
+        queue_batch
+        [ "$qb" = 0 ] || mk_cancel=1
+    fi
+    mk="${dim}↑↓ move   ⏎ select   ${r0}"
+    if [ "$mk_open" = 1 ]; then mk="${mk}${key_c}s${r0}${dim} don't start   ${r0}"
+    elif [ "$mk_open" = 0 ]; then mk="${mk}${key_c}s${r0}${dim} start when done   ${r0}"; fi
+    [ -z "$mk_cancel" ] || mk="${mk}${key_c}c${r0}${dim} cancel   ${r0}"
+    mk="${mk}${dim}q quit${r0}"
+}
+# wrap_status TEXT WIDTH -> ws_1 ws_2: a status line longer than WIDTH
+# broken at a space onto a second line (after a leading ✓ or ✗ the second
+# line starts under the text); what still does not fit ends in "…". Plain
+# sh (no bash) leaves it as it is.
+wrap_status() {
+    ws_1=$1 ws_2= ws_width=$2
+    [ -n "${BASH_VERSION:-}" ] || return 0
+    ws_plain=${1//$e\[*([0-9;])m/}
+    [ "${#ws_plain}" -gt "$2" ] || return 0
+    ws_hang=
+    case "$ws_plain" in '✓ '* | '✗ '*) ws_hang='  ' ;; esac
+    ws_1= ws_n=0 ws_line=1
+    set -f
+    # shellcheck disable=SC2086 # split into words on purpose
+    set -- $1
+    set +f
+    for ws_word in "$@"; do
+        ws_wp=${ws_word//$e\[*([0-9;])m/}
+        ws_add=${#ws_wp}; [ "$ws_n" = 0 ] || ws_add=$((ws_add + 1))
+        if [ "$ws_line" = 1 ] && [ $((ws_n + ws_add)) -gt "$ws_width" ] && [ "$ws_n" -gt 0 ]; then
+            ws_line=2 ws_n=${#ws_hang}
+            # The colour in force at the break carries over.
+            ws_tail=${ws_1##*"$e["}
+            ws_carry=
+            [ "$ws_tail" = "$ws_1" ] || { ws_code=${ws_tail%%m*}; [ "$ws_code" = 0 ] || ws_carry="$e[${ws_code}m"; }
+            ws_2="$ws_hang$ws_carry$ws_word" ws_n=$((ws_n + ${#ws_wp}))
+            continue
+        fi
+        if [ "$ws_line" = 2 ] && [ $((ws_n + ws_add)) -gt "$ws_width" ]; then ws_2="$ws_2…"; break; fi
+        if [ "$ws_line" = 1 ]; then
+            if [ "$ws_n" = 0 ]; then ws_1=$ws_word; else ws_1="$ws_1 $ws_word"; fi
+        else
+            ws_2="$ws_2 $ws_word"
+        fi
+        ws_n=$((ws_n + ws_add))
+    done
+    ws_1="$ws_1$r0" ws_2="$ws_2$r0"
 }
 # The line of a work step, from its state file.
 step_line() { # step_line LABEL -> sl
@@ -2021,8 +2180,8 @@ step_line() { # step_line LABEL -> sl
 # The selected row's "<action> ⏎" does not count (it moves with the
 # selection); where it reaches into the mark, the text wins. Plain sh (no
 # bash) draws no band and no mark.
-logo_lines() {
-    ll_out= ll_lines=$1 ll_band=$2
+logo_lines() { # logo_lines LINES BAND [SIZES] (the last line stays empty)
+    ll_out= ll_lines=$1 ll_band=$2 ll_sizes=${3:-big small}
     if [ -z "${BASH_VERSION:-}" ]; then
         while IFS= read -r ll_line; do ll_out="$ll_out$ll_line$e[K
 "; done <<EOF
@@ -2046,14 +2205,15 @@ EOF
     ll_cols=$(stty size <&3 2>/dev/null); ll_cols=${ll_cols#* }; ll_cols=${ll_cols:-80}
     [ "$ll_cols" -le 100 ] || ll_cols=100
     ll_art= ll_y0=-1 ll_x0=0
-    for ll_size in big small; do
+    ll_room=$((ll_count - 1))
+    for ll_size in $ll_sizes; do
         if [ "$ll_size" = big ]; then ll_h=13 ll_w=44 ll_ink=$logo_big_ink; else ll_h=9 ll_w=30 ll_ink=$logo_small_ink; fi
         ll_x0=$((ll_cols - 2 - ll_w))
-        [ "$ll_x0" -ge 30 ] && [ "$ll_h" -le "$ll_count" ] || continue
-        ll_mid=$(( (ll_count - ll_h) / 2 )) ll_d=0
-        while [ "$ll_d" -le "$ll_count" ]; do
+        [ "$ll_x0" -ge 30 ] && [ "$ll_h" -le "$ll_room" ] || continue
+        ll_mid=$(( (ll_room - ll_h) / 2 )) ll_d=0
+        while [ "$ll_d" -le "$ll_room" ]; do
             for ll_y in $((ll_mid - ll_d)) $((ll_mid + ll_d)); do
-                [ "$ll_y" -ge 0 ] && [ $((ll_y + ll_h)) -le "$ll_count" ] || continue
+                [ "$ll_y" -ge 0 ] && [ $((ll_y + ll_h)) -le "$ll_room" ] || continue
                 # shellcheck disable=SC2086
                 set -- $ll_clear
                 shift "$ll_y"
@@ -2127,8 +2287,14 @@ draw() {
     size
     screen_meta
     rows_out=$(screen_rows)
-    body= nbody=0 sel_line=-1 d_item=0 d_first=1
-    while IFS='|' read -r d_kind d_1 d_2 d_3 d_4 d_5; do
+    spin_frame=$((spin_frame + 1))
+    # The header, then the rows: everything above the footer scrolls as one.
+    # The email shows on the Account row, not in the header.
+    body="
+  ${b}Makepad${r0} Apps${crumb}
+  ${dim}${sub}${r0}
+" nbody=3 sel_line=-1 d_item=0 d_first=1 first_item=-1 item_lines= d_sel_id= d_info=
+    while IFS='|' read -r d_kind d_1 d_2 d_3 d_4 d_5 d_6; do
         case "$d_kind" in
             head)
                 if [ "$d_first" = 0 ] || [ "$back" = 0 ]; then body="$body
@@ -2139,11 +2305,16 @@ draw() {
 "; nbody=$((nbody + 1)) ;;
             step) step_line "$d_1"; body="$body$sl
 "; nbody=$((nbody + 1)) ;;
-            item)
+            item | sub)
                 if [ "$d_item" = 0 ] && [ "$back" = 1 ]; then body="$body
 "; nbody=$((nbody + 1)); fi
-                d_sel=0; [ "$d_item" != "$sel" ] || { d_sel=1; sel_line=$nbody; }
-                item_line "$d_2" "$d_3" "$d_4" "$d_5" "$d_sel"
+                [ "$first_item" -ge 0 ] || first_item=$nbody
+                item_lines="$item_lines $nbody"
+                d_sel=0; [ "$d_item" != "$sel" ] || { d_sel=1; sel_line=$nbody; d_sel_id=$d_1 d_info=$d_6; }
+                # Work in progress on the row: no action; its keys are in the footer.
+                if [ "$screen" = main ] && live_status "$d_1"; then d_4=$ls d_5=; fi
+                d_child=0; [ "$d_kind" != sub ] || d_child=1
+                item_line "$d_2" "$d_3" "$d_4" "$d_5" "$d_sel" "$d_child"
                 body="$body$il
 "; nbody=$((nbody + 1)); d_item=$((d_item + 1)) ;;
         esac
@@ -2152,56 +2323,80 @@ draw() {
 $rows_out
 EOF
     items=$d_item
-    room=$((height - 8 - back))
+    # The footer (the rule, two status lines, the keys) keeps the last four
+    # lines; one line above it stays empty or says what is scrolled away.
+    room=$((height - 5))
     [ "$room" -ge 3 ] || room=3
     if [ "$nbody" -le "$room" ]; then top=0; else
-        [ "$back" = 1 ] || room=$((room - 1))
         if [ "$sel_line" -ge 0 ]; then
+            # The first row brings the header back into view.
+            [ "$sel_line" -gt "$first_item" ] || top=0
             [ "$sel_line" -ge "$top" ] || top=$sel_line
             [ "$sel_line" -lt $((top + room)) ] || top=$((sel_line - room + 1))
         fi
         [ "$top" -le $((nbody - room)) ] || top=$((nbody - room))
     fi
-    # The email shows on the Account row, not in the header.
-    out="${e}[H${e}[K
-  ${b}Makepad${r0} Apps${crumb}${e}[K
-  ${dim}${sub}${r0}${e}[K
-"
-    # The rows shown, then the lines down to the rule; the selected row
-    # gets its band, and the logo is laid over the whole stretch.
-    d_i=0 d_shown=0 d_lines= d_band=-1
+    # The lines shown; the mark lies beside the rows, not the header.
+    d_i=0 d_shown=0 d_head= d_lines= d_band=-1 d_region=0
     while IFS= read -r d_line; do
-        if [ "$d_i" -ge "$top" ] && [ "$d_shown" -lt "$room" ]; then
-            [ "$d_i" != "$sel_line" ] || d_band=$d_shown
-            d_lines="$d_lines$d_line
+        if [ "$d_i" -ge "$top" ] && [ "$d_shown" -lt "$room" ] && [ "$d_i" -lt "$nbody" ]; then
+            if [ "$top" = 0 ] && [ "$d_i" -lt 3 ]; then
+                d_head="$d_head$d_line${e}[K
 "
+            else
+                [ "$d_i" != "$sel_line" ] || d_band=$d_region
+                d_lines="$d_lines$d_line
+"
+                d_region=$((d_region + 1))
+            fi
             d_shown=$((d_shown + 1))
         fi
         d_i=$((d_i + 1))
     done <<EOF
 $body
 EOF
+    d_last=' '
     if [ "$nbody" -gt "$room" ]; then
-        d_below=$((nbody - top - d_shown))
-        if [ "$d_below" -gt 0 ]; then d_lines="$d_lines    ${dim}↓ $d_below more${r0}
-"; else d_lines="$d_lines    ${dim}↑ $top above${r0}
-"; fi
-    elif [ "$back" = 1 ]; then d_lines="$d_lines
-"; fi
-    # The rule, status, choice and footer keep to the bottom of the window,
-    # so the mark has the height between them and the header.
-    d_n=$(printf '%s' "$d_lines" | wc -l | tr -d ' ')
-    while [ "$d_n" -lt $((height - 8)) ]; do d_lines="$d_lines
-"; d_n=$((d_n + 1)); done
-    logo_lines "$d_lines " "$d_band"
-    out="$out$ll_out"
+        d_above=0 d_below=0
+        for d_n in $item_lines; do
+            if [ "$d_n" -lt "$top" ]; then d_above=$((d_above + 1))
+            elif [ "$d_n" -ge $((top + room)) ]; then d_below=$((d_below + 1)); fi
+        done
+        if [ "$d_above" = 0 ]; then d_last="    ${dim}↓ $d_below more${r0}"
+        elif [ "$d_below" = 0 ]; then d_last="    ${dim}↑ $d_above above${r0}"
+        else d_last="    ${dim}↑ $d_above above · ↓ $d_below more${r0}"; fi
+    fi
+    # The mark sits beside the rows where the large or the small one fits,
+    # else the rule moves down just far enough for the small one (a short
+    # page like Log in gets it under its text), else there is none.
+    logo_lines "$d_lines$d_last" "$d_band"
+    if [ -n "${BASH_VERSION:-}" ] && [ -z "$ll_art" ]; then
+        d_more=$d_lines d_n=$d_shown
+        while [ "$d_n" -lt "$room" ]; do
+            d_more="$d_more
+"; d_n=$((d_n + 1))
+            logo_lines "$d_more$d_last" "$d_band" small
+            [ -z "$ll_art" ] || break
+        done
+        [ -n "$ll_art" ] || logo_lines "$d_lines$d_last" "$d_band"
+    fi
     d_rule=; d_i=4; while [ "$d_i" -lt "$width" ]; do d_rule="${d_rule}─"; d_i=$((d_i + 1)); done
-    out="$out  ${dim}${d_rule}${r0}${e}[K
-  ${message}${e}[K
-  ${choice}${e}[K
-  ${dim}${footer_override:-$default_footer}${r0}${e}[K
-${e}[J"
-    printf '%s' "$out"
+    # A status message longer than the line goes on onto the choice line
+    # when that is free. With no message, the main menu says what the
+    # selected row does; its keys depend on the row too.
+    d_message=$message d_footer=${footer_override:-$default_footer}
+    if [ "$screen" = main ] && [ -z "$footer_override" ]; then
+        [ -n "$message" ] || [ -n "$choice" ] || { info_line "$d_sel_id" "$d_info"; d_message=$li; }
+        menu_keys "$d_sel_id"; d_footer=$mk
+    else
+        d_footer="${dim}${d_footer}${r0}"
+    fi
+    d_choice=$choice
+    if [ -z "$choice" ]; then wrap_status "$d_message" $((width - 4)); d_message=$ws_1 d_choice=$ws_2; fi
+    printf '%s' "${e}[H$d_head$ll_out  ${dim}${d_rule}${r0}${e}[K
+  ${d_message}${e}[K
+  ${d_choice}${e}[K
+  ${d_footer}${e}[K${e}[J"
 }
 # The work page's steps, redrawn in place about ten times a second.
 work_redraw() {
@@ -2279,8 +2474,8 @@ edit() {
     return 0
 }
 select_row() {
-    sr_row=$(printf '%s\n' "$rows_out" | grep '^item|' | sed -n "$((sel + 1))p")
-    IFS='|' read -r sr_kind id title sr_lic sr_status action <<EOF
+    sr_row=$(printf '%s\n' "$rows_out" | grep -E '^(item|sub)\|' | sed -n "$((sel + 1))p")
+    IFS='|' read -r sr_kind id title sr_lic sr_status action sr_info <<EOF
 $sr_row
 EOF
 }
@@ -2524,23 +2719,36 @@ scan() {
         rel_load "$root/available/$sc_id.json" 2>/dev/null || continue
         state_texts "$state" "$rel_bytes"
         if ! rel_supported; then st_text="${dim}not available for this platform yet${r0}" st_act=; fi
+        if is_stopped "$sc_id"; then st_text="${warn}stopped · continue${r0}" st_act='compile and run'; fi
+        app_info "$sc_id" "$state"
         sc_lic=commercial; [ "$rel_license" != beta ] || sc_lic=beta
-        m_license_rows="${m_license_rows}item|app:$sc_id|$rel_title|$sc_lic|$st_text|$st_act
+        m_license_rows="${m_license_rows}item|app:$sc_id|$rel_title|$sc_lic|$st_text|$st_act|$ai
 "
     done
-    m_free_rows= m_free_total=0 m_free_ready=0
+    m_free_rows= m_free_total=0 m_free_ready=0 m_free_todo=
     sc_free=$(free_apps)
     while IFS='|' read -r sc_id sc_title; do
         [ -n "$sc_id" ] || continue
         app_state "$sc_id"
         m_free_total=$((m_free_total + 1))
+        # One shared Makepad download: rows show only readiness; the action
+        # appears on the selected row.
         case "$state" in
             ready) m_free_ready=$((m_free_ready + 1)); sc_st="${ok}✓${r0} ready" sc_act=run ;;
             compile) sc_st='needs compiling' sc_act=compile ;;
             merge) sc_st="${warn}updated · your changes to merge${r0}" sc_act='merge with agent' ;;
             *) sc_st= sc_act=download ;;
         esac
-        m_free_rows="${m_free_rows}item|app:$sc_id|$sc_title||$sc_st|$sc_act
+        if is_stopped "$sc_id"; then sc_st="${warn}stopped · continue${r0}" sc_act='compile and run'; fi
+        # What Compile all queues: every one that is not ready.
+        case "$state" in
+            ready | merge) if is_stopped "$sc_id"; then m_free_todo="$m_free_todo$sc_id|$sc_title
+"; fi ;;
+            *) m_free_todo="$m_free_todo$sc_id|$sc_title
+" ;;
+        esac
+        app_info "$sc_id" "$state"
+        m_free_rows="${m_free_rows}sub|app:$sc_id|$sc_title||$sc_st|$sc_act|$ai
 "
     done <<EOF
 $sc_free
@@ -2612,21 +2820,92 @@ main_rows() {
         printf 'item|disk|Disk||%smeasuring…%s|\n' "$dim" "$r0"
     fi
 }
-free_rows() {
+main_rows() {
+    # Update sits above everything; the menu still opens on the first app.
     printf 'note|\n'
-    if [ "$m_public_ready" = 1 ]; then printf 'note|%sEach one compiles the first time you run it.%s\n' "$dim" "$r0"
-    else printf 'note|%sOne %s MB download covers them all; each compiles on first run.%s\n' "$dim" "${m_public_mb:-0}" "$r0"; fi
-    printf '%s' "$m_free_rows"
+    mr_info='Checks your licenses and downloads newer sources of your apps.'
+    case "$checked" in
+        '') printf 'item|updates|Update||%scheck for updates%s|=|%s\n' "$dim" "$r0" "$mr_info" ;;
+        0*) printf 'item|updates|Update||%s✓%s up to date · %s|check again|%s\n' "$ok" "$r0" "${checked#* }" "$mr_info" ;;
+        *) printf 'item|updates|Update||updates downloaded · %s|check again|%s\n' "${checked#* }" "$mr_info" ;;
+    esac
+    printf 'head|YOUR APPS\n'
+    if [ -z "$email" ]; then printf 'item|login|Log in with your email address|||to see your licenses\n'
+    else
+        case "$lic_state" in
+            checking) printf 'note|%schecking licenses for %s…%s\n' "$dim" "$email" "$r0" ;;
+            ok) if [ -n "$m_license_rows" ]; then printf '%s' "$m_license_rows"; else printf 'note|%snone on this email yet · buy or request beta access at makepad.nl%s\n' "$dim" "$r0"; fi ;;
+            *) printf 'note|%slicenses not checked: %s%s\n' "$warn" "$lic_error" "$r0"; printf '%s' "$m_license_rows" ;;
+        esac
+    fi
+    printf 'head|MAKEPAD EXPERIMENTS\n'
+    # The Experiments node; open, Compile all and every experiment under it.
+    mr_about='Small open-source Makepad apps.'
+    [ "$m_public_ready" = 1 ] || mr_about="$mr_about One ${m_public_mb:-0} MB download covers them all."
+    mr_about="$mr_about ⏎ opens or closes the list."
+    if [ "$free_open" = 1 ]; then
+        printf 'item|free|▾ Experiments|free||close|%s\n' "$mr_about"
+        queue_batch
+        mr_batch=$qb
+        [ -z "$b_pid" ] || [ "$b_batch" != 1 ] || [ "$b_open" = 1 ] || mr_batch=$((mr_batch + 1))
+        mr_info='Queues every experiment that is not ready; each is compiled, not opened.'
+        if [ "$mr_batch" -gt 0 ]; then printf 'sub|all|Compile all||%s%s queued%s||%s\n' "$dim" "$mr_batch" "$r0" "$mr_info"
+        else printf 'sub|all|Compile all||%s%s not ready%s|queue all|%s\n' "$dim" "$((m_free_total - m_free_ready))" "$r0" "$mr_info"; fi
+        printf '%s' "$m_free_rows"
+    else
+        printf 'item|free|▸ Experiments|free|%s%s apps · %s ready%s|open|%s\n' "$dim" "$m_free_total" "$m_free_ready" "$r0" "$mr_about"
+    fi
+    printf 'head|CODING AGENTS\n'
+    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open|Ask it to change an app; it can rebuild them here.\n' "$mr_cmd" "$mr_title"; done
+    printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open|A shell in this folder; type exit to come back.\n" "$dim" "$r0"
+    printf 'head|SETUP\n'
+    mr_info='Log in, switch or log out.'
+    if [ -z "$email" ]; then printf 'item|account|Account||%snot logged in%s|log in|%s\n' "$warn" "$r0" "$mr_info"
+    else
+        case "$lic_state" in
+            ok) printf 'item|account|Account||%s✓%s %s|switch or log out|%s\n' "$ok" "$r0" "$email" "$mr_info" ;;
+            checking) printf 'item|account|Account||%s %schecking…%s|switch or log out|%s\n' "$email" "$dim" "$r0" "$mr_info" ;;
+            *) printf 'item|account|Account||%s %s· %s%s|switch or log out|%s\n' "$email" "$warn" "$lic_error" "$r0" "$mr_info" ;;
+        esac
+    fi
+    if [ "$plat" = linux ]; then
+        if [ -f "$root/graphics-notice-read" ]; then printf 'item|gpu|Graphics||%s✓%s driver notice read||The GPU driver notice.\n' "$ok" "$r0"
+        else printf 'item|gpu|Graphics||%sread the driver notice%s|read|The GPU driver notice.\n' "$warn" "$r0"; fi
+    fi
+    accepted_agreements
+    mr_info='The licenses you accepted; ⏎ opens them.'
+    if is_accepted makepad && is_accepted rust; then printf 'item|terms|Agreements||%s✓%s accepted %s· Makepad, Rust%s|read|%s\n' "$ok" "$r0" "$dim" "$r0" "$mr_info"
+    else printf 'item|terms|Agreements||%snot accepted%s|read|%s\n' "$warn" "$r0" "$mr_info"; fi
+    mr_info='Clearing build data keeps your apps; the next compile starts from scratch.'
+    if [ -f "$scratch/disk" ]; then
+        read -r mr_total mr_build < "$scratch/disk"
+        mr_gb=$(awk -v t="$mr_total" -v b="$mr_build" 'BEGIN { printf "%.1f %.1f", t / 1048576, b / 1048576 }')
+        if [ "${mr_build:-0}" -gt 0 ]; then printf 'item|disk|Disk||%s GB used %s· build %s GB%s|clear build data|%s\n' "${mr_gb% *}" "$dim" "${mr_gb#* }" "$r0" "$mr_info"
+        else printf 'item|disk|Disk||%s GB used||%s\n' "${mr_gb% *}" "$mr_info"; fi
+    else
+        printf 'item|disk|Disk||%smeasuring…%s||%s\n' "$dim" "$r0" "$mr_info"
+    fi
+}
+# app_info ID STATE -> ai: what Return does on an app's row.
+app_info() {
+    if is_stopped "$1"; then ai='Stopped; what was downloaded and compiled is kept. ⏎ continues.'; return 0; fi
+    case "$2" in
+        compile) ai='Compiles it from source and opens it.' ;;
+        update) ai='Downloads the new source, compiles it and opens it.' ;;
+        ready) ai='Built; ⏎ opens it.' ;;
+        merge) ai='Updated; a coding agent reapplies your saved changes.' ;;
+        *) ai='Downloads its source, compiles it and opens it.' ;;
+    esac
 }
 # The index of the item row with ID on the current screen.
 select_id() {
-    si_n=$(screen_rows | grep '^item|' | grep -n "^item|$1|" | head -n 1 | cut -d: -f1)
+    si_n=$(screen_rows | grep -E '^(item|sub)\|' | grep -nE "^(item|sub)\|$1\|" | head -n 1 | cut -d: -f1)
     [ -z "$si_n" ] || sel=$((si_n - 1))
 }
 # The menu starts on the first row of YOUR APPS. awk reads all of main_rows'
 # output (a reader that stops early would break its pipe).
 first_license_row() {
-    sel=$(main_rows | awk '/^head\|YOUR APPS/ { found = 1 } !found && /^item\|/ { n++ } END { print n + 0 }')
+    sel=$(main_rows | awk '/^head\|YOUR APPS/ { found = 1 } !found && /^(item|sub)\|/ { n++ } END { print n + 0 }')
 }
 measure_disk() {
     rm -f "$scratch/disk"
@@ -2946,72 +3225,285 @@ install_build_tools() {
 }
 
 # ------------------------------------------------------------------ apps ---
+# ------------------------------------------------------ background work ---
+# An app downloads and compiles in the background, on its own row, while
+# the menu stays usable: one at a time, the others queued ("app|open|batch|
+# title" lines; open: it opens when done, set by Return on its row and
+# turned off by s; batch: Compile all queued it). c cancels: the build's
+# process tree stops, what it downloaded and compiled stays, and the row
+# says "stopped · continue". The update check runs beside it.
+b_pid= b_app= b_title= b_open=0 b_batch=0 b_stopping=0 b_starting=
+u_pid= queue= stopped_apps= free_open=0
+is_stopped() { case " $stopped_apps " in *" $1 "*) return 0 ;; esac; return 1; }
+# queue_place APP -> qp (0 is next) and qp_open; fails when not queued.
+queue_place() {
+    qp=0
+    while IFS='|' read -r qp_app qp_open qp_batch qp_title; do
+        [ -n "$qp_app" ] || continue
+        [ "$qp_app" != "$1" ] || return 0
+        qp=$((qp + 1))
+    done <<EOF
+$queue
+EOF
+    return 1
+}
+# queue_batch -> qb: Compile all's apps that still wait to compile only.
+queue_batch() {
+    qb=0
+    while IFS='|' read -r qb_app qb_open qb_batch qb_title; do
+        [ "$qb_batch|$qb_open" != '1|0' ] || qb=$((qb + 1))
+    done <<EOF
+$queue
+EOF
+}
+# queue_edit APP open|toggle|remove: set its open flag (and it is no longer
+# part of Compile all's batch), flip it, or take it out.
+queue_edit() {
+    qe_new=
+    while IFS='|' read -r qe_app qe_open qe_batch qe_title; do
+        [ -n "$qe_app" ] || continue
+        if [ "$qe_app" = "$1" ]; then
+            case "$2" in
+                open) qe_open=1 qe_batch=0 ;;
+                toggle) qe_open=$((1 - qe_open)) ;;
+                remove) qe_removed=$qe_title; continue ;;
+            esac
+        fi
+        qe_new="$qe_new$qe_app|$qe_open|$qe_batch|$qe_title
+"
+    done <<EOF
+$queue
+EOF
+    queue=$qe_new
+}
+app_title() { # app_title ID -> at
+    at=$(free_apps | awk -F'|' -v id="$1" '$1 == id { print $2 }')
+    [ -n "$at" ] || { rel_load "$root/available/$1.json" 2>/dev/null && at=$rel_title; } || at=$1
+}
+
 # open_app ID: merge saved changes, run a built app, or download, compile
-# and run it on its work page, as every row does in the Windows Builder.
+# and open it in the background. Return on a row that is compiling or
+# queued asks it to open when it is done.
 open_app() {
     oa_id=$1
+    if [ -n "$b_pid" ] && [ "$b_app" = "$oa_id" ]; then b_open=1; return 0; fi
+    if queue_place "$oa_id"; then queue_edit "$oa_id" open; return 0; fi
     app_state "$oa_id"
     if [ "$state" = merge ]; then merge_changes "$oa_id"; return; fi
-    if [ "$state" = ready ]; then
+    if [ "$state" = ready ] && ! is_stopped "$oa_id"; then
         rel_load "$root/installed/$oa_id.json" && rel_dir
         busy "Opening $rel_title"
         launch_app
         launched_message "$rel_title"
         return
     fi
+    # One compiles at a time; the others wait their turn.
+    if [ -n "$b_pid" ]; then
+        app_title "$oa_id"
+        queue="$queue$oa_id|1|0|$at
+"
+        return 0
+    fi
+    start_build "$oa_id" 1 0
+}
+# compile_all: every experiment that is not ready joins the queue, to be
+# compiled only (Return on one of them makes it open when done).
+compile_all() {
+    ca_count=0
+    while IFS='|' read -r ca_id ca_title; do
+        [ -n "$ca_id" ] || continue
+        [ "$ca_id" != "$b_app" ] || [ -z "$b_pid" ] || continue
+        ! queue_place "$ca_id" || continue
+        queue="$queue$ca_id|0|1|$ca_title
+"
+        ca_count=$((ca_count + 1))
+    done <<EOF
+$m_free_todo
+EOF
+    if [ "$ca_count" = 0 ]; then message="${dim}Every experiment is ready or already queued.${r0}"; return 0; fi
+    if [ "$ca_count" = 1 ]; then message="${dim}Queued 1 experiment; each is compiled, not opened.${r0}"
+    else message="${dim}Queued $ca_count experiments; each is compiled, not opened.${r0}"; fi
+}
+# background_key c|s ID: c cancels the selected row's build or its place in
+# the queue (on Compile all, its queued apps); s flips whether it opens.
+background_key() {
+    bk_app=${2#app:}
+    case "$1" in
+        s)
+            if [ -n "$b_pid" ] && [ "$b_app" = "$bk_app" ] && [ "$b_stopping" = 0 ]; then b_open=$((1 - b_open))
+            elif queue_place "$bk_app"; then queue_edit "$bk_app" toggle; fi ;;
+        c)
+            if [ "$2" = all ]; then
+                bk_new= bk_gone=0
+                while IFS='|' read -r bk_q bk_open bk_batch bk_title; do
+                    [ -n "$bk_q" ] || continue
+                    if [ "$bk_batch|$bk_open" = '1|0' ]; then bk_gone=$((bk_gone + 1)); continue; fi
+                    bk_new="$bk_new$bk_q|$bk_open|$bk_batch|$bk_title
+"
+                done <<EOF
+$queue
+EOF
+                queue=$bk_new
+                if [ "$bk_gone" = 1 ]; then message="${dim}1 experiment is out of the queue.${r0}"
+                elif [ "$bk_gone" -gt 1 ]; then message="${dim}$bk_gone experiments are out of the queue.${r0}"; fi
+            elif [ -n "$b_pid" ] && [ "$b_app" = "$bk_app" ] && [ "$b_stopping" = 0 ]; then
+                # Its downloads and Cargo stop; the next queued app starts
+                # once they have.
+                b_stopping=1
+                kill_tree "$b_pid"
+                log "$b_title cancelled."
+                message="${warn}$b_title cancelled. What was downloaded and compiled is kept; select it to continue.${r0}"
+            elif queue_place "$bk_app"; then
+                queue_edit "$bk_app" remove
+                message="${dim}$qe_removed is out of the queue.${r0}"
+            fi ;;
+    esac
+}
+# start_build ID OPEN BATCH: first, here, what may need the person (the
+# build tools with their consent screens, the release, the email); then the
+# download and the compile as a background job.
+start_build() {
+    sb_app=$1
+    stopped_apps=$(printf '%s\n' $stopped_apps | grep -vx "$sb_app" | tr '\n' ' ' || :)
     install_build_tools || return 0
-    app_release_file "$oa_id" || release_file="$root/available/makepad.json"
-    rel_load "$release_file" || { message="${warn}$oa_id has no usable release; choose Update.${r0}"; return 0; }
+    app_release_file "$sb_app" || release_file="$root/available/makepad.json"
+    rel_load "$release_file" || { message="${warn}$sb_app has no usable release; choose Update.${r0}"; return 0; }
     rel_supported || { message="${warn}$rel_title is not available for this platform yet.${r0}"; return 0; }
     if [ "$rel_public" != true ]; then
         [ -n "$email" ] || { message="${warn}Log in with the email that has this app's license.${r0}"; return 0; }
         email_headers
     fi
-    oa_title=$rel_title
-    [ "$rel_id" != makepad ] || oa_title=$(free_apps | awk -F'|' -v id="$oa_id" '$1 == id { print $2 }')
+    sb_title=$rel_title
+    [ "$rel_id" != makepad ] || sb_title=$(free_apps | awk -F'|' -v id="$sb_app" '$1 == id { print $2 }')
     rust_ready "$rel_rust" || { message="${warn}The latest source requires Rust $rel_rust; it could not be set up.${r0}"; return 0; }
-    keep_edits "$oa_id" "$release_file"
-    rel_load "$release_file"
     source_labels
-    oa_steps=$(printf '%s' "$source_labels")
-    oa_sub='Your app is compiling from source, it will start when completed.'
-    IFS=$nl
-    # shellcheck disable=SC2086
-    set -- $oa_steps Compile Open
-    IFS=$ifs_default
-    work_begin "$oa_title" "$oa_sub" "$@"
-    log "$(describe_sources)"
-    if [ -n "$oa_steps" ]; then
-        checkout_jobs
-        if ! jobs_wait; then work_failure; work_end failed "${warn}${wf:-The download stopped.}${r0}"; scan; return 0; fi
+    if [ -n "$source_labels" ]; then b_starting=downloading; else b_starting=compiling; fi
+    # A stale checkout lock (a Builder that was closed mid-download) goes
+    # when nothing else runs.
+    [ -n "$u_pid" ] || rm -rf "$root/tmp/checkout.lock"
+    rm -f "$steps_dir/_build"
+    log "$sb_title downloads and compiles in the background."
+    ( build_job "$sb_app" ) </dev/null >/dev/null 2>>"$log_file" &
+    b_pid=$! b_app=$sb_app b_title=$sb_title b_open=$2 b_batch=$3 b_stopping=0
+}
+# checkout_wait STEP: download and check out the loaded release's missing
+# repositories (the job_pack jobs), one checkout at a time in the folder
+# (a build and an update may both want the same snapshot), with all of them
+# as one bar on STEP.
+checkout_wait() {
+    mkdir -p "$root/tmp"
+    until mkdir "$root/tmp/checkout.lock" 2>/dev/null; do
+        step "$1" 'now|0|0|MB|0|waiting'
+        sleep 0.3
+    done
+    rel_dir
+    cw_list=
+    while IFS='|' read -r v_name v_path v_commit v_sha v_bytes; do
+        [ -n "$v_name" ] || continue
+        repo_installed "$rel_directory" "$v_name" "$v_path" "$v_commit" && continue
+        cw_title=$(printf '%s' "$v_name" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')
+        step_key "$cw_title source"
+        rm -f "$steps_dir/$step_key"
+        cw_list="$cw_list$step_key|$v_bytes
+"
+    done <<EOF
+$rel_repos
+EOF
+    running_jobs=
+    checkout_jobs
+    cw_status=0
+    while :; do
+        cw_alive=
+        for cw_pid in $running_jobs; do kill -0 "$cw_pid" 2>/dev/null && cw_alive=1; done
+        cw_done=0 cw_total=0 cw_doing=unpacking cw_failed=
+        while IFS='|' read -r cw_key cw_bytes; do
+            [ -n "$cw_key" ] || continue
+            cw_state= cw_a=0
+            IFS='|' read -r cw_state cw_a cw_b cw_unit cw_mb cw_now 2>/dev/null < "$steps_dir/$cw_key" || :
+            cw_total=$((cw_total + 2 * cw_bytes))
+            case "$cw_state" in
+                now) cw_done=$((cw_done + cw_a)); [ "$cw_now" != downloading ] || cw_doing=downloading ;;
+                done) cw_done=$((cw_done + 2 * cw_bytes)) ;;
+                failed | held) cw_failed=${cw_failed:-$cw_a} ;;
+            esac
+        done <<EOF
+$cw_list
+EOF
+        step "$1" "now|$cw_done|$cw_total|MB|$((cw_total / 2))|$cw_doing"
+        [ -n "$cw_alive" ] || break
+        sleep 0.2
+    done
+    for cw_pid in $running_jobs; do wait "$cw_pid" || cw_status=1; done
+    running_jobs=
+    rmdir "$root/tmp/checkout.lock" 2>/dev/null || :
+    if [ -n "$cw_failed" ] || [ "$cw_status" != 0 ]; then
+        step_fail "$1" "${cw_failed:-The download stopped (see builder.log).}"
+        return 1
     fi
+}
+# build_job ID (background): the loaded release's source when it is not
+# here yet, then Cargo, with its progress on the step _build.
+build_job() {
+    bj_app=$1
+    log "$(describe_sources)"
+    keep_edits "$bj_app" "$release_file"
+    rel_load "$release_file"
+    checkout_wait _build || exit 1
     # A free app's package comes from the registry of the source it builds.
     if [ "$rel_id" = makepad ]; then
         load_registry
-        app_release_file "$oa_id" || { step_fail Compile "$oa_id is not in this Makepad release"; work_end failed; return 0; }
+        app_release_file "$bj_app" || { step_fail _build "$bj_app is not in this Makepad release"; exit 1; }
         rel_load "$release_file"
     fi
-    if [ "$release_file" = "$root/tmp/projected-$oa_id.json" ]; then
-        mkdir -p "$root/available"; cp "$release_file" "$root/available/$oa_id.json"; release_file="$root/available/$oa_id.json"
+    if [ "$release_file" = "$root/tmp/projected-$bj_app.json" ]; then
+        mkdir -p "$root/available"; cp "$release_file" "$root/available/$bj_app.json"; release_file="$root/available/$bj_app.json"
     fi
     rel_dir
     prepare_target
-    job_start job_compile Compile "$oa_id"
-    if ! jobs_wait; then work_failure; work_end failed "${warn}${wf:-The compile stopped.}${r0}"; scan; return 0; fi
-    step Open 'now|0|0|none|0|opening'
-    work_redraw
-    rel_load "$root/installed/$oa_id.json" && rel_dir
-    launch_app
-    oa_title=$rel_title
-    step Open 'done|running'
-    work_redraw
+    job_compile _build "$bj_app" || exit 1
     prune_snapshots || :
-    checked="0 $(date +%H:%M)"
+}
+# finish_build: the background build ended; open the app when it was asked
+# to, say so, and keep a cancelled one's row at "stopped · continue".
+finish_build() {
+    wait "$b_pid" 2>/dev/null || :
+    fb_state= fb_reason=
+    IFS='|' read -r fb_state fb_reason fb_rest 2>/dev/null < "$steps_dir/_build" || :
+    fb_app=$b_app fb_title=$b_title fb_open=$b_open fb_stopping=$b_stopping
+    b_pid= b_app= b_title= b_open=0 b_batch=0 b_stopping=0
     measure_disk
-    launched_message "$oa_title"
-    work_end ok "$message"
-    if [ -f "$root/changes/$oa_id.merge" ]; then message="${warn}$oa_title is updated. Your edits are in changes/; select it to merge.${r0}"; fi
+    if [ "$fb_stopping" = 1 ]; then
+        stopped_apps="$stopped_apps $fb_app"
+        log "$fb_title stopped; its downloads and compiled crates are kept."
+    elif [ "$fb_state" != done ]; then
+        message="${warn}$fb_title: ${fb_reason:-it stopped unexpectedly (see builder.log)}${r0}"
+    else
+        # Just downloaded and built: that is up to date, unless an update
+        # check meanwhile downloaded newer sources.
+        case "$checked" in 1*) ;; *) checked="0 $(date +%H:%M)" ;; esac
+        if [ "$fb_open" = 1 ]; then
+            rel_load "$root/installed/$fb_app.json" && rel_dir
+            launch_app
+            launched_message "$rel_title"
+            if [ -f "$root/changes/$fb_app.merge" ]; then message="${warn}$rel_title is updated. Your edits are in changes/; select it to merge.${r0}"; fi
+        else
+            message="${ok}✓${r0} $fb_title is compiled."
+        fi
+    fi
     scan
+}
+# service_background: work that ended reports on the status line, then the
+# next queued app starts (its preparation may ask something on the way).
+service_background() {
+    if [ -n "$u_pid" ] && ! kill -0 "$u_pid" 2>/dev/null; then finish_update; fi
+    if [ -n "$b_pid" ] && ! kill -0 "$b_pid" 2>/dev/null; then finish_build; fi
+    while [ -z "$b_pid" ] && [ -n "$queue" ]; do
+        IFS='|' read -r sv_app sv_open sv_batch sv_title <<EOF
+$queue
+EOF
+        queue=${queue#*"$nl"}
+        start_build "$sv_app" "$sv_open" "$sv_batch"
+    done
 }
 # One line for the log saying where the sources come from, so a full
 # recompile can be told apart from a shared build.
@@ -3108,15 +3600,20 @@ open_shell() {
 
 # ---------------------------------------------------------------- update ---
 # Licenses first (new purchases appear, expired ones go), then every
-# installed app is compared with its newest release: unchanged sources are
-# replaced by a clean download; edited ones are first saved as a diff.
+# installed app is compared with its newest release in the background, on
+# the Update row: unchanged sources are replaced by a clean download;
+# edited ones are first saved as a diff.
 check_updates() {
+    [ -z "$u_pid" ] || return 0
     consent Update 'Updates download the newest sources of your apps.' '' 'check for updates' makepad || { message="${dim}Nothing was downloaded.${r0}"; return 0; }
     licenses_now
-    work_begin Update 'Newer sources replace unchanged ones; your edits are kept as a diff.' 'Check for updates'
-    step 'Check for updates' 'now|0|0|none|0|checking'
-    work_redraw
-    if ! fetch_public; then step_fail 'Check for updates' "$public_error"; work_end failed "${warn}$public_error${r0}"; return 0; fi
+    [ -n "$b_pid" ] || rm -rf "$root/tmp/checkout.lock"
+    rm -f "$steps_dir/_update" "$scratch/update-result"
+    ( update_job ) </dev/null >/dev/null 2>>"$log_file" &
+    u_pid=$!
+}
+update_job() {
+    if ! fetch_public; then put "$scratch/update-result" "failed|$public_error"; exit 1; fi
     load_registry
     for cu_file in "$root"/available/*.json "$root"/installed/*.json; do
         [ -f "$cu_file" ] || continue
@@ -3125,8 +3622,6 @@ check_updates() {
         is_free "$cu_id" || continue
         project_public "$cu_id" "$root/available/$cu_id.json" || :
     done
-    step 'Check for updates' "done|licenses and releases checked"
-    work_redraw
     cu_updated= cu_merges= cu_started=
     for cu_file in "$root"/installed/*.json; do
         [ -f "$cu_file" ] || continue
@@ -3145,18 +3640,26 @@ check_updates() {
         cu_key="$rel_directory|$rel_repos"
         case "$cu_started" in *"<$cu_key>"*) cu_updated="$cu_updated${cu_updated:+, }$rel_title"; continue ;; esac
         cu_started="$cu_started<$cu_key>"
-        source_labels
-        while IFS= read -r cu_label; do [ -z "$cu_label" ] || work_add "$cu_label"; done <<EOF
-$source_labels
-EOF
-        checkout_jobs
+        if ! checkout_wait _update; then
+            IFS='|' read -r cu_state cu_reason 2>/dev/null < "$steps_dir/_update" || :
+            put "$scratch/update-result" "failed|${cu_reason:-The update stopped.}"
+            exit 1
+        fi
         cu_updated="$cu_updated${cu_updated:+, }$rel_title"
     done
-    if ! jobs_wait; then work_failure; work_end failed "${warn}${wf:-The update stopped.}${r0}"; scan; return 0; fi
+    put "$scratch/update-result" "ok|$cu_updated|$cu_merges"
+}
+finish_update() {
+    wait "$u_pid" 2>/dev/null || :
+    u_pid=
+    fu_state= fu_what= fu_merges=
+    IFS='|' read -r fu_state fu_what fu_merges 2>/dev/null < "$scratch/update-result" || :
     measure_disk
-    if [ -z "$cu_updated" ]; then checked="0 $(date +%H:%M)"; work_end ok "${ok}✓${r0} Licenses checked; everything is up to date."
-    elif [ -n "$cu_merges" ]; then checked="1 $(date +%H:%M)"; work_end ok "${ok}✓${r0} Updated $cu_updated. Your edits are saved in changes/; select to merge."
-    else checked="1 $(date +%H:%M)"; work_end ok "${ok}✓${r0} Updated $cu_updated. Each compiles on its next run."; fi
+    if [ "$fu_state" != ok ]; then message="${warn}${fu_what:-The update stopped (see builder.log).}${r0}"
+    elif [ -z "$fu_what" ]; then checked="0 $(date +%H:%M)"; message="${ok}✓${r0} Licenses checked; everything is up to date."
+    elif [ -n "$fu_merges" ]; then checked="1 $(date +%H:%M)"; message="${ok}✓${r0} Updated $fu_what. Your edits are saved in changes/; select to merge."
+    else checked="1 $(date +%H:%M)"; message="${ok}✓${r0} Updated $fu_what. Each compiles on its next run."; fi
+    load_registry
     scan
 }
 clear_build() {
@@ -3177,6 +3680,7 @@ for ag in 'claude|Claude Code' 'codex|Codex' 'grok|Grok'; do
 }$ag"; fi
 done
 lic_state=none lic_error= licensed_ids= checked= tools_problem= m_rust_ok=0 m_license_rows= m_free_rows= m_free_total=0 m_free_ready=0
+m_free_todo= m_public_ready=0 m_public_mb=0
 screen=main sel=0 top=0
 
 # Run again through curl | sh (not from the folder's own `makepad`): an
@@ -3257,8 +3761,18 @@ sel=0
 first_license_row
 
 while :; do
-    polling=0; [ -f "$scratch/disk" ] || polling=1
-    draw
+    # Finished work reports on the status line, and the next queued app
+    # starts; the screen redraws a few times a second while work runs.
+    service_background
+    polling=idle
+    if [ ! -f "$scratch/disk" ] || [ -n "$b_pid" ] || [ -n "$u_pid" ]; then polling=1; fi
+    if [ "$polling" = idle ] && [ "${key:-}" = none ]; then
+        ml_size=$(stty size <&3 2>/dev/null || :)
+        [ "$ml_size" = "${ml_drawn:-}" ] || { ml_drawn=$ml_size; draw; }
+    else
+        ml_drawn=$(stty size <&3 2>/dev/null || :)
+        draw
+    fi
     key
     [ "$key" = none ] && continue
     message=
@@ -3266,7 +3780,8 @@ while :; do
         up) [ "$items" = 0 ] || sel=$(( (sel + items - 1) % items )) ;;
         down) [ "$items" = 0 ] || sel=$(( (sel + 1) % items )) ;;
         q) exit 0 ;;
-        esc) if [ "$screen" = main ]; then exit 0; else screen=main sel=$free_back top=0; fi ;;
+        esc) exit 0 ;;
+        c | s) select_row; background_key "$key" "$id" ;;
         enter)
             select_row
             case "$screen/$id" in
@@ -3280,12 +3795,11 @@ while :; do
                     scan ;;
                 main/disk) clear_build ;;
                 main/updates) check_updates ;;
-                main/free) free_back=$sel screen=free sel=${free_sel:-0} top=0 ;;
+                main/free) free_open=$((1 - free_open)) ;;
+                main/all) compile_all ;;
                 main/agent-shell) open_shell ;;
                 main/agent-*) launch_agent "${id#agent-}" || : ;;
-                main/app:* | free/app:*)
-                    [ "$screen" != free ] || free_sel=$sel
-                    open_app "${id#app:}" ;;
+                main/app:*) open_app "${id#app:}" ;;
             esac ;;
     esac
 done
