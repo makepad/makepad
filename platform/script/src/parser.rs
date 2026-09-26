@@ -1304,6 +1304,7 @@ impl ScriptParser {
     }
 
     fn push_code(&mut self, code: ScriptValue, index: u32) {
+        debug_assert!(self.opcodes.len() < crate::value::ScriptIp::MAX_INDEX, "script body exceeds the opcodes ScriptIp can address");
         self.opcodes.push(code);
         self.source_map.push(Some(index));
     }

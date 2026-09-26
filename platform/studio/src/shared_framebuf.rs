@@ -2,6 +2,11 @@ use makepad_micro_serde::*;
 
 pub const SWAPCHAIN_IMAGE_COUNT: usize = match () {
     _ if cfg!(target_os = "linux") => 3,
+    // Android children draw into the host's AHardwareBuffers with no fence
+    // between the processes: a third image keeps the one being written two
+    // frames away from the one the desk samples (run_view paces the child
+    // to one frame per desk paint).
+    _ if cfg!(target_os = "android") => 3,
     _ if cfg!(target_os = "macos") => 1,
     _ if cfg!(target_os = "windows") => 2,
     _ => 2,
