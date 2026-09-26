@@ -1,10 +1,6 @@
 use std::io;
 
-#[cfg(target_os = "macos")]
-use crate::pty_spawn;
-#[cfg(target_os = "macos")]
-type UnixChild = pty_spawn::Child;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type UnixChild = std::process::Child;
 
 #[cfg(windows)]
@@ -267,14 +263,9 @@ impl Pty {
         env: &[(&str, &str)],
         cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
-        #[cfg(target_os = "macos")]
-        use std::os::fd::AsRawFd;
         use std::os::fd::FromRawFd;
-        #[cfg(target_os = "linux")]
         use std::os::unix::process::CommandExt;
-        use std::process::Command;
-        #[cfg(target_os = "linux")]
-        use std::process::Stdio;
+        use std::process::{Command, Stdio};
 
         let env_shell = env.iter().find_map(|(key, value)| {
             (*key == "SHELL" && !value.is_empty()).then(|| (*value).to_owned())
@@ -323,8 +314,9 @@ impl Pty {
         }
 
         // Make the spawned shell/session own the slave PTY as controlling terminal,
-        // so kernel SIGWINCH delivery works for foreground jobs on resize.
-        #[cfg(target_os = "linux")]
+        // so kernel SIGWINCH delivery works for foreground jobs on resize. Only
+        // setsid and ioctl run between fork and exec (both async-signal-safe),
+        // on macOS as on Linux: the terminal needs no helper binary.
         unsafe {
             cmd.pre_exec(move || {
                 if libc_ffi::setsid() == -1 {
@@ -337,9 +329,6 @@ impl Pty {
             });
         }
 
-        #[cfg(target_os = "macos")]
-        let child = pty_spawn::spawn(&cmd, slave_file.as_raw_fd(), &pty_spawn::screen_helper()?)?;
-        #[cfg(target_os = "linux")]
         let child = {
             cmd.stdin(Stdio::from(slave_file.try_clone()?));
             cmd.stdout(Stdio::from(slave_file.try_clone()?));
@@ -978,7 +967,6 @@ mod libc_ffi {
         pub fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
         pub fn ioctl(fd: i32, request: usize, ...) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-        #[cfg(target_os = "linux")]
         pub fn setsid() -> i32;
         pub fn killpg(pgrp: i32, sig: i32) -> i32;
     }
@@ -1014,6 +1002,8 @@ mod libc_ffi {
     pub const TIOCSWINSZ: usize = 0x80087467;
     #[cfg(target_os = "linux")]
     pub const TIOCSWINSZ: usize = 0x5414;
+    #[cfg(target_os = "macos")]
+    pub const TIOCSCTTY: usize = 0x20007461;
     #[cfg(target_os = "linux")]
     pub const TIOCSCTTY: usize = 0x540E;
 
