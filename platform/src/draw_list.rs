@@ -1345,6 +1345,28 @@ impl CxDrawListPool {
         }
         cleared
     }
+
+    /// The geometries the draw calls of every live draw list name: what the
+    /// backend can still paint, since a list that was not redrawn is painted
+    /// as it stands. Only each list's active items count (`draw_items.len()`;
+    /// slots past it are recording spares). A dropped `Geometry` is freed
+    /// only when it is not in this set (`CxGeometryPool::release_unreferenced`).
+    pub fn referenced_geometries(&self) -> HashSet<GeometryId> {
+        let mut referenced = HashSet::new();
+        for list in 0..self.0.pool.len() {
+            let generation = self.0.pool[list].generation;
+            if !self.0.is_live_generation(list, generation) {
+                continue;
+            }
+            let items = &self.0.pool[list].item.draw_items;
+            for index in 0..items.len() {
+                if let Some(geometry_id) = items[index].kind.draw_call().and_then(|call| call.geometry_id) {
+                    referenced.insert(geometry_id);
+                }
+            }
+        }
+        referenced
+    }
 }
 impl std::ops::Index<DrawListId> for CxDrawListPool {
     type Output = CxDrawList;
@@ -2265,6 +2287,8 @@ impl CxDrawItems {
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.texture_slots = Default::default();
                     call.uniform_buffer_slots = Default::default();
+                    // A spare must not pin a geometry (`referenced_geometries`).
+                    call.geometry_id = None;
                 }
                 item.shared = None;
             }

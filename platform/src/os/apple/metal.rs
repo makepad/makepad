@@ -136,8 +136,10 @@ fn map_metal_gpu_times_to_app_timeline(
 // Uses global IOSurface IDs which work across processes without needing Mach port transfer
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 use crate::os::apple::apple_sys::{
-    CFRelease, IOSurfaceCreate, IOSurfaceGetID, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
+    CFRelease, IOSurfaceID, IOSurfaceLookup, IOSurfaceRef,
 };
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use crate::os::apple::apple_sys::{IOSurfaceCreate, IOSurfaceGetID};
 
 impl Cx {
     fn total_drawcall_log_enabled() -> bool {
@@ -2716,6 +2718,8 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
     for staging in used {
         // Excess buffers are released on the completion thread. UI never
         // contends with this callback, nor frees a rejected pool return.
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if pool
             .count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -2725,6 +2729,8 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
         {
             continue;
         }
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if pool
             .bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bytes| {
@@ -5798,7 +5804,7 @@ impl CxTexture {
         staging_len as u64
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn update_shared_texture(&mut self, metal_device: ObjcId) -> IOSurfaceID {
         // we need a width/height for this one.
         if !self.alloc_shared() {

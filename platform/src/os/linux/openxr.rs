@@ -249,6 +249,15 @@ impl Cx {
         {
             self.os.xr_render_cpu_time_ms = saw_xr_vulkan_pass.then_some(xr_render_cpu_ms);
         }
+        // Offscreen passes without an XR view after them stay recorded in the
+        // repaint slot until submitted.
+        #[cfg(all(use_vulkan, target_os = "android"))]
+        if let Some(mut vulkan) = self.os.vulkan.take() {
+            if let Err(err) = vulkan.end_repaint() {
+                crate::error!("Android Vulkan repaint submit failed: {err}");
+            }
+            self.os.vulkan = Some(vulkan);
+        }
         #[cfg(not(use_vulkan))]
         {
             self.os.xr_render_cpu_time_ms = None;

@@ -1390,6 +1390,15 @@ impl Cx {
             }
         }
 
+        // The frame's recording boundary: every draw list has finished
+        // recording. The geometries dropped since the last redraw are freed
+        // now, except those a live draw call still names (see
+        // `CxGeometryPool`); the scan runs only when something was dropped.
+        if self.geometries.has_unreleased() {
+            let referenced = self.draw_lists.referenced_geometries();
+            self.geometries.release_unreferenced(&referenced);
+        }
+
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();
             self.try_send_studio_widget_snapshot_responses();
@@ -1543,8 +1552,12 @@ impl Cx {
     /// is replaced by it (a frame can only show the pointer's latest
     /// position). Everything else keeps its order, so a Down/Up/Scroll
     /// still sees the move that preceded it.
-    #[cfg(not(target_os = "android"))]
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(
+        gpusim,
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos")),
+    ))]
     #[cfg(any(not(linux_direct), use_vulkan))]
     pub(crate) fn stdin_coalesce_host_batch(msgs: &mut Vec<StudioToApp>) {
         let ticks = msgs
@@ -1586,8 +1599,11 @@ impl Cx {
     /// child that fell behind sees its whole backlog at once and can
     /// coalesce it. Returns true when the socket closed or failed; the
     /// caller dispatches what it has and then leaves its loop.
-    #[cfg(not(target_os = "android"))]
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos")),
+    ))]
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
     // The direct Vulkan loop drains inline (it also polls its GPU inbox
     // between batches); every blocking hosted loop uses this.

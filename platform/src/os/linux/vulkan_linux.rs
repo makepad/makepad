@@ -324,6 +324,8 @@ impl DesktopInit {
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
+            offscreen_draw_render_passes: HashMap::new(),
+            offscreen_framebuffers: HashMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
@@ -1134,7 +1136,7 @@ impl CxVulkan {
             Ok(bridge) => bridge,
             Err(error) => {
                 self.destroy_swapchain();
-                self.destroy_texture_resource(composition);
+                self.destroy_uncached_texture_resource(composition);
                 return Err(error);
             }
         };
@@ -1161,7 +1163,7 @@ impl CxVulkan {
         }
         unsafe { output.bridge.destroy(self, display) };
         self.destroy_swapchain();
-        self.destroy_texture_resource(output.composition);
+        self.destroy_uncached_texture_resource(output.composition);
     }
 
     pub(super) fn prepared_gpu_output_idle(
@@ -1207,7 +1209,7 @@ impl CxVulkan {
             // Old framebuffers/views must retire before their composition.
             old.destroy_swapchain();
             if let Some(composition) = routed.composition.take() {
-                old.destroy_texture_resource(composition);
+                old.destroy_uncached_texture_resource(composition);
             }
             (
                 routed.display,
@@ -2534,7 +2536,7 @@ impl CxVulkan {
             }
             let composition = self.install_composition_targets(targets);
             if let Some(old) = routed.composition.replace(composition) {
-                self.destroy_texture_resource(old);
+                self.destroy_uncached_texture_resource(old);
             }
             let mut direct = routed.display.desktop.direct.take().unwrap();
             routed
@@ -3501,15 +3503,15 @@ impl CxVulkan {
         let depth = match self.create_depth_target(extent.width, extent.height, depth_format) {
             Ok(depth) => depth,
             Err(err) => {
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
         let render_pass = match self.direct_create_composition_render_pass(depth_format) {
             Ok(render_pass) => render_pass,
             Err(err) => {
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
@@ -3528,8 +3530,8 @@ impl CxVulkan {
             Ok(framebuffer) => framebuffer,
             Err(e) => {
                 unsafe { self.device.destroy_render_pass(render_pass, None) };
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(format!("create composition framebuffer: {e:?}"));
             }
         };
@@ -3544,8 +3546,8 @@ impl CxVulkan {
                     self.device.destroy_framebuffer(framebuffer, None);
                     self.device.destroy_render_pass(render_pass, None);
                 }
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
@@ -3654,7 +3656,7 @@ impl CxVulkan {
         let extent = targets.extent;
         let resource = self.install_composition_targets(targets);
         if let Some(old) = direct.composition.replace(resource) {
-            self.destroy_texture_resource(old);
+            self.destroy_uncached_texture_resource(old);
         }
         direct.desktop_extent = extent;
         direct.composition_epoch += 1;
@@ -3686,8 +3688,8 @@ impl CxVulkan {
             self.device.destroy_buffer(targets.readback.buffer, None);
             self.device.free_memory(targets.readback.memory, None);
         }
-        self.destroy_texture_resource(targets.depth);
-        self.destroy_texture_resource(targets.resource);
+        self.destroy_uncached_texture_resource(targets.depth);
+        self.destroy_uncached_texture_resource(targets.resource);
     }
 
     /// Choose the render source and, when its mode differs from the desktop,
@@ -5291,7 +5293,7 @@ impl CxVulkan {
                 unsafe { bridge.destroy(self, &routed.display) };
             }
             if let Some(composition) = routed.composition.take() {
-                self.destroy_texture_resource(composition);
+                self.destroy_uncached_texture_resource(composition);
             }
             // Presenter Drop releases its WSI resources before either parent.
             drop(routed);
@@ -5356,7 +5358,7 @@ impl CxVulkan {
             }
         }
         if let Some(resource) = direct.composition.take() {
-            self.destroy_texture_resource(resource);
+            self.destroy_uncached_texture_resource(resource);
         }
         if let Some(blit) = direct.blit.take() {
             unsafe {

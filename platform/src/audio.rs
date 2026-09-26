@@ -111,6 +111,16 @@ impl AudioDevicesEvent {
         Vec::new()
     }
 
+    pub fn loopback_capture_order(&self) -> Vec<AudioDeviceId> {
+        let mut devices: Vec<&AudioDeviceDesc> = self
+            .descs
+            .iter()
+            .filter(|d| d.device_type.is_loopback() && !d.has_failed)
+            .collect();
+        devices.sort_by_key(|d| !d.is_default);
+        devices.iter().map(|d| d.device_id).collect()
+    }
+
     pub fn match_outputs(&self, outputs: &[&str]) -> Vec<AudioDeviceId> {
         let mut results = Vec::new();
         for d in &self.descs {
@@ -238,8 +248,8 @@ impl AudioBuffer {
         out.resize(self.data.len(), 0);
         for i in 0..self.data.len() {
             let f = (self.data[i] * 32767.0)
-                .max(std::i16::MIN as f32)
-                .min(std::i16::MAX as f32);
+                .max(i16::MIN as f32)
+                .min(i16::MAX as f32);
             out[i] = f as i16;
         }
         out

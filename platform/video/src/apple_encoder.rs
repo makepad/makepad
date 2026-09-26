@@ -134,7 +134,15 @@ pub struct MacosVideoFileEncoder {
 unsafe impl Send for MacosVideoFileEncoder {}
 
 impl MacosVideoFileEncoder {
-    pub fn new(path: &str, options: &VideoFileEncoderOptions) -> Result<Self, VideoFileError> {
+    /// `fragment_interval_secs`: the writer lays the movie down in
+    /// fragments that far apart (`movieFragmentInterval`), each one a
+    /// readable extension of the file, so a reader opening the path while
+    /// this encoder is still pushing sees everything fragmented so far.
+    pub fn new_with(
+        path: &str,
+        options: &VideoFileEncoderOptions,
+        fragment_interval_secs: Option<f64>,
+    ) -> Result<Self, VideoFileError> {
         // AVAssetWriter refuses to write over an existing file.
         let _ = std::fs::remove_file(path);
         let _pool = AutoreleasePool::new();
@@ -150,6 +158,14 @@ impl MacosVideoFileEncoder {
             ];
             if writer == nil {
                 return Err(nserror_to_video_error("AVAssetWriter init", error));
+            }
+            if let Some(secs) = fragment_interval_secs.filter(|secs| *secs > 0.0) {
+                // A fragmented movie: the header goes down first and every
+                // interval closes a fragment behind the frames, so the file
+                // is a movie a reader can open before `finish` writes the
+                // final index over it all.
+                let interval = hns_time((secs * HNS_PER_SECOND as f64) as i64);
+                let _: () = msg_send![writer, setMovieFragmentInterval: interval];
             }
 
             let (codec_type, codec_fourcc, codec_name) = match options.codec {

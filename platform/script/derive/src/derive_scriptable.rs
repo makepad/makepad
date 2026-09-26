@@ -180,7 +180,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .any(|a| a.name == "splat" || a.name == "walk" || a.name == "layout")
+                .any(|a| a.name == "script_splat" || a.name == "walk" || a.name == "layout")
             {
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
@@ -260,11 +260,11 @@ fn derive_script_impl_inner(
                     .ident(&field.name)
                     .add(".script_to_value_props(vm, obj);");
             }
-            // Also cascade walk/layout/splat fields' properties to the object
+            // Also cascade walk/layout/script_splat fields' properties to the object
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("self.")
@@ -397,7 +397,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("<")
@@ -627,6 +627,10 @@ fn derive_script_impl_inner(
                     tb.add("vm.bx.heap.set_value(enum_object, id!(")
                         .ident(&item.name)
                         .add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
+                    // Reflection needs the enum name as well as the variant's root id.
+                    tb.add("vm.bx.heap.set_value(bare, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("vm.bx.heap.freeze(bare);");
                 }
                 EnumKind::Tuple(args) => {
@@ -641,6 +645,9 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
+                    tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("    if vm.bx.heap.vec_len(args) != ")
                         .unsuf_usize(args.len())
                         .add("{");
@@ -697,6 +704,10 @@ fn derive_script_impl_inner(
                     tb.add("}");
                     tb.add("let ty_check = ScriptTypeCheck{props, object: None, is_repr_u32_enum: false};");
                     tb.add("let ty_index = vm.bx.heap.register_type(None, ty_check);");
+                    // Set hidden metadata before attaching the restricted property type.
+                    tb.add("vm.bx.heap.set_value(named, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     tb.add("vm.bx.heap.set_type(named, ty_index);");
                     tb.add("vm.bx.heap.freeze_component(named);");
                     tb.add("vm.bx.heap.set_value(enum_object, id!(")
@@ -855,6 +866,9 @@ fn derive_script_impl_inner(
                     tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
                         .ident(&item.name)
                         .add(").into());");
+                    tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
+                        .ident(&enum_name)
+                        .add(").into(), vm.bx.threads.cur().trap.pass());");
                     for (i, arg) in args.iter().enumerate() {
                         tb.add("let value = <")
                             .stream(Some(arg.clone()))
