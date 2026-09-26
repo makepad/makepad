@@ -2788,7 +2788,7 @@ open_app() {
     rel_load "$release_file"
     source_labels
     oa_steps=$(printf '%s' "$source_labels")
-    oa_sub='Your app is compiling, it will only take a minute.'
+    oa_sub=''
     IFS=$nl
     # shellcheck disable=SC2086
     set -- $oa_steps Compile Open
