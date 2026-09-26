@@ -441,6 +441,17 @@ impl ScriptHeap {
     // PODS
 
     pub fn new_pod(&mut self, ty: ScriptPodType) -> ScriptPod {
+        // Pods carry no refusal sentinel, so a refused charge still allocates
+        // this one value; the recorded limit error bails the VM before the
+        // next opcode, which bounds the overshoot to a single pod.
+        let data_bytes = self.pod_types[ty.index as usize]
+            .ty
+            .size_of()
+            .next_multiple_of(4);
+        let _ = self.charge_allocation(
+            std::mem::size_of::<ScriptPodData>().saturating_add(data_bytes),
+            "creating a pod value",
+        );
         let pod_ty = &self.pod_types[ty.index as usize];
         if let Some(ptr) = self.pods_free.pop() {
             let pod = &mut self.pods[ptr];

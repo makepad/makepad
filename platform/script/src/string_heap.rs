@@ -2,10 +2,230 @@ use crate::array::*;
 use crate::heap::*;
 use crate::string::*;
 use crate::value::*;
-use std::fmt::Write;
+use std::fmt::{self, Write};
+
+/// A sink used while the VM converts values into strings.
+///
+/// Ordinary [`String`] sinks preserve the upstream unbounded behavior. The
+/// runtime can instead use [`ScriptStringBuffer`] to stop a script-created
+/// string before it grows past the host-selected per-string ceiling or the
+/// remaining allocation budget.
+pub trait ScriptStringSink: Write {
+    fn is_full(&self) -> bool;
+
+    fn append_str(&mut self, value: &str) {
+        let _ = self.write_str(value);
+    }
+
+    fn append_char(&mut self, value: char) {
+        let _ = self.write_char(value);
+    }
+}
+
+impl ScriptStringSink for String {
+    fn is_full(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptStringLimitHit {
+    /// The per-string ceiling (`ScriptHeap::set_max_string_bytes`).
+    String,
+    /// The remaining allocation budget, or the allocator itself.
+    Heap,
+}
+
+/// A string builder that records a limit hit without allocating beyond its
+/// configured logical byte length.
+pub struct ScriptStringBuffer {
+    value: String,
+    max_string_bytes: Option<usize>,
+    max_heap_bytes: Option<usize>,
+    hit: Option<ScriptStringLimitHit>,
+}
+
+impl ScriptStringBuffer {
+    fn new(value: String, max_string_bytes: Option<usize>, max_heap_bytes: Option<usize>) -> Self {
+        Self {
+            value,
+            max_string_bytes,
+            max_heap_bytes,
+            hit: None,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    pub fn len(&self) -> usize {
+        self.value.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    fn into_parts(self) -> (String, Option<ScriptStringLimitHit>) {
+        (self.value, self.hit)
+    }
+
+    fn reserve_append(&mut self, additional_bytes: usize) -> fmt::Result {
+        if self.hit.is_some() {
+            return Err(fmt::Error);
+        }
+        let Some(next_len) = self.value.len().checked_add(additional_bytes) else {
+            self.hit = Some(ScriptStringLimitHit::Heap);
+            return Err(fmt::Error);
+        };
+        if self
+            .max_string_bytes
+            .is_some_and(|maximum| next_len > maximum)
+        {
+            self.hit = Some(ScriptStringLimitHit::String);
+            return Err(fmt::Error);
+        }
+        if self
+            .max_heap_bytes
+            .is_some_and(|maximum| next_len > maximum)
+        {
+            self.hit = Some(ScriptStringLimitHit::Heap);
+            return Err(fmt::Error);
+        }
+        if self.value.try_reserve(additional_bytes).is_err() {
+            self.hit = Some(ScriptStringLimitHit::Heap);
+            return Err(fmt::Error);
+        }
+        Ok(())
+    }
+}
+
+impl Write for ScriptStringBuffer {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.reserve_append(value.len())?;
+        self.value.push_str(value);
+        Ok(())
+    }
+
+    fn write_char(&mut self, value: char) -> fmt::Result {
+        let mut encoded = [0; 4];
+        self.write_str(value.encode_utf8(&mut encoded))
+    }
+}
+
+impl ScriptStringSink for ScriptStringBuffer {
+    fn is_full(&self) -> bool {
+        self.hit.is_some()
+    }
+}
 
 impl ScriptHeap {
     // Strings
+
+    /// Sets a maximum logical length for newly constructed script strings.
+    ///
+    /// `None` preserves the inherited VM behavior. A limit applies only to
+    /// string construction after this call; existing heap strings remain
+    /// valid so a host can safely lower a limit between completed runs.
+    pub fn set_max_string_bytes(&mut self, maximum_bytes: Option<usize>) {
+        self.max_string_bytes = maximum_bytes;
+        self.string_limit_exceeded = false;
+        self.pending_string_limit_error = None;
+    }
+
+    /// Returns the configured per-string ceiling, if any.
+    pub fn max_string_bytes(&self) -> Option<usize> {
+        self.max_string_bytes
+    }
+
+    /// Returns and clears a pending bounded-string construction failure.
+    pub fn take_string_limit_exceeded(&mut self) -> bool {
+        self.pending_string_limit_error = None;
+        std::mem::take(&mut self.string_limit_exceeded)
+    }
+
+    #[inline]
+    fn exceeds_string_limit(&self, len: usize) -> bool {
+        self.max_string_bytes
+            .is_some_and(|maximum| len > maximum)
+    }
+
+    /// Records a per-string ceiling refusal. The interpreter polls it through
+    /// `take_allocation_error` and bails, uncatchably, before the next opcode.
+    pub(crate) fn note_string_limit_exceeded(&mut self, len: usize, operation: &'static str) {
+        self.string_limit_exceeded = true;
+        if self.pending_string_limit_error.is_none() {
+            self.allocation_error_pending = true;
+            self.pending_string_limit_error = Some(format!(
+                "script string allocation limit exceeded while {operation}: {len} bytes, maximum {}",
+                self.max_string_bytes.unwrap_or(usize::MAX)
+            ));
+        }
+    }
+
+    /// Builds a script string through the per-string ceiling and the
+    /// remaining allocation budget without materializing text beyond either.
+    /// A refusal returns `NIL` and records the pending limit error.
+    pub fn new_bounded_string_with<F: FnOnce(&mut Self, &mut ScriptStringBuffer)>(
+        &mut self,
+        cb: F,
+    ) -> ScriptValue {
+        const OPERATION: &str = "building a bounded string";
+        let mut out = self.new_string_buffer();
+        cb(self, &mut out);
+        let (out, hit) = out.into_parts();
+        match hit {
+            Some(ScriptStringLimitHit::String) => {
+                self.note_string_limit_exceeded(out.len(), OPERATION);
+                NIL
+            }
+            Some(ScriptStringLimitHit::Heap) => {
+                let _ = self.charge_allocation(usize::MAX, OPERATION);
+                NIL
+            }
+            None => self.intern_or_store_string(out),
+        }
+    }
+
+    /// Builds a temporary string through the same bounds as
+    /// [`Self::new_bounded_string_with`]; the buffer is not retained, so it is
+    /// not charged, but a limit hit still records the pending limit error.
+    pub fn temp_bounded_string_with<R, F: FnOnce(&mut Self, &mut ScriptStringBuffer) -> R>(
+        &mut self,
+        cb: F,
+    ) -> R {
+        const OPERATION: &str = "building a temporary bounded string";
+        let mut out = self.new_string_buffer();
+        let r = cb(self, &mut out);
+        let (out, hit) = out.into_parts();
+        match hit {
+            Some(ScriptStringLimitHit::String) => {
+                self.note_string_limit_exceeded(out.len(), OPERATION);
+            }
+            Some(ScriptStringLimitHit::Heap) => {
+                let _ = self.charge_allocation(usize::MAX, OPERATION);
+            }
+            None => self.recycle_string(out),
+        }
+        r
+    }
+
+    fn new_string_buffer(&mut self) -> ScriptStringBuffer {
+        let out = self.strings_reuse.pop().unwrap_or_default();
+        let remaining = self.allocation_remaining();
+        let max_heap_bytes = if remaining == usize::MAX {
+            None
+        } else {
+            Some(remaining.saturating_sub(Self::string_metadata_bytes()))
+        };
+        ScriptStringBuffer::new(out, self.max_string_bytes, max_heap_bytes)
+    }
+
+    fn recycle_string(&mut self, mut out: String) {
+        out.clear();
+        self.strings_reuse.push(out);
+    }
 
     pub fn string_mut_self_with<R, F: FnOnce(&mut Self, &str) -> R>(
         &mut self,
@@ -47,6 +267,10 @@ impl ScriptHeap {
     }
 
     pub fn new_string_from_str(&mut self, value: &str) -> ScriptValue {
+        if self.exceeds_string_limit(value.len()) {
+            self.note_string_limit_exceeded(value.len(), "creating a string");
+            return NIL;
+        }
         if let Some(value) = ScriptValue::from_inline_string(value) {
             return value;
         }
@@ -153,6 +377,10 @@ impl ScriptHeap {
         let a_len = self.cast_to_string_len(a);
         let b_len = self.cast_to_string_len(b);
         let len = a_len.checked_add(b_len).unwrap_or(usize::MAX);
+        if self.exceeds_string_limit(len) {
+            self.note_string_limit_exceeded(len, "concatenating strings");
+            return NIL;
+        }
         if !self.charge_string_payload(len, "concatenating strings") {
             return NIL;
         }
@@ -176,6 +404,10 @@ impl ScriptHeap {
     /// Takes an owned String and either interns it, reuses an existing interned value, or stores it as a new string.
     /// The String is consumed and may be returned to the reuse pool.
     pub fn intern_or_store_string(&mut self, mut out: String) -> ScriptValue {
+        if self.exceeds_string_limit(out.len()) {
+            self.note_string_limit_exceeded(out.len(), "storing a string");
+            return NIL;
+        }
         if let Some(v) = ScriptValue::from_inline_string(&out) {
             out.clear();
             self.strings_reuse.push(out);
@@ -197,18 +429,27 @@ impl ScriptHeap {
         self.store_unique_string(out).into()
     }
 
+    #[inline]
+    fn string_metadata_bytes() -> usize {
+        std::mem::size_of::<ScriptStringData>() + 2 * std::mem::size_of::<usize>()
+    }
+
     fn charge_string_payload(&mut self, len: usize, operation: &'static str) -> bool {
         let bytes = len
-            .checked_add(std::mem::size_of::<ScriptStringData>())
-            .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+            .checked_add(Self::string_metadata_bytes())
             .unwrap_or(usize::MAX);
         self.charge_allocation(bytes, operation)
     }
 
     /// Store a string whose payload has already been charged. Inline and
     /// intern hits are still handled because concat preflights before it has
-    /// materialized the bytes.
+    /// materialized the bytes. The per-string ceiling is checked on the exact
+    /// length here because preflights only know an upper bound.
     fn intern_or_store_string_charged(&mut self, mut out: String) -> ScriptValue {
+        if self.exceeds_string_limit(out.len()) {
+            self.note_string_limit_exceeded(out.len(), "storing a string");
+            return NIL;
+        }
         if let Some(v) = ScriptValue::from_inline_string(&out) {
             out.clear();
             self.strings_reuse.push(out);
@@ -280,6 +521,9 @@ impl ScriptHeap {
     }
 
     pub fn check_intern_string(&self, value: &str) -> Option<ScriptValue> {
+        if self.exceeds_string_limit(value.len()) {
+            return None;
+        }
         if let Some(v) = ScriptValue::from_inline_string(&value) {
             Some(v)
         } else if let Some(idx) = self.string_intern.get(value) {
@@ -378,13 +622,13 @@ impl ScriptHeap {
         return arr;
     }
 
-    pub fn cast_to_string(&self, v: ScriptValue, out: &mut String) {
-        if v.as_inline_string(|s| write!(out, "{s}")).is_some() {
+    pub fn cast_to_string<S: ScriptStringSink>(&self, v: ScriptValue, out: &mut S) {
+        if v.as_inline_string(|s| out.append_str(s)).is_some() {
             return;
         }
         if let Some(v) = v.as_string() {
             let str = self.string(v);
-            out.push_str(str);
+            out.append_str(str);
             return;
         }
         if let Some(v) = v.as_f64() {
@@ -439,6 +683,79 @@ impl ScriptHeap {
             return;
         }
         write!(out, "[Unknown]").ok();
-        return;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_buffer_stops_at_the_string_ceiling_without_over_allocating() {
+        let mut heap = ScriptHeap::empty();
+        heap.set_max_string_bytes(Some(5));
+        let value = heap.new_bounded_string_with(|_, out| {
+            out.append_str("abc");
+            assert!(!out.is_full());
+            out.append_char('d');
+            out.append_str("efgh");
+            assert!(out.is_full());
+            assert_eq!(out.as_str(), "abcd");
+            assert!(out.len() <= 5);
+        });
+        assert!(value.is_nil());
+        assert!(heap
+            .take_allocation_error()
+            .is_some_and(|error| error.contains("script string allocation limit exceeded")));
+        assert!(heap.take_string_limit_exceeded());
+        assert!(heap.take_allocation_error().is_none());
+
+        let value = heap.new_bounded_string_with(|_, out| out.append_str("abcde"));
+        assert_eq!(heap.string_with(value, |_, text| text.to_owned()).as_deref(), Some("abcde"));
+        assert!(!heap.take_string_limit_exceeded());
+    }
+
+    #[test]
+    fn bounded_buffer_stops_at_the_remaining_heap_budget() {
+        let mut heap = ScriptHeap::empty();
+        heap.set_max_heap_bytes(Some(usize::MAX));
+        let baseline = heap.accounted_heap_bytes();
+        heap.set_max_heap_bytes(Some(baseline + 128));
+        let value = heap.new_bounded_string_with(|_, out| {
+            for _ in 0..64 {
+                out.append_str("0123456789");
+            }
+            assert!(out.is_full());
+            assert!(out.len() <= 128);
+        });
+        assert!(value.is_nil());
+        assert!(!heap.take_string_limit_exceeded());
+        assert!(heap
+            .take_allocation_error()
+            .is_some_and(|error| error.contains("script heap allocation limit exceeded")));
+        assert!(heap.take_heap_limit_exceeded());
+        assert!(heap.take_allocation_error().is_none());
+    }
+
+    #[test]
+    fn store_paths_apply_the_exact_string_ceiling() {
+        let mut heap = ScriptHeap::empty();
+        heap.set_max_string_bytes(Some(12));
+        assert!(heap.new_string_from_str("thirteen chars").is_nil());
+        assert!(heap.take_allocation_error().is_some());
+        assert!(heap.take_string_limit_exceeded());
+        assert!(heap.intern_or_store_string("thirteen chars".to_owned()).is_nil());
+        assert!(heap.take_string_limit_exceeded());
+        assert!(heap.check_intern_string("thirteen chars").is_none());
+
+        let a = heap.new_string_from_str("twelve!");
+        let b = heap.new_string_from_str("twelve");
+        assert!(heap.new_string_concat(a, b).is_nil());
+        assert!(heap.take_string_limit_exceeded());
+
+        let c = heap.new_string_from_str("abcde");
+        let ok = heap.new_string_concat(a, c);
+        assert_eq!(heap.string_with(ok, |_, text| text.to_owned()).as_deref(), Some("twelve!abcde"));
+        assert!(!heap.take_string_limit_exceeded());
     }
 }
