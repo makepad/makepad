@@ -465,9 +465,6 @@ impl Setup {
         rows.push(info(item("agent-shell", "Shell", "", text("with this folder's Rust on PATH", DIM), "open"), "A shell in this folder; type exit to come back."));
         rows.push(Row::Head("SETUP".into()));
         rows.push(info(self.account_row(), "Log in, switch or log out."));
-        if !cfg!(target_os = "macos") {
-            rows.push(info(self.graphics_row(), "The GPU driver notice."));
-        }
         if cfg!(windows) {
             rows.push(info(self.local_ai_row(), "AI features on your NVIDIA GPU: Microsoft's Build Tools and CUDA; apps compile again when it changes."));
         }
@@ -597,13 +594,6 @@ impl Setup {
         publish();
         Ok(())
     }
-    fn graphics_row(&self) -> Row {
-        if self.gpu_read {
-            item("gpu", "Graphics", "", done("driver notice read"), "")
-        } else {
-            item("gpu", "Graphics", "", text("read the driver notice", WARN), "read")
-        }
-    }
     /// The Makepad license applies by downloading and Rust's needs no
     /// acceptance, so nothing is asked for them; only Microsoft's build
     /// tools and SDK and NVIDIA's CUDA (Windows with local AI) are accepted,
@@ -611,16 +601,26 @@ impl Setup {
     fn agreements_row(&self) -> Row {
         let accepted = self.accepted_agreements();
         let required = required_for(&self.root);
-        let status = if required.is_empty() && !accepted.iter().any(|a| a == "cuda") {
-            done("nothing to accept")
-        } else if required.iter().all(|id| accepted.iter().any(|a| a == id)) {
-            let mut names = vec!["Microsoft"];
-            if accepted.iter().any(|a| a == "cuda") {
-                names.push("NVIDIA");
-            }
-            vec![view::Span("✓".into(), OK), view::Span(" accepted ".into(), PLAIN), view::Span(format!("· {}", names.join(", ")), DIM)]
-        } else {
+        // The GPU driver notice (Windows, Linux) is one of them too.
+        let graphics = !cfg!(target_os = "macos");
+        let mut names = Vec::new();
+        if graphics && self.gpu_read {
+            names.push("Graphics");
+        }
+        if !required.is_empty() || accepted.iter().any(|a| a == "vs") {
+            names.push("Microsoft");
+        }
+        if accepted.iter().any(|a| a == "cuda") {
+            names.push("NVIDIA");
+        }
+        let status = if graphics && !self.gpu_read {
+            text("driver notice not read", WARN)
+        } else if !required.iter().all(|id| accepted.iter().any(|a| a == id)) {
             text("not accepted", WARN)
+        } else if names.is_empty() {
+            done("nothing to accept")
+        } else {
+            vec![view::Span("✓".into(), OK), view::Span(" accepted ".into(), PLAIN), view::Span(format!("· {}", names.join(", ")), DIM)]
         };
         item("terms", "Agreements", "", status, "read")
     }
@@ -961,7 +961,7 @@ impl Setup {
     /// The Agreements page: each agreement with its state (Return opens it),
     /// then Agree to all and Disagree. Disagreeing only withdraws the record:
     /// nothing installed is removed, and the next install or update asks again.
-    fn agreements_screen(&self) -> Result<(), String> {
+    fn agreements_screen(&mut self) -> Result<(), String> {
         let mut selected = 0;
         loop {
             let accepted = self.accepted_agreements();
@@ -979,6 +979,11 @@ impl Setup {
                     item(format!("url:{id}"), format!("{name:<36}"), "", state, "open")
                 })
                 .collect();
+            // The GPU driver notice (Windows, Linux): Return shows it again.
+            if !cfg!(target_os = "macos") {
+                let state = if self.gpu_read { done("read") } else { text("not read", WARN) };
+                rows.insert(0, item("gpu", format!("{:<36}", "Graphics driver notice"), "", state, "read"));
+            }
             // Only the vendors' agreements (Windows) are accepted or withdrawn.
             let vendor: Vec<&str> = agreements().iter().map(|a| a.0).filter(|id| !matches!(*id, "makepad" | "rust")).collect();
             if !vendor.is_empty() {
@@ -1003,6 +1008,7 @@ impl Setup {
                     self.record_agreements(&[])?;
                     view::message(text("Agreements withdrawn: installing or updating build tools will ask again.", WARN));
                 }
+                Nav::Select(id) if id == "gpu" => self.graphics_screen()?,
                 Nav::Select(id) => open_agreement(&id),
                 Nav::Back => return Ok(()),
                 Nav::Quit => return Err(QUIT.into()),
@@ -1161,7 +1167,7 @@ impl Setup {
         Ok(Some(kinds))
     }
     /// Install the components `prepare_compiler` left, on the build's own
-    /// thread; their progress shows on the app's row ("installing Rust").
+    /// thread; their progress shows on the app's row ("Cuda, Tools ━━─ 38%").
     fn install_components(&mut self, release: &Release, kinds: &[Dependency]) -> Result<(), String> {
         crate::timing::reset();
         let result = runtime::dependencies(&self.root, release, kinds);

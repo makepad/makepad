@@ -556,16 +556,31 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
 }
 
 /// The spinner, the step, a short bar when the share is known and the amount.
+/// The row never wraps: the status starts at column 30 of a view at most
+/// 80 wide, so the bar shrinks (to 4, then none) and the step is cut to fit.
 fn doing_text(doing: &Doing) -> Text {
-    let mut spans = vec![Span(spinner_frame().to_string(), ACC), Span(format!(" {}", doing.step), PLAIN)];
-    if let Some(fraction) = doing.fraction {
-        let filled = ((fraction.clamp(0.0, 1.0) * 12.0).round() as usize).min(12);
+    let room = console::size().0.min(80).saturating_sub(32);
+    let amount = if doing.amount.is_empty() { String::new() } else { format!(" {}", doing.amount) };
+    let fixed = 2 + amount.chars().count();
+    let mut step = doing.step.clone();
+    let mut bar = if doing.fraction.is_some() { room.saturating_sub(fixed + step.chars().count() + 1).min(12) } else { 0 };
+    if bar < 4 {
+        bar = 0;
+    }
+    let used = fixed + step.chars().count() + if bar > 0 { bar + 1 } else { 0 };
+    if used > room {
+        let keep = step.chars().count().saturating_sub(used - room + 1);
+        step = step.chars().take(keep).collect::<String>() + "…";
+    }
+    let mut spans = vec![Span(spinner_frame().to_string(), ACC), Span(format!(" {step}"), PLAIN)];
+    if let (Some(fraction), true) = (doing.fraction, bar > 0) {
+        let filled = ((fraction.clamp(0.0, 1.0) * bar as f64).round() as usize).min(bar);
         spans.push(Span(" ".into(), PLAIN));
         spans.push(Span("━".repeat(filled), MARK));
-        spans.push(Span("─".repeat(12 - filled), DIM));
+        spans.push(Span("─".repeat(bar - filled), DIM));
     }
-    if !doing.amount.is_empty() {
-        spans.push(Span(format!(" {}", doing.amount), DIM));
+    if !amount.is_empty() {
+        spans.push(Span(amount, DIM));
     }
     spans
 }
@@ -1015,6 +1030,15 @@ fn spinner_frame() -> char {
     SPINNER[(START.get_or_init(Instant::now).elapsed().as_millis() / 100) as usize % SPINNER.len()]
 }
 
+/// A component's short name on the row: Cuda, Tools, SDK, Rust.
+pub(super) fn short_name(label: &str) -> String {
+    match label {
+        "CUDA" => "Cuda".into(),
+        "Build tools" | "Build Tools" => "Tools".into(),
+        "Windows SDK" => "SDK".into(),
+        other => other.into(),
+    }
+}
 /// A component installing beside others (Build tools, Windows SDK, Rust,
 /// CUDA), as the app's row counts it.
 pub(super) struct Part {
@@ -1029,7 +1053,8 @@ pub(super) struct Part {
 /// done over the work expected, each weighted by its payload bytes. It never
 /// goes back (a component that starts or learns its size adds to the
 /// whole; `shown` is what the row showed) and reaches 100% only when every
-/// one is done. The step names what runs: "installing Build tools, CUDA +2".
+/// one is done. The step names what still runs, short and in one order:
+/// "Cuda, Tools, SDK, Rust".
 pub(super) fn combined_install(parts: &[Part], shown: f64) -> (String, f64) {
     let total: f64 = parts.iter().map(|p| p.bytes.max(1) as f64).sum();
     let done: f64 = parts.iter().map(|p| p.bytes.max(1) as f64 * if p.done { 1.0 } else { p.fraction.unwrap_or(0.0).clamp(0.0, 1.0) }).sum();
@@ -1039,13 +1064,11 @@ pub(super) fn combined_install(parts: &[Part], shown: f64) -> (String, f64) {
         fraction = fraction.min(0.99);
     }
     let fraction = fraction.max(shown.min(if all_done { 1.0 } else { 0.99 }));
-    let running: Vec<&str> = parts.iter().filter(|p| p.running).map(|p| p.label.as_str()).collect();
-    let step = match running.as_slice() {
-        [] => "installing".to_owned(),
-        [one] => format!("installing {one}"),
-        [a, b] => format!("installing {a}, {b}"),
-        [a, b, rest @ ..] => format!("installing {a}, {b} +{}", rest.len()),
-    };
+    // Short names in one order: Cuda, Tools, SDK, Rust; a finished one drops.
+    let order = ["Cuda", "Tools", "SDK", "Rust"];
+    let mut running: Vec<String> = parts.iter().filter(|p| p.running).map(|p| short_name(&p.label)).collect();
+    running.sort_by_key(|name| order.iter().position(|o| o == name).unwrap_or(order.len()));
+    let step = if running.is_empty() { "installing".to_owned() } else { running.join(", ") };
     (step, fraction)
 }
 
@@ -1059,7 +1082,7 @@ mod combined_install_tests {
     fn weighted_by_bytes_forward_only_and_full_only_when_all_done() {
         // Build tools 1000 MB at 50 %, CUDA 3000 MB at 10 %: (500 + 300) / 4000.
         let (step, f) = combined_install(&[part("Build tools", false, Some(0.5), 1000), part("CUDA", false, Some(0.1), 3000)], 0.0);
-        assert_eq!(step, "installing Build tools, CUDA");
+        assert_eq!(step, "Cuda, Tools");
         assert!((f - 0.2).abs() < 1e-9);
         // Weighted, not averaged: Rust (300 MB) done and CUDA at 10 % is
         // (300 + 300) / 3300 = 18 %, not 55 %; below what was shown, the bar holds.
@@ -1072,7 +1095,7 @@ mod combined_install_tests {
             &[part("Build tools", false, Some(0.5), 1000), part("Windows SDK", false, Some(0.0), 2000), part("Rust", false, None, 0), part("CUDA", false, Some(0.1), 3000)],
             0.3,
         );
-        assert_eq!(step, "installing Build tools, Windows SDK +2");
+        assert_eq!(step, "Cuda, Tools, SDK, Rust");
         assert!((h - 0.3).abs() < 1e-9);
         // Nearly done is not done; all done is 100 %.
         let (_, i) = combined_install(&[part("Rust", true, Some(1.0), 300), part("CUDA", false, Some(1.0), 3000)], 0.0);
@@ -1090,11 +1113,13 @@ pub(super) struct Follow {
     logged_line: String,
     /// Components installing side by side (Rust, the build tools, CUDA).
     rows: progress::Rows,
+    /// The row shows their combined bar (it only moves forward).
+    installing: bool,
     pub doing: Doing,
 }
 impl Follow {
     pub(super) fn new(starting: &str) -> Self {
-        Follow { identity: String::new(), logged_line: String::new(), rows: progress::Rows::default(), doing: Doing { step: starting.into(), ..Doing::default() } }
+        Follow { identity: String::new(), logged_line: String::new(), rows: progress::Rows::default(), installing: false, doing: Doing { step: starting.into(), ..Doing::default() } }
     }
     pub(super) fn event(&mut self, p: &progress::Progress) {
         if !p.row.is_empty() {
@@ -1113,7 +1138,8 @@ impl Follow {
                 fraction: r.fraction,
                 bytes: r.bytes,
             }).collect();
-            let shown = if self.doing.step.starts_with("installing") { self.doing.fraction.unwrap_or(0.0) } else { 0.0 };
+            let shown = if self.installing { self.doing.fraction.unwrap_or(0.0) } else { 0.0 };
+            self.installing = true;
             let (step, fraction) = combined_install(&parts, shown);
             self.doing = Doing { step, fraction: Some(fraction), amount: format!("{:.0}%", fraction * 100.0) };
             return;
