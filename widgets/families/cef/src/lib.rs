@@ -1,0 +1,17 @@
+//! The embedded browser view (CEF).
+//!
+//! A family crate of `makepad-widgets`: it builds on `makepad-widgets-core`
+//! alone, has no features of its own, and compiles once whatever mix of
+//! families an app picks. `makepad-widgets` re-exports it under the module
+//! paths it always had and registers it when the app's features ask for it.
+
+// The core's modules and prelude, as `crate::...` paths for the modules
+// that moved here from it.
+use makepad_widgets_core::*;
+
+pub mod browser;
+
+/// Registers the browser view.
+pub fn cef_mod(vm: &mut ScriptVm) {
+    crate::browser::script_mod(vm);
+}

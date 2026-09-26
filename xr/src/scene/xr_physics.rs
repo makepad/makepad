@@ -36,7 +36,9 @@ const XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION: f32 = 0.0;
 const XR_CAR_MASS_KG: f32 = 500.0;
 const XR_CAR_MAX_STEER_DEG: f32 = 55.0;
 const XR_CAR_STEER_SMOOTHING_FACTOR: f32 = 0.1;
-const XR_CAR_ACCELERATION_FORCE: f32 = 18.0;
+// The original tuning supplied 18 N*s per wheel at the default tick.
+// Store force so changing the simulation timestep does not change thrust.
+const XR_CAR_ACCELERATION_FORCE: f32 = 18.0 / XR_SIMULATION_DT;
 const XR_CAR_BRAKE_FORCE: f32 = 12.0;
 const XR_CAR_TOP_SPEED_MPS: f32 = 25.0;
 const XR_CAR_DOWNFORCE_GAIN: f32 = 20.0;
@@ -1425,6 +1427,9 @@ impl PhysicsScene {
         controller.index_forward_axis = 2;
 
         let mut wheels = Vec::new();
+        let gravity = b3world::world_get_gravity(&self.world);
+        let gravity_magnitude =
+            (gravity.x * gravity.x + gravity.y * gravity.y + gravity.z * gravity.z).sqrt() as f32;
         for (slot, spec) in four_wheel_support_specs(half_extents)
             .into_iter()
             .enumerate()
@@ -1432,10 +1437,17 @@ impl PhysicsScene {
             let (Some(spec), Some(support_index)) = (spec, linked_support_bodies[slot]) else {
                 continue;
             };
+            // Each spring's force is stiffness * compression * chassis mass.
+            // Four springs must support gravity before consuming half their
+            // rest length, including when the car is scaled down. A fixed
+            // stiffness of 50 needs 4.9 cm of sag regardless of vehicle size.
+            let stiffness = XR_CAR_WHEEL_SUSPENSION_STIFFNESS
+                .max(gravity_magnitude / (4.0 * 0.5 * spec.rest_length));
+            let damping_scale = (stiffness / XR_CAR_WHEEL_SUSPENSION_STIFFNESS).sqrt();
             let tuning = WheelTuning {
-                suspension_stiffness: XR_CAR_WHEEL_SUSPENSION_STIFFNESS,
-                suspension_compression: XR_CAR_WHEEL_SUSPENSION_COMPRESSION,
-                suspension_damping: XR_CAR_WHEEL_SUSPENSION_RELAXATION,
+                suspension_stiffness: stiffness,
+                suspension_compression: XR_CAR_WHEEL_SUSPENSION_COMPRESSION * damping_scale,
+                suspension_damping: XR_CAR_WHEEL_SUSPENSION_RELAXATION * damping_scale,
                 max_suspension_travel: (spec.max_length - spec.rest_length).max(0.0),
                 side_friction_stiffness: XR_CAR_WHEEL_SIDE_FRICTION_STIFFNESS,
                 friction_slip: XR_CAR_WHEEL_FRICTION_HIGH,
@@ -1691,7 +1703,7 @@ impl PhysicsScene {
 
                 let reached_top_speed = current_speed > vehicle.config.top_speed_mps;
                 let accel_force = if current_acc != 0.0 && !reached_top_speed {
-                    (vehicle.config.acceleration_force / dt) * current_acc
+                    vehicle.config.acceleration_force * current_acc
                 } else {
                     0.0
                 };

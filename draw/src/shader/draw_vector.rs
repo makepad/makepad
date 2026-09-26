@@ -711,7 +711,60 @@ impl DrawVector {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
+        self.finish_gradient_texture(cx);
+        let slot = self.acquire_geometry_slot(cx);
+        let geometry_id = self.geometry_pool[slot].geometry_id();
+        let (mut indices, mut packed) = self.pack_geometry();
+        self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
+        self.geometry = Some(geometry_id);
+        self.geometry_slot = Some(slot);
+        self.submit_geometry(cx, geometry_id);
+    }
 
+    /// As [`Self::end`], but the mesh goes into `geometry`, which the caller
+    /// keeps: it outlives the frame and is drawn again by
+    /// [`Self::submit_geometry`] without tessellating or uploading anything.
+    /// A `DrawSvg` keeps one such mesh per size it is drawn at, so an icon
+    /// that only moves costs an instance per frame. Nothing is uploaded or
+    /// drawn when the session produced no geometry; the caller checks
+    /// [`Self::has_geometry`] first when that matters.
+    pub fn end_into(&mut self, cx: &mut Cx2d, geometry: &Geometry) {
+        if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
+            return;
+        }
+        self.finish_gradient_texture(cx);
+        let (mut indices, mut packed) = self.pack_geometry();
+        geometry.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
+        self.submit_geometry(cx, geometry.geometry_id());
+    }
+
+    /// Whether the session since [`Self::begin`] produced any mesh.
+    pub fn has_geometry(&self) -> bool {
+        !self.acc_verts.is_empty() && !self.acc_indices.is_empty()
+    }
+
+    /// A draw call plus an instance for a mesh already on the GPU (from
+    /// [`Self::end_into`] or a previous [`Self::end`]).
+    pub fn submit_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
+        self.draw_vars.geometry_id = Some(geometry_id);
+        cx.new_draw_call(&self.draw_vars);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+
+    /// The accumulated vertices packed for the GPU, and the index list, as
+    /// the buffers a `Geometry` swaps in.
+    fn pack_geometry(&self) -> (Vec<u32>, Vec<f32>) {
+        (self.acc_indices.clone(), crate::vector::pack_vector_vertices(&self.acc_verts))
+    }
+
+    /// Uploads the gradient rows this session rasterized (one texture per
+    /// `DrawVector`; the rows of a document are the same at every size, so
+    /// the texture is shared by every mesh of it) and turns the row indices
+    /// baked into the vertices into texture V coordinates.
+    fn finish_gradient_texture(&mut self, cx: &mut Cx2d) {
         // Build and upload gradient texture if we have gradient rows
         if self.gradient_row_count > 0 {
             const TEX_WIDTH: usize = 2048;
@@ -758,20 +811,6 @@ impl DrawVector {
                 }
             }
         }
-
-        let slot = self.acquire_geometry_slot(cx);
-        let geometry_id = self.geometry_pool[slot].geometry_id();
-        let mut packed = crate::vector::pack_vector_vertices(&self.acc_verts);
-        let mut indices = self.acc_indices.clone();
-        self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
-        self.geometry = Some(geometry_id);
-        self.geometry_slot = Some(slot);
-        self.draw_vars.geometry_id = Some(geometry_id);
-        cx.new_draw_call(&self.draw_vars);
-        if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
     }
 
     /// Rewind the per-frame geometry pool when a new frame has started, then
@@ -805,12 +844,7 @@ impl DrawVector {
         // is pointing at.
         self.rewind_geometry_pool(cx);
         self.geometry_cursor = self.geometry_cursor.max(slot + 1);
-        self.draw_vars.geometry_id = Some(geometry_id);
-        cx.new_draw_call(&self.draw_vars);
-        if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
+        self.submit_geometry(cx, geometry_id);
         true
     }
 

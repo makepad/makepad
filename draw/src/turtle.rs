@@ -3350,6 +3350,38 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.turtles.last().unwrap()
     }
 
+    /// Where the turtles around the current one clip what is drawn in it,
+    /// as far as this draw knows yet: every open ancestor's clip laid over
+    /// the others, the current turtle's own clip left out. The pair is the
+    /// least and the greatest corner, the form [`Rect::clip`] takes. An axis
+    /// no ancestor clips on, or clips on with an extent it does not know yet
+    /// (a Fit), is open to infinity.
+    ///
+    /// Read mid-draw, like [`Turtle::rect`], and so before any alignment an
+    /// ancestor applies when it ends. An overlay drawn on a root turtle,
+    /// which none of these turtles clip, reads it to stop where the view its
+    /// anchor sits in stops, on the same draw that scrolled the anchor there:
+    /// the clip an area reports is only known once the draw has ended.
+    pub fn turtle_ancestor_clip(&self) -> (Vec2d, Vec2d) {
+        let mut min = dvec2(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut max = dvec2(f64::INFINITY, f64::INFINITY);
+        let ancestors = self.turtles.len().saturating_sub(1);
+        for turtle in &self.turtles[..ancestors] {
+            let Some(AlignEntry::BeginClip(lo, hi)) = self.align_list.get(turtle.align_start) else {
+                continue;
+            };
+            if lo.x.is_finite() && hi.x.is_finite() {
+                min.x = min.x.max(lo.x);
+                max.x = max.x.min(hi.x);
+            }
+            if lo.y.is_finite() && hi.y.is_finite() {
+                min.y = min.y.max(lo.y);
+                max.y = max.y.min(hi.y);
+            }
+        }
+        (min, max)
+    }
+
     pub fn turtle_is_at_first_row(&self) -> bool {
         self.turtle().finished_rows_start == self.finished_rows.len()
     }

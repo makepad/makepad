@@ -504,9 +504,18 @@ mod tests {
             "vehicle controller should be configured with four wheels"
         );
         assert_eq!(
-            query_source_count, 4,
-            "four-wheel cars should expose one TSDF query source per wheel"
+            query_source_count, 5,
+            "four-wheel cars should expose the chassis query and one TSDF query per wheel"
         );
+        let sources = scene.cube_depth_query_sources(cube);
+        assert_eq!(sources[0].expect("chassis query").body, cube.body);
+        for (source, support_index) in sources[1..]
+            .iter()
+            .flatten()
+            .zip(cube.linked_support_bodies.iter().flatten())
+        {
+            assert_eq!(source.body, scene.linked_support_bodies[*support_index].body);
+        }
     }
 
     #[test]
