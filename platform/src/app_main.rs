@@ -7,6 +7,28 @@ use makepad_script::{ScriptValue, ScriptVm};
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
 
+/// Windows desktop apps are linked as windowed programs (no console of
+/// their own when started from Explorer). Started from a terminal, such a
+/// program has no stdout: join the terminal's console so its output shows
+/// there. A pipe — another program reading stdout, like an MCP client of
+/// `--mcp` — and console builds already have a stdout and are left alone.
+pub fn attach_parent_console() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn AttachConsole(process: u32) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if out == 0 || out == -1 {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 pub fn should_run_stdin_loop_from_env() -> bool {
     std::env::args().any(|v| v == "--stdin-loop")
         || std::env::var("MAKEPAD_STDIN_LOOP").is_ok_and(|v| {
@@ -449,6 +471,13 @@ macro_rules! app_main {
 
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
+            $crate::attach_parent_console();
+            // `--mcp`: a stdio relay to the running app's MCP endpoint for
+            // Claude Desktop. Before anything else exists: no window, no
+            // GPU, no audio, and stdout carries only JSON-RPC.
+            if $crate::mcp_relay::requested() {
+                std::process::exit($crate::mcp_relay::run());
+            }
             Cx::init_log();
             $crate::startup_trace("main-entered (dyld done)");
             if Cx::pre_start() {

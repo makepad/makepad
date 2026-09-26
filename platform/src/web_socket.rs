@@ -48,6 +48,17 @@ pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex:
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 const STUDIO_SOCKET_ID: u64 = 0;
 
+/// A response of the host (studio) socket rather than an app socket.
+pub(crate) fn is_studio_socket_response(response: &NetworkResponse) -> bool {
+    match response {
+        NetworkResponse::WsOpened { socket_id }
+        | NetworkResponse::WsClosed { socket_id }
+        | NetworkResponse::WsError { socket_id, .. }
+        | NetworkResponse::WsMessage { socket_id, .. } => socket_id.0 == STUDIO_SOCKET_ID,
+        _ => false,
+    }
+}
+
 pub(crate) fn consume_studio_socket_response(
     response: &NetworkResponse,
 ) -> Option<Vec<StudioToApp>> {
@@ -424,10 +435,21 @@ impl Cx {
     #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
     fn receive_studio_websocket_message(&mut self, wait: bool) -> Option<WebSocketMessage> {
         loop {
-            let network = &self.net;
-            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
-            let network = self.os.gpu_control_net.as_ref().unwrap_or(network);
-            let response = if wait { network.recv().ok()? } else { network.try_recv()? };
+            // The loop owns the host socket from its first read on; host
+            // messages a Tick's network drain took come first (`studio_backlog`).
+            let parked = self
+                .studio_backlog
+                .get_or_insert_with(Default::default)
+                .pop_front();
+            let response = match parked {
+                Some(response) => response,
+                None => {
+                    let network = &self.net;
+                    #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+                    let network = self.os.gpu_control_net.as_ref().unwrap_or(network);
+                    if wait { network.recv().ok()? } else { network.try_recv()? }
+                }
+            };
             match response {
                 NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
                     STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);

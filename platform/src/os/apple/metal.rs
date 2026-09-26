@@ -580,6 +580,7 @@ impl Cx {
                     self.passes[draw_pass_id].paint_dirty = true;
                     // Not ready yet either: a frame without it is partial.
                     self.pipeline_skips += 1;
+                        self.skip_reasons[0] += 1;
                     self.pipeline_skip_repaint = Some(self.repaint_id);
                     continue;
                 }
@@ -593,6 +594,7 @@ impl Cx {
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
                     self.pipeline_skips += 1;
+                        self.skip_reasons[1] += 1;
                     self.pipeline_skip_repaint = Some(self.repaint_id);
                     continue;
                 }
@@ -694,6 +696,7 @@ impl Cx {
                         // no fallback synchronous compile on first use.
                         self.passes[draw_pass_id].paint_dirty = true;
                         self.pipeline_skips += 1;
+                        self.skip_reasons[2] += 1;
                         self.pipeline_skip_repaint = Some(self.repaint_id);
                         continue;
                     }
@@ -2120,6 +2123,12 @@ impl Cx {
         metal_cx.submit_command_buffer(command_buffer, drawable);
     }
 
+    /// Shaders whose GPU pipelines are still being compiled (their draws
+    /// are left out of frames until then).
+    pub fn metal_pipelines_pending(&self) -> usize {
+        self.draw_shaders.os_shaders.iter().filter(|s| s.pipelines.solid.get().is_none() || s.pipelines.blend.get().is_none()).count()
+    }
+
     fn retry_metal_pipelines(&mut self, metal_cx: &MetalCx) {
         for shader in &mut self.draw_shaders.os_shaders {
             if !shader.compile_queued {
@@ -2181,6 +2190,15 @@ impl Cx {
             }
 
             let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
+            if crate::makepad_error_log::trace_enabled("shaderreuse") {
+                crate::log!("shaderreuse: {} {} ({} bytes)", if found_os_shader_id.is_some() { "reused" } else { "NEW" }, cx_shader.debug_id, mtlsl.len());
+                if found_os_shader_id.is_none() {
+                    let dir = std::env::temp_dir().join("makepad-mtlsl");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let n = self.draw_shaders.os_shaders.len();
+                    let _ = std::fs::write(dir.join(format!("{n:04}.metal")), &mtlsl);
+                }
+            }
             if let Some(os_shader_id) = found_os_shader_id {
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {

@@ -264,6 +264,13 @@ pub struct ShaderOutput {
     /// Set once the emitted-size budget is blown, so the error is raised
     /// exactly once rather than at every subsequent write.
     pub size_exceeded: bool,
+    /// The scope objects whose methods this shader calls, in the order it
+    /// first calls them: a method's name prefix is its object's place here
+    /// (`scope0_`, `scope1_`, …). The object's heap index would do for
+    /// uniqueness but changes whenever the module is evaluated again (a
+    /// style reload), which made the same shader's source text differ and
+    /// the GPU compile it again; the order of first use does not change.
+    pub scope_prefixes: Vec<usize>,
 }
 
 /// Ceiling on total emitted shader source. Real shaders here run to tens of

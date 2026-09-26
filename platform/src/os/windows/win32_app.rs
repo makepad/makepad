@@ -294,12 +294,14 @@ pub struct Win32App {
     pub currently_clicked_window_id: Option<WindowId>,
     pub start_dragging_items: Option<Vec<DragItem>>,
     pub is_dragging_internal: Cell<bool>,
-    /// The paint beat: one DXGI frame-latency waitable per vsync-paced window,
-    /// in registration order — index 0 is the *primary* window, whose beat drives
-    /// the whole app tick (the macOS backend picks its primary display link the
-    /// same way). Registered by `D3d11Window::new`, dropped on window teardown
-    /// and while a window is in a live resize (which presents unpaced).
+    /// The paint beat: one DXGI frame-latency waitable per vsync-paced window.
+    /// Registered by `D3d11Window::new`, dropped on window teardown and while a
+    /// window is in a live resize (which presents unpaced). No window owns the
+    /// app clock: whichever beat first reaches a new flip steps it (`windows.rs`).
     pub beat_handles: Vec<BeatSource>,
+    /// Counts the beats served, so the wait can put the window served longest
+    /// ago first (`BeatSource::served`).
+    pub beat_serial: u64,
     /// How long the beat wait may block before falling back to an unpaced tick.
     /// The waitable is a credit semaphore refilled by *retired presents*, so a
     /// stretch of ticks that present nothing (a NextFrame listener that dirties
@@ -328,6 +330,14 @@ pub struct BeatSource {
     /// wait until a frame is presented: the compositor is already ready for that
     /// window, so there is nothing left to wait for.
     pub credit_held: bool,
+    /// `beat_serial` when this window's beat was last served. The wait lists
+    /// the least recently served window first, because a multi-object wait
+    /// reports the LOWEST signaled index: with a fixed order, a first window
+    /// that is ready again every time the loop comes back to wait (any app
+    /// whose frame takes longer than a refresh) won every wait, and a second
+    /// window never got a beat — its passes were held back for good and it
+    /// only repainted while a modal move loop ran unscoped ticks.
+    pub served: u64,
 }
 
 /// Beat timeout after a tick that actually presented: ~2 refresh intervals at
@@ -432,6 +442,7 @@ impl Win32App {
             currently_clicked_window_id: None,
             is_dragging_internal: Cell::new(false),
             beat_handles: Vec::new(),
+            beat_serial: 0,
             beat_timeout_ms: BEAT_TIMEOUT_PRESENTED_MS,
             frame_trace: crate::frame_trace::FrameTrace::new(),
         };
@@ -570,7 +581,7 @@ impl Win32App {
                         // budget) without painting: a moving mouse injects WM_MOUSEMOVE at
                         // 500–1000 Hz and must never outvote the frame clock, but neither may it
                         // starve — hence the budget, and hence the loop coming straight back here.
-                        let beats: Vec<(WindowId, HANDLE, bool)> =
+                        let beats: Vec<(WindowId, HANDLE)> =
                             with_win32_app(|app| app.beat_wait_list());
                         if beats.is_empty() {
                             // Nothing to wait for: popup-only, a live resize (which presents
@@ -589,27 +600,24 @@ impl Win32App {
                                 Win32App::do_callback(Win32Event::Paint);
                             }
                         } else {
-                            let handles: Vec<HANDLE> = beats.iter().map(|(_, h, _)| *h).collect();
+                            let handles: Vec<HANDLE> = beats.iter().map(|(_, h)| *h).collect();
                             let timeout = with_win32_app(|app| app.beat_timeout_ms).max(1);
                             let count = handles.len() as u32;
                             let ret = msg_wait_for_beat_or_input(&handles, timeout);
                             if ret < count {
-                                let (window_id, _, primary) = beats[ret as usize];
+                                let (window_id, _) = beats[ret as usize];
                                 // The wait consumed one of that swap chain's credits. Record
                                 // it: it can only be given back by presenting a frame.
                                 let time = with_win32_app(|app| {
                                     app.take_beat_credit(window_id);
+                                    app.mark_beat_served(window_id);
                                     app.time_now()
                                 });
                                 // The flip this beat aims at is only known once the window's
                                 // frame statistics are read (windows.rs): the source is noted
                                 // here, the lead there.
                                 with_win32_app(|app| app.frame_trace.tick(TickSource::Waitable, time, None));
-                                Win32App::do_callback(Win32Event::Beat {
-                                    window_id,
-                                    time,
-                                    primary,
-                                });
+                                Win32App::do_callback(Win32Event::Beat { window_id, time });
                             } else if ret == count {
                                 let _ = drain_messages();
                             } else {
@@ -817,10 +825,8 @@ impl Win32App {
         }
     }
 
-    /// Register a window's DXGI frame-latency waitable as a beat source. The
-    /// first window registered becomes the primary: its beat runs the full app
-    /// tick. Re-registering the same window replaces its handle in place, so a
-    /// resize round-trip keeps the primary slot it had.
+    /// Register a window's DXGI frame-latency waitable as a beat source.
+    /// Re-registering the same window replaces its handle in place.
     pub fn register_beat_handle(&mut self, window_id: WindowId, handle: HANDLE, credit_held: bool) {
         if let Some(entry) = self
             .beat_handles
@@ -835,6 +841,7 @@ impl Win32App {
             window_id,
             handle,
             credit_held,
+            served: 0,
         });
     }
 
@@ -843,14 +850,13 @@ impl Win32App {
     }
 
     /// The windows to wait on this pass: everything registered that is not
-    /// already holding an unspent credit, tagged with whether it is the primary.
-    fn beat_wait_list(&self) -> Vec<(WindowId, HANDLE, bool)> {
-        self.beat_handles
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| !b.credit_held)
-            .map(|(i, b)| (b.window_id, b.handle, i == 0))
-            .collect()
+    /// already holding an unspent credit, the least recently served first
+    /// (see `BeatSource::served`).
+    fn beat_wait_list(&self) -> Vec<(WindowId, HANDLE)> {
+        let mut waiting: Vec<&BeatSource> =
+            self.beat_handles.iter().filter(|b| !b.credit_held).collect();
+        waiting.sort_by_key(|b| b.served);
+        waiting.iter().map(|b| (b.window_id, b.handle)).collect()
     }
 
     /// A wait on this window's waitable succeeded: we now hold one credit.
@@ -861,6 +867,19 @@ impl Win32App {
             .find(|b| b.window_id == window_id)
         {
             b.credit_held = true;
+        }
+    }
+
+    /// The beat wait woke on this window: it goes to the back of the wait order.
+    fn mark_beat_served(&mut self, window_id: WindowId) {
+        self.beat_serial += 1;
+        let serial = self.beat_serial;
+        if let Some(b) = self
+            .beat_handles
+            .iter_mut()
+            .find(|b| b.window_id == window_id)
+        {
+            b.served = serial;
         }
     }
 

@@ -1829,9 +1829,12 @@ impl ShaderFnCompiler {
                     if self.stack.types.len() <= *stack_depth {
                         return;
                     }
-                    let (_ty, s) = self.stack.pop(self.trap.pass());
-                    self.out.push_str(&s);
-                    self.out.push_str(";\n");
+                    // A value nothing consumes: an expression statement, or an
+                    // if/else whose branches ended in values (its phi).
+                    let (ty, s) = self.stack.pop(self.trap.pass());
+                    let pod = &vm.bx.code.builtins.pod;
+                    let is_void = ty.make_concrete(pod).map_or(true, |t| t == pod.pod_void);
+                    output.backend.write_discarded_expr(&mut self.out, &s, is_void);
                     self.stack.free_string(s);
                 }
                 ShaderMe::Pod { pod_ty: _, args } => {
