@@ -2014,7 +2014,9 @@ key() {
     k=$kr
     case "$k" in
         "$e")
-            key_read 2 1 || kr=
+            # The rest of an arrow key follows at once; a lone Escape is
+            # known after a moment (a second where bash 3.2 cannot wait less).
+            if [ "$ext" = zsh ] || [ "${BASH_VERSINFO:-0}" -ge 4 ] 2>/dev/null; then key_read 2 0.05 || kr=; else key_read 2 1 || kr=; fi
             case "$kr" in '[A' | OA) key=up ;; '[B' | OB) key=down ;; '[C' | OC) key=right ;; '[D' | OD) key=left ;; '') key=esc ;; *) key=other ;; esac ;;
         '
 ' | "$key_cr") key=enter ;;
@@ -2035,7 +2037,6 @@ screen_meta() {
     case "$screen" in
         main) back=0 sub='Shipped as source code, so your coding agent can customize everything.' ;;
         terms) crumb=' › License agreements' sub='Return opens an agreement in your browser.' ;;
-        consent) crumb=" › $consent_title" sub='Please read what you are agreeing to.' ;;
         work) crumb=" › $work_title" sub=$work_sub ;;
         signin) crumb=' › Log in' sub='Welcome to the Makepad Builder.' ;;
         folder) crumb=' › Folder' sub='Everything the Builder installs goes into one folder.' ;;
@@ -2045,13 +2046,12 @@ screen_meta() {
     esac
     default_footer='↑↓ move   ⏎ select   esc back   q quit'
     [ "$back" = 1 ] || default_footer='↑↓ move   ⏎ select   q quit'
-    case "$screen" in consent | gpu | xcode | packages) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
+    case "$screen" in gpu | xcode | packages) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
 }
 screen_rows() {
     case "$screen" in
         main) main_rows ;;
         terms) terms_rows ;;
-        consent) consent_rows ;;
         work) printf 'note|\n'; printf '%s' "$work_labels" | sed 's/^/step|/' ;;
         signin) signin_rows ;;
         folder) folder_rows ;;
@@ -2413,7 +2413,8 @@ draw() {
 "; nbody=$((nbody + 1)); fi
                 [ "$first_item" -ge 0 ] || first_item=$nbody
                 item_lines="$item_lines $nbody"
-                d_sel=0; [ "$d_item" != "$sel" ] || { d_sel=1; sel_line=$nbody; d_sel_id=$d_1 d_info=$d_6; }
+                d_sel=0
+                if [ "$d_item" = "$sel" ] && [ -z "$prompt_body" ]; then d_sel=1; sel_line=$nbody; d_sel_id=$d_1 d_info=$d_6; fi
                 # Work in progress on the row: no action; its keys are in the footer.
                 if [ "$screen" = main ] && live_status "$d_1"; then d_4=$ls d_5=; fi
                 d_child=0; [ "$d_kind" != sub ] || d_child=1
@@ -2426,6 +2427,14 @@ draw() {
 $rows_out
 EOF
     items=$d_item
+    # A question's rows follow the content; its active row is the one selected.
+    if [ -n "$prompt_body" ]; then
+        sel_line=$((nbody + prompt_active))
+        while IFS= read -r d_line; do body="$body$d_line
+"; nbody=$((nbody + 1)); done <<EOF
+${prompt_body%"$nl"}
+EOF
+    fi
     # The footer (the rule, two status lines, the keys) keeps the last four
     # lines; one line above it stays empty or says what is scrolled away.
     room=$((height - 5))
@@ -2465,7 +2474,8 @@ EOF
             if [ "$d_n" -lt "$top" ]; then d_above=$((d_above + 1))
             elif [ "$d_n" -ge $((top + room)) ]; then d_below=$((d_below + 1)); fi
         done
-        if [ "$d_above" = 0 ]; then d_last="    ${dim}↓ $d_below more${r0}"
+        if [ "$d_above" = 0 ] && [ "$d_below" = 0 ]; then :
+        elif [ "$d_above" = 0 ]; then d_last="    ${dim}↓ $d_below more${r0}"
         elif [ "$d_below" = 0 ]; then d_last="    ${dim}↑ $d_above above${r0}"
         else d_last="    ${dim}↑ $d_above above · ↓ $d_below more${r0}"; fi
     fi
@@ -2517,18 +2527,52 @@ EOF
 }
 busy() { message="${acc}⠋${r0} $1"; draw; }
 
-# choose QUESTION NOTE DEFAULT OPTION...: the question on the status line and
-# the options under it; ←→ or a first letter picks, ⏎ accepts, esc backs out.
+# Every question (an email, a folder, a choice) is shown the same way: as
+# rows at the end of the content, above the rule, its active row selected
+# like a menu row; the line under the rule stays for messages. draw() adds
+# prompt_body (lines) and bands line prompt_active of it.
+prompt_body= prompt_active=0
+# prompt_head QUESTION NOTE -> ph (lines) ph_n (their count): a blank line,
+# the question in lines of at most 72 columns, the note dim.
+prompt_head() {
+    ph="
+" ph_n=1
+    ph_lines=$(printf '%s\n' "$1" | awk -v w=72 '{
+        n = split($0, a, " "); line = ""
+        for (i = 1; i <= n; i++) {
+            if (line != "" && length(line) + 1 + length(a[i]) > w) { print line; line = a[i] }
+            else line = (line == "" ? a[i] : line " " a[i])
+        }
+        if (line != "") print line
+    }')
+    while IFS= read -r ph_line; do ph="$ph    $ph_line
+"; ph_n=$((ph_n + 1)); done <<EOF
+$ph_lines
+EOF
+    [ -z "$2" ] || { ph="$ph    ${dim}$2${r0}
+"; ph_n=$((ph_n + 1)); }
+}
+# choose QUESTION NOTE DEFAULT OPTION...: the options as rows under the
+# question; ↑↓ or a first letter picks, ⏎ accepts, esc backs out.
 choose() {
     ch_q=$1 ch_note=$2 ch_pick=$3; shift 3
     ch_saved_footer=$footer_override
+    prompt_head "$ch_q" "$ch_note"
     while :; do
-        choice=
+        prompt_body=$ph prompt_active=$ph_n
+        ch_i=0
         for ch_opt in "$@"; do
-            if [ "$ch_opt" = "$ch_pick" ]; then choice="${choice}${inv} ${ch_opt} ${r0} "; else choice="${choice} ${ch_opt}  "; fi
+            if [ "$ch_opt" = "$ch_pick" ]; then
+                prompt_active=$((ph_n + ch_i))
+                prompt_body="$prompt_body  ${mark}▌${r0} ${b}${ch_opt}${r0} ${ok}⏎${r0}
+"
+            else
+                prompt_body="$prompt_body    ${ch_opt}
+"
+            fi
+            ch_i=$((ch_i + 1))
         done
-        [ -z "$ch_note" ] || choice="${choice} ${dim}${ch_note}${r0}"
-        message=$ch_q footer_override='←→ choose   ⏎ accept   esc back'
+        message= choice= footer_override='↑↓ choose   ⏎ accept   esc back'
         draw
         key
         case "$key" in
@@ -2550,30 +2594,35 @@ choose() {
                 if [ -n "$ch_hit" ]; then chosen=$ch_hit; break; fi ;;
         esac
     done
-    message= choice= footer_override=$ch_saved_footer
+    prompt_body= message= choice= footer_override=$ch_saved_footer
     [ -n "$chosen" ]
 }
 
-# edit PROMPT INITIAL HINT FOOTER: a one-line editor on the status line.
-# Escape returns 1. Sets edited.
+# edit PROMPT INITIAL HINT FOOTER: a one-line editor as a row under its
+# question, HINT on the line under it. Escape returns 1. Sets edited.
 edit() {
     edited=$2
     ed_saved_footer=$footer_override
+    prompt_head "$1" ''
     while :; do
-        message="$1 ${b}${edited}${r0}${inv} ${r0}" choice=$3 footer_override=$4
+        prompt_body="$ph  ${mark}▌${r0} ${b}${edited}${r0}${inv} ${r0}
+" prompt_active=$ph_n
+        [ -z "$3" ] || prompt_body="$prompt_body    $3
+"
+        message= choice= footer_override=$4
         draw
         key
         case "$key" in
             enter) break ;;
-            esc) edited=; message= choice= footer_override=$ed_saved_footer; return 1 ;;
+            esc) edited=; prompt_body= message= choice= footer_override=$ed_saved_footer; return 1 ;;
             backspace) edited=$(printf '%s' "$edited" | sed 's/.$//') ;;
             clear) edited= ;;
-            up | down | left | right | other) ;;
+            up | down | left | right | other | none) ;;
             *) [ "${#edited}" -ge 200 ] || edited="$edited$key" ;;
         esac
     done
     edited=$(printf '%s' "$edited" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-    message= choice= footer_override=$ed_saved_footer
+    prompt_body= message= choice= footer_override=$ed_saved_footer
     return 0
 }
 select_row() {
@@ -2697,19 +2746,6 @@ packages_rows() {
 # ------------------------------------------------------------ agreements ---
 agreements='makepad|Makepad commercial license|https://makepad.nl/commercial-license
 rust|Rust|https://www.rust-lang.org/policies/licenses'
-accepted_agreements() {
-    if [ -f "$root/agreements-accepted" ]; then
-        accepted=
-        while IFS= read -r aa_id; do accepted="$accepted$aa_id "; done < "$root/agreements-accepted"
-    elif [ "${m_rust_ok:-0}" = 1 ] && [ -z "${tools_problem:-}" ]; then
-        # Folders set up before this record accepted them when installing.
-        accepted='makepad rust'
-    else
-        accepted=
-    fi
-}
-is_accepted() { case " $accepted " in *" $1 "*) return 0 ;; esac; return 1; }
-record_agreements() { put "$root/agreements-accepted" "$(printf '%s\n' "$@")"; accepted="$*"; }
 host_of() { host=${1#https://}; host=${host%%/*}; }
 open_url() {
     if [ "$plat" = mac ]; then open "$1" >/dev/null 2>&1 || return 1
@@ -2720,16 +2756,20 @@ open_agreement() {
     if open_url "$oa_url"; then message="${ok}✓${r0} Opened ${oa_url#https://} in your browser."
     else message="${warn}Could not open $oa_url${r0}"; fi
 }
+# The licenses involved, to read; nothing is accepted here: the Makepad
+# license applies by downloading the Builder, and Rust's (MIT or Apache 2.0)
+# asks for no acceptance.
 terms_rows() {
-    accepted_agreements
     while IFS='|' read -r tr_id tr_name tr_url; do
         host_of "$tr_url"; pad "$tr_name" 36
-        if is_accepted "$tr_id"; then tr_state="${ok}✓${r0} accepted  ${dim}${host}${r0}"; else tr_state="${warn}not accepted  ${r0}${dim}${host}${r0}"; fi
+        case "$tr_id" in
+            makepad) tr_state="${dim}applies by downloading  ${host}${r0}" ;;
+            *) tr_state="${dim}nothing to accept  ${host}${r0}" ;;
+        esac
         printf 'item|url:%s|%s||%s|open in browser\n' "$tr_id" "$padded" "$tr_state"
     done <<EOF
 $agreements
 EOF
-    printf '%s\n' 'note|' 'item|agree|Agree to all|||accept every agreement above' 'item|disagree|Disagree|||withdraw acceptance'
 }
 terms_screen() {
     t_screen=$screen t_sel=$sel t_top=$top
@@ -2744,60 +2784,12 @@ terms_screen() {
             enter)
                 select_row
                 case "$id" in
-                    agree) record_agreements makepad rust; message="${ok}✓${r0} Agreements accepted." ;;
-                    disagree) record_agreements; message="${warn}Agreements withdrawn: installing or updating build tools will ask again.${r0}" ;;
                     url:*) open_agreement "${id#url:}" ;;
                 esac ;;
         esac
     done
     t_message=$message
     screen=$t_screen sel=$t_sel top=$t_top message=$t_message
-}
-# consent TITLE INTRO DETAIL ACTION ID...: one screen for the terms a step
-# needs; Return opens an agreement, "Agree to all" (selected at the start)
-# records them, Cancel or Escape backs out. Already accepted: no screen.
-consent() {
-    accepted_agreements
-    c_title=$1 c_intro=$2 c_detail=$3 c_action=$4; shift 4
-    c_missing=
-    for c_id in "$@"; do is_accepted "$c_id" || c_missing="$c_missing $c_id"; done
-    [ -n "$c_missing" ] || return 0
-    c_screen=$screen c_sel=$sel c_top=$top c_message=$message
-    consent_title=$c_title consent_ids="$*"
-    screen=consent top=0 message=
-    sel=$#
-    c_result=1
-    while :; do
-        draw; key; message=
-        case "$key" in
-            up) sel=$(( (sel + items - 1) % items )) ;;
-            down) sel=$(( (sel + 1) % items )) ;;
-            esc | q) break ;;
-            enter)
-                select_row
-                case "$id" in
-                    agree) record_agreements $accepted $c_missing; c_result=0; break ;;
-                    cancel) break ;;
-                    url:*) open_agreement "${id#url:}" ;;
-                esac ;;
-        esac
-    done
-    screen=$c_screen sel=$c_sel top=$c_top message=$c_message
-    return "$c_result"
-}
-consent_rows() {
-    printf 'note|\n'
-    wrap '' "$c_intro"
-    [ -z "$c_detail" ] || printf 'note|%s%s%s\n' "$dim" "$c_detail" "$r0"
-    printf 'head|READ THE AGREEMENTS\n'
-    while IFS='|' read -r cr_id cr_name cr_url; do
-        case " $consent_ids " in *" $cr_id "*) ;; *) continue ;; esac
-        host_of "$cr_url"; pad "$cr_name" 36
-        printf 'item|url:%s|%s||%s%s%s|open in browser\n' "$cr_id" "$padded" "$dim" "$host" "$r0"
-    done <<EOF
-$agreements
-EOF
-    printf 'note|\nitem|agree|Agree to all|||%s\nitem|cancel|Cancel|||\n' "$c_action"
 }
 
 # --------------------------------------------------------------- model ---
@@ -2930,10 +2922,8 @@ main_rows() {
         if [ -f "$root/graphics-notice-read" ]; then printf 'item|gpu|Graphics||%s✓%s driver notice read||The GPU driver notice.\n' "$ok" "$r0"
         else printf 'item|gpu|Graphics||%sread the driver notice%s|read|The GPU driver notice.\n' "$warn" "$r0"; fi
     fi
-    accepted_agreements
-    mr_info='The licenses you accepted; ⏎ opens them.'
-    if is_accepted makepad && is_accepted rust; then printf 'item|terms|Agreements||%s✓%s accepted %s· Makepad, Rust%s|read|%s\n' "$ok" "$r0" "$dim" "$r0" "$mr_info"
-    else printf 'item|terms|Agreements||%snot accepted%s|read|%s\n' "$warn" "$r0" "$mr_info"; fi
+    mr_info='The licenses that apply; ⏎ opens them.'
+    printf 'item|terms|Agreements||%s✓%s nothing to accept|read|%s\n' "$ok" "$r0" "$mr_info"
     mr_info='Clearing build data keeps your apps; the next compile starts from scratch.'
     if [ -f "$scratch/disk" ]; then
         read -r mr_total mr_build < "$scratch/disk"
@@ -3240,13 +3230,9 @@ install_build_tools() {
         rust_ready "$ib_version" && ib_rust=1
     fi
     [ "$ib_tools" = 0 ] || [ "$ib_rust" = 0 ] || return 0
-    if [ "$ib_tools" = 1 ]; then ib_intro='Makepad compiles from source, so it needs a compiler.'
-    elif [ "$plat" = mac ]; then ib_intro="Makepad compiles from source, so it needs a compiler. Apple's developer tools come from Apple's installer, which shows its own license."
-    else ib_intro="Makepad compiles from source, so it needs a compiler. Development packages come from your distribution's package manager."; fi
-    ib_detail=; [ "$ib_rust" = 1 ] || ib_detail="Installed in this folder only: Rust $ib_version"
-    ib_action='install Rust'; [ "$ib_tools" = 1 ] || ib_action='install the build tools and Rust'
-    [ "$ib_rust" = 0 ] || ib_action='install the build tools'
-    consent 'Install build tools' "$ib_intro" "$ib_detail" "$ib_action" makepad rust || { message="${dim}Nothing was installed.${r0}"; return 1; }
+    # Nothing to accept: the Makepad license applies by downloading the
+    # Builder and Rust's (MIT or Apache 2.0) asks for no acceptance; Apple's
+    # tools and the distribution's packages have their own screens below.
     ib_steps= xcode_waiting=
     if [ "$ib_tools" = 0 ]; then
         if [ "$plat" = mac ]; then
@@ -3665,7 +3651,6 @@ open_shell() {
 # edited ones are first saved as a diff.
 check_updates() {
     [ -z "$u_pid" ] || return 0
-    consent Update 'Updates download the newest sources of your apps.' '' 'check for updates' makepad || { message="${dim}Nothing was downloaded.${r0}"; return 0; }
     licenses_now
     [ -n "$b_pid" ] || rm -rf "$root/tmp/checkout.lock"
     rm -f "$steps_dir/_update" "$scratch/update-result"
