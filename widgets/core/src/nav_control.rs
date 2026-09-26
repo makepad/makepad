@@ -52,6 +52,8 @@ impl NavControl {
     /// Tab and Shift+Tab move the key focus through the window's tab stops,
     /// wrapping at either end. With nothing focused, Tab starts at the first
     /// stop (Shift+Tab at the last). An open modal keeps them inside itself.
+    /// A focus that is no stop, such as an open menu that took itself out
+    /// of the stops, keeps the keyboard: Tab leaves it where it is.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, root: DrawListId) {
         let Event::KeyDown(ke) = event else { return };
         if ke.key_code != KeyCode::Tab || ke.modifiers.control || ke.modifiers.logo || ke.modifiers.alt {
@@ -65,7 +67,8 @@ impl NavControl {
         let current = if cx.key_focus().is_empty() {
             None
         } else {
-            stops.iter().position(|area| cx.has_key_focus(*area))
+            let Some(i) = stops.iter().position(|area| cx.has_key_focus(*area)) else { return };
+            Some(i)
         };
         let next = match (current, ke.modifiers.shift) {
             (Some(i), false) => (i + 1) % n,
