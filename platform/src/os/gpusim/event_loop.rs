@@ -806,7 +806,7 @@ impl CxOsApi for Cx {
         self.os.start_time = Some(Instant::now());
         self.os.no_draw = crate::app_main::should_disable_gpusim_draw_from_args();
         self.os.draw_cycles = crate::app_main::gpusim_draw_cycles_from_args();
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+        if let Some(item) = crate::app_meta::package_dir() {
             self.package_root = Some(item.to_string());
         }
         self.native_load_dependencies();

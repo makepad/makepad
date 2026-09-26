@@ -86,11 +86,11 @@ impl Cx {
     /// Shaders whose GPU pipelines are still compiling (0 where the
     /// backend compiles synchronously).
     pub fn pipelines_pending(&self) -> usize {
-        #[cfg(target_vendor = "apple")]
+        #[cfg(all(target_vendor = "apple", not(gpusim)))]
         {
             self.metal_pipelines_pending()
         }
-        #[cfg(not(target_vendor = "apple"))]
+        #[cfg(any(not(target_vendor = "apple"), gpusim))]
         {
             0
         }

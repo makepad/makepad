@@ -704,7 +704,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+        if let Some(item) = crate::app_meta::package_dir() {
             self.package_root = Some(item.to_string());
         }
         self.native_load_dependencies();

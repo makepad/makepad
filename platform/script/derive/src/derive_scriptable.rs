@@ -154,25 +154,15 @@ fn derive_script_impl_inner(
                 if preserve_state || imperative {
                     tb.add("if !apply.preserves_runtime_state() {");
                 }
-                tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
+                // One call into a helper generic over the field type: it
+                // looks the field up in `value` (prototype chain included),
+                // falls back to the type's registered default on a reload,
+                // and applies what it found to the field.
+                tb.add("vm.script_derive_apply_field(apply, scope, value, id!(")
                     .ident(&field.name)
-                    .add(").into(), apply);");
-                tb.add("if __field_value.is_none() && apply.is_reload(){");
-                tb.add("    let default_value = <")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptNew>::script_reload_default(vm);");
-                tb.add("    if !default_value.is_nil(){");
-                tb.add("        __field_value = Some(default_value);");
-                tb.add("    }");
-                tb.add("}");
-                tb.add("if let Some(v) = __field_value {");
-                tb.add("<")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptApply>::script_apply(&mut self.")
+                    .add("), &mut self.")
                     .ident(&field.name)
-                    .add(",vm, apply, scope, v);");
-                tb.add("}");
-                tb.add("}");
+                    .add(");");
                 if preserve_state || imperative {
                     tb.add("}");
                 }
@@ -276,14 +266,11 @@ fn derive_script_impl_inner(
                 .iter()
                 .find(|a| a.name == "live" || a.name == "apply_default")
             {
-                tb.add("let value:ScriptValue = <")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptApply>::script_to_value( &self.")
+                tb.add("vm.script_derive_field_to_value(obj,")
+                    .string(&field.name)
+                    .add(", &self.")
                     .ident(&field.name)
-                    .add(", vm); ");
-                tb.add("vm.bx.heap.set_value(obj, ScriptValue::from_id(id_lut!(")
-                    .ident(&field.name)
-                    .add(")), value, vm.bx.threads.cur().trap.pass());");
+                    .add(");");
             }
         }
 
@@ -411,14 +398,11 @@ fn derive_script_impl_inner(
                 .iter()
                 .find(|a| a.name == "live" || a.name == "apply_default")
             {
-                tb.add("<")
+                tb.add("vm.script_derive_proto_field::<")
                     .stream(Some(field.ty.clone()))
-                    .add(" as ScriptNew>::script_proto(vm);");
-                tb.add("props.insert(id_lut!(")
-                    .ident(&field.name)
-                    .add("),<")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptNew>::script_type_id_static());");
+                    .add(">(props,")
+                    .string(&field.name)
+                    .add(");");
             }
         }
 
@@ -617,21 +601,22 @@ fn derive_script_impl_inner(
         for item in &items {
             match &item.kind {
                 EnumKind::Bare => {
-                    tb.add("let bare = vm.bx.heap.new_with_proto(id_lut!(")
+                    // The variant object: its root proto is the variant's id,
+                    // it records the enum's name for reflection and, for a
+                    // repr(u32) enum, the discriminant as f64.
+                    tb.add("vm.script_derive_enum_bare_variant(enum_object,")
+                        .string(&item.name)
+                        .add(", id!(")
                         .ident(&item.name)
-                        .add(").into());");
-                    // If this is a repr(u32) enum, store the discriminant value as f64
+                        .add("),")
+                        .string(&enum_name)
+                        .add(",");
                     if let Some(disc) = &item.discriminant {
-                        tb.add("vm.bx.heap.set_value(bare, id!(_repr_u32_enum_value).into(), ScriptValue::from((").stream(Some(disc.clone())).add(") as f64), vm.bx.threads.cur().trap.pass());");
+                        tb.add("Some((").stream(Some(disc.clone())).add(") as f64)");
+                    } else {
+                        tb.add("None");
                     }
-                    tb.add("vm.bx.heap.set_value(enum_object, id!(")
-                        .ident(&item.name)
-                        .add(").into(), bare.into(), vm.bx.threads.cur().trap.pass());");
-                    // Reflection needs the enum name as well as the variant's root id.
-                    tb.add("vm.bx.heap.set_value(bare, id_lut!(__enum).into(), id_lut!(")
-                        .ident(&enum_name)
-                        .add(").into(), vm.bx.threads.cur().trap.pass());");
-                    tb.add("vm.bx.heap.freeze(bare);");
+                    tb.add(");");
                 }
                 EnumKind::Tuple(args) => {
                     for arg in args.iter() {
@@ -642,30 +627,21 @@ fn derive_script_impl_inner(
                     tb.add("vm.add_method(enum_object, id_lut!(")
                         .ident(&item.name)
                         .add("), &[], |vm, args|{");
-                    tb.add("    let tuple = vm.bx.heap.new_with_proto(id!(")
+                    // A non-generic helper builds the tuple and checks its
+                    // arguments with each type's check; `file!()` and
+                    // `line!()` name this expansion for its errors, as the
+                    // `script_err_*!` calls it replaces did.
+                    tb.add("    vm.script_derive_enum_tuple_new(args, id!(")
                         .ident(&item.name)
-                        .add(").into());");
-                    tb.add("vm.bx.heap.set_value(tuple, id_lut!(__enum).into(), id_lut!(")
-                        .ident(&enum_name)
-                        .add(").into(), vm.bx.threads.cur().trap.pass());");
-                    tb.add("    if vm.bx.heap.vec_len(args) != ")
-                        .unsuf_usize(args.len())
-                        .add("{");
-                    tb.add("        makepad_script::script_err_invalid_args!(vm.bx.threads.cur().trap, \"wrong argument count\");");
-                    tb.add("    }");
-                    for (i, arg) in args.iter().enumerate() {
-                        tb.add("if let Some(a) = vm.bx.heap.vec_value_if_exist(args, ")
-                            .unsuf_usize(i)
-                            .add("){");
-                        tb.add("    if!<")
+                        .add("),")
+                        .string(&enum_name)
+                        .add(", &[");
+                    for arg in args.iter() {
+                        tb.add("<")
                             .stream(Some(arg.clone()))
-                            .add(" as ScriptNew>::script_type_check(&vm.bx.heap, a){");
-                        tb.add("        makepad_script::script_err_type_mismatch!(vm.bx.threads.cur().trap, \"argument type mismatch\");");
-                        tb.add("    }");
-                        tb.add("}");
+                            .add(" as ScriptNew>::script_type_check,");
                     }
-                    tb.add("    vm.bx.heap.vec_push_vec(tuple, args, vm.bx.threads.cur().trap.pass());");
-                    tb.add("    tuple.into()");
+                    tb.add("], file!(), line!())");
                     tb.add("});");
                 }
                 EnumKind::Named(fields) => {
@@ -816,33 +792,27 @@ fn derive_script_impl_inner(
                 }
             }
         }
+        // The errors are reported by non-generic helpers; `file!()` and
+        // `line!()` stay here so they name this expansion, as the
+        // `script_err_unknown_type!` calls they replace did.
         tb.add("                    other=>{");
-        tb.add("                        let obj_desc = vm.format_object_for_error(object);");
-        tb.add("                        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,").string(&format!("unknown variant '{{}}' for enum {}, object: {{}}", enum_name)).add(", other, obj_desc);");
+        tb.add("                        vm.script_derive_enum_unknown_variant(")
+            .string(&enum_name)
+            .add(", other, object, file!(), line!());");
         tb.add("                        return;");
         tb.add("                    }");
         tb.add("                }");
         tb.add("            }");
         tb.add("            else{");
-        tb.add("                let obj_desc = vm.format_object_for_error(object);");
-        tb.add(
-            "                makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,",
-        )
-        .string(&format!(
-            "expected variant id for enum {}, got object: {{}}",
-            enum_name
-        ))
-        .add(", obj_desc);");
+        tb.add("                vm.script_derive_enum_not_variant(")
+            .string(&enum_name)
+            .add(", object, file!(), line!());");
         tb.add("                return;");
         tb.add("            }");
         tb.add("        }");
-        tb.add("        let value_desc = vm.format_enum_variant_error(value);");
-        tb.add("        makepad_script::script_err_unknown_type!(vm.bx.threads.cur().trap,")
-            .string(&format!(
-                "expected variant for enum {}, got {{}}",
-                enum_name
-            ))
-            .add(", value_desc);");
+        tb.add("        vm.script_derive_enum_bad_value(")
+            .string(&enum_name)
+            .add(", value, file!(), line!());");
         tb.add("    }");
 
         tb.add("    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{");
