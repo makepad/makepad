@@ -468,6 +468,9 @@ impl Setup {
         if !cfg!(target_os = "macos") {
             rows.push(info(self.graphics_row(), "The GPU driver notice."));
         }
+        if cfg!(windows) {
+            rows.push(info(self.local_ai_row(), "AI features on your NVIDIA GPU: Microsoft's Build Tools and CUDA; apps compile again when it changes."));
+        }
         rows.push(info(self.agreements_row(), "The licenses that apply; ⏎ opens them."));
         rows.push(info(self.disk_row(), "Clearing build data keeps your apps; the next compile starts from scratch."));
         View {
@@ -529,6 +532,70 @@ impl Setup {
             };
             item("account", "Account", "", status, "switch or log out")
         }
+    }
+    /// Windows: local AI on (Microsoft's Build Tools, the SDK and CUDA),
+    /// off (Rust's GNU toolchain), or not available without an NVIDIA GPU.
+    fn local_ai_row(&self) -> Row {
+        if !crate::cuda::gpu_present() {
+            return item("localai", "Local AI", "", text("not available · no NVIDIA GPU", DIM), "");
+        }
+        match runtime::windows_chain(&self.root) {
+            WindowsChain::Msvc => item("localai", "Local AI", "", done("on · Build tools, CUDA"), "turn off"),
+            WindowsChain::Gnu => item("localai", "Local AI", "", text("off", PLAIN), "turn on"),
+            WindowsChain::Undecided => item("localai", "Local AI", "", text("off · asked when an AI app is first built", DIM), "turn on"),
+        }
+    }
+    /// The Local AI row: turning it on shows the Local AI page and installs
+    /// what is missing on this row (one bar); turning it off switches back
+    /// to Rust's GNU toolchain (what was installed stays). Either way the
+    /// built apps compile again (their toolchain stamp no longer matches).
+    fn local_ai_toggle(&mut self) -> Result<(), String> {
+        if !crate::cuda::gpu_present() {
+            view::message(text("Local AI needs an NVIDIA GPU with its driver.", DIM));
+            return Ok(());
+        }
+        if JOBS.with(|j| { let j = j.borrow(); j.setup.is_some() || j.build.is_some() || !j.queue.is_empty() }) {
+            view::message(text("Local AI can be switched once nothing compiles or installs.", WARN));
+            return Ok(());
+        }
+        if runtime::windows_chain(&self.root) == WindowsChain::Msvc {
+            let question = "Turn local AI off? Apps then compile with Rust's GNU toolchain, without CUDA; the Build Tools and CUDA stay in this folder.";
+            if view::choose(question, "", &["turn off", "keep"], 1)?.as_deref() == Some("turn off") {
+                runtime::record_windows_chain(&self.root, WindowsChain::Gnu)?;
+                self.cuda = crate::cuda::build_with(&self.root);
+                activity("Local AI off: Rust's GNU toolchain.");
+                view::message(done("Local AI is off. Apps compile again on their next run."));
+            }
+            return Ok(());
+        }
+        let Some(chain) = self.local_ai_screen()? else { return Ok(()) };
+        runtime::record_windows_chain(&self.root, chain)?;
+        self.cuda = crate::cuda::build_with(&self.root);
+        if chain != WindowsChain::Msvc {
+            view::message(text("Local AI stays off.", DIM));
+            return Ok(());
+        }
+        let release = self.release.clone().or_else(|| self.public.clone()).ok_or("Check for updates first, then turn local AI on.")?;
+        let ready = self.ready();
+        let mut kinds = Vec::new();
+        if !ready.tools {
+            kinds.push(Dependency::Msvc);
+        }
+        if !ready.rust {
+            kinds.push(Dependency::Rust);
+        }
+        if self.cuda_wanted() {
+            kinds.push(Dependency::Cuda);
+        }
+        if kinds.is_empty() {
+            view::message(done("Local AI is on. Apps compile again on their next run."));
+            return Ok(());
+        }
+        let mut installing = self.clone();
+        let worker = Worker::start("installing", move || installing.install_components(&release, &kinds));
+        JOBS.with(|j| j.borrow_mut().setup = Some(worker));
+        publish();
+        Ok(())
     }
     fn graphics_row(&self) -> Row {
         if self.gpu_read {
@@ -622,6 +689,7 @@ impl Setup {
         match id {
             "account" | "login" => self.switch_account(),
             "gpu" => self.graphics_screen(),
+            "localai" => self.local_ai_toggle(),
             "updates" => self.check_updates(),
             "disk" => self.clear_build(),
             "terms" => self.agreements_screen(),
@@ -1503,8 +1571,9 @@ impl Setup {
             State::Ready if !stopped(app) => return self.run_app(app),
             _ => {}
         }
-        // One compiles at a time; the others wait their turn.
-        if JOBS.with(|j| j.borrow().build.is_some()) {
+        // One compiles at a time (and not while local AI installs); the
+        // others wait their turn.
+        if JOBS.with(|j| { let j = j.borrow(); j.build.is_some() || j.setup.is_some() }) {
             let title = release.map_or_else(|| app.to_owned(), |r| r.title);
             JOBS.with(|j| j.borrow_mut().queue.push(Queued { app: app.into(), title, open: true, batch: false }));
             publish();
@@ -1740,13 +1809,22 @@ impl Setup {
     /// Background work that ended is reported, then the next queued app
     /// starts (its preparation may ask something on the way).
     fn service_background(&mut self) -> Result<(), String> {
-        let (update, build) = JOBS.with(|j| {
+        let (update, build, setup) = JOBS.with(|j| {
             let mut j = j.borrow_mut();
             let update = if j.update.as_mut().is_some_and(Worker::poll) { j.update.take() } else { None };
+            let setup = if j.setup.as_mut().is_some_and(Worker::poll) { j.setup.take() } else { None };
             let build = if j.build.as_mut().is_some_and(|b| b.worker.poll()) { j.build.take() } else { None };
             j.ended_told = false;
-            (update, build)
+            (update, build, setup)
         });
+        if let Some(setup) = setup {
+            self.cuda = crate::cuda::build_with(&self.root);
+            self.measure_disk();
+            match setup.finish() {
+                Ok(()) => view::message(done("Local AI is on: the Build Tools and CUDA are installed. Apps compile again on their next run.")),
+                Err(error) => self.report(format!("Local AI: {error}")),
+            }
+        }
         if let Some(update) = update {
             match update.finish() {
                 Ok(found) => {
@@ -1765,7 +1843,7 @@ impl Setup {
         loop {
             let next = JOBS.with(|j| {
                 let mut j = j.borrow_mut();
-                if j.build.is_some() || j.queue.is_empty() { None } else { Some(j.queue.remove(0)) }
+                if j.build.is_some() || j.setup.is_some() || j.queue.is_empty() { None } else { Some(j.queue.remove(0)) }
             });
             let Some(next) = next else { break };
             publish();
@@ -2383,6 +2461,8 @@ struct Jobs {
     /// Cancelled in this session: their rows say "stopped · continue".
     stopped: Vec<String>,
     update: Option<Worker<Updates>>,
+    /// Local AI being turned on: its components install on its row.
+    setup: Option<Worker<()>>,
     /// A worker's end was reported once; the menu handles it next.
     ended_told: bool,
 }
@@ -2419,6 +2499,7 @@ fn publish() {
             // What c on Compile all takes out of the queue.
             batch: j.queue.iter().filter(|q| q.batch && !q.open).count(),
             update: j.update.as_ref().map(|u| u.follow.doing.clone()),
+            setup: j.setup.as_ref().map(|u| u.follow.doing.clone()),
         });
     });
 }
@@ -2429,7 +2510,8 @@ fn poll_background() -> bool {
         let mut j = j.borrow_mut();
         let build = j.build.as_mut().is_some_and(|b| b.worker.poll());
         let update = j.update.as_mut().is_some_and(Worker::poll);
-        let tell = (build || update) && !j.ended_told;
+        let setup = j.setup.as_mut().is_some_and(Worker::poll);
+        let tell = (build || update || setup) && !j.ended_told;
         j.ended_told |= tell;
         tell
     });
@@ -2439,11 +2521,15 @@ fn poll_background() -> bool {
 /// Leaving the Builder: stop the build (and its compilers) and the update
 /// check, and wait for them; their downloads and compiled crates stay.
 fn stop_background() {
-    let (build, update) = JOBS.with(|j| {
+    let (build, update, setup) = JOBS.with(|j| {
         let mut j = j.borrow_mut();
         j.queue.clear();
-        (j.build.take(), j.update.take())
+        (j.build.take(), j.update.take(), j.setup.take())
     });
+    if let Some(setup) = setup {
+        setup.cancel.store(true, Ordering::Relaxed);
+        let _ = setup.finish();
+    }
     if let Some(build) = build {
         build.worker.cancel.store(true, Ordering::Relaxed);
         activity(&format!("{} stopped with the Builder; its downloads and compiled crates are kept.", build.title));
