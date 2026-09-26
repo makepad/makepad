@@ -110,7 +110,11 @@ if [ -n "${LC_ALL:-}" ]; then LC_CTYPE=$LC_ALL; export LC_CTYPE; unset LC_ALL; f
 LC_COLLATE=C; export LC_COLLATE
 now() { if [ "$ext" = zsh ]; then printf '%s' "$EPOCHSECONDS"; else date +%s; fi; }
 # pause SECONDS (a fraction, "0.2"): wait, under zsh without a process.
-pause() { if [ "$ext" = zsh ]; then zselect -t "$(( ${1#0.} * 10 ))" || :; else sleep "$1"; fi; }
+pause() {
+    if [ "$ext" != zsh ]; then sleep "$1"; return 0; fi
+    case "$1" in 0.*) pa_t=$(( ${1#0.} * 10 )) ;; *) pa_t=$(( $1 * 100 )) ;; esac
+    zselect -t "$pa_t" || :
+}
 # first_line FILE DEFAULT -> fl: the file's first line, DEFAULT when it has none.
 first_line() {
     fl=
@@ -1047,7 +1051,6 @@ jobs_wait() {
         for jw_pid in $running_jobs; do
             if kill -0 "$jw_pid" 2>/dev/null; then jw_alive="$jw_alive $jw_pid"; fi
         done
-        [ -z "${tui:-}" ] || work_redraw
         [ -n "$jw_alive" ] || break
         if [ -n "${tui:-}" ] && [ -n "${xcode_job:-}" ] && kill -0 "$xcode_job" 2>/dev/null; then
             if key_read 1 1 && [ "$kr" = "$e" ]; then
@@ -1067,7 +1070,6 @@ jobs_wait() {
             failed | held) jw_status=1 ;;
         esac
     done
-    [ -z "${tui:-}" ] || work_redraw
     return "$jw_status"
 }
 
@@ -2037,27 +2039,21 @@ screen_meta() {
     case "$screen" in
         main) back=0 sub='Shipped as source code, so your coding agent can customize everything.' ;;
         terms) crumb=' › License agreements' sub='Return opens an agreement in your browser.' ;;
-        work) crumb=" › $work_title" sub=$work_sub ;;
         signin) crumb=' › Log in' sub='Welcome to the Makepad Builder.' ;;
         folder) crumb=' › Folder' sub='Everything the Builder installs goes into one folder.' ;;
-        xcode) crumb=' › Apple developer tools' sub='Needed to compile on macOS.' ;;
         gpu) crumb=' › Graphics' sub='Before you continue.' ;;
-        packages) crumb=' › System packages' sub='Installed outside this folder, so please check them.' ;;
     esac
     default_footer='↑↓ move   ⏎ select   esc back   q quit'
     [ "$back" = 1 ] || default_footer='↑↓ move   ⏎ select   q quit'
-    case "$screen" in gpu | xcode | packages) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
+    case "$screen" in gpu) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
 }
 screen_rows() {
     case "$screen" in
         main) main_rows ;;
         terms) terms_rows ;;
-        work) printf 'note|\n'; printf '%s' "$work_labels" | sed 's/^/step|/' ;;
         signin) signin_rows ;;
         folder) folder_rows ;;
-        xcode) xcode_rows ;;
         gpu) gpu_rows ;;
-        packages) packages_rows ;;
     esac
 }
 # item_line NAME LICENSE STATUS ACTION SELECTED CHILD -> il. A row of an
@@ -2086,9 +2082,10 @@ spin_frame=0
 spin() {
     case $((spin_frame % 10)) in 0) spin_c=⠋ ;; 1) spin_c=⠙ ;; 2) spin_c=⠹ ;; 3) spin_c=⠸ ;; 4) spin_c=⠼ ;; 5) spin_c=⠴ ;; 6) spin_c=⠦ ;; 7) spin_c=⠧ ;; 8) spin_c=⠇ ;; *) spin_c=⠏ ;; esac
 }
-# doing_text STEP-FILE DEFAULT -> ls: the spinner, what the work does now,
-# a short bar when its share is known and the amount (the Windows Builder
-# draws the same).
+# doing_text STEP-FILE DEFAULT [LABEL] -> ls: the spinner, what the work
+# does now, a short bar when its share is known and the amount (the Windows
+# Builder draws the same). With LABEL ("installing Rust") that is the step,
+# and the amount a percentage.
 doing_text() {
     dt_state= dt_a=0 dt_b=0 dt_unit= dt_bytes=0 dt_doing=
     if [ -f "$1" ]; then IFS='|' read -r dt_state dt_a dt_b dt_unit dt_bytes dt_doing < "$1" || :; fi
@@ -2096,6 +2093,7 @@ doing_text() {
     ls="${acc}${spin_c}${r0} "
     if [ "$dt_state" != now ]; then ls="$ls$2"; return 0; fi
     case "$dt_doing" in resolving | '') dt_doing=compiling ;; downloading | compiling | finishing) ;; *) [ "$dt_unit" != MB ] || dt_doing=unpacking ;; esac
+    [ -z "${3:-}" ] || dt_doing=$3
     ls="$ls$dt_doing"
     if [ "${dt_b:-0}" -gt 0 ] 2>/dev/null; then
         dt_fill=$(( (dt_a * 12 + dt_b / 2) / dt_b )); [ "$dt_fill" -le 12 ] || dt_fill=12
@@ -2105,7 +2103,8 @@ doing_text() {
             dt_i=$((dt_i + 1))
         done
         ls="$ls ${mark}${dt_on}${r0}${dim}${dt_off}${r0}"
-        if [ "$dt_unit" = crates ]; then ls="$ls ${dim}$dt_a / $dt_b crates${r0}"
+        if [ -n "${3:-}" ]; then ls="$ls ${dim}$((dt_a * 100 / dt_b))%${r0}"
+        elif [ "$dt_unit" = crates ]; then ls="$ls ${dim}$dt_a / $dt_b crates${r0}"
         elif [ "$dt_unit" = MB ] && [ "${dt_bytes:-0}" -gt 0 ]; then
             ls="$ls ${dim}$((dt_a * dt_bytes / dt_b / 1048576)) / $((dt_bytes / 1048576)) MB${r0}"
         fi
@@ -2123,6 +2122,9 @@ live_status() {
         app:*)
             if [ -n "$b_pid" ] && [ "$1" = "app:$b_app" ]; then
                 if [ "$b_stopping" = 1 ]; then spin; ls="${acc}${spin_c}${r0} stopping…"
+                elif [ -f "$steps_dir/_prep.label" ]; then
+                    first_line "$steps_dir/_prep.label" installing
+                    doing_text "$steps_dir/_prep" "$fl" "$fl"
                 else doing_text "$steps_dir/_build" "$b_starting"; fi
             else
                 queue_place "${1#app:}" || return 1
@@ -2214,63 +2216,6 @@ wrap_status() {
         ws_n=$((ws_n + ws_add))
     done
     ws_1="$ws_1$r0" ws_2="$ws_2$r0"
-}
-# The line of a work step, from its state file.
-step_line() { # step_line LABEL -> sl
-    step_key "$1"
-    sl_state= sl_a= sl_b= sl_unit= sl_bytes= sl_doing=
-    if [ -f "$steps_dir/$step_key" ]; then IFS='|' read -r sl_state sl_a sl_b sl_unit sl_bytes sl_doing < "$steps_dir/$step_key" || :; fi
-    [ -n "$sl_state" ] || sl_state=next
-    pad "$1 " 16
-    case "$sl_state" in
-        done) sl="    ${ok}✓${r0} ${padded}${dim}${sl_a}${r0}" ;;
-        failed) sl="    ${red}✗${r0} ${padded}${red}${sl_a}${r0}" ;;
-        held) sl="    ${warn}◌${r0} ${padded}${dim}${sl_a}${r0}" ;;
-        now)
-            sl="    ${acc}●${r0} ${b}${padded}${r0}"
-            sl_detail=
-            if [ "${sl_b:-0}" -gt 0 ]; then
-                if [ "$sl_unit" = crates ]; then sl_width=30; else sl_width=16; fi
-                sl_fill=$((sl_a * sl_width / sl_b)); [ "$sl_fill" -le "$sl_width" ] || sl_fill=$sl_width
-                sl_on= sl_off= sl_i=0
-                while [ "$sl_i" -lt "$sl_width" ]; do
-                    if [ "$sl_i" -lt "$sl_fill" ]; then sl_on="${sl_on}━"; else sl_off="${sl_off}─"; fi
-                    sl_i=$((sl_i + 1))
-                done
-                sl_pct=$((sl_a * 100 / sl_b)); [ "$sl_pct" -le 100 ] || sl_pct=100
-                sl_p="   $sl_pct"; sl_p=${sl_p#"${sl_p%???}"}
-                sl="${sl}${mark}${sl_on}${r0}${dim}${sl_off}${r0} ${sl_p}%"
-                if [ "$sl_unit" = crates ]; then
-                    sl_detail="$sl_a / $sl_b crates"
-                elif [ "$sl_unit" = MB ] && [ "${sl_bytes:-0}" -gt 0 ]; then
-                    sl_mb_total=$((sl_bytes / 1048576))
-                    sl_mb_done=$((sl_a * sl_mb_total / sl_b))
-                    [ "$sl_mb_total" = 0 ] || sl_detail="$sl_mb_done/$sl_mb_total MB"
-                    # Throughput and time left while it downloads.
-                    sl_t=$(now)
-                    eval "sl_t0=\${rate_t_$step_key:-} sl_b0=\${rate_b_$step_key:-}"
-                    if [ -z "$sl_t0" ] || [ "$sl_doing" != downloading ]; then
-                        eval "rate_t_$step_key=\$sl_t rate_b_$step_key=\$sl_mb_done"
-                    elif [ "$sl_t" -gt "$sl_t0" ]; then
-                        sl_rate=$(( (sl_mb_done - sl_b0) / (sl_t - sl_t0) ))
-                        if [ "$sl_rate" -gt 0 ]; then
-                            sl_left=$(( (sl_mb_total - sl_mb_done) / sl_rate ))
-                            sl_detail="$sl_detail · $sl_rate MB/s"
-                            [ "$sl_left" -lt 1 ] || sl_detail="$sl_detail · $sl_left s left"
-                        fi
-                    fi
-                fi
-            else
-                spin_frame=$((${spin_frame:-0} + 1))
-                case $((spin_frame % 10)) in 0) sl_c=⠋ ;; 1) sl_c=⠙ ;; 2) sl_c=⠹ ;; 3) sl_c=⠸ ;; 4) sl_c=⠼ ;; 5) sl_c=⠴ ;; 6) sl_c=⠦ ;; 7) sl_c=⠧ ;; 8) sl_c=⠇ ;; *) sl_c=⠏ ;; esac
-                sl="${sl}${acc}${sl_c}${r0}"
-                # No total yet: the crates compiled so far still count up.
-                [ "$sl_unit" != crates ] || [ "${sl_a:-0}" = 0 ] || sl_detail="$sl_a crates"
-            fi
-            [ -z "$sl_doing" ] || sl_detail="${sl_detail:+$sl_detail · }$sl_doing"
-            [ -z "$sl_detail" ] || sl="${sl}  ${dim}${sl_detail}${r0}" ;;
-        *) sl="    ${dim}○ ${padded}${r0}" ;;
-    esac
 }
 
 # logo_lines LINES BAND -> ll_out: LINES as screen lines, each ending in an
@@ -2406,8 +2351,6 @@ draw() {
 "; nbody=$((nbody + 1)) ;;
             note) body="$body    ${d_1}
 "; nbody=$((nbody + 1)) ;;
-            step) step_line "$d_1"; body="$body$sl
-"; nbody=$((nbody + 1)) ;;
             item | sub)
                 if [ "$d_item" = 0 ] && [ "$back" = 1 ]; then body="$body
 "; nbody=$((nbody + 1)); fi
@@ -2510,20 +2453,6 @@ EOF
   ${d_message}${e}[K
   ${d_choice}${e}[K
   ${d_footer}${e}[K${e}[J"
-}
-# The work page's steps, redrawn in place about ten times a second.
-work_redraw() {
-    [ "$screen" = work ] || return 0
-    wr_row=5 wr_out=
-    while IFS= read -r wr_label; do
-        [ -n "$wr_label" ] || continue
-        step_line "$wr_label"
-        wr_out="$wr_out${e}[${wr_row};1H$sl${e}[K"
-        wr_row=$((wr_row + 1))
-    done <<EOF
-$work_labels
-EOF
-    printf '%s' "$wr_out"
 }
 busy() { message="${acc}⠋${r0} $1"; draw; }
 
@@ -2635,50 +2564,6 @@ EOF
 pause_screen() { screen_off; }
 resume_screen() { screen_on; }
 
-# ------------------------------------------------------------ work pages ---
-work_begin() { # work_begin TITLE SUBTITLE STEP...
-    w_screen=$screen w_sel=$sel w_top=$top
-    work_title=$1 work_sub=$2; shift 2
-    work_labels= work_labels_keys=
-    for wb_label in "$@"; do work_add "$wb_label"; done
-    screen=work message= choice= footer_override='working · ctrl+c stops' top=0
-    draw
-}
-work_add() {
-    work_labels="$work_labels$1
-"
-    step_key "$1"; work_labels_keys="$work_labels_keys $step_key"
-    put "$steps_dir/$step_key" next
-    [ "$screen" != work ] || draw
-}
-# Keys pressed and trackpad scrolls (arrow keys in a terminal) during work
-# are not answers: throw away what is waiting, so the menu keeps its row.
-drain_keys() {
-    stty min 0 time 0 <&3 2>/dev/null || return 0
-    dd bs=256 count=64 <&3 >/dev/null 2>&1 || :
-    stty min 1 time 0 <&3 2>/dev/null || :
-}
-# work_end ok|failed MESSAGE: a failure stays on the page, marked on its
-# step, until Return or Escape.
-work_end() {
-    drain_keys
-    if [ "$1" != ok ]; then
-        footer_override='⏎ back'
-        draw
-        while :; do key; case "$key" in enter | esc | q) break ;; esac; done
-    fi
-    footer_override= screen=$w_screen sel=$w_sel top=$w_top message=$2 choice=
-}
-# The first failed step's reason, for the status line.
-work_failure() {
-    wf=
-    for wf_key in $work_labels_keys; do
-        [ -f "$steps_dir/$wf_key" ] || continue
-        IFS='|' read -r wf_state wf_reason wf_rest < "$steps_dir/$wf_key" || continue
-        if [ "$wf_state" = failed ]; then wf=$wf_reason; return; fi
-    done
-}
-
 # ---------------------------------------------------------------- screens ---
 # wrap STYLE TEXT: note rows of at most 74 columns.
 wrap() {
@@ -2707,42 +2592,6 @@ gpu_rows() {
     wrap '' "$gpu_notice"
     printf '%s\n' 'item|continue|I understand|||' 'item|cancel|Cancel|||'
 }
-xcode_rows() {
-    printf 'note|\n'
-    if [ "$tools_problem" = license ]; then
-        wrap '' "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run."
-        printf 'note|\n'
-        wrap "$dim" 'Apple shows the license here in the terminal and asks for your password; type agree at the end to accept it.'
-        pad 'Read and accept the Xcode license' 34
-        printf 'item|license|%s|||sudo xcodebuild -license\n' "$padded"
-    else
-        wrap '' "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet."
-        printf 'note|\n'
-        wrap "$dim" "Apple's installer opens in its own window (about 1 GB); come back here when it has finished."
-        pad 'Install the developer tools' 34
-        printf "item|install|%s|||opens Apple's installer\n" "$padded"
-    fi
-    printf '%s\n' 'item|check|Check again|||' 'item|cancel|Cancel|||'
-}
-packages_rows() {
-    printf 'note|\n'
-    set -- $packages_cmd
-    pr_manager=$1 pr_list= pr_count=0 pr_on=
-    for pr_word in "$@"; do
-        case "$pr_word" in
-            install | -S) pr_on=1 ;;
-            -*) ;;
-            *) if [ -n "$pr_on" ]; then pr_list="$pr_list $pr_word"; pr_count=$((pr_count + 1)); fi ;;
-        esac
-    done
-    wrap '' "Makepad compiles from source and needs $pr_count development packages from $distro_name. They are installed system-wide by your package manager:"
-    printf 'note|\n'
-    printf '%s\n' $pr_list | paste -d' ' - - - - - | sed "s/^/note|${dim}  /; s/\$/${r0}/"
-    printf 'note|\n'
-    printf 'item|install|Install with sudo|||sudo %s\n' "$pr_manager"
-    printf 'item|cancel|Cancel|||\n'
-}
-
 # ------------------------------------------------------------ agreements ---
 agreements='makepad|Makepad commercial license|https://makepad.nl/commercial-license
 rust|Rust|https://www.rust-lang.org/policies/licenses'
@@ -3116,8 +2965,8 @@ choose_rust() {
     esac
     if rust_check --probe "$1"; then
         cr_candidate=$rust_sysroot
-        choose "Build with a private Rust $1 in this folder, or your system Rust?" "system: $(short "$cr_candidate") (not modified)" private private system || return 1
-        if [ "$chosen" = system ]; then record_rust "$cr_candidate"; log 'Using the installed Rust.'; else record_rust private; log 'Using a private Rust in this folder.'; fi
+        choose "Use your installed Rust, or a private Rust $1 in this folder?" "installed: $(short "$cr_candidate") (not modified)" private private installed || return 1
+        if [ "$chosen" = installed ]; then record_rust "$cr_candidate"; log 'Using the installed Rust.'; else record_rust private; log 'Using a private Rust in this folder.'; fi
     elif [ -n "$cr_stale" ]; then
         choose "The selected Rust at $(short "$cr_stale") cannot be used. Switch to a private Rust in this folder?" '' switch switch keep || return 1
         [ "$chosen" = switch ] || { message="${warn}Kept the selected Rust at $(short "$cr_stale"). Make it available again, or select the app again to switch.${r0}"; return 1; }
@@ -3135,63 +2984,53 @@ change_rust() {
     fi
     cr_candidate=$rust_sysroot
     recorded_rust
-    cr_pick=private; case "$selected_rust" in /*) cr_pick=system ;; esac
-    choose "Build with a private Rust $rust_version in this folder, or your system Rust?" "system: $(short "$cr_candidate") (not modified)" "$cr_pick" private system || return 0
-    if [ "$chosen" = system ]; then record_rust "$cr_candidate"; else record_rust private; fi
+    cr_pick=private; case "$selected_rust" in /*) cr_pick=installed ;; esac
+    choose "Use your installed Rust, or a private Rust $rust_version in this folder?" "installed: $(short "$cr_candidate") (not modified)" "$cr_pick" private installed || return 0
+    if [ "$chosen" = installed ]; then record_rust "$cr_candidate"; else record_rust private; fi
     scan
-    if [ "$m_rust_ok" = 1 ]; then message="${ok}✓${r0} Rust changed; the next compile uses it."; else install_build_tools || :; fi
+    message="${ok}✓${r0} Rust changed; the next compile uses it."
 }
-# xcode_screen: Apple's installer or its license prompt, Check again or
-# Cancel. 0 when the tools are ready or Apple's installer was started.
+# xcode_screen: Apple's developer tools are missing or their license is not
+# accepted; asked where every question is (see choose). 0 when the tools
+# are ready or Apple's installer was started (the build waits for it on
+# the app's row).
 xcode_screen() {
-    x_screen=$screen x_sel=$sel
-    screen=xcode sel=0 top=0 message=
-    x_result=1
+    xs_again=
     while :; do
-        draw; key; message=
-        case "$key" in
-            up) sel=$(( (sel + items - 1) % items )) ;;
-            down) sel=$(( (sel + 1) % items )) ;;
-            esc | q) break ;;
-            enter)
-                select_row
-                case "$id" in
-                    install) /usr/bin/xcode-select --install >/dev/null 2>&1 || :; x_result=0; xcode_waiting=1; break ;;
-                    license)
-                        pause_screen
-                        printf "\n  Apple's Xcode license follows. Type agree at the end to accept it.\n\n"
-                        sudo xcodebuild -license </dev/tty || :
-                        resume_screen
-                        if tools_check; then x_result=0; break; fi
-                        message="${warn}Still not ready.${r0}" ;;
-                    check)
-                        busy 'Checking clang, the macOS SDK, the linker and git'
-                        if tools_check; then x_result=0; break; fi
-                        message="${warn}Still not ready.${r0}" ;;
-                    cancel) break ;;
-                esac ;;
+        if [ "$tools_problem" = license ]; then
+            choose "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run." "${xs_again}Apple shows the license in the terminal and asks for your password; type agree at the end." 'accept the license' 'accept the license' 'check again' cancel || return 1
+        else
+            choose "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet." "${xs_again}Apple's installer opens in its own window (about 1 GB); the app then builds by itself." 'install them' 'install them' 'check again' cancel || return 1
+        fi
+        case "$chosen" in
+            'install them') /usr/bin/xcode-select --install >/dev/null 2>&1 || :; xcode_waiting=1; return 0 ;;
+            'accept the license')
+                pause_screen
+                printf "\n  Apple's Xcode license follows. Type agree at the end to accept it.\n\n"
+                sudo xcodebuild -license </dev/tty || :
+                resume_screen ;;
+            'check again') busy 'Checking clang, the macOS SDK, the linker and git' ;;
+            *) return 1 ;;
         esac
+        tools_check && return 0
+        xs_again='Still not ready. '
     done
-    screen=$x_screen sel=$x_sel
-    return "$x_result"
 }
-packages_screen() { # 0 when sudo is ready to install the packages
-    p_screen=$screen p_sel=$sel
-    screen=packages sel=0 top=0 message=
-    p_result=1
-    while :; do
-        draw; key
-        case "$key" in
-            up) sel=0 ;;
-            down) sel=1 ;;
-            enter) [ "$sel" != 0 ] || p_result=0; break ;;
-            esc | q) break ;;
+# packages_screen: the distribution's development packages, asked where
+# every question is; sudo then asks for the password on the real terminal
+# and the packages install on the app's row. 0 when sudo is ready.
+packages_screen() {
+    set -- $packages_cmd
+    ps_list= ps_count=0 ps_on=
+    for ps_word in "$@"; do
+        case "$ps_word" in
+            install | -S) ps_on=1 ;;
+            -*) ;;
+            *) if [ -n "$ps_on" ]; then ps_list="$ps_list $ps_word"; ps_count=$((ps_count + 1)); fi ;;
         esac
     done
-    screen=$p_screen sel=$p_sel
-    [ "$p_result" = 0 ] || return 1
-    # sudo asks for the password on the real terminal; the packages then
-    # install beside the Rust download.
+    choose "Makepad compiles from source and needs $ps_count development packages from $distro_name, installed system-wide by your package manager:$ps_list" "sudo ${packages_cmd%% *} asks for your password in the terminal." 'install with sudo' 'install with sudo' cancel || return 1
+    [ "$chosen" = 'install with sudo' ] || return 1
     pause_screen
     printf '\n  Makepad installs development packages from %s with:\n\n    sudo %s\n\n' "$distro_name" "$packages_cmd"
     if sudo -v </dev/tty; then resume_screen; return 0; fi
@@ -3201,8 +3040,8 @@ packages_screen() { # 0 when sudo is ready to install the packages
 }
 job_xcode() { # waits for Apple's installer, checking every few seconds
     while ! tools_check; do
-        step "$1" "now|0|0|none|0|waiting for Apple's installer · esc stops waiting"
-        sleep 3
+        step "$1" "now|0|0|none|0|waiting for Apple's installer"
+        pause 3
     done
     step "$1" 'done|clang, SDK, git'
 }
@@ -3246,28 +3085,28 @@ install_build_tools() {
         fi
     fi
     [ "$ib_rust" = 1 ] || ib_steps="$ib_steps${ib_steps:+|}Rust"
-    if [ -n "$ib_steps" ]; then
-        IFS='|'; set -- $ib_steps; IFS=$ifs_default
-        work_begin 'Install build tools' 'This takes a few minutes; everything goes into this folder.' "$@"
-        for ib_step in "$@"; do
-            case "$ib_step" in
-                'Xcode tools') job_start job_xcode 'Xcode tools'; xcode_job=${running_jobs##* } ;;
-                'System packages') job_start job_packages 'System packages' ;;
-                Rust) job_start job_rust Rust "$ib_version" ;;
-            esac
-        done
-        if jobs_wait; then
-            work_end ok "${ok}✓${r0} Rust $ib_version is ready. Caches and builds stay in $(short "$root")."
-        else
-            work_failure
-            work_end failed "${warn}${wf:-Setup stopped.}${r0}"
-            scan; tools_check || :
-            return 1
-        fi
-    fi
-    tools_check || :
-    measure_disk
-    scan
+    # What is still to install goes on the app's own row, first thing in its
+    # background build (build_prep), not on a page of its own.
+    prep_steps=$ib_steps prep_rust=$ib_version
+}
+# build_prep (in the background build): Apple's tools (waiting for their
+# installer), the distribution's packages (sudo was asked in front) and the
+# private Rust, each shown on the app's row ("installing Rust ━━━──── 40%").
+build_prep() {
+    [ -n "$prep_steps" ] || return 0
+    IFS='|'; set -- $prep_steps; IFS=$ifs_default
+    for bp_step in "$@"; do
+        case "$bp_step" in
+            'Xcode tools') put "$steps_dir/_prep.label" "installing Apple's tools"; job_xcode _prep ;;
+            'System packages') put "$steps_dir/_prep.label" 'installing packages'; job_packages _prep || return 1 ;;
+            Rust)
+                put "$steps_dir/_prep.label" 'installing Rust'
+                job_rust _prep "$prep_rust" || return 1
+                # The build compiles with it (cargo_env reads rust_sysroot).
+                rust_ready "$prep_rust" || { step_fail _prep "Rust $prep_rust did not pass its check (see builder.log)"; return 1; } ;;
+        esac
+    done
+    rm -f "$steps_dir/_prep" "$steps_dir/_prep.label"
 }
 
 # ------------------------------------------------------------------ apps ---
@@ -3411,6 +3250,7 @@ EOF
 start_build() {
     sb_app=$1
     stopped_apps=$(printf '%s\n' $stopped_apps | grep -vx "$sb_app" | tr '\n' ' ' || :)
+    prep_steps= prep_rust=
     install_build_tools || return 0
     app_release_file "$sb_app" || release_file="$root/available/makepad.json"
     rel_load "$release_file" || { message="${warn}$sb_app has no usable release; choose Update.${r0}"; return 0; }
@@ -3421,16 +3261,18 @@ start_build() {
     fi
     sb_title=$rel_title
     [ "$rel_id" != makepad ] || sb_title=$(free_apps | awk -F'|' -v id="$sb_app" '$1 == id { print $2 }')
-    rust_ready "$rel_rust" || { message="${warn}The latest source requires Rust $rel_rust; it could not be set up.${r0}"; return 0; }
+    case "|$prep_steps|" in *'|Rust|'*) ;; *) rust_ready "$rel_rust" || { message="${warn}The latest source requires Rust $rel_rust; it could not be set up.${r0}"; return 0; } ;; esac
     source_labels
-    if [ -n "$source_labels" ]; then b_starting=downloading; else b_starting=compiling; fi
+    if [ -n "$prep_steps" ]; then b_starting=installing
+    elif [ -n "$source_labels" ]; then b_starting=downloading; else b_starting=compiling; fi
+    rm -f "$steps_dir/_prep" "$steps_dir/_prep.label"
     # A stale checkout lock (a Builder that was closed mid-download) goes
     # when nothing else runs.
     [ -n "$u_pid" ] || rm -rf "$root/tmp/checkout.lock"
     rm -f "$steps_dir/_build"
     log "$sb_title downloads and compiles in the background."
     ( build_job "$sb_app" ) </dev/null >/dev/null 2>>"$log_file" &
-    b_pid=$! b_app=$sb_app b_title=$sb_title b_open=$2 b_batch=$3 b_stopping=0
+    b_pid=$! b_app=$sb_app b_title=$sb_title b_open=$2 b_batch=$3 b_stopping=0 b_prep=$prep_steps
 }
 # checkout_wait STEP: download and check out the loaded release's missing
 # repositories (the job_pack jobs), one checkout at a time in the folder
@@ -3491,6 +3333,11 @@ EOF
 # here yet, then Cargo, with its progress on the step _build.
 build_job() {
     bj_app=$1
+    if ! build_prep; then
+        first_line "$steps_dir/_prep" 'failed|Setting up the build tools stopped (see builder.log)'
+        step _build "failed|${fl#*|}"
+        exit 1
+    fi
     log "$(describe_sources)"
     keep_edits "$bj_app" "$release_file"
     rel_load "$release_file"
@@ -3516,7 +3363,8 @@ finish_build() {
     fb_state= fb_reason=
     if [ -f "$steps_dir/_build" ]; then IFS='|' read -r fb_state fb_reason fb_rest < "$steps_dir/_build" || :; fi
     fb_app=$b_app fb_title=$b_title fb_open=$b_open fb_stopping=$b_stopping
-    b_pid= b_app= b_title= b_open=0 b_batch=0 b_stopping=0
+    [ -z "${b_prep:-}" ] || tools_check || :
+    b_pid= b_app= b_title= b_open=0 b_batch=0 b_stopping=0 b_prep=
     measure_disk
     if [ "$fb_stopping" = 1 ]; then
         stopped_apps="$stopped_apps $fb_app"
