@@ -123,9 +123,28 @@ pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
 pub mod system_info;
+pub mod clipboard_read;
 pub mod window_snapshot;
 pub mod audio_output_tap;
 pub mod log_ring;
+
+/// Seconds on a monotonic clock, from an arbitrary start. Portable where
+/// `std::time::Instant` is not: on wasm32-unknown-unknown std has no clock
+/// (`Instant::now()` panics, "time not implemented on this platform"), so
+/// code that runs in a web build measures time with this instead.
+pub fn monotonic_seconds() -> f64 {
+    #[cfg(all(not(gpusim), target_arch = "wasm32"))]
+    {
+        crate::Cx::monotonic_now()
+    }
+    #[cfg(not(all(not(gpusim), target_arch = "wasm32")))]
+    {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
+    }
+}
 pub mod midi_inject;
 pub mod audio_output_fence;
 pub mod shader_error;
