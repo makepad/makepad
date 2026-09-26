@@ -3,15 +3,25 @@
 //! | data | mechanism |
 //! |---|---|
 //! | process list, pid/ppid/name/threads | `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32FirstW`/`Process32NextW` |
-//! | per-process cpu | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes` (100 ns FILETIME deltas) |
-//! | per-process rss | `K32GetProcessMemoryInfo` → `WorkingSetSize` |
+//! | per-process cpu, start identity | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes` (100 ns FILETIME deltas; the creation FILETIME is the identity) |
+//! | per-process rss, peaks, commit, faults | `K32GetProcessMemoryInfo` → `PROCESS_MEMORY_COUNTERS` |
+//! | per-process I/O bytes | `GetProcessIoCounters` → `IO_COUNTERS` transfer counts, every tick (file, network and device I/O together: Windows has no storage-only count per process) |
 //! | owner | `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `LookupAccountSidW` |
 //! | total cpu | `GetSystemTimes` |
 //! | per-core cpu | `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` |
 //! | memory | `GlobalMemoryStatusEx` + `K32GetPerformanceInfo` (system cache) |
 //! | network bytes | `GetIfTable2` → `MIB_IF_TABLE2` |
+//! | threads | `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)` + `OpenThread` + `GetThreadTimes` |
+//! | modules ("libraries") | `CreateToolhelp32Snapshot(TH32CS_SNAPMODULE)` + `Module32FirstW`/`NextW` |
 //! | uptime | `GetTickCount64` |
 //! | terminate | `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess` |
+//!
+//! Open files and sockets per process need handle enumeration through
+//! undocumented `NtQuerySystemInformation` classes, and disk, GPU and power
+//! counters need PDH/ETW sessions: those tabs and tiles say "not available"
+//! on Windows rather than guess. Network traffic per process needs
+//! `GetPerTcpConnectionEStats` (administrator, per connection, TCP only) or
+//! an ETW session, so the per-process network fields stay `None`.
 //!
 //! **Why hand-written FFI and not the vendored `libs/windows/windows-rs`:**
 //! that crate's `src/Windows/mod.rs` is a *pruned* binding dump. It has no
@@ -62,8 +72,14 @@ pub fn wide_to_string(units: &[u16]) -> String {
     String::from_utf16_lossy(&units[..end])
 }
 
+/// A `FILETIME` (100 ns since 1601-01-01) as seconds since the unix epoch.
+pub fn filetime_to_unix_secs(filetime: u64) -> u64 {
+    const EPOCH_DIFFERENCE_100NS: u64 = 116_444_736_000_000_000;
+    filetime.saturating_sub(EPOCH_DIFFERENCE_100NS) / 10_000_000
+}
+
 #[cfg(windows)]
-pub use platform::{terminate, WindowsBackend};
+pub use platform::WindowsBackend;
 
 #[cfg(not(windows))]
 pub fn terminate(_pid: u32) -> Result<(), String> {
@@ -72,10 +88,16 @@ pub fn terminate(_pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 mod platform {
-    use super::super::{cpu_pct_from_ticks, MemInfo, NetInfo, ProcInfo, ProcState, Snapshot, SystemBackend};
+    use super::super::{
+        bounded, cpu_pct_from_ticks, not_collected, now_ms, Detail, IdentityDetail, LibraryInfo, MemInfo,
+        MemoryDetail, NetInfo, ProcDetail, ProcExtra, ProcInfo, ProcKey, ProcMeta, ProcState, Reading, Snapshot,
+        SystemBackend, ThreadInfo, ThreadState, Want, MAX_CMDLINE_LEN, MAX_NAME_LEN,
+    };
+    use crate::metrics::Measure;
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::c_void;
+    use std::sync::Arc;
     use std::time::Instant;
 
     type Handle = *mut c_void;
@@ -84,18 +106,26 @@ mod platform {
 
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+    const TH32CS_SNAPMODULE: u32 = 0x0000_0008;
+    const TH32CS_SNAPMODULE32: u32 = 0x0000_0010;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const PROCESS_TERMINATE: u32 = 0x0001;
+    const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
     const TOKEN_QUERY: u32 = 0x0008;
     /// `TokenUser` in `TOKEN_INFORMATION_CLASS`.
     const TOKEN_USER: i32 = 1;
     /// `SystemProcessorPerformanceInformation` in `SYSTEM_INFORMATION_CLASS`.
     const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION: i32 = 8;
     const MAX_PATH: usize = 260;
+    const MAX_MODULE_NAME32: usize = 255;
     /// `IF_TYPE_SOFTWARE_LOOPBACK`.
     const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
     /// `IfOperStatusUp`.
     const IF_OPER_STATUS_UP: i32 = 1;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    /// OpenProcess on a pid no process has.
+    const ERROR_INVALID_PARAMETER: u32 = 87;
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -125,6 +155,34 @@ mod platform {
         sz_exe_file: [u16; MAX_PATH],
     }
 
+    /// `THREADENTRY32` (tlhelp32.h).
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct ThreadEntry32 {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_thread_id: u32,
+        th32_owner_process_id: u32,
+        tp_base_pri: i32,
+        tp_delta_pri: i32,
+        dw_flags: u32,
+    }
+
+    /// `MODULEENTRY32W` (tlhelp32.h).
+    #[repr(C)]
+    struct ModuleEntry32W {
+        dw_size: u32,
+        th32_module_id: u32,
+        th32_process_id: u32,
+        glblcnt_usage: u32,
+        proccnt_usage: u32,
+        mod_base_addr: *mut u8,
+        mod_base_size: u32,
+        h_module: Handle,
+        sz_module: [u16; MAX_MODULE_NAME32 + 1],
+        sz_exe_path: [u16; MAX_PATH],
+    }
+
     /// `PROCESS_MEMORY_COUNTERS` (psapi.h).
     #[repr(C)]
     #[derive(Default)]
@@ -139,6 +197,20 @@ mod platform {
         quota_non_paged_pool_usage: usize,
         pagefile_usage: usize,
         peak_pagefile_usage: usize,
+    }
+
+    /// `IO_COUNTERS` (winnt.h): operation counts, then transfer counts in
+    /// bytes, for every kind of I/O the process issued (files, network,
+    /// devices), not only storage.
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
     }
 
     /// `MEMORYSTATUSEX` (sysinfoapi.h).
@@ -256,7 +328,10 @@ mod platform {
     // These are frozen Win32 ABIs. Getting a size wrong would silently read the
     // wrong offsets on a machine we cannot test on, so the build refuses first.
     const _: () = assert!(std::mem::size_of::<ProcessEntry32W>() == 568);
+    const _: () = assert!(std::mem::size_of::<ThreadEntry32>() == 28);
+    const _: () = assert!(std::mem::size_of::<ModuleEntry32W>() == 1080);
     const _: () = assert!(std::mem::size_of::<ProcessMemoryCounters>() == 72);
+    const _: () = assert!(std::mem::size_of::<IoCounters>() == 48);
     const _: () = assert!(std::mem::size_of::<MemoryStatusEx>() == 64);
     const _: () = assert!(std::mem::size_of::<PerformanceInformation>() == 104);
     const _: () = assert!(std::mem::size_of::<ProcessorPerformanceInformation>() == 48);
@@ -268,11 +343,23 @@ mod platform {
         fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> Bool;
+        fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> Bool;
+        fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry32) -> Bool;
+        fn Module32FirstW(snapshot: Handle, entry: *mut ModuleEntry32W) -> Bool;
+        fn Module32NextW(snapshot: Handle, entry: *mut ModuleEntry32W) -> Bool;
         fn CloseHandle(object: Handle) -> Bool;
         fn OpenProcess(desired_access: u32, inherit_handle: Bool, process_id: u32) -> Handle;
+        fn OpenThread(desired_access: u32, inherit_handle: Bool, thread_id: u32) -> Handle;
         fn TerminateProcess(process: Handle, exit_code: u32) -> Bool;
         fn GetProcessTimes(
             process: Handle,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> Bool;
+        fn GetThreadTimes(
+            thread: Handle,
             creation: *mut FileTime,
             exit: *mut FileTime,
             kernel: *mut FileTime,
@@ -282,6 +369,7 @@ mod platform {
         fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> Bool;
         fn GetTickCount64() -> u64;
         fn GetLastError() -> u32;
+        fn GetProcessIoCounters(process: Handle, counters: *mut IoCounters) -> Bool;
         // psapi entry points, re-exported from kernel32 since Windows 7 under
         // their K32 names so no psapi.lib import is needed.
         fn K32GetProcessMemoryInfo(
@@ -290,6 +378,7 @@ mod platform {
             size: u32,
         ) -> Bool;
         fn K32GetPerformanceInfo(info: *mut PerformanceInformation, size: u32) -> Bool;
+        fn K32GetModuleFileNameExW(process: Handle, module: Handle, filename: *mut u16, size: u32) -> u32;
     }
 
     #[link(name = "advapi32")]
@@ -332,7 +421,7 @@ mod platform {
     /// `MibIfTableNormal` — skip the statistics-only rows.
     const MIB_IF_TABLE_NORMAL: i32 = 0;
 
-    /// A process handle that closes itself.
+    /// A process (or thread, token, snapshot) handle that closes itself.
     struct OwnedHandle(Handle);
 
     impl OwnedHandle {
@@ -341,46 +430,58 @@ mod platform {
             let handle = unsafe { OpenProcess(access, 0, pid) };
             (!handle.is_null()).then_some(Self(handle))
         }
+
+        fn open_thread(tid: u32) -> Option<Self> {
+            // SAFETY: OpenThread validates the id and returns null on refusal.
+            let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid) };
+            (!handle.is_null()).then_some(Self(handle))
+        }
+
+        fn snapshot(flags: u32, pid: u32) -> Option<Self> {
+            // SAFETY: a snapshot request; INVALID_HANDLE_VALUE means refusal.
+            let handle = unsafe { CreateToolhelp32Snapshot(flags, pid) };
+            (handle != INVALID_HANDLE_VALUE && !handle.is_null()).then_some(Self(handle))
+        }
     }
 
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
-            // SAFETY: self.0 came from OpenProcess/OpenProcessToken and is
-            // closed exactly once, here.
+            // SAFETY: self.0 came from OpenProcess/OpenThread/OpenProcessToken/
+            // CreateToolhelp32Snapshot and is closed exactly once, here.
             unsafe { CloseHandle(self.0) };
         }
+    }
+
+    struct Identity {
+        meta: Arc<ProcMeta>,
+        /// Cumulative kernel+user 100 ns ticks at the previous sample.
+        previous_cpu: Option<u64>,
     }
 
     pub struct WindowsBackend {
         previous_cores: Vec<[u64; CPU_STATES]>,
         previous_total: Option<[u64; CPU_STATES]>,
-        /// pid → cumulative kernel+user 100 ns ticks at the previous sample.
-        previous_cpu: HashMap<u32, u64>,
         previous_net: Option<(u64, u64)>,
         last_sample: Option<Instant>,
-        /// pid → owner. The token never changes over a process's life.
-        owners: HashMap<u32, String>,
+        /// pid → identity, replaced when the creation time changes.
+        identities: HashMap<u32, Identity>,
+        /// `DOMAIN\user` of this process, for the "apps" filter.
+        my_user: String,
     }
 
     impl WindowsBackend {
         pub fn new() -> Self {
+            let my_user = OwnedHandle::open(std::process::id(), PROCESS_QUERY_LIMITED_INFORMATION)
+                .and_then(|handle| process_owner(&handle))
+                .unwrap_or_default();
             Self {
                 previous_cores: Vec::new(),
                 previous_total: None,
-                previous_cpu: HashMap::new(),
                 previous_net: None,
                 last_sample: None,
-                owners: HashMap::new(),
+                identities: HashMap::new(),
+                my_user,
             }
-        }
-
-        fn owner(&mut self, pid: u32, process: &OwnedHandle) -> String {
-            if let Some(name) = self.owners.get(&pid) {
-                return name.clone();
-            }
-            let name = process_owner(process).unwrap_or_default();
-            self.owners.insert(pid, name.clone());
-            name
         }
 
         fn sample_cores(&mut self) -> Vec<f64> {
@@ -444,55 +545,157 @@ mod platform {
             percent
         }
 
-        fn sample_processes(&mut self, wall_nanos: u64) -> Vec<ProcInfo> {
-            // SAFETY: a process snapshot needs no target pid.
-            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-            if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
-                return Vec::new();
+        /// The metadata for this pid with this creation time; a cached
+        /// identity with another creation time is a dead incarnation.
+        fn identity(&mut self, entry: &ProcessEntry32W, creation: u64, handle: Option<&OwnedHandle>) -> (Arc<ProcMeta>, Option<u64>) {
+            let pid = entry.th32_process_id;
+            let name = wide_to_string(&entry.sz_exe_file);
+            if let Some(identity) = self.identities.get(&pid) {
+                // Exact creation FILETIME. With no creation time (a process
+                // we may not open) the key is unverified; a changed image
+                // name at least tells two such incarnations apart.
+                if identity.meta.key.start == creation && (creation != 0 || identity.meta.name == bounded(name.clone(), MAX_NAME_LEN)) {
+                    return (identity.meta.clone(), identity.previous_cpu);
+                }
             }
-            let snapshot = OwnedHandle(snapshot);
+            let (user, path) = match handle {
+                Some(handle) => (process_owner(handle).unwrap_or_default(), process_path(handle)),
+                None => (String::new(), None),
+            };
+            let is_app = !self.my_user.is_empty() && user == self.my_user && !name.is_empty();
+            let meta = Arc::new(ProcMeta {
+                key: ProcKey { pid, start: creation },
+                ppid: entry.th32_parent_process_id,
+                user,
+                name: bounded(name.clone(), MAX_NAME_LEN),
+                cmdline: bounded(path.unwrap_or(name), MAX_CMDLINE_LEN),
+                started_secs: if creation == 0 { 0 } else { filetime_to_unix_secs(creation) },
+                is_app,
+            });
+            self.identities.insert(pid, Identity { meta: meta.clone(), previous_cpu: None });
+            (meta, None)
+        }
+
+        fn sample_processes(&mut self, wall_nanos: u64) -> Vec<ProcInfo> {
+            let Some(snapshot) = OwnedHandle::snapshot(TH32CS_SNAPPROCESS, 0) else { return Vec::new() };
             let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
             entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
             // SAFETY: dw_size is set as the API requires before the first walk.
             let mut more = unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0;
 
             let mut processes = Vec::new();
-            let mut live_cpu = HashMap::new();
+            let mut seen = HashSet::new();
             while more {
                 let pid = entry.th32_process_id;
-                let name = wide_to_string(&entry.sz_exe_file);
+                seen.insert(pid);
+                let handle = OwnedHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION);
+                let times = handle.as_ref().and_then(process_times);
+                let creation = times.map(|(creation, _)| creation).unwrap_or(0);
+                let (meta, previous_cpu) = self.identity(&entry, creation, handle.as_ref());
                 let mut process = ProcInfo {
-                    pid,
-                    ppid: entry.th32_parent_process_id,
-                    name: name.clone(),
-                    cmdline: name,
+                    meta,
+                    cpu_pct: 0.0,
+                    mem_rss: 0,
+                    cpu_time_ns: None,
                     threads: entry.cnt_threads,
                     // Windows keeps no process-level scheduler state; a listed
                     // process is a live one. Suspension lives per thread.
                     state: ProcState::Running,
-                    ..ProcInfo::default()
+                    extra: ProcExtra { priority: Some(entry.pc_pri_class_base), ..ProcExtra::default() },
                 };
-                if let Some(handle) = OwnedHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
-                    if let Some(ticks) = process_cpu_ticks(&handle) {
-                        if let Some(&before) = self.previous_cpu.get(&pid) {
-                            process.cpu_pct =
-                                cpu_pct_from_100ns(ticks.saturating_sub(before), wall_nanos);
+                if let Some(handle) = handle.as_ref() {
+                    if let Some((_, ticks)) = times {
+                        if let Some(before) = previous_cpu {
+                            process.cpu_pct = cpu_pct_from_100ns(ticks.saturating_sub(before), wall_nanos);
                         }
-                        live_cpu.insert(pid, ticks);
+                        process.cpu_time_ns = Some(ticks.saturating_mul(100));
+                        if let Some(identity) = self.identities.get_mut(&pid) {
+                            identity.previous_cpu = Some(ticks);
+                        }
                     }
-                    process.mem_rss = process_working_set(&handle);
-                    process.user = self.owner(pid, &handle);
+                    if let Some(memory) = process_memory(handle) {
+                        process.mem_rss = memory.working_set_size as u64;
+                        // The same PROCESS_MEMORY_COUNTERS: all bytes but the
+                        // fault count (soft and hard faults together).
+                        process.extra.faults = Some(memory.page_fault_count as u64);
+                        process.extra.peak_resident = Some(memory.peak_working_set_size as u64);
+                        process.extra.commit_bytes = Some(memory.pagefile_usage as u64);
+                        process.extra.peak_commit = Some(memory.peak_pagefile_usage as u64);
+                    }
+                    let mut io = IoCounters::default();
+                    // SAFETY: an IO_COUNTERS we own, against a handle opened
+                    // with PROCESS_QUERY_LIMITED_INFORMATION, which the call
+                    // accepts. The transfer counts include network and
+                    // device I/O; the disk fields carry them as the nearest
+                    // figure Windows keeps per process.
+                    if unsafe { GetProcessIoCounters(handle.0, &mut io) } != 0 {
+                        process.extra.disk_read = Some(io.read_transfer_count);
+                        process.extra.disk_written = Some(io.write_transfer_count);
+                    }
                 }
                 processes.push(process);
                 // SAFETY: same snapshot and entry, walked until it reports done.
                 more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
             }
-            self.previous_cpu = live_cpu;
-            if self.owners.len() > processes.len() * 2 + 64 {
-                let live: std::collections::HashSet<u32> = processes.iter().map(|p| p.pid).collect();
-                self.owners.retain(|pid, _| live.contains(pid));
-            }
+            self.identities.retain(|pid, _| seen.contains(pid));
             processes
+        }
+
+        /// The thread list, and whether it is whole (not cut at the cap).
+        fn detail_threads(&self, pid: u32) -> (Detail<Vec<ThreadInfo>>, bool) {
+            let Some(snapshot) = OwnedHandle::snapshot(TH32CS_SNAPTHREAD, 0) else {
+                return (Detail::Unavailable("the thread snapshot was refused".to_string()), false);
+            };
+            let mut entry = ThreadEntry32 { dw_size: std::mem::size_of::<ThreadEntry32>() as u32, ..ThreadEntry32::default() };
+            // SAFETY: dw_size is set as the API requires before the first walk.
+            let mut more = unsafe { Thread32First(snapshot.0, &mut entry) } != 0;
+            let mut threads = Vec::new();
+            while more && threads.len() < 4096 {
+                if entry.th32_owner_process_id == pid {
+                    let cpu_time_ns = OwnedHandle::open_thread(entry.th32_thread_id).and_then(|thread| {
+                        let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
+                        let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
+                        // SAFETY: four FILETIMEs we own, against a handle opened for query.
+                        let ok = unsafe { GetThreadTimes(thread.0, &mut creation, &mut exit, &mut kernel, &mut user) };
+                        (ok != 0).then(|| kernel.value().saturating_add(user.value()).saturating_mul(100))
+                    });
+                    threads.push(ThreadInfo {
+                        id: entry.th32_thread_id as u64,
+                        // Thread names need GetThreadDescription (Windows 10
+                        // 1607+, dynamic import); the id is what we have.
+                        name: String::new(),
+                        // Toolhelp carries no run state.
+                        state: ThreadState::Unknown,
+                        // Toolhelp keeps no recent-usage estimate per thread.
+                        cpu_pct: None,
+                        cpu_time_ns,
+                    });
+                }
+                // SAFETY: same snapshot and entry, walked until done.
+                more = unsafe { Thread32Next(snapshot.0, &mut entry) } != 0;
+            }
+            let complete = !more;
+            (Detail::Ready(threads), complete)
+        }
+
+        fn detail_modules(&self, pid: u32) -> Detail<Vec<LibraryInfo>> {
+            let Some(snapshot) = OwnedHandle::snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) else {
+                // SAFETY: reads the calling thread's own last-error slot.
+                let error = unsafe { GetLastError() };
+                return if error == ERROR_ACCESS_DENIED { Detail::denied() } else { Detail::Unavailable(format!("the module snapshot was refused: error {error}")) };
+            };
+            let mut entry: ModuleEntry32W = unsafe { std::mem::zeroed() };
+            entry.dw_size = std::mem::size_of::<ModuleEntry32W>() as u32;
+            // SAFETY: dw_size is set as the API requires before the first walk.
+            let mut more = unsafe { Module32FirstW(snapshot.0, &mut entry) } != 0;
+            let mut libraries = Vec::new();
+            while more && libraries.len() < 4096 {
+                libraries.push(LibraryInfo { path: wide_to_string(&entry.sz_exe_path), mapped: entry.mod_base_size as u64 });
+                // SAFETY: same snapshot and entry, walked until done.
+                more = unsafe { Module32NextW(snapshot.0, &mut entry) } != 0;
+            }
+            libraries.sort_by(|a, b| a.path.cmp(&b.path));
+            Detail::Ready(libraries)
         }
     }
 
@@ -536,6 +739,9 @@ mod platform {
                 cpu_cores,
                 mem: memory(),
                 net,
+                disk: Reading::Unavailable("not measured on windows (needs a PDH counter session)"),
+                gpu_pct: Reading::Unavailable("not measured on windows"),
+                power_watts: Reading::Unavailable("not measured on windows"),
                 processes: self.sample_processes(wall_nanos),
                 // Windows has no getloadavg equivalent.
                 load_avg: [0.0; 3],
@@ -544,19 +750,120 @@ mod platform {
                 backend: "windows/win32",
             }
         }
+
+        fn detail(&mut self, key: ProcKey, want: Want) -> ProcDetail {
+            let time_ms = now_ms();
+            let Some(handle) = OwnedHandle::open(key.pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+                // SAFETY: reads the calling thread's own last-error slot.
+                let error = unsafe { GetLastError() };
+                let reason = if error == ERROR_ACCESS_DENIED {
+                    "permission denied: the OS refused to open this process".to_string()
+                } else {
+                    format!("OpenProcess failed: error {error}")
+                };
+                return ProcDetail::unavailable(key, time_ms, &reason);
+            };
+            let Some((creation, ticks)) = process_times(&handle) else { return ProcDetail::gone(key, time_ms) };
+            if creation != key.start {
+                return ProcDetail::gone(key, time_ms);
+            }
+            let memory = match process_memory(&handle) {
+                // Its figures are in the basic sample's extras already.
+                Some(_) => Detail::Ready(MemoryDetail { regions: None }),
+                None => Detail::Unavailable("K32GetProcessMemoryInfo refused".to_string()),
+            };
+            let (threads, threads_complete) = if want.threads { self.detail_threads(key.pid) } else { (not_collected(), false) };
+            let thread_count = match &threads { Detail::Ready(list) => list.len() as u32, Detail::Unavailable(_) => 0 };
+            let mut measures = Vec::new();
+            let mut io = IoCounters::default();
+            // SAFETY: an IO_COUNTERS we own, against a handle opened with
+            // PROCESS_QUERY_LIMITED_INFORMATION, which the call accepts.
+            if unsafe { GetProcessIoCounters(handle.0, &mut io) } != 0 {
+                measures.push((Measure::IoRead, io.read_transfer_count as i64));
+                measures.push((Measure::IoWritten, io.write_transfer_count as i64));
+            }
+            let identity = IdentityDetail {
+                path: process_path(&handle).unwrap_or_default(),
+                status: "running".to_string(),
+                cpu_time_ns: Some(ticks.saturating_mul(100)),
+                threads: thread_count,
+                running_threads: 0,
+            };
+            ProcDetail {
+                key,
+                time_ms,
+                identity: Detail::Ready(identity),
+                memory,
+                threads,
+                files: Detail::Unavailable("open files: not listed on windows (needs undocumented handle enumeration)".to_string()),
+                ports: Detail::Unavailable("sockets per process: not listed on windows yet".to_string()),
+                libraries: want.libraries.then(|| self.detail_modules(key.pid)),
+                measures,
+                threads_complete,
+                files_complete: false,
+            }
+        }
+
+        fn is_alive(&mut self, key: ProcKey) -> Option<bool> {
+            match OwnedHandle::open(key.pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+                Some(handle) => {
+                    let (creation, _) = process_times(&handle)?;
+                    // A handle keeps an exited process' object alive: the
+                    // exit time says whether it still runs.
+                    Some(creation == key.start && !process_exited(&handle))
+                }
+                // SAFETY: reads the calling thread's own last-error slot.
+                None => match unsafe { GetLastError() } {
+                    ERROR_INVALID_PARAMETER => Some(false),
+                    _ => None,
+                },
+            }
+        }
+
+        /// Check and terminate through ONE handle, so the process checked is
+        /// the process terminated: a pid reused in between cannot be hit.
+        fn signal_verified(&mut self, key: ProcKey, _force: bool) -> Result<(), String> {
+            let Some(process) = OwnedHandle::open(key.pid, PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION) else {
+                // SAFETY: reads the calling thread's own last-error slot.
+                return Err(format!("OpenProcess failed: error {}", unsafe { GetLastError() }));
+            };
+            match process_times(&process) {
+                Some((creation, _)) if creation == key.start => {}
+                Some(_) => return Err(format!("PID {} now belongs to another process; not terminated", key.pid)),
+                None => return Err(format!("PID {} could not be verified; not terminated", key.pid)),
+            }
+            // SAFETY: a handle opened for PROCESS_TERMINATE; 1 is the exit code a
+            // killed process reports.
+            if unsafe { TerminateProcess(process.0, 1) } == 0 {
+                // SAFETY: as above.
+                return Err(format!("TerminateProcess failed: error {}", unsafe { GetLastError() }));
+            }
+            Ok(())
+        }
     }
 
-    fn process_cpu_ticks(process: &OwnedHandle) -> Option<u64> {
+    /// Whether the process behind `process` has exited (its exit FILETIME is
+    /// set only then).
+    fn process_exited(process: &OwnedHandle) -> bool {
+        let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
+        let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
+        // SAFETY: four FILETIMEs we own, against a handle opened for query.
+        let ok = unsafe { GetProcessTimes(process.0, &mut creation, &mut exit, &mut kernel, &mut user) };
+        ok != 0 && exit.value() != 0
+    }
+
+    /// (creation FILETIME, cumulative kernel+user 100 ns ticks).
+    fn process_times(process: &OwnedHandle) -> Option<(u64, u64)> {
         let (mut creation, mut exit) = (FileTime::default(), FileTime::default());
         let (mut kernel, mut user) = (FileTime::default(), FileTime::default());
         // SAFETY: four FILETIMEs we own, against a handle opened for query.
         let ok = unsafe {
             GetProcessTimes(process.0, &mut creation, &mut exit, &mut kernel, &mut user)
         };
-        (ok != 0).then(|| kernel.value().saturating_add(user.value()))
+        (ok != 0).then(|| (creation.value(), kernel.value().saturating_add(user.value())))
     }
 
-    fn process_working_set(process: &OwnedHandle) -> u64 {
+    fn process_memory(process: &OwnedHandle) -> Option<ProcessMemoryCounters> {
         let mut counters = ProcessMemoryCounters {
             cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
             ..ProcessMemoryCounters::default()
@@ -564,11 +871,15 @@ mod platform {
         let size = counters.cb;
         // SAFETY: counters is exactly `size` bytes and cb is set as required.
         let ok = unsafe { K32GetProcessMemoryInfo(process.0, &mut counters, size) };
-        if ok == 0 {
-            0
-        } else {
-            counters.working_set_size as u64
-        }
+        (ok != 0).then_some(counters)
+    }
+
+    /// The executable's full path.
+    fn process_path(process: &OwnedHandle) -> Option<String> {
+        let mut buffer = [0u16; 1024];
+        // SAFETY: buffer holds 1024 UTF-16 units; the call writes at most that.
+        let written = unsafe { K32GetModuleFileNameExW(process.0, std::ptr::null_mut(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        (written > 0).then(|| wide_to_string(&buffer[..written as usize]))
     }
 
     /// `DOMAIN\user` for the process's token, if we may read it.

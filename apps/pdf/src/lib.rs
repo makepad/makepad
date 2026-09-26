@@ -1,7 +1,7 @@
 //! pdf: a PDF viewer for the Makepad app family. See Cargo.toml for scope.
 //!
 //! The parsing is `makepad-pdf-parse` and the page drawing is the `PdfView` /
-//! `PdfPageView` pair in widgets/src/pdf_view.rs; this crate is the viewer
+//! `PdfPageView` pair in widgets/families/pdf/src/pdf_view.rs; this crate is the viewer
 //! around them.
 
 pub mod loader;

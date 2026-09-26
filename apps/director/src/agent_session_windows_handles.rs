@@ -349,6 +349,9 @@ impl Backend {
             }
         }
         let mut verified = BTreeMap::new();
+        // Why a candidate was rejected is kept: an unreadable or malformed
+        // evidence file must be told apart from "no match".
+        let mut rejected = None;
         for (conversation, path, opened) in candidates {
             let identity = ResumeIdentity {
                 provider,
@@ -361,21 +364,24 @@ impl Backend {
                 process_start: format!("windows-filetime:{}", proof.start),
                 verified_at_ms: timestamp_ms(),
             };
-            if evidence_matches(&identity).is_ok() {
-                verified.insert(
-                    (
-                        identity.conversation_id.clone(),
-                        identity.evidence_path.clone(),
-                    ),
-                    (identity, opened),
-                );
+            match evidence_matches(&identity) {
+                Ok(()) => {
+                    verified.insert(
+                        (
+                            identity.conversation_id.clone(),
+                            identity.evidence_path.clone(),
+                        ),
+                        (identity, opened),
+                    );
+                }
+                Err(error) => rejected = Some(error),
             }
         }
         if verified.len() != 1 {
-            return Err(
-                "Cannot prove one persisted root conversation; its Windows session remains running"
-                    .into(),
-            );
+            return Err(match rejected.filter(|_| verified.is_empty()) {
+                Some(error) => format!("Cannot prove one persisted root conversation; its Windows session remains running ({error})"),
+                None => "Cannot prove one persisted root conversation; its Windows session remains running".into(),
+            });
         }
         let (identity, opened) = verified.into_values().next().unwrap();
         self.verify_root_scope(id, info, supervisor, root.pid, &proof, stop)?;

@@ -534,11 +534,12 @@ fn groups_need_today_heading(_projection: &Projection) -> bool {
 pub fn row_height(compact: bool, title_lines: u32, notes: bool, metadata: bool) -> f64 {
     let title_lines = title_lines.max(1).min(2);
     let raw = if compact {
-        (20.0
-            + 22.0 * title_lines as f64
-            + if notes { 18.0 } else { 0.0 }
-            + if metadata { 18.0 } else { 0.0 })
-        .max(52.0)
+        // 16/24 titles, 14/20 supporting lines, 12 pt above and below; the
+        // floors are 56 pt for a bare title, 80 pt with one supporting line
+        // and 104 pt with two, and wrapped titles grow past them.
+        let supporting = usize::from(notes) + usize::from(metadata);
+        let floor = [56.0, 80.0, 104.0][supporting];
+        (24.0 + 24.0 * title_lines as f64 + 20.0 * supporting as f64).max(floor)
     } else {
         (16.0
             + 20.0 * title_lines as f64
@@ -1414,7 +1415,10 @@ mod tests {
             LayoutMode::Wide
         );
         assert_eq!(row_height(false, 1, false, false), 44.0);
-        assert_eq!(row_height(true, 1, false, false), 52.0);
+        assert_eq!(row_height(true, 1, false, false), 56.0);
+        assert_eq!(row_height(true, 1, true, false), 80.0);
+        assert_eq!(row_height(true, 1, true, true), 104.0);
+        assert_eq!(row_height(true, 2, true, true), 112.0);
     }
 
     #[test]

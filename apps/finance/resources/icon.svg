@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="gr" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6fe0a2"/><stop offset="1" stop-color="#4fd18b"/></linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- rising bars and a coin -->
+  <rect x="236" y="560" width="112" height="190" rx="22" fill="url(#gr)" fill-opacity="0.55"/>
+  <rect x="384" y="470" width="112" height="280" rx="22" fill="url(#gr)" fill-opacity="0.75"/>
+  <rect x="532" y="370" width="112" height="380" rx="22" fill="url(#gr)"/>
+  <path d="M250 480 L420 380 L520 420 L700 290" fill="none" stroke="#e8eef6" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="712" cy="632" r="126" fill="#f5c84c"/>
+  <circle cx="712" cy="632" r="126" fill="none" stroke="#0e1d33" stroke-width="12"/>
+  <circle cx="712" cy="632" r="80" fill="none" stroke="#0e1d33" stroke-opacity="0.35" stroke-width="18"/>
+</svg>

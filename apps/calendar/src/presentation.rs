@@ -86,9 +86,13 @@ impl CalendarColors {
                     .unwrap_or(0),
             )
         };
-        let paper = role("color_inset");
-        let ink = role("color_text");
         let chrome = role("color_bg_app");
+        // Opaque: sheets, pages and panels are painted in paper over the
+        // content they cover. Themes give the inset as a tint (15% black in
+        // the desktop dark theme); over the window's background it is the
+        // colour the root view shows.
+        let paper = composite(role("color_inset"), chrome);
+        let ink = role("color_text");
         let sidebar = role("color_bg_container");
         let raw_secondary = role("color_text_meta");
         let raw_action = role("color_error");
@@ -241,8 +245,15 @@ pub fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
         size: dvec2(w.max(0.0), h.max(0.0)),
     }
 }
+/// One physical pixel.
 pub fn hairline(cx: &Cx2d) -> f64 {
-    0.5_f64.max(1.0 / cx.current_dpi_factor())
+    1.0 / cx.current_dpi_factor()
+}
+/// `v` moved onto the nearest physical-pixel boundary, so a hairline at a
+/// fractional column edge covers one device pixel instead of two half ones.
+pub fn snap_px(cx: &Cx2d, v: f64) -> f64 {
+    let dpi = cx.current_dpi_factor();
+    (v * dpi).round() / dpi
 }
 pub fn text_at(cx: &mut Cx2d, text: &mut DrawText, r: Rect, value: &str, align: Align) {
     if r.size.x < 2.0 || r.size.y < 2.0 {

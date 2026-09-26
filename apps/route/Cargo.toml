@@ -23,7 +23,14 @@ required-features = ["standalone"]
 
 [features]
 dynamic-module = []
-default = ["standalone", "native"]
+default = ["tweaker", "standalone", "localai"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["makepad-widgets/tweaker"]
+# The local models route's own brain runs on (the Qwen dispatcher, Whisper,
+# spoken replies) are part of `native`; `localai` is that, under the name
+# every app uses for it.
+localai = ["native"]
 # The standalone window (src/main.rs). A host that links the module
 # leaves it off and gets the lib only.
 standalone = []
@@ -47,7 +54,7 @@ bake = ["dep:makepad-map-build"]
 demo = ["standalone"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["glass", "maps"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-ai-services = { path = "../../libs/ai/services" }
 # The module contract: what the window manager seats in-process (src/module.rs).
@@ -61,7 +68,7 @@ makepad-mbtile-reader = { path = "../../libs/mbtile_reader", optional = true } #
 # local filter model come in with `native`.
 makepad-converse = { path = "../../libs/converse", default-features = false }
 
-makepad-ai-hub  = { path = "../../libs/ai/hub", default-features = false, features = ["llm"], optional = true } # M2: local dispatcher LLM
+makepad-ai-hub  = { path = "../../libs/ai/hub", default-features = false, features = ["localai"], optional = true } # M2: local dispatcher LLM
 
 makepad-strict-json = { path = "../../libs/strict_json", optional = true }  # claude_agent tool schemas
 

@@ -101,9 +101,8 @@ pub trait Vfs: Send + Sync {
             .unwrap_or(false)
     }
 
-    /// Create a directory path. Callers validate collisions before this
-    /// reaches the backend; recursive creation also lets Trash bootstrap its
-    /// platform-specific parent folders.
+    /// Create a directory path, and any missing parents. Callers validate
+    /// collisions before this reaches the backend.
     fn mkdir(&self, path: &Path) -> Result<(), String>;
 
     /// Move or rename one path without replacing an existing target.
@@ -496,10 +495,8 @@ pub fn outcome_message(kind: OpKind, count: usize, where_to: &Path) -> String {
     match kind {
         OpKind::Copy => format!("Copied {items} to {}", model::display_name(where_to)),
         OpKind::Move => format!("Moved {items} to {}", model::display_name(where_to)),
-        OpKind::Trash => format!("Moved {items} to the Trash"),
         OpKind::Rename => format!("Renamed {items}"),
         OpKind::NewFolder => format!("Created {}", model::display_name(where_to)),
-        OpKind::Delete => format!("Deleted {items} permanently"),
     }
 }
 
@@ -555,10 +552,5 @@ mod tests {
         let dir = Path::new("/x/Documents");
         assert_eq!(outcome_message(OpKind::Copy, 1, dir), "Copied 1 item to Documents");
         assert_eq!(outcome_message(OpKind::Move, 3, dir), "Moved 3 items to Documents");
-        assert_eq!(outcome_message(OpKind::Trash, 2, dir), "Moved 2 items to the Trash");
-        assert_eq!(
-            outcome_message(OpKind::Delete, 1, dir),
-            "Deleted 1 item permanently"
-        );
     }
 }

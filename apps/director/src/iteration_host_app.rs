@@ -14,6 +14,13 @@ struct HostedIterationView {
     flow: String,
     widget: WidgetRef,
     window: Option<usize>,
+    /// An AI-owned preview: people watch it, nothing of theirs reaches it and
+    /// nothing of its reaches their clipboard.
+    ai_test: bool,
+    /// Windows the app opened beyond the one hosted view; they are not shown.
+    extra_windows: std::collections::BTreeSet<usize>,
+    /// The worker was told that this app's first frame was presented.
+    frame_reported: bool,
 }
 
 impl App {
@@ -83,20 +90,40 @@ impl App {
         for run in embedded {
             if !self.iteration_host.views.contains_key(&run.client) {
                 let dock = self.ui.dock(cx, ids!(artifact_dock));
-                let Some(widget) = dock.create_and_select_tab(
-                    cx,
-                    id!(root),
-                    LiveId(run.client),
-                    id!(ArtifactTab),
-                    format!("{} / {}", run.flow, run.artifact_id),
-                    id!(CloseableTab),
-                    None,
-                ) else {
+                let ai_test = run.role == iteration::RunRole::AiTest;
+                let title = match &run.demo {
+                    Some(demo) => format!("{} / {demo}", run.flow),
+                    None => format!("{} / {}", run.flow, run.artifact_id),
+                };
+                // A background AI test never selects a tab or takes focus; a
+                // human evaluation build is what the person asked to see.
+                let created = if ai_test {
+                    dock.create_tab(
+                        cx,
+                        id!(root),
+                        LiveId(run.client),
+                        id!(ArtifactTab),
+                        title,
+                        id!(CloseableTab),
+                        None,
+                    )
+                } else {
+                    dock.create_and_select_tab(
+                        cx,
+                        id!(root),
+                        LiveId(run.client),
+                        id!(ArtifactTab),
+                        title,
+                        id!(CloseableTab),
+                        None,
+                    )
+                };
+                let Some(widget) = created else {
                     continue;
                 };
                 if let Some(mut view) = widget.borrow_mut::<IterationRunView>() {
                     view.set_target_size(Some(dvec2(780.0, 450.0)));
-                    view.set_read_only(cx, false);
+                    view.set_read_only(cx, ai_test);
                     view.set_run_target(cx, run.client, 0, run.port);
                 }
                 self.iteration_host.views.insert(
@@ -105,6 +132,9 @@ impl App {
                         flow: run.flow.clone(),
                         widget,
                         window: None,
+                        ai_test,
+                        extra_windows: std::collections::BTreeSet::new(),
+                        frame_reported: false,
                     },
                 );
             }
@@ -125,6 +155,21 @@ impl App {
         };
         let events = worker.poll_host();
         self.sync_iteration_app_views(cx);
+        // A first frame may be presented by a later draw rather than on
+        // arrival; either way the worker hears about it exactly once.
+        for (client, hosted) in self.iteration_host.views.iter_mut() {
+            if !hosted.frame_reported
+                && hosted
+                    .widget
+                    .borrow::<IterationRunView>()
+                    .is_some_and(|view| view.has_frame())
+            {
+                hosted.frame_reported = true;
+                self.iteration_host
+                    .worker_requests
+                    .push_back(IterationRequest::HostFrame { client: *client });
+            }
+        }
         self.iteration_host.deferred.extend(events);
         let count = self.iteration_host.deferred.len().min(256);
         for _ in 0..count {
@@ -155,6 +200,8 @@ impl App {
                         }
                         continue;
                     };
+                    let mut unobserved = None;
+                    let mut first_frame = false;
                     for message in messages.iter().cloned() {
                         match message {
                             AppToStudio::CreateWindow { window_id, .. } => {
@@ -165,6 +212,14 @@ impl App {
                                     {
                                         view.app_ready(cx, client, window_id);
                                     }
+                                } else if hosted.window != Some(window_id)
+                                    && hosted.extra_windows.len() < 64
+                                    && hosted.extra_windows.insert(window_id)
+                                {
+                                    // One view per app: a further window is
+                                    // neither shown nor recorded, and the
+                                    // worker reports it rather than hide it.
+                                    unobserved = Some(hosted.extra_windows.len());
                                 }
                             }
                             AppToStudio::DrawCompleteAndFlip(frame) => {
@@ -172,6 +227,12 @@ impl App {
                                     hosted.widget.borrow_mut::<IterationRunView>()
                                 {
                                     view.set_presentable_draw(cx, frame);
+                                    // A frame that really reached the shared
+                                    // surface, not just a message on the wire.
+                                    if !hosted.frame_reported && view.has_frame() {
+                                        hosted.frame_reported = true;
+                                        first_frame = true;
+                                    }
                                 }
                             }
                             AppToStudio::SetCursor(cursor) => {
@@ -181,12 +242,25 @@ impl App {
                                     view.set_remote_cursor(cx, cursor.into());
                                 }
                             }
-                            AppToStudio::SetClipboard(text) => cx.copy_to_clipboard(&text),
+                            // An AI-owned preview never writes the person's clipboard.
+                            AppToStudio::SetClipboard(text) if !hosted.ai_test => {
+                                cx.copy_to_clipboard(&text)
+                            }
                             AppToStudio::LogItem(item) => {
                                 log!("studio app {client}: {}", item.message)
                             }
                             _ => {}
                         }
+                    }
+                    if first_frame {
+                        self.iteration_host
+                            .worker_requests
+                            .push_back(IterationRequest::HostFrame { client });
+                    }
+                    if let Some(extra) = unobserved {
+                        self.iteration_host
+                            .worker_requests
+                            .push_back(IterationRequest::HostWindows { client, extra });
                     }
                 }
                 HostEvent::Disconnected { client, reason } => {

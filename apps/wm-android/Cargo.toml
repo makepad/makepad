@@ -1,0 +1,41 @@
+# wm-android — the plain window manager as an Android app, hosting every app
+# as a real child PROCESS, the way the desktop WM does: each app is its own
+# library (its `app_main!`, the engine linked statically), run by a small
+# launcher in a process of its own, talking the desktop hosting protocol over
+# the WM's hub and drawing into shared AHardwareBuffer frames
+# (platform/src/os/linux/android/android_hosted.rs). No shared engine dylib.
+#
+#   cargo makepad android --abi=aarch64 --package-name=nl.makepad.wm \
+#     --app-label=wm proc-pack -p makepad-wm-android --release
+# (tools/cargo_makepad/src/android/proc_pack) builds this crate's APK, the
+# launcher (`launch/`) and one library per app listed below, and packs them.
+
+[package]
+name = "makepad-wm-android"
+version = "0.1.0"
+edition = "2021"
+
+# What `proc-pack` builds as hosted child libraries: [package, bin] pairs,
+# bin being the WM registry's binary name (apps/wm/src/clients.rs).
+[package.metadata.makepad.proc]
+apps = [
+    "makepad-calculator calculator",
+    "makepad-calendar calendar",
+    "makepad-clock clock",
+    "makepad-files files",
+    "makepad-finance finance",
+    "makepad-mail mail",
+    "makepad-notes notes",
+    "makepad-photos photos",
+    "makepad-reminders reminders",
+    "makepad-app-route makepad-app-route",
+    "makepad-sheets sheets",
+    "makepad-weather weather",
+]
+
+[lib]
+name = "makepad_wm_android"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-wm = { path = "../wm" }

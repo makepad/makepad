@@ -59,7 +59,6 @@ fn icon_for(id: &str) -> Option<Ico> {
         "pdf" => Ico::Check,
         "route" => Ico::Globe,
         "mixer" => Ico::Speaker,
-        "vj" => Ico::Headphone,
         "photos" => Ico::Photo,
         "clock" => Ico::Calendar,
         "weather" => Ico::Brightness,
@@ -93,7 +92,8 @@ pub fn apps(launchable: &Launchable) -> Vec<MenuItem> {
             kind: MenuKind::App,
             checked: false,
             disabled: false,
-            description: String::new(),
+            // Opening it compiles it first (clients.rs spawn_build).
+            description: if app.is_built() { String::new() } else { "compiles when opened".into() },
             aliases: vec![app.id.clone(), app.package.clone()],
         })
         .collect();
