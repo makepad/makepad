@@ -18,7 +18,8 @@ pub(super) const OK: &str = "32";
 pub(super) const WARN: &str = "33";
 pub(super) const ACC: &str = "36";
 const INV: &str = "7";
-/// Makepad orange, only ever one character: the ▌ on the selected row.
+/// Makepad orange: the ▌ on the selected row and the filled part of
+/// progress bars; never a background or an action.
 const MARK: &str = "38;2;255;92;57";
 /// The Makepad mark drawn faintly behind the rows (braille dots).
 const LOGO: &str = include_str!("../logo.txt");
@@ -262,38 +263,65 @@ fn band(y: usize, x0: usize, x1: usize) {
     });
 }
 /// The Makepad mark, faint, right-aligned to `right` and centred between
-/// rows `top` and `bottom` (inclusive, 1-based). Each line only shows to the
-/// right of that row's text with two columns of air, never on the band.
+/// rows `top` and `bottom` (inclusive, 1-based), or as near the middle as
+/// it fits beside every row's text with two columns of air: the large one
+/// (44 x 13) when it fits somewhere, else the small one (30 x 9), else none,
+/// so it is never cut into. The selected
+/// row's `<action> ⏎` does not count (it moves with the selection); where it
+/// reaches into the mark, the text wins there and the mark goes on around it.
 fn logo(top: usize, bottom: usize, right: usize) {
-    let art: Vec<&str> = LOGO.lines().collect();
-    let art_width = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    if bottom < top || right < art_width + 30 {
-        return;
-    }
-    let height = bottom - top + 1;
-    let y0 = top + height.saturating_sub(art.len()) / 2;
-    let x0 = right - art_width;
+    let height = (bottom + 1).saturating_sub(top);
     let style = if LIGHT.with(StdCell::get) { LOGO_LIGHT } else { LOGO_DARK };
     CANVAS.with(|canvas| {
         let mut c = canvas.borrow_mut();
         let width = c.width;
-        for (i, line) in art.iter().enumerate() {
-            let y = y0 + i;
-            if y < top || y > bottom || y == 0 {
+        if top == 0 || width == 0 {
+            return;
+        }
+        let row_cells = |c: &Canvas, y: usize| -> Vec<Cell> { c.cells.get((y - 1) * width..y * width).map(<[Cell]>::to_vec).unwrap_or_default() };
+        // Where each row's own text ends (plus two columns of air).
+        let clear = |cells: &[Cell]| -> usize {
+            let band = cells.iter().any(|cell| cell.band);
+            let mut end = cells.len();
+            if band {
+                // Skip the trailing action hint, drawn in OK after a gap.
+                while end > 0 && (cells[end - 1].ch == ' ' || cells[end - 1].style == OK) { end -= 1; }
+            } else {
+                while end > 0 && cells[end - 1].ch == ' ' { end -= 1; }
+            }
+            if end == 0 { 0 } else { end + 2 }
+        };
+        for art in LOGO.split("\n\n").map(|art| art.lines().collect::<Vec<&str>>()) {
+            let art_width = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            if art.len() > height || right < art_width + 30 || right > width {
                 continue;
             }
-            let row = (y - 1) * width;
-            let Some(cells) = c.cells.get(row..row + width) else { continue };
-            if cells.iter().any(|cell| cell.band) {
+            let x0 = right - art_width;
+            let middle = top + (height - art.len()) / 2;
+            let mut starts: Vec<usize> = (top..=top + height - art.len()).collect();
+            starts.sort_by_key(|&y| y.abs_diff(middle));
+            let Some(y0) = starts.into_iter().find(|&y0| {
+                art.iter().enumerate().all(|(i, line)| {
+                    let ink = line.chars().position(|ch| ch != ' ').unwrap_or(art_width);
+                    clear(&row_cells(&c, y0 + i)) <= x0 + ink
+                })
+            }) else {
                 continue;
-            }
-            let text_end = cells.iter().rposition(|cell| cell.ch != ' ').map_or(0, |x| x + 3);
-            for (dx, ch) in line.chars().enumerate() {
-                let x = x0 + dx;
-                if ch != ' ' && x >= text_end && x < width {
-                    c.cells[row + x] = Cell { ch, style, band: false };
+            };
+            for (i, line) in art.iter().enumerate() {
+                let y = y0 + i;
+                let before = row_cells(&c, y);
+                let row = (y - 1) * width;
+                for (dx, ch) in line.chars().enumerate() {
+                    let x = x0 + dx;
+                    let free = |x: usize| before.get(x).is_none_or(|cell| cell.ch == ' ');
+                    if ch != ' ' && x < width && free(x) && free(x + 1) && (x == 0 || free(x - 1)) {
+                        let band = before[x].band;
+                        c.cells[row + x] = Cell { ch, style, band };
+                    }
                 }
             }
+            return;
         }
     });
 }
@@ -434,7 +462,7 @@ fn draw() {
     VIEW.with(|view| {
         let view = view.borrow();
         let mut x = put(2, 2, "Makepad", BOLD);
-        x = put(2, x, " commercial apps", PLAIN);
+        x = put(2, x, " Apps", PLAIN);
         x = put(2, x, &view.crumb, PLAIN);
         let email = view.email.chars().count();
         if !view.email.is_empty() && width >= email + 2 && width - 2 - email > x {
@@ -483,7 +511,10 @@ fn draw() {
             put(y - 1, 4, &more, DIM);
         }
         // The rule, status, choice and footer follow the rows directly.
-        let y = (y + 1).min(rows - 3);
+        // The rule, status, choice and footer keep to the bottom of the
+        // window, so the mark has the height between them and the header.
+        let _ = y;
+        let y = rows - 3;
         // The mark sits at the right of the window (up to 100 columns),
         // beside the rows rather than under them.
         logo(top, y - 1, cols.min(100).saturating_sub(2));
@@ -1054,7 +1085,7 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
             match fraction {
                 Some(f) => {
                     let filled = (f * width as f64).round() as usize;
-                    spans.push(Span("━".repeat(filled), ACC));
+                    spans.push(Span("━".repeat(filled), MARK));
                     spans.push(Span("─".repeat(width - filled), DIM));
                     spans.push(Span(format!(" {:3.0}%", f * 100.), PLAIN));
                 }
@@ -1102,7 +1133,7 @@ fn row_line(row: &progress::Row, begun: &Instant, width: usize) -> Text {
     match (&row.state, row.fraction) {
         (progress::RowState::Running, Some(f)) => {
             let filled = (f * BAR as f64).round() as usize;
-            spans.push(Span("━".repeat(filled), ACC));
+            spans.push(Span("━".repeat(filled), MARK));
             spans.push(Span("─".repeat(BAR - filled), DIM));
             spans.push(Span(format!(" {:3.0}%", f * 100.), PLAIN));
         }

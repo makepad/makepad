@@ -212,8 +212,8 @@ rem and footer. Rows are rewritten in place.
 set "FRAMED=1"
 cls
 echo.
-echo   %B%Makepad%N% commercial apps › Getting started
-echo   %D%Makepad apps ship as source, so your own coding agent can customize them.%N%
+echo   %B%Makepad%N% Apps › Getting started
+echo   %D%Shipped as source code, so your coding agent can customize everything.%N%
 echo.
 if defined NEED_RUST (set "T=%D%○ downloads first%N%") else (set "T=%G%✓%N% ready")
 call :row 5 "Rust %RUST_VERSION%"
