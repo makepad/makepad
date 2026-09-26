@@ -256,6 +256,8 @@ workspace.exclude = [
     "libs/simd-adler32",
     "libs/smallvec",
     "libs/ttf-parser",
+    "libs/tween",
+    "libs/gizmo",
     "libs/unicase",
     "libs/unicode/unicode-bidi",
     "libs/unicode/unicode-bidi-mirroring",

@@ -1,0 +1,117 @@
+mod.theme = mod.themes.dark
+
+// Black glossy plastic: the dark kit with a cyan indicator. Low caps on a
+// charcoal housing, a strong sweep of gloss across the top of every face, a
+// bright rim where the light catches the shoulder, and a press that barely
+// moves the cap: the state is said by light, not by depth.
+mod.theme.color_bg_app = #2b2f34
+mod.theme.color_fg_app = #2b2f34
+mod.theme.color_bg_container = #2b2f34
+mod.theme.color_outset = #2b2f34
+mod.theme.color_outset_1 = #2b2f34
+mod.theme.color_outset_2 = #2b2f34
+mod.theme.color_outset_hover = #2f343a
+mod.theme.color_outset_1_hover = #2f343a
+mod.theme.color_outset_2_hover = #2f343a
+mod.theme.color_outset_down = #262a2f
+mod.theme.color_outset_1_down = #262a2f
+mod.theme.color_outset_2_down = #262a2f
+mod.theme.color_outset_disabled = #2b2f34
+mod.theme.color_outset_1_disabled = #2b2f34
+mod.theme.color_outset_2_disabled = #2b2f34
+mod.theme.color_inset = #202428
+mod.theme.color_inset_1 = #202428
+mod.theme.color_inset_2 = #202428
+mod.theme.color_inset_hover = #1c2024
+mod.theme.color_inset_1_hover = #1c2024
+mod.theme.color_inset_2_hover = #1c2024
+mod.theme.color_inset_focus = #1c2024
+mod.theme.color_inset_1_focus = #1c2024
+mod.theme.color_inset_2_focus = #1c2024
+mod.theme.color_inset_active = #1c2024
+mod.theme.color_inset_1_active = #1c2024
+mod.theme.color_inset_2_active = #1c2024
+mod.theme.color_inset_down = #1c2024
+mod.theme.color_inset_1_down = #1c2024
+mod.theme.color_inset_2_down = #1c2024
+mod.theme.color_inset_drag = #202428
+mod.theme.color_inset_1_drag = #202428
+mod.theme.color_inset_2_drag = #202428
+mod.theme.color_inset_empty = #202428
+mod.theme.color_inset_1_empty = #202428
+mod.theme.color_inset_2_empty = #202428
+mod.theme.color_inset_disabled = #262a2f
+mod.theme.color_inset_1_disabled = #262a2f
+mod.theme.color_inset_2_disabled = #262a2f
+
+// The bevel colours are the old fake-depth stroke: matched to the ground so
+// they disappear, the relief replaces them.
+mod.theme.color_bevel = #2b2f34
+mod.theme.color_bevel_inset_1 = #2b2f34
+mod.theme.color_bevel_inset_2 = #2b2f34
+mod.theme.color_bevel_outset_1 = #2b2f34
+mod.theme.color_bevel_outset_2 = #2b2f34
+mod.theme.beveling = 0.0
+
+mod.theme.color_text = #c6ced6
+mod.theme.color_label = #c6ced6
+mod.theme.color_label_inner = #c6ced6
+mod.theme.color_label_outer = #c6ced6
+mod.theme.color_icon = #c6ced6
+// The cyan indicator: focus, active and value all speak in it.
+mod.theme.color_focus = #4dd0e1
+mod.theme.color_ctrl_active = #4dd0e1
+mod.theme.color_val = #4dd0e1
+
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.corner_radius = 6.0
+mod.theme.container_corner_radius = 12.0
+
+// THE MATERIAL
+// Tier 2 with the finish turned up: a tight specular (low roughness), a
+// strong gloss sweep and a bright rim, under a light from nearly overhead so
+// the sweep sits on the top of every cap. A broad face gradient makes each
+// cap read as curved across its whole span, the way polished plastic does.
+mod.theme.material_level = 2.0
+mod.theme.material_light_x = -0.20
+mod.theme.material_light_y = -0.70
+mod.theme.material_light_z = 0.68
+mod.theme.material_light_intensity = 1.15
+mod.theme.material_bevel_width = 2.5
+mod.theme.material_bevel_curve = 0.70
+mod.theme.material_ao = 0.55
+mod.theme.material_rim = 0.62
+mod.theme.material_specular = 0.35
+mod.theme.material_roughness = 0.16
+mod.theme.material_gloss = 0.42
+mod.theme.material_raise = 2.5
+mod.theme.material_sink = 3.0
+mod.theme.material_face_gradient = 0.80
+mod.theme.material_hairline = 0.50
+mod.theme.material_ao_reach = 1.1
+
+// THE PRESS ILLUMINATES. The cap drops a single point and the glow carries
+// the state: the face lifts toward the cyan, a halo spills onto the housing,
+// and the label lights with it (material_ink_glow). Image 3's PUSHED.
+mod.theme.material_press_depth = -1.0
+mod.theme.material_press_invert = 0.0
+mod.theme.material_glow = 0.55
+mod.theme.material_ink_glow = 0.85
+mod.theme.material_ink_lift = 1.6
+
+mod.theme.material_shadow = 0.70
+mod.theme.material_shadow_blur = 10.0
+mod.theme.material_shadow_falloff = 1.0
+mod.theme.material_contact_ao = 0.50
+mod.theme.material_ground_lip = 0.0
+mod.theme.material_inner_shadow = 0.72
+mod.theme.material_inner_radius = 9.0
+mod.theme.material_margin = 8.0
+mod.theme.color_material_light = #ffffff
+mod.theme.color_material_shadow = #05070a
+mod.theme.color_material_glow = #4dd0e1
+true

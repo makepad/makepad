@@ -210,7 +210,7 @@ pub(crate) fn area_after_redraws(cx: &Cx, area: Area) -> Area {
             let Some(list) = cx.draw_lists.checked_index(ra.draw_list_id) else {
                 return Area::Empty;
             };
-            if cx.draw_lists.is_id_freed(ra.draw_list_id) || ra.rect_id >= list.rect_areas.len() {
+            if cx.draw_lists.is_id_freed(ra.draw_list_id) || ra.rect_id >= list.rect_area_count {
                 return Area::Empty;
             }
             Area::Rect(RectArea { redraw_id: list.redraw_id, ..ra })

@@ -59,8 +59,32 @@
 //!   boundary and a drag model, and they are what makes the grid a grid.
 //! * **No keyboard.** The body scrolls under the wheel and the thumb; there
 //!   is nothing to move a cursor between.
+//!
+//! # Headings on the diagonal
+//!
+//! `header_angle` is permission, not an instruction. With it set, a heading
+//! turns only when its name does not fit its column flat — measured, name
+//! plus the cell padding against the column's own width — and a heading that
+//! does fit stays exactly where it was, flat on the bottom line of the band.
+//! A table of wide columns with an angle set therefore draws the same
+//! rectangles as the same table without one, and the band is only as tall as
+//! the names that did turn need.
+//!
+//! That is the whole point of it: a column of three-digit numbers is three
+//! digits wide and its name is ten times that, so the name goes on the
+//! diagonal and the column keeps the width of its VALUES. Turning a name
+//! that already fits buys nothing and costs the reader a tilted head.
+//! `header_lean` says which way the ones that do turn lean; the arithmetic
+//! is in `diagonal_text.rs`, which the panel kit's own diagonal header
+//! shares.
 use crate::{
-    badge::measure, makepad_derive_widget::*, makepad_draw::*, widget::*,
+    badge::measure,
+    diagonal_text::{
+        diagonal_overhang, diagonal_row_height, draw_diagonal_name, DiagonalLean, DiagonalRun,
+    },
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
     widget_tree::CxWidgetExt,
 };
 use std::collections::HashMap;
@@ -216,6 +240,128 @@ fn column_widths(
     out
 }
 
+/// Whether a heading of `name_width` fits flat in a column of `width` with
+/// `pad` either side: the one question that decides whether it turns.
+///
+/// Measured the way a sharing column's own width is (`measure`, padding both
+/// sides), so a column sized to its heading always answers yes — which is
+/// what keeps a table of wide columns flat with an angle set. The hundredth
+/// of a point is for the sum that lands exactly on the width.
+pub fn heading_fits_flat(name_width: f64, width: f64, pad: f64) -> bool {
+    name_width + pad * 2.0 <= width + 0.01
+}
+
+/// Which columns' headings turn, given what each column came out as.
+fn turned_headings(name_widths: &[f64], widths: &[f64], pad: f64) -> Vec<bool> {
+    name_widths
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let width = widths.get(i).copied().unwrap_or(0.0);
+            !heading_fits_flat(*name, width, pad)
+        })
+        .collect()
+}
+
+/// The longest name among the headings that turn, or `None` when none do.
+fn longest_turned(name_widths: &[f64], turned: &[bool]) -> Option<(usize, f64)> {
+    name_widths
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(i, _)| turned.get(*i).copied().unwrap_or(false))
+        .fold(None, |best: Option<(usize, f64)>, (i, w)| match best {
+            Some((_, b)) if b >= w => best,
+            _ => Some((i, w)),
+        })
+}
+
+/// How far the turned names' ink reaches past the columns' own span, on the
+/// side they lean over: the strip the table has to keep back for it.
+///
+/// Measured column by column from where each name actually stands, rather
+/// than as the longest name's whole reach, because a name standing over a
+/// column in the middle mostly hangs over its neighbours — which is the
+/// point — and only what leaves the columns altogether needs room of its
+/// own. Nothing when nothing turned.
+fn ink_overreach(
+    name_widths: &[f64],
+    widths: &[f64],
+    turned: &[bool],
+    angle: f64,
+    lean: DiagonalLean,
+) -> f64 {
+    let span: f64 = widths.iter().sum();
+    let mut x = 0.0;
+    let mut over = 0.0f64;
+    for (i, width) in widths.iter().enumerate() {
+        if turned.get(i).copied().unwrap_or(false) {
+            let middle = x + width * 0.5;
+            let reach = diagonal_overhang(name_widths.get(i).copied().unwrap_or(0.0), angle);
+            over = over.max(match lean {
+                DiagonalLean::Rise => middle + reach - span,
+                DiagonalLean::Fall => reach - middle,
+            });
+        }
+        x += width;
+    }
+    over.max(0.0)
+}
+
+/// The columns' widths, which headings turn, and the strip kept back for
+/// the ink, settled together for a table with `room` inside it.
+///
+/// They depend on each other — a strip kept back narrows the sharing
+/// columns, and a narrower column may be one more that has to turn — so this
+/// starts from no strip at all and widens it until the ink fits. Each round
+/// can only turn more headings, never fewer, so it ends within a round per
+/// column; and a table where nothing turns stops on the first round with the
+/// widths it always had, which is what "exactly as before" rests on.
+fn settle_columns(
+    cols: &[TableColumn],
+    natural: &[f64],
+    names: &[f64],
+    room: f64,
+    min_width: f64,
+    pad: f64,
+    angle: f64,
+    lean: DiagonalLean,
+) -> (Vec<f64>, Vec<bool>, f64) {
+    let mut reserve = 0.0f64;
+    let mut rounds = 0;
+    loop {
+        let widths = column_widths(cols, natural, (room - reserve).max(0.0), min_width);
+        let turned = if names.is_empty() {
+            vec![false; widths.len()]
+        } else {
+            turned_headings(names, &widths, pad)
+        };
+        let need = ink_overreach(names, &widths, &turned, angle, lean);
+        rounds += 1;
+        if need <= reserve + 0.01 || rounds > cols.len() + 1 {
+            return (widths, turned, reserve);
+        }
+        reserve = need;
+    }
+}
+
+/// How tall the heading band is, given the longest turned name and the line
+/// it is written in: the stated height when nothing turned — so a table with
+/// nothing to turn is not a point taller for having the option — and
+/// otherwise what the longest turned name needs, but never less than the
+/// stated height, which the flat headings beside it still stand in.
+///
+/// Up to the whole point: a Fit table sizes itself to the band plus its
+/// rows, and a band of 106.07 points leaves the rows a fraction short of what
+/// they asked for — which is a scroll bar down the side of a table that has
+/// nothing to scroll.
+fn heading_band_height(stated: f64, longest_turned: Option<f64>, line: f64, angle: f64) -> f64 {
+    match longest_turned {
+        None => stated,
+        Some(width) => diagonal_row_height(width, line, angle).ceil().max(stated),
+    }
+}
+
 /// The half-open range of rows showing through a body of `height` scrolled
 /// to `scroll`. Always inside `rows`, so a stale scroll cannot ask for a row
 /// that is not there.
@@ -338,6 +484,10 @@ script_mod! {
         row_height: 26.
         /** how tall the heading band is 16..64 step 1 */
         header_height: 28.
+        /** how far a heading too long for its column is turned, in degrees; one that fits stays flat, and 0 turns none 0..80 step 5 */
+        header_angle: 0.
+        /** which way a turned heading leans: Rise hangs it over the right, Fall over the left */
+        header_lean: DiagonalLean.Rise
         /** the room on each side of a cell's text 0..32 step 1 */
         cell_pad: 10.
         /** the narrowest a sharing column may become 16..240 step 2 */
@@ -448,6 +598,12 @@ pub struct Table {
     pub draw_text: DrawText,
     #[live]
     pub draw_heading: DrawText,
+    /// The same headings, turned. It carries no style of its own on purpose:
+    /// the face and the ink are copied from `draw_heading` before each draw,
+    /// so a table styled once is styled at every angle and there is no second
+    /// place to forget.
+    #[live]
+    draw_heading_turned: DrawRotatedText,
 
     /// The columns as markup, one spec per column.
     #[live]
@@ -460,6 +616,18 @@ pub struct Table {
     pub row_height: f64,
     #[live(28.0)]
     pub header_height: f64,
+    /// How far a heading is turned from the horizontal when it has to be,
+    /// in degrees. Nought never turns one. Past nought, only a heading whose
+    /// name does not fit its column flat turns; the band is then as tall as
+    /// the longest turned name needs and never shorter than `header_height`,
+    /// and with nothing to turn it is `header_height` exactly.
+    #[live]
+    pub header_angle: f64,
+    /// Which way a turned heading leans. `Rise` by default — the
+    /// spreadsheet's way, which hangs the ink to the RIGHT, where the room
+    /// beyond the last column is the table's own.
+    #[live(DiagonalLean::Rise)]
+    pub header_lean: DiagonalLean,
     #[live(10.0)]
     pub cell_pad: f64,
     #[live(40.0)]
@@ -529,6 +697,21 @@ pub struct Table {
     /// to be.
     #[rust]
     drawn_cells: Vec<(usize, usize)>,
+
+    /// Scratch for one turned name's glyphs, kept so a row of them does not
+    /// allocate once a frame each.
+    #[rust]
+    head_glyphs: Vec<PathGlyphInstance>,
+    /// Which headings the last draw turned, one per column. Decided every
+    /// pass from the widths the columns came out at, so a column that grows
+    /// wide enough lays its name flat again without being told.
+    #[rust]
+    head_turned: Vec<bool>,
+    /// Where each turned name's ink went, by column, from the last draw:
+    /// what says a name stood over its own column and stayed inside the
+    /// table, rather than what the arithmetic promised it would.
+    #[rust]
+    head_runs: Vec<(usize, DiagonalRun)>,
 
     #[rust]
     heads: Vec<Rect>,
@@ -679,6 +862,58 @@ impl Table {
         self.heads.iter().position(|rect| rect.contains(pos))
     }
 
+    /// Whether a heading MAY turn this pass. Which ones do is the columns'
+    /// business: see `heading_fits_flat`.
+    fn may_turn(&self) -> bool {
+        self.show_header && self.header_angle > 0.0
+    }
+
+    /// The face the turned headings are drawn in: the flat ones' face,
+    /// copied over every pass so the two can never drift apart.
+    fn turn_heading_face(&mut self) {
+        self.draw_heading_turned.text_style = self.draw_heading.text_style.clone();
+        self.draw_heading_turned.color = self.draw_heading.color;
+    }
+
+    /// Every heading's width, measured exactly as `natural_widths` measures
+    /// it, so the fit test and the width a sharing column asked for are the
+    /// same number. The bare heading and not the sort mark: pressing a
+    /// heading must not be what tips it onto the diagonal.
+    fn heading_widths(&self, cx: &mut Cx2d) -> Vec<f64> {
+        self.cols.iter().map(|col| measure(&self.draw_heading, cx, &col.heading)).collect()
+    }
+
+    /// How tall the heading band is for this set of turned headings: the
+    /// stated height when none turned, else what the longest turned name
+    /// needs. Only that one name is shaped for its line.
+    fn band_height(
+        &self,
+        cx: &mut Cx2d,
+        cols: &[TableColumn],
+        names: &[f64],
+        turned: &[bool],
+        stated: f64,
+    ) -> f64 {
+        match longest_turned(names, turned) {
+            None => stated,
+            Some((index, width)) => {
+                let name = cols.get(index).map_or("", |col| col.heading.as_str());
+                let line = self.heading_line(cx, name);
+                heading_band_height(stated, Some(width), line, self.header_angle)
+            }
+        }
+    }
+
+    /// The height of one line of `name` in the heading face: what a turned
+    /// name stands across.
+    fn heading_line(&self, cx: &mut Cx2d, name: &str) -> f64 {
+        let size = self.draw_heading.text_style.font_size as f64;
+        match self.draw_heading.prepare_single_line_run(cx, name) {
+            Some(run) => ((run.ascender_in_lpxs - run.descender_in_lpxs) as f64).max(size),
+            None => size,
+        }
+    }
+
     /// What each sharing column would need to show its own content: the
     /// widest of its heading and its text cells, plus the padding either
     /// side. A widget cell measures as nothing, which is why a column of
@@ -777,13 +1012,35 @@ impl Widget for Table {
 
         let natural = self.natural_widths(cx);
         let frame = if self.framed { self.draw_bg.border_size as f64 } else { 0.0 };
-        let header_h = if self.show_header { self.header_height.max(0.0) } else { 0.0 };
+        // Every heading's width when a heading may turn, and nothing at all
+        // when none may: without an angle not one more thing is measured, so
+        // the flat table costs what it always did.
+        let may_turn = self.may_turn();
+        let names = if may_turn {
+            self.turn_heading_face();
+            self.heading_widths(cx)
+        } else {
+            Vec::new()
+        };
+        let stated_h = if self.show_header { self.header_height.max(0.0) } else { 0.0 };
         let content_h = body.len() as f64 * self.row_height;
 
         // A Fill inside a Fit resolves to nothing, so a Fit table has to
-        // work out its own size before a single row is drawn.
-        let natural_w = natural.iter().sum::<f64>() + frame * 2.0;
-        let natural_h = header_h + content_h + frame * 2.0;
+        // work out its own size before a single row is drawn — including
+        // the band, which is what the turned names make it. It is worked
+        // out here at the widths the table asks for; a table squeezed below
+        // those turns more headings once it knows its room, and then the
+        // body gives up the difference rather than the band.
+        let asked_turned = if may_turn {
+            turned_headings(&names, &natural, self.cell_pad)
+        } else {
+            vec![false; cols.len()]
+        };
+        let asked_reserve =
+            ink_overreach(&names, &natural, &asked_turned, self.header_angle, self.header_lean);
+        let asked_h = self.band_height(cx, &cols, &names, &asked_turned, stated_h);
+        let natural_w = natural.iter().sum::<f64>() + frame * 2.0 + asked_reserve;
+        let natural_h = asked_h + content_h + frame * 2.0;
         let walk = Walk {
             width: match walk.width {
                 Size::Fit { .. } => Size::Fixed(natural_w),
@@ -808,7 +1065,26 @@ impl Widget for Table {
                 (outer.size.y - frame * 2.0).max(0.0),
             ),
         };
-        let widths = column_widths(&cols, &natural, inner.size.x, self.min_col_width);
+        // The columns' real widths, which headings those leave unable to lie
+        // flat, and the strip their ink needs beside the columns. With
+        // nothing turned that is the whole inside, divided as it always was
+        // and starting at its left edge; with something turned, the strip is
+        // kept back on the side the names lean towards.
+        let (widths, turned, reserve) = settle_columns(
+            &cols,
+            &natural,
+            &names,
+            inner.size.x,
+            self.min_col_width,
+            self.cell_pad,
+            self.header_angle,
+            self.header_lean,
+        );
+        let header_h = self.band_height(cx, &cols, &names, &turned, stated_h);
+        self.head_turned.clone_from(&turned);
+        self.head_runs.clear();
+        let lean_left = self.header_lean == DiagonalLean::Fall;
+        let band_x = inner.pos.x + if lean_left { reserve } else { 0.0 };
 
         // The heading band, which does not move: the body is clipped to its
         // own rect below it, so there is nothing to keep it above.
@@ -818,7 +1094,7 @@ impl Widget for Table {
             self.draw_fill.color = self.color_header;
             self.draw_fill.draw_abs(cx, band);
 
-            let mut x = inner.pos.x;
+            let mut x = band_x;
             for (index, width) in widths.iter().enumerate() {
                 let rect = Rect { pos: dvec2(x, band.pos.y), size: dvec2(*width, header_h) };
                 if self.hot_head == Some(index) {
@@ -842,6 +1118,7 @@ impl Widget for Table {
 
             // The labels last, so neither the hover wash nor the rule paints
             // over them.
+            let mut glyphs = std::mem::take(&mut self.head_glyphs);
             for (index, col) in cols.iter().enumerate() {
                 let Some(rect) = self.heads.get(index).copied() else {
                     continue;
@@ -853,8 +1130,37 @@ impl Widget for Table {
                         label.push_str(if ascending { " \u{25B2}" } else { " \u{25BC}" });
                     }
                 }
-                draw_run(&mut self.draw_heading, cx, rect, self.cell_pad, col.align, &label);
+                if turned.get(index).copied().unwrap_or(false) {
+                    // Deliberately unclipped: a turned name is MEANT to
+                    // cross its neighbours, and the only thing it may not
+                    // cross is the table, which the strip kept back above
+                    // makes sure of.
+                    if let Some(run) = draw_diagonal_name(
+                        &mut self.draw_heading_turned,
+                        cx,
+                        &mut glyphs,
+                        rect,
+                        &label,
+                        self.header_angle,
+                        self.header_lean,
+                    ) {
+                        self.head_runs.push((index, run));
+                    }
+                } else {
+                    // A name that fits lies where it always did: in a slot
+                    // of the stated height on the band's bottom line, so it
+                    // reads along the same line the turned names stand on.
+                    // With nothing turned the slot IS the heading.
+                    let slot = Rect {
+                        // Bracketed so that with nothing turned the offset
+                        // is an exact nought and not a rounding of one.
+                        pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - stated_h)),
+                        size: dvec2(rect.size.x, stated_h),
+                    };
+                    draw_run(&mut self.draw_heading, cx, slot, self.cell_pad, col.align, &label);
+                }
             }
+            self.head_glyphs = glyphs;
         }
 
         let body_rect = Rect {
@@ -883,7 +1189,7 @@ impl Widget for Table {
                 );
             }
 
-            let mut x = inner.pos.x;
+            let mut x = band_x;
             for (col_index, col) in cols.iter().enumerate() {
                 let width = widths.get(col_index).copied().unwrap_or(0.0);
                 let rect = Rect { pos: dvec2(x, y), size: dvec2(width, self.row_height) };
@@ -954,7 +1260,7 @@ impl Widget for Table {
         }
 
         if self.column_lines && self.line_size > 0.0 && widths.len() > 1 {
-            let mut x = inner.pos.x;
+            let mut x = band_x;
             for width in &widths[..widths.len() - 1] {
                 x += width;
                 self.draw_fill.color = self.color_rule;
@@ -1335,5 +1641,423 @@ mod tests {
     fn the_thumb_never_shrinks_past_the_floor() {
         let (_, len) = thumb_span(0.0, 9000.0, 200.0, 9200.0, 24.0);
         assert_eq!(len, 24.0);
+    }
+}
+
+/// The turned heading row, drawn. What the arithmetic says about where a
+/// name goes is only worth something if that is where the table actually put
+/// it — and the rule it rests on, that a heading turns only when its name
+/// does not fit its column, has to hold in a real layout, where the widths
+/// come out of the sharing sum and not out of a test's head.
+#[cfg(test)]
+mod diagonal_headers {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: DVec2 = DVec2 { x: 900.0, y: 1600.0 };
+
+    /// The tables in one pass. The wide ones are one table three times —
+    /// flat, and with an angle in each lean — whose columns are all wide
+    /// enough for their names. The narrow ones are what the option is for:
+    /// numbers in 32-point columns under long names, beside a wide first
+    /// column with a short one.
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    wide_off := Table{
+                        width: 500. height: Fit
+                        sortable: true
+                        columns: ["First" "Born|90|end" "Last" "Town||center"]
+                        rows: ["Anna|1961|Berg|Ely" "Tom|1974|Hale|Wells next the Sea"]
+                    }
+                    wide_on := Table{
+                        width: 500. height: Fit
+                        sortable: true
+                        header_angle: 45.
+                        columns: ["First" "Born|90|end" "Last" "Town||center"]
+                        rows: ["Anna|1961|Berg|Ely" "Tom|1974|Hale|Wells next the Sea"]
+                    }
+                    wide_fall := Table{
+                        width: 500. height: Fit
+                        sortable: true
+                        header_angle: 45.
+                        header_lean: DiagonalLean.Fall
+                        columns: ["First" "Born|90|end" "Last" "Town||center"]
+                        rows: ["Anna|1961|Berg|Ely" "Tom|1974|Hale|Wells next the Sea"]
+                    }
+                    narrow_off := Table{
+                        width: Fit height: Fit
+                        columns: ["Site" "Readings taken|32|end" "Average reading|32|end" "Days without a reading|32|end"]
+                        rows: ["North gate|12|11|2" "South gate|9|8|4"]
+                    }
+                    narrow := Table{
+                        width: Fit height: Fit
+                        sortable: true
+                        header_angle: 45.
+                        columns: ["Site" "Readings taken|32|end" "Average reading|32|end" "Days without a reading|32|end"]
+                        rows: ["North gate|12|11|2" "South gate|9|8|4"]
+                    }
+                    narrow_fall := Table{
+                        width: Fit height: Fit
+                        sortable: true
+                        header_angle: 45.
+                        header_lean: DiagonalLean.Fall
+                        columns: ["Site" "Readings taken|32|end" "Average reading|32|end" "Days without a reading|32|end"]
+                        rows: ["North gate|12|11|2" "South gate|9|8|4"]
+                    }
+                    short_turned := Table{
+                        width: Fit height: Fit
+                        header_angle: 45.
+                        columns: ["Site" "Readings taken|32|end"]
+                        rows: ["North gate|12"]
+                    }
+                    long_flat := Table{
+                        width: Fit height: Fit
+                        header_angle: 45.
+                        columns: ["The site the readings were taken at" "Readings taken|32|end"]
+                        rows: ["North gate|12"]
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// One whole pass over `root`, the way a frame draws it.
+    fn draw(cx: &mut Cx, root: &WidgetRef) {
+        let pass = DrawPass::new(cx);
+        let mut draw_list = DrawList2d::new(cx);
+        pass.set_size(cx, SIZE);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+    }
+
+    fn start(cx: &mut Cx) -> WidgetRef {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        draw(cx, &root);
+        root
+    }
+
+    /// What one table in the scene drew: its heading rects, the box it drew
+    /// in, the body under the band, which headings turned and where their
+    /// ink went.
+    struct Drawn {
+        heads: Vec<Rect>,
+        area: Rect,
+        body: Rect,
+        turned: Vec<bool>,
+        runs: Vec<(usize, DiagonalRun)>,
+    }
+
+    fn drawn(cx: &Cx, root: &WidgetRef, id: &[LiveId]) -> Drawn {
+        let widget = root.widget(cx, id);
+        let table = widget.borrow::<Table>().expect("it is a Table");
+        Drawn {
+            heads: table.heads.clone(),
+            area: table.area.rect(cx),
+            body: table.body_rect,
+            turned: table.head_turned.clone(),
+            runs: table.head_runs.clone(),
+        }
+    }
+
+    /// A rect moved so its table's box starts at the origin: the tables
+    /// stand one under another, and only where things are INSIDE a table
+    /// can be compared between two of them.
+    fn local(rect: Rect, area: Rect) -> Rect {
+        Rect { pos: rect.pos - area.pos, size: rect.size }
+    }
+
+    /// Two rects the same to a billionth of a point: the tables stand at
+    /// different heights, and taking one origin off leaves a rounding that
+    /// is not a difference in the layout.
+    fn same(a: Rect, b: Rect) -> bool {
+        (a.pos - b.pos).length() < 1e-9 && (a.size - b.size).length() < 1e-9
+    }
+
+    fn band_height(heads: &[Rect]) -> f64 {
+        heads.first().expect("a heading row").size.y
+    }
+
+    /// The operator's rule, whole: a table whose columns all hold their
+    /// names flat looks exactly the same with an angle set as without one —
+    /// the same box, the same band, the same headings, the same body — in
+    /// either lean. Nothing turns, so nothing moves.
+    #[test]
+    fn wide_columns_with_an_angle_draw_exactly_what_they_drew_without_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        let off = drawn(&cx, &root, ids!(wide_off));
+        for id in [ids!(wide_on), ids!(wide_fall)] {
+            let on = drawn(&cx, &root, id);
+            assert_eq!(on.turned, vec![false; 4], "no heading here needs turning");
+            assert!(on.runs.is_empty(), "and none was drawn turned");
+            assert_eq!(on.area.size, off.area.size, "the same box");
+            assert!(
+                same(local(on.body, on.area), local(off.body, off.area)),
+                "the same body: {:?} against {:?}",
+                local(on.body, on.area),
+                local(off.body, off.area)
+            );
+            assert_eq!(on.heads.len(), off.heads.len());
+            for (a, b) in on.heads.iter().zip(&off.heads) {
+                let (a, b) = (local(*a, on.area), local(*b, off.area));
+                assert!(same(a, b), "the same heading: {a:?} against {b:?}");
+            }
+        }
+    }
+
+    /// Only the names too long for their columns turn. The wide first column
+    /// under a short name keeps it flat beside them, and the narrow columns
+    /// keep the width they were given — a turned name does not widen its
+    /// column, which is the reason for turning it.
+    #[test]
+    fn only_a_name_too_long_for_its_column_turns() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        for id in [ids!(narrow), ids!(narrow_fall)] {
+            let table = drawn(&cx, &root, id);
+            assert_eq!(table.turned, vec![false, true, true, true]);
+            assert_eq!(
+                table.runs.iter().map(|(col, _)| *col).collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "the turned ones, and only those, were drawn turned"
+            );
+            for head in &table.heads[1..] {
+                assert!((head.size.x - 32.0).abs() < 1e-9, "a narrow column stays narrow");
+            }
+        }
+    }
+
+    /// The band is as tall as the longest TURNED name needs. A long name
+    /// that fits its wide column flat does not make it any taller, and
+    /// with something turned it is taller than the flat band it replaces.
+    #[test]
+    fn the_band_is_as_tall_as_the_longest_turned_name() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        let flat = drawn(&cx, &root, ids!(narrow_off));
+        let turned = drawn(&cx, &root, ids!(narrow));
+        assert!((band_height(&flat.heads) - 28.0).abs() < 1e-9, "the stated height");
+        assert!(band_height(&turned.heads) > 28.0, "turned names need more room");
+        let short = drawn(&cx, &root, ids!(short_turned));
+        let long = drawn(&cx, &root, ids!(long_flat));
+        assert_eq!(long.turned, vec![false, true], "the long name fits its own column");
+        assert_eq!(
+            band_height(&long.heads),
+            band_height(&short.heads),
+            "a flat name, however long, does not raise the band"
+        );
+        assert!(
+            band_height(&turned.heads) > band_height(&short.heads),
+            "and a longer turned name raises it more"
+        );
+        for head in &turned.heads {
+            assert_eq!(head.pos.y, turned.heads[0].pos.y, "one band");
+            assert_eq!(head.size.y, band_height(&turned.heads), "one bottom line");
+        }
+    }
+
+    /// Each turned name stands on the middle of its own column's bottom
+    /// edge, and all of its ink is inside the table: the strip kept back for
+    /// it is on the side it leans over.
+    #[test]
+    fn each_turned_name_stands_over_its_own_column_and_inside_the_table() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        for (id, lean) in [(ids!(narrow), DiagonalLean::Rise), (ids!(narrow_fall), DiagonalLean::Fall)] {
+            let table = drawn(&cx, &root, id);
+            for (col, run) in &table.runs {
+                let head = table.heads[*col];
+                let foot = match lean {
+                    DiagonalLean::Rise => run.start,
+                    DiagonalLean::Fall => run.end,
+                };
+                assert!((foot.x - (head.pos.x + head.size.x * 0.5)).abs() < 1e-6, "column {col}");
+                assert!((foot.y - (head.pos.y + head.size.y)).abs() < 1e-6, "column {col}");
+                let ink = run.bounds;
+                assert!(ink.pos.x >= table.area.pos.x - 1e-6, "{lean:?} {col} leaves on the left");
+                assert!(
+                    ink.pos.x + ink.size.x <= table.area.pos.x + table.area.size.x + 1e-6,
+                    "{lean:?} {col} leaves on the right"
+                );
+                assert!(ink.pos.y >= head.pos.y - 1e-6, "{lean:?} {col} leaves the band");
+            }
+        }
+    }
+
+    /// A press on a turned heading lands on the column its name stands on:
+    /// the heading rects tile the band edge to edge whatever is turned, and
+    /// the hit walks those, not the ink.
+    #[test]
+    fn a_press_on_a_turned_heading_finds_its_own_column() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        for id in [ids!(narrow), ids!(narrow_fall)] {
+            let widget = root.widget(&cx, id);
+            let table = widget.borrow::<Table>().expect("it is a Table");
+            for (index, head) in table.heads.iter().enumerate() {
+                for at in [
+                    dvec2(head.pos.x + head.size.x * 0.5, head.pos.y + 2.0),
+                    dvec2(head.pos.x + head.size.x * 0.5, head.pos.y + head.size.y - 2.0),
+                ] {
+                    assert_eq!(table.head_at(at), Some(index), "column {index}");
+                }
+                assert!(table.can_sort(index), "column {index} sorts");
+            }
+            for pair in table.heads.windows(2) {
+                assert!(
+                    (pair[0].pos.x + pair[0].size.x - pair[1].pos.x).abs() < 1e-9,
+                    "the headings tile the band"
+                );
+            }
+        }
+    }
+
+    /// Sorting does not tip a heading onto the diagonal. The mark is drawn
+    /// after the name, but the fit is decided on the name alone — a heading
+    /// that jumped to 45 degrees because it was pressed would move the row
+    /// it names.
+    #[test]
+    fn sorting_leaves_every_heading_where_it_was() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        let before = drawn(&cx, &root, ids!(narrow));
+        let wide_before = drawn(&cx, &root, ids!(wide_on));
+        for (id, col) in [(ids!(narrow), 0), (ids!(wide_on), 1)] {
+            let widget = root.widget(&cx, id);
+            widget
+                .borrow_mut::<Table>()
+                .expect("it is a Table")
+                .set_sort_indicator(&mut cx, Some((col, true)));
+        }
+        draw(&mut cx, &root);
+        let after = drawn(&cx, &root, ids!(narrow));
+        let wide_after = drawn(&cx, &root, ids!(wide_on));
+        assert_eq!(after.turned, before.turned);
+        assert_eq!(after.heads, before.heads);
+        assert_eq!(wide_after.turned, wide_before.turned);
+        assert_eq!(wide_after.heads, wide_before.heads);
+    }
+
+    /// A column made wide enough for its name lays it flat again, and the
+    /// others keep theirs turned; made narrow again, it turns again. The
+    /// table has no grip to drag a column by, so this is the host handing
+    /// it a new width — the same thing a resize is.
+    #[test]
+    fn a_column_made_wide_enough_lays_its_name_flat_again() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = start(&mut cx);
+        let columns = |second: f64| {
+            vec![
+                TableColumn::new("Site"),
+                TableColumn::fixed("Readings taken", second).with_align(TableAlign::End),
+                TableColumn::fixed("Average reading", 32.0).with_align(TableAlign::End),
+                TableColumn::fixed("Days without a reading", 32.0).with_align(TableAlign::End),
+            ]
+        };
+        let widget = root.widget(&cx, ids!(narrow));
+        widget.borrow_mut::<Table>().unwrap().set_columns(&mut cx, columns(200.0));
+        draw(&mut cx, &root);
+        let wide = drawn(&cx, &root, ids!(narrow));
+        assert_eq!(wide.turned, vec![false, false, true, true], "wide enough: flat");
+        assert!((wide.heads[1].size.x - 200.0).abs() < 1e-9);
+
+        widget.borrow_mut::<Table>().unwrap().set_columns(&mut cx, columns(32.0));
+        draw(&mut cx, &root);
+        let narrow = drawn(&cx, &root, ids!(narrow));
+        assert_eq!(narrow.turned, vec![false, true, true, true], "narrow again: turned");
+    }
+}
+
+/// The rule without a window: which headings turn, the strip kept back for
+/// their ink, and the band — all settled from numbers.
+#[cfg(test)]
+mod heading_fit {
+    use super::*;
+
+    fn cols(specs: &[&str]) -> Vec<TableColumn> {
+        specs.iter().map(|spec| parse_column_spec(spec)).collect()
+    }
+
+    /// A column sized to its own heading holds it: the fit is measured the
+    /// same way the column's width is, so the two cannot disagree by a hair.
+    #[test]
+    fn a_column_sized_to_its_heading_holds_it_flat() {
+        assert!(heading_fits_flat(40.0, 60.0, 10.0));
+        assert!(heading_fits_flat(40.0, 40.0 + 2.0 * 10.0, 10.0), "exactly at the width");
+        assert!(!heading_fits_flat(40.0, 59.0, 10.0));
+    }
+
+    /// Nothing turned means nothing kept back and nothing moved: the widths
+    /// are the ones the table always had, to the bit.
+    #[test]
+    fn with_nothing_to_turn_the_widths_are_the_old_ones() {
+        let cols = cols(&["First", "Born|90|end", "Last"]);
+        let natural = vec![60.0, 90.0, 70.0];
+        let names = vec![30.0, 28.0, 26.0];
+        let (widths, turned, reserve) =
+            settle_columns(&cols, &natural, &names, 500.0, 40.0, 10.0, 45.0, DiagonalLean::Rise);
+        assert_eq!(widths, column_widths(&cols, &natural, 500.0, 40.0));
+        assert_eq!(turned, vec![false; 3]);
+        assert_eq!(reserve, 0.0);
+        assert_eq!(heading_band_height(28.0, longest_turned(&names, &turned).map(|(_, w)| w), 14.0, 45.0), 28.0);
+    }
+
+    /// The strip is on the side the names lean over and only as wide as the
+    /// ink that leaves the columns: a name over the middle hangs over its
+    /// neighbours, which needs nothing kept back.
+    #[test]
+    fn the_strip_is_what_leaves_the_columns() {
+        let cols = cols(&["Site", "Readings taken|32|end", "Days without a reading|32|end"]);
+        let natural = vec![90.0, 32.0, 32.0];
+        let names = vec![30.0, 90.0, 140.0];
+        let (widths, turned, reserve) =
+            settle_columns(&cols, &natural, &names, 500.0, 40.0, 10.0, 45.0, DiagonalLean::Rise);
+        assert_eq!(turned, vec![false, true, true]);
+        assert_eq!(widths[1], 32.0);
+        // The last name stands 16 in from the columns' end and reaches
+        // 140 cos 45 past its foot.
+        let expect = 140.0 * 45f64.to_radians().cos() - 16.0;
+        assert!((reserve - expect).abs() < 1e-6, "{reserve} against {expect}");
+
+        // Falling, the same names hang back over the wide first column, which
+        // has the room for all of them: nothing is kept back at all.
+        let (_, turned, reserve) =
+            settle_columns(&cols, &natural, &names, 500.0, 40.0, 10.0, 45.0, DiagonalLean::Fall);
+        assert_eq!(turned, vec![false, true, true]);
+        assert_eq!(reserve, 0.0);
+    }
+
+    /// Squeezed below what its heading needs, a sharing column turns too:
+    /// the rule is about the width a column came out at, not how it was
+    /// asked for.
+    #[test]
+    fn a_squeezed_sharing_column_turns() {
+        let cols = cols(&["Readings taken", "Average reading"]);
+        let natural = vec![120.0, 130.0];
+        let names = vec![100.0, 110.0];
+        let (_, roomy, _) =
+            settle_columns(&cols, &natural, &names, 400.0, 20.0, 10.0, 45.0, DiagonalLean::Rise);
+        assert_eq!(roomy, vec![false, false]);
+        let (_, squeezed, _) =
+            settle_columns(&cols, &natural, &names, 120.0, 20.0, 10.0, 45.0, DiagonalLean::Rise);
+        assert_eq!(squeezed, vec![true, true]);
     }
 }

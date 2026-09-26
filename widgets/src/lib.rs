@@ -13,7 +13,9 @@
 pub use makepad_widgets_core::*;
 
 #[cfg(feature = "tweaker")]
-pub use makepad_widgets_tweaker::{reflect, reflect::*, theme_store, tweaker};
+pub use makepad_widgets_tweaker::{
+    designer, reflect, reflect::*, theme_builder, theme_combinations, theme_lab, theme_store, tweaker,
+};
 
 #[cfg(feature = "data")]
 pub use makepad_widgets_data::{
@@ -45,7 +47,7 @@ pub use makepad_widgets_extras::{
 };
 
 #[cfg(feature = "color")]
-pub use makepad_widgets_extras::{color, color::*};
+pub use makepad_widgets_extras::{color, color::*, gradient_editor, gradient_editor::*};
 
 #[cfg(feature = "dates")]
 pub use makepad_widgets_extras::{

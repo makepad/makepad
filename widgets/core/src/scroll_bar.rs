@@ -1222,13 +1222,11 @@ impl ScrollBar {
             if !self.show_handle {
                 return;
             }
-            // A hidden bar takes no presses, so a tap on its strip reaches the content beneath.
-            if matches!(event, Event::MouseDown(_) | Event::TouchUpdate(_))
-                && self.auto_hide
-                && !self.animator_in_state(cx, ids!(show.on))
-            {
-                return;
-            }
+            // A faded bar still owns its strip: a press there shows it and
+            // scrolls or drags as always. The layouts in this tree leave the
+            // strip to their bar (ItemGrid's scroll_bar_band, View's
+            // pointer capture), so a bar that let the press through here
+            // would leave a strip along the edge that answers nothing.
 
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {

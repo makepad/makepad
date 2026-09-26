@@ -4,7 +4,7 @@ use {
         animator::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        makepad_script::ScriptFnRef,
+        makepad_script::{ScriptFnRef, ScriptIp},
         scroll_bars::{ScrollBars, ScrollExtent},
         widget::*,
         widget_async::{
@@ -174,8 +174,19 @@ pub struct View {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     pub children: SmallVec<[(LiveId, WidgetRef); 2]>,
+    /// Room one named child is laid out without, on top of its own margin.
+    /// See [`View::set_child_reserve`].
+    #[rust]
+    child_reserve: Option<(LiveId, Inset)>,
     #[rust]
     live_update_order: SmallVec<[LiveId; 1]>,
+    /// Where the children were last declared: the construction site of the
+    /// value whose vec last held them. A reload whose value comes from the
+    /// same site with an empty vec has deleted the last child; a reload from
+    /// another site (a restyle re-applying the widget's own template over a
+    /// body evaluated elsewhere) says nothing about them.
+    #[rust]
+    children_made_at: Option<ScriptIp>,
 
     #[apply_default]
     animator: Animator,
@@ -220,6 +231,7 @@ impl ScriptHook for View {
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 let mut anon_index = 0usize;
+                let mut declared = 0usize;
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
                         // Determine the id: use prefixed id if available, otherwise use numbered id for anonymous children
@@ -238,6 +250,7 @@ impl ScriptHook for View {
                             if !WidgetRef::value_is_newable_widget(vm, kv.value) {
                                 continue;
                             }
+                            declared += 1;
 
                             if apply.is_reload() {
                                 self.live_update_order.push(id);
@@ -255,15 +268,27 @@ impl ScriptHook for View {
                         }
                     }
                 });
+                if declared > 0 {
+                    let made_at = vm.bx.heap.object_data(obj).made_at;
+                    self.children_made_at = (!made_at.is_unknown()).then_some(made_at);
+                }
             }
         }
 
         if apply.is_reload() {
-            // update/delete children list
-            // Only reorder and truncate if we actually processed items from the vec.
-            // If vec was empty but children exist, this is likely an incomplete parse
-            // during streaming - preserve existing children.
-            if !self.live_update_order.is_empty() || self.children.is_empty() {
+            // Update or delete the children. An empty vec is the last child
+            // deleted only when a live edit re-applies the declaration that
+            // held the children; any other empty vec (a restyle re-applying
+            // the widget's own template, an `on_render` view's declaration,
+            // which is empty by design, a streaming parse still short of its
+            // children) leaves them alone.
+            let same_declaration = apply.is_live_edit_reload()
+                && self.children_made_at.is_some()
+                && value
+                    .as_object()
+                    .map(|obj| Some(vm.bx.heap.object_data(obj).made_at) == self.children_made_at)
+                    .unwrap_or(false);
+            if !self.live_update_order.is_empty() || self.children.is_empty() || same_declaration {
                 for (idx, id) in self.live_update_order.iter().enumerate() {
                     if let Some(pos) = self.children.iter().position(|(i, _v)| *i == *id) {
                         self.children.swap(idx, pos);
@@ -341,6 +366,28 @@ impl View {
             .heap
             .new_with_proto_no_vec(self.source.as_object().into())
             .into()
+    }
+
+    /// Lay the child named `child` out with `reserve` added to its margin,
+    /// or with nothing added when `reserve` is `None`.
+    ///
+    /// This is room the PARENT keeps back, not a property of the child: it is
+    /// added to the walk the child hands up on every draw and never written
+    /// into the child, so whatever re-applies the child from its script -- a
+    /// live edit, a style reload, a theme install -- cannot take it away, and
+    /// the first draw after one lays the child out exactly as the draw before
+    /// it did. A window docks a side panel next to its body this way.
+    ///
+    /// It is a runtime field, so a re-apply of this view leaves it standing
+    /// too; whoever sets it owns clearing it. One child at a time, because the
+    /// one user has one body.
+    pub fn set_child_reserve(&mut self, child: LiveId, reserve: Option<Inset>) {
+        self.child_reserve = reserve.map(|inset| (child, inset));
+    }
+
+    /// The reserve [`View::set_child_reserve`] last set, and on which child.
+    pub fn child_reserve(&self) -> Option<(LiveId, Inset)> {
+        self.child_reserve
     }
 
     pub fn set_debug_dump(&mut self, cx: &mut Cx, debug: bool) {
@@ -1593,7 +1640,17 @@ impl Widget for View {
                 //let id = self.draw_order[step];
                 if let Some((id, child)) = self.children.get_mut(step) {
                     if child.visible() {
-                        let walk = child.walk(cx);
+                        let mut walk = child.walk(cx);
+                        // Before the defer, so a Fill child resolved later
+                        // carries the reserve in the walk it keeps.
+                        if let Some((reserved, inset)) = &self.child_reserve {
+                            if reserved == id {
+                                walk.margin.left += inset.left;
+                                walk.margin.right += inset.right;
+                                walk.margin.top += inset.top;
+                                walk.margin.bottom += inset.bottom;
+                            }
+                        }
                         if resume {
                             child.draw_walk(cx, scope, walk)?;
                         } else if let Some(fw) = cx.defer_walk_turtle(walk) {
@@ -1734,6 +1791,17 @@ impl View {
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);
+        } else {
+            self.layout.scroll = v;
+        }
+    }
+
+    /// Set the scroll offset without clamping it to the content: for a
+    /// view that has not drawn yet, whose extent is still unknown, so its
+    /// first frame is drawn at a position put back from before a rebuild.
+    pub fn set_scroll_pos_unclipped(&mut self, cx: &mut Cx, v: Vec2d) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.set_scroll_pos_no_clip(cx, v);
         } else {
             self.layout.scroll = v;
         }

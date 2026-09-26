@@ -14,6 +14,12 @@
 //! table they used to read was a single fixed dark grade with no light and no
 //! skeleton variant, so those controls stayed dark on a light page.
 //!
+//! **A number row is a track.** The six channel rows under the wheel are
+//! filled bars, and a filled bar the width of a panel column reads as a
+//! slider: a press lands the channel where it fell and the drag keeps it
+//! there. The hex line below them is the one row that is still a text field,
+//! because a colour written down is typed, not aimed at.
+//!
 //! **Hue is the state, not red-green-blue.** Every control here keeps an
 //! [`Hsva`] and derives the RGBA from it. Round-tripping through RGBA loses
 //! the hue of a grey and the hue of black, and a picker that forgets which
@@ -782,10 +788,17 @@ script_mod! {
         align: Align{y: 0.5}
     }
 
+    // A channel row is a filled bar the width of a third of the panel, and a
+    // bar that wide reads as a slider whatever it is made of. `track` makes
+    // it behave the way it reads: the press lands the channel where it fell,
+    // and the drag keeps it under the pointer. As a scrub these rows looked
+    // movable and were not — crossing 0..255 at a step per pixel is most of
+    // a screen of travel, and a press on its own did nothing at all.
     let ChannelField = mod.widgets.ValueInput{
         width: Fill
         height: 20
         precision: 0.
+        track: true
     }
 
     // ---- the picker -------------------------------------------------------
@@ -2476,7 +2489,17 @@ impl Widget for ColorPicker {
                     if wa.widget_uid != num_uid {
                         continue;
                     }
+                    // A row is dragged now, so the two reports are two
+                    // different moments: the move is what the wheel, the
+                    // square and the hex follow, and the release is the one
+                    // a host writes down and the recent strip remembers. A
+                    // panel that ended on every move would file a hundred
+                    // commits across one drag of the R row.
                     if let ValueInputAction::Changed(v) = wa.cast::<ValueInputAction>() {
+                        self.hsva = channel_hsva(self.hsva, which, v);
+                        changed = true;
+                    }
+                    if let ValueInputTrackAction::Ended(v) = wa.cast::<ValueInputTrackAction>() {
                         self.hsva = channel_hsva(self.hsva, which, v);
                         changed = true;
                         ended = true;
@@ -3126,17 +3149,17 @@ mod pointer_capture_tests {
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
     const WINDOW: WindowId = WindowId(1, 1);
 
-    struct Target {
+    pub(super) struct Target {
         pass: DrawPass,
         draw_list: DrawList2d,
     }
 
     impl Target {
-        fn new(cx: &mut Cx) -> Self {
+        pub(super) fn new(cx: &mut Cx) -> Self {
             Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
         }
 
-        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+        pub(super) fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
             self.pass.set_size(cx, SIZE);
             let event = DrawEvent::default();
             let mut draw = CxDraw::new(cx, &event);
@@ -3151,7 +3174,7 @@ mod pointer_capture_tests {
         }
     }
 
-    fn press(abs: Vec2d) -> Event {
+    pub(super) fn press(abs: Vec2d) -> Event {
         Event::MouseDown(MouseDownEvent {
             abs,
             button: MouseButton::PRIMARY,
@@ -3162,7 +3185,38 @@ mod pointer_capture_tests {
         })
     }
 
-    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+    pub(super) fn moved(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.1,
+        })
+    }
+
+    pub(super) fn release(abs: Vec2d) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.2,
+        })
+    }
+
+    /// With no event loop here to end a capture on the release, the area a
+    /// press captured is let go by hand, or it takes every later press.
+    pub(super) fn claimed(event: &Event) -> Area {
+        match event {
+            Event::MouseDown(e) => e.handled.get(),
+            Event::MouseMove(e) => e.handled.get(),
+            _ => Area::Empty,
+        }
+    }
+
+    pub(super) fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
         cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
     }
 
@@ -3262,6 +3316,257 @@ mod pointer_capture_tests {
         );
         let Event::MouseDown(e) = &event else { unreachable!() };
         assert!(e.handled.get().is_empty(), "nor was it marked as spoken for");
+        cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// One colour, four views of it, and a hand on the number rows.
+///
+/// The rows are tracks now, so a press on one is a place to put the channel
+/// rather than the start of a scrub that never got going. What the panel owes
+/// the rest of itself is unchanged and easy to break while changing how a row
+/// is driven: every other view of the colour follows on the same frame, the
+/// hue survives a trip through grey and through black, and the panel says
+/// what it holds while the row moves and commits once when it stops.
+#[cfg(test)]
+mod channel_rows {
+    use super::pointer_capture_tests::{claimed, moved, press, release, send, Target};
+    use super::*;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := ColorPicker{color: #xFF0000FF}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let pick = root.widget(cx, ids!(pick));
+        assert!(!pick.is_empty(), "the scene has a picker in it");
+        (root, pick)
+    }
+
+    fn field(pick: &WidgetRef, row: LiveId, id: LiveId) -> WidgetRef {
+        pick.borrow::<ColorPicker>().unwrap().field(row, id)
+    }
+
+    fn num(pick: &WidgetRef, id: LiveId) -> WidgetRef {
+        let row = if id == live_id!(num_r) || id == live_id!(num_g) || id == live_id!(num_b) {
+            live_id!(row_rgb)
+        } else {
+            live_id!(row_hsv)
+        };
+        field(pick, row, id)
+    }
+
+    fn row_value(pick: &WidgetRef, id: LiveId) -> f64 {
+        num(pick, id)
+            .borrow::<ValueInput>()
+            .expect("the panel has that row")
+            .value()
+    }
+
+    /// A window point `t` (0..1) along a row's fill — the span the row paints
+    /// across and reads a press against.
+    fn along(cx: &Cx, pick: &WidgetRef, id: LiveId, t: f64) -> Vec2d {
+        let f = num(pick, id).area().rect(cx);
+        assert!(f.size.x > 10.0, "the row was drawn wide enough to press");
+        let (lo, hi) = crate::value_input::track_span(f.size.x);
+        dvec2(f.pos.x + lo + t * (hi - lo), f.pos.y + f.size.y * 0.5)
+    }
+
+    /// One press on a row and its release, with the capture let go by hand.
+    fn drag_row(cx: &mut Cx, root: &WidgetRef, pick: &WidgetRef, id: LiveId, t: f64) -> ActionsBuf {
+        let at = along(cx, pick, id, t);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        actions
+    }
+
+    fn wheel_hue(pick: &WidgetRef) -> f32 {
+        pick.borrow::<ColorPicker>()
+            .unwrap()
+            .wheel
+            .borrow::<ColorWheel>()
+            .expect("the panel has a wheel")
+            .hsva()
+            .h
+    }
+
+    fn square_sv(pick: &WidgetRef) -> (f32, f32) {
+        let inner = pick.borrow::<ColorPicker>().unwrap();
+        let area = inner.square.borrow::<ColorArea>().expect("the panel has a square");
+        (area.hsva().s, area.hsva().v)
+    }
+
+    fn hex_text(pick: &WidgetRef) -> String {
+        field(pick, live_id!(row_hex), live_id!(hex)).text()
+    }
+
+    fn said(actions: &ActionsBuf, pick: &WidgetRef) -> Vec<ColorAction> {
+        actions
+            .filter_widget_actions_cast::<ColorAction>(pick.widget_uid())
+            .collect()
+    }
+
+    /// The six number rows are tracks, and the hex line is not: a colour
+    /// written down is typed, not aimed at.
+    #[test]
+    fn the_number_rows_are_tracks_and_the_hex_row_is_a_text_field() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, pick) = start(&mut cx);
+        for id in [
+            live_id!(num_r),
+            live_id!(num_g),
+            live_id!(num_b),
+            live_id!(num_h),
+            live_id!(num_s),
+            live_id!(num_v),
+        ] {
+            assert!(
+                num(&pick, id).borrow::<ValueInput>().expect("the panel has that row").track,
+                "a number row of the panel is not a track"
+            );
+        }
+        let hex = field(&pick, live_id!(row_hex), live_id!(hex));
+        assert!(hex.borrow::<TextInput>().is_some(), "the hex row stopped being a text field");
+    }
+
+    /// A move on the H row reaches the bytes, the hex, the wheel and the
+    /// square, and does it on the same frame.
+    #[test]
+    fn moving_the_hue_row_carries_the_bytes_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 0.0, "the panel opened on red");
+        // A third of the way along 0..360 is green.
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 1.0 / 3.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 120.0);
+        assert_eq!(row_value(&pick, live_id!(num_r)), 0.0, "R never heard the hue move");
+        assert_eq!(row_value(&pick, live_id!(num_g)), 255.0);
+        assert_eq!(row_value(&pick, live_id!(num_b)), 0.0);
+        assert_eq!(hex_text(&pick), "#00ff00ff", "the hex field never heard it");
+        assert!((wheel_hue(&pick) - 1.0 / 3.0).abs() < 1e-4, "the wheel never heard it");
+    }
+
+    /// And the other way: a byte reaches H S V, the hex, the wheel and the
+    /// square.
+    #[test]
+    fn moving_a_byte_row_carries_the_hsv_rows_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        // Half way along G: 128 of 255, which is orange at 30 degrees.
+        drag_row(&mut cx, &root, &pick, live_id!(num_g), 0.5);
+        assert_eq!(row_value(&pick, live_id!(num_g)), 128.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 30.0, "H never heard the byte move");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(hex_text(&pick), "#ff8000ff", "the hex field never heard it");
+        let hue = wheel_hue(&pick);
+        assert!((hue - 30.0 / 360.0).abs() < 1e-3, "the wheel never heard it: {hue}");
+        assert_eq!(square_sv(&pick), (1.0, 1.0), "the square never heard it");
+    }
+
+    /// Saturation down to nothing and back up again keeps the hue.
+    ///
+    /// The panel holds HSVA and derives the rest; a grey has no hue to read
+    /// back out of RGB, so a state kept as bytes would answer red the moment
+    /// S touched the floor, and the colour would come back red.
+    #[test]
+    fn saturation_to_zero_and_back_keeps_the_hue() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 0.0);
+        assert_eq!(
+            row_value(&pick, live_id!(num_h)),
+            200.0,
+            "the hue jumped when the colour went grey"
+        );
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+    }
+
+    /// And value down to black and back up again keeps both.
+    #[test]
+    fn value_to_zero_and_back_keeps_the_hue_and_the_saturation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "black lost the hue");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "black lost the saturation");
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "the saturation did not come back");
+    }
+
+    /// A colour that went in as a hex comes back out of the hex field
+    /// unchanged, however far round the HSVA state it travelled.
+    #[test]
+    fn a_hex_comes_back_out_of_the_field_unchanged() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, pick) = start(&mut cx);
+        for text in ["#3a7bd5ff", "#ff8000ff", "#808080ff", "#000000ff", "#ffffffff", "#01020380"] {
+            let (rgba, _) = parse_hex_color(text).expect("a hex this test wrote");
+            pick.borrow_mut::<ColorPicker>()
+                .unwrap()
+                .set_color(&mut cx, vec4(rgba[0], rgba[1], rgba[2], rgba[3]));
+            assert_eq!(hex_text(&pick), text, "the colour did not survive the round trip");
+        }
+    }
+
+    /// The panel follows the row while it moves and commits once when it
+    /// stops. A panel that ended on every move would write a hundred commits
+    /// across one drag and fill the recent strip with the way there.
+    #[test]
+    fn the_panel_follows_a_row_and_commits_once_at_the_end() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick) = start(&mut cx);
+        let changes = |actions: &ActionsBuf| {
+            said(actions, &pick).iter().filter(|a| matches!(a, ColorAction::Changed(_))).count()
+        };
+        let ends = |actions: &ActionsBuf| {
+            said(actions, &pick).iter().filter(|a| matches!(a, ColorAction::Ended(_))).count()
+        };
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &pick, live_id!(num_h), 0.25);
+        let down = press(at);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(changes(&actions), 1, "the press said its colour more than once");
+        assert_eq!(ends(&actions), 0, "the press committed a gesture it had just begun");
+
+        let to = along(&cx, &pick, live_id!(num_h), 0.5);
+        let actions = send(&mut cx, &root, &moved(to));
+        assert_eq!(changes(&actions), 1, "the move said its colour more than once");
+        assert_eq!(ends(&actions), 0, "the move committed mid-drag");
+        assert_eq!(row_value(&pick, live_id!(num_h)), 180.0, "the drag did not follow");
+
+        let actions = send(&mut cx, &root, &release(to));
+        assert_eq!(ends(&actions), 1, "the release did not commit, or committed twice");
+        down.unhandle(&mut cx, &claimed(&down));
         cx.fingers.first_mouse_button = None;
     }
 }

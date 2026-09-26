@@ -513,6 +513,11 @@ script_mod! {
             text_style: theme.font_regular{font_size: theme.font_size_p}
         }
 
+        /** The plate under a region's name: the page, the ground the name's ink is put to. */
+        draw_name_plate +: {
+            color: theme.color_bg_app
+        }
+
         animator: Animator{
             hover: {
                 default: @off
@@ -1412,6 +1417,13 @@ pub struct Waveform {
     /// can read.
     #[live]
     pub draw_name: DrawText,
+    /// Under each region's name. The names run along the foot of the lane,
+    /// where a loud wave reaches and the region's own wash lies, and the
+    /// wave is drawn in the value fill, which is chosen to stand off the
+    /// lane and held to nothing written on it. On a plate of the page the
+    /// name reads against the ground its ink was put to, whatever is under.
+    #[live]
+    pub draw_name_plate: DrawColor,
     /// The colour of every intent, inherited from the shared palette so a
     /// region and a badge that mean the same thing look the same.
     #[live]
@@ -1817,6 +1829,14 @@ impl Waveform {
             if width > room {
                 continue;
             }
+            let pad = (size * 0.25).round();
+            self.draw_name_plate.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x0 + self.name_inset - pad, top),
+                    size: dvec2(width + pad * 2.0, box_h),
+                },
+            );
             self.draw_name.draw_abs(
                 cx,
                 dvec2(x0 + self.name_inset, text_top(top, box_h, size)),

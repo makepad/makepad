@@ -162,10 +162,15 @@ script_mod! {
             /** corner rounding radius 0..24 step 0.5 */
             border_radius: theme.corner_radius
 
+            // The chosen row's plate is a selected row's ground, and its
+            // label below is a selected row's ink: the pair every theme
+            // holds a menu's chosen item to, so the value is written on a
+            // ground its ink was settled against. The value fill this used
+            // to read is a slider's, which nothing is written on.
             color: #00000000
             color_hover: theme.color_inset_hover
-            color_active: theme.color_val
-            color_disabled: theme.color_val_disabled
+            color_active: theme.color_outset_active
+            color_disabled: theme.color_outset_disabled
         }
 
         /** The values that were not chosen: present, readable, quieter. */
@@ -176,7 +181,7 @@ script_mod! {
 
         /** The value that was chosen. */
         draw_text_active +: {
-            color: theme.color_label_inner
+            color: theme.color_label_inner_active
             text_style: theme.font_regular{font_size: theme.font_size_p}
         }
     }

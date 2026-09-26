@@ -472,6 +472,10 @@ pub struct FileTree {
 
     #[live]
     node_height: f64,
+    /// The host lets rows be picked up and carried: the pointer over a
+    /// row is a hand, as it is over anything that can be dragged.
+    #[live]
+    pub drag_cursor: bool,
 
     #[live]
     draw_scroll_shadow: DrawScrollShadow,
@@ -892,9 +896,20 @@ impl FileTree {
             tree_node.draw_all(cx, &mut Scope::empty());
             if self.scroll_to_pending == Some(node_id) {
                 self.scroll_to_pending = None;
+                // The row's rect is on screen, already shifted by the
+                // scroll; the scroll-into-view wants content coordinates,
+                // so put the row back where it sits in the content. A screen
+                // rect handed over as content made a scrolled tree jump
+                // back to wherever the row happened to be drawn.
                 let rect = tree_node.area().rect(cx);
                 if rect.size.y > 0.0 {
-                    self.scroll_bars.scroll_into_view(cx, rect);
+                    let view = self.scroll_bars.area().rect(cx);
+                    let scroll = self.scroll_bars.get_scroll_pos();
+                    let content = Rect {
+                        pos: rect.pos - view.pos + scroll,
+                        size: rect.size,
+                    };
+                    self.scroll_bars.scroll_into_view(cx, content);
                 }
             }
         }
@@ -1064,6 +1079,21 @@ impl FileTree {
         }
     }
 
+    /// The row drawn for `node_id`, in window points, when it is on screen.
+    pub fn node_rect(&self, cx: &Cx, node_id: LiveId) -> Option<Rect> {
+        let node = self.tree_nodes.get(&node_id)?;
+        let rect = node.area().clipped_rect_union(cx);
+        (rect.size.y > 0.0).then_some(rect)
+    }
+
+    /// The row under `abs`, with its rect, when a drawn row is there.
+    pub fn node_at(&self, cx: &Cx, abs: Vec2d) -> Option<(LiveId, Rect)> {
+        self.tree_nodes.iter().find_map(|(id, node)| {
+            let rect = node.area().clipped_rect_union(cx);
+            (rect.size.y > 0.0 && rect.contains(abs)).then_some((*id, rect))
+        })
+    }
+
     pub fn start_dragging_file_node(&mut self, cx: &mut Cx, node_id: LiveId, items: Vec<DragItem>) {
         self.dragging_node_id = Some(node_id);
         log!("makepad: start_dragging_file_node");
@@ -1125,9 +1155,15 @@ impl Widget for FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasHovered => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Hand);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHovered(node_id));
                 }
                 FileTreeNodeAction::HoverEnded => {
+                    if self.drag_cursor {
+                        cx.set_cursor(MouseCursor::Default);
+                    }
                     cx.widget_action(uid, FileTreeAction::NodeHoverEnded(node_id));
                 }
                 FileTreeNodeAction::WasClicked => {
