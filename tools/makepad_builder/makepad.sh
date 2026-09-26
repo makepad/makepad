@@ -66,6 +66,8 @@ case "$self" in /*) ;; *) self="$(pwd -P)/$self" ;; esac
 if [ "$#" = 0 ] && [ -z "${BASH_VERSION:-}" ] && [ -z "${MAKEPAD_BUILDER_SH:-}" ] && [ -x /bin/bash ] && [ -f "$self" ]; then
     MAKEPAD_BUILDER_SH=1 exec /bin/bash "$self"
 fi
+# The screen's faint logo strips colour codes with an extended pattern.
+[ -z "${BASH_VERSION:-}" ] || shopt -s extglob
 self_dir=$(cd -P -- "$(dirname -- "$self")" && pwd -P)
 # home: the folder people see, with this command and the apps built there;
 # root: the Builder's own folder in it (builder/), which holds everything
@@ -1773,6 +1775,28 @@ exec 1>&3
 tui=1
 e=$(printf '\033')
 dim="${e}[2m" b="${e}[1m" ok="${e}[32m" acc="${e}[36m" warn="${e}[33m" red="${e}[31m" inv="${e}[7m" r0="${e}[0m"
+# Makepad orange, only ever one character: the ▌ on the selected row. The
+# selection band and the logo behind the rows are faint greys, for a dark or
+# a light background (asked once at the start, see light_background).
+mark="${e}[38;2;255;92;57m"
+band_dark="${e}[48;2;42;44;48m" band_light="${e}[48;2;228;229;231m"
+logo_dark="${e}[38;2;44;47;52m" logo_light="${e}[38;2;226;227;229m"
+band=$band_dark logo_color=$logo_dark
+# The Makepad mark (tools/makepad_builder/logo.txt, which the Windows
+# Builder draws the same way).
+logo_art='             ⢀⣾⡄            ⣰⣷⡀
+            ⢠⣿⣿⣿⣆          ⣰⣿⣿⣷⡀
+           ⢠⣿⣿⣿⣿⣿⣆        ⣴⣿⣿⣿⣿⣿⡄
+          ⣰⣿⣿⣿⣿⣿⣿⣿⣧      ⣼⣿⣿⣿⣿⣿⣿⣿⡄
+         ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧   ⢀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣆
+        ⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀⢀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣆
+       ⡨⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⡅⢩⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⣭⢅
+     ⢀⣼⣷⡹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟ ⠈⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢣⣿⣧
+    ⢀⣾⣿⣿⣿⡜⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏    ⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⢣⣿⣿⣿⣧⡀
+   ⢠⣾⣿⣿⣿⣿⣿⣜⣿⣿⣿⣿⣿⣿⣿⠏      ⠹⣿⣿⣿⣿⣿⣿⡿⣱⣿⣿⣿⣿⣿⣷⡀
+  ⢠⣿⣿⣿⣿⣿⣿⣿⣿⣎⢿⣿⣿⣿⣿⠋        ⠹⣿⣿⣿⣿⡿⣱⣿⣿⣿⣿⣿⣿⣿⣷⡄
+ ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣎⢿⣿⣿⠃          ⠘⣿⣿⡟⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡄
+⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠻⠁            ⠘⢟⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣆'
 tty_saved=$(stty -g <&3)
 # The window is titled "Makepad Builder" while it runs; the terminal's own
 # title comes back afterwards.
@@ -1796,6 +1820,26 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 screen_on
+
+# The terminal's background colour (OSC 11), or COLORFGBG: light terminals
+# get light greys for the band and the logo. Dark when nobody says.
+light_background() {
+    case "${COLORFGBG:-}" in *';7' | *';15') band=$band_light logo_color=$logo_light; return 0 ;; *';'*) return 0 ;; esac
+    [ -n "${BASH_VERSION:-}" ] || return 0
+    printf '%s]11;?\007' "$e"
+    lb_reply=
+    IFS= read -rs -d "$(printf '\007')" -t 1 lb_reply <&3 || :
+    case "$lb_reply" in *rgb:*) ;; *) return 0 ;; esac
+    lb_rgb=${lb_reply#*rgb:}
+    lb_r=${lb_rgb%%/*}; lb_rgb=${lb_rgb#*/}; lb_g=${lb_rgb%%/*}; lb_b=${lb_rgb#*/}
+    lb_r=${lb_r:0:2} lb_g=${lb_g:0:2} lb_b=${lb_b:0:2}
+    case "$lb_r$lb_g$lb_b" in *[!0-9a-fA-F]* | '') return 0 ;; esac
+    # Relative luminance on a 0-255 scale: light above the middle.
+    if [ $(( (2126 * 16#$lb_r + 7152 * 16#$lb_g + 722 * 16#$lb_b) / 10000 )) -gt 127 ]; then
+        band=$band_light logo_color=$logo_light
+    fi
+}
+light_background
 
 size() {
     set -- $(stty size <&3 2>/dev/null || echo 24 80)
@@ -1884,7 +1928,7 @@ screen_rows() {
 }
 item_line() { # item_line NAME LICENSE STATUS ACTION SELECTED -> il
     pad "$1" 15
-    if [ "$5" = 1 ]; then il="  ${acc}›${r0} ${b}${padded}${r0} "; else il="    ${padded} "; fi
+    if [ "$5" = 1 ]; then il="  ${mark}▌${r0} ${b}${padded}${r0} "; else il="    ${padded} "; fi
     case "$2" in
         commercial) il="${il}${b}commercial license  ${r0}" ;;
         beta) il="${il}${warn}beta access         ${r0}" ;;
@@ -1892,9 +1936,9 @@ item_line() { # item_line NAME LICENSE STATUS ACTION SELECTED -> il
     esac
     il="${il}$3"
     if [ "$5" = 1 ]; then
-        if [ "$4" = = ]; then il="${il} ${acc}⏎${r0}"
+        if [ "$4" = = ]; then il="${il} ${ok}⏎${r0}"
         elif [ -n "$4" ]; then
-            if [ -z "$3" ] && [ -z "$2" ]; then il="${il}${acc}$4 ⏎${r0}"; else il="${il}  ${acc}$4 ⏎${r0}"; fi
+            if [ -z "$3" ] && [ -z "$2" ]; then il="${il}${ok}$4 ⏎${r0}"; else il="${il}  ${ok}$4 ⏎${r0}"; fi
         fi
     fi
 }
@@ -1955,6 +1999,62 @@ step_line() { # step_line LABEL -> sl
     esac
 }
 
+# logo_lines LINES BAND -> ll_out: LINES as screen lines, each ending in an
+# erase to the end of the line; line BAND (0-based, -1 for none) on the
+# selection band; the Makepad mark faintly at the right of the window (up to
+# 100 columns), centred over the stretch, each of its lines only right of
+# that line's text with two columns of air and never on the band. Plain sh
+# (no bash) draws neither.
+logo_lines() {
+    ll_out= ll_count=0
+    while IFS= read -r ll_line; do ll_count=$((ll_count + 1)); done <<EOF
+$1
+EOF
+    ll_art=0 ll_x0=0 ll_y0=0
+    if [ -n "${BASH_VERSION:-}" ]; then
+        ll_cols=$(stty size <&3 2>/dev/null); ll_cols=${ll_cols#* }; ll_cols=${ll_cols:-80}
+        [ "$ll_cols" -le 100 ] || ll_cols=100
+        ll_x0=$((ll_cols - 2 - 44))
+        [ "$ll_x0" -lt 30 ] || ll_art=13
+        ll_y0=$(( (ll_count - ll_art) / 2 )); [ "$ll_y0" -ge 0 ] || ll_y0=0
+    fi
+    ll_i=0
+    while IFS= read -r ll_line; do
+        if [ -n "${BASH_VERSION:-}" ] && [ "$ll_i" = "$2" ]; then
+            # The band: every colour reset goes back to the band, which
+            # reaches the rule's right end.
+            ll_plain=${ll_line//$e\[*([0-9;])m/}
+            ll_pad=$((width - 2 - ${#ll_plain})); ll_fill=
+            while [ "$ll_pad" -gt 0 ]; do ll_fill="$ll_fill "; ll_pad=$((ll_pad - 1)); done
+            ll_line="${ll_line:0:2}$band${ll_line:2}$ll_fill"
+            ll_line="${ll_line//$r0/$r0$band}$r0"
+        elif [ "$ll_art" -gt 0 ] && [ "$ll_i" -ge "$ll_y0" ] && [ "$ll_i" -lt $((ll_y0 + ll_art)) ]; then
+            ll_n=$((ll_i - ll_y0)) ll_art_line=
+            while IFS= read -r ll_a; do
+                [ "$ll_n" -gt 0 ] || { ll_art_line=$ll_a; break; }
+                ll_n=$((ll_n - 1))
+            done <<EOF
+$logo_art
+EOF
+            # The text without its trailing blanks, then air, then the art.
+            ll_line=${ll_line%"$r0"}; ll_line=${ll_line%%+( )}
+            ll_plain=${ll_line//$e\[*([0-9;])m/}
+            [ "$ll_line" = "$ll_plain" ] || ll_line="$ll_line$r0"
+            ll_skip=$(( ${#ll_plain} + 2 - ll_x0 )); [ "$ll_skip" -ge 0 ] || ll_skip=0
+            ll_piece=${ll_art_line:$ll_skip}
+            if [ -n "${ll_piece// /}" ]; then
+                ll_pad=$((ll_x0 + ll_skip - ${#ll_plain})); ll_fill=
+                while [ "$ll_pad" -gt 0 ]; do ll_fill="$ll_fill "; ll_pad=$((ll_pad - 1)); done
+                ll_line="$ll_line$ll_fill$logo_color$ll_piece$r0"
+            fi
+        fi
+        ll_out="$ll_out$ll_line$e[K
+"
+        ll_i=$((ll_i + 1))
+    done <<EOF
+$1
+EOF
+}
 draw() {
     size
     screen_meta
@@ -2003,10 +2103,13 @@ EOF
   ${b}Makepad${r0} commercial apps${crumb}${d_gap}${dim}${d_email}${r0}${e}[K
   ${dim}${sub}${r0}${e}[K
 "
-    d_i=0 d_shown=0
+    # The rows shown, then the lines down to the rule; the selected row
+    # gets its band, and the logo is laid over the whole stretch.
+    d_i=0 d_shown=0 d_lines= d_band=-1
     while IFS= read -r d_line; do
         if [ "$d_i" -ge "$top" ] && [ "$d_shown" -lt "$room" ]; then
-            out="$out$d_line${e}[K
+            [ "$d_i" != "$sel_line" ] || d_band=$d_shown
+            d_lines="$d_lines$d_line
 "
             d_shown=$((d_shown + 1))
         fi
@@ -2016,14 +2119,15 @@ $body
 EOF
     if [ "$nbody" -gt "$room" ]; then
         d_below=$((nbody - top - d_shown))
-        if [ "$d_below" -gt 0 ]; then out="$out    ${dim}↓ $d_below more${r0}${e}[K
-"; else out="$out    ${dim}↑ $top above${r0}${e}[K
+        if [ "$d_below" -gt 0 ]; then d_lines="$d_lines    ${dim}↓ $d_below more${r0}
+"; else d_lines="$d_lines    ${dim}↑ $top above${r0}
 "; fi
-    elif [ "$back" = 1 ]; then out="$out${e}[K
+    elif [ "$back" = 1 ]; then d_lines="$d_lines
 "; fi
+    logo_lines "$d_lines " "$d_band"
+    out="$out$ll_out"
     d_rule=; d_i=4; while [ "$d_i" -lt "$width" ]; do d_rule="${d_rule}─"; d_i=$((d_i + 1)); done
-    out="$out${e}[K
-  ${dim}${d_rule}${r0}${e}[K
+    out="$out  ${dim}${d_rule}${r0}${e}[K
   ${message}${e}[K
   ${choice}${e}[K
   ${dim}${footer_override:-$default_footer}${r0}${e}[K
@@ -2411,7 +2515,7 @@ main_rows() {
     fi
     printf 'head|MAKEPAD EXPERIMENTS\n'
     printf 'item|free|Experiments|free|%s · %s ready|open list\n' "$m_free_total" "$m_free_ready"
-    printf 'head|CODING AGENTS · each one knows how to change and rebuild these apps\n'
+    printf 'head|CODING AGENTS\n'
     [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open\n' "$mr_cmd" "$mr_title"; done
     printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open\n" "$dim" "$r0"
     printf 'head|SETUP\n'

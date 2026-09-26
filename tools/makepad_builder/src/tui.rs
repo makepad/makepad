@@ -74,6 +74,7 @@ pub fn run() -> Result<(), String> {
     // agents and apps started from it.
     env::remove_var("MAKEPAD_TERMINAL_COLORS");
     let screen = Screen::enter();
+    view::set_light_background(console::light_background());
     // The email comes first (downloads are not personalized): asked once per
     // folder, kept in its makepad-builder.json and never asked again.
     if setup.email.is_empty() && !setup.root.join(".login-asked").exists() {
@@ -434,7 +435,7 @@ impl Setup {
         let built = free.iter().filter(|(id, _)| self.app_state(id, self.app_release(id).as_ref()) == State::Ready).count();
         rows.push(Row::Head("MAKEPAD EXPERIMENTS".into()));
         rows.push(item("free", "Experiments", "free", text(format!("{} · {built} ready", free.len()), PLAIN), "open list"));
-        rows.push(Row::Head("CODING AGENTS · each one knows how to change and rebuild these apps".into()));
+        rows.push(Row::Head("CODING AGENTS".into()));
         for (command, title) in &self.agents {
             rows.push(item(format!("agent-{command}"), *title, "", Vec::new(), "open"));
         }
@@ -2119,6 +2120,13 @@ fn open_url(url: &str) -> Result<(), String> {
 }
 
 /// An executable of this name is on PATH (with a PATHEXT extension on Windows).
+/// COLORFGBG ("fg;bg", set by some terminals): a light background is 7 or 15.
+fn colorfgbg_light() -> Option<bool> {
+    let value = env::var("COLORFGBG").ok()?;
+    let back: u32 = value.rsplit(';').next()?.parse().ok()?;
+    Some(matches!(back, 7 | 15))
+}
+
 fn on_path(name: &str) -> bool {
     let Some(path) = env::var_os("PATH") else { return false };
     let extensions: Vec<String> = if cfg!(windows) {
@@ -2326,6 +2334,10 @@ mod console {
             Ok(Self)
         }
     }
+    /// Windows consoles are dark unless COLORFGBG says otherwise.
+    pub fn light_background() -> bool {
+        super::colorfgbg_light().unwrap_or(false)
+    }
     /// Throw away keys typed while no menu was reading them.
     pub fn drain() {
         for _ in 0..4096 {
@@ -2457,6 +2469,34 @@ mod console {
     fn byte() -> Option<u8> {
         let mut value = 0u8;
         (unsafe { read(0, &mut value, 1) } == 1).then_some(value)
+    }
+    /// Ask the terminal for its background colour (OSC 11) and say whether
+    /// it is light; COLORFGBG, then dark, when it does not answer in time.
+    pub fn light_background() -> bool {
+        if let Some(light) = super::colorfgbg_light() {
+            return light;
+        }
+        let Ok(_input) = Input::enter() else { return false };
+        print!("\x1b]11;?\x1b\\");
+        let _ = io::stdout().flush();
+        let mut reply = Vec::new();
+        while reply.len() < 64 && waiting(if reply.is_empty() { 150 } else { 30 }) {
+            let Some(value) = byte() else { break };
+            reply.push(value);
+            if value == 7 || reply.ends_with(b"\x1b\\") {
+                break;
+            }
+        }
+        let reply = String::from_utf8_lossy(&reply);
+        let Some(rgb) = reply.split("rgb:").nth(1) else { return false };
+        let channel = |part: Option<&str>| {
+            let hex: String = part.unwrap_or("").chars().take_while(char::is_ascii_hexdigit).collect();
+            let digits = hex.len().max(1) as u32;
+            u32::from_str_radix(&hex, 16).map_or(0.0, |v| v as f64 / ((1u64 << (4 * digits)) - 1) as f64)
+        };
+        let mut parts = rgb.split('/');
+        let (r, g, b) = (channel(parts.next()), channel(parts.next()), channel(parts.next()));
+        0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
     }
     /// Throw away keys typed while no menu was reading them.
     pub fn drain() {

@@ -18,6 +18,16 @@ pub(super) const OK: &str = "32";
 pub(super) const WARN: &str = "33";
 pub(super) const ACC: &str = "36";
 const INV: &str = "7";
+/// Makepad orange, only ever one character: the ▌ on the selected row.
+const MARK: &str = "38;2;255;92;57";
+/// The Makepad mark drawn faintly behind the rows (braille dots).
+const LOGO: &str = include_str!("../logo.txt");
+/// Faint colours for the selection band and the logo, for a dark or a
+/// light terminal background (see `set_light_background`).
+const BAND_DARK: &str = "48;2;42;44;48";
+const BAND_LIGHT: &str = "48;2;228;229;231";
+const LOGO_DARK: &str = "38;2;44;47;52";
+const LOGO_LIGHT: &str = "38;2;226;227;229";
 
 #[derive(Clone)]
 pub(super) struct Span(pub String, pub &'static str);
@@ -80,6 +90,7 @@ thread_local! {
     static FOOTER: StdCell<Option<&'static str>> = const { StdCell::new(None) };
     static LOG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static COLOR: StdCell<bool> = const { StdCell::new(false) };
+    static LIGHT: StdCell<bool> = const { StdCell::new(false) };
     /// The row last worked on; `menu` starts its selection there once.
     static WORKED_ON: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -161,11 +172,21 @@ pub(super) fn set_view(view: View) {
     SELECTED.with(|s| s.set(None));
 }
 
-fn ansi(style: &str) -> String {
-    format!("\x1b[0;{style}m")
+/// The terminal's background is light: the band and the logo use light
+/// greys. Dark (the default) when the terminal does not say.
+pub(super) fn set_light_background(light: bool) {
+    LIGHT.with(|l| l.set(light));
+}
+fn ansi(style: &str, band: bool) -> String {
+    if band {
+        let back = if LIGHT.with(StdCell::get) { BAND_LIGHT } else { BAND_DARK };
+        format!("\x1b[0;{style};{back}m")
+    } else {
+        format!("\x1b[0;{style}m")
+    }
 }
 #[derive(Clone, Copy, PartialEq)]
-struct Cell { ch: char, style: &'static str }
+struct Cell { ch: char, style: &'static str, band: bool }
 #[derive(Default)]
 struct Canvas { width: usize, cells: Vec<Cell>, shown: Vec<Cell> }
 thread_local! {
@@ -179,7 +200,7 @@ fn begin_frame(cols: usize, rows: usize) {
         if c.width != cols || c.cells.len() != cols * rows { c.shown.clear(); }
         c.width = cols;
         c.cells.clear();
-        c.cells.resize(cols * rows, Cell { ch: ' ', style: PLAIN });
+        c.cells.resize(cols * rows, Cell { ch: ' ', style: PLAIN, band: false });
     });
 }
 fn present() -> io::Result<()> {
@@ -193,9 +214,9 @@ fn present() -> io::Result<()> {
             let start = y * width;
             if c.shown.get(start..start + width) == Some(cells) { continue; }
             let _ = write!(out, "\x1b[{};1H", y + 1);
-            let mut style = "";
+            let mut style = None;
             for cell in cells {
-                if style != cell.style { out.push_str(&ansi(cell.style)); style = cell.style; }
+                if style != Some((cell.style, cell.band)) { out.push_str(&ansi(cell.style, cell.band)); style = Some((cell.style, cell.band)); }
                 out.push(cell.ch);
             }
         }
@@ -223,12 +244,58 @@ fn put(y: usize, x: usize, value: &str, style: &'static str) -> usize {
         for ch in value.chars() {
             if ch.is_control() { continue; }
             if x < width {
-                if let Some(cell) = c.cells.get_mut((y - 1) * width + x) { *cell = Cell { ch, style }; }
+                if let Some(cell) = c.cells.get_mut((y - 1) * width + x) { *cell = Cell { ch, style, band: cell.band }; }
             }
             x += 1;
         }
         x
     })
+}
+/// The selected row's band: a faint background from column `x0` to `x1`.
+fn band(y: usize, x0: usize, x1: usize) {
+    CANVAS.with(|canvas| {
+        let mut c = canvas.borrow_mut();
+        let width = c.width;
+        for x in x0..x1.min(width) {
+            if let Some(cell) = c.cells.get_mut((y - 1) * width + x) { cell.band = true; }
+        }
+    });
+}
+/// The Makepad mark, faint, right-aligned to `right` and centred between
+/// rows `top` and `bottom` (inclusive, 1-based). Each line only shows to the
+/// right of that row's text with two columns of air, never on the band.
+fn logo(top: usize, bottom: usize, right: usize) {
+    let art: Vec<&str> = LOGO.lines().collect();
+    let art_width = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    if bottom < top || right < art_width + 30 {
+        return;
+    }
+    let height = bottom - top + 1;
+    let y0 = top + height.saturating_sub(art.len()) / 2;
+    let x0 = right - art_width;
+    let style = if LIGHT.with(StdCell::get) { LOGO_LIGHT } else { LOGO_DARK };
+    CANVAS.with(|canvas| {
+        let mut c = canvas.borrow_mut();
+        let width = c.width;
+        for (i, line) in art.iter().enumerate() {
+            let y = y0 + i;
+            if y < top || y > bottom || y == 0 {
+                continue;
+            }
+            let row = (y - 1) * width;
+            let Some(cells) = c.cells.get(row..row + width) else { continue };
+            if cells.iter().any(|cell| cell.band) {
+                continue;
+            }
+            let text_end = cells.iter().rposition(|cell| cell.ch != ' ').map_or(0, |x| x + 3);
+            for (dx, ch) in line.chars().enumerate() {
+                let x = x0 + dx;
+                if ch != ' ' && x >= text_end && x < width {
+                    c.cells[row + x] = Cell { ch, style, band: false };
+                }
+            }
+        }
+    });
 }
 /// `value` in at most `max` lines of `width` columns, broken at spaces and
 /// keeping each span's style; the last line ends in "…" when text is left.
@@ -324,7 +391,7 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
                 }
                 let chosen = selected == Some(item);
                 let mut spans = if chosen {
-                    vec![Span("  ".into(), PLAIN), Span("›".into(), ACC), Span(" ".into(), PLAIN), Span(padded(&entry.name, name_width), BOLD), Span(" ".into(), PLAIN)]
+                    vec![Span("  ".into(), PLAIN), Span("▌".into(), MARK), Span(" ".into(), PLAIN), Span(padded(&entry.name, name_width), BOLD), Span(" ".into(), PLAIN)]
                 } else {
                     vec![Span(format!("    {} ", padded(&entry.name, name_width)), PLAIN)]
                 };
@@ -339,10 +406,10 @@ fn body_lines(view: &View, selected: Option<usize>) -> (Vec<(Text, Option<usize>
                 }
                 spans.extend(entry.status.iter().cloned());
                 if chosen && entry.action == "⏎" {
-                    spans.push(Span(" ⏎".into(), ACC));
+                    spans.push(Span(" ⏎".into(), OK));
                 } else if chosen && !entry.action.is_empty() {
                     let gap = if entry.status.is_empty() && entry.license.is_empty() { "" } else { "  " };
-                    spans.push(Span(format!("{gap}{} ⏎", entry.action), ACC));
+                    spans.push(Span(format!("{gap}{} ⏎", entry.action), OK));
                 }
                 if chosen { selected_line = Some(lines.len()); }
                 lines.push((spans, Some(item)));
@@ -397,7 +464,10 @@ fn draw() {
         }
         SCROLL.with(|s| s.set(offset));
         let mut y = top;
-        for (spans, _) in lines.iter().skip(offset).take(room) {
+        for (index, (spans, _)) in lines.iter().enumerate().skip(offset).take(room) {
+            if selected_line == Some(index) {
+                band(y, 2, width.saturating_sub(2));
+            }
             put_text(y, 0, spans);
             y += 1;
         }
@@ -414,6 +484,9 @@ fn draw() {
         }
         // The rule, status, choice and footer follow the rows directly.
         let y = (y + 1).min(rows - 3);
+        // The mark sits at the right of the window (up to 100 columns),
+        // beside the rows rather than under them.
+        logo(top, y - 1, cols.min(100).saturating_sub(2));
         put(y, 2, &"─".repeat(width.saturating_sub(4)), DIM);
         // A status message longer than the line wraps onto the choice line
         // when that is free; what still does not fit ends in "…".
