@@ -11,18 +11,25 @@ const MAX_ICON_PIXELS: usize = MAX_ICON_DIMENSION * MAX_ICON_DIMENSION;
 pub fn window_icon() -> WindowIcon {
     // When a packaged app bundle is running, skip the runtime override
     // so the app bundle's icon doesn't get changed.
-    if option_env!("MAKEPAD_PACKAGE_DIR").is_some() {
+    if crate::app_meta::package_dir().is_some() {
         return WindowIcon {
             name: None,
             buffers: Vec::new(),
         };
     }
-    let icon32 = decode_png(CUSTOM_ICON_PNG_32, 1);
-    let icon64 = decode_png(CUSTOM_ICON_PNG_64, 1);
-    let icon128 = decode_png(CUSTOM_ICON_PNG_128, 2);
-    let icon256 = decode_png(CUSTOM_ICON_PNG_256, 2);
-    let icon512 = decode_png(CUSTOM_ICON_PNG_512, 4);
-    let icon1024 = decode_png(CUSTOM_ICON_PNG_1024, 8);
+    // Per slot: the app's own icon file (MAKEPAD_APP_ICON_*, captured by
+    // `app_main!` in the app crate) → the one found in the workspace's
+    // `resources/` when platform was built.
+    let slot = |slot: usize, found: &'static [u8], scale: u32| match crate::app_meta::icon_path(slot) {
+        Some(path) => decode_png(&std::fs::read(path).unwrap_or_default(), scale),
+        None => decode_png(found, scale),
+    };
+    let icon32 = slot(0, CUSTOM_ICON_PNG_32, 1);
+    let icon64 = slot(1, CUSTOM_ICON_PNG_64, 1);
+    let icon128 = slot(2, CUSTOM_ICON_PNG_128, 2);
+    let icon256 = slot(3, CUSTOM_ICON_PNG_256, 2);
+    let icon512 = slot(4, CUSTOM_ICON_PNG_512, 4);
+    let icon1024 = slot(5, CUSTOM_ICON_PNG_1024, 8);
 
     #[cfg(target_os = "windows")]
     {

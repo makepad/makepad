@@ -659,16 +659,35 @@ impl Cx {
         init_macos_app_global(Box::new({
             let cx = cx.clone();
             move |event| {
+                use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
                 let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
-                let event_flow =
-                    cx_ref.cocoa_event_callback(event, &mut metal_cx, &mut metal_windows);
+                // A panic unwinds on to the callback boundary that contains
+                // it (`shielded`), and `do_callback` keeps this callback:
+                // put `Cx` back in order first, so the next event finds it
+                // consistent (as on iOS).
+                let event_flow = match catch_unwind(AssertUnwindSafe(|| {
+                    cx_ref.cocoa_event_callback(event, &mut metal_cx, &mut metal_windows)
+                })) {
+                    Ok(event_flow) => event_flow,
+                    Err(payload) => {
+                        cx_ref.recover_after_caught_panic();
+                        drop(metal_windows);
+                        drop(metal_cx);
+                        drop(cx_ref);
+                        resume_unwind(payload);
+                    }
+                };
                 let executor = cx_ref.executor.take().unwrap();
                 drop(cx_ref);
-                executor.run_until_stalled();
-                let mut cx_ref = cx.borrow_mut();
-                cx_ref.executor = Some(executor);
+                // Put the executor back even if a spawned task panics, so the
+                // `take` above can't hand a `None` to the next event.
+                let stalled = catch_unwind(AssertUnwindSafe(|| executor.run_until_stalled()));
+                cx.borrow_mut().executor = Some(executor);
+                if let Err(payload) = stalled {
+                    resume_unwind(payload);
+                }
                 event_flow
             }
         }));
@@ -2513,7 +2532,7 @@ impl CxOsApi for Cx {
 
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+        if let Some(item) = crate::app_meta::package_dir() {
             self.package_root = Some(item.to_string());
         }
 

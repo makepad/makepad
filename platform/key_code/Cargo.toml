@@ -1,0 +1,9 @@
+[package]
+name = "makepad-key-code"
+version = "0.1.0"
+edition = "2021"
+description = "Makepad's cross-platform KeyCode, shared by the Studio protocol and script"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }

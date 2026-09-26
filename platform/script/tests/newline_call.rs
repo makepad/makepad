@@ -112,7 +112,7 @@ fn leading_binary_operator_newline_continues_expression() {
     // A leading INFIX operator on a new line CONTINUES the expression (it can't
     // start a statement), so `let a = 3\n <op> 2` folds into one binding. This is
     // load-bearing: makepad's shader DSL breaks long math this way, e.g.
-    // `let color = sample() * 0.125\n + (...) * 0.03125` (widgets/src/window.rs).
+    // `let color = sample() * 0.125\n + (...) * 0.03125` (widgets/core/src/window.rs).
     assert_eq!(in_fn(vm, "minus_nl", "let a = 3.0\n- 2.0\na"), Some(1.0));
     assert_eq!(in_fn(vm, "plus_nl", "let a = 3.0\n+ 2.0\na"), Some(5.0));
     assert_eq!(in_fn(vm, "star_nl", "let a = 3.0\n* 2.0\na"), Some(6.0));

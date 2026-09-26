@@ -290,6 +290,9 @@ macro_rules! _app_main_event_closure {
         $crate::_app_main_event_closure!($app, |_cx: &mut Cx| {})
     };
     ($app:ident, $configure:expr) => {{
+        // This app's build inputs (package dir, icons), read in the app
+        // crate so they never rebuild platform; before `init_cx_os`.
+        $crate::app_meta::set_app_build_meta($crate::_app_build_meta!());
         // Event dispatch already excludes synchronous re-entry. Plain captured slots
         // also survive a caught wasm panic=abort trap; a RefCell borrow flag would not
         // be released because wasm does not unwind the trapped Rust stack.
@@ -463,6 +466,24 @@ macro_rules! app_main {
             $manifest,
             MAKEPAD_EXTRA_FONT_ASSETS,
         )] = $crate::extend_font_asset_manifest($manifest, MAKEPAD_EXTRA_FONT_ASSETS);
+
+        // The executable's own Info.plist (see app_meta.rs): the application
+        // menu's title of an unbundled launch. Read here, in the app crate,
+        // a bundle name rebuilds only the app.
+        #[cfg(target_os = "macos")]
+        const MAKEPAD_BUNDLE_NAME: &str = match option_env!("MAKEPAD_BUNDLE_NAME") {
+            Some(name) => name,
+            None => $crate::app_meta::DEFAULT_BUNDLE_NAME,
+        };
+        #[cfg(target_os = "macos")]
+        const MAKEPAD_BUNDLE_IDENTIFIER: Option<&str> = option_env!("MAKEPAD_BUNDLE_IDENTIFIER");
+        #[cfg(target_os = "macos")]
+        #[used]
+        #[link_section = "__TEXT,__info_plist"]
+        static MAKEPAD_INFO_PLIST: [u8; $crate::app_meta::info_plist_len(
+            MAKEPAD_BUNDLE_NAME,
+            MAKEPAD_BUNDLE_IDENTIFIER,
+        )] = $crate::app_meta::info_plist(MAKEPAD_BUNDLE_NAME, MAKEPAD_BUNDLE_IDENTIFIER);
 
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         fn main() {
