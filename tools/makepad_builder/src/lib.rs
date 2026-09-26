@@ -31,6 +31,31 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
 
+/// The error a stopped piece of work returns once it noticed `cancelled`.
+pub const CANCELLED: &str = "\u{1}cancelled";
+
+thread_local! {
+    static CANCEL: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+/// Run `f` on this thread with `flag` as its stop request: downloads and
+/// Cargo builds started inside it check `cancelled` and stop (their whole
+/// process tree) once the flag is set. Work on other threads is not stopped.
+pub fn cancel_scope<R>(flag: std::sync::Arc<std::sync::atomic::AtomicBool>, f: impl FnOnce() -> R) -> R {
+    let previous = CANCEL.with(|c| c.replace(Some(flag)));
+    struct Restore(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CANCEL.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(previous);
+    f()
+}
+/// The work on this thread was asked to stop (see `cancel_scope`).
+pub fn cancelled() -> bool {
+    CANCEL.with(|c| c.borrow().as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 #[derive(Clone)]
 pub struct InstallOpts {
     pub root: PathBuf,
