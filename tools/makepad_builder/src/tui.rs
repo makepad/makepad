@@ -902,13 +902,13 @@ impl Setup {
                 .map(|(id, name, url)| {
                     let state = match id {
                         // Downloading the Builder is agreeing to it (the site says so).
-                        "makepad" => vec![view::Span("applies by downloading  ".into(), DIM), view::Span(host(url).into(), DIM)],
+                        "makepad" => vec![view::Span("by downloading  ".into(), DIM), view::Span(host(url).into(), DIM)],
                         // MIT or Apache 2.0: nothing to accept.
                         "rust" => vec![view::Span("nothing to accept  ".into(), DIM), view::Span(host(url).into(), DIM)],
                         _ if accepted.iter().any(|a| a == id) => vec![view::Span("✓".into(), OK), view::Span(" accepted  ".into(), PLAIN), view::Span(host(url).into(), DIM)],
                         _ => vec![view::Span("not accepted  ".into(), WARN), view::Span(host(url).into(), DIM)],
                     };
-                    item(format!("url:{id}"), format!("{name:<36}"), "", state, "open in browser")
+                    item(format!("url:{id}"), format!("{name:<36}"), "", state, "open")
                 })
                 .collect();
             // Only the vendors' agreements (Windows) are accepted or withdrawn.
@@ -946,24 +946,43 @@ impl Setup {
     /// installs and where, each agreement by name (Return opens it), then
     /// "Agree to all" (selected at the start) and Cancel. Escape cancels.
     /// Agreements already accepted are not asked again; agreeing records them.
-    fn consent(&self, _title: &str, intro: &str, detail: &str, ids: &[&str], action: &str) -> Result<bool, String> {
+    fn consent(&self, title: &str, intro: &str, detail: &str, ids: &[&str], action: &str) -> Result<bool, String> {
         let accepted = self.accepted_agreements();
         if ids.iter().all(|id| accepted.iter().any(|a| a == id)) {
             return Ok(true);
         }
-        // Asked where every question is: what is installed, then agreeing,
-        // reading the agreements (in the browser) or cancelling.
-        let question = if detail.is_empty() { intro.to_owned() } else { format!("{intro} {detail}.") };
+        let mut selected = agreement_rows(Some(ids)).len();
         loop {
-            match view::choose(&question, &agreements_note(ids), &[action, "read the agreements", "cancel"], 0)?.as_deref() {
-                Some("read the agreements") => open_agreements(ids),
-                Some("cancel") | None => return Ok(false),
-                Some(_) => {
+            let mut rows = vec![Row::Note(Vec::new())];
+            rows.extend(wrap(intro, 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+            if !detail.is_empty() {
+                rows.push(Row::Note(text(detail, DIM)));
+            }
+            rows.push(Row::Head("READ THE AGREEMENTS".into()));
+            rows.extend(agreement_rows(Some(ids)));
+            rows.push(Row::Note(Vec::new()));
+            rows.push(item("agree", "Agree to all", "", Vec::new(), action));
+            rows.push(item("cancel", "Cancel", "", Vec::new(), ""));
+            let view = View {
+                crumb: format!(" › {title}"),
+                subtitle: "Please read what you are agreeing to.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc cancel"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "agree" => {
                     let mut all: Vec<&str> = accepted.iter().map(String::as_str).collect();
                     all.extend(ids.iter().filter(|id| !accepted.iter().any(|a| a == *id)));
                     self.record_agreements(&all)?;
                     return Ok(true);
                 }
+                Nav::Select(id) if id == "cancel" => return Ok(false),
+                Nav::Select(id) => open_agreement(&id),
+                Nav::Back | Nav::Quit => return Ok(false),
+                Nav::Refresh | Nav::Key(..) => {}
             }
         }
     }
@@ -1104,10 +1123,30 @@ impl Setup {
     /// to the menu without deciding.
     fn local_ai_screen(&self) -> Result<Option<WindowsChain>, String> {
         let ids = ["cuda", "vs", "sdk"];
+        let mut selected = ids.len();
         loop {
-            let question = "An NVIDIA GPU is here, so Makepad can run AI features on it. Local AI support requires Microsoft Build Tools and NVIDIA CUDA, which have their own license agreements you need to agree to.";
-            match view::choose(question, &agreements_note(&ids), &["agree and enable local AI", "no local AI", "read the agreements"], 0)?.as_deref() {
-                Some("agree and enable local AI") => {
+            let mut rows = vec![Row::Note(Vec::new()), Row::Note(done("NVIDIA GPU found")), Row::Note(Vec::new())];
+            rows.extend(
+                wrap("Local AI support requires Microsoft Build Tools and NVIDIA CUDA, which have their own license agreements you need to agree to.", 74)
+                    .into_iter()
+                    .map(|line| Row::Note(text(line, PLAIN))),
+            );
+            rows.push(Row::Note(Vec::new()));
+            rows.extend(agreement_rows(Some(&ids)));
+            rows.push(Row::Note(Vec::new()));
+            rows.push(item("agree", "Agree and enable local AI", "", Vec::new(), ""));
+            rows.push(item("no", "No local AI", "", Vec::new(), ""));
+            let view = View {
+                crumb: " › Local AI".into(),
+                subtitle: "You can run local AI functionality.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc back"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "agree" => {
                     let mut all = self.accepted_agreements();
                     for id in ["vs", "sdk", "cuda"] {
                         if !all.iter().any(|a| a == id) {
@@ -1118,12 +1157,13 @@ impl Setup {
                     activity("Local AI on: Microsoft's C++ tools and CUDA.");
                     return Ok(Some(WindowsChain::Msvc));
                 }
-                Some("no local AI") => {
+                Nav::Select(id) if id == "no" => {
                     activity("No local AI: Rust's GNU toolchain.");
                     return Ok(Some(WindowsChain::Gnu));
                 }
-                Some(_) => open_agreements(&ids),
-                None => return Ok(None),
+                Nav::Select(id) => open_agreement(&id),
+                Nav::Back | Nav::Quit => return Ok(None),
+                Nav::Refresh | Nav::Key(..) => {}
             }
         }
     }
@@ -1225,9 +1265,7 @@ impl Setup {
         match runtime::probe_rust(version) {
             Ok(candidate) => {
                 let sysroot = candidate.to_string_lossy().into_owned();
-                let question = format!("Use your installed Rust, or a private Rust {version} in this folder?");
-                let note = format!("installed: {} (not modified)", short_path(&candidate));
-                let choice = match view::choose(&question, &note, &["private", "installed"], 0)?.as_deref() {
+                let choice = match self.rust_page(version, &short_path(&candidate), None)?.as_deref() {
                     Some("installed") => {
                         activity("Using the installed Rust.");
                         RustChoice::External(sysroot)
@@ -1248,8 +1286,7 @@ impl Setup {
                     activity(&format!("Installed Rust not used: {reason}"));
                     return Ok(false);
                 };
-                let question = format!("The selected Rust at {recorded} cannot be used. Switch to a private Rust in this folder?");
-                if view::choose(&question, "", &["switch", "keep"], 0)?.as_deref() == Some("switch") {
+                if self.rust_page(version, "", Some(recorded.as_str()))?.as_deref() == Some("switch") {
                     runtime::record_rust_choice(&self.root, &RustChoice::Private)?;
                     activity("Switching to a private Rust in this folder.");
                     Ok(true)
@@ -1259,47 +1296,106 @@ impl Setup {
             }
         }
     }
+    /// The Rust question as a page of its own, the explanation and the
+    /// choice together: private or installed (`candidate`), or for a
+    /// recorded Rust that broke (`stale`) switch or keep. None on Escape.
+    fn rust_page(&self, version: &str, candidate: &str, stale: Option<&str>) -> Result<Option<String>, String> {
+        let mut rows = vec![Row::Note(Vec::new())];
+        match stale {
+            Some(stale) => {
+                rows.extend(wrap(&format!("Makepad compiles with Rust {version}. The Rust this folder was set to use, {stale}, cannot be used any more."), 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+                rows.push(Row::Note(Vec::new()));
+                rows.push(item("switch", format!("{:<34}", format!("Switch to a private Rust {version}")), "", Vec::new(), "installs in this folder only"));
+                rows.push(item("keep", format!("{:<34}", "Keep the selected Rust"), "", Vec::new(), "make it available again first"));
+            }
+            None => {
+                rows.extend(wrap(&format!("Makepad compiles with Rust {version}. A Rust that can build it is already installed on this machine. The Builder can use it as it is, without changing it, or install a private Rust in this folder only."), 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+                rows.push(Row::Note(Vec::new()));
+                rows.push(Row::Note(text(format!("installed: {candidate}"), DIM)));
+                rows.push(Row::Note(Vec::new()));
+                rows.push(item("private", format!("{:<34}", format!("Private Rust {version}")), "", Vec::new(), "install in this folder"));
+                rows.push(item("installed", format!("{:<34}", "Your installed Rust"), "", Vec::new(), "use it as it is"));
+            }
+        }
+        let view = View {
+            crumb: " › Rust".into(),
+            subtitle: "Which Rust compiles your apps.".into(),
+            email: self.shown_email(),
+            rows,
+            back: true,
+            footer: Some("↑↓ move   ⏎ select   esc cancel"),
+            ..View::default()
+        };
+        let mut selected = 0;
+        loop {
+            match view::menu(view.clone(), &mut selected, &|| false)? {
+                Nav::Select(id) => return Ok(Some(id)),
+                Nav::Back | Nav::Quit => return Ok(None),
+                Nav::Refresh | Nav::Key(..) => {}
+            }
+        }
+    }
     /// macOS: the "› Apple developer tools" screen when clang, the SDK or
     /// git are missing, or Xcode's license is not accepted. Installing opens
     /// Apple's installer and waits for it; the license runs Apple's own
     /// `sudo xcodebuild -license` on the real terminal. Never accepts on the
     /// person's behalf. True once the tools are ready.
     fn xcode_screen(&mut self) -> Result<bool, String> {
-        let mut again = "";
+        let mut selected = 0;
         loop {
             if runtime::system_tools_ready().is_ok() {
                 return Ok(true);
             }
-            // Asked where every question is.
-            let chosen = if xcode_license_pending() {
-                view::choose(
+            let license = xcode_license_pending();
+            let (intro, note, first) = if license {
+                (
                     "Xcode is installed, but its license has not been accepted yet, so Apple's compiler will not run.",
-                    &format!("{again}Apple shows the license in the terminal and asks for your password; type agree at the end."),
-                    &["accept the license", "check again", "cancel"],
-                    0,
-                )?
+                    "Apple shows the license here in the terminal and asks for your password; type agree at the end to accept it.",
+                    item("license", format!("{:<34}", "Read and accept the Xcode license"), "", Vec::new(), "sudo xcodebuild -license"),
+                )
             } else {
-                view::choose(
+                (
                     "Makepad compiles with Apple's command line developer tools: clang, the macOS SDK and git. They are not installed on this Mac yet.",
-                    &format!("{again}Apple's installer opens in its own window (about 1 GB); come back when it has finished."),
-                    &["install them", "check again", "cancel"],
-                    0,
-                )?
+                    "Apple's installer opens in its own window (about 1 GB); come back here when it has finished.",
+                    item("install", format!("{:<34}", "Install the developer tools"), "", Vec::new(), "opens Apple's installer"),
+                )
             };
-            match chosen.as_deref() {
-                Some("install them") => {
+            let mut rows = vec![Row::Note(Vec::new())];
+            rows.extend(wrap(intro, 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+            rows.push(Row::Note(Vec::new()));
+            rows.extend(wrap(note, 74).into_iter().map(|line| Row::Note(text(line, DIM))));
+            rows.push(Row::Note(Vec::new()));
+            rows.push(first);
+            rows.push(item("check", "Check again", "", Vec::new(), ""));
+            rows.push(item("cancel", "Cancel", "", Vec::new(), ""));
+            let view = View {
+                crumb: " › Apple developer tools".into(),
+                subtitle: "Needed to compile on macOS.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc cancel"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "install" => {
                     let _ = Command::new("/usr/bin/xcode-select").arg("--install").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
                     wait_for_apple_installer()?;
                 }
-                Some("accept the license") => {
+                Nav::Select(id) if id == "license" => {
                     let _pause = Screen::pause();
                     println!("Apple's Xcode license follows. Type agree at the end to accept it.\n");
                     let _ = Command::new("sudo").args(["/usr/bin/xcodebuild", "-license"]).status();
                 }
-                Some("check again") => view::busy("Checking clang, the macOS SDK, the linker and git"),
-                _ => return Ok(false),
+                Nav::Select(id) if id == "check" => {
+                    view::busy("Checking clang, the macOS SDK, the linker and git");
+                    if runtime::system_tools_ready().is_err() {
+                        view::message(text("Still not ready.", WARN));
+                    }
+                }
+                Nav::Select(_) | Nav::Back | Nav::Quit => return Ok(false),
+                Nav::Refresh | Nav::Key(..) => {}
             }
-            again = "Still not ready. ";
         }
     }
     /// An NVIDIA card without the toolkit: CUDA joins the build tools.
@@ -2037,31 +2133,21 @@ fn required_for(root: &Path) -> &'static [&'static str] {
     if cfg!(windows) && runtime::windows_chain(root) == WindowsChain::Gnu { &[] } else { required_agreements() }
 }
 
+/// Agreement rows: full name and host; Return opens the link.
+fn agreement_rows(ids: Option<&[&str]>) -> Vec<Row> {
+    agreements()
+        .into_iter()
+        .filter(|(id, _, _)| ids.is_none_or(|ids| ids.contains(id)))
+        .map(|(id, name, url)| item(format!("url:{id}"), format!("{name:<36}"), "", text(host(url), DIM), "open"))
+        .collect()
+}
+
 /// Return on an agreement row: open it and confirm on the status line.
 fn open_agreement(id: &str) {
     let Some((_, _, url)) = agreements().into_iter().find(|(key, _, _)| Some(*key) == id.strip_prefix("url:")) else { return };
     match open_url(url) {
         Ok(()) => view::message(done(format!("Opened {} in your browser.", url.trim_start_matches("https://")))),
         Err(error) => view::warn(&error),
-    }
-}
-
-/// The agreements a question is about, by name and host, for its note.
-fn agreements_note(ids: &[&str]) -> String {
-    let names: Vec<String> = agreements().into_iter().filter(|(id, _, _)| ids.contains(id)).map(|(_, name, url)| format!("{name} ({})", host(url))).collect();
-    format!("Agreements: {}.", names.join(", "))
-}
-/// "read the agreements": each one opens in the browser.
-fn open_agreements(ids: &[&str]) {
-    let mut failed = None;
-    for (_, _, url) in agreements().into_iter().filter(|(id, _, _)| ids.contains(id)) {
-        if let Err(error) = open_url(url) {
-            failed = Some(error);
-        }
-    }
-    match failed {
-        Some(error) => view::warn(&error),
-        None => view::message(done("The agreements opened in your browser.")),
     }
 }
 
