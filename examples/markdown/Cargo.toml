@@ -1,0 +1,9 @@
+[package]
+name = "makepad-example-markdown"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-markdown-widgets = { path = "../../libs/markdown_widgets", features = ["full"] }

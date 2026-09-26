@@ -56,6 +56,7 @@ let RunRelease = RunItem{
 
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-hello-world"}
+    RunStudioRelease{name: "makepad-example-markdown"}
     RunStudioRelease{name: "makepad-example-aichat"}
     RunStudioRelease{name: "makepad-example-box3d"}
     RunStudioRelease{name: "makepad-example-browser"}
