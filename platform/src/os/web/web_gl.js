@@ -13,6 +13,10 @@ const MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES = 16 * 1024 * 1024;
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
 
+function makepad_webgl_opt(obj, key) {
+  return obj == null ? undefined : obj[key];
+}
+
 function makepad_webgl_limit(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 1
@@ -472,7 +476,9 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   report_vertex_submission_once(key, reason, detail) {
-    if (this.gl?.isContextLost?.()) throw new Error("WebGL context lost during submission");
+    if (this.gl && typeof this.gl.isContextLost === "function" && this.gl.isContextLost()) {
+      throw new Error("WebGL context lost during submission");
+    }
     const reports = this._vertex_submission_reports ||
       (this._vertex_submission_reports = new Set());
     if (reports.has(key) || reports.size >= MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS) {
@@ -1619,7 +1625,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
   FromWasmRetainedArrayBuffer(args) {
     const gl = this.gl;
-    const buffer = this.numeric_buffer_for_update(this.array_buffers, args?.buffer_id, "array");
+    const buffer = this.numeric_buffer_for_update(this.array_buffers, makepad_webgl_opt(args, "buffer_id"), "array");
     if (!buffer) return;
     const reject = (reason) => {
       buffer.retained_capacity = 0;
@@ -1658,7 +1664,7 @@ export class WasmWebGL extends WasmWebBrowser {
       buffer.source_kind = "f32";
       // Browser/driver owns in-flight backing stores. No fabricated completion.
     } catch (error) {
-      reject(`retained upload failed: ${error?.message || error}`);
+      reject(`retained upload failed: ${makepad_webgl_opt(error, "message") || error}`);
     } finally {
       if (bound) { try { gl.bindBuffer(gl.ARRAY_BUFFER, null); } catch (_) {} }
     }
@@ -1669,12 +1675,12 @@ export class WasmWebGL extends WasmWebBrowser {
     const validInteger = (value) => Number.isSafeInteger(value) && value >= 0;
     const reject = (reason) => {
       this.report_vertex_submission_once(
-        `retained-delta:${args?.buffer_id}:${reason}`, reason, { buffer_id: args?.buffer_id });
-      if (validInteger(args?.buffer_id)) {
+        `retained-delta:${makepad_webgl_opt(args, "buffer_id")}:${reason}`, reason, { buffer_id: makepad_webgl_opt(args, "buffer_id") });
+      if (validInteger(makepad_webgl_opt(args, "buffer_id"))) {
         this.to_wasm.ToWasmRetainedUploadFailed({ buffer_id: args.buffer_id });
       }
     };
-    if (!validInteger(args?.buffer_id) || !validInteger(args.slot_count) ||
+    if (!validInteger(makepad_webgl_opt(args, "buffer_id")) || !validInteger(args.slot_count) ||
         !validInteger(args.capacity_bytes) || args.capacity_bytes < args.slot_count * 4 ||
         !Array.isArray(args.copies) || !Array.isArray(args.writes)) {
       reject("invalid retained delta metadata"); return;
@@ -1689,24 +1695,24 @@ export class WasmWebGL extends WasmWebBrowser {
           write.destination_slot + checked.element_count > args.slot_count) {
         reject(checked.reason || "retained segment is outside destination"); return;
       }
-      if (!args.replace && checked.element_count && write.destination_slot < (previous?.length || 0)) {
+      if (!args.replace && checked.element_count && write.destination_slot < ((previous && previous.length) || 0)) {
         reject("retained patch requires a replacement backing"); return;
       }
       writes.push({ offset: write.destination_slot * 4, data: checked.array });
     }
     for (const copy of args.copies) {
       if (!validInteger(copy.source_slot) || !validInteger(copy.destination_slot) ||
-          !validInteger(copy.slot_count) || !previous?.valid ||
+          !validInteger(copy.slot_count) || !(previous && previous.valid) ||
           copy.source_slot + copy.slot_count > previous.length ||
           copy.destination_slot + copy.slot_count > args.slot_count ||
           (!args.replace && copy.source_slot !== copy.destination_slot)) {
         reject("invalid retained GPU copy range"); return;
       }
     }
-    if (!args.replace && (!previous?.valid || args.capacity_bytes > previous.retained_capacity)) {
+    if (!args.replace && (!(previous && previous.valid) || args.capacity_bytes > previous.retained_capacity)) {
       reject("retained update has no compatible backing"); return;
     }
-    let destination = previous?.gl_buf;
+    let destination = previous && previous.gl_buf;
     let installed = false;
     try {
       if (args.replace) {
@@ -1733,13 +1739,13 @@ export class WasmWebGL extends WasmWebBrowser {
       this.array_buffers[args.buffer_id] = {
         gl_buf: destination, valid: true, byte_length: byteLength, length: args.slot_count,
         retained_capacity: args.capacity_bytes, source_kind: "f32",
-        upload_version: (previous?.upload_version || 0) + 1,
+        upload_version: ((previous && previous.upload_version) || 0) + 1,
       };
       installed = true;
       // The command stream retains storage read by earlier draws and copies.
-      if (args.replace && previous?.gl_buf) gl.deleteBuffer(previous.gl_buf);
+      if (args.replace && previous && previous.gl_buf) gl.deleteBuffer(previous.gl_buf);
     } catch (error) {
-      reject(`retained delta failed: ${error?.message || error}`);
+      reject(`retained delta failed: ${makepad_webgl_opt(error, "message") || error}`);
     } finally {
       gl.bindBuffer(gl.COPY_READ_BUFFER, null);
       gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
@@ -3054,7 +3060,7 @@ export class WasmWebGL extends WasmWebBrowser {
       send("allocation changed");
       return;
     }
-    this.readback_reserved_bytes ||= 0;
+    this.readback_reserved_bytes = this.readback_reserved_bytes || 0;
     if (!Number.isSafeInteger(byteLength) || byteLength <= 0 ||
         byteLength > 32 * 1024 * 1024 - this.readback_reserved_bytes ||
         this.pending_render_texture_captures.size >= 256) {
