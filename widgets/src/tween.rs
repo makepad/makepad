@@ -830,7 +830,17 @@ impl TweenHost {
                             self.engine.anim(id).set_time_scale(scale);
                         }
                         InspectCommand::Repeat { id, count } => {
+                            // Fewer repeats can leave the playhead past the
+                            // new end (Loop off after a few loops): fold it
+                            // into the last pass at the same point of it.
+                            let local = self.engine.anim_ref(id).time();
                             self.engine.anim(id).set_repeat(count);
+                            let a = self.engine.anim_ref(id);
+                            let (total, one) = (a.total_duration(), a.duration());
+                            if a.total_time() > total && total < BIG {
+                                let at = (total - one + local).clamp(0.0, total);
+                                self.engine.anim(id).seek(Seek::Time(at), Emit::Suppress);
+                            }
                         }
                         InspectCommand::Yoyo { id, on } => {
                             self.engine.anim(id).set_yoyo(on);
