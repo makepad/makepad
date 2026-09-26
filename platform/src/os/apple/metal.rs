@@ -571,6 +571,7 @@ impl Cx {
             } else {
                 let (draw_list, _) =
                     self.draw_lists.list_and_upload_budget(draw_list_id);
+                let list_debug_id = draw_list.debug_id;
                 let draw_item = draw_list.draw_items.binding_mut(draw_item_id);
                 let backing_bytes = draw_item
                     .os
@@ -1055,6 +1056,15 @@ impl Cx {
                             continue;
                         }
                         let count = end - start;
+                        if crate::makepad_error_log::trace_enabled("gpu.shaders") {
+                            gpu_shader_tally(
+                                self.repaint_id,
+                                draw_call.draw_shader_id.index,
+                                list_debug_id,
+                                geometry.index_count as u64,
+                                count,
+                            );
+                        }
                         self.os.draw_calls_done += 1;
                         self.os.instances_done = self.os.instances_done.saturating_add(count);
                         self.os.vertices_done = self
@@ -6687,6 +6697,62 @@ impl EaglRenderBridge {
             (gl_texture_id, metal_texture)
         }
     }
+}
+
+/// The `gpu.shaders` topic tallies every indexed draw by (shader, draw list)
+/// debug id on the UI thread and prints a per-frame average table every two
+/// seconds: draws, vertices submitted (index count x instances), instances.
+fn gpu_shader_tally(repaint_id: u64, shader: usize, list: LiveId, index_count: u64, instances: u64) {
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Tally {
+        started: Option<std::time::Instant>,
+        frames: u64,
+        last_repaint: u64,
+        rows: HashMap<(usize, LiveId), (u64, u64, u64)>,
+    }
+    thread_local! {
+        static TALLY: std::cell::RefCell<Tally> = std::cell::RefCell::new(Tally::default());
+    }
+    TALLY.with(|tally| {
+        let mut tally = tally.borrow_mut();
+        let started = *tally.started.get_or_insert_with(std::time::Instant::now);
+        if tally.last_repaint != repaint_id {
+            tally.last_repaint = repaint_id;
+            tally.frames += 1;
+        }
+        let row = tally.rows.entry((shader, list)).or_default();
+        row.0 += 1;
+        row.1 = row.1.saturating_add(index_count.saturating_mul(instances));
+        row.2 = row.2.saturating_add(instances);
+        if started.elapsed().as_secs_f64() >= 2.0 {
+            let frames = tally.frames.max(1);
+            let mut rows: Vec<_> = tally.rows.iter().map(|(k, v)| (*k, *v)).collect();
+            rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+            let (draws, verts, inst) = rows.iter().fold((0, 0, 0), |acc, (_, v)| {
+                (acc.0 + v.0, acc.1 + v.1, acc.2 + v.2)
+            });
+            let mut out = format!(
+                "GPUSHADERS frames:{} per-frame draws:{} verts:{} inst:{}\n",
+                frames,
+                draws / frames,
+                verts / frames,
+                inst / frames
+            );
+            for ((shader, list), (d, v, i)) in rows.iter().take(40) {
+                out.push_str(&format!(
+                    "  shader:{:<5} list:{:<22} draws:{:<6} verts:{:<10} inst:{}\n",
+                    shader,
+                    format!("{:?}", list),
+                    d / frames,
+                    v / frames,
+                    i / frames
+                ));
+            }
+            crate::trace!("gpu.shaders", "{}", out);
+            *tally = Tally::default();
+        }
+    });
 }
 
 /// The `gpu.profile` topic prints a per-pass GPU-time + geometry table once

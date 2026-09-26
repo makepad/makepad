@@ -23,8 +23,12 @@ pub mod nav_build;
 pub mod native;
 pub mod osm_pbf;
 pub mod progress;
+#[cfg(all(feature = "faces", not(target_arch = "wasm32")))]
+pub mod render_check;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod repack;
+#[cfg(unix)]
+pub mod repack_remote;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testmap;
 pub mod versatiles;
