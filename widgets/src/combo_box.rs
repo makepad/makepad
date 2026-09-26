@@ -964,6 +964,22 @@ impl ComboBox {
         }
     }
 
+    /// Runs the popup's scroll bar on an event and follows any scroll it reports.
+    fn forward_to_scroll_bar(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let mut scrolled = None;
+        self.scroll_bar.handle_event_with(cx, event, &mut |_cx, action| {
+            if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
+                scrolled = Some(scroll_pos);
+            }
+        });
+        let Some(pos) = scrolled else { return false };
+        if (pos - self.scroll).abs() > f64::EPSILON {
+            self.scroll = pos;
+            self.draw_list.redraw(cx);
+        }
+        true
+    }
+
     fn handle_popup_pointer(&mut self, cx: &mut Cx, event: &Event) {
         let Some(g) = self.geom else { return };
         match event {
@@ -1233,27 +1249,20 @@ impl Widget for ComboBox {
             let inside = self
                 .geom
                 .is_some_and(|g| pointer_pos(popup_event).is_some_and(|p| g.popup_rect().contains(p)));
+            // Timer and frame events keep the bar's hide countdown and fade running.
+            if matches!(event, Event::Timer(_) | Event::NextFrame(_))
+                && self.geom.is_some_and(|g| g.needs_scroll_bar())
+            {
+                self.forward_to_scroll_bar(cx, event);
+            }
             if inside {
                 // The scrollbar hit-tests with its own area and would be
                 // refused by our sweep lock; lend it the lock for one dispatch.
                 if self.geom.is_some_and(|g| g.needs_scroll_bar()) {
                     cx.sweep_unlock(self.draw_bg.area());
-                    let mut scrolled = None;
-                    self.scroll_bar
-                        .handle_event_with(cx, popup_event, &mut |_cx, action| {
-                            if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
-                                scrolled = Some(scroll_pos);
-                            }
-                        });
+                    let scrolled = self.forward_to_scroll_bar(cx, popup_event);
                     cx.sweep_lock(self.draw_bg.area());
-                    if let Some(pos) = scrolled {
-                        if (pos - self.scroll).abs() > f64::EPSILON {
-                            self.scroll = pos;
-                            self.draw_list.redraw(cx);
-                        }
-                        return;
-                    }
-                    if self.scroll_bar.is_area_captured(cx) {
+                    if scrolled || self.scroll_bar.is_area_captured(cx) {
                         return;
                     }
                 }
