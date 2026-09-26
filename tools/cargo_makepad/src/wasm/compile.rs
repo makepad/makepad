@@ -338,7 +338,6 @@ pub fn generate_html(
                 && wasm.exports.memory.buffer instanceof SharedArrayBuffer;
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
-            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             "
         )
     } else {
@@ -359,7 +358,6 @@ pub fn generate_html(
         };
         format!(
             "
-            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 './{wasm}.wasm'{split_options}
             );
@@ -380,6 +378,7 @@ pub fn generate_html(
     } else {
         "
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        <link rel='modulepreload' href='./makepad_platform/web.js'>
         "
     };
 
@@ -393,6 +392,12 @@ pub fn generate_html(
         <title>{wasm}</title>
         {preloads}
         <script type='module'>
+            // CHROME63: static import only. Chrome 63 cannot parse a dynamic
+            // `import()`, and it cannot parse a top-level `await`, so the
+            // bootstrap body is wrapped in an async IIFE below.
+            import {{WasmWebGL}} from './makepad_platform/web_gl.js';
+            import {{makepad_crash_reporter}} from './makepad_platform/web.js';
+            (async () => {{
             const reportBrowserIssue = async (kind, data) => {{
                 try {{
                     const reporter = window.makepad_crash_reporter;
@@ -452,7 +457,6 @@ pub fn generate_html(
             }});
 
             try {{
-                const {{makepad_crash_reporter}} = await import('./makepad_platform/web.js');
                 {init}
                 makepad_crash_reporter.set_wasm(wasm);
                 class MyWasmApp {{
@@ -469,6 +473,7 @@ pub fn generate_html(
                 }});
                 throw error;
             }}
+            }})();
         </script>
         {auto_reload_script}
         <link rel='stylesheet' type='text/css' href='./makepad_platform/full_canvas.css'>
@@ -2260,7 +2265,12 @@ mod tests {
         assert!(html.contains("window.addEventListener('unhandledrejection'"));
         assert!(html.contains("window.makepad_report_browser_issue = reportBrowserIssue"));
         assert!(html.contains("window.makepad_crash_reporter"));
-        assert!(html.contains("await import('./makepad_platform/web.js')"));
+        // Chrome 63 parses neither a dynamic `import()` nor a top-level `await`,
+        // so the crash reporter is a static import and the bootstrap body is
+        // wrapped in an async IIFE.
+        assert!(html.contains("import {makepad_crash_reporter} from './makepad_platform/web.js'"));
+        assert!(!html.contains("await import('./makepad_platform/web.js')"));
+        assert!(html.contains("(async () => {"));
         assert!(html.contains("makepad_crash_reporter.set_wasm(wasm)"));
         assert!(html.contains("/$report_error?data="));
     }
