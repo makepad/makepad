@@ -154,6 +154,10 @@ impl<'a> CxSystemBrowser<'a> {
     }
 }
 
+/// A system haptic (`Cx::haptic_feedback`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HapticFeedback { Click, VirtualKey, Tick }
+
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
 
@@ -1504,6 +1508,17 @@ impl Cx {
     /// Copies the given string to the clipboard.
     ///
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
+    /// A system haptic (Android: the window's `performHapticFeedback`;
+    /// a no-op elsewhere and in hosted children, which have no window).
+    pub fn haptic_feedback(&mut self, kind: HapticFeedback) {
+        #[cfg(all(target_os = "android", not(linux_direct)))]
+        if !crate::os::linux::android::android_hosted::is_hosted() {
+            let kind = match kind { HapticFeedback::Click => 0, HapticFeedback::VirtualKey => 1, HapticFeedback::Tick => 2 };
+            unsafe { crate::os::linux::android::android_jni::to_java_haptic(kind) };
+        }
+        let _ = kind;
+    }
+
     pub fn copy_to_clipboard(&mut self, content: &str) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops
@@ -1619,6 +1634,16 @@ impl Cx {
     /// inside one of its children. Returns true if a child capture was dropped.
     pub fn promote_finger_capture_over(&mut self, over: Area) -> bool {
         self.fingers.promote_capture_over(over)
+    }
+
+    /// `area` takes the gesture of the finger `digit_id` (a scroller that
+    /// starts scrolling): it becomes the finger's one owner and every other
+    /// capture of it is cancelled. False when the gesture is not `area`'s
+    /// to take (see `CxFingers::claim_gesture`) — then it must stand down.
+    /// On success the owner dispatches `Event::FingerCancel` to its
+    /// children so the presses it took end at once.
+    pub fn claim_finger_gesture(&mut self, digit_id: crate::event::DigitId, area: Area) -> bool {
+        self.fingers.claim_gesture(digit_id, area)
     }
 
     pub fn sweep_unlock(&mut self, value: Area) {

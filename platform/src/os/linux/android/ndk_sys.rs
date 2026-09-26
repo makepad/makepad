@@ -67,6 +67,44 @@ extern "C" {
     pub fn AHardwareBuffer_release(buffer: *mut AHardwareBuffer);
 }
 
+// The shared-frame transport between a host and its hosted children
+// (`android_hosted`); all API 26, in libnativewindow.
+#[link(name = "nativewindow")]
+extern "C" {
+    pub fn AHardwareBuffer_allocate(
+        desc: *const AHardwareBuffer_Desc,
+        out_buffer: *mut *mut AHardwareBuffer,
+    ) -> ::std::os::raw::c_int;
+    pub fn AHardwareBuffer_describe(
+        buffer: *const AHardwareBuffer,
+        out_desc: *mut AHardwareBuffer_Desc,
+    );
+    pub fn AHardwareBuffer_sendHandleToUnixSocket(
+        buffer: *const AHardwareBuffer,
+        socket_fd: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+    pub fn AHardwareBuffer_recvHandleFromUnixSocket(
+        socket_fd: ::std::os::raw::c_int,
+        out_buffer: *mut *mut AHardwareBuffer,
+    ) -> ::std::os::raw::c_int;
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct AHardwareBuffer_Desc {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub format: u32,
+    pub usage: u64,
+    pub stride: u32,
+    pub rfu0: u32,
+    pub rfu1: u64,
+}
+
+pub const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: u32 = 1;
+pub const AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT: u64 = 1 << 9;
+
 pub const AHARDWAREBUFFER_USAGE_CPU_READ_RARELY: u64 = 2;
 pub const AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN: u64 = 3;
 pub const AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;

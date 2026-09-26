@@ -86,6 +86,13 @@ impl SignalToUI {
         }
     }
 
+    /// Whether any of the UI thread's signals is raised (without clearing).
+    pub fn any_pending() -> bool {
+        UI_SIGNAL.load(Ordering::Acquire)
+            || INTERNAL_SIGNAL.load(Ordering::Acquire)
+            || ACTION_SIGNAL.load(Ordering::Acquire)
+    }
+
     pub fn check_and_clear_ui_signal() -> bool {
         UI_SIGNAL.swap(false, Ordering::AcqRel)
     }
