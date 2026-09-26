@@ -347,8 +347,7 @@ impl HeightTree {
             self.tree.resize(new_size + 1, 0.0);
             self.measured.resize(new_size, false);
 
-            // The nodes tiling the old range fold into the new nodes above them, which
-            // otherwise start empty and lose every old height they span.
+            // New parent nodes start at zero, so first add in the old heights they cover.
             let mut i = old_size;
             while i > 0 {
                 let sum = self.tree[i];

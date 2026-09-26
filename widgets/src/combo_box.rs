@@ -964,7 +964,7 @@ impl ComboBox {
         }
     }
 
-    /// Runs the popup's scroll bar on an event and follows any scroll it reports.
+    /// Passes an event to the popup's scroll bar and applies any scroll it reports.
     fn forward_to_scroll_bar(&mut self, cx: &mut Cx, event: &Event) -> bool {
         let mut scrolled = None;
         self.scroll_bar.handle_event_with(cx, event, &mut |_cx, action| {

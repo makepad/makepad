@@ -37,7 +37,7 @@ script_mod! {
             drag: instance(0.0)
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
-            /** shown mix 0..1 step 0.01 */
+            /** how visible the bar is 0..1 step 0.01 */
             opacity: instance(0.0)
 
             /** drawn handle thickness in pixels 1..20 step 0.5 */
@@ -154,7 +154,7 @@ script_mod! {
             drag: instance(0.0)
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
-            /** shown mix 0..1 step 0.01 */
+            /** how visible the bar is 0..1 step 0.01 */
             opacity: instance(0.0)
 
             /** drawn handle thickness in pixels 1..20 step 0.5 */
@@ -321,8 +321,7 @@ pub struct ScrollBar {
     /// Whether the pointer is over the bar, which keeps it from hiding.
     #[rust]
     pointer_over: bool,
-    /// The scroll position and viewport size the bar last showed for, so a slow
-    /// scroll adds up across draws instead of slipping under the per-frame threshold.
+    /// The scroll position and viewport size when the bar last appeared; moving far enough from them shows it again.
     #[rust]
     last_shown: Option<(f64, f64)>,
     #[rust(false)]
@@ -1128,7 +1127,7 @@ impl ScrollBar {
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
                     self.drag_point = None;
-                    // A touch never hovers, so a lifted finger leaves the bar free to hide.
+                    // Touch has no hover, so the bar can hide once a touch ends.
                     self.pointer_over = fe.is_over && fe.device.has_hovers();
                     if self.pointer_over {
                         self.animator_play(cx, ids!(hover.on));
@@ -1325,7 +1324,7 @@ impl ScrollBar {
         self.scroll_pos = self.scroll_pos.min(total - viewport).max(0.);
 
         if self.visible && self.show_handle {
-            // The hover-out can go missing while the bar isn't drawn or its host is hidden.
+            // Drop a stale hover, since we miss the hover-out if the pointer left while the bar wasn't drawn.
             if self.pointer_over && !cx.fingers.is_area_hovered(self.draw_bg.area()) {
                 self.pointer_over = false;
                 self.restart_hide_timer(cx);
