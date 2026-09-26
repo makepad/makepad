@@ -504,6 +504,11 @@ app_state() {
     fi
     if [ "$as_installed" = "$rel_release" ] && [ -f "$as_bin" ]; then
         if sources_changed; then state=compile; else state=ready; fi
+        # Linux: CUDA came or went since it was built (no record: a CPU build).
+        if [ "$state" = ready ] && [ "$plat" = linux ]; then
+            cuda_mode; first_line "$root/installed/$as_id.toolchain" "$triple cpu"
+            [ "$fl" = "$triple $cm" ] || state=compile
+        fi
     elif rel_installed; then state=compile
     elif [ -n "$as_installed" ]; then state=update
     elif [ -n "$(ls -A "$rel_directory/.builder-repositories" 2>/dev/null)" ] || ls "$root"/cache/*.pack.part* >/dev/null 2>&1; then state=partial
@@ -688,15 +693,62 @@ cargo_env() { # cargo_env LABEL APP [THREADS]: exports into the current (sub)she
     export TMPDIR="$root/tmp" TMP="$root/tmp" TEMP="$root/tmp"
     export RUSTUP_HOME="$root/rustup-home" RUSTUP_AUTO_INSTALL=0 RUSTUP_TOOLCHAIN=
     export MAKEPAD_LOADER_EMAIL= MAKEPAD_PACKAGE_DIR=. MAKEPAD_BUILDER_APP="$2"
-    export CUDA_PATH= CUDA_HOME= CUDACXX= MAKEPAD_GGML_NO_CUDA=1 MAKEPAD_GGML_REQUIRE_CUDA=0
+    # Local AI on Linux is decided here, at every build, and nowhere in the
+    # menu: an installed CUDA toolkit and an NVIDIA driver (cuda_detect) give
+    # the AI crates CUDA (libs/ai/cuda/build.rs takes only the toolkit named
+    # by MAKEPAD_CUDA_ROOT and does not probe) and apps their localai feature
+    # (build_features); otherwise CUDA is off and so is local AI, which has
+    # no CPU backend on Linux. A kernel build that fails gives link-clean
+    # stubs, so the build still succeeds (REQUIRE stays 0).
+    if [ "$plat" = linux ] && cuda_detect; then
+        unset MAKEPAD_GGML_NO_CUDA
+        export CUDA_PATH="$cuda_root" CUDA_HOME="$cuda_root" MAKEPAD_CUDA_ROOT="$cuda_root" CUDACXX="$cuda_root/bin/nvcc" \
+            MAKEPAD_GGML_REQUIRE_CUDA=0
+        export LD_LIBRARY_PATH="$cuda_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        ce_cuda_path="$cuda_root/bin:"
+    else
+        export CUDA_PATH= CUDA_HOME= CUDACXX= MAKEPAD_CUDA_ROOT= MAKEPAD_GGML_NO_CUDA=1 MAKEPAD_GGML_REQUIRE_CUDA=0
+        ce_cuda_path=
+    fi
     # Pinned: the shell's RUSTFLAGS would change every fingerprint in the
     # shared target.
     if [ -n "${3:-}" ]; then ce_threads=$3; else rustc_threads; ce_threads=$rustc_threads; fi
     if [ "$ce_threads" -gt 1 ]; then export RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Zthreads=$ce_threads"
     else export RUSTC_BOOTSTRAP= RUSTFLAGS=; fi
     if [ -x "$rust_sysroot/bin/rustdoc" ]; then export RUSTDOC="$rust_sysroot/bin/rustdoc"; fi
-    export PATH="$rust_sysroot/bin:$root/cargo-home/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+    export PATH="$rust_sysroot/bin:$root/cargo-home/bin:$ce_cuda_path/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 }
+# cuda_detect -> cuda_root cuda_lib cuda_version (Linux): an NVIDIA driver
+# (/proc/driver/nvidia or nvidia-smi) and a CUDA toolkit with nvcc and
+# libcudart (the same test libs/ai/cuda/build.rs makes of MAKEPAD_CUDA_ROOT),
+# from CUDA_HOME, CUDA_PATH, /usr/local/cuda, /usr/local/cuda-*, /opt/cuda
+# or the nvcc on PATH.
+# Fails when either is missing. Only files are looked at.
+cuda_detect() {
+    cuda_root= cuda_lib= cuda_version=
+    [ -e /proc/driver/nvidia/version ] || command -v nvidia-smi >/dev/null 2>&1 || return 1
+    cd_nvcc=$(command -v nvcc 2>/dev/null || :)
+    [ -z "$cd_nvcc" ] || cd_nvcc=${cd_nvcc%/bin/nvcc}
+    for cd_root in "${CUDA_HOME:-}" "${CUDA_PATH:-}" /usr/local/cuda /usr/local/cuda-* /opt/cuda "$cd_nvcc"; do
+        [ -n "$cd_root" ] && [ -x "$cd_root/bin/nvcc" ] || continue
+        for cd_lib in "$cd_root/lib64" "$cd_root/targets/x86_64-linux/lib" "$cd_root/targets/sbsa-linux/lib" "$cd_root/lib"; do
+            for cd_so in "$cd_lib"/libcudart.so*; do
+                [ -e "$cd_so" ] || continue
+                cuda_root=$cd_root cuda_lib=$cd_lib
+                cuda_version=
+                if [ -f "$cd_root/version.json" ]; then
+                    cuda_version=$(awk -F'"' '/"cuda"/ { c = 1 } c && /"version"/ { print $4; exit }' "$cd_root/version.json" 2>/dev/null || :)
+                fi
+                return 0
+            done
+        done
+    done
+    return 1
+}
+# cuda_mode -> cm: "cuda" when a Linux build gets CUDA now, else "cpu"; an
+# app records the mode it was built with (installed/<app>.toolchain), and
+# compiles again when it changes.
+cuda_mode() { cm=cpu; if [ "$plat" = linux ] && cuda_detect; then cm=cuda; fi; }
 
 # prepare_target: the snapshot's target directory. A folder from before the
 # per-snapshot layout has Cargo's output directly in target/; the snapshot
@@ -1184,13 +1236,22 @@ expected_crates() {
 # build_features -> $feature_args: the release's features, as cargo takes them.
 build_features() {
     feature_args=--no-default-features
-    [ -z "$rel_features" ] || feature_args="$feature_args --features $rel_features"
+    bf_features=$rel_features
+    # With CUDA (Linux), an app that has a localai feature gets it.
+    if [ "$plat" = linux ] && cuda_detect && grep -q '^localai *=' "$rel_directory/$rel_workspace/Cargo.toml" 2>/dev/null; then
+        case ",$bf_features," in *,localai,*) ;; *) bf_features="${bf_features:+$bf_features,}localai" ;; esac
+    fi
+    [ -z "$bf_features" ] || feature_args="$feature_args --features $bf_features"
 }
 # compile_app: builds the loaded release's app in the background, with its
 # progress on the step "Compile"; build log in the snapshot's target.
 job_compile() { # job_compile LABEL APP
     jc_label=$1
     jc_started=$(now)
+    if [ "$plat" = linux ]; then
+        if cuda_detect; then log "Local AI: CUDA ${cuda_version:-toolkit} at $cuda_root; $2 builds with CUDA (and its localai feature when it has one)."
+        else log "Local AI: no CUDA toolkit or NVIDIA driver; $2 builds without CUDA."; fi
+    fi
     step "$jc_label" "now|0|0|none|0|resolving"
     ( cargo_env "$rel_label" "$2" 1 >/dev/null; expected_crates > "$root/tmp/expected-crates" ) || :
     jc_expected=$(cat "$root/tmp/expected-crates" 2>/dev/null || echo 0)
@@ -1334,6 +1395,8 @@ publish_app() {
     write_launcher "$rel_binary"
     if [ "$plat" = mac ]; then mac_bundle || return 1; fi
     mkdir -p "$root/installed"
+    # Linux: built with CUDA or not; the app compiles again when that changes.
+    if [ "$plat" = linux ]; then cuda_mode; put "$root/installed/$rel_id.toolchain" "$triple $cm"; fi
     cp "$release_file" "$root/installed/$rel_id.json.next"
     mv -f "$root/installed/$rel_id.json.next" "$root/installed/$rel_id.json"
     cp "$root/installed/$rel_id.json" "$root/installed-release.json"
