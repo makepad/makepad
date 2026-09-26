@@ -2988,7 +2988,7 @@ EOF
 }
 clear_build() {
     [ -d "$root/target" ] || { message="${dim}There is no build data to delete.${r0}"; return 0; }
-    choose 'Delete the build data in target/?' 'your apps keep working; the next compile starts from scratch' keep keep delete || return 0
+    choose 'Delete the build data in target/?' 'your apps keep working; the next compile starts from scratch' delete keep delete || return 0
     [ "$chosen" = delete ] || return 0
     busy 'Deleting build data'
     if remove_inside "$root/target"; then message="${ok}✓${r0} Build data cleaned. Built apps are unchanged."
