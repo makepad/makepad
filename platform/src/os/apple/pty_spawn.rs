@@ -1,6 +1,6 @@
 //! Darwin PTY spawning without running any code between fork and exec.
 //!
-//! Shared with makepad-screen by source path so its tiny host stays GUI-free.
+//! Shared with makepad-agents by source path so its tiny host stays GUI-free.
 //! Darwin's opaque spawn types/flags are defined by the SDK's spawn.h.
 use std::{
     collections::BTreeMap,
@@ -117,7 +117,17 @@ pub fn screen_helper() -> io::Result<PathBuf> {
     } else {
         directory
     };
-    Ok(directory.join("makepad-screen"))
+    let helper = directory.join("agents");
+    if !helper.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the pty helper {} is not built; build it with the same profile: cargo build -p makepad-agents",
+                helper.display()
+            ),
+        ));
+    }
+    Ok(helper)
 }
 
 /// Start a new session with `slave` as its controlling terminal and stdio.
@@ -323,7 +333,7 @@ fn wait_for_exec(pipe: &mut File) -> io::Result<()> {
     }
 }
 
-/// Called at makepad-screen entry, before any host, socket, worker or UI.
+/// Called at makepad-agents entry, before any host, socket, worker or UI.
 /// Returns for ordinary invocations; exec mode never returns.
 pub fn exec_helper() {
     let mut arguments = std::env::args_os().skip(1);

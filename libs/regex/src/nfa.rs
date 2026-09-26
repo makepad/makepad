@@ -172,6 +172,17 @@ struct AddThreadView<'a, C: Cursor> {
 }
 
 impl<'a, C: Cursor> AddThreadView<'a, C> {
+    fn is_word_boundary(&mut self) -> bool {
+        if self.prog.ascii_word_boundary {
+            use super::char::CharExt;
+            let prev = self.cursor.prev_byte().map_or(false, |b| (b as char).is_ascii_word());
+            let next = self.cursor.current_byte().map_or(false, |b| (b as char).is_ascii_word());
+            prev != next
+        } else {
+            self.cursor.is_word_boundary()
+        }
+    }
+
     fn add_thread(&mut self, threads: &mut Threads, inst: InstPtr, slots: &mut [Option<usize>]) {
         use super::prog::Inst;
 
@@ -212,8 +223,8 @@ impl<'a, C: Cursor> AddThreadView<'a, C> {
                                     Pred::TextEnd => self.cursor.is_end(),
                                     Pred::LineStart => self.cursor.is_line_start(),
                                     Pred::LineEnd => self.cursor.is_line_end(),
-                                    Pred::WordBoundary => self.cursor.is_word_boundary(),
-                                    Pred::NotWordBoundary => !self.cursor.is_word_boundary(),
+                                    Pred::WordBoundary => self.is_word_boundary(),
+                                    Pred::NotWordBoundary => !self.is_word_boundary(),
                                 } {
                                     inst = inst_ref.out;
                                     continue;

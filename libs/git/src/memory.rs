@@ -26,6 +26,8 @@ struct Account {
     capacity: usize,
     reserved: AtomicUsize,
     peak: AtomicUsize,
+    /// The most the ledger has stood above its capacity.
+    overcommitted: AtomicUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -33,14 +35,34 @@ pub struct MemoryAccount(Arc<Account>);
 
 impl MemoryAccount {
     pub fn new(capacity: usize) -> Self {
-        Self(Arc::new(Account { capacity, reserved: AtomicUsize::new(0), peak: AtomicUsize::new(0) }))
+        Self(Arc::new(Account { capacity, reserved: AtomicUsize::new(0), peak: AtomicUsize::new(0), overcommitted: AtomicUsize::new(0) }))
     }
     pub fn capacity(&self) -> usize { self.0.capacity }
     pub fn reserved(&self) -> usize { self.0.reserved.load(Ordering::Acquire) }
     pub fn available(&self) -> usize { self.capacity().saturating_sub(self.reserved()) }
     pub fn peak(&self) -> usize { self.0.peak.load(Ordering::Acquire) }
+    /// The most `reserve` has taken the ledger above its capacity.
+    pub fn overcommitted(&self) -> usize { self.0.overcommitted.load(Ordering::Acquire) }
     pub fn same_account(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+    /// Take `bytes` whether or not the account has room: for work that
+    /// cannot do without them. The ledger is a pacing device, not a wall:
+    /// `try_reserve` answers callers that can wait or scale down, and this
+    /// answers the ones that cannot. The excess shows in `overcommitted`
+    /// and, while it stands, `available` is zero, so pacing callers hold
+    /// back until it is given back; the machine may swap, the work does
+    /// not stop.
+    pub fn reserve(&self, bytes: usize) -> Reservation {
+        let old = self.0.reserved.fetch_add(bytes, Ordering::AcqRel);
+        let next = old.saturating_add(bytes);
+        self.0.peak.fetch_max(next, Ordering::Relaxed);
+        if next > self.capacity() {
+            self.0.overcommitted.fetch_max(next - self.capacity(), Ordering::Relaxed);
+        }
+        Reservation(Arc::new(Reserved { account: self.clone(), bytes }))
+    }
     pub fn try_reserve(&self, bytes: usize) -> Option<Reservation> {
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         let old = self.0.reserved.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|next| *next <= self.capacity())
         }).ok()?;
@@ -106,5 +128,24 @@ mod tests {
         drop(other);
         assert_eq!(account.reserved(), 0);
         assert_eq!(account.peak(), 64);
+    }
+
+    /// What must be taken is taken: the ledger stands above its capacity,
+    /// says by how much, gives nothing to callers that ask for room until
+    /// it is given back, and comes back down when it is.
+    #[test]
+    fn a_reservation_that_must_be_taken_overcommits_and_is_given_back() {
+        let account = MemoryAccount::new(64);
+        let held = account.try_reserve(48).unwrap();
+        let taken = account.reserve(32);
+        assert_eq!(account.reserved(), 80);
+        assert_eq!(account.available(), 0);
+        assert_eq!(account.overcommitted(), 16);
+        assert!(account.try_reserve(1).is_none(), "no room while the ledger stands above its capacity");
+        drop(taken);
+        assert_eq!(account.reserved(), 48);
+        assert!(account.try_reserve(16).is_some());
+        drop(held);
+        assert_eq!(account.overcommitted(), 16, "the excess is remembered as a peak");
     }
 }

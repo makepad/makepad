@@ -86,7 +86,7 @@ impl CxVulkan {
             ) {
                 Ok(resource) => resource,
                 Err(error) => {
-                    self.destroy_texture_resource(local);
+                    self.destroy_uncached_texture_resource(local);
                     return Err(error);
                 }
             };
@@ -94,15 +94,15 @@ impl CxVulkan {
                 .host
                 .import_shared_image(texture, width, height, image)
             {
-                self.destroy_texture_resource(local);
-                route.host.destroy_texture_resource(intermediate);
+                self.destroy_uncached_texture_resource(local);
+                route.host.destroy_uncached_texture_resource(intermediate);
                 return Err(error);
             }
             let bridge = match GpuBridge::new(self, &route.host, vk::Extent2D { width, height }) {
                 Ok(bridge) => bridge,
                 Err(error) => {
-                    self.destroy_texture_resource(local);
-                    route.host.destroy_texture_resource(intermediate);
+                    self.destroy_uncached_texture_resource(local);
+                    route.host.destroy_uncached_texture_resource(intermediate);
                     route.host.retire_unused_shared_producer(key);
                     return Err(error);
                 }
@@ -238,7 +238,7 @@ impl CxVulkan {
             for key in retired {
                 let image = route.images.remove(&key).unwrap();
                 unsafe { image.bridge.destroy(self, &route.host) };
-                route.host.destroy_texture_resource(image.intermediate);
+                route.host.destroy_uncached_texture_resource(image.intermediate);
                 route.host.retire_unused_shared_producer(key);
             }
             Ok(completed)
@@ -370,7 +370,7 @@ impl CxVulkan {
         route.host.device_wait_idle();
         for (_, image) in route.images {
             unsafe { image.bridge.destroy(self, &route.host) };
-            route.host.destroy_texture_resource(image.intermediate);
+            route.host.destroy_uncached_texture_resource(image.intermediate);
         }
         // Both devices still exist above; only now can the auxiliary host
         // context release its imports and Vulkan device.

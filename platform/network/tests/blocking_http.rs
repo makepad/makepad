@@ -161,10 +161,10 @@ fn caller_cannot_set_reserved_or_injected_headers() {
         Request::post("http://127.0.0.1:1/").header("Accept-Encoding", "gzip"),
         Error::ReservedHeader,
     );
-    expect_header_err(
-        Request::post("http://127.0.0.1:1/").header("Accept", "application/json"),
-        Error::ReservedHeader,
-    );
+    // Content negotiation is caller-controlled; transport headers remain reserved.
+    assert!(Request::post("http://127.0.0.1:1/")
+        .header("Accept", "application/json")
+        .is_ok());
     expect_header_err(
         Request::post("http://127.0.0.1:1/").header("Expect", "100-continue"),
         Error::ReservedHeader,

@@ -799,17 +799,17 @@ macro_rules! impl_ser_de_json_float {
     };
 }
 
-impl_ser_de_json_unsigned!(usize, std::u64::MAX);
-impl_ser_de_json_unsigned!(u64, std::u64::MAX);
-impl_ser_de_json_unsigned!(u128, std::u128::MAX);
-impl_ser_de_json_unsigned!(u32, std::u32::MAX);
-impl_ser_de_json_unsigned!(u16, std::u16::MAX);
-impl_ser_de_json_unsigned!(u8, std::u8::MAX);
-impl_ser_de_json_signed!(i64, std::i64::MIN, std::i64::MAX);
-impl_ser_de_json_signed!(i128, std::i128::MIN, std::i128::MAX);
-impl_ser_de_json_signed!(i32, std::i64::MIN, std::i64::MAX);
-impl_ser_de_json_signed!(i16, std::i64::MIN, std::i64::MAX);
-impl_ser_de_json_signed!(i8, std::i64::MIN, std::i8::MAX);
+impl_ser_de_json_unsigned!(usize, u64::MAX);
+impl_ser_de_json_unsigned!(u64, u64::MAX);
+impl_ser_de_json_unsigned!(u128, u128::MAX);
+impl_ser_de_json_unsigned!(u32, u32::MAX);
+impl_ser_de_json_unsigned!(u16, u16::MAX);
+impl_ser_de_json_unsigned!(u8, u8::MAX);
+impl_ser_de_json_signed!(i64, i64::MIN, i64::MAX);
+impl_ser_de_json_signed!(i128, i128::MIN, i128::MAX);
+impl_ser_de_json_signed!(i32, i64::MIN, i64::MAX);
+impl_ser_de_json_signed!(i16, i64::MIN, i64::MAX);
+impl_ser_de_json_signed!(i8, i64::MIN, i8::MAX);
 impl_ser_de_json_float!(f64);
 impl_ser_de_json_float!(f32);
 

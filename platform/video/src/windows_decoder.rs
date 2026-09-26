@@ -24,7 +24,8 @@ use {
             MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
             MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
             MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-            MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             MF_SOURCE_READER_MEDIASOURCE, MF_BYTESTREAM_CONTENT_TYPE,
         },
         Win32::UI::Shell::SHCreateMemStream,
@@ -50,6 +51,9 @@ pub struct WindowsVideoFileDecoder {
     video_stride: usize,
     video_eos: bool,
     audio_eos: bool,
+    /// Opened for sound alone: the video stream was never selected, so
+    /// nothing may read it and nothing may re-arm it.
+    audio_only: bool,
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -83,11 +87,46 @@ impl WindowsVideoFileDecoder {
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         ensure_media_foundation()?;
         unsafe {
-            let attributes = Self::reader_attributes()?;
-            let wide_path = to_wide(path);
-            let reader = MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), &attributes)
-                .map_err(|e| hr_err("MFCreateSourceReaderFromURL", e))?;
+            let reader = Self::reader_from_url(path, true)?;
             Self::from_reader(reader)
+        }
+    }
+
+    /// Open the container for its sound alone. The video stream is never
+    /// selected, so a file with no picture in it opens where [`Self::open`]
+    /// refuses -- and a file that has one does not pay to demux it.
+    pub fn open_audio(path: &str) -> Result<Self, VideoFileError> {
+        ensure_media_foundation()?;
+        unsafe {
+            let reader = Self::reader_from_url(path, false)?;
+            Self::from_reader_audio_only(reader)
+        }
+    }
+
+    /// The reader both doors are built from. One helper rather than two,
+    /// so they cannot drift apart on the attributes -- and the sound door
+    /// does not ask for picture processing on a file that has no picture.
+    unsafe fn reader_from_url(
+        path: &str,
+        want_video: bool,
+    ) -> Result<IMFSourceReader, VideoFileError> {
+        unsafe {
+            let mut attributes = None;
+            MFCreateAttributes(&mut attributes, 2).map_err(|e| hr_err("MFCreateAttributes", e))?;
+            let attributes = attributes.unwrap();
+            attributes
+                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+                .map_err(|e| hr_err("set MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS", e))?;
+            if want_video {
+                attributes
+                    .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
+                    .map_err(|e| {
+                        hr_err("set MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING", e)
+                    })?;
+            }
+            let wide_path = to_wide(path);
+            MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), &attributes)
+                .map_err(|e| hr_err("MFCreateSourceReaderFromURL", e))
         }
     }
 
@@ -275,6 +314,105 @@ impl WindowsVideoFileDecoder {
                 video_stride,
                 video_eos: false,
                 audio_eos: false,
+                audio_only: false,
+            })
+        }
+    }
+
+    /// The sound door's other half: select the audio stream and nothing
+    /// else, so no picture is demuxed at all and a container that has none
+    /// is not refused for it.
+    unsafe fn from_reader_audio_only(
+        reader: IMFSourceReader,
+    ) -> Result<Self, VideoFileError> {
+        unsafe {
+            let audio_stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+            reader
+                .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)
+                .map_err(|e| hr_err("deselect every stream", e))?;
+            // Asked before the stream is selected, and worded the way the
+            // other desktop arm words it, so the app reads one refusal
+            // whatever machine it is on.
+            let native_audio = reader
+                .GetNativeMediaType(audio_stream, 0)
+                .map_err(|e| hr_err("no audio stream in file", e))?;
+            reader
+                .SetStreamSelection(audio_stream, true)
+                .map_err(|e| hr_err("select the audio stream", e))?;
+            let rate = native_audio
+                .GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)
+                .unwrap_or(48000);
+            // Clamped for the same reason the picture door clamps it: a
+            // wider layout's second channel is not the right ear, and the
+            // caller pairs the first two.
+            let channels = native_audio
+                .GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)
+                .unwrap_or(2)
+                .clamp(1, 2);
+            let pcm_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
+            pcm_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .map_err(|e| hr_err("set decode audio major type", e))?;
+            pcm_type
+                .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+                .map_err(|e| hr_err("set decode audio subtype PCM", e))?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+                .map_err(|e| hr_err("set decode audio bits", e))?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)
+                .map_err(|e| hr_err("set decode audio rate", e))?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)
+                .map_err(|e| hr_err("set decode audio channels", e))?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2)
+                .map_err(|e| hr_err("set decode audio block align", e))?;
+            reader
+                .SetCurrentMediaType(audio_stream, None, &pcm_type)
+                .map_err(|e| hr_err("SetCurrentMediaType(audio PCM)", e))?;
+            let current_audio = reader
+                .GetCurrentMediaType(audio_stream)
+                .map_err(|e| hr_err("GetCurrentMediaType(audio)", e))?;
+            let audio_sample_rate = current_audio
+                .GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)
+                .unwrap_or(rate);
+            let audio_channels = current_audio
+                .GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)
+                .unwrap_or(channels) as u16;
+            // A source that reports no duration leaves it at zero rather
+            // than failing the open, the same way the picture door treats it.
+            let mut duration_100ns = 0i64;
+            if let Ok(prop) = reader.GetPresentationAttribute(
+                MF_SOURCE_READER_MEDIASOURCE.0 as u32,
+                &MF_PD_DURATION,
+            ) {
+                if prop.Anonymous.Anonymous.vt == VT_UI8 {
+                    duration_100ns = prop.Anonymous.Anonymous.Anonymous.uhVal as i64;
+                }
+            }
+            Ok(Self {
+                reader,
+                coded_width: 0,
+                coded_height: 0,
+                info: VideoFileInfo {
+                    width: 0,
+                    height: 0,
+                    fps_num: 0,
+                    fps_den: 1,
+                    duration_100ns,
+                    video_codec: None,
+                    video_codec_fourcc: 0,
+                    has_audio: true,
+                    audio_sample_rate,
+                    audio_channels,
+                },
+                video_stride: 0,
+                // There is no picture to read, and saying so here is what
+                // keeps `next_frame` from asking a deselected stream for one.
+                video_eos: true,
+                audio_eos: false,
+                audio_only: true,
             })
         }
     }
@@ -285,6 +423,14 @@ impl WindowsVideoFileDecoder {
 
     /// Refresh coded size/stride after MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.
     unsafe fn refresh_video_type(&mut self) {
+        // A stream that is merely deselected still answers this question,
+        // and the answer would turn an honest zero picture into a one-pixel
+        // one. Unpinned on purpose: a media-type change is only raised for
+        // a stream being read, which an audio-only reader never has, so no
+        // test can be relied on to catch this line going away.
+        if self.audio_only {
+            return;
+        }
         let video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
         if let Ok(current) = self.reader.GetCurrentMediaType(video_stream) {
             if let Ok(frame_size) = current.GetUINT64(&MF_MT_FRAME_SIZE) {
@@ -471,9 +617,12 @@ impl WindowsVideoFileDecoder {
                 .SetCurrentPosition(&GUID::zeroed(), &position)
                 .map_err(|e| hr_err("IMFSourceReader::SetCurrentPosition", e))?;
         }
-        // The seek re-arms both streams: whatever end-of-stream we had reached
-        // before is no longer where we are.
-        self.video_eos = false;
+        // The seek re-arms whatever streams there are: whatever
+        // end-of-stream we had reached before is no longer where we are.
+        // A reader opened for sound alone has no picture to re-arm, and
+        // re-arming one would send the caller's discard loop at a stream
+        // this reader will refuse.
+        self.video_eos = self.audio_only;
         self.audio_eos = false;
         Ok(())
     }

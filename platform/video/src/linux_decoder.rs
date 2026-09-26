@@ -4,10 +4,11 @@
 //! packed NV12 frames out.
 //!
 //! Limitations of this first arm, stated rather than hidden: the audio
-//! track is not wired (`next_audio` reports end-of-stream), `info()`
-//! cannot name the compressed codec, and frames whose negotiated NV12
-//! layout is not tightly packed are refused loudly (never silently
-//! sheared). The VJ thumbnail cache — 30-frame 256x160 H.264, no audio —
+//! track is not wired (`next_audio` reports end-of-stream, and opening a
+//! file FOR its sound refuses rather than opening something that could
+//! only fail later), `info()` cannot name the compressed codec, and
+//! frames whose negotiated NV12 layout is not tightly packed are refused
+//! loudly (never silently sheared). The VJ thumbnail cache — 30-frame 256x160 H.264, no audio —
 //! sits comfortably inside all three.
 //!
 //! WRITTEN-UNTESTED: compiles cfg(linux); the fleet's Linux verification
@@ -48,6 +49,15 @@ fn caps_field<'a>(caps: &'a str, key: &str) -> Option<&'a str> {
 }
 
 impl LinuxVideoFileDecoder {
+    /// This arm has no audio at all (see `next_audio` below and the note
+    /// at the top of the module): opening a file for its sound would only
+    /// be a way of failing later, so it fails here and says why.
+    pub fn open_audio(_path: &str) -> Result<Self, VideoFileError> {
+        Err(VideoFileError::new(
+            "audio-only decode is not implemented on this platform yet",
+        ))
+    }
+
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         let gst = LibGst::get().ok_or_else(|| {
             VideoFileError::new(

@@ -1506,7 +1506,55 @@ pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
     ndk_utils::call_void_method!(env, get_activity(), "switchActivity", "()V");
 }
 
-pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
+pub fn load_asset(filepath: &str) -> Option<Vec<u8>> {
+    unsafe { to_java_load_asset(filepath) }
+}
+
+/// An APK asset read in pieces (`AASSET_MODE_STREAMING`), so an asset of
+/// hundreds of megabytes never sits in memory whole. Closed on drop.
+pub struct AssetReader {
+    asset: *mut ndk_sys::AAsset,
+    len: u64,
+}
+
+impl AssetReader {
+    /// The asset's size in bytes.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl std::io::Read for AssetReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let n = unsafe { ndk_sys::AAsset_read(self.asset, buf.as_mut_ptr() as *mut _, buf.len()) };
+        if n < 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "AAsset_read failed"));
+        }
+        Ok(n as usize)
+    }
+}
+
+impl Drop for AssetReader {
+    fn drop(&mut self) {
+        unsafe { ndk_sys::AAsset_close(self.asset) };
+    }
+}
+
+/// Open an asset for streaming reads; None when the APK has no such file.
+pub fn open_asset(filepath: &str) -> Option<AssetReader> {
+    let (asset, len) = unsafe { open_raw_asset(filepath, ndk_sys::AASSET_MODE_STREAMING)? };
+    Some(AssetReader { asset, len: len.max(0) as u64 })
+}
+
+/// The activity's AssetManager, then `AAssetManager_open`.
+unsafe fn open_raw_asset(filepath: &str, mode: ::std::os::raw::c_uint) -> Option<(*mut ndk_sys::AAsset, i64)> {
     let env = attach_jni_env();
 
     let get_method_id = (**env).GetMethodID.unwrap();
@@ -1521,21 +1569,22 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
     );
     let asset_manager = (call_object_method)(env, get_activity(), mid);
     let mgr = ndk_sys::AAssetManager_fromJava(env, asset_manager);
-    let file_path = CString::new(filepath).unwrap();
-    let asset =
-        ndk_sys::AAssetManager_open(mgr, file_path.as_ptr(), ndk_sys::AASSET_MODE_BUFFER as _);
+    let file_path = CString::new(filepath).ok()?;
+    let asset = ndk_sys::AAssetManager_open(mgr, file_path.as_ptr(), mode as _);
     if asset.is_null() {
         return None;
     }
     let length = ndk_sys::AAsset_getLength64(asset);
+    Some((asset, length))
+}
 
+pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
+    let (asset, length) = open_raw_asset(filepath, ndk_sys::AASSET_MODE_BUFFER)?;
     let mut buffer = Vec::new();
-    buffer.resize(length as usize, 0u8);
-    if ndk_sys::AAsset_read(asset, buffer.as_ptr() as *mut _, length as _) > 0 {
-        ndk_sys::AAsset_close(asset);
-        return Some(buffer);
-    }
-    return None;
+    buffer.resize(length.max(0) as usize, 0u8);
+    let ok = length == 0 || ndk_sys::AAsset_read(asset, buffer.as_mut_ptr() as *mut _, length as _) > 0;
+    ndk_sys::AAsset_close(asset);
+    ok.then_some(buffer)
 }
 
 pub unsafe fn to_java_show_keyboard(visible: bool) {

@@ -255,6 +255,17 @@ fn write_log_record(
 
     // `--remote` keeps a ring buffer of log lines so an agent can read errors
     // over `GET /log` without owning the app's stdout.
+    crate::log_ring::push(
+        level,
+        format!(
+            "{} {}:{}:{} - {}",
+            log_level_prefix(level),
+            file_name,
+            line_start + 1,
+            column_start + 1,
+            message
+        ),
+    );
     if crate::remote::is_active() {
         crate::remote::push_log_line(format!(
             "{} {}:{}:{} - {}",

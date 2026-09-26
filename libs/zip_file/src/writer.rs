@@ -5,12 +5,18 @@
 // descriptors, no zip64, and a fixed timestamp so packing the same bytes twice
 // produces the same archive. That last property is what lets a package be
 // content-addressed by its sha256.
+//
+// The archive goes to any `Write` sink: `ZipWriter::new()` builds it in
+// memory, `ZipWriter::to(file)` streams it to disk one member at a time, so
+// an APK of hundreds of megabytes never sits in memory whole. Only the
+// central directory (a few dozen bytes per member) is kept until `finish`.
 
 use crate::{
-    COMPRESS_METHOD_DEFLATED, COMPRESS_METHOD_UNCOMPRESSED, CENTRAL_DIR_FILE_HEADER_SIGNATURE,
+    CENTRAL_DIR_FILE_HEADER_SIGNATURE, COMPRESS_METHOD_DEFLATED, COMPRESS_METHOD_UNCOMPRESSED,
     END_OF_CENTRAL_DIRECTORY_SIGNATURE, LOCAL_FILE_HEADER_SIGNATURE,
 };
 use makepad_fast_inflate::{crc32, deflate::compress_to_vec};
+use std::io::{self, Write};
 
 /// 1980-01-01 00:00:00, the zero of the MS-DOS date format. Fixed rather than
 /// wall-clock so archives are reproducible.
@@ -27,7 +33,28 @@ pub enum ZipWriteError {
     /// zip32 holds sizes and offsets in u32.
     TooLarge,
     DuplicateName(String),
+    /// The sink refused bytes.
+    Io(io::Error),
 }
+
+impl From<io::Error> for ZipWriteError {
+    fn from(e: io::Error) -> Self {
+        ZipWriteError::Io(e)
+    }
+}
+
+impl std::fmt::Display for ZipWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZipWriteError::InvalidName(name) => write!(f, "invalid zip member name {name:?}"),
+            ZipWriteError::TooLarge => write!(f, "zip archive or member exceeds 4 GB"),
+            ZipWriteError::DuplicateName(name) => write!(f, "duplicate zip member {name:?}"),
+            ZipWriteError::Io(e) => write!(f, "zip write: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ZipWriteError {}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ZipMethod {
@@ -44,22 +71,33 @@ struct Entry {
     local_header_offset: u32,
 }
 
-/// Builds a zip archive in memory.
-pub struct ZipWriter {
-    out: Vec<u8>,
+/// Builds a zip archive, in memory by default or into any sink.
+pub struct ZipWriter<W: Write = Vec<u8>> {
+    out: W,
+    /// Bytes written to `out` so far: the next member's local header offset.
+    offset: u64,
     entries: Vec<Entry>,
 }
 
-impl Default for ZipWriter {
+impl Default for ZipWriter<Vec<u8>> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ZipWriter {
+impl ZipWriter<Vec<u8>> {
+    /// An archive built in memory; `finish` returns its bytes.
     pub fn new() -> Self {
+        Self::to(Vec::new())
+    }
+}
+
+impl<W: Write> ZipWriter<W> {
+    /// An archive written to `sink` as members are added.
+    pub fn to(sink: W) -> Self {
         Self {
-            out: Vec::new(),
+            out: sink,
+            offset: 0,
             entries: Vec::new(),
         }
     }
@@ -99,41 +137,42 @@ impl ZipWriter {
 
         // Fall back to Store when deflate does not pay: a stored member is
         // cheaper to read back and never larger than the input.
-        let (method_code, payload) = match method {
-            ZipMethod::Store => (COMPRESS_METHOD_UNCOMPRESSED, data.to_vec()),
+        let packed;
+        let (method_code, payload): (u16, &[u8]) = match method {
+            ZipMethod::Store => (COMPRESS_METHOD_UNCOMPRESSED, data),
             ZipMethod::Deflate => {
-                let packed = compress_to_vec(data, 6);
+                packed = compress_to_vec(data, 6);
                 if packed.len() < data.len() {
-                    (COMPRESS_METHOD_DEFLATED, packed)
+                    (COMPRESS_METHOD_DEFLATED, &packed)
                 } else {
-                    (COMPRESS_METHOD_UNCOMPRESSED, data.to_vec())
+                    (COMPRESS_METHOD_UNCOMPRESSED, data)
                 }
             }
         };
-        if payload.len() > u32::MAX as usize || self.out.len() > u32::MAX as usize {
+        if payload.len() > u32::MAX as usize || self.offset > u32::MAX as u64 {
             return Err(ZipWriteError::TooLarge);
         }
 
-        let local_header_offset = self.out.len() as u32;
+        let local_header_offset = self.offset as u32;
         let version = if method_code == COMPRESS_METHOD_DEFLATED {
             VERSION_DEFLATE
         } else {
             VERSION_STORE
         };
 
-        self.push_u32(LOCAL_FILE_HEADER_SIGNATURE);
-        self.push_u16(version);
-        self.push_u16(0); // general purpose flags: none
-        self.push_u16(method_code);
-        self.push_u16(DOS_TIME);
-        self.push_u16(DOS_DATE);
-        self.push_u32(crc);
-        self.push_u32(payload.len() as u32);
-        self.push_u32(data.len() as u32);
-        self.push_u16(name.len() as u16);
-        self.push_u16(0); // extra field length
-        self.out.extend_from_slice(name.as_bytes());
-        self.out.extend_from_slice(&payload);
+        self.push_u32(LOCAL_FILE_HEADER_SIGNATURE)?;
+        self.push_u16(version)?;
+        self.push_u16(0)?; // general purpose flags: none
+        self.push_u16(method_code)?;
+        self.push_u16(DOS_TIME)?;
+        self.push_u16(DOS_DATE)?;
+        self.push_u32(crc)?;
+        self.push_u32(payload.len() as u32)?;
+        self.push_u32(data.len() as u32)?;
+        self.push_u16(name.len() as u16)?;
+        self.push_u16(0)?; // extra field length
+        self.push_bytes(name.as_bytes())?;
+        self.push_bytes(payload)?;
 
         self.entries.push(Entry {
             name: name.to_string(),
@@ -146,12 +185,14 @@ impl ZipWriter {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<Vec<u8>, ZipWriteError> {
+    /// The central directory and its end record; the sink is handed back
+    /// flushed.
+    pub fn finish(mut self) -> Result<W, ZipWriteError> {
         if self.entries.len() > u16::MAX as usize {
             return Err(ZipWriteError::TooLarge);
         }
-        let central_start = self.out.len();
-        if central_start > u32::MAX as usize {
+        let central_start = self.offset;
+        if central_start > u32::MAX as u64 {
             return Err(ZipWriteError::TooLarge);
         }
 
@@ -162,46 +203,53 @@ impl ZipWriter {
             } else {
                 VERSION_STORE
             };
-            self.push_u32(CENTRAL_DIR_FILE_HEADER_SIGNATURE);
-            self.push_u16(version); // version made by
-            self.push_u16(version); // version needed to extract
-            self.push_u16(0);
-            self.push_u16(e.method);
-            self.push_u16(DOS_TIME);
-            self.push_u16(DOS_DATE);
-            self.push_u32(e.crc);
-            self.push_u32(e.compressed_size);
-            self.push_u32(e.uncompressed_size);
-            self.push_u16(e.name.len() as u16);
-            self.push_u16(0); // extra field
-            self.push_u16(0); // comment
-            self.push_u16(0); // disk number
-            self.push_u16(0); // internal attributes
+            self.push_u32(CENTRAL_DIR_FILE_HEADER_SIGNATURE)?;
+            self.push_u16(version)?; // version made by
+            self.push_u16(version)?; // version needed to extract
+            self.push_u16(0)?;
+            self.push_u16(e.method)?;
+            self.push_u16(DOS_TIME)?;
+            self.push_u16(DOS_DATE)?;
+            self.push_u32(e.crc)?;
+            self.push_u32(e.compressed_size)?;
+            self.push_u32(e.uncompressed_size)?;
+            self.push_u16(e.name.len() as u16)?;
+            self.push_u16(0)?; // extra field
+            self.push_u16(0)?; // comment
+            self.push_u16(0)?; // disk number
+            self.push_u16(0)?; // internal attributes
             // External attributes stay 0: we never carry unix permissions, so
             // an extracted member can never arrive executable.
-            self.push_u32(0);
-            self.push_u32(e.local_header_offset);
-            self.out.extend_from_slice(e.name.as_bytes());
+            self.push_u32(0)?;
+            self.push_u32(e.local_header_offset)?;
+            self.push_bytes(e.name.as_bytes())?;
         }
 
-        let central_size = self.out.len() - central_start;
-        self.push_u32(END_OF_CENTRAL_DIRECTORY_SIGNATURE);
-        self.push_u16(0); // this disk
-        self.push_u16(0); // disk with central dir
-        self.push_u16(entries.len() as u16);
-        self.push_u16(entries.len() as u16);
-        self.push_u32(central_size as u32);
-        self.push_u32(central_start as u32);
-        self.push_u16(0); // comment length — must stay 0, see module note
+        let central_size = self.offset - central_start;
+        self.push_u32(END_OF_CENTRAL_DIRECTORY_SIGNATURE)?;
+        self.push_u16(0)?; // this disk
+        self.push_u16(0)?; // disk with central dir
+        self.push_u16(entries.len() as u16)?;
+        self.push_u16(entries.len() as u16)?;
+        self.push_u32(central_size as u32)?;
+        self.push_u32(central_start as u32)?;
+        self.push_u16(0)?; // comment length — must stay 0, see module note
+        self.out.flush()?;
         Ok(self.out)
     }
 
-    fn push_u16(&mut self, v: u16) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), ZipWriteError> {
+        self.out.write_all(bytes)?;
+        self.offset += bytes.len() as u64;
+        Ok(())
     }
 
-    fn push_u32(&mut self, v: u32) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+    fn push_u16(&mut self, v: u16) -> Result<(), ZipWriteError> {
+        self.push_bytes(&v.to_le_bytes())
+    }
+
+    fn push_u32(&mut self, v: u32) -> Result<(), ZipWriteError> {
+        self.push_bytes(&v.to_le_bytes())
     }
 }
 
@@ -314,5 +362,22 @@ mod tests {
             w.finish().unwrap()
         };
         assert_eq!(build(), build());
+    }
+
+    #[test]
+    fn a_sink_gets_the_same_bytes_as_memory() {
+        let in_memory = {
+            let mut w = ZipWriter::new();
+            w.add("a.txt", b"alpha", ZipMethod::Deflate).unwrap();
+            w.add("b/c.txt", b"beta", ZipMethod::Store).unwrap();
+            w.finish().unwrap()
+        };
+        let streamed = {
+            let mut w = ZipWriter::to(Cursor::new(Vec::new()));
+            w.add("a.txt", b"alpha", ZipMethod::Deflate).unwrap();
+            w.add("b/c.txt", b"beta", ZipMethod::Store).unwrap();
+            w.finish().unwrap().into_inner()
+        };
+        assert_eq!(in_memory, streamed);
     }
 }

@@ -99,10 +99,12 @@ pub struct MacosVideoFileDecoder {
     // cannot rewind, so `seek` throws its reader away and builds a new one
     // over these.
     asset: RcObjcId,
-    video_track: RcObjcId,
+    /// None when the container was opened for its sound alone: there is
+    /// no picture to read and nothing may go looking for one.
+    video_track: Option<RcObjcId>,
     audio_track: Option<RcObjcId>,
     reader: RcObjcId,
-    video_output: RcObjcId,
+    video_output: Option<RcObjcId>,
     audio_output: Option<RcObjcId>,
     info: VideoFileInfo,
     video_eos: bool,
@@ -112,7 +114,7 @@ pub struct MacosVideoFileDecoder {
 /// One reader and the outputs attached to it. Rebuilt wholesale on seek.
 struct ReaderSet {
     reader: RcObjcId,
-    video_output: RcObjcId,
+    video_output: Option<RcObjcId>,
     audio_output: Option<RcObjcId>,
 }
 
@@ -128,7 +130,7 @@ struct ReaderSet {
 /// before the target.
 unsafe fn build_reader(
     asset: ObjcId,
-    video_track: ObjcId,
+    video_track: Option<ObjcId>,
     audio_track: Option<ObjcId>,
     start_100ns: Option<i64>,
 ) -> Result<ReaderSet, VideoFileError> {
@@ -151,38 +153,44 @@ unsafe fn build_reader(
         let _: () = msg_send![reader, setTimeRange: range];
     }
 
-    let nv12_number: ObjcId = msg_send![
-        class!(NSNumber),
-        numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-    ];
-    let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
-    let values: &[ObjcId] = &[nv12_number];
-    let video_settings: ObjcId = msg_send![
-        class!(NSDictionary),
-        dictionaryWithObjects: values.as_ptr()
-        forKeys: keys.as_ptr()
-        count: 1usize
-    ];
-    let video_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
-    let video_output: ObjcId = msg_send![
-        video_output,
-        initWithTrack: video_track
-        outputSettings: video_settings
-    ];
-    if video_output == nil {
-        return Err(VideoFileError::new(
-            "AVAssetReaderTrackOutput(video NV12) init failed",
-        ));
+    // The picture, when one was asked for. A reader built for sound alone
+    // attaches no video output at all, so nothing is demuxed for it.
+    let mut video_output_obj: ObjcId = nil;
+    if let Some(video_track) = video_track {
+        let nv12_number: ObjcId = msg_send![
+            class!(NSNumber),
+            numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ];
+        let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
+        let values: &[ObjcId] = &[nv12_number];
+        let video_settings: ObjcId = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObjects: values.as_ptr()
+            forKeys: keys.as_ptr()
+            count: 1usize
+        ];
+        let video_output: ObjcId = msg_send![class!(AVAssetReaderTrackOutput), alloc];
+        let video_output: ObjcId = msg_send![
+            video_output,
+            initWithTrack: video_track
+            outputSettings: video_settings
+        ];
+        if video_output == nil {
+            return Err(VideoFileError::new(
+                "AVAssetReaderTrackOutput(video NV12) init failed",
+            ));
+        }
+        // We repack into our own buffer before releasing the sample, so
+        // the vended buffer may be recycled.
+        let _: () = msg_send![video_output, setAlwaysCopiesSampleData: NO];
+        let can_add: BOOL = msg_send![reader, canAddOutput: video_output];
+        if can_add == NO {
+            let _: () = msg_send![video_output, release];
+            return Err(VideoFileError::new("AVAssetReader rejected video output"));
+        }
+        let _: () = msg_send![reader, addOutput: video_output];
+        video_output_obj = video_output;
     }
-    // We repack into our own buffer before releasing the sample, so
-    // the vended buffer may be recycled.
-    let _: () = msg_send![video_output, setAlwaysCopiesSampleData: NO];
-    let can_add: BOOL = msg_send![reader, canAddOutput: video_output];
-    if can_add == NO {
-        let _: () = msg_send![video_output, release];
-        return Err(VideoFileError::new("AVAssetReader rejected video output"));
-    }
-    let _: () = msg_send![reader, addOutput: video_output];
 
     // Optional audio track -> 16-bit interleaved PCM at native rate/layout.
     let mut audio_output_obj: ObjcId = nil;
@@ -225,20 +233,28 @@ unsafe fn build_reader(
         }
     }
 
+    // A reader with nothing attached reads nothing: say so here rather
+    // than handing back a set whose every read is end-of-stream.
+    if video_output_obj == nil && audio_output_obj == nil {
+        return Err(VideoFileError::new("audio track could not be read"));
+    }
+
     let started: BOOL = msg_send![reader, startReading];
     if started == NO {
         let error: ObjcId = msg_send![reader, error];
         if audio_output_obj != nil {
             let _: () = msg_send![audio_output_obj, release];
         }
-        let _: () = msg_send![video_output, release];
+        if video_output_obj != nil {
+            let _: () = msg_send![video_output_obj, release];
+        }
         return Err(nserror_to_video_error("AVAssetReader startReading", error));
     }
 
     Ok(ReaderSet {
         reader: RcObjcId::from_unowned(NonNull::new(reader).unwrap()),
         // initWithTrack: returned +1; from_owned takes that reference.
-        video_output: RcObjcId::from_owned(NonNull::new(video_output).unwrap()),
+        video_output: NonNull::new(video_output_obj).map(RcObjcId::from_owned),
         audio_output: NonNull::new(audio_output_obj).map(RcObjcId::from_owned),
     })
 }
@@ -249,6 +265,74 @@ unsafe fn build_reader(
 unsafe impl Send for MacosVideoFileDecoder {}
 
 impl MacosVideoFileDecoder {
+    /// Open the container for its sound alone: no picture is read, so a
+    /// file that has none opens here where [`Self::open`] refuses.
+    pub fn open_audio(path: &str) -> Result<Self, VideoFileError> {
+        if !std::path::Path::new(path).is_file() {
+            return Err(VideoFileError::new(format!("file not found: {}", path)));
+        }
+        let _pool = AutoreleasePool::new();
+        unsafe {
+            let ns_path = str_to_nsstring(path);
+            let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: ns_path];
+            let asset: ObjcId = msg_send![class!(AVURLAsset), URLAssetWithURL: url options: nil];
+            if asset == nil {
+                return Err(VideoFileError::new(format!(
+                    "AVURLAsset failed to open {}",
+                    path
+                )));
+            }
+            let audio_tracks: ObjcId = msg_send![asset, tracksWithMediaType: AVMediaTypeAudio];
+            let audio_track_count: usize = msg_send![audio_tracks, count];
+            if audio_track_count == 0 {
+                return Err(VideoFileError::new("no audio stream in file"));
+            }
+            let audio_track_obj: ObjcId = msg_send![audio_tracks, objectAtIndex: 0usize];
+            let mut audio_sample_rate = 48000u32;
+            let mut audio_channels = 2u16;
+            let audio_descs: ObjcId = msg_send![audio_track_obj, formatDescriptions];
+            let audio_desc_count: usize = msg_send![audio_descs, count];
+            if audio_desc_count > 0 {
+                let desc: CMFormatDescriptionRef = msg_send![audio_descs, objectAtIndex: 0usize];
+                let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc);
+                if !asbd.is_null() {
+                    let asbd = &*asbd;
+                    if asbd.mSampleRate > 0.0 {
+                        audio_sample_rate = asbd.mSampleRate as u32;
+                    }
+                    if asbd.mChannelsPerFrame > 0 {
+                        audio_channels = asbd.mChannelsPerFrame.min(u16::MAX as u32) as u16;
+                    }
+                }
+            }
+            let duration: CMTime = msg_send![asset, duration];
+            let duration_100ns = cmtime_to_100ns(duration);
+            let set = build_reader(asset, None, Some(audio_track_obj), None)?;
+            Ok(Self {
+                asset: RcObjcId::from_unowned(NonNull::new(asset).unwrap()),
+                video_track: None,
+                audio_track: NonNull::new(audio_track_obj).map(RcObjcId::from_unowned),
+                reader: set.reader,
+                video_output: None,
+                audio_output: set.audio_output,
+                info: VideoFileInfo {
+                    width: 0,
+                    height: 0,
+                    fps_num: 0,
+                    fps_den: 1,
+                    duration_100ns,
+                    video_codec: None,
+                    video_codec_fourcc: 0,
+                    has_audio: true,
+                    audio_sample_rate,
+                    audio_channels,
+                },
+                video_eos: false,
+                audio_eos: false,
+            })
+        }
+    }
+
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         if !std::path::Path::new(path).is_file() {
             return Err(VideoFileError::new(format!("file not found: {}", path)));
@@ -368,7 +452,7 @@ impl MacosVideoFileDecoder {
 
             let set = build_reader(
                 asset,
-                video_track,
+                Some(video_track),
                 (audio_track_obj != nil).then_some(audio_track_obj),
                 None,
             )?;
@@ -383,7 +467,7 @@ impl MacosVideoFileDecoder {
 
             Ok(Self {
                 asset: RcObjcId::from_unowned(NonNull::new(asset).unwrap()),
-                video_track: RcObjcId::from_unowned(NonNull::new(video_track).unwrap()),
+                video_track: NonNull::new(video_track).map(RcObjcId::from_unowned),
                 audio_track: NonNull::new(audio_track_obj).map(RcObjcId::from_unowned),
                 reader: set.reader,
                 video_output: set.video_output,
@@ -436,8 +520,15 @@ impl MacosVideoFileDecoder {
         }
         let _pool = AutoreleasePool::new();
         unsafe {
+            // Opened for sound alone: there is no picture to read, and
+            // end-of-stream is the honest answer rather than a read of an
+            // output that was never attached.
+            let Some(video_output) = self.video_output.as_ref().map(|out| out.as_id()) else {
+                self.video_eos = true;
+                return Ok(None);
+            };
             let Some(sample) =
-                self.copy_next_sample(self.video_output.as_id(), "copyNextSampleBuffer(video)")?
+                self.copy_next_sample(video_output, "copyNextSampleBuffer(video)")?
             else {
                 self.video_eos = true;
                 return Ok(None);
@@ -576,7 +667,7 @@ impl MacosVideoFileDecoder {
         unsafe {
             let set = build_reader(
                 self.asset.as_id(),
-                self.video_track.as_id(),
+                self.video_track.as_ref().map(|t| t.as_id()),
                 self.audio_track.as_ref().map(|t| t.as_id()),
                 Some(start),
             )?;

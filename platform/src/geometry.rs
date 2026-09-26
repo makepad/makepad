@@ -2,7 +2,7 @@ use crate::{
     cx::Cx, draw_shader::DrawShaderInputs, id_pool::*, makepad_error_log::*, makepad_script::*,
     os::CxOsGeometry,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct Geometry(PoolId);
@@ -50,8 +50,12 @@ impl GeometryId {
     }
 }
 
-#[derive(Default)]
 pub struct CxGeometryPool(
+    /// Frees are deferred (`IdPool::defer_frees`): a draw call names its
+    /// geometry by id without owning it, and a draw list that was not
+    /// redrawn is painted as it stands, so a dropped `Geometry` keeps its
+    /// slot until [`CxGeometryPool::release_unreferenced`] finds no live
+    /// draw call naming it — once per redraw, at the recording boundary.
     pub(crate) IdPool<CxGeometry>,
     /// Cx-owned singleton geometries (e.g. the standard quad/triangle/cube shader
     /// meshes), keyed by name. Owned here so their slots live for the whole app and
@@ -63,9 +67,30 @@ pub struct CxGeometryPool(
     pub(crate) u64,
 );
 
+impl Default for CxGeometryPool {
+    fn default() -> Self {
+        let mut pool = IdPool::default();
+        pool.defer_frees();
+        Self(pool, HashMap::new(), 0)
+    }
+}
+
 impl CxGeometryPool {
     pub fn alloc(&mut self) -> Geometry {
         Geometry(self.0.alloc())
+    }
+
+    /// Whether any dropped geometry is waiting to be freed.
+    pub fn has_unreleased(&self) -> bool {
+        self.0.has_deferred()
+    }
+
+    /// Frees the dropped geometries whose ids `referenced` — every geometry a
+    /// live draw call names, see `CxDrawListPool::referenced_geometries` —
+    /// does not contain; the others wait for a later call. Returns how many
+    /// were freed.
+    pub fn release_unreferenced(&mut self, referenced: &HashSet<GeometryId>) -> usize {
+        self.0.release_deferred(|id, generation| referenced.contains(&GeometryId(id, generation)))
     }
 }
 
@@ -693,10 +718,21 @@ fn a_reused_slot_invalidates_the_old_geometry_id() {
     let first = Geometry::new(&mut cx);
     let old_id = first.geometry_id();
     assert!(!cx.geometries.skip_stale(old_id));
-    // Freed but not reused: the slot still holds what the id named.
+    // Dropped: the slot is parked, not freed — a draw call may still name
+    // it — so it still holds what the id named and is not handed out.
     drop(first);
     assert!(!cx.geometries.skip_stale(old_id));
-    // Reused: same slot, new generation; the old id is stale and must skip.
+    assert!(cx.geometries.has_unreleased());
+    let other = Geometry::new(&mut cx);
+    assert_ne!(other.geometry_id().slot_index(), old_id.slot_index());
+    // Still named by a draw call: the release keeps it parked.
+    let named = HashSet::from([old_id]);
+    assert_eq!(cx.geometries.release_unreferenced(&named), 0);
+    assert!(!cx.geometries.skip_stale(old_id));
+    // Named by nothing: freed, then reused — same slot, new generation; the
+    // old id is stale and must skip.
+    assert_eq!(cx.geometries.release_unreferenced(&HashSet::new()), 1);
+    assert!(!cx.geometries.has_unreleased());
     let second = Geometry::new(&mut cx);
     let new_id = second.geometry_id();
     assert_eq!(new_id.slot_index(), old_id.slot_index());
