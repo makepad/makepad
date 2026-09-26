@@ -971,6 +971,11 @@ impl Cx {
                     if draw_call.options.backface_culling {
                         (gl.glEnable)(gl_sys::CULL_FACE);
                         (gl.glCullFace)(gl_sys::BACK);
+                        (gl.glFrontFace)(if self.passes[draw_pass_id].os.projection_inverted {
+                            gl_sys::CW
+                        } else {
+                            gl_sys::CCW
+                        });
                     } else {
                         (gl.glDisable)(gl_sys::CULL_FACE);
                     }
@@ -1198,22 +1203,30 @@ impl Cx {
         let pass = &mut self.passes[draw_pass_id];
         if !pass.keep_camera_matrix {
             pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
-            if to_texture {
-                // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
-                // are stored bottom-up, so inverting the projection's Y
-                // lands the texels in the same top-left order Metal/D3D
-                // produce. Every consumer then plain-samples — nobody
-                // flips a V coordinate in a pixel shader (the web backend
-                // has rendered offscreen this way all along; desktop GL
-                // used to compensate per-sample with sample_rt instead).
-                let m = &mut pass.pass_uniforms.camera_projection.v;
-                m[1] = -m[1];
-                m[5] = -m[5];
-                m[9] = -m[9];
-                m[13] = -m[13];
-            }
         }
         pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+        // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows are
+        // stored bottom-up, so inverting the projection's Y lands the
+        // texels in the same top-left order Metal, D3D and Vulkan
+        // produce (the platform's Y law). Every consumer then samples as
+        // stored; nobody flips a V coordinate in a pixel shader. The 2D
+        // camera is inverted in place (it is rebuilt every pass); a custom
+        // camera belongs to its owner, so an inverted copy is what goes to
+        // the GPU, as on the web. The inversion reverses winding, which
+        // the draw loop answers with a clockwise front face.
+        pass.os.projection_inverted = to_texture;
+        if to_texture {
+            if pass.keep_camera_matrix {
+                let mut inverted = pass.pass_uniforms.clone();
+                invert_projection_y(&mut inverted.camera_projection);
+                invert_projection_y(&mut inverted.camera_projection_r);
+                pass.os
+                    .pass_uniforms
+                    .update_uniform_buffer(self.os.gl(), inverted.as_slice());
+                return Some((pass_rect.size, dpi_factor));
+            }
+            invert_projection_y(&mut pass.pass_uniforms.camera_projection);
+        }
 
         pass.os
             .pass_uniforms
@@ -1234,11 +1247,10 @@ impl Cx {
         } else {
             return;
         };
-        // Whether this pass rendered with the inverted projection above:
-        // its color targets then hold TOP-LEFT rows (readback must not
-        // row-swap them). Custom-camera passes (XR, 3D) keep their own
-        // matrices and the classic GL bottom-up storage.
-        let rows_top_left = !self.passes[draw_pass_id].keep_camera_matrix;
+        // Every texture pass renders through the inverted projection above,
+        // so its color targets hold TOP-LEFT rows and a readback must not
+        // row-swap them.
+        let rows_top_left = true;
 
         let mut clear_color = Vec4f::default();
         let mut clear_depth = 1.0;
@@ -1374,21 +1386,13 @@ impl Cx {
         //while unsafe { (gl.glGetError)() } != 0 {}
 
         unsafe {
-            let (x, mut y) = (0, 0);
+            // The viewport starts at the target's first row: with the
+            // inverted projection the pass's top row is texel row 0, where
+            // Metal, D3D and Vulkan put it, also in a target allocated
+            // taller than the pass.
+            let (x, y) = (0, 0);
             let width = (pass_size.x * dpi_factor) as u32;
             let height = (pass_size.y * dpi_factor) as u32;
-
-            // HACK(eddyb) to try and match DirectX and Metal conventions, we
-            // need the viewport to be placed on the other end of the Y axis.
-            if let [color_texture] = color_textures {
-                let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
-                if cxtexture.os.gl_texture.is_some() {
-                    let alloc_height = cxtexture.alloc.as_ref().unwrap().height as u32;
-                    if alloc_height > height {
-                        y = alloc_height - height;
-                    }
-                }
-            }
 
             (gl.glViewport)(x as i32, y as i32, width as i32, height as i32);
 
@@ -3710,11 +3714,24 @@ impl CxTexture {
     }
 }
 
+/// Negates a projection's Y row: what a texture pass on GL renders through
+/// so its bottom-up target holds top-left rows (`setup_render_pass`).
+fn invert_projection_y(m: &mut crate::makepad_math::Mat4f) {
+    m.v[1] = -m.v[1];
+    m.v[5] = -m.v[5];
+    m.v[9] = -m.v[9];
+    m.v[13] = -m.v[13];
+}
+
 #[derive(Default, Clone)]
 pub struct CxOsPass {
     pub shader_variant: usize,
     pub pass_uniforms: OpenglBuffer,
     pub gl_framebuffer: Option<u32>,
+    /// This pass renders into a texture through a projection whose Y is
+    /// inverted (see `setup_render_pass`), which also reverses triangle
+    /// winding: its draws cull with a clockwise front face.
+    pub projection_inverted: bool,
 }
 
 impl CxOsPass {
