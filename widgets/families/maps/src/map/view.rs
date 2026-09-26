@@ -12,7 +12,7 @@ use crate::{
 };
 use crate::makepad_draw::vector::{
     FACE_IMPLICIT_UV, FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES,
-    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES,
+    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES, ROOF_PARAPET_SURFACE_DEPTH,
     VECTOR_ZBIAS_STEP, SubdivisionBudget,
 };
 use crate::makepad_draw::event::{TouchState, TouchUpdateEvent};
@@ -1745,6 +1745,11 @@ script_mod! {
                 self.v_stroke_mult = 1.0
             }
             self.v_tcoord = vec2(#(FACE_IMPLICIT_UV.0), #(FACE_IMPLICIT_UV.1))
+            if kind > 1.5 {
+                // Grounded AA fringe: params.y = u + 1 carries the signed
+                // edge coordinate (fringe_face_record_from_road).
+                self.v_tcoord = vec2(face_params.y - 1.0, 1.0)
+            }
             self.v_stroke_dist = face_params.y * self.map_scale.x
             self.v_shape_id = 0.0
             self.v_param0 = 0.0
@@ -1791,8 +1796,15 @@ script_mod! {
             let roof = self.geom.params
             let color = self.geom.color
             let feature_lift = self.geom.height * self.height_grow
+            // material >= 16: a roof-edge parapet strip one depth micro-rank
+            // over the building surface (ROOF_PARAPET_MATERIAL_FLAG); else
+            // the deck height formula.
+            var material = roof.x
             var surface_depth = 0.5
-            if self.geom.height > 0.0 {
+            if material > 15.5 {
+                material = material - 16.0
+                surface_depth = #(ROOF_PARAPET_SURFACE_DEPTH)
+            } else if self.geom.height > 0.0 {
                 surface_depth = 0.5 + 0.30 * min(self.geom.height / 2.0, 1.0)
             }
             var transformed = pos * self.map_scale + self.map_offset
@@ -1875,7 +1887,7 @@ script_mod! {
             self.v_param0 = 0.0
             self.v_param1 = 0.0
             self.v_param2 = 0.0
-            self.v_param3 = roof.x
+            self.v_param3 = material
             self.v_param4 = self.geom.height
             self.v_param5 = surface_depth
 
@@ -3020,11 +3032,46 @@ const LABEL_FADE_SECONDS: f64 = 0.25;
 
 /// Inclusive tile-index span covering the half-open world-space interval
 /// `[world_min, world_max)` plus one prefetch tile on either side.
+#[cfg(test)]
 fn tile_span_with_prefetch(world_min: f64, world_max: f64) -> (i32, i32) {
+    tile_span_with_margin(world_min, world_max, TILE_SIZE)
+}
+
+/// Inclusive tile span covering `[world_min, world_max]` widened by
+/// `margin` world pixels on both sides.
+fn tile_span_with_margin(world_min: f64, world_max: f64, margin: f64) -> (i32, i32) {
     (
-        (world_min / TILE_SIZE).floor() as i32 - 1,
-        (world_max / TILE_SIZE).ceil() as i32,
+        ((world_min - margin) / TILE_SIZE).floor() as i32,
+        ((world_max + margin) / TILE_SIZE).ceil() as i32 - 1,
     )
+}
+
+/// Prefetch margin around the viewport, in screen (logical) pixels. At the
+/// request zoom this is one whole tile; overzoomed it shrinks with the
+/// view, so a z16 view over z14 tiles prefetches a quarter tile of margin
+/// instead of a full ring of 4x-screen-sized tiles.
+const PREFETCH_SCREEN_PX: f64 = TILE_SIZE;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TileSpan {
+    pub z: u32,
+    pub x: (i32, i32),
+    pub y: (i32, i32),
+}
+
+impl TileSpan {
+    pub fn contains(&self, key: TileKey) -> bool {
+        if key.z != self.z || key.y < self.y.0 || key.y > self.y.1 {
+            return false;
+        }
+        let count = 1_i32 << self.z;
+        if self.x.1 - self.x.0 + 1 >= count {
+            return true;
+        }
+        // Spans may run past the antimeridian; keys are wrapped.
+        let dx = (key.x - self.x.0).rem_euclid(count);
+        dx <= self.x.1 - self.x.0
+    }
 }
 
 // --- Actions ---
@@ -4135,12 +4182,14 @@ fn release_uploaded_staging(cx: &mut Cx2d, state: &TileLoadState) {
     let TileLoadState::Ready {
         fill_geometry,
         fill_misc_geometry,
+        fill_outline_geometry,
         face_geometry,
         casing_geometry,
         stroke_geometry,
         icon_geometry,
         icon_high_geometry,
         fringe_geometry,
+        fringe_face_geometry,
         fill_3d_geometry,
         fill_3d_misc_geometry,
         wall_geometry,
@@ -4159,12 +4208,14 @@ fn release_uploaded_staging(cx: &mut Cx2d, state: &TileLoadState) {
     for geometry in fill_geometry
         .iter()
         .chain(fill_misc_geometry.iter())
+        .chain(fill_outline_geometry.iter())
         .chain(face_geometry.iter())
         .chain(casing_geometry.iter())
         .chain(stroke_geometry.iter())
         .chain(icon_geometry.iter())
         .chain(icon_high_geometry.iter())
         .chain(fringe_geometry.iter())
+        .chain(fringe_face_geometry.iter())
         .chain(fill_3d_geometry.iter())
         .chain(fill_3d_misc_geometry.iter())
         .chain(wall_geometry.iter())
@@ -4484,6 +4535,11 @@ pub struct MapView {
     next_request_id: u64,
     #[rust]
     visible_tiles: Vec<TileKey>,
+    /// The part of `visible_tiles` the viewport actually covers (request
+    /// zoom, inclusive x/y spans): the prefetch margin is fetched and baked
+    /// but never drawn.
+    #[rust]
+    visible_draw_span: Option<TileSpan>,
     #[rust]
     frame_counter: u64,
     #[rust]
@@ -4748,6 +4804,11 @@ pub struct MapView {
     perf_ms_max: f64,
     #[rust]
     perf_label_full_places: u32,
+    /// Last `map.frame` trace line: app seconds and its tile counts.
+    #[rust]
+    perf_frame_trace_at: f64,
+    #[rust]
+    perf_frame_trace_counts: (usize, usize, usize, usize),
     #[rust]
     perf_last_frame: Option<f64>,
     #[rust]
@@ -5496,6 +5557,43 @@ impl Widget for MapView {
             )
         });
         let draw_tiles = draw_tiles;
+        // `map.frame`: what this frame draws against what is resident,
+        // whenever those counts change (at most every two seconds otherwise).
+        if crate::makepad_platform::makepad_error_log::trace_enabled("map.frame") {
+            let request_zoom = self.request_zoom_level();
+            let stand_ins = draw_tiles.iter().filter(|key| key.z != request_zoom).count();
+            let fading = draw_tiles
+                .iter()
+                .filter(|key| self.tiles.get(key).is_some_and(|entry| entry.fade.is_some()))
+                .count();
+            let counts = (draw_tiles.len(), stand_ins, fading, self.tiles.len());
+            if counts != self.perf_frame_trace_counts
+                || perf_start - self.perf_frame_trace_at >= 2.0
+            {
+                self.perf_frame_trace_at = perf_start;
+                self.perf_frame_trace_counts = counts;
+                let drawn_bytes: usize = draw_tiles
+                    .iter()
+                    .filter_map(|key| self.tiles.get(key))
+                    .map(TileEntry::working_set_bytes)
+                    .sum();
+                let resident_bytes: usize =
+                    self.tiles.values().map(TileEntry::working_set_bytes).sum();
+                trace!(
+                    "map.frame",
+                    "z{:.2} bucket{} drawn={} (stand-ins {} fading {}) visible={} resident={} drawn_bytes={:.1}MiB resident_bytes={:.1}MiB",
+                    view_zoom,
+                    self.render_bucket(),
+                    draw_tiles.len(),
+                    stand_ins,
+                    fading,
+                    self.visible_tiles.len(),
+                    self.tiles.len(),
+                    drawn_bytes as f64 / (1024.0 * 1024.0),
+                    resident_bytes as f64 / (1024.0 * 1024.0),
+                );
+            }
+        }
 
         let shadow_mask_live = self.buildings_3d
             && self.tilt > 0.0
@@ -6044,6 +6142,38 @@ fn upload_typed_stream(
         .collect()
 }
 
+/// Byte offset of `RoadVertexTyped::deck` in the packed 28-byte record.
+const ROAD_VERTEX_DECK_OFFSET: usize = 16;
+
+/// Bit `i` is set when uploaded chunk `i` of a road stream carries a
+/// vertex lifted enough to cast into the shadow mask (the cast discards
+/// `v_lift = deck * height_grow < 0.05`). Chunks past 63 are all set.
+/// Mirrors `upload_typed_stream`'s chunk filter, so bits match geometries.
+fn lifted_road_chunk_mask(stream: &TypedStream) -> u64 {
+    let mut mask = 0u64;
+    let chunks = stream
+        .chunks
+        .iter()
+        .filter(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty());
+    for (index, chunk) in chunks.enumerate() {
+        if index >= 63 {
+            mask |= !0u64 << 63;
+            break;
+        }
+        let lifted = chunk
+            .vertices
+            .chunks_exact(ROAD_TYPED_VERTEX_BYTES)
+            .any(|record| {
+                let deck = &record[ROAD_VERTEX_DECK_OFFSET..ROAD_VERTEX_DECK_OFFSET + 4];
+                f32::from_ne_bytes([deck[0], deck[1], deck[2], deck[3]]) >= 0.05
+            });
+        if lifted {
+            mask |= 1 << index;
+        }
+    }
+    mask
+}
+
 /// The typed upload needs the shader's physical layout, which exists once the
 /// shader has drawn; a tile that lands earlier waits in the pending queue.
 fn geometry_layout(cx: &Cx, draw_vars: &DrawVars) -> Option<DrawShaderInputs> {
@@ -6354,6 +6484,35 @@ impl MapView {
     }
 
     fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
+        // Per-stream upload sizes of each arriving bake (KiB), in
+        // `stream_bytes` order.
+        if crate::makepad_platform::makepad_error_log::trace_enabled("map.streams") {
+            const NAMES: [&str; 14] = [
+                "fill", "fill_misc", "face", "casing", "stroke", "fringe", "icon", "icon_high",
+                "road_icon", "fill_3d", "fill_3d_misc", "wall", "tree", "tree_cross",
+            ];
+            let bytes = buffers.stream_bytes();
+            let mut line = format!(
+                "z{}/{}/{} rz{} total={}KiB",
+                tile_key.z,
+                tile_key.x,
+                tile_key.y,
+                buffers.render_zoom,
+                buffers.allocated_byte_size() / 1024
+            );
+            for (name, bytes) in NAMES.iter().zip(bytes) {
+                if bytes > 0 {
+                    line.push_str(&format!(" {name}={}", bytes / 1024));
+                }
+            }
+            line.push_str(&format!(
+                " walls={} trees={} labels={}",
+                buffers.wall_instances.len(),
+                buffers.tree_instances.len(),
+                buffers.labels.len()
+            ));
+            trace!("map.streams", "{}", line);
+        }
         // An overlay-only result has no roads of its own. Never accept it if
         // eviction, a zoom restyle, or another transition replaced the exact
         // resident core it was built to reuse; leave the current entry
@@ -6441,6 +6600,27 @@ impl MapView {
                     max_edge,
                 );
             }
+            let (mut outline_indices, mut outline_vertices) =
+                std::mem::take(&mut buffers.fill_outline).into_u32(ROAD_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_road_mesh_budgeted(
+                    &mut outline_indices,
+                    &mut outline_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_road_mesh(
+                    &mut outline_indices,
+                    &mut outline_vertices,
+                    max_edge,
+                );
+            }
+            buffers.fill_outline = TypedStream::from_u32(
+                outline_indices,
+                outline_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
+            );
             let (mut face_indices, mut face_vertices) =
                 std::mem::take(&mut buffers.face).into_u32(FACE_TYPED_VERTEX_BYTES);
             if let Some(budget) = refinement_budget.as_mut() {
@@ -6506,6 +6686,17 @@ impl MapView {
             );
             let (mut fringe_indices, mut fringe_vertices) =
                 std::mem::take(&mut buffers.fringe).into_u32(ROAD_TYPED_VERTEX_BYTES);
+            // Refinement interpolates the road form: the compact fringes
+            // rejoin the road-layout stream (the fold wants them dense).
+            let (face_fringe_indices, face_fringe_vertices) =
+                std::mem::take(&mut buffers.fringe_face).into_u32(FACE_TYPED_VERTEX_BYTES);
+            if !face_fringe_indices.is_empty() {
+                let base = (fringe_vertices.len() / ROAD_TYPED_VERTEX_BYTES) as u32;
+                fringe_indices.extend(face_fringe_indices.iter().map(|index| index + base));
+                fringe_vertices.extend(crate::makepad_draw::vector::fringe_face_vertices_to_road(
+                    &face_fringe_vertices,
+                ));
+            }
             if let Some(budget) = refinement_budget.as_mut() {
                 crate::makepad_draw::vector::subdivide_road_mesh_budgeted(
                     &mut fringe_indices,
@@ -6550,6 +6741,7 @@ impl MapView {
             old_baked_3d,
             old_fill,
             old_fill_misc,
+            old_fill_outline,
             old_face,
             old_casing,
             old_stroke,
@@ -6557,17 +6749,20 @@ impl MapView {
             old_feature_count,
             old_bytes,
             old_icon_instances,
+            old_road_lift_mask,
         ) = match old_entry {
             Some(TileEntry {
                 state:
                     TileLoadState::Ready {
                         fill_geometry,
                         fill_misc_geometry,
+                        fill_outline_geometry,
                         face_geometry,
                         casing_geometry,
                         stroke_geometry,
                         icon_geometry,
                         icon_instances,
+                        road_lift_mask,
                 feature_count,
                 ..
             },
@@ -6580,6 +6775,7 @@ impl MapView {
                 baked_3d,
                 fill_geometry,
                 fill_misc_geometry,
+                fill_outline_geometry,
                 face_geometry,
                 casing_geometry,
                 stroke_geometry,
@@ -6587,6 +6783,7 @@ impl MapView {
                 feature_count,
                 bytes,
                 icon_instances,
+                road_lift_mask,
             ),
             _ => (
                 buffers.render_zoom,
@@ -6596,10 +6793,12 @@ impl MapView {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 None,
                 0,
                 0,
                 Vec::new(),
+                RoadLiftMask::default(),
             ),
         };
 
@@ -6636,6 +6835,7 @@ impl MapView {
             None
         };
 
+        let fill_outline_geometry = upload_typed_stream(cx, buffers.fill_outline, &road_layout);
         let new_face_geometry = upload_typed_stream(cx, buffers.face, &face_layout);
         let (face_geometry, fade_face_geometry) = if reuse_road_core {
             (old_face, Vec::new())
@@ -6643,6 +6843,15 @@ impl MapView {
             (new_face_geometry, old_face)
         };
 
+        let new_road_lift_mask = RoadLiftMask {
+            casing: lifted_road_chunk_mask(&buffers.casing),
+            stroke: lifted_road_chunk_mask(&buffers.stroke),
+        };
+        let road_lift_mask = if reuse_road_core {
+            old_road_lift_mask
+        } else {
+            new_road_lift_mask
+        };
         let new_casing_geometry = upload_typed_stream(cx, buffers.casing, &road_layout);
         let (casing_geometry, fade_casing_geometry) = if reuse_road_core {
             (old_casing, Vec::new())
@@ -6675,6 +6884,7 @@ impl MapView {
             None
         };
         let fringe_geometry = upload_typed_stream(cx, buffers.fringe, &road_layout);
+        let fringe_face_geometry = upload_typed_stream(cx, buffers.fringe_face, &face_layout);
         let fill_3d_geometry = upload_typed_stream(cx, buffers.fill_3d, &roof_layout);
         let mut band = |indices: Vec<u32>, vertices: Vec<f32>| {
             if indices.is_empty() || vertices.is_empty() {
@@ -6718,6 +6928,7 @@ impl MapView {
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
         let fade = if !old_fill.is_empty()
             || old_fill_misc.is_some()
+            || !old_fill_outline.is_empty()
             || old_icon.is_some()
             || !old_icon_instances.is_empty()
             || !fade_face_geometry.is_empty()
@@ -6732,6 +6943,7 @@ impl MapView {
                 bytes: old_bytes,
                 fill_geometry: old_fill,
                 fill_misc_geometry: old_fill_misc,
+                fill_outline_geometry: old_fill_outline,
                 // Stable road geometry stays current across a mode switch;
                 // drawing it again as outgoing fade would darken the roads.
                 face_geometry: fade_face_geometry,
@@ -6749,6 +6961,7 @@ impl MapView {
                 bytes: 0,
                 fill_geometry: Vec::new(),
                 fill_misc_geometry: None,
+                fill_outline_geometry: Vec::new(),
                 face_geometry: Vec::new(),
                 casing_geometry: Vec::new(),
                 stroke_geometry: Vec::new(),
@@ -6792,6 +7005,7 @@ impl MapView {
                 state: TileLoadState::Ready {
                     fill_geometry,
                     fill_misc_geometry,
+                    fill_outline_geometry,
                     face_geometry,
                     casing_geometry,
                     stroke_geometry,
@@ -6801,6 +7015,7 @@ impl MapView {
                     icon_instances: buffers.icon_instances,
                     icon_high_instances: buffers.icon_high_instances,
                     fringe_geometry,
+                    fringe_face_geometry,
                     fill_3d_geometry,
                     fill_3d_misc_geometry,
                     wall_geometry,
@@ -6821,6 +7036,7 @@ impl MapView {
                     },
                     labels: buffers.labels,
                     pin_hits: buffers.pin_hits,
+                    road_lift_mask,
                 },
                 last_used: self.frame_counter,
                 attempts: 0,
@@ -8808,7 +9024,9 @@ impl MapView {
                 entry.end_fade();
             }
         }
-        self.visible_tiles = self.visible_tile_keys(rect);
+        let (visible_tiles, visible_draw_span) = self.visible_tile_keys_and_span(rect);
+        self.visible_tiles = visible_tiles;
+        self.visible_draw_span = visible_draw_span;
         // A pan can evict enough neighboring payload to admit a previously
         // exhausted tile. Recheck after installing this frame's visible set
         // so the headroom calculation observes that event immediately.
@@ -9002,9 +9220,15 @@ impl MapView {
         self.update_status_text();
     }
 
+    #[cfg(test)]
     fn visible_tile_keys(&self, rect: Rect) -> Vec<TileKey> {
+        self.visible_tile_keys_and_span(rect).0
+    }
+
+    /// The fetch set (viewport plus prefetch margin) and the drawn span.
+    fn visible_tile_keys_and_span(&self, rect: Rect) -> (Vec<TileKey>, Option<TileSpan>) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let zoom = self.request_zoom_level();
         let world_size = tile_world_size(zoom);
@@ -9043,8 +9267,14 @@ impl MapView {
         let bottom_right = center_world + half_size;
         let tile_count = 1_i32 << zoom;
 
-        let (min_tx, max_tx) = tile_span_with_prefetch(top_left.x, bottom_right.x);
-        let (min_ty, max_ty) = tile_span_with_prefetch(top_left.y, bottom_right.y);
+        let margin = PREFETCH_SCREEN_PX / overzoom;
+        let (min_tx, max_tx) = tile_span_with_margin(top_left.x, bottom_right.x, margin);
+        let (min_ty, max_ty) = tile_span_with_margin(top_left.y, bottom_right.y, margin);
+        let draw_span = TileSpan {
+            z: zoom,
+            x: tile_span_with_margin(top_left.x, bottom_right.x, 0.0),
+            y: tile_span_with_margin(top_left.y, bottom_right.y, 0.0),
+        };
 
         let mut out = Vec::new();
         for ty in min_ty..=max_ty {
@@ -9069,7 +9299,7 @@ impl MapView {
             let dy = (key.y - center_ty).abs();
             (dx + dy, key.y, key.x)
         });
-        out
+        (out, Some(draw_span))
     }
 
     /// A ready tile whose cross-fade started from no previous geometry —
@@ -9080,6 +9310,7 @@ impl MapView {
             entry.fade.as_ref().is_some_and(|fade| {
                 fade.fill_geometry.is_empty()
                     && fade.fill_misc_geometry.is_none()
+                    && fade.fill_outline_geometry.is_empty()
                     && fade.face_geometry.is_empty()
                     && fade.casing_geometry.is_empty()
                     && fade.stroke_geometry.is_empty()
@@ -9095,6 +9326,10 @@ impl MapView {
 
         for i in 0..self.visible_tiles.len() {
             let key = self.visible_tiles[i];
+            // Prefetch-margin tiles are off screen: resident, not drawn.
+            if self.visible_draw_span.is_some_and(|span| !span.contains(key)) {
+                continue;
+            }
             if self.tile_is_ready(key) {
                 // While this tile fades in from empty (fresh zoom level),
                 // keep the previous zoom level's imagery painted beneath it
@@ -9848,7 +10083,11 @@ impl MapView {
             shader: self.draw_label.draw_super.draw_vars.draw_shader_id.is_some(),
         };
         let slot = set_index * 2 + usize::from(pin_phase);
-        let list = self.label_lists.lists[slot].get_or_insert_with(|| DrawList2d::new(cx));
+        let list = self.label_lists.lists[slot].get_or_insert_with(|| {
+            let list = DrawList2d::new(cx);
+            cx.draw_lists[list.id()].debug_id = LiveId::from_str_with_lut("map_labels").unwrap();
+            list
+        });
         let record = self.label_lists.sigs[slot] != Some(sig);
         if list.begin_maybe(cx, record).is_not_redrawing() {
             self.draw_label.refresh_glyph_batch(cx, list.id());
@@ -11419,9 +11658,20 @@ impl MapView {
                 pts.push(p);
             }
         }
+        let clip = camera.rect;
         for gy in 0..GY {
             for gx in 0..GX {
                 let i = gy * (GX + 1) + gx;
+                // Cells wholly outside the map rect are not drawn: the
+                // DEM box usually spans far more than the view.
+                let corners = [pts[i], pts[i + 1], pts[i + GX + 2], pts[i + GX + 1]];
+                if corners.iter().all(|c| c.x < clip.pos.x)
+                    || corners.iter().all(|c| c.y < clip.pos.y)
+                    || corners.iter().all(|c| c.x > clip.pos.x + clip.size.x)
+                    || corners.iter().all(|c| c.y > clip.pos.y + clip.size.y)
+                {
+                    continue;
+                }
                 self.draw_terrain.uv0 = Vec2f {
                     x: gx as f32 / GX as f32,
                     y: gy as f32 / GY as f32,

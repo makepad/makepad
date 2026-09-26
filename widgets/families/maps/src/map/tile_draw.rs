@@ -569,7 +569,19 @@ impl<'a> TileDrawCtx<'a> {
         let TileLoadState::Ready { .. } = state else {
             return;
         };
-        let slot = draw.phases[phase.index()].get_or_insert_with(|| TilePhaseList::new(cx));
+        let slot = draw.phases[phase.index()].get_or_insert_with(|| {
+            let slot = TilePhaseList::new(cx);
+            // Names the list in the `gpu.shaders` table.
+            cx.draw_lists[slot.list.id()].debug_id = match phase {
+                TilePhase::Fill => LiveId::from_str_with_lut("map_fill").unwrap(),
+                TilePhase::Casing => LiveId::from_str_with_lut("map_casing").unwrap(),
+                TilePhase::Stroke => LiveId::from_str_with_lut("map_stroke").unwrap(),
+                TilePhase::Icon => LiveId::from_str_with_lut("map_icon").unwrap(),
+                TilePhase::IconHigh => LiveId::from_str_with_lut("map_icon_high").unwrap(),
+                TilePhase::Shadow => LiveId::from_str_with_lut("map_shadow").unwrap(),
+            };
+            slot
+        });
         let record = slot.sig != Some(sig);
         if slot.list.begin_maybe(cx, record).is_redrawing() {
             slot.calls.clear();
@@ -793,6 +805,7 @@ impl<'a> TileDrawCtx<'a> {
         let TileLoadState::Ready {
             fill_geometry,
             fill_misc_geometry,
+            fill_outline_geometry,
             face_geometry,
             casing_geometry,
             stroke_geometry,
@@ -802,6 +815,7 @@ impl<'a> TileDrawCtx<'a> {
             icon_high_instances,
             shadow_disc_instances,
             fringe_geometry,
+            fringe_face_geometry,
             fill_3d_geometry,
             fill_3d_misc_geometry,
             wall_geometry,
@@ -815,6 +829,7 @@ impl<'a> TileDrawCtx<'a> {
             stalk_instances,
             stoplight_template_geometry,
             stoplight_instances,
+            road_lift_mask,
             ..
         } = state
         else {
@@ -839,6 +854,8 @@ impl<'a> TileDrawCtx<'a> {
                         let n = self.geometry(cx, rec, phase, view, TileDrawer::Vector, outgoing.geometry_id(), Full, Outgoing, HeightSource::Full, 0.0);
                         rec.close_group(n);
                     }
+                    let n = self.stream(cx, rec, phase, view, TileDrawer::Road, &fade.fill_outline_geometry, Full, Outgoing, HeightSource::Full);
+                    rec.close_group(n);
                 }
                 let n = self.stream(cx, rec, phase, view, TileDrawer::Fill, fill_geometry, Alpha, Resident, Grow);
                 rec.close_group(n);
@@ -846,6 +863,8 @@ impl<'a> TileDrawCtx<'a> {
                     let n = self.geometry(cx, rec, phase, view, TileDrawer::Vector, geometry.geometry_id(), Alpha, Resident, Grow, 0.0);
                     rec.close_group(n);
                 }
+                let n = self.stream(cx, rec, phase, view, TileDrawer::Road, fill_outline_geometry, Alpha, Resident, Grow);
+                rec.close_group(n);
                 if view.lod_band >= 1 {
                     let n = self.stream(cx, rec, phase, view, TileDrawer::Roof, fill_3d_geometry, Alpha, Resident, LodGrow);
                     rec.close_group(n);
@@ -914,7 +933,10 @@ impl<'a> TileDrawCtx<'a> {
                 // density hide it, and the fringes are ~2/3 of the casing
                 // vertex mass on street tiles.
                 if frame.fringe {
-                    let n = self.stream(cx, rec, phase, view, TileDrawer::Road, fringe_geometry, road_fade, Resident, HeightSource::Full);
+                    // Grounded fringes on the face layout, lifted ones on the
+                    // road layout: one layer, as one stream before.
+                    let n = self.stream(cx, rec, phase, view, TileDrawer::Face, fringe_face_geometry, road_fade, Resident, HeightSource::Full)
+                        + self.stream(cx, rec, phase, view, TileDrawer::Road, fringe_geometry, road_fade, Resident, HeightSource::Full);
                     rec.close_group(n);
                 }
             }
@@ -970,7 +992,17 @@ impl<'a> TileDrawCtx<'a> {
                     let n = self.geometry(cx, rec, phase, view, TileDrawer::Vector, geometry.geometry_id(), Full, Resident, HeightSource::Full, 1.0);
                     rec.close_group(n);
                 }
-                for chunk in casing_geometry.iter().chain(stroke_geometry.iter()) {
+                // Only chunks with a lifted vertex: a grounded chunk's
+                // every cast fragment discards.
+                let casing = casing_geometry
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| RoadLiftMask::casts(road_lift_mask.casing, *i));
+                let stroke = stroke_geometry
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| RoadLiftMask::casts(road_lift_mask.stroke, *i));
+                for (_, chunk) in casing.chain(stroke) {
                     let n = self.geometry(cx, rec, phase, view, TileDrawer::Road, chunk.geometry_id(), Full, Resident, HeightSource::Full, 1.0);
                     rec.close_group(n);
                 }

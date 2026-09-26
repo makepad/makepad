@@ -11,7 +11,7 @@ use super::label::{
     LABEL_CLASS_AMENITY, LABEL_CLASS_CULTURE, LABEL_CLASS_DEFAULT, LABEL_CLASS_GREEN,
     LABEL_CLASS_MUTED, LABEL_CLASS_SHOP, LABEL_CLASS_TRANSPORT, LABEL_CLASS_TREE, LABEL_CLASS_HEALTH,
 };
-use super::geometry::TagLookup;
+use super::geometry::{RendererDetailTags, TagLookup};
 use crate::makepad_draw::vector::{
     document::SvgNode, parse::parse_svg, LineJoin, PathCmd, Tessellator, VVertex, VectorPath,
 };
@@ -312,62 +312,19 @@ fn build_disc_mesh(radius: f32) -> Option<IconMesh> {
 
 /// Micro-POI symbols sourced from the all-tag detail archive (not present in
 /// shortbread pois): trees, benches, bins, recycling, playgrounds, artwork.
+/// The table itself is the archive contract's (`makepad_mbtile_reader::
+/// micro_icon`), so the bake and repack keep exactly the points drawn here.
 pub fn micro_icon_for_tags(tags: &impl TagLookup) -> Option<(&'static str, u8)> {
-    if tags.get("natural") == Some("tree") {
-        return Some(("tree", LABEL_CLASS_TREE));
-    }
-    if let Some(amenity) = tags.get("amenity") {
-        return match amenity {
-            "bench" => Some(("bench", LABEL_CLASS_MUTED)),
-            "waste_basket" | "waste_disposal" => Some(("waste_basket", LABEL_CLASS_MUTED)),
-            "recycling" => Some(("recycling", LABEL_CLASS_MUTED)),
-            "bicycle_parking" => Some(("bicycle", LABEL_CLASS_TRANSPORT)),
-            "parking" => Some(("parking", LABEL_CLASS_TRANSPORT)),
-            "parking_entrance" => Some(("parking", LABEL_CLASS_TRANSPORT)),
-            "charging_station" => Some(("charger", LABEL_CLASS_TRANSPORT)),
-            _ => None,
-        };
-    }
-    if tags.get("highway") == Some("traffic_signals") {
-        return Some(("traffic_signals", LABEL_CLASS_MUTED));
-    }
-    // Offices (TomTom etc.) only exist in the detail archive; carto shows
-    // them as a small dot + name from street-level zoom.
-    if tags.contains_key("office") && tags.contains_key("name") {
-        return Some(("dot", LABEL_CLASS_MUTED));
-    }
-    if let Some(leisure) = tags.get("leisure") {
-        return match leisure {
-            "playground" => Some(("playground", LABEL_CLASS_GREEN)),
-            "picnic_table" => Some(("bench", LABEL_CLASS_GREEN)),
-            _ => None,
-        };
-    }
-    if let Some(tourism) = tags.get("tourism") {
-        return match tourism {
-            "artwork" => Some(("statue", LABEL_CLASS_CULTURE)),
-            "information" => Some(("information", LABEL_CLASS_CULTURE)),
-            _ => None,
-        };
-    }
-    // Building/station entrances (door icon, high zoom only — the caller
-    // gates the zoom).
-    if tags.get("railway") == Some("subway_entrance") {
-        return Some(("entrance", LABEL_CLASS_TRANSPORT));
-    }
-    if let Some(entrance) = tags.get("entrance") {
-        return match entrance {
-            "no" => None,
-            _ => Some(("entrance", LABEL_CLASS_MUTED)),
-        };
-    }
-    if let Some(historic) = tags.get("historic") {
-        return match historic {
-            "memorial" | "monument" | "statue" => Some(("statue", LABEL_CLASS_CULTURE)),
-            _ => None,
-        };
-    }
-    None
+    use makepad_mbtile_reader::MicroIconClass;
+    let (icon, class) = makepad_mbtile_reader::micro_icon(&RendererDetailTags(tags))?;
+    let class = match class {
+        MicroIconClass::Tree => LABEL_CLASS_TREE,
+        MicroIconClass::Muted => LABEL_CLASS_MUTED,
+        MicroIconClass::Transport => LABEL_CLASS_TRANSPORT,
+        MicroIconClass::Green => LABEL_CLASS_GREEN,
+        MicroIconClass::Culture => LABEL_CLASS_CULTURE,
+    };
+    Some((icon, class))
 }
 
 /// Map shortbread poi attributes to a symbol + label color class.

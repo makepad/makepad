@@ -99,6 +99,24 @@ fn typed_stream(name: &'static str, stream: &TypedStream, stride: usize) -> Stre
     }
 }
 
+/// Two typed streams reported as one row (a stream split across layouts).
+fn merged_stream(name: &'static str, a: StreamRow, b: StreamRow) -> StreamRow {
+    StreamRow {
+        name,
+        vertices: a.vertices + b.vertices,
+        source_vertices: a.source_vertices + b.source_vertices,
+        indices: a.indices + b.indices,
+        index_width: a.index_width.max(b.index_width),
+        unchunked_index_width: a.unchunked_index_width.max(b.unchunked_index_width),
+        index_bytes: a.index_bytes + b.index_bytes,
+        vertex_bytes: a.vertex_bytes + b.vertex_bytes,
+        bytes: a.bytes + b.bytes,
+        unchunked_bytes: a.unchunked_bytes + b.unchunked_bytes,
+        chunks: a.chunks + b.chunks,
+        duplicate_vertices: a.duplicate_vertices + b.duplicate_vertices,
+    }
+}
+
 fn legacy_stream(
     name: &'static str,
     vertices: usize,
@@ -127,16 +145,24 @@ fn streams(b: &TileBuffers) -> [StreamRow; 14] {
     let bytes = b.stream_bytes();
     [
         typed_stream("fill", &b.fill, FILL_TYPED_VERTEX_BYTES),
-        legacy_stream(
+        merged_stream(
             "fill_misc",
-            b.fill_misc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
-            b.fill_misc_indices.len(),
-            bytes[1],
+            legacy_stream(
+                "fill_misc",
+                b.fill_misc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
+                b.fill_misc_indices.len(),
+                (b.fill_misc_vertices.len() + b.fill_misc_indices.len()) * 4,
+            ),
+            typed_stream("fill_misc", &b.fill_outline, ROAD_TYPED_VERTEX_BYTES),
         ),
         typed_stream("face", &b.face, FACE_TYPED_VERTEX_BYTES),
         typed_stream("casing", &b.casing, ROAD_TYPED_VERTEX_BYTES),
         typed_stream("stroke", &b.stroke, ROAD_TYPED_VERTEX_BYTES),
-        typed_stream("fringe", &b.fringe, ROAD_TYPED_VERTEX_BYTES),
+        merged_stream(
+            "fringe",
+            typed_stream("fringe", &b.fringe, ROAD_TYPED_VERTEX_BYTES),
+            typed_stream("fringe", &b.fringe_face, FACE_TYPED_VERTEX_BYTES),
+        ),
         legacy_stream("icon", b.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.icon_indices.len(), bytes[6]),
         legacy_stream("icon_high", b.icon_high_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.icon_high_indices.len(), bytes[7]),
         legacy_stream("road_icon", b.road_icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX, b.road_icon_indices.len(), bytes[8]),

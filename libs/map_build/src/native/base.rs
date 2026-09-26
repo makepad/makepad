@@ -1846,6 +1846,12 @@ fn archive_metadata(
             "makepad_all_osm_tags".to_string(),
             options.full.to_string(),
         ));
+        if !options.full {
+            metadata.push((
+                makepad_mbtile_reader::DETAIL_CONTRACT_METADATA_KEY.to_string(),
+                makepad_mbtile_reader::DETAIL_CONTRACT.to_string(),
+            ));
+        }
         metadata.push((
             "makepad_detail_zoom".to_string(),
             DETAIL_ZOOM.to_string(),

@@ -7,7 +7,8 @@ use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
     append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
     is_compact_face_record, is_compact_roof_record, pack_face_vertices, pack_fill_vertices,
-    pack_road_vertices, pack_roof_vertices, pack_vector_vertices,
+    pack_road_vertices, pack_road_vertices_rounding_zbias, pack_fringe_face_vertices,
+    is_compact_fringe_face_record, pack_roof_vertices, pack_vector_vertices,
     FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
     ROOF_TYPED_VERTEX_BYTES, MAP_VERTEX_POSITION_SCALE,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
@@ -18,7 +19,7 @@ use crate::makepad_draw::vector::{
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
-use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
+use makepad_mbtile_reader::{DetailGeom, MbtilesReader, TileArchiveReader};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -120,9 +121,12 @@ pub enum TileLoadState {
     LoadingLocal,
     Ready {
         fill_geometry: Vec<Geometry>,
-        /// Non-fill records formerly interleaved with ground fills (building
-        /// outline strokes), retained on the generic vector layout.
+        /// Non-fill records formerly interleaved with ground fills that no
+        /// typed layout carries, retained on the generic vector layout.
         fill_misc_geometry: Option<Geometry>,
+        /// Building outline strokes on the 28-byte road layout, drawn by the
+        /// fill pass right after the ground fills.
+        fill_outline_geometry: Vec<Geometry>,
         /// Grounded road-union faces on the 16-byte face layout, drawn in
         /// the casing pass just before `casing_geometry`.
         face_geometry: Vec<Geometry>,
@@ -139,8 +143,10 @@ pub enum TileLoadState {
         /// Tree/signal contact-shadow disc instance records.
         shadow_disc_instances: Vec<f32>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
-        /// density hide 1px edge AA.
+        /// density hide 1px edge AA. Grounded ones ride the 16-byte face
+        /// layout (`fringe_face_geometry`); lifted ones the road layout.
         fringe_geometry: Vec<Geometry>,
+        fringe_face_geometry: Vec<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
         fill_3d_geometry: Vec<Geometry>,
         /// Lifted records that need the generic vector layout.
@@ -164,10 +170,26 @@ pub enum TileLoadState {
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
+        /// Which casing/stroke chunks can cast into the shadow mask.
+        road_lift_mask: RoadLiftMask,
     },
     Failed {
         retry_after: u64,
     },
+}
+
+/// Per-chunk "has a lifted vertex" bits of a tile's casing and stroke
+/// geometry: the shadow-mask pass casts only these chunks.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoadLiftMask {
+    pub casing: u64,
+    pub stroke: u64,
+}
+
+impl RoadLiftMask {
+    pub fn casts(mask: u64, chunk: usize) -> bool {
+        mask & (1u64 << chunk.min(63)) != 0
+    }
 }
 
 #[derive(Debug)]
@@ -241,6 +263,7 @@ pub struct TileFade {
     pub bytes: usize,
     pub fill_geometry: Vec<Geometry>,
     pub fill_misc_geometry: Option<Geometry>,
+    pub fill_outline_geometry: Vec<Geometry>,
     pub face_geometry: Vec<Geometry>,
     pub casing_geometry: Vec<Geometry>,
     pub stroke_geometry: Vec<Geometry>,
@@ -1284,6 +1307,9 @@ pub struct TileBuffers {
     pub fill: TypedStream,
     pub fill_misc_indices: Vec<u32>,
     pub fill_misc_vertices: Vec<f32>,
+    /// Typed 28-byte `RoadVertexTyped` records: the building outline
+    /// strokes (GPU-expandable, shape >= 100) split out of the fill pass.
+    pub fill_outline: TypedStream,
     /// Typed 16-byte `FaceVertexTyped` records: the grounded shape-0
     /// Boolean union faces split out of the casing pass (see
     /// `is_compact_face_record`). Drawn by the casing pass first, so the
@@ -1319,6 +1345,9 @@ pub struct TileBuffers {
     /// stored as typed 28-byte `RoadVertexTyped` records and drawn
     /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
     pub fringe: TypedStream,
+    /// The grounded fringes on the 16-byte `FaceVertexTyped` layout (see
+    /// `fringe_face_record_from_road`); `fringe` keeps the lifted rest.
+    pub fringe_face: TypedStream,
     /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
     /// tilt so the far field skips its vertex mass.
     pub fill_3d: TypedStream,
@@ -1384,11 +1413,12 @@ impl TileBuffers {
     pub fn stream_bytes(&self) -> [usize; 14] {
         [
             self.fill.byte_size(),
-            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4
+                + self.fill_outline.byte_size(),
             self.face.byte_size(),
             self.casing.byte_size(),
             self.stroke.byte_size(),
-            self.fringe.byte_size(),
+            self.fringe.byte_size() + self.fringe_face.byte_size(),
             (self.icon_vertices.len() + self.icon_indices.len()) * 4,
             (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
             (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
@@ -1404,11 +1434,13 @@ impl TileBuffers {
     pub fn unchunked_stream_bytes(&self) -> [usize; 14] {
         [
             self.fill.unchunked_byte_size(FILL_TYPED_VERTEX_BYTES),
-            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4
+                + self.fill_outline.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
             self.face.unchunked_byte_size(FACE_TYPED_VERTEX_BYTES),
             self.casing.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
             self.stroke.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
-            self.fringe.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            self.fringe.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES)
+                + self.fringe_face.unchunked_byte_size(FACE_TYPED_VERTEX_BYTES),
             (self.icon_vertices.len() + self.icon_indices.len()) * 4,
             (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
             (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
@@ -1422,29 +1454,35 @@ impl TileBuffers {
 
     pub fn typed_duplicate_vertices(&self) -> usize {
         self.fill.duplicate_vertex_count()
+            + self.fill_outline.duplicate_vertex_count()
             + self.face.duplicate_vertex_count()
             + self.casing.duplicate_vertex_count()
             + self.stroke.duplicate_vertex_count()
             + self.fringe.duplicate_vertex_count()
+            + self.fringe_face.duplicate_vertex_count()
             + self.fill_3d.duplicate_vertex_count()
     }
 
     pub fn typed_source_vertices(&self) -> usize {
         self.fill.source_vertex_count()
+            + self.fill_outline.source_vertex_count()
             + self.face.source_vertex_count()
             + self.casing.source_vertex_count()
             + self.stroke.source_vertex_count()
             + self.fringe.source_vertex_count()
+            + self.fringe_face.source_vertex_count()
             + self.fill_3d.source_vertex_count()
     }
 
     pub fn max_typed_chunk_count(&self) -> usize {
         [
             self.fill.chunks.len(),
+            self.fill_outline.chunks.len(),
             self.face.chunks.len(),
             self.casing.chunks.len(),
             self.stroke.chunks.len(),
             self.fringe.chunks.len(),
+            self.fringe_face.chunks.len(),
             self.fill_3d.chunks.len(),
         ]
         .into_iter()
@@ -1479,10 +1517,12 @@ impl TileBuffers {
     pub fn allocated_byte_size(&self) -> usize {
         let vec_bytes = |len: usize, item: usize| len.saturating_mul(item);
         let typed = self.fill.allocated_byte_size()
+            + self.fill_outline.allocated_byte_size()
             + self.face.allocated_byte_size()
             + self.casing.allocated_byte_size()
             + self.stroke.allocated_byte_size()
             + self.fringe.allocated_byte_size()
+            + self.fringe_face.allocated_byte_size()
             + self.fill_3d.allocated_byte_size();
         let u32s = self.fill_misc_indices.capacity()
             + self.icon_indices.capacity()
@@ -1581,6 +1621,7 @@ impl TileBuffers {
         self.icon_high_vertices.clear();
         self.icon_high_instances.clear();
         self.fringe = TypedStream::default();
+        self.fringe_face = TypedStream::default();
         self.shadow_disc_instances.clear();
         self.tree_indices.clear();
         self.tree_vertices.clear();
@@ -1665,10 +1706,12 @@ impl TileBuffers {
 
     fn shrink_memory_vectors(&mut self) {
         self.fill.shrink_to_fit();
+        self.fill_outline.shrink_to_fit();
         self.face.shrink_to_fit();
         self.casing.shrink_to_fit();
         self.stroke.shrink_to_fit();
         self.fringe.shrink_to_fit();
+        self.fringe_face.shrink_to_fit();
         self.fill_3d.shrink_to_fit();
         macro_rules! shrink {
             ($($field:ident),+ $(,)?) => {$(
@@ -3629,6 +3672,7 @@ fn merge_overlay_features(
     let raw = overlay.raw.decode()?;
     let pbf_data = decode_vector_tile_payload(&raw)?;
     let mut collector = MvtLocalCollector::new(render_scale);
+    collector.next_feature_id = OVERLAY_FEATURE_ID_BASE.fetch_add(1 << 32, std::sync::atomic::Ordering::Relaxed);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let scale = (1u32 << overlay.shift) as f32;
     let offset_x = overlay.quadrant_x as f32 * TILE_SIZE as f32;
@@ -3744,6 +3788,9 @@ fn parse_detail_features_with_parser(
 ) -> Result<MvtLocalCollector, String> {
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
+    // Polygon ids group rings into one fill (with the colour); a detail id
+    // that equals a base id would fuse two unrelated polygons.
+    collector.next_feature_id = DETAIL_FEATURE_ID_BASE;
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
     // Combined archives carry base AND detail layers in one tile; this
     // pass only consumes the raw osm_* layers, and of those only the
@@ -5047,11 +5094,13 @@ fn primary_road_and_tram_bake(want_fringe: bool) -> TileBuffers {
 fn fringe_free_bake_keeps_road_core_byte_identical() {
     let with_fringe = primary_road_and_tram_bake(true);
     let without_fringe = primary_road_and_tram_bake(false);
-    assert!(!with_fringe.fringe.is_empty());
-    assert!(with_fringe.fringe.index_count() > 0);
+    // The grounded road's fringe rides the compact face layout.
+    assert!(!with_fringe.fringe_face.is_empty());
+    assert!(with_fringe.fringe_face.index_count() > 0);
     assert!(!with_fringe.stroke.is_empty());
     assert!(with_fringe.stroke.index_count() > 0);
     assert!(without_fringe.fringe.is_empty());
+    assert!(without_fringe.fringe_face.is_empty());
     assert_eq!(without_fringe.face, with_fringe.face);
     assert_eq!(without_fringe.casing, with_fringe.casing);
     assert_eq!(without_fringe.stroke, with_fringe.stroke);
@@ -7505,6 +7554,9 @@ fn build_tile_buffers_from_features_profiled(
         && baked_faces
             .as_ref()
             .is_some_and(|bake| bake.bucket == render_zoom && bake.signature == input_sig);
+    if baked_input_hit {
+        BAKED_FACES_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     // Per-tier deck fields: index 0 is the plaza field, tier i lives at
     // 1 + i. Casing and center faces of one tier share one field, so both
     // displace identically in tilt — no more detached outlines on ramps.
@@ -7696,6 +7748,7 @@ fn build_tile_buffers_from_features_profiled(
             fill: TypedStream::default(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
+            fill_outline: TypedStream::default(),
             face: TypedStream::default(),
             casing: TypedStream::default(),
             stroke: TypedStream::default(),
@@ -7707,6 +7760,7 @@ fn build_tile_buffers_from_features_profiled(
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe: TypedStream::default(),
+            fringe_face: TypedStream::default(),
             fill_3d: TypedStream::default(),
             fill_3d_misc_indices: Vec::new(),
             fill_3d_misc_vertices: Vec::new(),
@@ -8690,11 +8744,18 @@ fn build_tile_buffers_from_features_profiled(
     let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
-    let (fringe_vertices, fringe_indices) = if want_fringe {
+    let (mut fringe_vertices, mut fringe_indices) = if want_fringe {
         split_fringe_band(&mut casing_vertices, &mut casing_indices)
     } else {
         (Vec::new(), Vec::new())
     };
+    // Grounded fringes fit the 16-byte face layout (28-byte road records
+    // before); lifted deck fringes keep the road layout.
+    let (fringe_face_vertices, fringe_face_indices) = split_band_by_all(
+        &mut fringe_vertices,
+        &mut fringe_indices,
+        is_compact_fringe_face_record,
+    );
     // Grounded union faces take the 16-byte face layout. Deck fields can
     // cross zero inside one ramp triangle, so only triangles whose THREE
     // records project losslessly may enter the compact stream. Mixed
@@ -8719,29 +8780,40 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
-    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout.
-    // Parapet depth variants and any future gradient or patterned roof stay
-    // on the generic vector path; stalks and signals now have instance bands.
+    // Lifted shape-0 roofs and their roof-edge AO parapet strips use the
+    // 16-byte typed roof layout. Any other depth variant and any future
+    // gradient or patterned roof stay on the generic vector path; stalks and
+    // signals have instance bands.
     let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
         &mut fill_3d_vertices,
         &mut fill_3d_indices,
         |record| !is_compact_roof_record(record),
     );
     // The ground stream is compact only for polygon-fill variants. Building
-    // outline strokes are the sole generic records emitted into this pass;
-    // keep them in a sibling stream so their stroke expansion stays intact.
+    // outline strokes are the generic records emitted into this pass; keep
+    // them in a sibling stream so their stroke expansion stays intact. As
+    // GPU-expandable strokes they fit the 28-byte road layout (a 48-byte
+    // vector record plus a u32 index before); anything else stays generic.
     let mut fill_vertices = fill_vertices;
     let mut fill_indices = fill_indices;
-    let (fill_misc_vertices, fill_misc_indices) = split_band_by(
+    let (mut fill_misc_vertices, mut fill_misc_indices) = split_band_by(
         &mut fill_vertices,
         &mut fill_indices,
         |record| map_fill_variant_code(record).is_none(),
+    );
+    let (fill_outline_vertices, fill_outline_indices) = split_band_by_all(
+        &mut fill_misc_vertices,
+        &mut fill_misc_indices,
+        |record| record[10] >= 99.5,
     );
     // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
     // main-thread pack was 10-15ms per street tile and throttled the
     // upload drain to one tile per frame).
     let fill_vertices = pack_fill_vertices(&fill_vertices);
     let fill_misc_vertices = pack_vector_vertices(&fill_misc_vertices);
+    // Outline z-bias rides the ground-fill counter, past the exact f16 tick
+    // range on dense tiles (see pack_road_record_rounding_zbias).
+    let fill_outline_vertices = pack_road_vertices_rounding_zbias(&fill_outline_vertices);
     let fill_3d_vertices = pack_roof_vertices(&fill_3d_vertices);
     let fill_3d_misc_vertices = pack_vector_vertices(&fill_3d_misc_vertices);
     debug_assert!(casing_vertices
@@ -8759,6 +8831,7 @@ fn build_tile_buffers_from_features_profiled(
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
     let fringe_vertices = pack_road_vertices(&fringe_vertices);
+    let fringe_face_vertices = pack_fringe_face_vertices(&fringe_face_vertices);
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
     let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);
@@ -8768,6 +8841,11 @@ fn build_tile_buffers_from_features_profiled(
         fill: TypedStream::from_u32(fill_indices, fill_vertices, FILL_TYPED_VERTEX_BYTES),
         fill_misc_indices,
         fill_misc_vertices,
+        fill_outline: TypedStream::from_u32(
+            fill_outline_indices,
+            fill_outline_vertices,
+            ROAD_TYPED_VERTEX_BYTES,
+        ),
         face: TypedStream::from_u32(face_indices, face_vertices, FACE_TYPED_VERTEX_BYTES),
         casing: TypedStream::from_u32(casing_indices, casing_vertices, ROAD_TYPED_VERTEX_BYTES),
         stroke: TypedStream::from_u32(stroke_indices, stroke_vertices, ROAD_TYPED_VERTEX_BYTES),
@@ -8779,6 +8857,11 @@ fn build_tile_buffers_from_features_profiled(
         icon_instances,
         icon_high_instances,
         fringe: TypedStream::from_u32(fringe_indices, fringe_vertices, ROAD_TYPED_VERTEX_BYTES),
+        fringe_face: TypedStream::from_u32(
+            fringe_face_indices,
+            fringe_face_vertices,
+            FACE_TYPED_VERTEX_BYTES,
+        ),
         fill_3d: TypedStream::from_u32(fill_3d_indices, fill_3d_vertices, ROOF_TYPED_VERTEX_BYTES),
         fill_3d_misc_indices,
         fill_3d_misc_vertices,
@@ -9879,6 +9962,12 @@ pub trait MvtSink {
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
         Some(point_keys())
     }
+    /// Per-feature skip, consulted after tag decode and BEFORE any id is
+    /// allocated or geometry decoded, so a skipped feature leaves no trace
+    /// (an archive without it parses identically). Default: consume all.
+    fn wants_feature(&self, _layer_name: &str, _geom: DetailGeom, _tags: &TagSet) -> bool {
+        true
+    }
     fn add_path(
         &mut self,
         tile_key: TileKey,
@@ -9925,6 +10014,35 @@ enum LayerParseFilter {
     /// tags) and icons don't render below z17 — parsing them there was
     /// most of a ~110ms/tile constant.
     DetailLayers { points: bool, lines: bool, polygons: bool },
+}
+
+/// Polygon feature ids (`MvtPathMeta::feature_group`) of the base, detail
+/// and overlay parses of one tile live in disjoint ranges: the fill and
+/// building passes group rings by id, so a shared id fused unrelated
+/// polygons (and which ones depended on how many features preceded them).
+const DETAIL_FEATURE_ID_BASE: u64 = 1 << 48;
+/// Overlays draw from a rolling range above the detail one; each parse
+/// takes 2^32 ids, far more than any tile holds.
+static OVERLAY_FEATURE_ID_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(2 << 48);
+
+/// Off only for the repack render-equivalence check, which compares the
+/// unfiltered parse of a full tile against the filtered parse of its
+/// repacked copy.
+static DETAIL_CONTRACT_FILTER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Tile builds whose baked field-101 regions matched their input
+/// signature (the painter cascade was skipped). A rewrite that silently
+/// invalidated baked faces renders the same but slower; this exposes it.
+static BAKED_FACES_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn baked_faces_hits() -> u64 {
+    BAKED_FACES_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_detail_contract_filter(enabled: bool) {
+    DETAIL_CONTRACT_FILTER.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 const DETAIL_WAY_KEYS: &[&str] = &[
@@ -10040,6 +10158,18 @@ impl MvtSink for MvtLocalCollector {
                     }
             }
         }
+    }
+
+    fn wants_feature(&self, layer_name: &str, geom: DetailGeom, tags: &TagSet) -> bool {
+        // The detail pass reads osm_* features under the archive contract;
+        // the bake and the repacker drop exactly what it rejects.
+        !matches!(self.layer_filter, LayerParseFilter::DetailLayers { .. })
+            || !DETAIL_CONTRACT_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+            || makepad_mbtile_reader::detail_feature_used(
+                layer_name,
+                geom,
+                &RendererDetailTags(tags),
+            )
     }
 
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
@@ -11118,6 +11248,18 @@ fn parse_mvt_layer(
 
     let arena = Arc::new(TagArena { strings, keys, values, pairs });
     for feature in pending {
+        let geom = match feature.geom_type {
+            MvtGeomType::Point => DetailGeom::Point,
+            MvtGeomType::Polygon => DetailGeom::Polygon,
+            _ => DetailGeom::Line,
+        };
+        if !builder.wants_feature(
+            &layer_name,
+            geom,
+            &TagSet::from_arena(arena.clone(), feature.tags.clone()),
+        ) {
+            continue;
+        }
         parse_mvt_feature(
             feature,
             arena.clone(),
@@ -12242,10 +12384,12 @@ mod tag_arena_tests {
         let assert_valid_indices = |buffers: &TileBuffers, what: &str| {
             for (name, stream, stride) in [
                 ("fill", &buffers.fill, FILL_TYPED_VERTEX_BYTES),
+                ("fill_outline", &buffers.fill_outline, ROAD_TYPED_VERTEX_BYTES),
                 ("face", &buffers.face, FACE_TYPED_VERTEX_BYTES),
                 ("casing", &buffers.casing, ROAD_TYPED_VERTEX_BYTES),
                 ("stroke", &buffers.stroke, ROAD_TYPED_VERTEX_BYTES),
                 ("fringe", &buffers.fringe, ROAD_TYPED_VERTEX_BYTES),
+                ("fringe_face", &buffers.fringe_face, FACE_TYPED_VERTEX_BYTES),
                 ("fill_3d", &buffers.fill_3d, ROOF_TYPED_VERTEX_BYTES),
             ] {
                 for chunk in &stream.chunks {
@@ -12304,7 +12448,9 @@ mod tag_arena_tests {
             bytes: buffers.byte_size(),
             walls: buffers.wall_instances.len(),
             roofs: buffers.fill_3d.index_count() + buffers.fill_3d_misc_indices.len(),
-            ground: buffers.fill.index_count() + buffers.fill_misc_indices.len(),
+            ground: buffers.fill.index_count()
+                + buffers.fill_misc_indices.len()
+                + buffers.fill_outline.index_count(),
             roads: [buffers.face.index_count(), buffers.casing.index_count(),
                 buffers.stroke.index_count()],
         };
@@ -12506,6 +12652,7 @@ mod tag_arena_tests {
         same_typed_stream!(fill, FILL_TYPED_VERTEX_BYTES);
         same_vec!(fill_misc_indices);
         same_float_vec!(fill_misc_vertices);
+        same_typed_stream!(fill_outline, ROAD_TYPED_VERTEX_BYTES);
         same_typed_stream!(face, FACE_TYPED_VERTEX_BYTES);
         same_typed_stream!(casing, ROAD_TYPED_VERTEX_BYTES);
         same_typed_stream!(stroke, ROAD_TYPED_VERTEX_BYTES);
@@ -12539,6 +12686,7 @@ mod tag_arena_tests {
         }
         same_float_vec!(shadow_disc_instances);
         same_typed_stream!(fringe, ROAD_TYPED_VERTEX_BYTES);
+        same_typed_stream!(fringe_face, FACE_TYPED_VERTEX_BYTES);
         same_typed_stream!(fill_3d, ROOF_TYPED_VERTEX_BYTES);
         same_vec!(fill_3d_misc_indices);
         same_float_vec!(fill_3d_misc_vertices);
@@ -13301,6 +13449,7 @@ mod bridge_probe_tests {
             fill: TypedStream::default(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
+            fill_outline: TypedStream::default(),
             face: TypedStream::default(),
             casing: TypedStream::default(),
             stroke: TypedStream::default(),
@@ -13314,6 +13463,7 @@ mod bridge_probe_tests {
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe: TypedStream::default(),
+            fringe_face: TypedStream::default(),
             fill_3d: TypedStream::default(),
             fill_3d_misc_indices: Vec::new(),
             fill_3d_misc_vertices: Vec::new(),
@@ -13526,6 +13676,7 @@ mod bridge_probe_tests {
         assert!(buffers.allocated_byte_size() > limit);
         assert_eq!(principal_record_counts(&buffers), principal_before);
         assert!(buffers.fringe.is_empty());
+        assert!(buffers.fringe_face.is_empty());
         assert!(buffers.labels.is_empty());
 
         // Reapplying the finite policy is stable while the caller defers it.
