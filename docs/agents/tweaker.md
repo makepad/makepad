@@ -76,6 +76,24 @@ edit to a widget declared in another file. To persist: read
 `/design/commit`, check `base_matches_disk`, apply `diff` to the file, then
 rebuild, relaunch and verify as below.
 
+## Motion: the tween inspector
+
+The Motion tab lists every animation the app's `TweenHost`s play (the
+Splash `tween` driver, stack navigation, the widgets and stories built on
+the tween engine) and shows the chosen one on a timeline: its labels on
+the ruler, one lane per child indented by depth, and the playhead. Drag on
+the timeline to scrub (the animation pauses, callbacks stay quiet, and it
+plays on at release if it was playing); the chips pause, restart and set
+the speed. Hosts publish only while the tab is up.
+
+`/tweak/op?op=motion` answers the same data as JSON: `open`, and per host
+`id`, `name`, `age` and `roots` (`name`, `kind`, `len`, `time`, `paused`,
+`scale`, `lanes`, `labels`). Add `host=<id>&root=<k>` with one of
+`seek=<seconds>`, `pause=1`, `resume=1`, `restart=1` or `scale=<x>` to
+control the k-th top-level animation of that host; the host applies it on
+its next event, so read again after a frame. `open=1` publishes without
+the tab.
+
 ## Persist the result
 
 The overlay never writes source. With a design session open,

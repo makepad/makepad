@@ -265,7 +265,11 @@ struct VmTweens {
 
 impl VmTweens {
     fn new(vm_id: SplashVmId) -> Self {
-        let mut host = TweenHost::new();
+        let mut host = TweenHost::new().inspect_named(if vm_id == MAIN_SPLASH_VM_ID {
+            "Splash tweens".to_string()
+        } else {
+            format!("Splash tweens (vm {})", vm_id.0)
+        });
         host.set_vm_id(vm_id);
         Self {
             vm_id,

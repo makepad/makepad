@@ -1514,6 +1514,10 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             }
             cx.sploded_set_flat_band(None);
             cx.sploded_set_flat_rects(Vec::new());
+            // The Motion tab goes with the panel: its hosts stop publishing.
+            if crate::tween_inspect::tween_inspect_on() {
+                crate::tween_inspect::set_tween_inspect(cx, false);
+            }
         }
         log!("TWEAK mode {}", if on { "on" } else { "off" });
         cx.redraw_all();
@@ -6859,6 +6863,91 @@ pub fn apply_splash_chunk(
 // the remote surface — `Cx::tweak_callback`. Routes parse; this decides.
 // ---------------------------------------------------------------------------
 
+/// `/tweak/op?op=motion`: what the tween inspector sees (the Motion tab
+/// open, or `open=1`), and playback commands for one of it:
+/// `host=<id>&root=<k>` (the k-th top-level animation, default 0) with one
+/// of `seek=<seconds>`, `pause=1`, `resume=1`, `restart=1`, `scale=<x>`.
+/// A command lands on that host's next event.
+fn motion_remote(cx: &mut Cx, args: &[(String, String)]) -> Result<String, String> {
+    use crate::tween_inspect::{set_tween_inspect, tween_inspect_on, InspectCommand, TweenInspectRegistry};
+    use crate::tween_inspector::{node_name, view_of};
+    if let Some(open) = arg(args, &["open"]) {
+        set_tween_inspect(cx, !matches!(open, "0" | "false" | "off" | "no"));
+    }
+    let mut queued = false;
+    if let Some(host) = arg(args, &["host"]).and_then(|h| h.parse::<u64>().ok()) {
+        let k = arg(args, &["root"]).and_then(|r| r.parse::<usize>().ok()).unwrap_or(0);
+        let reg = cx.global::<TweenInspectRegistry>();
+        let id = reg
+            .hosts
+            .iter()
+            .find(|h| h.id == host)
+            .and_then(|h| h.roots().nth(k))
+            .map(|n| n.id)
+            .ok_or_else(|| format!("no root {k} on host {host}"))?;
+        let num = |keys: &[&str]| arg(args, keys).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+        let cmd = if let Some(time) = num(&["seek"]) {
+            InspectCommand::Scrub { id, time }
+        } else if let Some(scale) = num(&["scale"]) {
+            InspectCommand::TimeScale { id, scale }
+        } else if arg(args, &["pause"]).is_some() {
+            InspectCommand::Pause(id)
+        } else if arg(args, &["resume"]).is_some() {
+            InspectCommand::Resume(id)
+        } else if arg(args, &["restart"]).is_some() {
+            InspectCommand::Restart(id)
+        } else {
+            return Err("host given without seek, scale, pause, resume or restart".to_string());
+        };
+        queued = reg.command(host, cmd);
+        cx.redraw_all();
+    }
+    let now = cx.seconds_since_app_start();
+    let reg = cx.global::<TweenInspectRegistry>();
+    let mut out = format!(
+        "{{\"open\":{},\"queued\":{},\"hosts\":[",
+        tween_inspect_on() as u8,
+        queued as u8
+    );
+    for (i, h) in reg.hosts.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"id\":{},\"name\":{},\"age\":{:.3},\"roots\":[",
+            h.id,
+            json_str(&h.name),
+            now - h.at
+        ));
+        for (j, root) in h.roots().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            let (len, head) = view_of(root);
+            let labels: Vec<String> = h
+                .labels
+                .iter()
+                .filter(|l| l.0 == root.id)
+                .map(|l| format!("[{},{:.4}]", json_str(&crate::widget_tree::live_id_token(LiveId(l.1 .0))), l.2))
+                .collect();
+            out.push_str(&format!(
+                "{{\"name\":{},\"kind\":\"{:?}\",\"len\":{:.4},\"time\":{:.4},\"paused\":{},\"scale\":{},\"lanes\":{},\"labels\":[{}]}}",
+                json_str(&node_name(root)),
+                root.kind,
+                len,
+                head,
+                root.paused as u8,
+                root.time_scale,
+                h.subtree(root.id).len(),
+                labels.join(",")
+            ));
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
 fn arg<'a>(args: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
     for key in keys {
         if let Some((_, value)) = args.iter().find(|(k, _)| k == key) {
@@ -7594,6 +7683,7 @@ pub fn tweak_callback(
                 lock.map_or("null".to_string(), |m| format!("{m}"))
             ))
         }
+        "motion" => motion_remote(cx, args),
         "states" => {
             // The state swatches' pose lock: phase=0 (off pose), 1 (on
             // pose), any mix between, or auto to animate again.
@@ -8338,6 +8428,9 @@ enum PanelTab {
     /// The builder: insert, move, delete and wrap widgets by editing the
     /// source file, previewed through hot reload. See [`crate::designer`].
     Build,
+    /// The tween timeline inspector: what every `TweenHost` plays, on a
+    /// scrubbable timeline. See [`crate::tween_inspector`].
+    Motion,
 }
 
 /// One built-in thing the Theme tab's picker offers: a theme the library is
@@ -9061,7 +9154,11 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 6],
+    tab_uids: [u64; 7],
+    /// The Motion tab was up at the last draw (leaving it closes the
+    /// tween inspector).
+    #[rust]
+    motion_shown: bool,
     /// The Theme tab's picker and its three commands, captured at draw. A
     /// click arrives as a uid and nothing else; 0 is no widget, so a control
     /// that is not on screen routes nothing.
@@ -11049,6 +11146,8 @@ impl Tweaker {
                         tab_spec_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_braces.svg") } }
                         tab_build := PanelTabButton { text: "Build" }
                         tab_build_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_hammer.svg") } }
+                        tab_motion := PanelTabButton { text: "Motion" }
+                        tab_motion_i := PanelTabButton { visible: false text: "" padding: Inset{left: 7 right: 7 top: 3 bottom: 3} icon_walk: Walk{width: 13 height: Fit} draw_icon +: { color: #xd0d0d0 svg: crate_resource("self:resources/icons/tab_motion.svg") } }
                     }
                     // The Theme tab's head: which theme the whole library
                     // is running under, and what may be done with it. It
@@ -11644,6 +11743,25 @@ impl Tweaker {
                             is_read_only: true
                             empty_text: "the patch appears here"
                             draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                    }
+                    // The Motion tab: the tween timeline inspector. Shown,
+                    // it opens the inspector (every TweenHost publishes what
+                    // it plays); leaving the tab closes it again.
+                    motion_wrap := View {
+                        width: Fill
+                        height: Fill
+                        visible: false
+                        motion := TweenInspector {
+                            draw_bg +: { color: #x161616 }
+                            draw_text +: { color: #xd0d0d0 }
+                            color_ink: #xd0d0d0
+                            color_meta: panel.text_muted
+                            color_face: #x2a2a2a
+                            color_face_on: #x2f5a9e
+                            color_ruler: #x202020
+                            color_label: #xe8b53a
+                            color_playhead: #xf05050
                         }
                     }
                     props_wrap := View {
@@ -12667,7 +12785,7 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 38] = [
+        let chrome: [(&[LiveId], &str); 40] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12691,6 +12809,8 @@ impl Tweaker {
             (&[live_id!(tab_row), live_id!(tab_theme_i)], "Theme: the theme's colours and values, edited live everywhere"),
             (&[live_id!(tab_row), live_id!(tab_spec_i)], "Spec: notes and rules about the selection, and rules for the whole app"),
             (&[live_id!(tab_row), live_id!(tab_build_i)], "Build: the designer: palette, structure, patch"),
+            (&[live_id!(tab_row), live_id!(tab_motion)], "every running tween on a timeline: scrub, pause, speed"),
+            (&[live_id!(tab_row), live_id!(tab_motion_i)], "Motion: every running tween on a timeline: scrub, pause, speed"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(isolate)], "show only the selection and what is inside it"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(center)], "keep the view centred on the selection"),
             (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(zoom)], "magnify the app view \u{00b7} 1 is life size"),
@@ -14105,6 +14225,17 @@ impl Tweaker {
             if tab == PanelTab::Build {
                 self.draw_build_head(cx, &sidebar);
             }
+            sidebar
+                .child(live_id!(motion_wrap))
+                .set_visible(cx, tab == PanelTab::Motion);
+            // The inspector opens itself when drawn; the tab closes it on
+            // the way out (only then: another inspector an app shows keeps
+            // its own).
+            if tab == PanelTab::Motion {
+                self.motion_shown = true;
+            } else if std::mem::take(&mut self.motion_shown) {
+                crate::tween_inspect::set_tween_inspect(cx, false);
+            }
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -14186,7 +14317,7 @@ impl Tweaker {
                 // Spec tabs do not have. A box that looks live and does
                 // nothing is worse than none, so on those tabs it says so
                 // and goes quiet.
-                let filters_here = !matches!(tab, PanelTab::Shader | PanelTab::Spec);
+                let filters_here = !matches!(tab, PanelTab::Shader | PanelTab::Spec | PanelTab::Motion);
                 let input = sidebar
                     .child(live_id!(filter_row))
                     .child(live_id!(search))
@@ -14250,6 +14381,7 @@ impl Tweaker {
                 (live_id!(tab_theme), live_id!(tab_theme_i), PanelTab::Theme, "Theme"),
                 (live_id!(tab_spec), live_id!(tab_spec_i), PanelTab::Spec, "Spec"),
                 (live_id!(tab_build), live_id!(tab_build_i), PanelTab::Build, "Build"),
+                (live_id!(tab_motion), live_id!(tab_motion_i), PanelTab::Motion, "Motion"),
             ];
             // The words while the row can hold every one of them, the
             // icons when the band is too narrow: measured, not guessed.
@@ -17597,6 +17729,7 @@ impl Tweaker {
             3 => PanelTab::Theme,
             4 => PanelTab::Spec,
             5 => PanelTab::Build,
+            6 => PanelTab::Motion,
             _ => PanelTab::Props,
         };
         // Entering the Theme tab is the moment to look at the theme folder

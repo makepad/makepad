@@ -726,6 +726,12 @@ pub struct TweenHost {
     pending_push: bool,
     warned_unseeded: u64,
     warned_unplaced: bool,
+    /// The inspector's identity for this host (0 until it first publishes).
+    inspect_id: u64,
+    /// The name the inspector lists it under.
+    inspect_name: Option<String>,
+    /// When it last published to the inspector (app seconds).
+    inspect_at: f64,
 }
 
 impl Default for TweenHost {
@@ -757,7 +763,75 @@ impl TweenHost {
             pending_push: false,
             warned_unseeded: 0,
             warned_unplaced: false,
+            inspect_id: 0,
+            inspect_name: None,
+            inspect_at: f64::NEG_INFINITY,
         }
+    }
+
+    /// The name the tween inspector lists this host under (by default
+    /// "tweens #N"). Owners name their motion, e.g. "StackNavigation slide".
+    pub fn set_inspect_name(&mut self, name: impl Into<String>) {
+        self.inspect_name = Some(name.into());
+    }
+
+    /// [`TweenHost::set_inspect_name`] as a builder, for field initialisers.
+    pub fn inspect_named(mut self, name: impl Into<String>) -> Self {
+        self.set_inspect_name(name);
+        self
+    }
+
+    /// While the inspector is open: applies the commands it queued for this
+    /// host and republishes what plays. True when a command changed the
+    /// playhead (the caller reports the new values).
+    fn inspect_sync(&mut self, cx: &mut Cx) -> bool {
+        use crate::tween_inspect::{InspectCommand, TweenInspectRegistry, REPUBLISH_SECS};
+        if self.inspect_id == 0 {
+            self.inspect_id = crate::tween_inspect::next_host_id();
+        }
+        let now = crate::makepad_platform::CxOsApi::seconds_since_app_start(cx);
+        let mut applied = false;
+        {
+            let registry = cx.global::<TweenInspectRegistry>();
+            if let Some(h) = registry.hosts.iter_mut().find(|h| h.id == self.inspect_id) {
+                for cmd in h.commands.drain(..) {
+                    applied = true;
+                    match cmd {
+                        InspectCommand::Scrub { id, time } => {
+                            self.engine.anim(id).pause().seek(Seek::Time(time), Emit::Suppress);
+                        }
+                        InspectCommand::Pause(id) => {
+                            self.engine.anim(id).pause();
+                        }
+                        InspectCommand::Resume(id) => {
+                            self.engine.anim(id).resume();
+                        }
+                        InspectCommand::Restart(id) => {
+                            self.engine.anim(id).restart(false, Emit::Suppress);
+                        }
+                        InspectCommand::TimeScale { id, scale } => {
+                            self.engine.anim(id).set_time_scale(scale);
+                        }
+                    }
+                }
+            }
+        }
+        let due = now - self.inspect_at >= REPUBLISH_SECS;
+        if applied || due || !self.engine.changes().is_empty() {
+            self.inspect_at = now;
+            let name = match &self.inspect_name {
+                Some(name) => name.clone(),
+                None => format!("tweens #{}", self.inspect_id),
+            };
+            cx.global::<TweenInspectRegistry>().publish(self.inspect_id, &name, now, &self.engine);
+        }
+        if applied && (self.engine.is_active() || self.pending_push) && !self.clock.is_armed(cx) {
+            // A resume (or a restart) plays again from here: the first
+            // frame moves by nothing, not by the time spent paused.
+            self.clock.stop();
+            self.clock.arm(cx);
+        }
+        applied
     }
 
     /// GSAP `gsap.defaults()` for this host's tweens.
@@ -1010,8 +1084,13 @@ impl TweenHost {
                 TweenAction::Changed
             };
         }
+        // The inspector: one relaxed load while it is closed.
+        let inspected =
+            crate::tween_inspect::INSPECT_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+                && self.inspect_sync(cx);
         let Some(dt) = self.clock.tick(cx, event) else {
-            return TweenAction::None;
+            // A scrub moved the playhead outside a frame: report the values.
+            return if inspected { self.action() } else { TweenAction::None };
         };
         self.step(dt);
         let moving = self.engine.is_active() || self.pending_push;

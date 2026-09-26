@@ -539,7 +539,7 @@ pub struct StoryTweenStage {
     yoyo: bool,
     #[live(0.0)]
     repeat: f64,
-    #[rust]
+    #[rust(TweenHost::new().inspect_named("Story: Tween & Timeline"))]
     motion: TweenHost,
     #[rust]
     tl: TweenId,

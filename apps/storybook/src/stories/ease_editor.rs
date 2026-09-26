@@ -284,7 +284,7 @@ pub struct StoryEaseLab {
     view: View,
     #[live(1.2)]
     preview_secs: f64,
-    #[rust]
+    #[rust(TweenHost::new().inspect_named("Story: Ease lab"))]
     motion: TweenHost,
     /// The parity tween of the current run (its time is the readout's).
     #[rust]

@@ -19,6 +19,8 @@ pub use makepad_draw::makepad_zune_png;
 // Core modules (used internally first)
 pub mod animator;
 pub mod tween;
+pub mod tween_inspect;
+pub mod tween_inspector;
 pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
@@ -826,6 +828,7 @@ true
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::ease_editor::script_mod(vm);
+    crate::tween_inspector::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
