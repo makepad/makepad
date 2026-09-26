@@ -13442,7 +13442,10 @@ mod tests {
             &mut Scope::empty(),
         );
         assert!(map.archive_watch_in_flight);
-        for _ in 0..2_000 {
+        // The watcher runs on a worker thread; a loaded machine (the CI runs
+        // every test binary at once) can take seconds to schedule it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             <MapView as Widget>::handle_event(
                 &mut map,
                 &mut cx,
