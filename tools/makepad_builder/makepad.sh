@@ -2090,7 +2090,7 @@ spin() {
 }
 # doing_text STEP-FILE DEFAULT [LABEL] -> ls: the spinner, what the work
 # does now, a short bar when its share is known and the amount (the Windows
-# Builder draws the same). With LABEL ("installing Rust") that is the step,
+# Builder draws the same). With LABEL ("Rust") that is the step,
 # and the amount a percentage.
 doing_text() {
     dt_state= dt_a=0 dt_b=0 dt_unit= dt_bytes=0 dt_doing=
@@ -2102,18 +2102,24 @@ doing_text() {
     [ -z "${3:-}" ] || dt_doing=$3
     ls="$ls$dt_doing"
     if [ "${dt_b:-0}" -gt 0 ] 2>/dev/null; then
-        dt_fill=$(( (dt_a * 12 + dt_b / 2) / dt_b )); [ "$dt_fill" -le 12 ] || dt_fill=12
-        dt_on= dt_off= dt_i=0
-        while [ "$dt_i" -lt 12 ]; do
-            if [ "$dt_i" -lt "$dt_fill" ]; then dt_on="${dt_on}━"; else dt_off="${dt_off}─"; fi
-            dt_i=$((dt_i + 1))
-        done
-        ls="$ls ${mark}${dt_on}${r0}${dim}${dt_off}${r0}"
-        if [ -n "${3:-}" ]; then ls="$ls ${dim}$((dt_a * 100 / dt_b))%${r0}"
-        elif [ "$dt_unit" = crates ]; then ls="$ls ${dim}$dt_a / $dt_b crates${r0}"
-        elif [ "$dt_unit" = MB ] && [ "${dt_bytes:-0}" -gt 0 ]; then
-            ls="$ls ${dim}$((dt_a * dt_bytes / dt_b / 1048576)) / $((dt_bytes / 1048576)) MB${r0}"
+        if [ -n "${3:-}" ]; then dt_amount="$((dt_a * 100 / dt_b))%"
+        elif [ "$dt_unit" = crates ]; then dt_amount="$dt_a / $dt_b crates"
+        elif [ "$dt_unit" = MB ] && [ "${dt_bytes:-0}" -gt 0 ]; then dt_amount="$((dt_a * dt_bytes / dt_b / 1048576)) / $((dt_bytes / 1048576)) MB"
+        else dt_amount=; fi
+        # The row never wraps: the status starts at column 30 of a screen at
+        # most 80 wide, so the bar shrinks to fit (to 4, then none).
+        dt_w=$(( width - 32 - 3 - ${#dt_doing} - ${#dt_amount} ))
+        [ "$dt_w" -le 12 ] || dt_w=12
+        if [ "$dt_w" -ge 4 ]; then
+            dt_fill=$(( (dt_a * dt_w + dt_b / 2) / dt_b )); [ "$dt_fill" -le "$dt_w" ] || dt_fill=$dt_w
+            dt_on= dt_off= dt_i=0
+            while [ "$dt_i" -lt "$dt_w" ]; do
+                if [ "$dt_i" -lt "$dt_fill" ]; then dt_on="${dt_on}━"; else dt_off="${dt_off}─"; fi
+                dt_i=$((dt_i + 1))
+            done
+            ls="$ls ${mark}${dt_on}${r0}${dim}${dt_off}${r0}"
         fi
+        [ -z "$dt_amount" ] || ls="$ls ${dim}${dt_amount}${r0}"
     elif [ "$dt_unit" = crates ] && [ "${dt_a:-0}" -gt 0 ]; then
         ls="$ls ${dim}$dt_a crates${r0}"
     fi
@@ -2651,6 +2657,11 @@ open_agreement() {
 # license applies by downloading the Builder, and Rust's (MIT or Apache 2.0)
 # asks for no acceptance.
 terms_rows() {
+    if [ "$plat" = linux ]; then
+        pad 'Graphics driver notice' 36
+        if [ -f "$root/graphics-notice-read" ]; then printf 'item|gpu|%s||%s✓%s read|read\n' "$padded" "$ok" "$r0"
+        else printf 'item|gpu|%s||%snot read%s|read\n' "$padded" "$warn" "$r0"; fi
+    fi
     while IFS='|' read -r tr_id tr_name tr_url; do
         host_of "$tr_url"; pad "$tr_name" 36
         case "$tr_id" in
@@ -2676,6 +2687,7 @@ terms_screen() {
                 select_row
                 case "$id" in
                     url:*) open_agreement "${id#url:}" ;;
+                    gpu) gpu_screen || : ;;
                 esac ;;
         esac
     done
@@ -2809,12 +2821,11 @@ main_rows() {
             *) printf 'item|account|Account||%s %s· %s%s|switch or log out|%s\n' "$email" "$warn" "$lic_error" "$r0" "$mr_info" ;;
         esac
     fi
-    if [ "$plat" = linux ]; then
-        if [ -f "$root/graphics-notice-read" ]; then printf 'item|gpu|Graphics||%s✓%s driver notice read||The GPU driver notice.\n' "$ok" "$r0"
-        else printf 'item|gpu|Graphics||%sread the driver notice%s|read|The GPU driver notice.\n' "$warn" "$r0"; fi
-    fi
     mr_info='The licenses that apply; ⏎ opens them.'
-    printf 'item|terms|Agreements||%s✓%s nothing to accept|read|%s\n' "$ok" "$r0" "$mr_info"
+    # The GPU driver notice (Linux) is one of them too.
+    if [ "$plat" != linux ]; then printf 'item|terms|Agreements||%s✓%s nothing to accept|read|%s\n' "$ok" "$r0" "$mr_info"
+    elif [ -f "$root/graphics-notice-read" ]; then printf 'item|terms|Agreements||%s✓%s accepted %s· Graphics%s|read|%s\n' "$ok" "$r0" "$dim" "$r0" "$mr_info"
+    else printf 'item|terms|Agreements||%sdriver notice not read%s|read|%s\n' "$warn" "$r0" "$mr_info"; fi
     mr_info='Clearing build data keeps your apps; the next compile starts from scratch.'
     if [ -f "$scratch/disk" ]; then
         read -r mr_total mr_build < "$scratch/disk"
@@ -3186,16 +3197,16 @@ install_build_tools() {
 }
 # build_prep (in the background build): Apple's tools (waiting for their
 # installer), the distribution's packages (sudo was asked in front) and the
-# private Rust, each shown on the app's row ("installing Rust ━━━──── 40%").
+# private Rust, each shown on the app's row ("Rust ━━━──── 40%").
 build_prep() {
     [ -n "$prep_steps" ] || return 0
     IFS='|'; set -- $prep_steps; IFS=$ifs_default
     for bp_step in "$@"; do
         case "$bp_step" in
-            'Xcode tools') put "$steps_dir/_prep.label" "installing Apple's tools"; job_xcode _prep ;;
-            'System packages') put "$steps_dir/_prep.label" 'installing packages'; job_packages _prep || return 1 ;;
+            'Xcode tools') put "$steps_dir/_prep.label" 'Apple tools'; job_xcode _prep ;;
+            'System packages') put "$steps_dir/_prep.label" 'Packages'; job_packages _prep || return 1 ;;
             Rust)
-                put "$steps_dir/_prep.label" 'installing Rust'
+                put "$steps_dir/_prep.label" 'Rust'
                 job_rust _prep "$prep_rust" || return 1
                 # The build compiles with it (cargo_env reads rust_sysroot).
                 rust_ready "$prep_rust" || { step_fail _prep "Rust $prep_rust did not pass its check (see builder.log)"; return 1; } ;;
