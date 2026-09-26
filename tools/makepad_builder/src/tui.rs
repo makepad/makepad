@@ -1197,6 +1197,14 @@ impl Setup {
     /// to the menu without deciding.
     fn local_ai_screen(&self) -> Result<Option<WindowsChain>, String> {
         let ids = ["cuda", "vs", "sdk"];
+        // Agreed before (the Agreements page, an earlier Local AI page):
+        // local AI turns on without the page. Acceptance is recorded by
+        // agreement, not by version.
+        let accepted = self.accepted_agreements();
+        if ids.iter().all(|id| accepted.iter().any(|a| a == id)) {
+            activity("Local AI on: Microsoft's C++ tools and CUDA (agreements already accepted).");
+            return Ok(Some(WindowsChain::Msvc));
+        }
         let mut selected = ids.len();
         loop {
             let mut rows = vec![Row::Note(Vec::new()), Row::Note(done("NVIDIA GPU found")), Row::Note(Vec::new())];
