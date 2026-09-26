@@ -333,7 +333,12 @@ impl CxWindowPool {
             *cached_window_zero_geom = new_native_geom;
             return None;
         };
-
+        // CHROME63: indexing panics on a stale id, and a web resize can be
+        // processed before/after the window is registered, so guard the lookup.
+        if !self.is_valid(window_id) {
+            *cached_window_zero_geom = new_native_geom;
+            return None;
+        };
         let window = &mut self[window_id];
         let old_geom = window.window_geom.clone();
         window.os_dpi_factor = Some(new_native_geom.dpi_factor);
