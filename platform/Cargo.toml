@@ -132,7 +132,14 @@ version = "0.62.2"
 [target.'cfg(windows)'.dependencies.windows]
 path = "../libs/windows/windows-rs"
 version = "0.62.2"
+# Win32_System_Console and _Pipes are only for the terminal (ConPTY), but a
+# feature one app adds changes the `windows` crate's build, and with it
+# makepad-platform, makepad-draw and everything above: an app building in the
+# shared target compiled all of those again. Named here, every app builds the
+# same `windows`; each feature only adds bindings.
 features = [
+    "Win32_System_Console",
+    "Win32_System_Pipes",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",

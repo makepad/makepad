@@ -18,9 +18,18 @@ pub fn retained_upload_limit() -> usize {
     const PROBE_BYTES: usize = 4 * 1024 * 1024;
     let source = vec![0x5au8; PROBE_BYTES];
     let mut destination = vec![0u8; PROBE_BYTES];
+    // std has no clock on wasm32-unknown-unknown (Instant::now panics,
+    // "time not implemented on this platform", and took every web app down
+    // at its first frame): the browser's performance.now() there.
+    #[cfg(target_arch = "wasm32")]
+    let start = crate::Cx::monotonic_now();
+    #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
     destination.copy_from_slice(std::hint::black_box(&source));
     std::hint::black_box(&destination);
+    #[cfg(target_arch = "wasm32")]
+    let nanos = (((crate::Cx::monotonic_now() - start) * 1e9) as u128).max(1);
+    #[cfg(not(target_arch = "wasm32"))]
     let nanos = start.elapsed().as_nanos().max(1);
     ((PROBE_BYTES as u128 * 2_000_000 / nanos).min(PROBE_BYTES as u128) as usize) & !3
 }
