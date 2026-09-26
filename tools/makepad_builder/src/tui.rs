@@ -1499,7 +1499,7 @@ impl Setup {
             steps.push("Download source");
         }
         steps.extend(["Compile", "Open"]);
-        let subtitle = if steps[0] == "Download source" { "Download the source, compile it, then run it." } else { "Compile the source, then run it." };
+        let subtitle = "Your app is compiling, it will only take a minute.";
         view::work_begin(&release.title, subtitle, &self.shown_email(), &format!("app:{}", release.id), &steps);
         let cuda_before = crate::cuda::kernels_failed(&self.root).is_some();
         let title = view::work_end(self.compile_and_open(&release))?;
