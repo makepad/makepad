@@ -26,6 +26,9 @@ pub enum IosEvent {
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     TouchUpdate(TouchUpdateEvent),
+    /// `touchesCancelled`: the system took these touches away (a system
+    /// gesture, an alert). Their Stop is dispatched as a cancellation.
+    TouchCancel(TouchUpdateEvent),
     LongPress(LongPressEvent),
 
     Scroll(ScrollEvent),

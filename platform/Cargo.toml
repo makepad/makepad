@@ -111,6 +111,9 @@ makepad-jni-sys = {version = "0.4.0"}
 makepad-android-state = {version = "0.1.0"}
 naga = { path = "../libs/vulkan/naga", version = "27.0", features = ["wgsl-in", "spv-out"]}
 ash = { path = "../libs/vulkan/ash", version = "0.38" }
+# A hosted child process (android_hosted.rs) has no AssetManager: it reads
+# its assets from the APK file itself.
+makepad-zip-file = { path = "../libs/zip_file" }
 
 [target.'cfg(target_env = "ohos")'.dependencies]
 hilog-sys = "0.1.1"

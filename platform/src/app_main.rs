@@ -524,6 +524,25 @@ macro_rules! app_main {
             })
         }
 
+        /// The entry of a hosted child PROCESS on Android: the WM's launcher
+        /// `dlopen`s this library in a process of its own and calls this
+        /// (os/linux/android/android_hosted.rs). No JVM, no Activity: the app
+        /// talks to its host over the host's hub and draws into its frames.
+        #[cfg(target_os = "android")]
+        #[no_mangle]
+        pub extern "C" fn makepad_hosted_main() {
+            $crate::os::linux::android::android_hosted::set_hosted();
+            Cx::init_log();
+            let studio_http = $crate::resolve_studio_http();
+            let mut cx = Box::new($crate::new_cx_with_font_set(
+                $crate::_app_main_event_closure!($app, $configure),
+                $font_set,
+            ));
+            cx.init_websockets(&studio_http);
+            cx.init_cx_os();
+            cx.android_hosted_event_loop();
+        }
+
         #[cfg(target_env = "ohos")]
         #[no_mangle]
         extern "C" fn ohos_init_app_main(
@@ -631,7 +650,7 @@ mod font_set_macro_compile_test {
 
         let source = include_str!("app_main.rs");
         let constructor_call = ["$crate::new_cx", "_with_font_set("].concat();
-        assert_eq!(source.matches(constructor_call.as_str()).count(), 4);
+        assert_eq!(source.matches(constructor_call.as_str()).count(), 5);
     }
 }
 

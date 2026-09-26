@@ -1231,6 +1231,7 @@ impl XrLocalEvent {
                                 rect,
                                 is_over: false,
                                 is_sweep: true,
+                                cancelled: false,
                             })
                         } else {
                             Hit::FingerMove(crate::FingerMoveEvent {
@@ -1262,6 +1263,7 @@ impl XrLocalEvent {
                             rect,
                             is_over: release_is_over,
                             is_sweep: false,
+                            cancelled: false,
                         })
                     }
                 };
@@ -1290,6 +1292,7 @@ impl XrLocalEvent {
                     rect,
                     is_over: false,
                     is_sweep: false,
+                    cancelled: false,
                 });
             }
         }

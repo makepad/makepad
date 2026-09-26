@@ -514,6 +514,9 @@ pub fn shared_swapchain_from_host_swapchain(
     host: &HostSwapchain,
     _cx: &mut crate::cx::Cx,
 ) -> SharedSwapchain {
+    // Android: every image is a hardware buffer the child fetches by id.
+    #[cfg(target_os = "android")]
+    _cx.android_share_host_swapchain(host);
     SharedSwapchain {
         window_id: host.window_id,
         alloc_width: host.alloc_width,

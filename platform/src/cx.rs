@@ -229,6 +229,21 @@ pub struct Cx {
     pub post_draw_hook: Option<Box<dyn FnMut(&mut Cx)>>,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
+    /// Frames to copy for transitions (`window_snapshot.rs`).
+    pub(crate) window_snapshots: Vec<crate::window_snapshot::WindowSnapshotRequest>,
+    /// Draws skipped because their pipeline was still compiling: in all,
+    /// and the repaint that last skipped one (`window_snapshot.rs`).
+    pub(crate) pipeline_skips: u64,
+    #[cfg(target_vendor = "apple")]
+    pub(crate) pipeline_skip_repaint: Option<u64>,
+    /// Until then (seconds since start), a window frame with a draw skipped
+    /// for a compiling pipeline is not presented: the last whole frame stays.
+    pub(crate) whole_frames_until: f64,
+    /// When the current whole-frames hold began (for the `switch` trace).
+    pub(crate) whole_hold_began: Option<f64>,
+    /// The app knows the frame being drawn is not the finished one (it lays
+    /// out again next frame): hold it back, within a whole-frames hold.
+    pub(crate) hold_next_paint: bool,
     #[allow(dead_code)]
     pub(crate) run_view_frame_requests: Vec<RunViewFrameRequest>,
     #[allow(dead_code)]
@@ -972,6 +987,13 @@ impl Cx {
 
             post_draw_hook: None,
             screenshot_requests: Default::default(),
+            window_snapshots: Vec::new(),
+            pipeline_skips: 0,
+            #[cfg(target_vendor = "apple")]
+            pipeline_skip_repaint: None,
+            whole_frames_until: 0.0,
+            whole_hold_began: None,
+            hold_next_paint: false,
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
             run_view_frame_encode_in_flight: false,
