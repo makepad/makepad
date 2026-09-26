@@ -537,7 +537,7 @@ impl Setup {
             return item("localai", "Local AI", "", text("not available · no NVIDIA GPU", DIM), "");
         }
         match runtime::windows_chain(&self.root) {
-            WindowsChain::Msvc => item("localai", "Local AI", "", done("on · Build tools, CUDA"), "turn off"),
+            WindowsChain::Msvc => item("localai", "Local AI", "", done("on"), "turn off"),
             WindowsChain::Gnu => item("localai", "Local AI", "", text("off", PLAIN), "turn on"),
             WindowsChain::Undecided => item("localai", "Local AI", "", text("off · asked when an AI app is first built", DIM), "turn on"),
         }
