@@ -1115,6 +1115,13 @@ impl Cx {
         }
     }
 
+    /// Whether a shader is queued for compilation or compiling on a worker:
+    /// the draws it holds back need another paint tick once it is ready.
+    pub(crate) fn hlsl_compiles_waiting(&self) -> bool {
+        !self.draw_shaders.compile_set.is_empty()
+            || !self.os.async_hlsl_compile.pending.is_empty()
+    }
+
     /// Installs one compile's outcome; true when the shader can now draw.
     fn hlsl_install_shader(
         &mut self,

@@ -467,7 +467,7 @@ impl Cx {
     /// Whether there is work a paint tick has to do, so the loop keeps
     /// ticking (`Poll`) instead of sleeping in `GetMessageW` (`Wait`): a dirty
     /// pass, a redraw, a queued NextFrame, a pending screenshot, a video that
-    /// is preparing or playing.
+    /// is preparing or playing, a shader on its way to the GPU.
     ///
     /// A pending screenshot must never be left asleep: nothing else would
     /// wake the loop to render the frame it needs.
@@ -477,6 +477,7 @@ impl Cx {
             || self.new_next_frames.len() != 0
             || !self.screenshot_requests.is_empty()
             || self.os.video_players.values().any(|p| p.keep_polling())
+            || self.hlsl_compiles_waiting()
     }
 
     /// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: once a second, the numbers an upload

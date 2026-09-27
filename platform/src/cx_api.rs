@@ -1606,12 +1606,19 @@ impl Cx {
     /// backend: the pointer's moves become `Event::Drag`, its release
     /// `Event::Drop` then `Event::DragEnd`. Files alone go to the OS drag
     /// where a backend has one, since a file may leave the app.
+    ///
+    /// Android and iOS are the exception: a finger sends touch updates, not
+    /// mouse moves and ups, so the shared path would never see the drag move
+    /// or end, and the next drag would find the last one still running. Their
+    /// backends drive every drag from the touch stream, cancel included.
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         if self.script_data.std.host_io_only() { return; }
         let files_only = items
             .iter()
             .all(|item| matches!(item, DragItem::FilePath { internal_id: None, .. }));
-        let os_drag = cfg!(not(any(target_arch = "wasm32", target_os = "linux", test))) && files_only;
+        let touch_backend = cfg!(any(target_os = "android", target_os = "ios"));
+        let os_drag = cfg!(not(any(target_arch = "wasm32", target_os = "linux", test)))
+            && (files_only || touch_backend);
         if !os_drag {
             self.drag_drop.start_internal_drag(items);
             return;
@@ -2982,25 +2989,3 @@ mod host_io_tests {
     }
 }
 
-#[cfg(test)]
-mod host_io_tests {
-    use super::*;
-
-    #[test]
-    fn host_io_native_widget_paths_do_not_enqueue_external_operations() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.script_data.std.restrict_to_host_io();
-        let before = cx.platform_ops.len();
-        cx.copy_to_clipboard("private");
-        cx.set_primary_selection("private");
-        cx.open_system_savefile_dialog();
-        cx.open_system_openfile_dialog();
-        cx.open_system_openfolder_dialog();
-        cx.open_system_savefolder_dialog();
-        cx.system_browser(LiveId::unique()).spawn("https://example.invalid/private");
-        cx.system_browser(LiveId::unique()).set_url("https://example.invalid/private", false);
-        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Network("https://example.invalid/private".into()), false, false);
-        cx.prepare_audio_playback(LiveId::unique(), VideoSource::Filesystem("/etc/passwd".into()), false, false);
-        assert_eq!(cx.platform_ops.len(), before);
-    }
-}
