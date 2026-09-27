@@ -354,7 +354,7 @@ script_mod! {
                 let off = Material.cast_offset(elev, self.material_light)
                 // A shadow wider than the margin it falls into would only be
                 // cut off: its blur stays within reach of the quad's edge.
-                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(m, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, m, length(off)), self.material_shadow.z, self.material_shadow.w)
                 var under = Material.cast(
                     d,
                     self.material_sd(p - off, c, h, r_tl, r_tr, r_br, r_bl),
@@ -372,7 +372,7 @@ script_mod! {
                 let qc = self.rect_size * 0.5
                 let rq = min((r_tl + r_tr + r_br + r_bl) * 0.5 + m, min(qc.x, qc.y))
                 let edge = -Material.sd_box(p, qc, qc, rq)
-                return under * smoothstep(0.0, max(m, 1.0), edge)
+                return under * Material.window(edge, m)
             }
 
             /** the face lit by the material: convex at rest, dished as far

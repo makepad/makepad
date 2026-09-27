@@ -61,9 +61,10 @@ script_mod! {
 
     // The margin is the room the shadow falls into, paid for again in the
     // padding, since a control keeps its quad and insets its face rather
-    // than growing past its clip.
+    // than growing past its clip: the offset the shadow starts at (the
+    // raise over the light's slope, 4) and two blur lengths for its tail.
     let Cap = Button{
-        padding: Inset{left: 22. right: 22. top: 16. bottom: 16.}
+        padding: Inset{left: 40. right: 40. top: 34. bottom: 34.}
         draw_bg +: {
             color: neu_ground
             color_hover: neu_ground
@@ -71,7 +72,7 @@ script_mod! {
             color_focus: neu_ground
             color_disabled: neu_ground
             material: neu_tier
-            material_margin: 10.0
+            material_margin: 28.0
             material_light: neu_light
             material_relief: neu_relief
             material_finish: neu_finish
@@ -227,15 +228,17 @@ script_mod! {
         StoryNote{text: "The Controls tab carries the material bench's controls, in its groups: Light, Relief, Surface, Finish, Shadow and Colours, each folded away or back by a click on its heading, and a preset that sets them all to one of the bench's eleven materials. They write every control on this page at once. A preset also brings the bench's ground for its material, which the examples stand on and are moulded out of, and its label ink, so each is seen as it was tuned whatever theme is showing. The page starts on the neumorphic preset at tier 2."}
 
         StoryHeading{text: "Raised and sunken"}
-        StoryNote{text: "The same material lit from opposite sides. A rounded view stands off the page: its face is lit and its cast shadow, contact ring and light-side lip go UNDER the face, inside the margin border_inset reclaims. A panel is a shallow step in the housing; sunken, it takes the surround's shadow across its face."}
+        StoryNote{text: "The same material lit from opposite sides. A rounded view stands off the page: its face is lit and its cast shadow, contact ring and light-side lip go UNDER the face, inside the margin border_inset reclaims, which is the shadow's offset and two blur lengths, so the tail is spent before the quad's edge. A panel is a shallow step in the housing; sunken, it takes the surround's shadow across its face."}
         stage_views := Stage{StoryRow{
             spacing: theme.space_3
             raised := RoundedView{
-                width: 160. height: 90.
+                width: 200. height: 130.
                 draw_bg +: {
                     color: neu_ground
                     border_radius: 8.
-                    border_inset: vec4(12. 12. 12. 12.)
+                    // The same room as a cap's margin: the shadow's offset
+                    // and two blur lengths.
+                    border_inset: vec4(28. 28. 28. 28.)
                     material: neu_tier
                     material_light: neu_light
                     material_relief: neu_relief
@@ -966,7 +969,7 @@ The bench's metallic, clearcoat, environment, reflection, exposure and highlight
     controls: &[
         section("Rest cap"),
         Control { label: "Tier", target: "subject", kind: ControlKind::Number { prop: "draw_bg.material", min: 0., max: 2., step: 1., default: 2. } },
-        Control { label: "Margin", target: "subject", kind: ControlKind::Number { prop: "draw_bg.material_margin", min: 0., max: 32., step: 1., default: 10. } },
+        Control { label: "Margin", target: "subject", kind: ControlKind::Number { prop: "draw_bg.material_margin", min: 0., max: 48., step: 1., default: 28. } },
         Control { label: "Press", target: "subject", kind: ControlKind::Number { prop: "draw_bg.material_press", min: -32., max: 8., step: 0.5, default: -9. } },
         Control { label: "Invert", target: "subject", kind: ControlKind::Number { prop: "draw_bg.material_press_invert", min: 0., max: 1., step: 0.05, default: 1. } },
         section("Material"),
