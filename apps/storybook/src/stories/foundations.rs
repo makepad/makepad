@@ -38,14 +38,6 @@ script_mod! {
         }
     }
 
-    mod.storybook.StillViewBase = #(StillView::register_widget(vm))
-    /** A view that passes no event to anything inside it, so whatever state its children were built in is the state they keep. */
-    mod.storybook.StillView = set_type_default() do mod.storybook.StillViewBase{
-        width: Fill
-        height: Fit
-        flow: Down
-    }
-
     mod.storybook.FoundationsFileTreeBase = #(FoundationsFileTree::register_widget(vm))
     /** A file tree of six fixed rows: two open folders and four files. */
     mod.storybook.FoundationsFileTree = set_type_default() do mod.storybook.FoundationsFileTreeBase{
@@ -854,23 +846,6 @@ fn motion_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             return;
         }
     }
-}
-
-/// A view that hands no event to its children. The state matrix builds each
-/// control in the state it shows, and a pointer passing over one would play
-/// that control's hover off and leave the cell showing rest.
-#[derive(Script, ScriptHook, Widget)]
-pub struct StillView {
-    #[deref]
-    view: View,
-}
-
-impl Widget for StillView {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.draw_walk(cx, scope, walk)
-    }
-
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
 /// A file tree with six rows that never change: two folders, both open, and
