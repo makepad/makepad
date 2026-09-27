@@ -239,6 +239,20 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
 
+## Performance dynamics and limits
+
+- Always carefully evaluate the performance dynamics a change has on the main
+  UI loop: what now runs per frame, per event, or per item, how that cost
+  scales with data size and view state, and what moves on or off the UI
+  thread. State this in the change's report, with measurements for hot paths.
+- Never add arbitrary limits (memory caps, CPU/time budgets, chunk or item
+  counts, queue sizes, retry counts) that only surface as random failures
+  when real data reaches them. It is better to keep working with a
+  performance hiccup than to stop working.
+- Where a bound is genuinely required, hitting it must degrade gracefully
+  (queue, spill, split, slow down, or retry on a later frame) and never
+  drop data, refuse input, or fail the operation; log when it happens.
+
 ## Platform changes stay application-neutral
 
 - `platform/`, `widgets/`, `draw/`, and the other shared layers serve every

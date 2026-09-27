@@ -1339,7 +1339,10 @@ fn process_shard(
     }
 
     let jobs = jobs.max(1);
-    let window = jobs.saturating_mul(2).max(1);
+    // Results are written in tile order, so a window only a little wider
+    // than the pool stalls every worker behind one huge q11 tile; a deep
+    // window keeps the cores busy (it holds compressed outputs only).
+    let window = jobs.saturating_mul(64).max(1);
     let pipeline_result = std::thread::scope(|scope| -> Result<(), String> {
         let (job_tx, job_rx) = sync_channel::<(usize, MkmapTileRef, Vec<u8>)>(jobs);
         let job_rx = Arc::new(Mutex::new(job_rx));
@@ -1566,7 +1569,7 @@ fn verify_in_place_partial(
             refs.len()
         ));
     }
-    for tile in refs {
+    let check = |tile: &MkmapTileRef, source: Vec<u8>| -> Result<(), String> {
         let blob = leaf
             .find(tile.tile_id)
             .ok_or_else(|| format!("shard {shard:03} partial lacks tile {}", tile.tile_id))?;
@@ -1577,7 +1580,7 @@ fn verify_in_place_partial(
         file.read_exact_at(&mut stored, blob.offset)
             .map_err(|err| format!("read {}: {err}", partial.display()))?;
         let before = codec
-            .decode(&read(tile)?)
+            .decode(&source)
             .map_err(|err| format!("decode input tile {}: {err}", tile.tile_id))?;
         let after = codec
             .decode(&stored)
@@ -1589,9 +1592,46 @@ fn verify_in_place_partial(
             ));
         }
         verify_kept_sections(&before, &after)
-            .map_err(|err| format!("shard {shard:03} tile {}: {err}", tile.tile_id))?;
+            .map_err(|err| format!("shard {shard:03} tile {}: {err}", tile.tile_id))
+    };
+    // Tiles stored in this shard verify in parallel, read straight from the
+    // original shard file (still in place; positional reads share it);
+    // borrowed ones go through `read` on this thread.
+    let (own, borrowed): (Vec<&MkmapTileRef>, Vec<&MkmapTileRef>) =
+        refs.iter().partition(|tile| tile.shard == shard);
+    for tile in borrowed {
+        check(tile, read(tile)?)?;
     }
-    Ok(())
+    let source_path = shard_path(dir, shard);
+    let source = File::open(&source_path)
+        .map_err(|err| format!("open {}: {err}", source_path.display()))?;
+    let jobs = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failure = Mutex::new(None::<String>);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(tile) = own.get(index) else { break };
+                let result = (|| {
+                    let mut bytes = vec![0_u8; tile.len as usize];
+                    source
+                        .read_exact_at(&mut bytes, tile.offset)
+                        .map_err(|err| format!("read {}: {err}", source_path.display()))?;
+                    check(tile, bytes)
+                })();
+                if let Err(err) = result {
+                    failure.lock().unwrap().get_or_insert(err);
+                    next.store(own.len(), std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            });
+        }
+    });
+    match failure.into_inner().unwrap() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 
