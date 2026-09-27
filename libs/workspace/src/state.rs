@@ -175,7 +175,36 @@ pub struct Settings {
     /// Directories hidden from the code map, per prepared project
     /// (`None` = nothing hidden anywhere). See [`MapHidden`].
     pub map_hidden: Option<Vec<MapHidden>>,
+    /// Folders opened, most recent first (`None` = none yet). See
+    /// [`RecentFolder`].
+    pub recent_folders: Option<Vec<RecentFolder>>,
 }
+
+/// A folder the app opened, with the platform bookmark that lets it open the
+/// folder again after a restart (a sandboxed macOS app has no access to a
+/// folder the user did not pick in this process otherwise).
+#[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
+pub struct RecentFolder {
+    pub path: String,
+    /// `makepad_platform::folder_access` bookmark bytes as lowercase hex.
+    pub bookmark: Option<String>,
+}
+
+impl RecentFolder {
+    pub fn bookmark_bytes(&self) -> Option<Vec<u8>> {
+        let hex = self.bookmark.as_deref()?.as_bytes();
+        if hex.len() % 2 != 0 {
+            return None;
+        }
+        hex.chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+            .collect()
+    }
+}
+
+/// How many folders the recent list keeps: what a recent-folders menu shows,
+/// the oldest drops off.
+const RECENT_FOLDERS: usize = 12;
 
 /// The directories one prepared project hides from its code map: the
 /// project is the prepared map's identity (the namespace directory name),
@@ -246,6 +275,27 @@ impl Settings {
     /// within 1..=16.
     pub fn tab_width(&self) -> u32 {
         self.tab_width.unwrap_or(8).clamp(1, 16)
+    }
+    /// Opened folders, most recent first.
+    pub fn recent_folders(&self) -> &[RecentFolder] {
+        self.recent_folders.as_deref().unwrap_or(&[])
+    }
+    /// Put `path` first in the recent list, with its bookmark (`None` keeps
+    /// the bookmark it already had, if any).
+    pub fn remember_folder(&mut self, path: &Path, bookmark: Option<&[u8]>) {
+        let path = path.to_string_lossy().into_owned();
+        let mut entries = self.recent_folders.take().unwrap_or_default();
+        let previous = entries
+            .iter()
+            .position(|entry| entry.path == path)
+            .map(|index| entries.remove(index));
+        let bookmark = match bookmark {
+            Some(bytes) => Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
+            None => previous.and_then(|entry| entry.bookmark),
+        };
+        entries.insert(0, RecentFolder { path, bookmark });
+        entries.truncate(RECENT_FOLDERS);
+        self.recent_folders = Some(entries);
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))

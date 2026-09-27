@@ -2581,8 +2581,27 @@ impl CxOsApi for Cx {
 
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
         if self.script_data.std.host_io_only() { return; }
-        // Use the macOS `open` command to open URLs
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        // NSWorkspace, not the `open` tool: no child process, and it works
+        // inside the App Sandbox. Like `open`, a string without a scheme is
+        // a file path.
+        unsafe {
+            let ns_string = str_to_nsstring(url);
+            let mut ns_url: ObjcId = msg_send![class!(NSURL), URLWithString: ns_string];
+            let has_scheme = ns_url != nil && {
+                let scheme: ObjcId = msg_send![ns_url, scheme];
+                scheme != nil
+            };
+            if !has_scheme {
+                ns_url = msg_send![class!(NSURL), fileURLWithPath: ns_string];
+            }
+            if ns_url != nil {
+                let workspace: ObjcId = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let opened: BOOL = msg_send![workspace, openURL: ns_url];
+                if opened == NO {
+                    crate::log!("open_url: macOS could not open {url}");
+                }
+            }
+        }
     }
 
     fn max_texture_width() -> usize {
