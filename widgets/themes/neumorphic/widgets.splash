@@ -1,9 +1,9 @@
 // The material itself needs no assignment here: `material` is a uniform whose
 // default is `theme.material_level`, and theme.splash has already raised that
 // before any widget registered. This file is only the geometry the look needs.
-// theme.material_margin (10) of every padding is the face keeping back from
+// theme.material_margin (32) of every padding is the face keeping back from
 // the quad; the rest is the face's own padding round the label.
-mod.widgets.Button.padding = mod.turtle.Inset{left: 26.0 right: 26.0 top: 17.0 bottom: 17.0}
+mod.widgets.Button.padding = mod.turtle.Inset{left: 48.0 right: 48.0 top: 39.0 bottom: 39.0}
 mod.widgets.Button.draw_bg.border_radius = 8.0
 mod.widgets.Button.draw_bg.border_size = 0.0
 // A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each

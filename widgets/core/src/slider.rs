@@ -2010,14 +2010,14 @@ script_mod! {
                     }
                     let raise = self.material_relief.z * (1.0 + 0.25 * lifted) * (1.0 - self.disabled)
                     let off = Material.cast_offset(raise, self.material_light)
-                    let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(margin, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                    let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, margin, length(off)), self.material_shadow.z, self.material_shadow.w)
                     var under = Material.cast(
                         d, length(q - off) - disc_r, length(q + off) - disc_r, g, px, raise, self.material_relief.z,
                         self.material_light, sh, self.material_inner.z,
                         self.material_shadow_ink.rgb, self.material_light_ink.rgb
                     ) * (1.0 - self.disabled)
                     // Faded out before the box edge, so it ends round.
-                    under = under * smoothstep(0.0, max(margin, 1.0), radius - rr)
+                    under = under * Material.window(radius - rr, margin)
                     // `clear` premultiplies what it is given.
                     sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
                     let t2 = step(1.5, self.material)

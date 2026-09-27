@@ -7,13 +7,14 @@
 //! the analytic cast-shadow sweep, the wing as a few knots with its taper,
 //! and the revolve's self-shadow over its disc as a 64 x 64 table.
 //!
-//! None of it depends on a knob's size or value, so every knob of one style
+//! None of it depends on a knob's size or value, so every knob of one shape
 //! under one light shares one bake. The ports follow the bench's functions
 //! step for step (`fixTangents`, `polyline`, `resample`, `bakeProfile`,
 //! `bakeCurve`, `bakeWing`, `dpIdx`, `bakeShade`), in the same order of
 //! operations, so the same inputs give the same taps.
-use super::presets::{Anchor, KnobMaterial, KnobStyle};
+use super::presets::{Anchor, KnobMaterial, KnobShape};
 use std::collections::BTreeSet;
+use std::f64::consts::TAU;
 
 /// Taps per curve.
 pub const TAPS: usize = 256;
@@ -330,7 +331,7 @@ pub struct ShadeConsts {
     pub wt: [f64; 4],
 }
 
-/// A style's geometry, baked: everything that depends on its curves and
+/// A shape's geometry, baked: everything that depends on its curves and
 /// the material's crease blur, and nothing that depends on the light.
 pub struct GeomBake {
     /// `DATA_ROWS` rows of `TAPS` texels, each (slope, value) at 16 bits as
@@ -346,7 +347,7 @@ pub struct GeomBake {
     hvs: Vec<f64>,
 }
 
-/// A style's shadows under one light and depth, baked.
+/// A shape's shadows under one light and depth, baked.
 pub struct ShadeBake {
     /// The knots as floats: the outline's eight, then the wing's four.
     pub knots: Vec<f32>,
@@ -355,17 +356,18 @@ pub struct ShadeBake {
     pub consts: ShadeConsts,
 }
 
-/// The geometry bake depends on the style and the material's crease blur.
+/// The geometry bake depends on the shape (its fingerprint) and the
+/// material's crease blur.
 #[derive(Clone, Copy, PartialEq)]
 pub struct GeomKey {
-    pub style: usize,
+    pub shape: u64,
     pub psmooth: f64,
 }
 
-/// The shadow bake on the style, the knob's depth and the light.
+/// The shadow bake on the shape, the knob's depth and the light.
 #[derive(Clone, Copy, PartialEq)]
 pub struct ShadeKey {
-    pub style: usize,
+    pub shape: u64,
     pub psmooth: f64,
     pub pdepth: f64,
     pub lx: f64,
@@ -374,26 +376,28 @@ pub struct ShadeKey {
 }
 
 impl GeomKey {
-    pub fn new(style: usize, m: &KnobMaterial) -> Self {
-        Self { style, psmooth: m.psmooth.round() }
+    /// `shape` is the shape's [`KnobShape::fingerprint`].
+    pub fn new(shape: u64, m: &KnobMaterial) -> Self {
+        Self { shape, psmooth: m.psmooth.round() }
     }
 }
 
 impl ShadeKey {
-    pub fn new(style: usize, m: &KnobMaterial) -> Self {
-        Self { style, psmooth: m.psmooth.round(), pdepth: m.pdepth, lx: m.lx, ly: m.ly, lz: m.lz }
+    /// `shape` is the shape's [`KnobShape::fingerprint`].
+    pub fn new(shape: u64, m: &KnobMaterial) -> Self {
+        Self { shape, psmooth: m.psmooth.round(), pdepth: m.pdepth, lx: m.lx, ly: m.ly, lz: m.lz }
     }
 }
 
-/// Bake one style's curves and wing (the bench's `bakeProfile`,
+/// Bake one shape's curves and wing (the bench's `bakeProfile`,
 /// `bakeFlute`, `bakeWing`).
-pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
+pub fn bake_geometry(style: &KnobShape, key: &GeomKey) -> GeomBake {
     let mut c = GeomConsts::default();
-    let prof = bake_profile(style.prof, key.psmooth);
-    let flute = bake_curve(style.flute);
-    let wwid = bake_curve(style.wwid);
-    let whgt = bake_curve(style.whgt);
-    let wprof = bake_curve(style.wprof);
+    let prof = bake_profile(&style.prof, key.psmooth);
+    let flute = bake_curve(&style.flute);
+    let wwid = bake_curve(&style.wwid);
+    let whgt = bake_curve(&style.whgt);
+    let wprof = bake_curve(&style.wprof);
 
     // The grip band, from the profile's anchors.
     let fa = style.prof[style.ffrom.min(style.prof.len() - 1)][0];
@@ -401,11 +405,11 @@ pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
     c.flute_r = [fa.min(fb), fa.max(fb)];
 
     // bakeWing.
-    let hv64 = resample(style.whgt, 64);
+    let hv64 = resample(&style.whgt, 64);
     c.wing_top = hv64.iter().fold(0.0f64, |a, b| a.max(*b)) * 2.0;
-    c.wing_hc = flat_curve(style.whgt)[1];
-    c.wing_wc = flat_curve(style.wwid);
-    let wv = resample(style.wwid, 256);
+    c.wing_hc = flat_curve(&style.whgt)[1];
+    c.wing_wc = flat_curve(&style.wwid);
+    let wv = resample(&style.wwid, 256);
     c.wing_ends = [wv[0], wv[255]];
     let slopes = [(wv[1] - wv[0]) * 255.0, (wv[255] - wv[254]) * 255.0];
     let w2n = style.wwmax * 0.5;
@@ -427,7 +431,7 @@ pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
     }
     c.wing_geo = [a0, a1, ms, me];
     c.wing_rc = [rs, re];
-    let pv = resample(style.wprof, 256);
+    let pv = resample(&style.wprof, 256);
     let dmax = hv64.iter().fold(0.0f64, |a, b| a.max(b * 2.0));
     c.wing_thru = -1.0;
     for (j, v) in pv.iter().enumerate() {
@@ -437,8 +441,8 @@ pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
         }
     }
 
-    let h = resample(style.prof, TAPS);
-    let hvs = resample(style.whgt, 256);
+    let h = resample(&style.prof, TAPS);
+    let hvs = resample(&style.whgt, 256);
 
     // What the shader precomputed per draw in the bench (solidPre).
     c.prof09 = row_at(&prof, 0.9)[1];
@@ -460,10 +464,10 @@ pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
     GeomBake { data, consts: c, h, pv, wvs: wv, hvs }
 }
 
-/// Bake one style's shadows under one light (the bench's `bakeShade`): the
+/// Bake one shape's shadows under one light (the bench's `bakeShade`): the
 /// revolve's outline by height, the wing's knots and taper, and the
 /// self-shadow table.
-pub fn bake_shade(style: &KnobStyle, geom: &GeomBake, key: &ShadeKey) -> ShadeBake {
+pub fn bake_shade(style: &KnobShape, geom: &GeomBake, key: &ShadeKey) -> ShadeBake {
     let mut c = ShadeConsts::default();
     let g = &geom.consts;
     let (h, pv, wvs, hvs) = (&geom.h, &geom.pv, &geom.wvs, &geom.hvs);
@@ -682,11 +686,119 @@ pub fn ink(c: u32) -> [f64; 3] {
     [((c >> 24) & 255) as f64 / 255.0, ((c >> 16) & 255) as f64 / 255.0, ((c >> 8) & 255) as f64 / 255.0]
 }
 
+/// The most strip lights the chrome studio hangs. The shader runs its strip
+/// loop this many times for every reflection it looks up, so a material
+/// asking for more gets this many.
+pub const MAX_STUDIO_LIGHTS: f64 = 32.0;
+
+/// The chrome studio's strip lights for this material, capped.
+pub fn studio_lights(m: &KnobMaterial) -> f64 {
+    m.lights.clamp(0.0, MAX_STUDIO_LIGHTS)
+}
+
+/// The panes across the chrome studio's ceiling panel: one is the plain
+/// panel the bench hangs.
+pub fn studio_panes(m: &KnobMaterial) -> f64 {
+    m.panes.clamp(1.0, 12.0)
+}
+
+/// Where a reflection along `rv` meets the plane of a rectangle light in
+/// direction `dir`, in the coordinates `rect_d` measures in; far off when
+/// the light is behind it. The shader's `rect_q`.
+fn rect_q(rv: [f64; 3], dir: [f64; 3]) -> [f64; 2] {
+    let rlu = norm3({
+        let c = cross3([0.0, 0.0, 1.0], dir);
+        [c[0] + 0.0001, c[1], c[2]]
+    });
+    let rlv = cross3(dir, rlu);
+    let rlc = dot3(rv, dir);
+    if rlc < 0.05 {
+        return [1000.0, 1000.0];
+    }
+    [dot3(rv, rlu) / rlc, dot3(rv, rlv) / rlc]
+}
+
+/// How much of a panel's light comes through at `q` when the panel (half
+/// size `half`) is glazed in `panes` panes each way: the shader's
+/// `glazing`, bars that blur with the footprint and fade as they do. An
+/// axis of one pane has no bar.
+fn glazing(q: [f64; 2], half: [f64; 2], panes: [f64; 2], wf: f64) -> f64 {
+    let mut near = 1000.0f64;
+    for i in 0..2 {
+        if panes[i] <= 1.5 {
+            continue;
+        }
+        let pitch = half[i] * 2.0 / panes[i].max(1.0);
+        let t = (q[i] + half[i]) / pitch + 0.5;
+        near = near.min(((t - t.floor()) - 0.5).abs() * pitch);
+    }
+    let bar = 1.0 - smoothstep(0.03 - wf, 0.03 + wf, near);
+    1.0 - bar * (0.12 / (0.03 + wf)).min(1.0)
+}
+
+/// The glazing of the chrome studio's ceiling panel and of its key softbox
+/// along `rv`: `panes` across each, the softbox in the rows that keep its
+/// panes square. One pane is the bench's plain panels.
+fn studio_glazing(rv: [f64; 3], kl: [f64; 3], panes: f64, wf: f64) -> (f64, f64) {
+    if panes <= 1.5 {
+        return (1.0, 1.0);
+    }
+    let rows = (panes * 0.62 + 0.5).floor().max(1.0);
+    (
+        glazing(rect_q(rv, [0.0, 0.0, 1.0]), [0.36, 0.36], [panes, panes], wf),
+        glazing(rect_q(rv, kl), [0.42, 0.26], [panes, rows], wf),
+    )
+}
+
+/// A rounded rectangle light in direction `dir` as a reflection along `rv`
+/// sees it: the signed distance to its edge, in the plane across `dir`.
+fn rect_d(rv: [f64; 3], dir: [f64; 3], hs: [f64; 2], rc: f64) -> f64 {
+    let rlu = norm3({
+        let c = cross3([0.0, 0.0, 1.0], dir);
+        [c[0] + 0.0001, c[1], c[2]]
+    });
+    let rlv = cross3(dir, rlu);
+    let rlc = dot3(rv, dir);
+    if rlc < 0.05 {
+        return 1e9;
+    }
+    let q = [(dot3(rv, rlu) / rlc).abs() - hs[0] + rc, (dot3(rv, rlv) / rlc).abs() - hs[1] + rc];
+    q[0].max(0.0).hypot(q[1].max(0.0)) + q[0].max(q[1]).min(0.0) - rc
+}
+
+fn rect_cov(d: f64, w: f64) -> f64 {
+    1.0 - smoothstep(-w, w, d)
+}
+
+/// The chrome studio's strip lights along `rv`: `lights` tall strips round
+/// the walls, the first a turn over `lights + 1` round from the key light's
+/// azimuth `az0` and the rest evenly after it, so three stand at the
+/// bench's right angles. Past three, every other one hangs high and short.
+/// The loop is the shader's: it runs while the count is at least half a
+/// light more than the strips so far.
+fn studio_strips(rv: [f64; 3], az0: f64, lights: f64, w: f64, wf: f64, en: f64) -> f64 {
+    let mut strips = 0.0;
+    let mut si = 0.0;
+    while si <= lights - 0.5 {
+        let az = az0 + TAU * (si + 1.0) / (lights + 1.0);
+        let high = lights > 3.5 && (si * 0.5).fract() > 0.25;
+        let (z, hs) = if high { (0.95, [0.035, 0.3]) } else { (0.35, [0.05, 0.8]) };
+        let ds = rect_d(rv, norm3([az.cos(), az.sin(), z]), hs, 0.02);
+        strips += 5.0 * en * (hs[0] + w) / (hs[0] + wf) * rect_cov(ds, wf);
+        si += 1.0;
+    }
+    strips
+}
+
 /// `envHDR2` for the straight-up reflection with no footprint, at one
 /// roughness: the environment's brightness a flat face sees, which every
 /// reflection is measured against. The bench works it out per vertex.
 fn env_up(m: &KnobMaterial, rgh: f64) -> [f64; 3] {
-    let rv = [0.0, 0.0, 1.0];
+    env_hdr(m, [0.0, 0.0, 1.0], rgh)
+}
+
+/// `envHDR2` along `rv` with no footprint, at one roughness.
+fn env_hdr(m: &KnobMaterial, rv: [f64; 3], rgh: f64) -> [f64; 3] {
     let light = [m.lx, m.ly, m.lz.max(0.02)];
     let kl = norm3(light);
     let (kvis, fp) = (1.0, 0.0);
@@ -694,20 +806,6 @@ fn env_up(m: &KnobMaterial, rgh: f64) -> [f64; 3] {
     let en = 1.0 / (1.0 + rgh * 3.0);
     let wf = (w * w + fp * fp).sqrt();
     let ground = ink(m.ground);
-    let rect_d = |dir: [f64; 3], hs: [f64; 2], rc: f64| -> f64 {
-        let rlu = norm3({
-            let c = cross3([0.0, 0.0, 1.0], dir);
-            [c[0] + 0.0001, c[1], c[2]]
-        });
-        let rlv = cross3(dir, rlu);
-        let rlc = dot3(rv, dir);
-        if rlc < 0.05 {
-            return 1e9;
-        }
-        let q = [(dot3(rv, rlu) / rlc).abs() - hs[0] + rc, (dot3(rv, rlv) / rlc).abs() - hs[1] + rc];
-        q[0].max(0.0).hypot(q[1].max(0.0)) + q[0].max(q[1]).min(0.0) - rc
-    };
-    let rect_cov = |d: f64, w: f64| 1.0 - smoothstep(-w, w, d);
     let mix3 = |a: [f64; 3], b: [f64; 3], t: f64| {
         [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
     };
@@ -728,17 +826,12 @@ fn env_up(m: &KnobMaterial, rgh: f64) -> [f64; 3] {
         let fc = mix3([0.55; 3], ground, 0.3);
         let floor_c = [fc[0] * 0.75, fc[1] * 0.75, fc[2] * 0.75];
         let wall_c = [0.03 + 0.6 * smoothstep(0.0, 0.9, rv[2]); 3];
-        let dt = rect_d([0.0, 0.0, 1.0], [0.36, 0.36], 0.36);
-        let dk = rect_d(kl, [0.42, 0.26], 0.08);
+        let dt = rect_d(rv, [0.0, 0.0, 1.0], [0.36, 0.36], 0.36);
+        let dk = rect_d(rv, kl, [0.42, 0.26], 0.08);
         let mut ec = mix3(floor_c, wall_c, smoothstep(-0.4 * w, 0.4 * w, rv[2]));
-        let add = 1.1 * en * rect_cov(dt, wf) + 3.5 * m.li * en * kvis * rect_cov(dk, wf);
-        let az0 = kl[1].atan2(kl[0]);
-        let mut strips = 0.0;
-        for si in 0..3 {
-            let az = az0 + 1.5708 * (si as f64 + 1.0);
-            let ds = rect_d(norm3([az.cos(), az.sin(), 0.35]), [0.05, 0.8], 0.02);
-            strips += 5.0 * en * (0.05 + w) / (0.05 + wf) * rect_cov(ds, wf);
-        }
+        let (pane, key_pane) = studio_glazing(rv, kl, studio_panes(m), wf);
+        let add = 1.1 * en * rect_cov(dt, wf) * pane + 3.5 * m.li * en * kvis * rect_cov(dk, wf) * key_pane;
+        let strips = studio_strips(rv, kl[1].atan2(kl[0]), studio_lights(m), w, wf, en);
         let hz = (rv[2] - 0.12).abs();
         let lw = w * 0.6 + 0.01;
         let lwf = (lw * lw + fp * fp).sqrt();
@@ -750,8 +843,8 @@ fn env_up(m: &KnobMaterial, rgh: f64) -> [f64; 3] {
     }
     let wall = mix3([0.5; 3], ground, 0.5);
     let k = (0.25 + 0.5 * smoothstep(-0.2, 1.0, rv[2])) * (0.2 + 0.8 * smoothstep(-0.3, 0.05, rv[2]));
-    let dk = rect_d(kl, [0.42, 0.26], 0.08);
-    let df = rect_d(norm3([-kl[0] + 0.0001, -kl[1], 0.45]), [0.07, 0.55], 0.0);
+    let dk = rect_d(rv, kl, [0.42, 0.26], 0.08);
+    let df = rect_d(rv, norm3([-kl[0] + 0.0001, -kl[1], 0.45]), [0.07, 0.55], 0.0);
     let add = 7.0 * m.li * en * kvis * rect_cov(dk, wf) + 2.2 * en * (0.07 + w) / (0.07 + wf) * rect_cov(df, wf);
     [wall[0] * k + add, wall[1] * k + add, wall[2] * k + add]
 }
@@ -767,4 +860,149 @@ pub fn env_ref(m: &KnobMaterial) -> [f64; 4] {
     let ec = if m.coat > 0.001 { env_up(m, m.coatr.clamp(0.0, 1.0)) } else { [0.0; 3] };
     let lum = (e0[0] * 0.2126 + e0[1] * 0.7152 + e0[2] * 0.0722).max(0.05);
     [lum, ec[0], ec[1], ec[2]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knob::presets::{material_index, MATERIALS};
+
+    fn chrome(lights: f64) -> KnobMaterial {
+        KnobMaterial { lights, ..MATERIALS[material_index("chrome").unwrap()] }
+    }
+
+    /// The key light's azimuth, the strips' origin.
+    fn az0(m: &KnobMaterial) -> f64 {
+        let kl = norm3([m.lx, m.ly, m.lz.max(0.02)]);
+        kl[1].atan2(kl[0])
+    }
+
+    /// The reflection that looks straight at a strip at this azimuth.
+    fn toward(az: f64) -> [f64; 3] {
+        norm3([az.cos(), az.sin(), 0.35])
+    }
+
+    #[test]
+    fn the_strips_follow_the_count_of_lights() {
+        let rgh = chrome(3.0).rough;
+        // Where the first of three hangs: lit by three, dark with none.
+        let first_of_three = toward(az0(&chrome(3.0)) + TAU / 4.0);
+        let lit = env_hdr(&chrome(3.0), first_of_three, rgh);
+        let bare = env_hdr(&chrome(0.0), first_of_three, rgh);
+        assert!(lit[0] - bare[0] > 1.0, "three lights {lit:?} against none {bare:?}");
+        // Where the first of seven hangs, between the three's: seven light it
+        // and three do not.
+        let first_of_seven = toward(az0(&chrome(7.0)) + TAU / 8.0);
+        let seven = env_hdr(&chrome(7.0), first_of_seven, rgh);
+        let three = env_hdr(&chrome(3.0), first_of_seven, rgh);
+        assert!(seven[0] - three[0] > 1.0, "seven lights {seven:?} against three {three:?}");
+        assert_eq!(three, env_hdr(&chrome(0.0), first_of_seven, rgh));
+        // No count past the cap reaches the shader.
+        assert_eq!(studio_lights(&chrome(1e6)), MAX_STUDIO_LIGHTS);
+        assert_eq!(studio_lights(&chrome(-4.0)), 0.0);
+    }
+
+    /// Three lights are the bench's studio: its loop put them at 1.5708
+    /// radians apart, a turn over four to within 4e-6. A strip is narrower
+    /// than its blur, so that shift moves what a reflection sees by a few
+    /// thousandths at most, at the steepest of a strip's edge.
+    #[test]
+    fn three_lights_are_the_benchs_right_angles() {
+        let m = chrome(3.0);
+        let a0 = az0(&m);
+        for rgh in [0.06, 0.3, 0.8] {
+            let w = 0.03 + rgh * 0.45;
+            let en = 1.0 / (1.0 + rgh * 3.0);
+            // With no footprint the blurred width is the width, and the
+            // strip's brightness is its plain 5 en.
+            let bench = |rv: [f64; 3]| -> f64 {
+                (0..3)
+                    .map(|si| {
+                        let az = a0 + 1.5708 * (si as f64 + 1.0);
+                        let ds = rect_d(rv, toward(az), [0.05, 0.8], 0.02);
+                        5.0 * en * rect_cov(ds, w)
+                    })
+                    .sum()
+            };
+            for si in 0..3 {
+                let rv = toward(a0 + 1.5708 * (si as f64 + 1.0));
+                let (ours, theirs) = (studio_strips(rv, a0, 3.0, w, w, en), bench(rv));
+                assert!(theirs > 0.5 * 5.0 * en, "the bench's strip {si} is not where it was hung");
+                assert!((ours - theirs).abs() < 5e-3, "strip {si}: {ours} against the bench's {theirs}");
+            }
+            for i in 0..90 {
+                for z in [0.1, 0.35, 0.6] {
+                    let az = i as f64 * TAU / 90.0;
+                    let rv = norm3([az.cos(), az.sin(), z]);
+                    let (ours, theirs) = (studio_strips(rv, a0, 3.0, w, w, en), bench(rv));
+                    assert!((ours - theirs).abs() < 5e-3, "{ours} against the bench's {theirs} at {rv:?}");
+                }
+            }
+        }
+    }
+
+    /// A glazed ceiling darkens a reflection that looks at a bar and leaves
+    /// one that looks through the middle of a pane, and one pane is the
+    /// bench's plain panel.
+    #[test]
+    fn the_ceiling_is_glazed_in_panes() {
+        let plain = chrome(3.0);
+        let glazed = KnobMaterial { panes: 3.0, ..plain };
+        let rgh = plain.rough;
+        // Three panes across 0.72: bars at 0.12 either side of the middle.
+        let at_a_bar = norm3([0.12, 0.0, 1.0]);
+        let through_a_pane = [0.0, 0.0, 1.0];
+        let (bar, open) = (env_hdr(&glazed, at_a_bar, rgh), env_hdr(&plain, at_a_bar, rgh));
+        assert!(open[0] - bar[0] > 0.2, "a bar {bar:?} against the plain panel {open:?}");
+        assert_eq!(env_hdr(&glazed, through_a_pane, rgh), env_hdr(&plain, through_a_pane, rgh));
+        assert_eq!(studio_glazing(at_a_bar, [0.0, 0.0, 1.0], 1.0, 0.05), (1.0, 1.0));
+        assert_eq!(studio_panes(&KnobMaterial { panes: 0.0, ..plain }), 1.0);
+    }
+
+    /// The key softbox is glazed with the ceiling: a reflection that looks
+    /// at one of its bars is darker than the plain softbox gives, and one
+    /// that looks through the middle of a pane is the same.
+    #[test]
+    fn the_key_softbox_is_glazed_too() {
+        let plain = chrome(3.0);
+        let glazed = KnobMaterial { panes: 3.0, ..plain };
+        let rgh = plain.rough;
+        let kl = norm3([plain.lx, plain.ly, plain.lz.max(0.02)]);
+        // The softbox's own axes, as rect_q lays them out.
+        let u = norm3({
+            let c = cross3([0.0, 0.0, 1.0], kl);
+            [c[0] + 0.0001, c[1], c[2]]
+        });
+        let v = cross3(kl, u);
+        let at = |qu: f64, qv: f64| norm3([kl[0] + u[0] * qu + v[0] * qv, kl[1] + u[1] * qu + v[1] * qv, kl[2] + u[2] * qu + v[2] * qv]);
+        // Three panes across 0.84: bars at 0.14 either side of the middle,
+        // and two rows: one bar along the middle.
+        let bar = at(0.14, 0.13);
+        assert!(env_hdr(&plain, bar, rgh)[0] - env_hdr(&glazed, bar, rgh)[0] > 0.5);
+        let open = at(0.0, 0.13);
+        assert_eq!(env_hdr(&glazed, open, rgh), env_hdr(&plain, open, rgh));
+    }
+
+    /// Past three lights every other strip hangs high: the second of seven
+    /// is found up the wall and not down it.
+    #[test]
+    fn past_three_every_other_strip_hangs_high() {
+        let m = chrome(7.0);
+        let rgh = m.rough;
+        let az = az0(&m) + TAU * 2.0 / 8.0;
+        let (up, down) = (norm3([az.cos(), az.sin(), 0.95]), norm3([az.cos(), az.sin(), 0.35]));
+        let bare = chrome(0.0);
+        assert!(env_hdr(&m, up, rgh)[0] - env_hdr(&bare, up, rgh)[0] > 1.0);
+        assert_eq!(env_hdr(&m, down, rgh), env_hdr(&bare, down, rgh));
+    }
+
+    /// The strips hang low on the walls and the reflection a flat face
+    /// measures against looks straight up, so the count of lights leaves it
+    /// alone: the flat face's colour does not move with the studio.
+    #[test]
+    fn the_flat_face_reference_does_not_see_the_strips() {
+        for lights in [0.0, 1.0, 7.0, 12.0] {
+            assert_eq!(env_ref(&chrome(lights)), env_ref(&chrome(3.0)), "{lights} lights");
+        }
+    }
 }

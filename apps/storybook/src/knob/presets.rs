@@ -1,5 +1,5 @@
-//! The knob presets as data: the bench's eleven materials and its nineteen
-//! styles, which multiply -- any style in any material.
+//! The knob presets as data: the bench's eleven materials and a twelfth, and
+//! eighteen of its styles, which multiply -- any style in any material.
 //!
 //! A material carries the light, the finish, the surface (metal, clear coat,
 //! the studio it reflects) and the inks; a style carries the geometry: the
@@ -7,6 +7,10 @@
 //! numbers the Material Bench (`material-bench-v74.html`) hands its shader
 //! after its own preprocessing, so a knob drawn here from the same pair reads
 //! as the bench's.
+//!
+//! A style is a const with borrowed curves; [`KnobShape`] is the same
+//! geometry owned, for a knob whose shape is being edited.
+use std::sync::OnceLock;
 
 /// One material: light, finish, surface, shadow and inks.
 ///
@@ -67,6 +71,14 @@ pub struct KnobMaterial {
     pub coatr: f64,
     pub envk: f64,
     pub persp: f64,
+    /// How many strip lights hang round the chrome studio's walls: the
+    /// first a turn over `lights + 1` round from the key light, the rest
+    /// evenly after it, so the bench's three stand at right angles. Past
+    /// three, every other one hangs high and short.
+    pub lights: f64,
+    /// How many panes the chrome studio's ceiling panel is glazed in: one
+    /// is the bench's plain panel, more put a window in a flat face.
+    pub panes: f64,
     pub ground: u32,
     pub body_ink: u32,
     pub light_ink: u32,
@@ -158,6 +170,148 @@ impl KnobStyle {
     }
 }
 
+/// A knob's geometry, owned: every field of [`KnobStyle`], the curves as
+/// vectors, so a page can edit a shape and hand it to a knob. Every curve
+/// needs two anchors at least, x running from 0 to 1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KnobShape {
+    pub name: String,
+    pub capr: f64,
+    pub cap_ink: u32,
+    pub spun: f64,
+    pub flat: f64,
+    pub wr0: f64,
+    pub wr1: f64,
+    pub wwmax: f64,
+    pub barfil: f64,
+    pub wendr: f64,
+    pub wmode: f64,
+    pub wbase: f64,
+    pub wwid: Vec<Anchor>,
+    pub whgt: Vec<Anchor>,
+    pub wprof: Vec<Anchor>,
+    pub arcr: f64,
+    pub arcw: f64,
+    pub awell: f64,
+    pub well: f64,
+    pub ticks: f64,
+    pub tickr: f64,
+    pub tickl: f64,
+    pub tickw: f64,
+    pub prof: Vec<Anchor>,
+    pub flutes: f64,
+    pub fd: f64,
+    pub fs: f64,
+    pub gtaper: f64,
+    pub ffrom: usize,
+    pub fto: usize,
+    pub flute: Vec<Anchor>,
+    pub ptype: f64,
+    pub pr0: f64,
+    pub pr1: f64,
+    pub pw: f64,
+    pub cut: f64,
+    pub cn: f64,
+    pub cr: f64,
+    pub cs: f64,
+    pub cl: f64,
+    pub cf: f64,
+    pub cw: f64,
+    pub cfil: f64,
+    pub csph: f64,
+    pub cz: f64,
+}
+
+impl From<&KnobStyle> for KnobShape {
+    fn from(s: &KnobStyle) -> Self {
+        KnobShape {
+            name: s.name.to_string(),
+            capr: s.capr,
+            cap_ink: s.cap_ink,
+            spun: s.spun,
+            flat: s.flat,
+            wr0: s.wr0,
+            wr1: s.wr1,
+            wwmax: s.wwmax,
+            barfil: s.barfil,
+            wendr: s.wendr,
+            wmode: s.wmode,
+            wbase: s.wbase,
+            wwid: s.wwid.to_vec(),
+            whgt: s.whgt.to_vec(),
+            wprof: s.wprof.to_vec(),
+            arcr: s.arcr,
+            arcw: s.arcw,
+            awell: s.awell,
+            well: s.well,
+            ticks: s.ticks,
+            tickr: s.tickr,
+            tickl: s.tickl,
+            tickw: s.tickw,
+            prof: s.prof.to_vec(),
+            flutes: s.flutes,
+            fd: s.fd,
+            fs: s.fs,
+            gtaper: s.gtaper,
+            ffrom: s.ffrom,
+            fto: s.fto,
+            flute: s.flute.to_vec(),
+            ptype: s.ptype,
+            pr0: s.pr0,
+            pr1: s.pr1,
+            pw: s.pw,
+            cut: s.cut,
+            cn: s.cn,
+            cr: s.cr,
+            cs: s.cs,
+            cl: s.cl,
+            cf: s.cf,
+            cw: s.cw,
+            cfil: s.cfil,
+            csph: s.csph,
+            cz: s.cz,
+        }
+    }
+}
+
+impl KnobShape {
+    /// What the bakes are keyed on: a 64-bit FNV-1a over every number that
+    /// shapes the knob, each curve's length and anchors included. The name
+    /// is a label, not geometry, and is left out, so a shape edited back to
+    /// a preset's numbers finds that preset's bakes. A zero is hashed as +0,
+    /// so two shapes that compare equal fingerprint equal.
+    pub fn fingerprint(&self) -> u64 {
+        fn mix(h: u64, bits: u64) -> u64 {
+            bits.to_le_bytes().iter().fold(h, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3))
+        }
+        fn num(h: u64, v: f64) -> u64 {
+            mix(h, if v == 0.0 { 0 } else { v.to_bits() })
+        }
+        let scalars = [
+            self.capr, self.spun, self.flat, self.wr0, self.wr1, self.wwmax, self.barfil, self.wendr, self.wmode,
+            self.wbase, self.arcr, self.arcw, self.awell, self.well, self.ticks, self.tickr, self.tickl, self.tickw,
+            self.flutes, self.fd, self.fs, self.gtaper, self.ptype, self.pr0, self.pr1, self.pw, self.cut, self.cn,
+            self.cr, self.cs, self.cl, self.cf, self.cw, self.cfil, self.csph, self.cz,
+        ];
+        let mut h = scalars.iter().fold(0xCBF2_9CE4_8422_2325, |h, v| num(h, *v));
+        h = mix(h, self.cap_ink as u64);
+        h = mix(h, self.ffrom as u64);
+        h = mix(h, self.fto as u64);
+        for curve in [&self.prof, &self.flute, &self.wwid, &self.whgt, &self.wprof] {
+            h = mix(h, curve.len() as u64);
+            h = curve.iter().flatten().fold(h, |h, v| num(h, *v));
+        }
+        h
+    }
+}
+
+/// Every style as an owned shape, made once: what a knob with no shape of
+/// its own draws, without a fresh copy of the curves every frame.
+pub fn style_shapes() -> &'static [KnobShape] {
+    static SHAPES: OnceLock<Vec<KnobShape>> = OnceLock::new();
+    SHAPES.get_or_init(|| STYLES.iter().map(KnobShape::from).collect())
+}
+
 /// The material's index by its name, case-insensitively.
 pub fn material_index(name: &str) -> Option<usize> {
     MATERIALS.iter().position(|m| m.name.eq_ignore_ascii_case(name))
@@ -171,8 +325,8 @@ pub fn style_index(name: &str) -> Option<usize> {
 // The bench's eleven materials as it applies them: every derived preset
 // resolved, each shadow ink divided by its ground and the occlusion rescaled
 // to match (the bench's own post-pass), so these are the numbers its shader
-// receives. Generated from material-bench-v74.html.
-pub const MATERIALS: [KnobMaterial; 11] = [
+// receives. Generated from material-bench-v74.html; the twelfth is ours.
+pub const MATERIALS: [KnobMaterial; 12] = [
     KnobMaterial {
         name: "Neumorphic",
         level: 1.0,
@@ -212,6 +366,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0xEEF0F6FF,
         body_ink: 0xEEF0F6FF,
         light_ink: 0xFFFFFFFF,
@@ -258,6 +414,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0xD8DAD6FF,
         body_ink: 0xD8DAD6FF,
         light_ink: 0xF6F6F3FF,
@@ -304,6 +462,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2F34FF,
         body_ink: 0x2B2F34FF,
         light_ink: 0xFFFFFFFF,
@@ -350,6 +510,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x15171BFF,
         body_ink: 0x15171BFF,
         light_ink: 0x9AA3ADFF,
@@ -396,6 +558,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0xE3E7EEFF,
         body_ink: 0xE3E7EEFF,
         light_ink: 0xFFFFFFFF,
@@ -442,6 +606,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0xE3E7EEFF,
         body_ink: 0x171618FF,
         light_ink: 0xFFF6EAFF,
@@ -488,6 +654,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2F35FF,
         body_ink: 0x2B2F35FF,
         light_ink: 0xCFD5DCFF,
@@ -534,6 +702,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2826FF,
         body_ink: 0x2B2826FF,
         light_ink: 0xF0E9E0FF,
@@ -580,6 +750,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x0E1013FF,
         body_ink: 0x0E1013FF,
         light_ink: 0x7C838CFF,
@@ -626,6 +798,8 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.08,
         envk: 0.0,
         persp: 0.0,
+        lights: 3.0,
+        panes: 1.0,
         ground: 0x8A8A8AFF,
         body_ink: 0x8A8A8AFF,
         light_ink: 0xF7F8FAFF,
@@ -672,6 +846,59 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         coatr: 0.05,
         envk: 1.0,
         persp: 0.7,
+        lights: 3.0,
+        panes: 1.0,
+        ground: 0x1B1E23FF,
+        body_ink: 0xB8BDC5FF,
+        light_ink: 0xFFFFFFFF,
+        shadow_ink: 0x262B2CFF,
+        glow_ink: 0x7FD4FFFF,
+        ptr_ink: 0xE8ECF2FF,
+    },
+    // Not the bench's: the chrome in a studio hung with seven strip lights
+    // under a ceiling glazed in three panes, so its face shows more of the
+    // room than the bench's three strips and plain panel put there.
+    KnobMaterial {
+        name: "Showroom chrome",
+        level: 2.0,
+        lx: -0.2,
+        ly: -0.7,
+        lz: 0.68,
+        li: 1.15,
+        bw: 2.5,
+        bc: 0.7,
+        raise: 2.5,
+        sink: 3.0,
+        spec: 1.0,
+        rough: 0.06,
+        ao: 1.0,
+        rim: 0.0,
+        gloss: 0.0,
+        glow: 0.4,
+        shadow: 0.7,
+        sblur: 10.0,
+        fall: 1.0,
+        oao: 1.0,
+        inner: 0.72,
+        inner_r: 9.0,
+        lip: 0.0,
+        facegrad: 0.0,
+        hair: 0.5,
+        aoreach: 1.1,
+        pdepth: 0.75,
+        psmooth: 3.0,
+        pfin: 0.0,
+        mbev: 1.5,
+        env: 1.0,
+        metal: 1.0,
+        ev: 0.0,
+        roll: 0.75,
+        coat: 0.0,
+        coatr: 0.05,
+        envk: 1.0,
+        persp: 0.7,
+        lights: 7.0,
+        panes: 3.0,
         ground: 0x1B1E23FF,
         body_ink: 0xB8BDC5FF,
         light_ink: 0xFFFFFFFF,
@@ -681,10 +908,10 @@ pub const MATERIALS: [KnobMaterial; 11] = [
     },
 ];
 
-// The bench's nineteen knob styles: geometry only, any style in any
+// Eighteen of the bench's knob styles: geometry only, any style in any
 // material. Curves are anchors [x, y, type]: 0 point, 1 smooth, 2 corner,
 // 3 horizontal. Generated from material-bench-v74.html.
-pub const STYLES: [KnobStyle; 19] = [
+pub const STYLES: [KnobStyle; 18] = [
     KnobStyle {
         name: "classic",
         capr: 0.0,
@@ -916,63 +1143,6 @@ pub const STYLES: [KnobStyle; 19] = [
         fto: 3,
         prof: &[[0.0, 1.0, 1.0], [0.28, 0.97, 1.0], [0.34, 0.3, 2.0], [0.93, 0.25, 1.0], [1.0, 0.0, 2.0]],
         flute: &[[0.0, 1.0, 1.0], [0.5, 0.5, 1.0], [1.0, 0.0, 1.0]],
-        wwid: &[[0.0, 1.0, 1.0], [0.86, 0.6, 1.0], [1.0, 0.0, 1.0]],
-        whgt: &[[0.0, 0.3, 0.0], [1.0, 0.3, 0.0]],
-        wprof: &[[0.0, 1.0, 0.0], [0.55, 1.0, 1.0], [1.0, 0.0, 1.0]],
-    },
-    KnobStyle {
-        name: "collet",
-        capr: 0.0,
-        spun: 0.0,
-        flat: 0.0,
-        wr0: 0.0,
-        wr1: 0.0,
-        wwmax: 0.5,
-        barfil: 0.06,
-        wendr: 1.0,
-        arcr: 1.18,
-        arcw: 0.0,
-        well: 0.0,
-        tickr: 0.78,
-        tickl: 0.14,
-        tickw: 1.8,
-        gtaper: 0.15,
-        flutes: 24.0,
-        fd: 2.2,
-        fs: 0.6,
-        ptype: 1.0,
-        pr0: 0.16,
-        pr1: 0.5,
-        pw: 3.0,
-        ticks: 0.0,
-        cut: 0.0,
-        cn: 8.0,
-        cr: 0.0,
-        cs: 0.3,
-        cl: 0.6,
-        cf: 0.75,
-        cw: 0.1,
-        cfil: 0.05,
-        csph: 0.0,
-        cz: 0.2,
-        wmode: 0.0,
-        wbase: 0.0,
-        awell: 0.0,
-        cap_ink: 0xA9AEB5FF,
-        ffrom: 4,
-        fto: 7,
-        prof: &[
-            [0.0, 1.0, 1.0],
-            [0.26, 0.97, 1.0],
-            [0.32, 0.66, 2.0],
-            [0.44, 0.62, 2.0],
-            [0.52, 0.84, 2.0],
-            [0.62, 0.78, 0.0],
-            [0.68, 0.34, 2.0],
-            [0.94, 0.28, 1.0],
-            [1.0, 0.0, 2.0],
-        ],
-        flute: &[[0.0, 1.0, 2.0], [0.4, 0.72, 1.0], [1.0, 0.0, 2.0]],
         wwid: &[[0.0, 1.0, 1.0], [0.86, 0.6, 1.0], [1.0, 0.0, 1.0]],
         whgt: &[[0.0, 0.3, 0.0], [1.0, 0.3, 0.0]],
         wprof: &[[0.0, 1.0, 0.0], [0.55, 1.0, 1.0], [1.0, 0.0, 1.0]],
@@ -1597,3 +1767,109 @@ pub const STYLES: [KnobStyle; 19] = [
         wprof: &[[0.0, 1.0, 1.0], [0.16, 0.18, 1.0], [1.0, 0.0, 0.0]],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bakes are keyed on the fingerprint, so a preset that shared
+    /// another's would draw with the other's curves and shadows.
+    #[test]
+    fn every_style_fingerprints_as_itself_and_no_other() {
+        let prints: Vec<u64> = STYLES.iter().map(|s| KnobShape::from(s).fingerprint()).collect();
+        for (i, s) in STYLES.iter().enumerate() {
+            assert_eq!(KnobShape::from(s), KnobShape::from(s));
+            assert_eq!(KnobShape::from(s).fingerprint(), prints[i], "{} fingerprints two ways", s.name);
+            assert_eq!(style_shapes()[i], KnobShape::from(s), "the shared table has {} wrong", s.name);
+            for (j, other) in STYLES.iter().enumerate().skip(i + 1) {
+                assert_ne!(prints[i], prints[j], "{} and {} fingerprint alike", s.name, other.name);
+            }
+        }
+    }
+
+    /// Every field a bake reads moves the fingerprint; the name, which no
+    /// bake reads, does not.
+    #[test]
+    fn the_fingerprint_follows_every_field_but_the_name() {
+        let base = KnobShape::from(&STYLES[0]);
+        let edits: [fn(&mut KnobShape); 44] = [
+            |s| s.capr += 0.01,
+            |s| s.cap_ink ^= 0x100,
+            |s| s.spun += 0.01,
+            |s| s.flat += 0.01,
+            |s| s.wr0 += 0.01,
+            |s| s.wr1 += 0.01,
+            |s| s.wwmax += 0.01,
+            |s| s.barfil += 0.01,
+            |s| s.wendr += 0.01,
+            |s| s.wmode += 0.01,
+            |s| s.wbase += 0.01,
+            |s| s.wwid[0][1] += 0.01,
+            |s| s.whgt[0][1] += 0.01,
+            |s| s.wprof[0][1] += 0.01,
+            |s| s.arcr += 0.01,
+            |s| s.arcw += 0.01,
+            |s| s.awell += 0.01,
+            |s| s.well += 0.01,
+            |s| s.ticks += 0.01,
+            |s| s.tickr += 0.01,
+            |s| s.tickl += 0.01,
+            |s| s.tickw += 0.01,
+            |s| s.prof[1][0] += 0.01,
+            |s| s.flutes += 0.01,
+            |s| s.fd += 0.01,
+            |s| s.fs += 0.01,
+            |s| s.gtaper += 0.01,
+            |s| s.ffrom += 1,
+            |s| s.fto += 1,
+            |s| s.flute[0][2] = 2.0,
+            |s| s.ptype += 0.01,
+            |s| s.pr0 += 0.01,
+            |s| s.pr1 += 0.01,
+            |s| s.pw += 0.01,
+            |s| s.cut += 0.01,
+            |s| s.cn += 0.01,
+            |s| s.cr += 0.01,
+            |s| s.cs += 0.01,
+            |s| s.cl += 0.01,
+            |s| s.cf += 0.01,
+            |s| s.cw += 0.01,
+            |s| s.cfil += 0.01,
+            |s| s.csph += 0.01,
+            |s| s.cz += 0.01,
+        ];
+        for (i, edit) in edits.iter().enumerate() {
+            let mut s = base.clone();
+            edit(&mut s);
+            assert_ne!(s.fingerprint(), base.fingerprint(), "edit {i} left the fingerprint alone");
+        }
+        // An anchor moved from one curve to the next is a different shape.
+        let mut moved = base.clone();
+        let a = moved.wwid.pop().unwrap();
+        moved.whgt.insert(0, a);
+        assert_ne!(moved.fingerprint(), base.fingerprint());
+        let renamed = KnobShape { name: "custom".into(), ..base.clone() };
+        assert_eq!(renamed.fingerprint(), base.fingerprint());
+        // -0 and +0 compare equal, so they fingerprint equal.
+        let signed = KnobShape { capr: -0.0, ..base.clone() };
+        assert_eq!(signed, base);
+        assert_eq!(signed.fingerprint(), base.fingerprint());
+    }
+
+    #[test]
+    fn the_showroom_is_the_chrome_under_more_lights() {
+        let chrome = MATERIALS[material_index("chrome").unwrap()];
+        let showroom = MATERIALS[material_index("showroom chrome").unwrap()];
+        assert_eq!((showroom.lights, showroom.panes), (7.0, 3.0));
+        assert_eq!(KnobMaterial { name: chrome.name, lights: chrome.lights, panes: chrome.panes, ..showroom }, chrome);
+        for m in MATERIALS.iter().filter(|m| m.name != showroom.name) {
+            assert_eq!((m.lights, m.panes), (3.0, 1.0), "{} is not hung like the bench's studio", m.name);
+        }
+    }
+
+    #[test]
+    fn the_collet_is_gone() {
+        assert_eq!(STYLES.len(), 18);
+        assert!(style_index("collet").is_none());
+    }
+}

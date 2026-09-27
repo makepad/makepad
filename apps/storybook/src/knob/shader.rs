@@ -74,15 +74,19 @@ script_mod! {
         // Material. light: x, y, z, intensity; relief: bevel width and
         // curve, raise, specular; finish: occlusion, rim, gloss, roughness;
         // env: reflection, perspective, exposure (linear), roll-off;
-        // surf: metal, clear coat, its roughness, studio; shadow: strength,
-        // blur, falloff, contact; inner: inner shadow, its blur, lip, glow;
-        // tune: tier, sink, hairline, occlusion reach; knob: profile depth,
-        // mark finish, mark bevel, face gradient; env_ref: the flat face's
-        // reflection (luminance, clear coat rgb).
+        // surf: metal, clear coat, its roughness, studio; studio: the
+        // chrome studio's strip lights and the panes its ceiling panel is
+        // glazed in; shadow: strength, blur, falloff,
+        // contact; inner: inner shadow, its blur, lip, glow; tune: tier,
+        // sink, hairline, occlusion reach; knob: profile depth, mark finish,
+        // mark bevel, face gradient; env_ref: the flat face's reflection
+        // (luminance, clear coat rgb). Both draw shaders spread this, so
+        // both carry every one of these.
         m_light: uniform(vec4(-0.35, -0.55, 0.66, 0.7))
         m_relief: uniform(vec4(4.0, 0.7, 4.0, 0.0))
         m_finish: uniform(vec4(0.25, 0.4, 0.0, 0.85))
         m_surf: uniform(vec4(0.0, 0.0, 0.08, 0.0))
+        m_studio: uniform(vec4(3.0, 1.0, 0.0, 0.0))
         m_shadow: uniform(vec4(0.85, 12.0, 1.0, 0.25))
         m_inner: uniform(vec4(0.55, 10.0, 0.7, 0.0))
         m_tune: uniform(vec4(1.0, 4.0, 0.0, 1.2))
@@ -731,9 +735,54 @@ script_mod! {
             return 1.0 - smoothstep(-w, w, d)
         }
 
+        // Where a reflection along `rv` meets the plane of a rectangle
+        // light in direction `dir`, in the coordinates `rect_d` measures
+        // in; far off when the light is behind it.
+        rect_q: fn(rv: vec3, dir: vec3) -> vec2 {
+            let rlu = normalize(cross(vec3(0.0, 0.0, 1.0), dir) + vec3(0.0001, 0.0, 0.0))
+            let rlv = cross(dir, rlu)
+            let rlc = dot(rv, dir)
+            if rlc < 0.05 { return vec2(1000.0, 1000.0) }
+            return vec2(dot(rv, rlu), dot(rv, rlv)) / rlc
+        }
+
+        // GLAZING. How much of a panel's light comes through at `q` when
+        // the panel (half size `half`) is glazed in `panes` panes each way:
+        // dark bars along the panes' edges. A bar blurs with the
+        // reflection's footprint and fades as it does, so a rough face sees
+        // the panel a little dimmer rather than a grid. An axis of one pane
+        // has no bar.
+        glazing: fn(q: vec2, half: vec2, panes: vec2, wf: float) -> float {
+            let pitch = half * 2.0 / max(panes, vec2(1.0, 1.0))
+            let bq = abs(fract((q + half) / pitch + vec2(0.5, 0.5)) - vec2(0.5, 0.5)) * pitch
+            let b = mix(bq, vec2(1000.0, 1000.0), step(panes, vec2(1.5, 1.5)))
+            let bar = 1.0 - smoothstep(0.03 - wf, 0.03 + wf, min(b.x, b.y))
+            return 1.0 - bar * min(0.12 / (0.03 + wf), 1.0)
+        }
+
+        // THE KEY LIGHT IS THE SOFTBOX the reflection shows, so its
+        // highlight wears the softbox's glazing: how much of the highlight
+        // comes through for a face with normal `n` seen along `v`. Without
+        // this the highlight lies over the glazed softbox as a plain white
+        // patch, and a flat cap that mirrors the key light is a blank disc
+        // however the studio is glazed. The highlight is many times
+        // brighter than white, so a bar shows in it only where the bar lets
+        // nothing through: the glazing is taken with its contrast raised.
+        key_glaze: fn(n: vec3, v: vec3) -> float {
+            let envk = self.m_surf.w
+            if self.m_studio.y < 1.5 || envk < 0.5 || envk > 1.5 { return 1.0 }
+            let kl = normalize(self.m_light.xyz)
+            let rv = n * (2.0 * dot(n, v)) - v
+            let w = 0.03 + clamp(self.m_finish.w, 0.0, 1.0) * 0.45
+            let np = self.m_studio.y
+            let g = self.glazing(self.rect_q(rv, kl), vec2(0.42, 0.26), vec2(np, max(floor(np * 0.62 + 0.5), 1.0)), w)
+            return mix(1.0, smoothstep(0.15, 0.6, g), self.rect_cov(self.rect_d(rv, kl, vec2(0.42, 0.26), 0.08), w))
+        }
+
         // THE STUDIOS (the bench's envHDR2 at one roughness): 0 a softbox
-        // studio, 1 the chrome studio (ceiling panel, key box, three strips,
-        // a horizon line), 2 outdoors (sky, ground, a sun). `fp` is the
+        // studio, 1 the chrome studio (ceiling panel, key box, `m_studio.x`
+        // strips round the walls -- the bench's three, at right angles --
+        // and a horizon line), 2 outdoors (sky, ground, a sun). `fp` is the
         // reflection's footprint, which widens every edge it crosses.
         env_hdr: fn(rv: vec3, rgh: float, kvis: float, fp: float) -> vec3 {
             let kl = normalize(self.m_light.xyz)
@@ -758,15 +807,38 @@ script_mod! {
                 let dt = self.rect_d(rv, vec3(0.0, 0.0, 1.0), vec2(0.36, 0.36), 0.36)
                 let dk = self.rect_d(rv, kl, vec2(0.42, 0.26), 0.08)
                 var ec = mix(floor_c, wall_c, smoothstep(-0.4 * w, 0.4 * w, rv.z))
-                ec = ec + vec3(1.1, 1.1, 1.1) * en * self.rect_cov(dt, wf)
-                ec = ec + vec3(3.5, 3.5, 3.5) * (li * en * kvis) * self.rect_cov(dk, wf)
+                // THE PANELS ARE GLAZED. One plain panel overhead is all a
+                // flat cap reflects, and the key softbox all a cap seen from
+                // the side does: each a blank white disc. Glazing bars
+                // across them put a window in the face. `m_studio.y` panes
+                // across, one as the bench has it; the softbox, wider than
+                // it is tall, takes the rows that keep its panes square.
+                var pane = 1.0
+                var key_pane = 1.0
+                if self.m_studio.y > 1.5 {
+                    let n = self.m_studio.y
+                    pane = self.glazing(self.rect_q(rv, vec3(0.0, 0.0, 1.0)), vec2(0.36, 0.36), vec2(n, n), wf)
+                    key_pane = self.glazing(self.rect_q(rv, kl), vec2(0.42, 0.26), vec2(n, max(floor(n * 0.62 + 0.5), 1.0)), wf)
+                }
+                ec = ec + vec3(1.1, 1.1, 1.1) * en * self.rect_cov(dt, wf) * pane
+                ec = ec + vec3(3.5, 3.5, 3.5) * (li * en * kvis) * self.rect_cov(dk, wf) * key_pane
+                // The strips: the first a turn over (lights + 1) round from
+                // the key light, the rest evenly after it. Past the bench's
+                // three, every other one hangs high and short, so a dome and
+                // a shoulder catch lights the walls' strips pass by.
                 let az0 = atan2(kl.y, kl.x)
                 var si = 0.0
                 loop {
-                    if si > 2.5 + self.knob_zero { break }
-                    let az = az0 + 1.5708 * (si + 1.0)
-                    let ds = self.rect_d(rv, normalize(vec3(cos(az), sin(az), 0.35)), vec2(0.05, 0.8), 0.02)
-                    let sv = 5.0 * en * (0.05 + w) / (0.05 + wf) * self.rect_cov(ds, wf)
+                    if si > self.m_studio.x - 0.5 + self.knob_zero { break }
+                    let az = az0 + 6.2831853 * (si + 1.0) / (self.m_studio.x + 1.0)
+                    var sdir = vec3(cos(az), sin(az), 0.35)
+                    var shs = vec2(0.05, 0.8)
+                    if self.m_studio.x > 3.5 && fract(si * 0.5) > 0.25 {
+                        sdir = vec3(cos(az), sin(az), 0.95)
+                        shs = vec2(0.035, 0.3)
+                    }
+                    let ds = self.rect_d(rv, normalize(sdir), shs, 0.02)
+                    let sv = 5.0 * en * (shs.x + w) / (shs.x + wf) * self.rect_cov(ds, wf)
                     ec = ec + vec3(sv, sv, sv)
                     si = si + 1.0
                 }
@@ -893,7 +965,7 @@ script_mod! {
             }
             if crease > 0.001 { oe = mix(oe, min(oe, oside), crease) }
             o = oe
-            o = o + mix(vec3(1.0, 1.0, 1.0), base * 1.6, mtl) * lt.y * vis
+            o = o + mix(vec3(1.0, 1.0, 1.0), base * 1.6, mtl) * lt.y * vis * self.key_glaze(n, v)
             let coat = self.m_surf.y
             if coat > 0.001 {
                 let cs = self.lit_of_v(n, vec2(coat * 0.6, self.m_surf.z), v, rgh_aa).y * vis
@@ -1689,7 +1761,7 @@ script_mod! {
                     col = self.in_light(col, clamp(sp3, 0.0, 1.0) * 0.55 * vis3)
                     col = self.in_shadow(col, clamp(-sp3, 0.0, 1.0) * 0.42 * vis3)
                 }
-                col = col + mix(vec3(1.0, 1.0, 1.0), base * 1.6, m3) * lt.y * vis3
+                col = col + mix(vec3(1.0, 1.0, 1.0), base * 1.6, m3) * lt.y * vis3 * self.key_glaze(n, v3)
                 if self.m_surf.y > 0.001 {
                     let cs = self.lit_of_v(n, vec2(self.m_surf.y * 0.6, self.m_surf.z), v3, 0.0).y * vis3
                     col = col + vec3(cs, cs, cs)

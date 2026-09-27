@@ -19,6 +19,7 @@ pub mod slug;
 pub mod foundations;
 pub mod tween;
 pub mod ease_editor;
+pub mod curve_editor;
 pub mod tween_script;
 pub mod motion_path;
 pub mod sequencer;
@@ -180,6 +181,7 @@ static FILES: &[StoryModule] = &[
     file(foundations::script_mod, foundations::STORIES),
     file(tween::script_mod, tween::STORIES),
     file(ease_editor::script_mod, ease_editor::STORIES),
+    file(curve_editor::script_mod, curve_editor::STORIES),
     file(tween_script::script_mod, tween_script::STORIES),
     file(motion_path::script_mod, motion_path::STORIES),
     file(sequencer::script_mod, sequencer::STORIES),

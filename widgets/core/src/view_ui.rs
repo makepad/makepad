@@ -445,8 +445,8 @@ script_mod! {
                     let off = Material.cast_offset(raise, self.material_light)
                     let margin = min(min(self.border_inset.x, self.border_inset.y), min(self.border_inset.z, self.border_inset.w)) + self.border_size
                     // A shadow wider than the margin it falls into would only
-                    // be cut off: its blur stays within reach of the quad's edge.
-                    let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(margin, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                    // be cut off: its blur is held to what the margin can spend.
+                    let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, margin, length(off)), self.material_shadow.z, self.material_shadow.w)
                     var under = Material.cast(
                         d,
                         Material.sd_box(p - off, c, h, r),
@@ -457,7 +457,7 @@ script_mod! {
                     )
                     let qc = self.rect_size * 0.5
                     let edge = -Material.sd_box(p, qc, qc, min(r + margin, min(qc.x, qc.y)))
-                    under = under * smoothstep(0.0, max(margin, 1.0), edge)
+                    under = under * Material.window(edge, margin)
                     // `clear` premultiplies what it is given.
                     sdf.clear(vec4(under.rgb / max(under.a, 0.0001), under.a))
                     // Tier 1 is the relief alone: no rim, gloss or specular.

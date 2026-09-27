@@ -6,7 +6,8 @@
 //! reflect, metal and clear coat, an analytic cast shadow and a baked
 //! self-shadow, and marks in four finishes. This module is that engine:
 //!
-//! * [`presets`]: its eleven materials and nineteen styles, as data;
+//! * [`presets`]: its eleven materials and a twelfth, and eighteen of its
+//!   styles, as data, and a style's geometry as an owned, editable shape;
 //! * [`bake`]: its JavaScript bakes -- the curves, the wing's constants, the
 //!   shadow's knots and the self-shadow table;
 //! * [`shader`]: its GLSL in the shader DSL, one set of solid and shading
@@ -21,7 +22,7 @@ pub mod presets;
 pub mod shader;
 pub mod widgets;
 
-pub use presets::{KnobMaterial, KnobStyle, MATERIALS, STYLES};
+pub use presets::{KnobMaterial, KnobShape, KnobStyle, MATERIALS, STYLES};
 pub use widgets::{KnobView3d, KnobView3dRef, TurnedKnob, TurnedKnobAction, TurnedKnobRef};
 
 /// Register the shaders and the widgets. The story that uses them calls this

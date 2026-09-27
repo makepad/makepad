@@ -101,6 +101,7 @@ pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
 pub mod ease_editor;
+pub mod curve_editor;
 pub mod sequencer;
 pub mod diagonal_text;
 pub mod fab_controls;
@@ -283,6 +284,7 @@ pub use crate::{
     keyboard_map::*,
     diagonal_text::*,
     ease_editor::*,
+    curve_editor::*,
     sequencer::*,
     list_item::*,
     avatar::*,
@@ -839,6 +841,7 @@ true
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::ease_editor::script_mod(vm);
+    crate::curve_editor::script_mod(vm);
     crate::tween_inspector::script_mod(vm);
     crate::sequencer::script_mod(vm);
     // Before the panel kit and the tables: all three turn a heading with the
@@ -1386,6 +1389,53 @@ fn widgets_mod_source() -> &'static str {
     let start = lib.find("pub fn widgets_mod(vm: &mut ScriptVm)").expect("widgets_mod");
     let end = lib.find("pub fn script_mod(vm: &mut ScriptVm)").expect("script_mod");
     &lib[start..end]
+}
+
+/// Asserts `call` is registered after every one of `bases`, and directly
+/// after the first of them, so each new widget keeps the slot its bases
+/// give it and no later edit slides another registration in between.
+#[cfg(test)]
+fn assert_registered_after(call: &str, bases: &[&str]) {
+    let calls = widgets_mod_source();
+    let at = calls.find(call).unwrap_or_else(|| panic!("{call} is not registered"));
+    for base in bases {
+        let base_at = calls.find(base).unwrap_or_else(|| panic!("{base} is not registered"));
+        assert!(base_at < at, "{base} must register before {call}");
+    }
+    let first = bases[0];
+    let after_first = &calls[calls.find(first).unwrap() + first.len()..];
+    let next = after_first
+        .lines()
+        .map(str::trim)
+        .find(|line| line.ends_with("::script_mod(vm);"))
+        .unwrap_or_default();
+    assert_eq!(next, call, "{call} must follow {first} directly");
+}
+
+#[cfg(test)]
+mod curve_editor_registration_tests {
+    /// The curve editor registers directly after the ease editor it sits
+    /// beside, and after the view, button and badge it is built from and
+    /// measures its captions with, with one type default.
+    #[test]
+    fn test_curve_editor_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let editor = include_str!("curve_editor.rs");
+        assert!(lib.contains("\npub mod curve_editor;"));
+        assert!(lib.contains("\n    curve_editor::*,"));
+        crate::assert_registered_after(
+            "crate::curve_editor::script_mod(vm);",
+            &[
+                "crate::ease_editor::script_mod(vm);",
+                "crate::view::script_mod(vm);",
+                "crate::button::script_mod(vm);",
+                "crate::radio_button::script_mod(vm);",
+                "crate::badge::script_mod(vm);",
+            ],
+        );
+        assert!(editor.contains("mod.widgets.CurveEditorBase = #(CurveEditor::register_widget(vm))"));
+        assert_eq!(editor.matches("set_type_default() do mod.widgets.CurveEditorBase").count(), 1);
+    }
 }
 
 #[cfg(test)]

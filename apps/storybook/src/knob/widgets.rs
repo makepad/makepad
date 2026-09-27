@@ -2,7 +2,7 @@
 //! material in its own quad, turned by a drag; `KnobView3d`, the same solid
 //! ray marched under an orbiting camera; and the bake cache they share.
 use super::bake::{self, GeomBake, GeomConsts, GeomKey, ShadeConsts, ShadeKey, DATA_ROWS, KNOT_FLOATS, SHADE_N, TAPS};
-use super::presets::{KnobMaterial, KnobStyle, MATERIALS, STYLES};
+use super::presets::{style_shapes, KnobMaterial, KnobShape, MATERIALS, STYLES};
 use super::shader::{DrawKnobView3d, DrawTurnedKnob};
 use crate::makepad_widgets::*;
 use std::rc::Rc;
@@ -12,8 +12,8 @@ script_mod! {
     use mod.widgets.*
 
     mod.storybook.TurnedKnobBase = #(TurnedKnob::register_widget(vm))
-    /** One knob of the bench's knob engine: `style` (0..18) in `material`
-     * (0..10), turned to `value`. A drag turns it; a tap raises `Tapped`. */
+    /** One knob of the bench's knob engine: `style` (0..17) in `material`
+     * (0..11), turned to `value`. A drag turns it; a tap raises `Tapped`. */
     mod.storybook.TurnedKnob = set_type_default() do mod.storybook.TurnedKnobBase{
         width: 160.
         height: 160.
@@ -28,7 +28,7 @@ script_mod! {
     }
 }
 
-/// A style's geometry bake as the GPU holds it.
+/// A shape's geometry bake as the GPU holds it.
 pub struct GeomAssets {
     pub key: GeomKey,
     pub data: Texture,
@@ -36,7 +36,7 @@ pub struct GeomAssets {
     bake: GeomBake,
 }
 
-/// A style's shadow bake as the GPU holds it.
+/// A shape's shadow bake as the GPU holds it.
 pub struct ShadeAssets {
     pub key: ShadeKey,
     pub knots: Texture,
@@ -52,13 +52,14 @@ pub struct KnobAssets {
 }
 
 impl KnobAssets {
-    /// Whether these are the bakes for this style in this material.
-    pub fn fits(&self, style: usize, m: &KnobMaterial) -> bool {
-        self.shade.key == ShadeKey::new(style, m)
+    /// Whether these are the bakes for the shape with this fingerprint in
+    /// this material.
+    pub fn fits(&self, shape: u64, m: &KnobMaterial) -> bool {
+        self.shade.key == ShadeKey::new(shape, m)
     }
 }
 
-/// The bakes in use, newest last. A style's curves are baked once per crease
+/// The bakes in use, newest last. A shape's curves are baked once per crease
 /// blur and its shadows once per light, and every knob and view that draws
 /// it shares them: moving the light re-bakes the shadows only.
 #[derive(Default)]
@@ -69,6 +70,13 @@ struct BakeCache {
 
 /// How many of each the cache keeps: every style under two lights, so a
 /// gallery survives a light being moved back and forth.
+///
+/// A shape being edited makes a new key at every step of a slider's drag,
+/// and a long drag pushes older bakes off this list. That does not thrash:
+/// a knob holds the bakes it draws with and only looks here when its key
+/// changes, so the knobs the drag does not reshape keep theirs and bake
+/// nothing. What a drag can cost is a later light moved back finding its
+/// old bakes gone, one bake per knob, once.
 const CACHE_SIZE: usize = 48;
 
 fn cached<T, K: PartialEq>(list: &mut Vec<Rc<T>>, key: &K, key_of: impl Fn(&T) -> &K) -> Option<Rc<T>> {
@@ -85,15 +93,15 @@ fn keep<T>(list: &mut Vec<Rc<T>>, item: Rc<T>) {
     }
 }
 
-/// The bakes for this style in this material, from the cache or made now.
-pub fn knob_assets(cx: &mut Cx, style: usize, m: &KnobMaterial) -> KnobAssets {
-    let style = style.min(STYLES.len() - 1);
-    let gkey = GeomKey::new(style, m);
-    let skey = ShadeKey::new(style, m);
+/// The bakes for this shape in this material, from the cache or made now.
+pub fn knob_assets(cx: &mut Cx, shape: &KnobShape, m: &KnobMaterial) -> KnobAssets {
+    let print = shape.fingerprint();
+    let gkey = GeomKey::new(print, m);
+    let skey = ShadeKey::new(print, m);
     let geom = match cached(&mut cx.global::<BakeCache>().geoms, &gkey, |a| &a.key) {
         Some(g) => g,
         None => {
-            let bake = bake::bake_geometry(&STYLES[style], &gkey);
+            let bake = bake::bake_geometry(shape, &gkey);
             let data = Texture::new_with_format(
                 cx,
                 TextureFormat::VecBGRAu8_32 {
@@ -111,7 +119,7 @@ pub fn knob_assets(cx: &mut Cx, style: usize, m: &KnobMaterial) -> KnobAssets {
     let shade = match cached(&mut cx.global::<BakeCache>().shades, &skey, |a| &a.key) {
         Some(s) => s,
         None => {
-            let bake = bake::bake_shade(&STYLES[style], &geom.bake, &skey);
+            let bake = bake::bake_shade(shape, &geom.bake, &skey);
             let knots = Texture::new_with_format(
                 cx,
                 TextureFormat::VecRf32 {
@@ -159,6 +167,7 @@ pub fn set_material_uniforms(cx: &Cx, vars: &mut DrawVars, m: &KnobMaterial) {
     u4(cx, vars, live_id!(m_finish), [m.ao, m.rim, m.gloss, m.rough]);
     u4(cx, vars, live_id!(m_env), [m.env, m.persp, 2f64.powf(m.ev), m.roll]);
     u4(cx, vars, live_id!(m_surf), [m.metal, m.coat, m.coatr, m.envk]);
+    u4(cx, vars, live_id!(m_studio), [bake::studio_lights(m), bake::studio_panes(m), 0.0, 0.0]);
     u4(cx, vars, live_id!(m_shadow), [m.shadow, m.sblur, m.fall, m.oao]);
     u4(cx, vars, live_id!(m_inner), [m.inner, m.inner_r, m.lip, m.glow]);
     u4(cx, vars, live_id!(m_tune), [m.level, m.sink, m.hair, m.aoreach]);
@@ -172,8 +181,8 @@ pub fn set_material_uniforms(cx: &Cx, vars: &mut DrawVars, m: &KnobMaterial) {
     u4(cx, vars, live_id!(m_ptr_ink), ink4(m.ptr_ink));
 }
 
-/// The style's uniforms and its bake's textures.
-pub fn set_style_uniforms(cx: &Cx, vars: &mut DrawVars, s: &KnobStyle, a: &KnobAssets) {
+/// The shape's uniforms and its bake's textures.
+pub fn set_style_uniforms(cx: &Cx, vars: &mut DrawVars, s: &KnobShape, a: &KnobAssets) {
     let c = &a.geom.consts;
     let d = &a.shade.consts;
     u4(cx, vars, live_id!(knob_zero), [0.0; 4]);
@@ -237,10 +246,11 @@ pub struct TurnedKnob {
     #[redraw]
     #[live]
     draw_knob: DrawTurnedKnob,
-    /// The style, 0..18, in the order of `STYLES`.
+    /// The style, 0..17, in the order of `STYLES`, unless the host has
+    /// handed a shape over with `set_shape`.
     #[live]
     pub style: f64,
-    /// The material, 0..10, in the order of `MATERIALS`, unless the host
+    /// The material, 0..11, in the order of `MATERIALS`, unless the host
     /// has handed one over with `set_material`.
     #[live]
     pub material: f64,
@@ -268,6 +278,8 @@ pub struct TurnedKnob {
     #[rust]
     custom: Option<KnobMaterial>,
     #[rust]
+    custom_shape: Option<KnobShape>,
+    #[rust]
     assets: Option<KnobAssets>,
     #[rust]
     drag: Option<Drag>,
@@ -282,9 +294,22 @@ impl TurnedKnob {
         (self.style.round().max(0.0) as usize).min(STYLES.len() - 1)
     }
 
+    /// The shape it draws: the one handed over, or its style's.
+    pub fn shape(&self) -> KnobShape {
+        self.custom_shape.clone().unwrap_or_else(|| style_shapes()[self.style_index()].clone())
+    }
+
     pub fn set_material(&mut self, cx: &mut Cx, m: &KnobMaterial) {
         if self.custom.as_ref() != Some(m) {
             self.custom = Some(*m);
+            self.draw_knob.redraw(cx);
+        }
+    }
+
+    /// Draw this shape rather than the style's.
+    pub fn set_shape(&mut self, cx: &mut Cx, shape: &KnobShape) {
+        if self.custom_shape.as_ref() != Some(shape) {
+            self.custom_shape = Some(shape.clone());
             self.draw_knob.redraw(cx);
         }
     }
@@ -316,11 +341,12 @@ impl Widget for TurnedKnob {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle(walk);
         let m = self.material();
-        let style = self.style_index();
+        let shape = self.custom_shape.as_ref().unwrap_or(&style_shapes()[self.style_index()]);
+        let print = shape.fingerprint();
         let assets = match &self.assets {
-            Some(a) if a.fits(style, &m) => a.clone(),
+            Some(a) if a.fits(print, &m) => a.clone(),
             _ => {
-                let a = knob_assets(cx, style, &m);
+                let a = knob_assets(cx, shape, &m);
                 self.assets = Some(a.clone());
                 a
             }
@@ -328,7 +354,7 @@ impl Widget for TurnedKnob {
         let radius = self.fill * rect.size.x.min(rect.size.y) * 0.5;
         let vars = &mut self.draw_knob.draw_vars;
         set_material_uniforms(cx, vars, &m);
-        set_style_uniforms(cx, vars, &STYLES[style], &assets);
+        set_style_uniforms(cx, vars, shape, &assets);
         u4(cx, vars, live_id!(k_state), [self.value, if self.lit { 1.0 } else { 0.0 }, self.edge_fade, 0.0]);
         u4(cx, vars, live_id!(k_geom), [rect.size.x * 0.5, rect.size.y * 0.5, radius.max(1.0), self.unit_radius]);
         self.draw_knob.draw_abs(cx, rect);
@@ -384,6 +410,12 @@ impl TurnedKnobRef {
     pub fn set_material(&self, cx: &mut Cx, m: &KnobMaterial) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_material(cx, m);
+        }
+    }
+
+    pub fn set_shape(&self, cx: &mut Cx, shape: &KnobShape) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_shape(cx, shape);
         }
     }
 
@@ -454,6 +486,8 @@ pub struct KnobView3d {
     #[rust]
     custom: Option<KnobMaterial>,
     #[rust]
+    custom_shape: Option<KnobShape>,
+    #[rust]
     assets: Option<KnobAssets>,
     #[rust]
     orbit: Option<(Vec2d, [f64; 2])>,
@@ -468,9 +502,22 @@ impl KnobView3d {
         (self.style.round().max(0.0) as usize).min(STYLES.len() - 1)
     }
 
+    /// The shape it draws: the one handed over, or its style's.
+    pub fn shape(&self) -> KnobShape {
+        self.custom_shape.clone().unwrap_or_else(|| style_shapes()[self.style_index()].clone())
+    }
+
     pub fn set_material(&mut self, cx: &mut Cx, m: &KnobMaterial) {
         if self.custom.as_ref() != Some(m) {
             self.custom = Some(*m);
+            self.draw_view.redraw(cx);
+        }
+    }
+
+    /// Draw this shape rather than the style's.
+    pub fn set_shape(&mut self, cx: &mut Cx, shape: &KnobShape) {
+        if self.custom_shape.as_ref() != Some(shape) {
+            self.custom_shape = Some(shape.clone());
             self.draw_view.redraw(cx);
         }
     }
@@ -502,18 +549,19 @@ impl Widget for KnobView3d {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle(walk);
         let m = self.material();
-        let style = self.style_index();
+        let shape = self.custom_shape.as_ref().unwrap_or(&style_shapes()[self.style_index()]);
+        let print = shape.fingerprint();
         let assets = match &self.assets {
-            Some(a) if a.fits(style, &m) => a.clone(),
+            Some(a) if a.fits(print, &m) => a.clone(),
             _ => {
-                let a = knob_assets(cx, style, &m);
+                let a = knob_assets(cx, shape, &m);
                 self.assets = Some(a.clone());
                 a
             }
         };
         let vars = &mut self.draw_view.draw_vars;
         set_material_uniforms(cx, vars, &m);
-        set_style_uniforms(cx, vars, &STYLES[style], &assets);
+        set_style_uniforms(cx, vars, shape, &assets);
         u4(cx, vars, live_id!(k_state), [self.value, 0.0, 0.0, 0.0]);
         let samples = if self.orbit.is_some() { 1.0 } else { self.samples.round().clamp(1.0, 2.0) };
         u4(cx, vars, live_id!(k_cam), [self.yaw, self.elevation, self.zoom, samples]);
@@ -562,6 +610,12 @@ impl KnobView3dRef {
     pub fn set_material(&self, cx: &mut Cx, m: &KnobMaterial) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_material(cx, m);
+        }
+    }
+
+    pub fn set_shape(&self, cx: &mut Cx, shape: &KnobShape) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_shape(cx, shape);
         }
     }
 

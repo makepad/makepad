@@ -110,7 +110,8 @@ mod.theme.material_contact_ao = 0.35
 mod.theme.material_ground_lip = 0.0
 mod.theme.material_inner_shadow = 0.50
 mod.theme.material_inner_radius = 7.0
-mod.theme.material_margin = 9.0
+// The shadow's offset (3) and two blur lengths, paid for again in the padding.
+mod.theme.material_margin = 27.0
 mod.theme.color_material_light = #f6f6f3
 mod.theme.color_material_shadow = #6b7176
 mod.theme.color_material_glow = #d24b3a
