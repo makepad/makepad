@@ -104,8 +104,35 @@ pub struct ControllerButtons {
     pub power: bool,
 }
 
+/// Colours laid over the room patch from outside the desk, as linear 0..1
+/// RGB. A group with `None` keeps its hue dial; the faders and dials still
+/// decide every level, position and effect. Components outside 0..1 are
+/// clamped and a component that is not a number counts as zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RigColors {
+    /// Both moving washes, in place of the `dial_top[2]` hue.
+    pub washes: Option<[f32; 3]>,
+    /// The RGB laser and the RGB strobe, in place of the `dial_top[3]` hue.
+    pub laser_strobe: Option<[f32; 3]>,
+}
+
+impl RigColors {
+    /// The same colours with every component inside 0..1.
+    fn clamped(self) -> Self {
+        Self {
+            washes: self.washes.map(clamp_rgb),
+            laser_strobe: self.laser_strobe.map(clamp_rgb),
+        }
+    }
+}
+
 pub fn clamp01(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
+}
+
+/// Clamp each component into 0..1, counting not-a-number as zero.
+fn clamp_rgb(rgb: [f32; 3]) -> [f32; 3] {
+    rgb.map(|value| if value.is_nan() { 0.0 } else { clamp01(value) })
 }
 
 fn hsv_to_rgb(mut hue: f32, sat: f32, val: f32) -> (f32, f32, f32) {
@@ -129,6 +156,21 @@ fn map_wargb(value: f32, fade: f32, out: &mut [u8], bases: &[usize]) {
     let fade = clamp01(fade);
     let (r, g, b) = hsv_to_rgb(value, 1.0, fade);
     map_rgb([r, g, b], 1.0, out, bases);
+}
+
+/// One colour group at `fade`: the laid-over RGB when there is one, else the
+/// hue dial at full saturation. Both paths scale by the same clamped level.
+fn map_group_color(
+    rgb: Option<[f32; 3]>,
+    hue: f32,
+    fade: f32,
+    out: &mut [u8],
+    bases: &[usize],
+) {
+    match rgb {
+        Some(rgb) => map_rgb(clamp_rgb(rgb), clamp01(fade), out, bases),
+        None => map_wargb(hue, fade, out, bases),
+    }
 }
 
 fn map_rgb(rgb: [f32; 3], gain: f32, out: &mut [u8], bases: &[usize]) {
@@ -165,11 +207,32 @@ pub fn apply_dmx_mapping(
     dmx: &mut [u8],
     clock: f64,
 ) {
+    apply_dmx_mapping_with_colors(state, buttons, dmx, clock, &RigColors::default());
+}
+
+/// Render the full room patch with `colors` laid over the colour groups.
+/// A group with a colour gets that RGB at the level its hue would have had:
+/// the laser and the washes at full level, the strobe at `fade[3]`. Every
+/// other channel, and a frame with [`RigColors::default`], is byte-identical
+/// to [`apply_dmx_mapping`]. Power off still leaves the frame untouched.
+pub fn apply_dmx_mapping_with_colors(
+    state: &ControllerState,
+    buttons: &ControllerButtons,
+    dmx: &mut [u8],
+    clock: f64,
+    colors: &RigColors,
+) {
     if !buttons.power {
         return;
     }
 
-    map_wargb(state.dial_top[3], 1.0, dmx, &[fixture_patch::RGB_LASER + 1]);
+    map_group_color(
+        colors.laser_strobe,
+        state.dial_top[3],
+        1.0,
+        dmx,
+        &[fixture_patch::RGB_LASER + 1],
+    );
     let rgb_laser_addr = fixture_patch::RGB_LASER;
     match (state.fade[3] * 3.0) as usize {
         0 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
@@ -185,7 +248,13 @@ pub fn apply_dmx_mapping(
         }
         _ => {}
     }
-    map_wargb(state.dial_top[3], 1.0, dmx, &[rgb_laser_addr + 1]);
+    map_group_color(
+        colors.laser_strobe,
+        state.dial_top[3],
+        1.0,
+        dmx,
+        &[rgb_laser_addr + 1],
+    );
     match (state.fade[3] * 4.0) as usize {
         0 | 3 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
         1 => {
@@ -202,7 +271,13 @@ pub fn apply_dmx_mapping(
     }
 
     let rgb_strobe = fixture_patch::RGB_STROBE;
-    map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe + 2]);
+    map_group_color(
+        colors.laser_strobe,
+        state.dial_top[3],
+        state.fade[3],
+        dmx,
+        &[rgb_strobe + 2],
+    );
     dmx_f32(state.fade[3], dmx, &[rgb_strobe], 1);
     dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
     dmx_f32(state.dial_3[0], dmx, &[rgb_strobe], 13);
@@ -224,7 +299,13 @@ pub fn apply_dmx_mapping(
     dmx_f32(state.dial_1[3], dmx, &[spot1, spot2], 13);
     dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
     dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14);
-    map_wargb(state.dial_top[2], 1.0, dmx, &[spot1 + 15, spot2 + 15]);
+    map_group_color(
+        colors.washes,
+        state.dial_top[2],
+        1.0,
+        dmx,
+        &[spot1 + 15, spot2 + 15],
+    );
 
     let [smoke, smoke_2] = fixture_patch::SMOKE;
     let slot_len = 101.0f64;
@@ -252,6 +333,25 @@ pub fn apply_dmx_mapping(
     dmx_f32(state.fade[6], dmx, &uv, 1);
     dmx_f32(if state.tempo < 0.1 { 0.0 } else { state.tempo }, dmx, &uv, 2);
     dmx_f32(if state.fade[7] > 0.5 { 1.0 } else { 0.0 }, dmx, &uv, 3);
+}
+
+/// The RGB each colour group wears now at full level, washes first and the
+/// laser and strobe second: the laid-over colour where `colors` gives one,
+/// else the group's hue dial at full saturation. It describes colour only;
+/// scaled by the group's level (full for the washes and the laser, `fade[3]`
+/// for the strobe) it gives exactly what [`apply_dmx_mapping_with_colors`]
+/// writes, while power and the fixtures' dimmers decide whether it is lit.
+pub fn group_colors(state: &ControllerState, colors: &RigColors) -> [[f32; 3]; 2] {
+    let wear = |rgb: Option<[f32; 3]>, hue: f32| {
+        clamp_rgb(rgb.unwrap_or_else(|| {
+            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
+            [r, g, b]
+        }))
+    };
+    [
+        wear(colors.washes, state.dial_top[2]),
+        wear(colors.laser_strobe, state.dial_top[3]),
+    ]
 }
 
 /// Color and perceptual intensity for one part of a frame. `rgb` describes
@@ -1704,6 +1804,407 @@ mod tests {
         let state = ControllerState { fade: [1.0; 9], ..Default::default() };
         apply_dmx_mapping(&state, &ControllerButtons::default(), &mut dmx, 1.0);
         assert!(dmx.iter().all(|v| *v == 0));
+    }
+
+    /// The room patch exactly as it stood before the colour input, kept as
+    /// the reference every hue-only frame must still match byte for byte.
+    fn reference_dmx_mapping(
+        state: &ControllerState,
+        buttons: &ControllerButtons,
+        dmx: &mut [u8],
+        clock: f64,
+    ) {
+        if !buttons.power {
+            return;
+        }
+
+        map_wargb(state.dial_top[3], 1.0, dmx, &[fixture_patch::RGB_LASER + 1]);
+        let rgb_laser_addr = fixture_patch::RGB_LASER;
+        match (state.fade[3] * 3.0) as usize {
+            0 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
+            1 => {
+                dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+            }
+            2 => {
+                dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+            }
+            _ => {}
+        }
+        map_wargb(state.dial_top[3], 1.0, dmx, &[rgb_laser_addr + 1]);
+        match (state.fade[3] * 4.0) as usize {
+            0 | 3 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
+            1 => {
+                dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
+                dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+            }
+            2 => {
+                dmx_u8(255, dmx, &[rgb_laser_addr], 1);
+                dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
+                dmx_u8(32, dmx, &[rgb_laser_addr], 7);
+            }
+            _ => {}
+        }
+
+        let rgb_strobe = fixture_patch::RGB_STROBE;
+        map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe + 2]);
+        dmx_f32(state.fade[3], dmx, &[rgb_strobe], 1);
+        dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
+        dmx_f32(state.dial_3[0], dmx, &[rgb_strobe], 13);
+        dmx_f32(state.dial_3[1], dmx, &[rgb_strobe], 14);
+        dmx_f32(state.dial_3[2], dmx, &[rgb_strobe], 15);
+        dmx_f32(state.dial_3[3], dmx, &[rgb_strobe], 16);
+        dmx_f32(state.dial_3[4], dmx, &[rgb_strobe], 17);
+        dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
+        dmx_f32(state.tempo, dmx, &[rgb_strobe], 8);
+        dmx_f32(state.dial_4[0], dmx, &[rgb_strobe], 11);
+        dmx_f32(state.dial_4[1], dmx, &[rgb_strobe], 12);
+
+        let [spot1, spot2] = fixture_patch::MOVING_WASHES;
+        dmx_f32(state.fade[1], dmx, &[spot1, spot2], 6);
+        dmx_f32(state.dial_1[0], dmx, &[spot1, spot2], 1);
+        dmx_f32(state.dial_1[1], dmx, &[spot1, spot2], 3);
+        dmx_f32(state.dial_top[1], dmx, &[spot1, spot2], 8);
+        dmx_f32(state.dial_1[4], dmx, &[spot1, spot2], 12);
+        dmx_f32(state.dial_1[3], dmx, &[spot1, spot2], 13);
+        dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
+        dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14);
+        map_wargb(state.dial_top[2], 1.0, dmx, &[spot1 + 15, spot2 + 15]);
+
+        let [smoke, smoke_2] = fixture_patch::SMOKE;
+        let slot_len = 101.0f64;
+        let needed = slot_len * state.dial_0[0] as f64;
+        let t = clock.rem_euclid(slot_len);
+        dmx_f32(if t < needed { 1.0 } else { 0.0 }, dmx, &[smoke], 1);
+        dmx_f32(state.dial_0[2], dmx, &[smoke_2], 1);
+        dmx_f32(state.dial_0[1], dmx, &[smoke_2], 2);
+
+        let lasers = fixture_patch::BEAM_LASERS;
+        dmx_f32(state.fade[5], dmx, &lasers, 1);
+        dmx_f32(state.dial_5[0], dmx, &lasers, 2);
+        dmx_f32(state.dial_top[5], dmx, &lasers, 11);
+        dmx_f32(state.dial_5[1], dmx, &lasers, 12);
+        dmx_f32(0.5, dmx, &lasers, 3);
+        dmx_f32(0.3, dmx, &lasers, 4);
+        dmx_f32(state.dial_5[2], dmx, &lasers, 5);
+        dmx_f32(state.dial_5[3], dmx, &lasers, 6);
+        dmx_f32(0.5, dmx, &lasers, 7);
+        dmx_f32(0.5, dmx, &lasers, 8);
+        dmx_f32(0.5, dmx, &lasers, 9);
+        dmx_f32(0.5, dmx, &lasers, 10);
+
+        let uv = fixture_patch::UV;
+        dmx_f32(state.fade[6], dmx, &uv, 1);
+        dmx_f32(if state.tempo < 0.1 { 0.0 } else { state.tempo }, dmx, &uv, 2);
+        dmx_f32(if state.fade[7] > 0.5 { 1.0 } else { 0.0 }, dmx, &uv, 3);
+    }
+
+    /// Deterministic spread of desk values: mostly ordinary positions, with
+    /// the level thresholds, both ends, values past both ends and
+    /// not-a-number mixed in.
+    struct Spread(u64);
+
+    impl Spread {
+        fn unit(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32
+        }
+
+        fn value(&mut self) -> f32 {
+            const EDGES: [f32; 12] = [
+                0.0,
+                1.0,
+                0.25,
+                1.0 / 3.0,
+                0.5,
+                2.0 / 3.0,
+                0.75,
+                1.0 / 6.0,
+                0.999,
+                1.5,
+                -0.25,
+                f32::NAN,
+            ];
+            if self.unit() < 0.3 {
+                EDGES[(self.unit() * EDGES.len() as f32) as usize % EDGES.len()]
+            } else {
+                self.unit()
+            }
+        }
+
+        fn bank(&mut self) -> [f32; 8] {
+            std::array::from_fn(|_| self.value())
+        }
+
+        fn state(&mut self) -> ControllerState {
+            ControllerState {
+                fade: std::array::from_fn(|_| self.value()),
+                tempo: self.value(),
+                dial_0: self.bank(),
+                dial_1: self.bank(),
+                dial_2: self.bank(),
+                dial_3: self.bank(),
+                dial_4: self.bank(),
+                dial_5: self.bank(),
+                dial_6: self.bank(),
+                dial_7: self.bank(),
+                dial_top: self.bank(),
+            }
+        }
+
+        fn buttons(&mut self) -> ControllerButtons {
+            ControllerButtons {
+                preset: std::array::from_fn(|_| self.unit() < 0.1),
+                write_preset: self.unit() < 0.2,
+                power: self.unit() < 0.85,
+            }
+        }
+    }
+
+    const SPREAD_CLOCKS: [f64; 9] =
+        [0.0, DMX_FRAME_DT, 1.0, 37.25, 100.99, 101.0, 202.5, 12345.678, -3.5];
+
+    fn spread_frames(mut check: impl FnMut(&ControllerState, &ControllerButtons, f64)) {
+        let mut spread = Spread(0x5eed_c010);
+        let fixed = [
+            ControllerState::default(),
+            ControllerState {
+                fade: [1.0; 9],
+                tempo: 1.0,
+                dial_0: [1.0; 8],
+                dial_1: [1.0; 8],
+                dial_2: [1.0; 8],
+                dial_3: [1.0; 8],
+                dial_4: [1.0; 8],
+                dial_5: [1.0; 8],
+                dial_6: [1.0; 8],
+                dial_7: [1.0; 8],
+                dial_top: [1.0; 8],
+            },
+        ];
+        let powered = ControllerButtons { power: true, ..Default::default() };
+        for state in fixed {
+            for clock in SPREAD_CLOCKS {
+                check(&state, &powered, clock);
+            }
+        }
+        for _ in 0..800 {
+            let state = spread.state();
+            let buttons = spread.buttons();
+            for clock in SPREAD_CLOCKS {
+                check(&state, &buttons, clock);
+            }
+        }
+    }
+
+    #[test]
+    fn hue_only_frames_are_byte_identical_to_the_reference_patch() {
+        let mut frames = 0;
+        spread_frames(|state, buttons, clock| {
+            let mut expected = [0xa5u8; DMX_LEN];
+            reference_dmx_mapping(state, buttons, &mut expected, clock);
+            let mut actual = [0xa5u8; DMX_LEN];
+            apply_dmx_mapping(state, buttons, &mut actual, clock);
+            assert_eq!(actual, expected, "{state:?} {buttons:?} clock {clock}");
+            let mut with_default = [0xa5u8; DMX_LEN];
+            apply_dmx_mapping_with_colors(
+                state,
+                buttons,
+                &mut with_default,
+                clock,
+                &RigColors::default(),
+            );
+            assert_eq!(with_default, expected, "{state:?} {buttons:?} clock {clock}");
+            frames += 1;
+        });
+        assert_eq!(frames, 802 * SPREAD_CLOCKS.len());
+    }
+
+    const LASER_RGB: std::ops::Range<usize> =
+        fixture_patch::RGB_LASER..fixture_patch::RGB_LASER + 3;
+    const STROBE_RGB: std::ops::Range<usize> =
+        fixture_patch::RGB_STROBE + 1..fixture_patch::RGB_STROBE + 4;
+    const WASH_RGB: [std::ops::Range<usize>; 2] = [
+        fixture_patch::MOVING_WASHES[0] + 14..fixture_patch::MOVING_WASHES[0] + 17,
+        fixture_patch::MOVING_WASHES[1] + 14..fixture_patch::MOVING_WASHES[1] + 17,
+    ];
+
+    fn frame(state: &ControllerState, colors: &RigColors) -> [u8; DMX_LEN] {
+        let buttons = ControllerButtons { power: true, ..Default::default() };
+        let mut dmx = [0u8; DMX_LEN];
+        apply_dmx_mapping_with_colors(state, &buttons, &mut dmx, 12.5, colors);
+        dmx
+    }
+
+    /// A lit scene whose hue dials sit far from the colours laid over it:
+    /// red washes and a cyan laser and strobe.
+    fn lit_state(strobe_level: f32) -> ControllerState {
+        let mut state = ControllerState {
+            fade: [0.8, 0.7, 0.6, strobe_level, 0.5, 0.4, 0.3, 0.9, 1.0],
+            tempo: 0.45,
+            ..Default::default()
+        };
+        state.dial_top = [0.1, 0.2, 0.0, 0.5, 0.3, 0.6, 0.7, 0.8];
+        state.dial_1 = [0.2, 0.3, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0];
+        state.dial_3 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.0, 0.0, 0.0];
+        state.dial_5 = [0.6, 0.7, 0.8, 0.9, 0.0, 0.0, 0.0, 0.0];
+        state
+    }
+
+    #[test]
+    fn rig_colors_reach_only_the_colour_channels_of_their_groups() {
+        let state = lit_state(0.6);
+        let hue = frame(&state, &RigColors::default());
+        assert_eq!(&hue[WASH_RGB[0].clone()], &[255, 0, 0], "washes on their red hue");
+        assert_eq!(&hue[LASER_RGB], &[0, 255, 255], "laser on its cyan hue");
+
+        let colors = RigColors {
+            washes: Some([0.2, 0.4, 0.8]),
+            laser_strobe: Some([1.0, 0.5, 0.0]),
+        };
+        let laid = frame(&state, &colors);
+        for wash in WASH_RGB {
+            assert_eq!(&laid[wash], &[51, 102, 204], "washes at full level");
+        }
+        assert_eq!(&laid[LASER_RGB], &[255, 127, 0], "laser at full level");
+        assert_eq!(&laid[STROBE_RGB], &[153, 76, 0], "strobe at fade[3]");
+        let colour_channel = |index: usize| {
+            LASER_RGB.contains(&index)
+                || STROBE_RGB.contains(&index)
+                || WASH_RGB.iter().any(|wash| wash.contains(&index))
+        };
+        for index in 0..DMX_LEN {
+            if !colour_channel(index) {
+                assert_eq!(laid[index], hue[index], "channel {} moved", index + 1);
+            }
+        }
+
+        let washes_only = frame(&state, &RigColors { washes: colors.washes, laser_strobe: None });
+        let laser_only =
+            frame(&state, &RigColors { washes: None, laser_strobe: colors.laser_strobe });
+        for index in 0..DMX_LEN {
+            let wash = WASH_RGB.iter().any(|wash| wash.contains(&index));
+            assert_eq!(washes_only[index], if wash { laid[index] } else { hue[index] });
+            assert_eq!(laser_only[index], if wash { hue[index] } else { laid[index] });
+        }
+    }
+
+    #[test]
+    fn faders_keep_the_levels_under_rig_colors() {
+        let colors = RigColors {
+            washes: Some([1.0, 0.0, 0.5]),
+            laser_strobe: Some([0.0, 1.0, 1.0]),
+        };
+        for (level, strobe) in [
+            (0.0, [0, 0, 0]),
+            (0.25, [0, 63, 63]),
+            (0.5, [0, 127, 127]),
+            (0.75, [0, 191, 191]),
+            (1.0, [0, 255, 255]),
+            (1.7, [0, 255, 255]),
+            (-0.3, [0, 0, 0]),
+            (f32::NAN, [0, 0, 0]),
+        ] {
+            let state = lit_state(level);
+            let laid = frame(&state, &colors);
+            let hue = frame(&state, &RigColors::default());
+            assert_eq!(&laid[STROBE_RGB], &strobe, "strobe colour at fade[3] {level}");
+            assert_eq!(&laid[LASER_RGB], &[0, 255, 255], "laser colour stays at full level");
+            for wash in WASH_RGB {
+                assert_eq!(&laid[wash], &[255, 0, 127], "wash colour stays at full level");
+            }
+            let strobe_dimmer = fixture_patch::RGB_STROBE - 1;
+            let laser_mode = fixture_patch::RGB_LASER - 1;
+            assert_eq!(laid[strobe_dimmer], hue[strobe_dimmer], "strobe dimmer from fade[3]");
+            assert_eq!(laid[laser_mode], hue[laser_mode], "laser mode from fade[3]");
+            for base in fixture_patch::MOVING_WASHES {
+                assert_eq!(laid[base - 1 + 5], (0.7f32 * 255.0) as u8, "wash dimmer from fade[1]");
+                assert_eq!(laid[base - 1 + 13], (0.6f32 * 255.0) as u8, "wash level from fade[2]");
+            }
+        }
+    }
+
+    #[test]
+    fn rig_colors_outside_the_unit_range_are_clamped_and_nan_is_zero() {
+        let colors = RigColors {
+            washes: Some([1.5, -0.5, f32::NAN]),
+            laser_strobe: Some([f32::INFINITY, f32::NEG_INFINITY, 0.5]),
+        };
+        let laid = frame(&lit_state(0.5), &colors);
+        for wash in WASH_RGB {
+            assert_eq!(&laid[wash], &[255, 0, 0]);
+        }
+        assert_eq!(&laid[LASER_RGB], &[255, 0, 127]);
+        assert_eq!(&laid[STROBE_RGB], &[127, 0, 63]);
+        assert_eq!(
+            group_colors(&lit_state(0.5), &colors),
+            [[1.0, 0.0, 0.0], [1.0, 0.0, 0.5]]
+        );
+        assert_eq!(
+            colors.clamped(),
+            RigColors {
+                washes: Some([1.0, 0.0, 0.0]),
+                laser_strobe: Some([1.0, 0.0, 0.5]),
+            }
+        );
+    }
+
+    #[test]
+    fn power_off_is_dark_under_rig_colors() {
+        let colors = RigColors {
+            washes: Some([1.0, 1.0, 1.0]),
+            laser_strobe: Some([1.0, 1.0, 1.0]),
+        };
+        let state = ControllerState { fade: [1.0; 9], dial_0: [1.0; 8], ..lit_state(1.0) };
+        let mut dmx = [0u8; DMX_LEN];
+        apply_dmx_mapping_with_colors(
+            &state,
+            &ControllerButtons::default(),
+            &mut dmx,
+            1.0,
+            &colors,
+        );
+        assert!(dmx.iter().all(|v| *v == 0));
+    }
+
+    #[test]
+    fn group_colors_follow_the_rig_exactly() {
+        let state = lit_state(0.6);
+        assert_eq!(
+            group_colors(&state, &RigColors::default()),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0]],
+            "red and cyan from the hue dials"
+        );
+        let washes = [0.2, 0.4, 0.8];
+        assert_eq!(
+            group_colors(&state, &RigColors { washes: Some(washes), laser_strobe: None }),
+            [washes, [0.0, 1.0, 1.0]]
+        );
+
+        // Laying the reader's own colours over the rig changes no byte, for
+        // any state: the reader names exactly what each group wears.
+        spread_frames(|state, buttons, clock| {
+            for colors in [
+                RigColors::default(),
+                RigColors { washes: Some([0.9, 0.1, 0.3]), laser_strobe: None },
+                RigColors { washes: None, laser_strobe: Some([0.05, 0.6, 1.0]) },
+            ] {
+                let [washes, laser_strobe] = group_colors(state, &colors);
+                let worn = RigColors { washes: Some(washes), laser_strobe: Some(laser_strobe) };
+                let mut expected = [0u8; DMX_LEN];
+                apply_dmx_mapping_with_colors(state, buttons, &mut expected, clock, &colors);
+                let mut actual = [0u8; DMX_LEN];
+                apply_dmx_mapping_with_colors(state, buttons, &mut actual, clock, &worn);
+                assert_eq!(actual, expected, "{state:?} {colors:?}");
+            }
+        });
     }
 
     #[test]
