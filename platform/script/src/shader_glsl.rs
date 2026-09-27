@@ -1,5 +1,6 @@
 use crate::pod::{ScriptPodTy, ScriptPodTypeInline};
 use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
+use crate::shader_output::{GlslFlatUniform, GlslFlatUniformGroup};
 use crate::value::ScriptPodType;
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
@@ -88,7 +89,210 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         self.glsl_write_fragment_main(vm, &varying_fields, out);
     }
 
+    /// The `draw_pass` camera matrices arrive as adjacent left/right pairs,
+    /// which the std140 block form packs into one `mat4[2]`. Flattened it is
+    /// still one uniform, fed from the pair's two offsets: a `mat4[2]` is the
+    /// only spelling Chrome 63's GLSL accepts for "pick an eye", since its
+    /// translator rejects a ternary over matrices.
+    const EYE_PAIRED_FIELDS: [&'static str; 5] = [
+        "camera_projection",
+        "camera_view",
+        "depth_projection",
+        "depth_view",
+        "camera_inv",
+    ];
+
+    /// Name of the standalone uniform that replaces one field of what would
+    /// have been a block member: the body already says `unibuf_draw_call`, so
+    /// the uniform is `unibuf_draw_call_zbias` and the body appends `_` where it
+    /// used to append `.`. Shared with the rewriter in `shader_vars` so the
+    /// declared identifier and the one the body references cannot drift apart.
+    pub fn glsl_flat_uniform_name(prefix: &str, field_path: &[&str]) -> String {
+        let mut name = String::from(prefix);
+        for part in field_path {
+            name.push('_');
+            name.push_str(part);
+        }
+        name
+    }
+
+    fn push_flat_uniform(
+        &mut self,
+        group: GlslFlatUniformGroup,
+        io_id: LiveId,
+        uniform_name: String,
+        glsl_type: String,
+        comps: usize,
+        array_len: usize,
+        offsets: [usize; 2],
+    ) {
+        self.flat_uniforms.push(GlslFlatUniform {
+            group,
+            io_id,
+            uniform_name,
+            glsl_type,
+            comps,
+            array_len,
+            rel_offset_f32: offsets[0],
+            rel_offset_f32_2: offsets[1],
+        });
+    }
+
+    /// Build the flat-uniform descriptor list. Must run before the GLSL is
+    /// written and before the backend mapping is built from `self`.
+    pub fn collect_glsl_flat_uniforms(&mut self, vm: &ScriptVm) {
+        self.flat_uniforms.clear();
+        if !self.flatten_uniform_blocks {
+            return;
+        }
+        let ios = std::mem::take(&mut self.io);
+        for io in &ios {
+            let mut eye_paired = false;
+            let group = match io.kind {
+                ShaderIoKind::UniformBuffer => {
+                    let io_name = self.backend.map_io_name(io.name);
+                    let group = match io_name.as_str() {
+                        "draw_pass" => GlslFlatUniformGroup::Pass,
+                        "draw_list" => GlslFlatUniformGroup::DrawList,
+                        "draw_call" => GlslFlatUniformGroup::DrawCall,
+                        _ => GlslFlatUniformGroup::Custom(
+                            io.buffer_index.unwrap_or(0).saturating_sub(3),
+                        ),
+                    };
+                    eye_paired = io_name == "draw_pass";
+                    group
+                }
+                ShaderIoKind::Uniform => GlslFlatUniformGroup::User,
+                ShaderIoKind::ScopeUniform => GlslFlatUniformGroup::Live,
+                _ => continue,
+            };
+            let io_name = self.backend.map_io_name(io.name);
+            // The prefix the body already spells for this IO, so the declared
+            // name is that prefix plus the field path.
+            let prefix = match io.kind {
+                ShaderIoKind::UniformBuffer => format!("unibuf_{}", io_name),
+                ShaderIoKind::Uniform => format!("uni_{}", io_name),
+                _ => format!("su_{}", io_name),
+            };
+            self.collect_flat_struct(
+                vm, io.ty, &prefix, &[], io.name, group, 0, eye_paired,
+            );
+        }
+        self.io = ios;
+    }
+
+    /// Flatten a POD type into one uniform per leaf field. A non-struct (the
+    /// usual case for a `Uniform` IO) becomes a single uniform named after the
+    /// IO; a struct recurses, carrying `base` so a nested struct's leaves keep
+    /// their offset within the IO rather than within the nested struct.
+    fn collect_flat_struct(
+        &mut self,
+        vm: &ScriptVm,
+        ty: ScriptPodType,
+        prefix: &str,
+        field_path: &[&str],
+        io_id: LiveId,
+        group: GlslFlatUniformGroup,
+        base: usize,
+        eye_paired: bool,
+    ) {
+        let pod_ty = vm.bx.heap.pod_type_ref(ty);
+        let ScriptPodTy::Struct { fields, .. } = &pod_ty.ty else {
+            self.push_flat_uniform(
+                group,
+                io_id,
+                Self::glsl_flat_uniform_name(prefix, field_path),
+                self.glsl_type_name_from_ty(vm, ty),
+                pod_ty.ty.size_of() / 4,
+                1,
+                [0, 0],
+            );
+            return;
+        };
+        // Field names and offsets up front: an eye-paired uniform reads its
+        // partner's offset, and the partner is declared after it.
+        let mut names = Vec::with_capacity(fields.len());
+        let mut offsets = Vec::with_capacity(fields.len());
+        let mut offset = 0usize;
+        for field in fields {
+            let align = field.ty.data.ty.align_of();
+            offset += (align - offset % align) % align;
+            names.push(self.backend.map_field_name(field.name));
+            offsets.push(base + offset / 4);
+            offset += field.ty.data.ty.size_of();
+        }
+        let offset_of =
+            |name: &str| names.iter().position(|field| field == name).map(|i| offsets[i]);
+        for (field, field_name) in fields.iter().zip(names.iter()) {
+            if eye_paired {
+                if let Some(partner) = Self::EYE_PAIRED_FIELDS
+                    .iter()
+                    .find(|paired| **paired == field_name.as_str())
+                {
+                    let first = offset_of(partner).expect("eye-paired field is declared");
+                    let second = offset_of(&format!("{}_r", partner))
+                        .expect("eye-paired field has a right-hand half");
+                    self.push_flat_uniform(
+                        group,
+                        io_id,
+                        Self::glsl_flat_uniform_name(prefix, &[field_name]),
+                        self.glsl_type_name_inline(&field.ty),
+                        field.ty.data.ty.size_of() / 4,
+                        2,
+                        [first, second],
+                    );
+                    continue;
+                }
+                if Self::EYE_PAIRED_FIELDS
+                    .iter()
+                    .any(|paired| *field_name == format!("{}_r", paired))
+                {
+                    continue;
+                }
+            }
+            let mut path = field_path.to_vec();
+            path.push(field_name);
+            let rel = offset_of(field_name).expect("field is declared");
+            match &field.ty.data.ty {
+                ScriptPodTy::Struct { .. } => {
+                    self.collect_flat_struct(
+                        vm, field.ty.self_ref, prefix, &path, io_id, group, rel, false,
+                    )
+                }
+                _ => {
+                    self.push_flat_uniform(
+                        group,
+                        io_id,
+                        Self::glsl_flat_uniform_name(prefix, &path),
+                        self.glsl_type_name_inline(&field.ty),
+                        field.ty.data.ty.size_of() / 4,
+                        1,
+                        [rel, 0],
+                    );
+                }
+            }
+        }
+    }
+
+    fn glsl_write_flat_uniforms(&self, out: &mut String) {
+        for uniform in &self.flat_uniforms {
+            if uniform.array_len > 1 {
+                writeln!(
+                    out,
+                    "uniform {} {}[{}];",
+                    uniform.glsl_type, uniform.uniform_name, uniform.array_len
+                )
+                .ok();
+            } else {
+                writeln!(out, "uniform {} {};", uniform.glsl_type, uniform.uniform_name).ok();
+            }
+        }
+    }
+
     fn glsl_write_uniform_blocks(&self, vm: &ScriptVm, out: &mut String) {
+        if self.flatten_uniform_blocks {
+            return self.glsl_write_flat_uniforms(out);
+        }
         for io in &self.io {
             if let ShaderIoKind::UniformBuffer = io.kind {
                 let block_name = self.glsl_uniform_block_name(io.name);
@@ -1143,5 +1347,52 @@ mod typed_vertex_tests {
         assert!(source.contains("in vec4 packed_geometry_1;"), "{source}");
         assert!(source.contains("in vec4 packed_geometry_2;"), "{source}");
         assert!(!source.contains("geom_a"), "{source}");
+    }
+
+    // Chromium 63 segfaults in gpu::gles2::Program::ClearUniforms() as soon as
+    // a program declaring a std140 uniform block becomes current, so the web
+    // backend flattens every block member into a plain uniform instead. The
+    // declarations and their names are what the JS uploader binds by, so keep
+    // them pinned here.
+    #[test]
+    fn flat_uniforms_are_declared_without_uniform_blocks() {
+        fn flat_uniform(
+            group: GlslFlatUniformGroup,
+            uniform_name: &str,
+            glsl_type: &str,
+            comps: usize,
+            array_len: usize,
+        ) -> GlslFlatUniform {
+            GlslFlatUniform {
+                group,
+                io_id: LiveId(0),
+                uniform_name: uniform_name.into(),
+                glsl_type: glsl_type.into(),
+                comps,
+                array_len,
+                rel_offset_f32: 0,
+                rel_offset_f32_2: 0,
+            }
+        }
+
+        let mut output = ShaderOutput {
+            backend: ShaderBackend::Glsl,
+            flatten_uniform_blocks: true,
+            ..Default::default()
+        };
+        output.flat_uniforms = vec![
+            flat_uniform(GlslFlatUniformGroup::DrawCall, "unibuf_draw_call_zbias", "float", 1, 1),
+            flat_uniform(GlslFlatUniformGroup::Pass, "unibuf_draw_pass_camera_projection", "mat4", 16, 2),
+            flat_uniform(GlslFlatUniformGroup::DrawList, "unibuf_draw_list_view_shift", "vec2", 2, 1),
+        ];
+        let mut source = String::new();
+        output.glsl_write_flat_uniforms(&mut source);
+        assert!(source.contains("uniform float unibuf_draw_call_zbias;"), "{source}");
+        assert!(
+            source.contains("uniform mat4 unibuf_draw_pass_camera_projection[2];"),
+            "{source}"
+        );
+        assert!(source.contains("uniform vec2 unibuf_draw_list_view_shift;"), "{source}");
+        assert!(!source.contains("layout(std140)"), "{source}");
     }
 }

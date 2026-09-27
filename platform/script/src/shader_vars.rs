@@ -669,6 +669,59 @@ impl ShaderFnCompiler {
         let (field_ty, field_s) = self.stack.pop(self.trap.pass());
         let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
+        // CHROME63 (flatten_uniform_blocks): with interface blocks off,
+        // `unibuf_draw_call.zbias` becomes the standalone uniform declared for
+        // that field, so the body appends `_` where it used to append `.`. Only
+        // a struct-typed IO was flattened; on a scalar or vector uniform a `.`
+        // is a swizzle (`view_clip.xy`) and stays dotted. Keying off the type
+        // rather than the declared-uniform list keeps this independent of when
+        // that list is collected.
+        if output.flatten_uniform_blocks {
+            let flat_uniform_instance = instance_s.starts_with("unibuf_")
+                || instance_s.starts_with("uni_")
+                || instance_s.starts_with("su_");
+            let flat_struct_instance = match instance_ty {
+                ShaderType::Pod(p) => matches!(
+                    vm.bx.heap.pod_types[p.index as usize].ty,
+                    ScriptPodTy::Struct { .. }
+                ),
+                _ => false,
+            };
+            // The five `draw_pass` camera matrices come in a left/right pair
+            // and the body has to pick one, so they fall through to the
+            // special case below.
+            let flat_eye_paired = instance_s == "unibuf_draw_pass"
+                && matches!(field_ty, ShaderType::Id(id!(camera_projection)
+                    | id!(camera_view)
+                    | id!(depth_projection)
+                    | id!(depth_view)
+                    | id!(camera_inv)));
+            if flat_uniform_instance && flat_struct_instance && !flat_eye_paired {
+                if let ShaderType::Id(flat_field_id) = field_ty {
+                    let flat_field_name = output.backend.map_field_name(flat_field_id);
+                    let flat_name =
+                        ShaderOutput::glsl_flat_uniform_name(&instance_s, &[&flat_field_name]);
+                    let flat_ret_ty = match instance_ty {
+                        ShaderType::Pod(p) => vm
+                            .bx
+                            .heap
+                            .pod_field_type(p, flat_field_id, &vm.bx.code.builtins.pod),
+                        _ => None,
+                    };
+                    if let Some(flat_ret_ty) = flat_ret_ty {
+                        self.stack.push(
+                            self.trap.pass(),
+                            ShaderType::Pod(Self::logical_fetch_pod_type(vm, flat_ret_ty)),
+                            flat_name,
+                        );
+                        self.stack.free_string(field_s);
+                        self.stack.free_string(instance_s);
+                        return;
+                    }
+                }
+            }
+        }
+
         if let ShaderType::Id(field_id) = field_ty {
             if let ShaderType::Pod(pod_ty) = instance_ty {
                 if let Some(ret_ty) =
@@ -680,21 +733,37 @@ impl ShaderFnCompiler {
                         && instance_s == "unibuf_draw_pass"
                     {
                         let mut s = self.stack.new_string();
+                        // CHROME63: flattened, the pair is one `mat4[2]`
+                        // uniform, so it keeps its `[int(VIEW_ID)]` index and
+                        // only the member access changes shape.
+                        let base = "unibuf_draw_pass";
+                        let indexed = |field: &str| -> String {
+                            if output.flatten_uniform_blocks {
+                                format!("{}_{}[int(VIEW_ID)]", base, field)
+                            } else {
+                                format!("{}.{}[int(VIEW_ID)]", base, field)
+                            }
+                        };
                         match field_id {
                             id!(camera_projection) => {
-                                write!(s, "unibuf_draw_pass.camera_projection[int(VIEW_ID)]").ok();
+                                let t = indexed("camera_projection");
+                                write!(s, "{}", t).ok();
                             }
                             id!(camera_view) => {
-                                write!(s, "unibuf_draw_pass.camera_view[int(VIEW_ID)]").ok();
+                                let t = indexed("camera_view");
+                                write!(s, "{}", t).ok();
                             }
                             id!(depth_projection) => {
-                                write!(s, "unibuf_draw_pass.depth_projection[int(VIEW_ID)]").ok();
+                                let t = indexed("depth_projection");
+                                write!(s, "{}", t).ok();
                             }
                             id!(depth_view) => {
-                                write!(s, "unibuf_draw_pass.depth_view[int(VIEW_ID)]").ok();
+                                let t = indexed("depth_view");
+                                write!(s, "{}", t).ok();
                             }
                             id!(camera_inv) => {
-                                write!(s, "unibuf_draw_pass.camera_inv[int(VIEW_ID)]").ok();
+                                let t = indexed("camera_inv");
+                                write!(s, "{}", t).ok();
                             }
                             _ => {
                                 self.stack.free_string(s);

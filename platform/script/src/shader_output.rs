@@ -216,6 +216,18 @@ pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
     pub use_vulkan: bool,
+    /// GLSL only: emit uniform blocks as individual uniform variables instead
+    /// of `layout(std140) uniform` interface blocks.
+    ///
+    /// Chromium 63's GPU process segfaults in `gles2::Program::ClearUniforms`
+    /// when `useProgram` selects a program carrying a std140 uniform block
+    /// (see `tools/chrome63_ubo_crash_report.md`), so the web backend asks for
+    /// the flat form. Native GL keeps the blocks.
+    pub flatten_uniform_blocks: bool,
+    /// Filled by [`ShaderOutput::collect_glsl_flat_uniforms`] when
+    /// [`Self::flatten_uniform_blocks`] is set. Drives both the GLSL
+    /// declarations and the backend's per-uniform upload.
+    pub flat_uniforms: Vec<GlslFlatUniform>,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,
@@ -271,6 +283,51 @@ pub struct ShaderOutput {
     /// style reload), which made the same shader's source text differ and
     /// the GPU compile it again; the order of first use does not change.
     pub scope_prefixes: Vec<usize>,
+}
+
+/// Which uniform payload a flattened uniform is filled from at draw time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlslFlatUniformGroup {
+    /// `passUniforms` — the whole `DrawPassUniforms` for the active pass.
+    Pass,
+    /// `draw_listUniforms` — the draw list's own uniforms.
+    DrawList,
+    /// `draw_callUniforms` — per draw call.
+    DrawCall,
+    /// `userUniforms` — dynamic uniforms, offset by the IO's slot.
+    User,
+    /// `liveUniforms` — scope uniforms, offset by the IO's slot.
+    Live,
+    /// An app-declared custom uniform buffer, by slot index.
+    Custom(usize),
+}
+
+/// One `uniform` variable replacing a member of what would have been a std140
+/// interface block, with what a backend needs to fill it.
+///
+/// `rel_offset_f32` is relative to the start of the owning IO's data (the whole
+/// struct for a `UniformBuffer` IO, the packed slot for a `Uniform` or
+/// `ScopeUniform` IO), so the backend only has to add the base offset of the
+/// slice it already has.
+#[derive(Clone, Debug)]
+pub struct GlslFlatUniform {
+    /// Which payload the value has to be read from at draw time.
+    pub group: GlslFlatUniformGroup,
+    /// The IO this uniform came from, used to find its slot in the dynamic and
+    /// scope uniform buffers.
+    pub io_id: LiveId,
+    /// Identifier as declared in the generated GLSL.
+    pub uniform_name: String,
+    /// Declared GLSL type, e.g. `float`, `vec4`, `mat4`.
+    pub glsl_type: String,
+    /// Floats per array element (1 for `float`, 4 for `vec4`, 16 for `mat4`).
+    pub comps: usize,
+    /// Array length; 2 for the eye-paired camera matrices.
+    pub array_len: usize,
+    /// Source offset, in f32 units from the IO's data start.
+    pub rel_offset_f32: usize,
+    /// Source offset of array element 1, only used when `array_len == 2`.
+    pub rel_offset_f32_2: usize,
 }
 
 /// Ceiling on total emitted shader source. Real shaders here run to tens of
