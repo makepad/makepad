@@ -274,8 +274,31 @@ pub struct WVertexAttrib {
     pub integer: u32,
 }
 
+/// CHROME63 (flatten_uniform_blocks): one `uniform` variable to fill at draw
+/// time, in place of a uniform block binding.
+#[derive(FromWasm)]
+pub struct WFlatUniform {
+    /// Payload tag, see `FLAT_UNIFORM_GROUP_*` in web_gl.js.
+    pub group: u32,
+    /// Slot within the custom uniform buffers, for `group == 4`.
+    pub slot: u32,
+    /// Identifier as declared in the GLSL.
+    pub name: String,
+    /// Floats per array element: 1 scalar, 4 vec4, 16 mat4.
+    pub comps: u32,
+    /// Array length; 2 for the eye-paired camera matrices.
+    pub array_len: u32,
+    /// Source offset in f32 units from the start of the payload.
+    pub offset_f32: u32,
+    /// Source offset of array element 1, when `array_len == 2`.
+    pub offset_f32_2: u32,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
+    /// CHROME63 (flatten_uniform_blocks): empty when the backend uses uniform
+    /// blocks, in which case the block bindings below are used instead.
+    pub flat_uniforms: Vec<WFlatUniform>,
     pub shader_id: usize,
     pub vertex: String,
     pub pixel: String,

@@ -497,7 +497,11 @@ pub struct DrawShaderInput {
 fn uniform_packing() -> DrawShaderInputPacking {
     #[cfg(any(target_arch = "wasm32"))]
     {
-        return DrawShaderInputPacking::UniformsGLSL140;
+        // CHROME63 (flatten_uniform_blocks): the web backend takes its uniforms
+        // as individual `uniform` variables, so the dyn-uniform buffer is laid
+        // out tight. std140 padding would only add holes the per-uniform
+        // uploads would have to skip over.
+        return DrawShaderInputPacking::UniformsGLSLTight;
     }
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -841,6 +845,9 @@ pub struct CxDrawShaderMapping {
     pub geometries: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
     pub uniform_buffers: Vec<DrawShaderUniformBufferInput>,
+    /// CHROME63: per-uniform descriptors for the web backend's flattened
+    /// (no interface block) form. Empty on every other backend.
+    pub flat_uniforms: Vec<makepad_script::shader_output::GlslFlatUniform>,
     pub samplers: Vec<ShaderSampler>,
     pub texture_sampler_indices: Vec<usize>,
     pub uses_time: bool,
@@ -1370,6 +1377,7 @@ impl CxDrawShaderMapping {
             geometries,
             textures,
             uniform_buffers,
+            flat_uniforms: output.flat_uniforms.clone(),
             samplers: output.samplers.clone(),
             texture_sampler_indices,
             uses_time,

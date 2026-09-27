@@ -1194,6 +1194,10 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
             output.use_vulkan = false;
+            // CHROME63: Chromium 63's GLES2 crashes in Program::ClearUniforms
+            // when a program with a std140 uniform block becomes current, so
+            // the web backend takes uniforms as individual variables.
+            output.flatten_uniform_blocks = cfg!(target_arch = "wasm32");
             output.const_table = vm.host.cx().shader_const_table_mode();
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -1239,6 +1243,9 @@ impl DrawVars {
             }
 
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+            // CHROME63: must run before glsl_create_*_shader and before the
+            // backend mapping is built, both of which read flat_uniforms.
+            output.collect_glsl_flat_uniforms(vm);
 
             let mut shared_defs = String::new();
             output.create_struct_defs(vm, &mut shared_defs);

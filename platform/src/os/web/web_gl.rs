@@ -9,6 +9,7 @@ use crate::{
     os::web::from_wasm::*,
     texture::TextureFormat,
 };
+use makepad_script::shader_output::GlslFlatUniformGroup;
 use std::collections::BTreeSet;
 
 const WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT: usize = 32;
@@ -1017,6 +1018,7 @@ impl Cx {
                 debug_code,
                 geom_attribs,
                 inst_attribs,
+                flat_uniforms,
             ) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
@@ -1045,6 +1047,54 @@ impl Cx {
                 } else {
                     (Vec::new(), Vec::new())
                 };
+                // CHROME63 (flatten_uniform_blocks): each standalone uniform's
+                // offset within the payload it is read from. Uniform-buffer
+                // groups start at 0; the dynamic and scope groups are packed
+                // back to back, so their base is the IO's own slot.
+                let flat_uniforms: Vec<WFlatUniform> = cx_shader
+                    .mapping
+                    .flat_uniforms
+                    .iter()
+                    .map(|uniform| {
+                        let (group, slot, base_f32) = match uniform.group {
+                            GlslFlatUniformGroup::Pass => (0u32, 0u32, 0u32),
+                            GlslFlatUniformGroup::DrawList => (1, 0, 0),
+                            GlslFlatUniformGroup::DrawCall => (2, 0, 0),
+                            GlslFlatUniformGroup::Custom(slot) => (4, slot as u32, 0),
+                            GlslFlatUniformGroup::User => {
+                                let base = cx_shader
+                                    .mapping
+                                    .dyn_uniforms
+                                    .inputs
+                                    .iter()
+                                    .find(|input| input.id == uniform.io_id)
+                                    .map(|input| input.offset as u32)
+                                    .unwrap_or(0);
+                                (3, 0, base)
+                            }
+                            GlslFlatUniformGroup::Live => {
+                                let base = cx_shader
+                                    .mapping
+                                    .scope_uniforms
+                                    .inputs
+                                    .iter()
+                                    .find(|input| input.id == uniform.io_id)
+                                    .map(|input| input.offset as u32)
+                                    .unwrap_or(0);
+                                (5, 0, base)
+                            }
+                        };
+                        WFlatUniform {
+                            group,
+                            slot,
+                            name: uniform.uniform_name.clone(),
+                            comps: uniform.comps as u32,
+                            array_len: uniform.array_len as u32,
+                            offset_f32: base_f32 + uniform.rel_offset_f32 as u32,
+                            offset_f32_2: base_f32 + uniform.rel_offset_f32_2 as u32,
+                        }
+                    })
+                    .collect();
                 (
                     vertex,
                     pixel,
@@ -1054,6 +1104,7 @@ impl Cx {
                     cx_shader.mapping.flags.debug_code,
                     geom_attribs,
                     inst_attribs,
+                    flat_uniforms,
                 )
             };
 
@@ -1076,6 +1127,7 @@ impl Cx {
                 let shader_id = self.draw_shaders.os_shaders.len();
                 self.os.from_wasm(FromWasmCompileWebGLShader {
                     shader_id,
+                    flat_uniforms,
                     vertex: shp.vertex.clone(),
                     pixel: shp.pixel.clone(),
                     geometry_slots,

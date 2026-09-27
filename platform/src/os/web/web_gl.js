@@ -424,6 +424,40 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  // CHROME63: never hand a WebGL entry point a view that sits on wasm memory.
+  // A memory growth detaches every view taken before it, and Blink answers the
+  // resulting out-of-range view by CHECK-failing in TypedArrayBase.h (inside
+  // bufferData, texImage2D, uniform*fv), aborting the tab with no JS-level
+  // error to catch. Which way a detached view reads is not something JS can
+  // rely on, so no guard is trustworthy here: copy into a buffer this class
+  // owns, which can never be detached, and upload that.
+  stable_upload_view(view) {
+    const Type = view.constructor;
+    const bytes = view.byteLength;
+    let scratch = this._stable_upload_scratch;
+    if (!scratch || scratch.buffer.byteLength < bytes) {
+      // Grow with headroom so a slowly growing buffer does not reallocate on
+      // every upload.
+      const capacity = Math.max(bytes, 8192);
+      scratch = { buffer: new ArrayBuffer(capacity), view: null };
+      this._stable_upload_scratch = scratch;
+    }
+    if (
+      !scratch.view ||
+      scratch.view.constructor !== Type ||
+      scratch.view.byteLength * Type.BYTES_PER_ELEMENT < bytes
+    ) {
+      scratch.view = new Type(
+        scratch.buffer,
+        0,
+        Math.floor(scratch.buffer.byteLength / Type.BYTES_PER_ELEMENT),
+      );
+    }
+    const out = new Type(scratch.buffer, 0, view.length);
+    out.set(view);
+    return out;
+  }
+
   upload_buffer_data(gl, target, gl_buf, data, usage) {
     if (!this.view_is_uploadable(data)) {
       this.report_uniform_upload_once(
@@ -439,6 +473,74 @@ export class WasmWebGL extends WasmWebBrowser {
       gl_buf._buffer_byte_length = byte_length;
     } else {
       gl.bufferSubData(target, 0, data);
+    }
+  }
+
+  // CHROME63 (flatten_uniform_blocks): fill this program's individual uniforms
+  // from the per-draw-call payloads, so no uniform block is ever bound. Each
+  // entry names the payload it belongs to and the f32 offset within it, so a
+  // standalone uniform is read exactly where its block member used to sit.
+  //
+  // Group tags match the Rust side: 0 pass, 1 draw-list, 2 draw-call,
+  // 3 user (dynamic), 4 custom buffer by slot, 5 live (scope).
+  flat_payload_views(args, custom_views) {
+    // Copy each payload into a buffer this class owns, so every uniform of the
+    // draw is a subarray of a view a memory growth cannot detach.
+    const view = (key, slice, label) => {
+      if (!slice || !slice.len) return null;
+      const checked = this.make_validated_wasm_view(slice, 4, false, label, Float32Array);
+      if (!checked.ok) return null;
+      if (!this._flat_payload_scratch) this._flat_payload_scratch = {};
+      const scratch = this._flat_payload_scratch;
+      if (!scratch[key] || scratch[key].length < checked.array.length) {
+        scratch[key] = new Float32Array(checked.array.length);
+      }
+      scratch[key].set(checked.array);
+      return scratch[key].subarray(0, checked.array.length);
+    };
+    return {
+      0: view(0, args.pass_uniforms, "pass uniforms"),
+      1: view(1, args.draw_list_uniforms, "draw list uniforms"),
+      2: view(2, args.draw_call_uniforms, "draw call uniforms"),
+      3: view(3, args.user_uniforms, "user uniforms"),
+      5: view(5, args.live_uniforms, "live uniforms"),
+      4: custom_views,
+    };
+  }
+
+  upload_flat_uniforms(gl, shader, args, views) {
+    const list = shader.flat_uniforms;
+    if (!Array.isArray(list) || list.length === 0) return;
+    for (let i = 0; i < list.length; i++) {
+      const uniform = list[i];
+      if (uniform.loc === null || uniform.loc === undefined) continue;
+      const view =
+        uniform.group === 4 ? (views[4] || [])[uniform.slot] || null : views[uniform.group] || null;
+      if (!view || !this.view_is_uploadable(view)) continue;
+      const comps = uniform.comps;
+      this.set_flat_uniform(
+        gl, uniform, view.subarray(uniform.offset_f32, uniform.offset_f32 + comps),
+      );
+    }
+  }
+
+  set_flat_uniform(gl, uniform, array) {
+    if (!array || array.length === 0) return;
+    switch (uniform.comps) {
+      case 1: gl.uniform1fv(uniform.loc, array); break;
+      case 2: gl.uniform2fv(uniform.loc, array); break;
+      case 3: gl.uniform3fv(uniform.loc, array); break;
+      case 4: gl.uniform4fv(uniform.loc, array); break;
+      case 16: gl.uniformMatrix4fv(uniform.loc, false, array); break;
+      case 9: gl.uniformMatrix3fv(uniform.loc, false, array); break;
+      default:
+        // A packed run of components (a pod array wider than one vector).
+        // Write it in the widest component count that divides evenly.
+        if (uniform.comps % 4 === 0) gl.uniform4fv(uniform.loc, array);
+        else if (uniform.comps % 3 === 0) gl.uniform3fv(uniform.loc, array);
+        else if (uniform.comps % 2 === 0) gl.uniform2fv(uniform.loc, array);
+        else gl.uniform1fv(uniform.loc, array);
+        break;
     }
   }
 
@@ -1409,13 +1511,43 @@ export class WasmWebGL extends WasmWebBrowser {
     let pass_uniform_buf = null;
     let draw_list_uniform_buf = null;
     let live_uniform_buf = null;
-    try {
-      pass_uniform_buf = gl.createBuffer();
-      draw_list_uniform_buf = gl.createBuffer();
-      live_uniform_buf = gl.createBuffer();
-    } catch (_error) {
+    // CHROME63 (flatten_uniform_blocks): the backend asked for individual
+    // uniforms instead of interface blocks, so resolve their locations now,
+    // while the linked program is current, and keep them for its lifetime.
+    let flat_uniforms = null;
+    if (Array.isArray(shader.flat_uniforms) && shader.flat_uniforms.length) {
+      flat_uniforms = [];
+      for (const input of shader.flat_uniforms) {
+        const loc = gl.getUniformLocation(shader.program, input.name);
+        flat_uniforms.push({
+          group: input.group,
+          slot: input.slot,
+          comps: input.comps,
+          offset_f32: input.offset_f32,
+          loc: loc === undefined ? null : loc,
+        });
+      }
     }
+
+    // CHROME63 (flatten_uniform_blocks): a program that declares no uniform
+    // block must not be asked for block indices either. Chromium 63's gles2
+    // decoder routes uniformBlockBinding through the same program-state
+    // validation as useProgram, so touching the block API at all is what
+    // reaches ClearUniforms(). Leave the bindings null and take the
+    // per-uniform path in the draw instead.
+    const block = flat_uniforms === null;
+    const binding = (name) => (block ? null : this.get_uniform_block_binding(shader.program, name));
+    if (block) {
+      try {
+        pass_uniform_buf = gl.createBuffer();
+        draw_list_uniform_buf = gl.createBuffer();
+        live_uniform_buf = gl.createBuffer();
+      } catch (_error) {
+      }
+    }
+
     const finished_shader = {
+      flat_uniforms,
       vertex: shader.vertex,
       pixel: shader.pixel,
       geom_attribs:
@@ -1434,26 +1566,11 @@ export class WasmWebGL extends WasmWebBrowser {
               "packed_instance_",
               shader.instance_slots,
             ),
-      pass_uniforms_binding: this.get_uniform_block_binding(
-        shader.program,
-        "passUniforms",
-      ),
-      draw_list_uniforms_binding: this.get_uniform_block_binding(
-        shader.program,
-        "draw_listUniforms",
-      ),
-      draw_call_uniforms_binding: this.get_uniform_block_binding(
-        shader.program,
-        "draw_callUniforms",
-      ),
-      user_uniforms_binding: this.get_uniform_block_binding(
-        shader.program,
-        "userUniforms",
-      ),
-      live_uniforms_binding: this.get_uniform_block_binding(
-        shader.program,
-        "liveUniforms",
-      ),
+      pass_uniforms_binding: binding("passUniforms"),
+      draw_list_uniforms_binding: binding("draw_listUniforms"),
+      draw_call_uniforms_binding: binding("draw_callUniforms"),
+      user_uniforms_binding: binding("userUniforms"),
+      live_uniforms_binding: binding("liveUniforms"),
       pass_uniform_buf,
       draw_list_uniform_buf,
       live_uniform_buf,
@@ -1555,6 +1672,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     let shader = {
       shader_id: args.shader_id,
+      flat_uniforms: args.flat_uniforms,
       vertex: args.vertex,
       pixel: args.pixel,
       geometry_slots: args.geometry_slots,
@@ -1927,7 +2045,14 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!shader.program) {
       return { ok: false, reason: "shader program allocation failed" };
     }
-    if (shader.uniform_buffers_valid === false || vao.uniform_buffers_valid === false) {
+    // CHROME63 (flatten_uniform_blocks): a flat program reads its uniforms
+    // straight from the wasm payloads, so it owns no uniform buffers and the
+    // allocation checks below do not apply to it.
+    const uses_flat_uniforms = Array.isArray(shader.flat_uniforms) && shader.flat_uniforms.length > 0;
+    if (
+      !uses_flat_uniforms &&
+      (shader.uniform_buffers_valid === false || vao.uniform_buffers_valid === false)
+    ) {
       return { ok: false, reason: "uniform buffer allocation failed" };
     }
     const layout = this.validate_webgl_attrib_layout(shader);
@@ -2038,7 +2163,7 @@ export class WasmWebGL extends WasmWebBrowser {
       [shader.live_uniforms_binding, shader.live_uniform_buf, "live"],
     ];
     for (const [binding, buffer, label] of uniform_blocks) {
-      if (binding !== null && !buffer) {
+      if (!uses_flat_uniforms && binding !== null && !buffer) {
         return { ok: false, reason: `${label} uniform buffer allocation failed` };
       }
     }
@@ -2439,57 +2564,79 @@ export class WasmWebGL extends WasmWebBrowser {
         this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
       }
 
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        shader.draw_list_uniform_buf,
-        args.draw_list_uniforms,
-        args.draw_list_uniforms_gen_lo,
-        args.draw_list_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        vao.draw_call_uniform_buf,
-        args.draw_call_uniforms,
-        args.draw_call_uniforms_gen_lo,
-        args.draw_call_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        vao.user_uniform_buf,
-        args.user_uniforms,
-        args.user_uniforms_gen_lo,
-        args.user_uniforms_gen_hi,
-      );
-      this.upload_uniform_buffer_from_ptr(
-        gl,
-        shader.live_uniform_buf,
-        args.live_uniforms,
-        args.live_uniforms_gen_lo,
-        args.live_uniforms_gen_hi,
-      );
+      // CHROME63 (flatten_uniform_blocks): when the program was compiled from
+      // individual uniforms, fill them from the draw-call payloads instead of
+      // uploading and binding uniform blocks. The block path stays for
+      // programs that do use blocks.
+      let flat_views = null;
+      if (Array.isArray(shader.flat_uniforms) && shader.flat_uniforms.length) {
+        const custom_views = [];
+        for (let slot = 0; slot < (args.custom_uniforms || []).length; slot++) {
+          const input = args.custom_uniforms[slot];
+          // input.data is a byte range, so declare 4-byte elements: the
+          // length stays a byte count and the view reads it as f32.
+          const checked = this.make_validated_wasm_view(
+            input.data, 4, true, "custom uniforms", Float32Array,
+          );
+          custom_views.push(
+            checked.ok ? this.stable_upload_view(checked.array) : null,
+          );
+        }
+        flat_views = this.flat_payload_views(args, custom_views);
+        this.upload_flat_uniforms(gl, shader, args, flat_views);
+      } else {
+        this.upload_uniform_buffer_from_ptr(
+          gl,
+          shader.draw_list_uniform_buf,
+          args.draw_list_uniforms,
+          args.draw_list_uniforms_gen_lo,
+          args.draw_list_uniforms_gen_hi,
+        );
+        this.upload_uniform_buffer_from_ptr(
+          gl,
+          vao.draw_call_uniform_buf,
+          args.draw_call_uniforms,
+          args.draw_call_uniforms_gen_lo,
+          args.draw_call_uniforms_gen_hi,
+        );
+        this.upload_uniform_buffer_from_ptr(
+          gl,
+          vao.user_uniform_buf,
+          args.user_uniforms,
+          args.user_uniforms_gen_lo,
+          args.user_uniforms_gen_hi,
+        );
+        this.upload_uniform_buffer_from_ptr(
+          gl,
+          shader.live_uniform_buf,
+          args.live_uniforms,
+          args.live_uniforms_gen_lo,
+          args.live_uniforms_gen_hi,
+        );
 
-      if (!shader.custom_uniform_buffers) shader.custom_uniform_buffers = [];
-      for (let slot = 0; slot < (args.custom_uniforms || []).length; slot++) {
-        const input = args.custom_uniforms[slot];
-        let entry = shader.custom_uniform_buffers[slot];
-        if (!entry) {
-          entry = { buffer: gl.createBuffer(), binding: this.get_uniform_block_binding(shader.program, input.block_name) };
-          shader.custom_uniform_buffers[slot] = entry;
+        if (!shader.custom_uniform_buffers) shader.custom_uniform_buffers = [];
+        for (let slot = 0; slot < (args.custom_uniforms || []).length; slot++) {
+          const input = args.custom_uniforms[slot];
+          let entry = shader.custom_uniform_buffers[slot];
+          if (!entry) {
+            entry = { buffer: gl.createBuffer(), binding: this.get_uniform_block_binding(shader.program, input.block_name) };
+            shader.custom_uniform_buffers[slot] = entry;
+          }
+          const checked = this.make_validated_wasm_view(input.data, 1, true, "custom uniforms", Uint8Array);
+          if (!checked.ok || !entry.buffer) continue;
+          if (entry.lo !== input.generation_lo || entry.hi !== input.generation_hi) {
+            this.upload_uniform_buffer_data(gl, entry.buffer, checked.array, gl.DYNAMIC_DRAW);
+            entry.lo = input.generation_lo;
+            entry.hi = input.generation_hi;
+          }
+          this.bind_uniform_block(gl, entry.binding, entry.buffer);
         }
-        const checked = this.make_validated_wasm_view(input.data, 1, true, "custom uniforms", Uint8Array);
-        if (!checked.ok || !entry.buffer) continue;
-        if (entry.lo !== input.generation_lo || entry.hi !== input.generation_hi) {
-          this.upload_uniform_buffer_data(gl, entry.buffer, checked.array, gl.DYNAMIC_DRAW);
-          entry.lo = input.generation_lo;
-          entry.hi = input.generation_hi;
-        }
-        this.bind_uniform_block(gl, entry.binding, entry.buffer);
+        this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
+        this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
+        this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, vao.draw_call_uniform_buf);
+        this.bind_uniform_block(gl, shader.user_uniforms_binding, vao.user_uniform_buf);
+        this.bind_uniform_block(gl, shader.live_uniforms_binding, shader.live_uniform_buf);
       }
-      this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
-      this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
-      this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, vao.draw_call_uniform_buf);
-      this.bind_uniform_block(gl, shader.user_uniforms_binding, vao.user_uniform_buf);
-      this.bind_uniform_block(gl, shader.live_uniforms_binding, shader.live_uniform_buf);
 
       for (let i = 0; i < shader.texture_locs.length; i++) {
         const tex_loc = shader.texture_locs[i];
@@ -2530,7 +2677,11 @@ export class WasmWebGL extends WasmWebBrowser {
           for (let i = 0; i < 16; i++) pass_uniforms[i] = eye.projection_matrix[i];
           for (let i = 0; i < 16; i++) pass_uniforms[i + 16] = eye.transform_matrix[i];
           for (let i = 0; i < 16; i++) pass_uniforms[i + 32] = eye.invtransform_matrix[i];
-          this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
+          if (flat_views) {
+            this.upload_flat_uniforms(gl, shader, args, flat_views);
+          } else {
+            this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms);
+          }
           gl.drawElementsInstanced(
             gl.TRIANGLES,
             preflight.indices,
@@ -2542,13 +2693,19 @@ export class WasmWebGL extends WasmWebBrowser {
         draw_eye(xr.left_eye);
         draw_eye(xr.right_eye);
       } else {
-        this.upload_uniform_buffer_from_ptr(
-          gl,
-          shader.pass_uniform_buf,
-          args.pass_uniforms,
-          args.pass_uniforms_gen_lo,
-          args.pass_uniforms_gen_hi,
-        );
+        if (flat_views) {
+          // CHROME63 (flatten_uniform_blocks): the pass uniforms go in with the
+          // rest, from the same payload the block path would have uploaded.
+          this.upload_flat_uniforms(gl, shader, args, flat_views);
+        } else {
+          this.upload_uniform_buffer_from_ptr(
+            gl,
+            shader.pass_uniform_buf,
+            args.pass_uniforms,
+            args.pass_uniforms_gen_lo,
+            args.pass_uniforms_gen_hi,
+          );
+        }
         gl.drawElementsInstanced(
           gl.TRIANGLES,
           preflight.indices,
