@@ -4,6 +4,7 @@
 use crate::controls::ControlValue;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -142,6 +143,19 @@ script_mod! {
     let Illuminate = Cap{
         draw_bg +: {material_press: -1.0 material_press_invert: 0.0 material_inner: vec4(0.55, 10.0, 0.70, 0.6)}
         draw_text +: {material_ink_glow: 0.85 material_ink_lift: 3.0}
+    }
+    // A toggle: the inverting cap with round ends, as the bench draws its
+    // own, whose label takes the glow ink while it is held or latched, so
+    // on is told from a press that has not been let go.
+    let Latch = Invert{
+        draw_bg +: {border_radius: 26.0}
+        draw_text +: {material_ink_glow: 1.0 material_ink_lift: 1.0}
+    }
+    // A cap lit where it stands, the bench's latched light: latched, with
+    // no press to go down by.
+    let Lit = Cap{
+        draw_bg +: {active: 1.0 material_press: 0.0 material_press_invert: 0.0}
+        draw_text +: {active: 1.0}
     }
 
     let Well = CheckBox{
@@ -350,6 +364,18 @@ script_mod! {
             Pose{illuminate_focused := Illuminate{text: "Focused" animator +: {focus: {default: @on}}}}
             Pose{illuminate_disabled := Illuminate{text: "Disabled" animator +: {disabled: {default: @on}}}}
         }}
+        StoryNote{text: "LATCHED: a button shown on. It stays where the press left it and keeps the light the press gave it, through draw_bg.active and draw_text.active. The toggle is live: press it to latch it and again to let it go, beside the same cap held latched. The three after it are the bench's lit caps, latched with no press to go down by, so they are lit where they stand: the face alone, the label alone, and both."}
+        stage_latched := Stage{Caps{
+            toggle := Latch{text: "Toggle"}
+            Pose{toggle_on := Latch{text: "Latched" draw_bg +: {active: 1.0} draw_text +: {active: 1.0}}}
+            Pose{glow_face := Lit{text: "Glow face" draw_bg +: {material_inner: vec4(0.55, 10.0, 0.70, 0.6)}}}
+            Pose{glow_ink := Lit{text: "Glow ink" draw_text +: {material_ink_glow: 0.85 material_ink_lift: 1.0}}}
+            Pose{glow_both := Lit{
+                text: "Glow both"
+                draw_bg +: {material_inner: vec4(0.55, 10.0, 0.70, 0.6)}
+                draw_text +: {material_ink_glow: 0.85 material_ink_lift: 3.0}
+            }}
+        }}
 
         StoryHeading{text: "Wells and caps"}
         StoryNote{text: "A check box is a well cut into the housing. A toggle is a sunken track with one solid knob travelling in it, the same substance as the housing, throwing its shadow on the track and taking the active ink as it turns on. A slider's track is a groove and its handle a cap standing in it."}
@@ -381,7 +407,19 @@ script_mod! {
 // rounded view, a panel and the slider's groove have no glow ink; only a
 // button has a press and a lit label; the illuminating row keeps its own
 // glow, and the deepening and illuminating rows their own press, so the
-// three idioms stay apart however the rest is tuned.
+// three idioms stay apart however the rest is tuned. The toggle is an
+// inverting cap and moves with that row; the lit caps keep their own glow
+// and have no press.
+macro_rules! latch_row {
+    () => {
+        "toggle toggle_on"
+    };
+}
+macro_rules! glow_row {
+    () => {
+        "glow_face glow_ink glow_both"
+    };
+}
 macro_rules! views {
     () => {
         "raised panel inset"
@@ -414,24 +452,29 @@ macro_rules! knobs {
 }
 macro_rules! stages {
     () => {
-        "stage_views stage_invert stage_deepen stage_illuminate stage_wells stage_knobs"
+        "stage_views stage_invert stage_deepen stage_illuminate stage_latched stage_wells stage_knobs"
     };
 }
 
 /// Every material control on the page.
 const EVERY: &str = concat!(
-    views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!(), " groove"
+    views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!(), " ",
+    wells!(), " ", knobs!(), " groove"
 );
-/// Every one but the illuminating row, which keeps its glow.
-const INNER: &str = concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", wells!(), " ", knobs!(), " groove");
+/// Every one but the illuminating row and the lit caps, which keep their glow.
+const INNER: &str =
+    concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", latch_row!(), " ", wells!(), " ", knobs!(), " groove");
 /// Every one with a glow ink.
-const GLOW_INK: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!());
-/// The inverting row, the neumorphic idiom the press controls move.
-const PRESSED: &str = invert_row!();
+const GLOW_INK: &str = concat!(
+    invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!(), " ", wells!(), " ", knobs!()
+);
+/// The inverting row and the toggle, the neumorphic idiom the press controls move.
+const PRESSED: &str = concat!(invert_row!(), " ", latch_row!());
 /// The buttons whose label does not already glow.
 const LIT_LABEL: &str = concat!(invert_row!(), " ", deepen_row!());
 /// Every button on the page.
-const BUTTONS: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!());
+const BUTTONS: &str =
+    concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!());
 /// What takes the ground as one colour: the stages, the views moulded
 /// straight out of them, and the knobs, which have no state colours.
 const PLAIN_GROUND: &str = concat!(stages!(), " ", views!(), " ", knobs!());
@@ -960,6 +1003,31 @@ const fn color(label: &'static str, target: &'static str, prop: &'static str, de
     Control { label, target, kind: ControlKind::Color { prop, default } }
 }
 
+/// Whether the page's toggle is latched. A button keeps nothing itself, so
+/// the page keeps this, as a host would.
+static LATCHED: AtomicBool = AtomicBool::new(false);
+
+/// A press of the toggle latches it, and the next lets it go. A pass with
+/// no actions is the page settling after it was built or rebuilt, which
+/// builds the toggle let go: it is given the state it was left in.
+fn material_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let pressed = root.button(cx, ids!(toggle)).clicked(actions);
+    let settling = actions.is_empty();
+    if !pressed && !settling {
+        return;
+    }
+    let latched = if pressed { !LATCHED.fetch_xor(true, Ordering::Relaxed) } else { LATCHED.load(Ordering::Relaxed) };
+    if settling && !latched {
+        return;
+    }
+    let active = if latched { 1.0 } else { 0.0 };
+    let toggle = root.widget(cx, ids!(toggle));
+    if let Err(err) = crate::canvas::apply_chunk(cx, &toggle, &format!("{{draw_bg.active: {active:?} draw_text.active: {active:?}}}")) {
+        log!("material: the toggle took no latch: {}", err);
+    }
+    toggle.redraw(cx);
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "containers/material/overview",
     category: "Containers",
@@ -996,6 +1064,8 @@ Makepad clips by default, and a button is not a view, so it cannot grow past its
 One elevation per control: raised at rest, lifted a quarter more under the pointer, moved by `material_press_depth` while held, moulded flat when disabled. The sign and size of the press pick the idiom -- past `-material_raise` the face inverts, short of it the cap deepens, near zero the glow carries the state -- and `material_press_invert` says whether a held face dishes as well as descends. The button's state layer (`layer_color`) is skipped under a material: a face that both darkens and re-lights reads as muddy.
 
 Lit ink is one `mix` in the label's existing `get_color`, toward `color_material_glow` and past full brightness by `material_ink_lift`; the halo comes from the face. Nothing samples a glyph twice.
+
+A button shown on is latched: `draw_bg.active` and `draw_text.active` hold it where a press leaves it and keep the light a press gives it. A button keeps nothing itself, so its host sets both, as the toggle on this page does. With no material they draw nothing.
 
 ## What this page shows
 
@@ -1062,7 +1132,7 @@ The bench's metallic, clearcoat, environment, reflection, exposure and highlight
         color(LABEL_INK, wells!(), WELL_INK, 0x3A4052FF),
         color(LABEL_INK, "groove", GROOVE_INK, 0x3A4052FF),
     ],
-    on_actions: None,
+    on_actions: Some(material_actions),
 }];
 
 #[cfg(test)]
