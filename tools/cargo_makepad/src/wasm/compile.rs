@@ -780,25 +780,34 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        // The app resolves `self://` through its own module path, which for a bin target is
-        // the BIN name (`files`), not the package name (`makepad-files`): package under that.
+        // The app resolves `self://` through the module path of the code that names the
+        // resource: for a bin target that is the BIN name (`files`), for code in the package's
+        // library the LIBRARY name (`makepad_app_route` for bin `route`). Package under both
+        // when they differ, or a lib+bin app's own icons 404 on the web.
         let underscore_build_bin = build_bin.replace('-', "_");
-        let dst_dir = app_dir.join(&underscore_build_bin).join("resources");
-        font_package.copy_tree_filtered(
-            &local_resources_path,
-            &dst_dir,
-            &format!("{underscore_build_bin}/resources"),
-            no_skip,
-            |dest_path| {
-                let dest_path = dest_path.to_path_buf();
-                if config.brotli {
-                    brotli_compress(&dest_path);
-                } else {
-                    remove_brotli_artifact(&dest_path);
-                }
-                Ok(())
-            },
-        )?;
+        let underscore_lib = build_crate.replace('-', "_");
+        let mut names = vec![underscore_build_bin];
+        if !names.contains(&underscore_lib) {
+            names.push(underscore_lib);
+        }
+        for name in names {
+            let dst_dir = app_dir.join(&name).join("resources");
+            font_package.copy_tree_filtered(
+                &local_resources_path,
+                &dst_dir,
+                &format!("{name}/resources"),
+                no_skip,
+                |dest_path| {
+                    let dest_path = dest_path.to_path_buf();
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    } else {
+                        remove_brotli_artifact(&dest_path);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
     }
     let resources = get_crate_dep_dirs(build_crate, &build_dir, "wasm32-unknown-unknown");
     for (name, dep_dir) in resources.iter() {
