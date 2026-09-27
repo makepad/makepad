@@ -1793,6 +1793,42 @@ mod tests {
     }
 
     #[test]
+    fn dropped_anchor_centers_a_taller_walk_in_place() {
+        let layout = Layout {
+            flow: Flow::Right { wrap: true, row_align: RowAlign::Center },
+            padding: Inset { top: 1.0, ..Default::default() },
+            ..Default::default()
+        };
+        with_turtle(dvec2(200.0, 100.0), layout, |cx| {
+            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+            let pill = tracked_walk(cx, Walk::fixed(20.0, 24.0));
+            // Centering an 18-tall anchor on the 24-tall walk seats it 3 below the row top.
+            let drop = cx.row_center_anchor_drop(18.0);
+            assert_eq!(drop, 3.0);
+
+            // Emit the anchor the way a wrapped text run does: from the row top, padded by the drop.
+            let row_top = cx.turtle().pos();
+            let start = cx.align_list.len();
+            cx.align_list.push(AlignEntry::BeginClip(row_top + dvec2(0.0, drop), row_top));
+            cx.turtle_mut().allocate_width(30.0);
+            cx.turtle_mut().allocate_height(drop + 18.0);
+            let rect = Rect { pos: row_top, size: dvec2(30.0, drop + 18.0) };
+            let align_height = Some(18.0 + 2.0 * drop);
+            cx.emit_turtle_walk_with_role(rect, start, Metrics::default(), align_height, RowAlignRole::Anchor);
+            // A second anchor on this row stays on the first one's line.
+            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+            cx.turtle_new_line();
+
+            // The walk stayed where it was drawn, below the padding, and both centers meet.
+            assert_eq!(marker_pos(cx, pill).y, 1.0);
+            assert_eq!(marker_pos(cx, start).y, 4.0);
+            assert_eq!(marker_pos(cx, pill).y + 12.0, marker_pos(cx, start).y + 9.0);
+            // A fresh row holds nothing to center on.
+            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+        });
+    }
+
+    #[test]
     fn deferred_prefix_delta_moves_anchor_and_fixed_followers() {
         with_turtle(dvec2(100.0, 40.0), Layout::flow_right(), |cx| {
             let mut deferred = cx
@@ -5201,6 +5237,26 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let row_bottom_forgiveness = (current_row_height - max_effective_bottom.max(0.0))
             .clamp(0.0, max_up_overhang);
         row_bottom_forgiveness
+    }
+
+    /// How far below the current row's top an anchor of `anchor_height` must sit for the row's
+    /// taller walks to center on it without moving up, as the per-row path centers a row. A row
+    /// that already holds an anchor keeps the new anchor on that anchor's line instead.
+    pub fn row_center_anchor_drop(&self, anchor_height: f64) -> f64 {
+        if !matches!(self.turtle().flow(), Flow::Right { row_align: RowAlign::Center, .. }) {
+            return 0.0;
+        }
+        let mut tallest: f64 = 0.0;
+        for walk in &self.finished_walks[self.current_row_walks_start()..] {
+            match walk.align_role {
+                RowAlignRole::Anchor => return 0.0,
+                RowAlignRole::Shiftable => {
+                    tallest = tallest.max(walk.align_height.unwrap_or(walk.outer_size.y))
+                }
+                RowAlignRole::Fixed => {}
+            }
+        }
+        ((tallest - anchor_height) * 0.5).max(0.0)
     }
 
     /// Shifts the rendered content in the align list range `[start, end)` by

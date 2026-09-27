@@ -1418,6 +1418,30 @@ impl TextFlow {
         em
     }
 
+    /// The font size (in points) of the current line. A code or sub/superscript run
+    /// pushes its own scaled size; the entry below it (or the base size) is the line's.
+    pub fn line_font_size(&self) -> f32 {
+        let scaled_run = self.fixed.value() > 0
+            || self.y_shift_scales.last().is_some_and(|scale| *scale != 0.0);
+        if scaled_run {
+            self.font_sizes.iter().rev().nth(1).copied().unwrap_or(self.font_size)
+        } else {
+            self.font_sizes.last().copied().unwrap_or(self.font_size)
+        }
+    }
+
+    /// Lays out a probe in the current line's own style (the normal style at the
+    /// line's size), so an inline widget can read the metrics it has to line up with.
+    pub fn line_probe(&mut self, cx: &mut Cx2d) -> Rc<LaidoutText> {
+        let line_size = self.line_font_size();
+        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
+        let normal_size = std::mem::replace(&mut self.draw_text.text_style.font_size, line_size);
+        let probe = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "Ag");
+        self.draw_text.text_style.font_size = normal_size;
+        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
+        probe
+    }
+
     pub fn push_size_abs_scale(&mut self, scale: f64) {
         self.font_sizes.push(self.font_size * (scale as f32));
     }
@@ -2102,17 +2126,7 @@ impl TextFlow {
 
             let run_size = *self.font_sizes.last().unwrap_or(&self.font_size);
             let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
-            // A code or sub/superscript run pushed its own scaled size; the
-            // entry below it (or the base size) is the surrounding line's.
-            let line_size = if style_slot == 4 || y_shift_scale != 0.0 {
-                if self.font_sizes.len() >= 2 {
-                    self.font_sizes[self.font_sizes.len() - 2]
-                } else {
-                    self.font_size
-                }
-            } else {
-                run_size
-            };
+            let line_size = self.line_font_size();
 
             // Baseline-align mixed runs: a fixed/code run scaled to 0.85x of
             // the surrounding text must sit ON the line's baseline — without
@@ -2134,6 +2148,11 @@ impl TextFlow {
             let (line_asc, line_desc) = self.style_metrics_em(cx, 0);
             self.draw_text.align_row_height =
                 Some((line_asc + line_desc) * line_size * LPXS_PER_PT);
+            // Our runs' rows wrap at the flow's pitch, not the font's line gap. Read once here
+            // so the selection capture, the wrap probes and the draw share one layout.
+            self.draw_text.flow_wrap_spacing_in_lpxs = Some(
+                (cx.turtle().wrap_spacing() / self.draw_text.font_scale.max(0.0001) as f64) as f32,
+            );
 
             // Apply the text style to the single draw_text instance
             let top_drop = text_style.top_drop;

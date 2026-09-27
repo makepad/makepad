@@ -5,6 +5,7 @@ use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     fold_button::{FoldButton, FoldButtonAction},
     makepad_derive_widget::*,
+    makepad_draw::turtle::RowAlign,
     makepad_draw::*,
     makepad_html::*,
     text_flow::TextFlow,
@@ -931,11 +932,19 @@ impl Widget for Html {
                             // Walk scaled to the current summary font size so
                             // the triangle tracks headings, `<sub>`, etc. The
                             // right margin is the gap between triangle and
-                            // summary text. The top margin pushes the box
-                            // down so the triangle's center lines up with
-                            // the text's optical middle — `Flow::Right` uses
-                            // `RowAlign::Top`, and a font_size-tall box on
-                            // its own sits above the text baseline.
+                            // summary text.
+                            //
+                            // A font_size-tall box sits high in a top-aligned row, so it's pushed
+                            // down; a centered row seats it on the line box, and the bottom
+                            // margin lifts it onto the cap band instead.
+                            let centered =
+                                matches!(cx.turtle().flow(), Flow::Right { row_align: RowAlign::Center, .. });
+                            let (top, bottom) = if centered {
+                                let ink_offset = self.text_flow.line_probe(cx).ink_center_offset_in_lpxs();
+                                (0.0, 2.0 * ink_offset as f64)
+                            } else {
+                                (font_size * 0.25, 0.0)
+                            };
                             let triangle_walk = Walk {
                                 abs_pos: None,
                                 width: Size::Fixed(font_size),
@@ -943,8 +952,8 @@ impl Widget for Html {
                                 margin: Inset {
                                     left: 0.0,
                                     right: font_size * 0.2,
-                                    top: font_size * 0.25,
-                                    bottom: 0.0,
+                                    top,
+                                    bottom,
                                 },
                                 ..Default::default()
                             };
