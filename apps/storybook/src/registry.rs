@@ -90,6 +90,20 @@ pub enum ControlKind {
     /// `prop` may name several properties, separated by spaces, that all
     /// take the one colour: a face and each of its states.
     Color { prop: &'static str, default: u32 },
+    /// A prop that takes an array of `[x, y, kind]` anchors, a curve over
+    /// the unit box, edited in a curve editor. `left` and `right` caption
+    /// the editor's two ends, `guide` draws a dashed reference line at that
+    /// height, named by `guide_label`, and `mirror` draws the curve followed
+    /// by its own mirror across the top, for a half tooth.
+    Curve {
+        prop: &'static str,
+        default: &'static [[f64; 3]],
+        left: &'static str,
+        right: &'static str,
+        guide: Option<f64>,
+        guide_label: &'static str,
+        mirror: bool,
+    },
     Disabled { default: bool },
     /// A heading, the control's label, over the controls that follow it up
     /// to the next section. A click on it folds them away or back. Controls
@@ -359,7 +373,7 @@ mod tests {
                 ("Shape", &["Radius"]),
                 ("Elevation", &["Levels"]),
                 ("State", &["Layers"]),
-                ("Motion", &["Overview", "Tween & timeline", "Ease editor", "Script tweens", "Motion paths", "Sequencer"]),
+                ("Motion", &["Overview", "Tween & timeline", "Ease editor", "Curve editor", "Script tweens", "Motion paths", "Sequencer"]),
             ],
         ),
         (
