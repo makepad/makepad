@@ -25,41 +25,6 @@ use {
     std::{ffi::CStr, os::raw::c_void, sync::Arc, sync::Mutex},
 };
 
-/// AppKit's transparent-titlebar container still owns the top ~28pt of a
-/// caption-less window: clicks fall through to the app, but DRAGS move the
-/// window — so a slider the app draws in its own top bar loses every drag
-/// to AppKit. Swapped onto the container after window creation, this
-/// subclass keeps only AppKit's own controls hittable (the traffic lights
-/// are NSButtons); everything else falls through to the makepad view, and
-/// window dragging is decided solely by the app's WindowDragQuery answer.
-pub fn define_titlebar_container_class() -> *const Class {
-    let Some(container_class) = Class::get("NSTitlebarContainerView") else {
-        return std::ptr::null();
-    };
-    extern "C" fn hit_test(this: &Object, _: Sel, point: NSPoint) -> ObjcId {
-        unsafe {
-            let hit: ObjcId = msg_send![super(this, superclass(this)), hitTest: point];
-            let mut view = hit;
-            while view != nil {
-                let is_button: bool = msg_send![view, isKindOfClass: class!(NSButton)];
-                if is_button {
-                    return hit;
-                }
-                view = msg_send![view, superview];
-            }
-            nil
-        }
-    }
-    let mut decl = ClassDecl::new("MakepadTitlebarContainerView", container_class).unwrap();
-    unsafe {
-        decl.add_method(
-            sel!(hitTest:),
-            hit_test as extern "C" fn(&Object, Sel, NSPoint) -> ObjcId,
-        );
-    }
-    decl.register()
-}
-
 pub fn define_macos_timer_delegate() -> *const Class {
     // A panic must NOT unwind across these ObjC boundaries: the unwind hits
     // `panic_cannot_unwind` and aborts the whole app — and because the run
@@ -1188,9 +1153,24 @@ pub fn define_cocoa_view_class() -> *const Class {
         //cw.send_change_event();
     }*/
 
+    /// AppKit starts a window drag in the titlebar strip on the window
+    /// server, before the app sees the mouse-down, wherever it believes the
+    /// content is see-through. This undocumented override (Chromium's
+    /// BridgedContentView and Electron's App Store builds ship the same)
+    /// claims the whole view, so every mouse-down reaches the view and the
+    /// app's WindowDragQuery alone decides caption drags (`mouse_down` then
+    /// calls the public `performWindowDragWithEvent:`).
+    extern "C" fn opaque_rect_for_window_move_when_in_titlebar(this: &Object, _: Sel) -> NSRect {
+        unsafe { msg_send![this, bounds] }
+    }
+
     let superclass = class!(NSView);
     let mut decl = ClassDecl::new("RenderViewClass", superclass).unwrap();
     unsafe {
+        decl.add_method(
+            sel!(_opaqueRectForWindowMoveWhenInTitlebar),
+            opaque_rect_for_window_move_when_in_titlebar as extern "C" fn(&Object, Sel) -> NSRect,
+        );
         decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
         decl.add_method(
             sel!(initWithPtr:),
