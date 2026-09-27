@@ -468,11 +468,12 @@ export class WasmWebGL extends WasmWebBrowser {
       return;
     }
     const byte_length = data.byteLength || data.length * 4;
+    const stable = this.stable_upload_view(data);
     if (gl_buf._buffer_byte_length !== byte_length) {
-      gl.bufferData(target, data, usage);
+      gl.bufferData(target, stable, usage);
       gl_buf._buffer_byte_length = byte_length;
     } else {
-      gl.bufferSubData(target, 0, data);
+      gl.bufferSubData(target, 0, stable);
     }
   }
 
@@ -1155,7 +1156,7 @@ export class WasmWebGL extends WasmWebBrowser {
           `buffer=${source && source.buffer && source.buffer.byteLength})`,
         );
       }
-      upload(gl, target, allocation_changed, source, admission);
+      upload(gl, target, allocation_changed, this.stable_upload_view(source), admission);
       if (allocation_changed) {
         const allocation_error = gl.getError();
         if (allocation_error !== gl.NO_ERROR) {
@@ -1843,8 +1844,10 @@ export class WasmWebGL extends WasmWebBrowser {
         buffer.gl_buf._buffer_byte_length = capacity;
         first = 0;
       }
+      // See stable_upload_view: hand bufferSubData a copy, not wasm memory.
+      const stable = this.stable_upload_view(checked.array);
       for (let offset = first; offset < checked.element_count; offset += 65536) {
-        gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, checked.array, offset, Math.min(65536, checked.element_count - offset));
+        gl.bufferSubData(gl.ARRAY_BUFFER, offset * 4, stable, offset, Math.min(65536, checked.element_count - offset));
       }
       buffer.valid = true;
       buffer.byte_length = checked.byte_length;
