@@ -237,7 +237,7 @@ impl Splash {
                     if crate::desktop_style::current(vm).as_ref()!=Some(&sheet) {
                         crate::desktop_style::install(vm,sheet);
                         // Keep the isolate's existing prelude/resource handles and jail.
-                        vm.with_reload(|vm| {crate::widgets_mod(vm);crate::desktop_style::apply_widgets(vm);});
+                        vm.with_reload(|vm| {let host_io_only=vm.cx().script_data.std.host_io_only();crate::widgets_mod_with_host_io(vm,host_io_only);crate::desktop_style::apply_widgets(vm);});
                     }
                 }
                 // Everything on `mod` that is not the body's own; whatever the run

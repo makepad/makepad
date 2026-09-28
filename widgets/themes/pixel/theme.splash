@@ -169,6 +169,13 @@ mod.theme.color_text_cursor = #0d2117
 // from `color_ctrl_selected`. A dark teal, the deepest colour a handheld's
 // screen shows, so the lit ink on it reads at 8 to 1.
 mod.theme.color_ctrl_selected = #1e4a44
+// The primary itself is that teal with the lit ink on it, as on every pale
+// sheet: a ground dark enough for a light ink. Grown from the seed at the
+// family's lightness it came out a bright teal under a dark ink, the one
+// pale sheet the other way round, and a mix with any other pale sheet met
+// in the middle with neither ink reading.
+mod.theme.color_primary = #1e4a44
+mod.theme.color_on_primary = #d6e0b2
 mod.theme.color_focus = #0d2117
 mod.theme.color_ctrl_active = #0d2117
 
