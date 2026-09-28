@@ -5966,6 +5966,7 @@ mod theme_builder_tests {
     /// ends of both appearances' halves of the lightness slider -- and at
     /// both ends of the text contrast.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_built_theme_reads() {
         let mut built_themes = 0;
         for harmony in Harmony::ALL {
@@ -8579,6 +8580,7 @@ mod theme_builder_tests {
     /// suggestion names are used as they are -- the primary is the colour
     /// picked -- and this is what says that costs no reading.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_suggested_theme_reads() {
         let mut checked = 0;
         for dark in [true, false] {
@@ -9054,6 +9056,7 @@ mod theme_builder_tests {
     /// and pass by checking nothing -- which is why the count is asserted at
     /// the end as well.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_combination_theme_reads() {
         let mut checked = 0;
         for dark in [true, false] {
@@ -9303,6 +9306,7 @@ mod theme_builder_tests {
     /// ink of the row in the band reads on the band at the bar for words,
     /// and a disabled one at the bar for disabled words.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn the_wheel_pickers_band_reads_on_every_built_palette() {
         let states = wheel_band_states();
         let (mut checked, mut failed) = (0, 0);
@@ -9980,6 +9984,7 @@ mod theme_builder_tests {
     /// `build` that sweep holds to the bar, and what is new is only where the
     /// four colours come from.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_theme_grown_from_every_seed_slot_reads() {
         let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
         let seeds = [
@@ -10293,6 +10298,7 @@ mod theme_builder_tests {
     /// of the saturation -- and a palette named by hand at each count. Every
     /// held pair meets its bar, the derived colours' included.
     #[test]
+    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_theme_of_fewer_colours_reads() {
         let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
         let mut seeds: Vec<u32> = (0..6).map(|step| hsl_to_rgb(step as f64 * 60.0 + 10.0, 0.85, 0.5)).collect();

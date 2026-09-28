@@ -126,12 +126,12 @@ fn rgb(r: u8, g: u8, b: u8) -> Vec4f {
 }
 /// The wall is an OLED that shows this all day, so everything is a dark grey
 /// with a hint of its meaning: untested grey, passed grey-green, a warning
-/// grey-amber, the one being tested grey-blue. A failure is the ONLY bright
-/// thing on the screen.
+/// grey-purple (never amber: it must not read as the red), the one being
+/// tested grey-blue. A failure is the ONLY bright thing on the screen.
 fn colour(verdict: &str) -> Vec4f {
     match verdict {
         "green" => rgb(40, 66, 52),
-        "orange" => rgb(88, 70, 40),
+        "orange" => rgb(66, 44, 91),
         "red" => rgb(255, 38, 38),
         "running" => rgb(40, 58, 80),
         _ => rgb(34, 37, 42),
