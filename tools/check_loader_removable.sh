@@ -15,6 +15,6 @@ if rg -n 'external-loaders|makepad-fab-loader-external|loaders/external' \
     exit 1
 fi
 
-cargo check -p makepad-fab
+cargo check -p makepad-app-fab
 
 echo "loader removability gate: ok"

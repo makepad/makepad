@@ -41,6 +41,16 @@ use std::thread;
 /// their platform signal). The same type as the chat session's hook.
 pub type WakeHook = Arc<dyn Fn() + Send + Sync>;
 
+/// One word of a `say` text and when the rendered audio speaks it, in
+/// seconds from the audio's first sample. `word` is the whitespace-separated
+/// word as written, punctuation included.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WordTiming {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// The rate [`SttSession::transcribe`] expects: mono f32 at 16 kHz.
 pub const STT_SAMPLE_RATE: u32 = 16_000;
 
@@ -231,7 +241,10 @@ pub enum TtsEvent {
     Ready(TtsEngineInfo),
     Failed(String),
     /// The rendered speech for one `say`. Mono PCM at the engine's rate.
-    Audio { utterance: u64, audio: SpeechAudio, secs: f64 },
+    /// `timings`: every whitespace-separated word of the text, in order,
+    /// when the engine knows when it spoke them (Kokoro, in-process or on a
+    /// node); `None` for the OS voices.
+    Audio { utterance: u64, audio: SpeechAudio, timings: Option<Vec<WordTiming>>, secs: f64 },
     Error { utterance: u64, message: String },
 }
 

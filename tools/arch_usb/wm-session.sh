@@ -11,8 +11,8 @@ export CARGO_NET_OFFLINE=true
 export MAKEPAD_CEF_OFFLINE=1
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 cd "$MAKEPAD_WM_ROOT"
-if test ! -x target/release/wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
-    cargo build --offline --release -p makepad-wm
+if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then
+    cargo build --offline --release -p makepad-app-wm
 fi
 
 # The GPU the compositor starts on. The WM's Display panel saves the
@@ -79,6 +79,6 @@ if test -z "${MAKEPAD_VULKAN_COMPOSITOR_UUID:-}" && test -z "${MAKEPAD_VULKAN_CO
 fi
 if test -n "$wm_gpu_pci"; then
     echo "wm-session: compositor PCI $wm_gpu_pci (saved GPU choice)" >&2
-    exec env MAKEPAD_WM_GPU_FROM_SAVED=1 MAKEPAD_VULKAN_COMPOSITOR_PCI="$wm_gpu_pci" target/release/wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "$@"
+    exec env MAKEPAD_WM_GPU_FROM_SAVED=1 MAKEPAD_VULKAN_COMPOSITOR_PCI="$wm_gpu_pci" target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "$@"
 fi
-exec target/release/wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "$@"
+exec target/release/makepad-app-wm "-scale=${MAKEPAD_WM_SCALE:-1.3}" "$@"

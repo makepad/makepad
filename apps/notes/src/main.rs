@@ -1,7 +1,7 @@
 //! notes — the standalone window around NotesView.
 
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_notes::{ai, view::NotesView};
+use makepad_app_notes::{ai, view::NotesView};
 use makepad_strict_json::{self as json, Value};
 pub use makepad_widgets;
 use makepad_widgets::*;
@@ -130,7 +130,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
-        makepad_notes::script_mod(vm);
+        makepad_app_notes::script_mod(vm);
         self::script_mod(vm)
     }
 

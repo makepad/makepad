@@ -1,13 +1,13 @@
 //! The window manager as an Android app whose apps are real processes.
 //!
 //! This library is the Android cdylib (`cargo makepad android` builds the
-//! package's `[lib]`): the plain `makepad-wm` desk in its Android skin, with
+//! package's `[lib]`): the plain `makepad-app-wm` desk in its Android skin, with
 //! processes. Every app it opens runs in a process of its own — the APK's
 //! launcher (`launch/`) runs the app's library there — and reaches the desk
 //! over its hub, exactly like a desktop child (apps/wm/src/clients.rs,
 //! platform/src/os/linux/android/android_hosted.rs).
 
-use makepad_wm::{DesktopStyle, WmBuild};
+use makepad_app_wm::{DesktopStyle, WmBuild};
 
 /// The build: no linked modules, every app a hosted child process.
 pub fn wm_build() -> WmBuild {
@@ -22,9 +22,9 @@ pub fn wm_build() -> WmBuild {
 }
 
 #[cfg(target_os = "android")]
-use makepad_wm::makepad_widgets::*;
+use makepad_app_wm::makepad_widgets::*;
 #[cfg(target_os = "android")]
-use makepad_wm::App;
+use makepad_app_wm::App;
 
 #[cfg(target_os = "android")]
 app_main!(
@@ -48,7 +48,7 @@ app_main!(
         if system_property("debug.makepad.wm.ondevice") == "1" {
             std::env::set_var("MAKEPAD_WM_ONDEVICE_BUILD", "1");
         }
-        makepad_wm::android_prepare_children(cx);
+        makepad_app_wm::android_prepare_children(cx);
         cx.set_global(wm_build());
     }
 );

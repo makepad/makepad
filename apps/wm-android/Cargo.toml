@@ -6,12 +6,12 @@
 # (platform/src/os/linux/android/android_hosted.rs). No shared engine dylib.
 #
 #   cargo makepad android --abi=aarch64 --package-name=nl.makepad.wm \
-#     --app-label=wm proc-pack -p makepad-wm-android --release
+#     --app-label=wm proc-pack -p makepad-app-wm-android --release
 # (tools/cargo_makepad/src/android/proc_pack) builds this crate's APK, the
 # launcher (`launch/`) and one library per app listed below, and packs them.
 
 [package]
-name = "makepad-wm-android"
+name = "makepad-app-wm-android"
 version = "0.1.0"
 edition = "2021"
 
@@ -19,23 +19,23 @@ edition = "2021"
 # bin being the WM registry's binary name (apps/wm/src/clients.rs).
 [package.metadata.makepad.proc]
 apps = [
-    "makepad-calculator calculator",
-    "makepad-calendar calendar",
-    "makepad-clock clock",
-    "makepad-files files",
-    "makepad-finance finance",
-    "makepad-mail mail",
-    "makepad-notes notes",
-    "makepad-photos photos",
-    "makepad-reminders reminders",
+    "makepad-app-calculator makepad-app-calculator",
+    "makepad-app-calendar makepad-app-calendar",
+    "makepad-app-clock makepad-app-clock",
+    "makepad-app-files makepad-app-files",
+    "makepad-app-finance makepad-app-finance",
+    "makepad-app-mail makepad-app-mail",
+    "makepad-app-notes makepad-app-notes",
+    "makepad-app-photos makepad-app-photos",
+    "makepad-app-reminders makepad-app-reminders",
     "makepad-app-route makepad-app-route",
-    "makepad-sheets sheets",
-    "makepad-weather weather",
+    "makepad-app-sheets makepad-app-sheets",
+    "makepad-app-weather makepad-app-weather",
 ]
 
 [lib]
-name = "makepad_wm_android"
+name = "makepad_app_wm_android"
 path = "src/lib.rs"
 
 [dependencies]
-makepad-wm = { path = "../wm" }
+makepad-app-wm = { path = "../wm" }

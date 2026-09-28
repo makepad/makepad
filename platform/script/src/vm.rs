@@ -608,6 +608,7 @@ impl<'a> ScriptVm<'a> {
                         args: OpcodeArgs::default(),
                         return_ip: None,
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
+                        body_root: false,
                     };
                     if !self.bx.threads.cur().push_call_frame(call) {
                         return self
@@ -1211,6 +1212,7 @@ impl<'a> ScriptVm<'a> {
             args: Default::default(),
             return_ip: None,
             prev_slot_base: root_slot_base,
+            body_root: true,
         }) {
             return self
                 .handle_execution_limit_failure()
@@ -2125,6 +2127,7 @@ mod tests {
                 args: OpcodeArgs::NONE,
                 return_ip: None,
                 prev_slot_base: 0,
+                body_root: false,
             }));
             assert!(thread.push_call_frame(CallFrame {
                 bases: StackBases {
@@ -2135,6 +2138,7 @@ mod tests {
                 args: pop_to_me,
                 return_ip: Some(ScriptIp::default()),
                 prev_slot_base: 0,
+                body_root: false,
             }));
         }
 

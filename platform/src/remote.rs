@@ -27,6 +27,11 @@
 //!   not by the time their clients opened sockets. Each sequence deadline is
 //!   a new boundary; it does not freeze the app for the entire sequence.
 
+#[path = "app_clock.rs"]
+pub mod app_clock;
+#[path = "synthetic_cursor.rs"]
+pub mod synthetic_cursor;
+
 /// Marks synchronous injected dispatch, including hardware-path mouse input and
 /// nested events. Native input delivered on a later event-loop turn stays native.
 /// The flag is the `Cx`'s (`RemoteActivity::remote_input`); the guard holds a
@@ -56,8 +61,15 @@ impl Drop for RemoteInputScope {
 mod activity;
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[path = "remote_capture.rs"]
+mod capture;
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
 mod imp {
     use super::activity;
+    use super::app_clock;
+    use super::capture;
+    use super::synthetic_cursor;
     pub(crate) use activity::note_user_event;
     pub(crate) use activity::RemoteActivity;
     use crate::cx::Cx;
@@ -70,6 +82,7 @@ mod imp {
     use makepad_studio_protocol::{
         KeyCode, KeyEvent, PinchPhase, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
         RemoteMouseUp, RemotePinch, RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
+        WidgetSnapshot,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -121,6 +134,10 @@ mod imp {
         // to the next (present within three seconds of a click, absent after).
         static HIDDEN: OnceLock<bool> = OnceLock::new();
         if *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()) {
+            return false;
+        }
+        // Nor does it belong in an in-process capture of the window.
+        if capture::capturing() {
             return false;
         }
         if HANDS_OFF.load(Ordering::Relaxed) {
@@ -252,6 +269,10 @@ mod imp {
         /// intervened; one that sends nothing only meets the quiet-period gate.
         static REQUEST_USER_SEQ: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         static REQUEST_START_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// The `/step` in progress, if any: UI-owned, like the captures.
+        static STEP: std::cell::RefCell<Option<StepJob>> = const { std::cell::RefCell::new(None) };
+        /// The `/cap/start` session as the UI sees it.
+        static CAPTURE: std::cell::RefCell<Option<UiCapture>> = const { std::cell::RefCell::new(None) };
     }
 
     struct EncodeJob {
@@ -366,13 +387,48 @@ mod imp {
             tx: Sender<Reply>,
         },
         CancelGrabs(Vec<u64>),
-        Dump(Sender<Reply>),
+        Dump {
+            /// One line per widget with its id path instead of the tree.
+            paths: bool,
+            tx: Sender<Reply>,
+        },
         /// The task pool's one-line summary (workers, jobs, queue waits).
         PoolSummary(Sender<Reply>),
         Snap {
             window: Option<usize>,
             needle: String,
+            /// `q=path:a.b` / `path=a.b`: match id paths, exactly or as a
+            /// suffix of whole segments, instead of the substring search.
+            path: Option<String>,
             all: bool,
+            tx: Sender<Reply>,
+        },
+        /// Run `frames` frames of the virtual clock at `fps`; answered after
+        /// the last is presented (and captured, while a capture runs).
+        Step {
+            window: Option<usize>,
+            frames: u64,
+            fps: u32,
+            tx: Sender<Reply>,
+        },
+        /// Is anything still moving: a pending NextFrame, redraw, repaint or
+        /// virtual timer due within the next frame?
+        Settled(Sender<Reply>),
+        CapStart {
+            window: usize,
+            config: capture::CaptureConfig,
+            session: capture::NewSession,
+            tx: Sender<Reply>,
+        },
+        CapStop(Sender<Reply>),
+        /// `/cap/pause` (true) and `/cap/resume` (false).
+        CapPause(bool, Sender<Reply>),
+        /// Show (`Some(Some(style))`), hide (`Some(None)`) or just place
+        /// (`None`) the synthetic cursor.
+        Cursor {
+            style: Option<Option<synthetic_cursor::SyntheticCursorStyle>>,
+            window: Option<usize>,
+            pos: Option<Vec2d>,
             tx: Sender<Reply>,
         },
         Close {
@@ -514,6 +570,99 @@ mod imp {
         Text(String),
         Err(String),
         Conflict(String),
+    }
+
+    /// A `/step` in progress (UI thread only).
+    struct StepJob {
+        window: WindowId,
+        fps: u32,
+        remaining: u64,
+        open: Option<OpenFrame>,
+        /// Since when the step has been waiting on the capture encoder.
+        wait_since: Option<Instant>,
+        tx: Sender<Reply>,
+    }
+
+    /// The step frame being presented: advanced, dispatched, not yet on the
+    /// GPU (a drawable or a shader pipeline may still be on its way).
+    struct OpenFrame {
+        repaint_id: u64,
+        /// The capture request id and the frame index it carries.
+        capture: Option<(u64, u64)>,
+        opened: Instant,
+        prepared: bool,
+    }
+
+    /// The capture session as the UI sees it.
+    struct UiCapture {
+        session: u64,
+        window: usize,
+        virtual_clock: bool,
+        fps: u32,
+        /// Step frames given a capture request.
+        armed: u64,
+        /// Armed frames given up on (never presented, or never read back).
+        abandoned: u64,
+        /// The worker's failure has been reported to a `/step`.
+        failure_reported: bool,
+        tx: Sender<capture::CaptureMsg>,
+        counters: Arc<capture::CaptureCounters>,
+        tap: Option<u64>,
+    }
+
+    /// How long a step frame waits for shader pipelines still compiling
+    /// before it is presented without them (logged).
+    const STEP_SHADER_WAIT: Duration = Duration::from_secs(10);
+    /// How long one step frame may fail to reach the screen, or a step may
+    /// wait on the capture encoder, before `/step` gives up with an error.
+    const STEP_FRAME_LIMIT: Duration = Duration::from_secs(20);
+
+    /// What a `/step` must wait for from a running capture.
+    enum CaptureGate {
+        Ready,
+        Wait,
+        Failed(String),
+    }
+
+    /// `last`: every step frame is presented; the captured ones must also
+    /// have left the GPU. Otherwise: may another frame be armed, or is the
+    /// encoder too far behind?
+    fn capture_gate(last: bool) -> CaptureGate {
+        CAPTURE.with_borrow_mut(|capture| {
+            let Some(c) = capture.as_mut().filter(|c| c.virtual_clock) else {
+                return CaptureGate::Ready;
+            };
+            if let Some(error) = c.counters.failure() {
+                if c.failure_reported {
+                    // the capture is dead; steps go on uncaptured
+                    return CaptureGate::Ready;
+                }
+                c.failure_reported = true;
+                return CaptureGate::Failed(error);
+            }
+            let lagging = if last {
+                c.counters.delivered.load(Ordering::Acquire) + c.abandoned < c.armed
+            } else {
+                c.armed.saturating_sub(c.counters.consumed.load(Ordering::Acquire))
+                    >= capture::MAX_FRAMES_AHEAD
+            };
+            if lagging {
+                CaptureGate::Wait
+            } else {
+                CaptureGate::Ready
+            }
+        })
+    }
+
+    /// Which half of a remote present the event loop is asked for.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(crate) enum PresentStage {
+        /// Draw what is pending and say whether the GPU can render all of it
+        /// now: `Some(true)` yes, `Some(false)` not yet (pipelines compiling).
+        Prepare,
+        /// Submit the window's frame: `Some(true)` submitted, `Some(false)`
+        /// failed, `None` waiting on a drawable (poll again next beat).
+        Present,
     }
 
     /// `(target repaint_id, responder, payload)` — resolved once the app has
@@ -717,6 +866,8 @@ mod imp {
         !queue().try_lock().map(|q| q.is_empty()).unwrap_or(false)
             || FRAME_WAITERS.with_borrow(|waiters| !waiters.is_empty())
             || PENDING_GRABS.load(Ordering::Relaxed) != 0
+            || STEP.with_borrow(|step| step.is_some())
+            || CAPTURE.with_borrow(|capture| capture.as_ref().is_some_and(|c| !c.virtual_clock))
     }
 
     // ------------------------------------------------------------------
@@ -822,6 +973,10 @@ mod imp {
         if !is_grab_id(request_id) {
             return true;
         }
+        if capture::is_capture_id(request_id) {
+            let target = CAPTURE.with_borrow(|capture| capture.as_ref().map(|c| c.window));
+            return target.is_some() && target == window_id;
+        }
         // Called only while the renderer consumes screenshot_requests. Keep
         // targeting UI-owned so HTTP/GPU locks cannot defer the requested frame.
         CAPTURES.with_borrow_mut(|captures| match captures.windows.get(&request_id) {
@@ -852,6 +1007,10 @@ mod imp {
         };
         let mut rest = Vec::new();
         for id in request_ids {
+            if capture::is_capture_id(id) {
+                capture::deliver(id, width, height, capture::Pixels::Png(png.to_vec()));
+                continue;
+            }
             match sinks.remove(&id) {
                 Some(sink) => {
                     let capture_ms = sink.requested_at.elapsed().as_secs_f64() * 1000.0;
@@ -903,6 +1062,16 @@ mod imp {
         };
         let mut rest = Vec::new();
         for id in request_ids {
+            let raw = || capture::Pixels::Raw {
+                data: pixels.clone(),
+                stride,
+                order,
+                origin,
+            };
+            if capture::is_capture_id(id) {
+                capture::deliver(id, width, height, raw());
+                continue;
+            }
             if let Some(sink) = sinks.remove(&id) {
                 let capture_ms = captured.duration_since(sink.requested_at).as_secs_f64() * 1000.0;
                 crate::trace!(
@@ -1093,14 +1262,17 @@ mod imp {
         if !cx.in_makepad_studio {
             return;
         }
-        poll_with_present(cx, |_, _| None);
+        poll_with_present(cx, false, |_, _, _| None);
     }
 
     /// Returns whether a present is still waiting on its window's drawable
     /// (the caller schedules the next beat to poll it again).
     #[cfg(all(target_os = "macos", not(gpusim)))]
-    pub(crate) fn poll_macos(cx: &mut Cx, present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
-        poll_with_present(cx, present)
+    pub(crate) fn poll_macos(
+        cx: &mut Cx,
+        present: impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
+    ) -> bool {
+        poll_with_present(cx, true, present)
     }
 
     #[cfg(all(target_os = "macos", not(gpusim)))]
@@ -1115,12 +1287,29 @@ mod imp {
         })
     }
 
-    fn poll_with_present(cx: &mut Cx, mut present: impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
+    /// `presents`: the caller's closure submits frames itself (standalone
+    /// macOS). Otherwise the backend's own render loop presents what the
+    /// bridge marked, and a step frame counts as presented once `repaint_id`
+    /// moves past it.
+    fn poll_with_present(
+        cx: &mut Cx,
+        presents: bool,
+        mut present: impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
+    ) -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
         }
         publish_windows(cx);
         let mut pending = false;
+        // A wall-clock capture records what the window presents, so a still
+        // window is kept presenting (a pass repaint, no widget redraw).
+        if let Some(window) = CAPTURE.with_borrow(|capture| {
+            capture.as_ref().filter(|c| !c.virtual_clock).map(|c| c.window)
+        }) {
+            if let Ok(window) = resolve_window(cx, Some(window)) {
+                cx.request_remote_window_present(window);
+            }
+        }
 
         let cmds: Vec<QueuedCmd> = {
             match queue().try_lock() {
@@ -1130,10 +1319,10 @@ mod imp {
         };
         // A due sequence frame precedes commands dispatched on this wake.
         poll_captures(cx);
-        pending |= present_captures(cx, &mut present);
+        pending |= present_captures(cx, presents, &mut present);
         for cmd in cmds {
             poll_captures(cx);
-            pending |= present_captures(cx, &mut present);
+            pending |= present_captures(cx, presents, &mut present);
             let wait_window = match &cmd.cmd {
                 Cmd::Input {
                     window, wait: true, ..
@@ -1144,7 +1333,7 @@ mod imp {
             apply(cx, cmd);
             // Do not batch later input ahead of a grab in this same drain.
             poll_captures(cx);
-            pending |= present_captures(cx, &mut present);
+            pending |= present_captures(cx, presents, &mut present);
             if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
                 cx.request_remote_window_present(window);
                 // The input has been applied above, whatever the present
@@ -1153,7 +1342,7 @@ mod imp {
                 // a later beat, and the waiters resolve on that repaint. An
                 // answer of "retry" here made drivers send the input again,
                 // and a busy app took every key twice ("bbrowser").
-                match present(cx, window) {
+                match present(cx, window, PresentStage::Present) {
                     Some(true) => {}
                     Some(false) | None => {
                         cx.request_remote_window_present(window);
@@ -1165,14 +1354,20 @@ mod imp {
         }
 
         poll_captures(cx);
-        pending |= present_captures(cx, &mut present);
+        pending |= present_captures(cx, presents, &mut present);
         resolve_frame_waiters(cx);
         pending
     }
 
-    /// Returns whether a capture's present is waiting on its drawable.
-    fn present_captures(cx: &mut Cx, present: &mut impl FnMut(&mut Cx, WindowId) -> Option<bool>) -> bool {
-        let mut pending = false;
+    /// Returns whether a capture's present is waiting on its drawable. A
+    /// `/step` in progress runs here too, so its frames are sealed at the
+    /// same boundaries as grabs: before any later command is applied.
+    fn present_captures(
+        cx: &mut Cx,
+        presents: bool,
+        present: &mut impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
+    ) -> bool {
+        let mut pending = drive_step(cx, presents, present);
         let windows = CAPTURES.with_borrow(|captures| {
             let mut windows: Vec<usize> = captures.windows.values().copied().collect();
             windows.sort_unstable();
@@ -1181,7 +1376,7 @@ mod imp {
         });
         for window in windows {
             let result = match resolve_window(cx, Some(window)) {
-                Ok(window) => present(cx, window),
+                Ok(window) => present(cx, window, PresentStage::Present),
                 Err(_) => Some(false),
             };
             if result.is_none() {
@@ -1206,6 +1401,358 @@ mod imp {
             });
         }
         pending
+    }
+
+    /// Run the `/step` in progress as far as the GPU lets it: each frame
+    /// advances the virtual clock, fires due timers, delivers NextFrame, and
+    /// is drawn and presented (with a capture request while a capture runs)
+    /// before the next one starts. Returns whether it is still running.
+    fn drive_step(
+        cx: &mut Cx,
+        presents: bool,
+        present: &mut impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
+    ) -> bool {
+        let Some(mut job) = STEP.with_borrow_mut(Option::take) else {
+            return false;
+        };
+        let pending = loop {
+            if !cx.windows.is_valid(job.window) || !cx.windows[job.window].is_created {
+                let _ = job.tx.send(Reply::Err("the stepped window closed".into()));
+                return false;
+            }
+            if job.open.is_none() {
+                // Before another frame (or the answer): the capture encoder
+                // must have kept up, within a bound; its failure is reported.
+                let last = job.remaining == 0;
+                match capture_gate(last) {
+                    CaptureGate::Ready => job.wait_since = None,
+                    CaptureGate::Failed(error) => {
+                        let _ = job.tx.send(Reply::Err(format!(
+                            "capture failed: {error} (steps continue uncaptured; /cap/stop to close it)"
+                        )));
+                        return false;
+                    }
+                    CaptureGate::Wait => {
+                        let since = *job.wait_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() < STEP_FRAME_LIMIT {
+                            break true;
+                        }
+                        let lost = CAPTURE.with_borrow_mut(|capture| {
+                            let c = capture.as_mut()?;
+                            let delivered = c.counters.delivered.load(Ordering::Acquire);
+                            let lost = c.armed.saturating_sub(delivered + c.abandoned);
+                            if last {
+                                // count them lost, so the next step does not wait
+                                c.abandoned += lost;
+                            }
+                            Some(lost)
+                        });
+                        let _ = job.tx.send(Reply::Err(if last {
+                            format!(
+                                "{} captured frame(s) never came back from the GPU within {:?}; they are missing from the file",
+                                lost.unwrap_or(0),
+                                STEP_FRAME_LIMIT
+                            )
+                        } else {
+                            format!("the capture encoder fell behind for {:?}", STEP_FRAME_LIMIT)
+                        }));
+                        return false;
+                    }
+                }
+                if last {
+                    let captured = CAPTURE.with_borrow(|capture| {
+                        capture.as_ref().filter(|c| c.virtual_clock).map(|c| c.armed)
+                    });
+                    let mut answer = format!(
+                        "{{\"frame\":{},\"time\":{}",
+                        app_clock::frame(),
+                        num(app_clock::now().unwrap_or(0.0))
+                    );
+                    if let Some(captured) = captured {
+                        answer.push_str(&format!(",\"captured\":{captured}"));
+                    }
+                    answer.push('}');
+                    let _ = job.tx.send(Reply::Text(answer));
+                    return false;
+                }
+                job.open = Some(open_step_frame(cx, &job));
+            }
+            let open = job.open.as_mut().unwrap();
+            let presented = if presents {
+                if !open.prepared {
+                    if present(cx, job.window, PresentStage::Prepare) == Some(false) {
+                        if open.opened.elapsed() < STEP_SHADER_WAIT {
+                            break true;
+                        }
+                        crate::log!(
+                            "[makepad-remote] step frame {}: shader pipelines still compiling after {:?}, presenting without them",
+                            app_clock::frame(),
+                            STEP_SHADER_WAIT
+                        );
+                    }
+                    open.prepared = true;
+                }
+                present(cx, job.window, PresentStage::Present) == Some(true)
+            } else {
+                cx.repaint_id > open.repaint_id
+            };
+            let captured = open.capture.is_none_or(|(id, _)| {
+                !cx.screenshot_requests.iter().any(|request| request.request_id == id)
+            });
+            if presented && captured {
+                job.open = None;
+                job.remaining -= 1;
+                continue;
+            }
+            if open.opened.elapsed() >= STEP_FRAME_LIMIT {
+                if let Some((id, index)) = open.capture {
+                    let armed = cx.screenshot_requests.iter().any(|request| request.request_id == id);
+                    cx.screenshot_requests.retain(|request| request.request_id != id);
+                    if armed {
+                        // Never read back: the file gets a gap there, and
+                        // neither this step nor the encoder waits for it.
+                        CAPTURE.with_borrow_mut(|capture| {
+                            if let Some(c) = capture.as_mut() {
+                                c.abandoned += 1;
+                                let _ = c.tx.send(capture::CaptureMsg::Skip { index });
+                            }
+                        });
+                    }
+                }
+                let _ = job.tx.send(Reply::Err(format!(
+                    "step frame {} was not presented within {:?}",
+                    app_clock::frame(),
+                    STEP_FRAME_LIMIT
+                )));
+                return false;
+            }
+            // The frame is still to be presented (or presented without its
+            // capture): mark the window again and retry on the next beat.
+            cx.request_remote_window_present(job.window);
+            break true;
+        };
+        STEP.set(Some(job));
+        pending
+    }
+
+    /// Advance the virtual clock by one frame and deliver what that frame
+    /// owes the app, in the order a real frame would: timers due by now,
+    /// then NextFrame. The draw happens when the frame is presented.
+    fn open_step_frame(cx: &mut Cx, job: &StepJob) -> OpenFrame {
+        let (_, time) = app_clock::advance(job.fps);
+        // The batch due now; timers its handlers start fire next frame.
+        for timer_id in cx.app_clock.take_due(time) {
+            let event = crate::event::TimerEvent {
+                time: Some(time),
+                timer_id,
+            };
+            cx.handle_script_timer(&event);
+            cx.call_event_handler(&crate::event::Event::Timer(event));
+        }
+        if !cx.new_next_frames.is_empty() {
+            cx.app_clock.dispatching_frame = true;
+            cx.call_next_frame_event(time);
+            cx.app_clock.dispatching_frame = false;
+        }
+        let capture = CAPTURE.with_borrow_mut(|capture| match capture {
+            Some(c)
+                if c.virtual_clock
+                    && c.window == job.window.id()
+                    && !c.counters.failed.load(Ordering::Acquire)
+                    && !c.counters.paused.load(Ordering::Acquire) =>
+            {
+                let index = c.armed;
+                c.armed += 1;
+                Some((capture::capture_id(c.session, index), index))
+            }
+            _ => None,
+        });
+        if let Some((id, _)) = capture {
+            cx.screenshot_requests.push(ScreenshotRequest {
+                request_id: id,
+                kind_id: 0,
+            });
+        }
+        cx.request_remote_window_present(job.window);
+        OpenFrame {
+            repaint_id: cx.repaint_id,
+            capture,
+            opened: Instant::now(),
+            prepared: false,
+        }
+    }
+
+    /// Detach the UI from the capture and tell the worker to finish: the
+    /// audio tap comes off, and a step frame armed but not yet on the GPU is
+    /// dropped (the file ends one frame short of it). Returns the frame
+    /// count the file is finished at, `None` when no capture runs.
+    fn stop_ui_capture(cx: &mut Cx) -> Option<u64> {
+        let mut capture = CAPTURE.with_borrow_mut(Option::take)?;
+        if let Some(tap) = capture.tap.take() {
+            crate::audio_output_tap::remove_audio_output_tap(tap);
+        }
+        let dropped = STEP.with_borrow_mut(|step| {
+            let open = step.as_mut().and_then(|job| job.open.as_mut())?;
+            let (id, _) = open.capture.take()?;
+            let pending = cx
+                .screenshot_requests
+                .iter()
+                .any(|request| request.request_id == id);
+            cx.screenshot_requests.retain(|request| request.request_id != id);
+            pending.then_some(())
+        });
+        let frames = capture.armed - dropped.map_or(0, |_| 1);
+        let _ = capture.tx.send(capture::CaptureMsg::Stop {
+            frames: capture.virtual_clock.then_some(frames),
+        });
+        Some(frames)
+    }
+
+    /// The app is shutting down (`/quit`, `/gq`, its last window closed, a
+    /// signal) with a capture open: finish the file so it is playable (its
+    /// index is written by `finish`). This waits on the encoder, bounded, on
+    /// the UI thread; the process is exiting and has nothing else to do.
+    pub(crate) fn finish_capture_on_shutdown(cx: &mut Cx) {
+        if stop_ui_capture(cx).is_none() {
+            return;
+        }
+        capture::remove_screen_sink();
+        let line = match capture::wait_for_result(CAPTURE_SHUTDOWN_WAIT) {
+            Ok(result) => format!(
+                "[makepad-remote] capture finished at shutdown: {} ({} frames)",
+                result.path, result.frames
+            ),
+            Err(err) => format!("[makepad-remote] capture at shutdown: {err}"),
+        };
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+        push_log_line(line);
+    }
+
+    /// Longer than the worker's wait for a missing frame, so a lost last
+    /// readback still ends in a finished file.
+    const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
+
+    /// `/settled`: why the app would still change if time moved on.
+    fn settled_json(cx: &Cx) -> String {
+        let mut reasons = Vec::new();
+        if !cx.new_next_frames.is_empty() {
+            reasons.push("next_frame");
+        }
+        if cx.need_redrawing() {
+            reasons.push("redraw");
+        }
+        if cx.any_passes_dirty() {
+            reasons.push("repaint");
+        }
+        if let Some(now) = app_clock::now() {
+            if cx.app_clock.due_within(now + 1.0 / app_clock::fps().max(1) as f64) {
+                reasons.push("timer");
+            }
+        }
+        if STEP.with_borrow(|step| step.is_some()) {
+            reasons.push("step");
+        }
+        #[cfg(all(
+            not(gpusim),
+            any(target_os = "macos", target_os = "ios", target_os = "tvos")
+        ))]
+        if cx.metal_pipelines_pending() > 0 {
+            reasons.push("shaders");
+        }
+        let list: Vec<String> = reasons.iter().map(|reason| format!("\"{reason}\"")).collect();
+        let mut out = format!(
+            "{{\"settled\":{},\"reasons\":[{}]",
+            reasons.is_empty(),
+            list.join(",")
+        );
+        if let Some(now) = app_clock::now() {
+            out.push_str(&format!(",\"frame\":{},\"time\":{}", app_clock::frame(), num(now)));
+        }
+        out.push('}');
+        out
+    }
+
+    /// Does an id path answer a `path:` query? Exactly, or as its trailing
+    /// whole segments: `new_note` and `main.new_note` both find
+    /// `main.new_note`; `note` does not.
+    fn path_matches(path: &str, query: &str) -> bool {
+        let query = query.trim_matches('.');
+        !query.is_empty()
+            && (path == query
+                || path
+                    .strip_suffix(query)
+                    .is_some_and(|head| head.ends_with('.')))
+    }
+
+    /// The widget rows `/snap` reports, each with its id path when the
+    /// widgets layer registered one (`Cx::widget_paths_callback`).
+    fn snapshot_rows(cx: &Cx) -> Vec<(WidgetSnapshot, Option<String>)> {
+        if let Some(callback) = cx.widget_paths_callback {
+            return callback(cx)
+                .into_iter()
+                .map(|(widget, path)| (widget, Some(path)))
+                .collect();
+        }
+        match cx.widget_snapshot_callback {
+            Some(callback) => callback(cx).into_iter().map(|widget| (widget, None)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// `/d?paths=1`: one visible widget per line, `path type x y w h` in
+    /// window-local points (an unnamed widget shows its id).
+    fn path_dump(cx: &Cx) -> String {
+        if cx.widget_paths_callback.is_none() {
+            return "no widget paths (this app's widgets layer registers none)\n".into();
+        }
+        let rows = snapshot_rows(cx);
+        let mut out = String::new();
+        for (widget, path) in rows {
+            if !widget.visible || widget.width <= 0 || widget.height <= 0 {
+                continue;
+            }
+            let origin = cx
+                .windows
+                .id_iter()
+                .find(|id| id.id() == widget.window_index && cx.windows[*id].is_created)
+                .map(|id| cx.windows[id].window_geom.position)
+                .unwrap_or_default();
+            let path = path.filter(|p| !p.is_empty()).unwrap_or_else(|| widget.id.clone());
+            out.push_str(&format!(
+                "{} {} {} {} {} {}\n",
+                path,
+                widget.widget_type,
+                num(widget.x as f64 - origin.x),
+                num(widget.y as f64 - origin.y),
+                widget.width,
+                widget.height
+            ));
+        }
+        out
+    }
+
+    /// Injected pointer input moves the synthetic cursor (when shown).
+    fn note_cursor(window_id: WindowId, kind: MouseKind, pos: Vec2d, time: f64) {
+        let down = match kind {
+            MouseKind::Down => Some(true),
+            MouseKind::Up => Some(false),
+            MouseKind::Move | MouseKind::Scroll => None,
+        };
+        synthetic_cursor::note_synthetic_pointer(window_id.id(), pos, down, time);
+    }
+
+    fn cursor_json() -> String {
+        match synthetic_cursor::synthetic_cursor() {
+            Some(cursor) => format!(
+                "{{\"cursor\":1,\"style\":\"{}\",\"pos\":[{},{}],\"w\":{}}}",
+                cursor.style.name(),
+                num(cursor.pos.x),
+                num(cursor.pos.y),
+                cursor.window_id.map_or("null".to_string(), |id| id.to_string()),
+            ),
+            None => "{\"cursor\":0}".to_string(),
+        }
     }
 
     fn resolve_frame_waiters(cx: &Cx) {
@@ -1335,6 +1882,7 @@ mod imp {
                     {
                         let time = at.unwrap_or(time);
                         let raw = dvec2(x, y);
+                        note_cursor(window_id, kind, raw, time);
                         match kind {
                             MouseKind::Move => {
                                 let (seed, delta) = {
@@ -1412,6 +1960,7 @@ mod imp {
                             time: at,
                         } => {
                             let time = at.unwrap_or(time);
+                            note_cursor(window_id, kind, dvec2(x, y), time);
                             // Remote /click and /m are window-local layout points.
                             // dispatch_studio_msg calls stdin_pointer_abs ->
                             // dpi_override_scale and remaps native OS points into
@@ -1588,12 +2137,200 @@ mod imp {
                     }
                 });
             }
-            Cmd::Dump(tx) => {
-                let dump = match cx.widget_tree_dump_callback {
-                    Some(callback) => callback(cx),
-                    None => String::new(),
+            Cmd::Dump { paths, tx } => {
+                let dump = if paths {
+                    path_dump(cx)
+                } else {
+                    match cx.widget_tree_dump_callback {
+                        Some(callback) => callback(cx),
+                        None => String::new(),
+                    }
                 };
                 let _ = tx.send(Reply::Text(dump));
+            }
+            Cmd::Step {
+                window,
+                frames,
+                fps,
+                tx,
+            } => {
+                if !app_clock::enabled() {
+                    let _ = tx.send(Reply::Err(
+                        "/step needs the virtual clock (launch with --virtual-clock or MAKEPAD_VIRTUAL_CLOCK=1)".into(),
+                    ));
+                    return;
+                }
+                if STEP.with_borrow(|step| step.is_some()) {
+                    let _ = tx.send(Reply::Err("a /step is already running".into()));
+                    return;
+                }
+                // A capture's window is the one stepped, unless one is named.
+                let window = window.or_else(|| CAPTURE.with_borrow(|c| c.as_ref().map(|c| c.window)));
+                let window = match resolve_window(cx, window) {
+                    Ok(window) => window,
+                    Err(err) => {
+                        let _ = tx.send(Reply::Err(err));
+                        return;
+                    }
+                };
+                // The file's timestamps are n / capture fps: a step at another
+                // rate would play back faster or slower than it ran.
+                let capture_fps = CAPTURE.with_borrow(|c| {
+                    c.as_ref().filter(|c| c.virtual_clock && !c.failure_reported).map(|c| c.fps)
+                });
+                if let Some(capture_fps) = capture_fps.filter(|capture_fps| *capture_fps != fps) {
+                    let _ = tx.send(Reply::Err(format!(
+                        "a capture at {capture_fps} fps is running; step with fps={capture_fps}"
+                    )));
+                    return;
+                }
+                STEP.set(Some(StepJob {
+                    window,
+                    fps,
+                    remaining: frames,
+                    open: None,
+                    wait_since: None,
+                    tx,
+                }));
+            }
+            Cmd::Settled(tx) => {
+                let _ = tx.send(Reply::Text(settled_json(cx)));
+            }
+            Cmd::CapStart {
+                window,
+                config,
+                session,
+                tx,
+            } => {
+                let window_id = match resolve_window(cx, Some(window)) {
+                    Ok(window_id) => window_id,
+                    Err(err) => {
+                        let _ = tx.send(Reply::Err(err));
+                        return;
+                    }
+                };
+                let capture::NewSession {
+                    session,
+                    tx: capture_tx,
+                    rx,
+                    counters,
+                    done_tx,
+                } = session;
+                // Applied after its request gave up (and closed the session).
+                if !capture::session_open(session) {
+                    let _ = tx.send(Reply::Err("capture session was closed before it started".into()));
+                    return;
+                }
+                let virtual_clock = config.virtual_clock;
+                let audio = config
+                    .audio
+                    .then(|| Arc::new(Mutex::new(capture::AudioQueue::new(virtual_clock))));
+                let tap = audio.clone().map(|queue| {
+                    let counters = counters.clone();
+                    crate::audio_output_tap::add_audio_output_tap(move |info, buffer| {
+                        capture::tap_audio(&queue, &counters, info.sample_rate, buffer)
+                    })
+                });
+                let answer = format!(
+                    "{{\"ok\":1,\"path\":{},\"fps\":{},\"audio\":{},\"virtual_clock\":{},\"w\":{},\"frame\":{}}}",
+                    json_str(&config.path),
+                    config.fps,
+                    config.audio as u8,
+                    config.virtual_clock as u8,
+                    window,
+                    app_clock::frame(),
+                );
+                let fps = config.fps;
+                let worker_counters = counters.clone();
+                let spawned = cx.thread_spawner().spawn_worker(
+                    crate::thread::ThreadOptions {
+                        name: Some("makepad-remote-capture".into()),
+                        ..Default::default()
+                    },
+                    move || {
+                        let result = capture::run_worker(config, rx, worker_counters, audio);
+                        let _ = done_tx.send(result);
+                    },
+                );
+                match spawned {
+                    Ok(handle) => handle.detach(),
+                    Err(err) => {
+                        if let Some(tap) = tap {
+                            crate::audio_output_tap::remove_audio_output_tap(tap);
+                        }
+                        let _ = tx.send(Reply::Err(format!("capture worker: {err:?}")));
+                        return;
+                    }
+                }
+                CAPTURE.set(Some(UiCapture {
+                    session,
+                    window: window_id.id(),
+                    virtual_clock,
+                    fps,
+                    armed: 0,
+                    abandoned: 0,
+                    failure_reported: false,
+                    tx: capture_tx,
+                    counters,
+                    tap,
+                }));
+                let _ = tx.send(Reply::Text(answer));
+            }
+            Cmd::CapPause(pause, tx) => {
+                // Under the virtual clock a paused capture arms no step frame,
+                // so the next written frame takes the next index: pts, the
+                // frame count and the audio (fed per written frame) go on
+                // without a gap. Wall mode takes the paused time off its clock.
+                let answer = CAPTURE.with_borrow(|capture| {
+                    let c = capture.as_ref()?;
+                    c.counters.paused.store(pause, Ordering::Release);
+                    let frames = if c.virtual_clock {
+                        c.armed.saturating_sub(c.abandoned)
+                    } else {
+                        c.counters.consumed.load(Ordering::Acquire)
+                    };
+                    Some(format!(
+                        "{{\"ok\":1,\"{}\":1,\"frames\":{frames}}}",
+                        if pause { "paused" } else { "resumed" }
+                    ))
+                });
+                let _ = tx.send(match answer {
+                    Some(answer) => Reply::Text(answer),
+                    None => Reply::Err("no capture is running".into()),
+                });
+            }
+            Cmd::CapStop(tx) => match stop_ui_capture(cx) {
+                Some(frames) => {
+                    let _ = tx.send(Reply::Text(format!("{{\"armed\":{frames}}}")));
+                }
+                None => {
+                    let _ = tx.send(Reply::Err("no capture is running".into()));
+                }
+            },
+            Cmd::Cursor {
+                style,
+                window,
+                pos,
+                tx,
+            } => {
+                if let Some(style) = style {
+                    synthetic_cursor::set_synthetic_cursor(style);
+                }
+                if let Some(pos) = pos {
+                    let window_id = match resolve_window(cx, window) {
+                        Ok(window_id) => window_id,
+                        Err(err) => {
+                            let _ = tx.send(Reply::Err(err));
+                            return;
+                        }
+                    };
+                    let time = cx.seconds_since_app_start();
+                    synthetic_cursor::note_synthetic_pointer(window_id.id(), pos, None, time);
+                }
+                // The cursor is drawn by the window; a hide or a new style
+                // is a change nothing else would redraw.
+                cx.redraw_all();
+                let _ = tx.send(Reply::Text(cursor_json()));
             }
             Cmd::PoolSummary(tx) => {
                 let _ = tx.send(Reply::Text(cx.task_pool_summary()));
@@ -1624,13 +2361,11 @@ mod imp {
             Cmd::Snap {
                 window,
                 needle,
+                path,
                 all,
                 tx,
             } => {
-                let widgets = match cx.widget_snapshot_callback {
-                    Some(callback) => callback(cx),
-                    None => Vec::new(),
-                };
+                let widgets = snapshot_rows(cx);
                 // Widget rects arrive in desktop coordinates (window position
                 // already folded in). Remote input is window-local, so subtract
                 // it back out — an agent must be able to feed a rect straight
@@ -1647,9 +2382,14 @@ mod imp {
                 let needle = needle.to_lowercase();
                 let mut out = String::from("{\"s\":[");
                 let mut first = true;
-                for widget in &widgets {
+                for (widget, widget_path) in &widgets {
                     if !all && (!widget.visible || widget.width <= 0 || widget.height <= 0) {
                         continue;
+                    }
+                    if let Some(query) = &path {
+                        if !widget_path.as_deref().is_some_and(|p| path_matches(p, query)) {
+                            continue;
+                        }
                     }
                     if let Some(want) = window {
                         if widget.window_index != want {
@@ -1692,6 +2432,9 @@ mod imp {
                         json_str(&widget.window_id),
                         widget.enabled,
                     ));
+                    if let Some(widget_path) = widget_path.as_ref().filter(|p| !p.is_empty()) {
+                        out.push_str(&format!(",\"p\":{}", json_str(widget_path)));
+                    }
                     if let Some(text) = &widget.text {
                         if !text.is_empty() {
                             out.push_str(&format!(",\"t\":{}", json_str(text)));
@@ -1773,7 +2516,7 @@ mod imp {
                 let result = match cx.ai_callback {
                     Some(callback) => callback(cx, &op, &args),
                     None => {
-                        Err("no AI overlay (this app does not link makepad-aichat)".to_string())
+                        Err("no AI overlay (this app does not link makepad-app-aichat)".to_string())
                     }
                 };
                 match result {
@@ -1840,8 +2583,14 @@ mod imp {
         let target = parts.next().unwrap_or("/").to_string();
 
         let mut content_length = 0usize;
+        let mut from_browser = false;
         for line in lines {
             if let Some((name, value)) = line.split_once(':') {
+                // Browsers send Origin on cross-site requests; an agent's
+                // curl does not.
+                if name.trim().eq_ignore_ascii_case("origin") {
+                    from_browser = true;
+                }
                 if name.trim().eq_ignore_ascii_case("content-length") {
                     content_length = value
                         .trim()
@@ -1866,6 +2615,17 @@ mod imp {
             Some((path, query)) => (path.to_string(), query.to_string()),
             None => (target.clone(), String::new()),
         };
+        // `/cap/start` writes a file the caller names: never on behalf of a
+        // web page (the bridge answers any origin).
+        if from_browser && path.starts_with("/cap/") {
+            let _ = respond(
+                &mut stream,
+                403,
+                "application/json",
+                b"{\"err\":\"capture routes refuse browser (Origin) requests\"}",
+            );
+            return;
+        }
         let mut params = parse_query(&query);
         if !body.is_empty() {
             params.extend(parse_flat_json(&String::from_utf8_lossy(&body)));
@@ -1941,6 +2701,7 @@ mod imp {
             400 => "Bad Request",
             404 => "Not Found",
             408 => "Request Timeout",
+            403 => "Forbidden",
             409 => "Conflict",
             431 => "Request Header Fields Too Large",
             503 => "Service Unavailable",
@@ -2000,24 +2761,40 @@ mod imp {
             "/log" => route_log(p),
             "/midi" => route_midi(p),
             "/trace" => route_trace(p),
-            "/d" | "/dump" => match ask(|tx| Cmd::Dump(tx), 4) {
-                Reply::Text(text) => Out::Text(200, text),
-                other => reply_to_out(other),
-            },
+            "/d" | "/dump" => {
+                let paths = p.flag(&["paths"]);
+                match ask(move |tx| Cmd::Dump { paths, tx }, 4) {
+                    Reply::Text(text) => Out::Text(200, text),
+                    other => reply_to_out(other),
+                }
+            }
             "/snap" => {
                 let window = p.window();
-                let needle = p.get(&["q", "query"]).unwrap_or_default().to_string();
+                let mut needle = p.get(&["q", "query"]).unwrap_or_default().to_string();
+                let mut path = p.get(&["path"]).map(str::to_string);
+                if let Some(query) = needle.strip_prefix("path:") {
+                    path = Some(query.to_string());
+                    needle.clear();
+                }
                 let all = p.flag(&["all"]);
                 reply_to_out(ask(
                     move |tx| Cmd::Snap {
                         window,
                         needle,
+                        path,
                         all,
                         tx,
                     },
                     4,
                 ))
             }
+            "/step" => route_step(p),
+            "/settled" => reply_to_out(ask(Cmd::Settled, 4)),
+            "/cap/start" => route_capture_start(p),
+            "/cap/stop" => route_capture_stop(p),
+            "/cap/pause" => reply_to_out(ask(|tx| Cmd::CapPause(true, tx), 4)),
+            "/cap/resume" => reply_to_out(ask(|tx| Cmd::CapPause(false, tx), 4)),
+            "/cursor" => route_cursor(p),
             "/close" => {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
@@ -2228,9 +3005,18 @@ mod imp {
                                /midi?k=out reads back what the app SENT (its LED writes); /midi?k=reset forgets both
                                it enters at the app's own receive, so enumeration and the OS handles are NOT proved
              /trace             get topics; ?topics=gpu.pass,wm sets them; ?off=1 clears them\n\
-             /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
+             /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text,\"p\":path}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
-             /d                whole widget tree as indented text (id, type, x y w h)\n\
+             \x20                 q=path:a.b (or path=a.b) matches the id path p exactly or as a suffix of whole segments\n\
+             /d                whole widget tree as indented text (id, type, x y w h); /d?paths=1 one line per widget: path type x y w h\n\
+             /step?frames=K&fps=60  --virtual-clock only: run K frames of 1/fps (timers, NextFrame, draw, present); answers {{\"frame\",\"time\"}} after the K-th\n\
+             /settled          {{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders]}}\n\
+             /cap/start?path=/ABS.mp4&fps=60&audio=1&overwrite=1  record the window in process (native pixels, H.264); virtual clock: one frame per /step frame (step at the same fps), pts=n/fps\n\
+             \x20                 the directory must exist; an existing file needs overwrite=1; quitting with a capture open finishes the file\n\
+             /cap/stop[?hashes=1]  finalize; {{\"frames\",\"sz\",\"missing\",\"hash\"}}\n\
+             /cap/pause, /cap/resume  stop / restart writing without stopping the clock; the file stays gapless (pts count written frames); {{\"paused\"|\"resumed\":1,\"frames\":N}}\n\
+             /cursor?show=1|0&style=arrow|hand|text|crosshair|app&x=&y=  a pointer drawn into the frame, moved by injected mouse input, ripple on press\n\
+             \x20                 launch flags: --virtual-clock --window WxH@scale --seed N (MAKEPAD_VIRTUAL_CLOCK=1, MAKEPAD_SEED=N)\n\
              /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
              /handsoff?on=1|0  a red frame round the window: the bridge is driving, hands off. it lights by itself for 3s after any /m /k /t\n\
              /tweak/state      selection + its editable properties + diff log + annotations + asks waiting on the source (renames; converts: grid, flex, dock with its \"do\"), one JSON\n\
@@ -2261,6 +3047,152 @@ mod imp {
             status.windows.len(),
             dir,
         )
+    }
+
+    /// `/step?frames=k[&fps=60][&w=]`: answered after the k-th frame.
+    fn route_step(p: &Params) -> Out {
+        let frames = match p.get(&["frames", "n"]).unwrap_or("1").parse::<u64>() {
+            Ok(frames) if frames >= 1 => frames,
+            _ => return err("step frames must be a positive integer"),
+        };
+        let fps = match p.get(&["fps"]).unwrap_or("60").parse::<u32>() {
+            Ok(fps @ 1..=1000) => fps,
+            _ => return err("step fps must be an integer in 1..=1000"),
+        };
+        let window = p.window();
+        // A frame normally takes well under a second; the bound only keeps
+        // a wedged app from pinning this request thread.
+        let timeout = 30 + frames;
+        reply_to_out(ask(
+            move |tx| Cmd::Step {
+                window,
+                frames,
+                fps,
+                tx,
+            },
+            timeout,
+        ))
+    }
+
+    /// `/cap/start?path=ABS.mp4[&fps=60][&audio=1][&w=]`.
+    fn route_capture_start(p: &Params) -> Out {
+        let Some(path) = p.get(&["path"]) else {
+            return err("cap/start needs path= (an absolute .mp4 path)");
+        };
+        if let Err(msg) = capture::check_output_path(path, p.flag(&["overwrite"])) {
+            return err(&msg);
+        }
+        let fps = match p.get(&["fps"]).unwrap_or("60").parse::<u32>() {
+            Ok(fps @ 1..=240) => fps,
+            _ => return err("cap/start fps must be an integer in 1..=240"),
+        };
+        let window = match p
+            .window()
+            .or_else(|| status_cell().lock().unwrap().windows.first().map(|w| w.id))
+        {
+            Some(window) => window,
+            None => return err("no windows"),
+        };
+        let session = match capture::open_session() {
+            Ok(session) => session,
+            Err(msg) => return err(&msg),
+        };
+        let config = capture::CaptureConfig {
+            path: path.to_string(),
+            fps,
+            audio: p.flag(&["audio"]),
+            virtual_clock: app_clock::enabled(),
+        };
+        let virtual_clock = config.virtual_clock;
+        match ask(
+            move |tx| Cmd::CapStart {
+                window,
+                config,
+                session,
+                tx,
+            },
+            10,
+        ) {
+            Reply::Text(text) => {
+                if !virtual_clock {
+                    capture::install_screen_sink(window, fps);
+                }
+                Out::Json(200, text)
+            }
+            other => {
+                capture::close_session();
+                reply_to_out(other)
+            }
+        }
+    }
+
+    /// `/cap/stop[?hashes=1]`: answered once the file is finalized.
+    fn route_capture_stop(p: &Params) -> Out {
+        capture::remove_screen_sink();
+        match ask(Cmd::CapStop, 10) {
+            Reply::Text(_) => {}
+            other => return reply_to_out(other),
+        }
+        match capture::wait_for_result(Duration::from_secs(600)) {
+            Ok(result) => {
+                let mut out = format!(
+                    "{{\"ok\":1,\"path\":{},\"frames\":{},\"sz\":[{},{}],\"missing\":{},\"hash\":\"{:016x}\"",
+                    json_str(&result.path),
+                    result.frames,
+                    result.width,
+                    result.height,
+                    result.missing,
+                    result.hash,
+                );
+                if let Some(rate) = result.audio_rate {
+                    out.push_str(&format!(",\"audio_rate\":{rate}"));
+                }
+                if p.flag(&["hashes"]) {
+                    let hashes: Vec<String> = result
+                        .frame_hashes
+                        .iter()
+                        .map(|hash| format!("\"{hash:016x}\""))
+                        .collect();
+                    out.push_str(&format!(",\"frame_hashes\":[{}]", hashes.join(",")));
+                }
+                out.push('}');
+                Out::Json(200, out)
+            }
+            Err(msg) => err(&msg),
+        }
+    }
+
+    /// `/cursor?show=1|0[&style=arrow|hand|text|crosshair|app][&x=&y=][&w=]`.
+    fn route_cursor(p: &Params) -> Out {
+        let style = match p.get(&["style"]) {
+            Some(name) => match synthetic_cursor::SyntheticCursorStyle::parse(name) {
+                Some(style) => Some(style),
+                None => return err("cursor style must be arrow, hand, text, crosshair or app"),
+            },
+            None => None,
+        };
+        let style = match p.get(&["show", "on"]) {
+            Some("0" | "false" | "off" | "no") => Some(None),
+            Some(_) => Some(Some(style.unwrap_or(synthetic_cursor::SyntheticCursorStyle::Fixed(
+                crate::cursor::MouseCursor::Arrow,
+            )))),
+            None => style.map(Some),
+        };
+        let pos = match (p.get(&["x"]), p.get(&["y"])) {
+            (Some(_), Some(_)) => Some(dvec2(p.f64(&["x"], 0.0), p.f64(&["y"], 0.0))),
+            (None, None) => None,
+            _ => return err("cursor position needs both x= and y="),
+        };
+        let window = p.window();
+        reply_to_out(ask(
+            move |tx| Cmd::Cursor {
+                style,
+                window,
+                pos,
+                tx,
+            },
+            4,
+        ))
     }
 
     fn route_trace(p: &Params) -> Out {
@@ -3618,6 +4550,18 @@ mod imp {
         }
 
         #[test]
+        fn path_queries_match_whole_trailing_segments() {
+            assert!(path_matches("main.new_note", "main.new_note"));
+            assert!(path_matches("main.new_note", "new_note"));
+            assert!(path_matches("body.main.new_note", "main.new_note"));
+            assert!(path_matches("main.new_note", ".new_note"));
+            assert!(!path_matches("main.new_note", "note"));
+            assert!(!path_matches("main.new_note", "main"));
+            assert!(!path_matches("main.new_note", ""));
+            assert!(!path_matches("", "new_note"));
+        }
+
+        #[test]
         fn key_codes_accept_short_and_long_names() {
             assert_eq!(parse_key_code("a"), Some(KeyCode::KeyA));
             assert_eq!(parse_key_code("KeyA"), Some(KeyCode::KeyA));
@@ -3710,6 +4654,7 @@ mod imp {
         title
     }
     pub(crate) fn poll(_cx: &mut Cx) {}
+    pub(crate) fn finish_capture_on_shutdown(_cx: &mut Cx) {}
     pub(crate) fn grab_targets_window(_request_id: u64, _window_id: Option<usize>) -> bool {
         true
     }

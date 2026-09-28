@@ -17,17 +17,17 @@
 # strip, and the chrome.
 
 [package]
-name = "makepad-pdf"
+name = "makepad-app-pdf"
 version = "0.1.0"
 edition = "2021"
-default-run = "pdf"
+default-run = "makepad-app-pdf"
 
 [lib]
-name = "makepad_pdf"
+name = "makepad_app_pdf"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pdf"
+name = "makepad-app-pdf"
 path = "src/main.rs"
 
 [features]

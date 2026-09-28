@@ -1,11 +1,25 @@
 //! The engine output types: mono PCM plus the synthesis error. Text in, PCM
 //! out — the caller owns the audio device.
 
+/// One input word and when it is spoken, in seconds from the start of the
+/// audio. `word` is the whitespace-separated word as written, punctuation
+/// included.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WordTiming {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// Mono PCM produced by a backend.
 #[derive(Clone, Debug)]
 pub struct SpeechAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    /// Every whitespace-separated word of the text, in order, when the
+    /// backend knows when it spoke them (Kokoro does, from its duration
+    /// predictor). `None` when it does not, or when the run stopped early.
+    pub timings: Option<Vec<WordTiming>>,
 }
 
 impl SpeechAudio {
@@ -13,6 +27,7 @@ impl SpeechAudio {
         Self {
             samples: Vec::new(),
             sample_rate: 24_000,
+            timings: None,
         }
     }
 

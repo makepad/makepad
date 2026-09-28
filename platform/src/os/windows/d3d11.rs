@@ -273,7 +273,15 @@ impl Cx {
                 }
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
-                    // shader didnt compile somehow
+                    // Queued or compiling on a worker: this frame is partial,
+                    // so the pass paints again once the shader is adopted. A
+                    // shader that failed to compile is skipped for good.
+                    let index = draw_call.draw_shader_id.index;
+                    if self.draw_shaders.compile_set.contains(&index)
+                        || self.os.async_hlsl_compile.pending.contains_key(&index)
+                    {
+                        self.passes[pass_id].paint_dirty = true;
+                    }
                     continue;
                 }
                 if sh.mapping.uses_time {
@@ -602,7 +610,16 @@ impl Cx {
                 let mut acquired_mutexes: Vec<IDXGIKeyedMutex> = Vec::new();
                 for i in 0..sh.mapping.textures.len() {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
-                        texture.texture_id()
+                        let texture_id = texture.texture_id();
+                        if crate::os::cx_shared::samples_incomplete_target(
+                            &self.passes,
+                            &self.textures,
+                            texture_id,
+                            pass_id,
+                        ) {
+                            self.passes[pass_id].paint_dirty = true;
+                        }
+                        texture_id
                     } else {
                         let clear_srvs = [None];
                         unsafe {

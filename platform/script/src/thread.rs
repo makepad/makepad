@@ -55,6 +55,9 @@ pub struct CallFrame {
     /// The callee's own frame is established by SLOTS_FRAME (slot-compiled
     /// fns only); non-slotted fns never touch slot_base.
     pub prev_slot_base: usize,
+    /// The root frame of a script body run (not a host->fn call): its
+    /// return records the scope the body ended in (`ScriptBody::end_scope`).
+    pub body_root: bool,
 }
 
 #[derive(Debug)]

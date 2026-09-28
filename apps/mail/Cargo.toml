@@ -3,17 +3,17 @@
 # local/agent_state/wm-all/apps/mail-spec.md; contract: .../CONTRACT.md.
 
 [package]
-name = "makepad-mail"
+name = "makepad-app-mail"
 version = "0.1.0"
 edition = "2021"
-default-run = "mail"
+default-run = "makepad-app-mail"
 
 [lib]
-name = "makepad_mail"
+name = "makepad_app_mail"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mail"
+name = "makepad-app-mail"
 path = "src/main.rs"
 required-features = ["standalone"]
 

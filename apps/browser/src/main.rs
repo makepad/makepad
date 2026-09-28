@@ -1,6 +1,6 @@
 //! browser: a Chrome-like browser as a plain full-window Makepad app.
 //! CEF renders the page (GPU-accelerated into a shared IOSurface texture);
-//! every bit of chrome is Makepad. Runs standalone or inside makepad-wm /
+//! every bit of chrome is Makepad. Runs standalone or inside makepad-app-wm /
 //! Studio tiles via the shared --stdin-loop client runtime.
 
 pub use makepad_widgets;
@@ -732,6 +732,7 @@ pub fn app_main() {
     // first frames of every page are BLACK — a dark dip then a bright jump on
     // open, and a black margin wherever a resize outruns the reflow.
     makepad_cef::set_background_color(palette().page_background_argb());
+    adopt_renamed_profile();
     // Only the cheap NSApp/pump preparation here: the window goes up first,
     // the WebView runs `cef_initialize` on the frame after it is drawn.
     if let Err(err) = makepad_cef::prepare() {
@@ -751,6 +752,29 @@ pub fn app_main() {
     Cx::event_loop(cx.clone());
     drop(cx);
     makepad_cef::shutdown();
+}
+
+/// CEF keeps the browser profile (cookies, logins) at
+/// `~/.makepad-cef/<executable name>`. The binary was `browser` before it
+/// became `makepad-app-browser`: an existing old profile moves over once, so
+/// the rename does not sign the user out of everything. Not when a profile
+/// directory is chosen explicitly, and never over an existing new profile.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+fn adopt_renamed_profile() {
+    if std::env::var_os("MAKEPAD_CEF_PROFILE_DIR").is_some() || std::env::var_os("MAKEPAD_CEF_EPHEMERAL").is_some() {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return };
+    let Some(stem) = std::env::current_exe().ok().and_then(|exe| exe.file_stem().map(|s| s.to_os_string())) else { return };
+    let profiles = std::path::Path::new(&home).join(".makepad-cef");
+    let (old, new) = (profiles.join("browser"), profiles.join(&stem));
+    if stem != "makepad-app-browser" || !old.is_dir() || new.exists() {
+        return;
+    }
+    match std::fs::rename(&old, &new) {
+        Ok(()) => log!("browser: moved the profile {} to {}", old.display(), new.display()),
+        Err(err) => log!("browser: could not move the profile {} to {}: {err}", old.display(), new.display()),
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))]

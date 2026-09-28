@@ -26,7 +26,7 @@ pub struct WmBuild {
     pub dynamic_dylibs: bool,
     /// The style the desk comes up in.
     pub style: DesktopStyle,
-    /// The assistant's widget families (`makepad_aichat::script_mod`), when
+    /// The assistant's widget families (`makepad_app_aichat::script_mod`), when
     /// the pane seats the assistant in-process.
     pub assistant: Option<fn(&mut ScriptVm)>,
     /// The window's title.

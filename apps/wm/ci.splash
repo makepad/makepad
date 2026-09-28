@@ -15,19 +15,19 @@ let FRAME = "This is a screenshot of one application window taken from a Mac. A 
 let VERDICT = " Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO"
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-wm"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-wm"] targets: ci.host.targets})
 })
 
 // The WM starts its apps through cargo. Building them first makes that
 // launch instant, so the waits below measure the app, not the compiler.
 ci.step("build the apps the desk will open", fn(){
-    ci.build({package: "makepad-terminal" binary: "terminal"})
+    ci.build({package: "makepad-app-terminal" binary: "makepad-app-terminal"})
     // The terminal starts its shell through this helper, next to it.
     ci.build({package: "makepad-agents" binary: "agents"})
-    ci.build({package: "makepad-browser" binary: "browser"})
+    ci.build({package: "makepad-app-browser" binary: "makepad-app-browser"})
 })
 
-let wm = ci.launch({package: "makepad-wm" binary: "wm" cwd: "."})
+let wm = ci.launch({package: "makepad-app-wm" binary: "makepad-app-wm" cwd: "."})
 
 ci.step("desktop is up", fn(){
     ci.sleep(3.0)

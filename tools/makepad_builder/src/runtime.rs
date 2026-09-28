@@ -798,8 +798,44 @@ impl Environment {
                 .unwrap_or_else(|| release.source(&self.root));
             crate::desktop::prepare(&self.root, release, &project)?;
         }
+        remove_renamed_binary(&root, release);
         progress::stage("Ready", &format!("{} is ready in the installation folder", exe(&release.binary)), 1.0);
         Ok(())
+    }
+}
+
+/// An app whose binary was renamed (`notes` became `makepad-app-notes`):
+/// the build the installation recorded last (`installed/<app>.json`, not yet
+/// replaced when this runs) published the old name, and those files are
+/// removed so the folder shows the app once. Best effort: a file still in
+/// use (a running Windows .exe) stays until the next build of the app.
+fn remove_renamed_binary(root: &Path, release: &Release) {
+    let Ok(data) = fs::read(root.join("installed").join(format!("{}.json", release.id))) else { return };
+    let Some(previous) = makepad_strict_json::parse(&data).ok().and_then(|v| Release::parse(&v).ok()) else { return };
+    let old = previous.binary;
+    if old == release.binary || old.is_empty() || old.contains(['/', '\\']) || old.starts_with('.') {
+        return;
+    }
+    let home = crate::home_of(root);
+    let stale = if cfg!(windows) {
+        let exe = exe(&old);
+        vec![home.join(&exe), home.join(format!("{exe}.makepad-package-paths")), root.join(format!("{exe}.makepad-package-paths"))]
+    } else {
+        // The old command, only when it is the launcher a Builder wrote.
+        let command = home.join(&old);
+        let ours = fs::read_to_string(&command).is_ok_and(|text| text.contains("builder_directory") && text.contains(&format!("{old}.bin")));
+        let mut stale = vec![root.join(format!("{old}.bin")), root.join(format!("{old}.bin.makepad-package-paths")),
+            root.join("installed").join(format!("{old}.project"))];
+        if ours { stale.push(command); }
+        stale
+    };
+    for path in stale {
+        if path.is_file() {
+            match fs::remove_file(&path) {
+                Ok(()) => note(&format!("Removed {} (the app's binary is now {})", crate::shown(&path), release.binary)),
+                Err(error) => note(&format!("Could not remove the old {}: {error}", crate::shown(&path))),
+            }
+        }
     }
 }
 

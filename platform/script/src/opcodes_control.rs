@@ -44,9 +44,11 @@ impl<'a> ScriptVm<'a> {
             return;
         };
         self.bx.threads.cur().slot_base = call.prev_slot_base;
-        // A root frame's last scope holds everything the body defined after
-        // a shadowing let; keep it for host->script lookups.
-        if call.return_ip.is_none() {
+        // A body run's last scope holds everything the body defined after
+        // a shadowing let; keep it for host->script lookups. Only a body
+        // root: pinning a host->fn call's scope would defeat its eager free
+        // (one leaked scope per host tick until GC).
+        if call.body_root {
             let end = self.bx.threads.cur_ref().scopes.last().copied();
             self.bx.threads.cur().root_end_scope = end.map(|s| self.bx.heap.new_object_ref(s));
         }

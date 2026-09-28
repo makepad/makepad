@@ -3,17 +3,17 @@
 # local/agent_state/wm-all/apps/reminders-spec.md; contract: .../CONTRACT.md.
 
 [package]
-name = "makepad-reminders"
+name = "makepad-app-reminders"
 version = "0.1.0"
 edition = "2021"
-default-run = "reminders"
+default-run = "makepad-app-reminders"
 
 [lib]
-name = "makepad_reminders"
+name = "makepad_app_reminders"
 path = "src/lib.rs"
 
 [[bin]]
-name = "reminders"
+name = "makepad-app-reminders"
 path = "src/main.rs"
 required-features = ["standalone"]
 

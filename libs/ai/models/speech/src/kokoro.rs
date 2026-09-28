@@ -37,6 +37,7 @@ pub mod ops;
 pub mod predictor;
 pub mod stft;
 pub mod text_encoder;
+pub mod timing;
 pub mod weights;
 
 use crate::g2p;
@@ -47,6 +48,7 @@ use decoder::Decoder;
 use ops::{expand_to_frames, round_half_even};
 use predictor::Predictor;
 use text_encoder::TextEncoder;
+use timing::WordClock;
 use weights::Weights;
 
 /// Default weights filename, resolved relative to the working directory.
@@ -152,11 +154,26 @@ impl KokoroSpeaker {
         let chunks = split_to_fit(text);
         let total = chunks.len();
         let mut samples = Vec::new();
-        for (index, chunk) in chunks.iter().enumerate() {
+        let mut clock = WordClock::new(text);
+        let mut finished = true;
+        for (index, (start, end)) in chunks.iter().enumerate() {
             if !on_chunk(index, total) {
+                finished = false;
                 break;
             }
-            self.synthesize_chunk(chunk, speed, &mut samples);
+            let offset = samples.len() as f64 / SAMPLE_RATE as f64;
+            let before = samples.len();
+            if let Some(spoken) = self.synthesize_chunk(&text[*start..*end], speed, &mut samples) {
+                let rendered = samples.len() - before;
+                let frames: usize = spoken.frames.iter().sum();
+                if frames > 0 && rendered > 0 {
+                    // The decoder renders a fixed number of samples per
+                    // predicted frame (600 at 24 kHz); read it off the
+                    // output rather than assuming it.
+                    let frame_secs = rendered as f64 / frames as f64 / SAMPLE_RATE as f64;
+                    clock.add_chunk(*start, &spoken.sources, &spoken.frames, offset, frame_secs);
+                }
+            }
         }
         if samples.is_empty() {
             return Err(TtsError::Empty);
@@ -171,17 +188,23 @@ impl KokoroSpeaker {
                 *sample *= gain;
             }
         }
+        // A run stopped early has no timings: most of its words were never
+        // spoken.
+        let timings = finished.then(|| clock.finish(text));
         Ok(SpeechAudio {
             samples,
             sample_rate: SAMPLE_RATE,
+            timings,
         })
     }
 
-    fn synthesize_chunk(&self, text: &str, speed: f32, samples: &mut Vec<f32>) {
-        let tokens = g2p::tokens(text);
+    /// Renders one chunk onto `samples`; returns what the timings need:
+    /// per token, its predicted frames and the word it sounds.
+    fn synthesize_chunk(&self, text: &str, speed: f32, samples: &mut Vec<f32>) -> Option<SpokenChunk> {
+        let (tokens, sources) = g2p::tokens_with_sources(text);
         // Two zero pads plus at least one phoneme.
         if tokens.len() < 3 {
-            return;
+            return None;
         }
 
         // The voice pack is indexed by phoneme count minus one; `tokens` carries
@@ -204,45 +227,67 @@ impl KokoroSpeaker {
         let prosody = self.predictor.prosody(&en, predictor_style);
         let out = self.decoder.run(&asr, &prosody.f0, &prosody.noise, decoder_style);
         samples.extend_from_slice(&out.generator.waveform);
+        Some(SpokenChunk { frames, sources })
     }
+}
+
+struct SpokenChunk {
+    frames: Vec<usize>,
+    sources: Vec<Option<usize>>,
 }
 
 /// Break text into pieces that each fit the 510-phoneme window: whole sentences
 /// while they fit, single words when one sentence alone does not. `g2p::tokens`
-/// would otherwise silently truncate.
-fn split_to_fit(text: &str) -> Vec<String> {
-    let fits = |s: &str| g2p::tokens(s).len() <= g2p::MAX_TOKENS + 1;
-    if fits(text) {
-        return vec![text.to_string()];
+/// would otherwise silently truncate. Pieces are byte ranges of `text`, in
+/// order, so the word timings can place every chunk's words in the whole text.
+fn split_to_fit(text: &str) -> Vec<(usize, usize)> {
+    let fits = |range: (usize, usize)| g2p::tokens(&text[range.0..range.1]).len() <= g2p::MAX_TOKENS + 1;
+    if fits((0, text.len())) {
+        return vec![(0, text.len())];
     }
+    // Every piece below is a subslice of `text`; its range is its offset.
+    let range_of = |piece: &str| {
+        let start = piece.as_ptr() as usize - text.as_ptr() as usize;
+        (start, start + piece.len())
+    };
 
     let mut out = Vec::new();
-    let mut current = String::new();
-    let mut push = |current: &mut String| {
-        if !current.trim().is_empty() {
-            out.push(std::mem::take(current));
+    // `current` is always a run of consecutive pieces (`None` = nothing yet).
+    let mut current: Option<(usize, usize)> = None;
+    let mut push = |current: &mut Option<(usize, usize)>| {
+        if let Some((start, end)) = *current {
+            if !text[start..end].trim().is_empty() {
+                out.push((start, end));
+                *current = None;
+            }
         }
+    };
+    let extend = |current: Option<(usize, usize)>, piece: (usize, usize)| match current {
+        Some((start, _)) => (start, piece.1),
+        None => piece,
     };
 
     for sentence in split_after(text, &['.', '!', '?', '\n']) {
-        let candidate = format!("{current}{sentence}");
-        if fits(&candidate) {
-            current = candidate;
+        let sentence = range_of(sentence);
+        let candidate = extend(current, sentence);
+        if fits(candidate) {
+            current = Some(candidate);
             continue;
         }
         push(&mut current);
         if fits(sentence) {
-            current = sentence.to_string();
+            current = Some(sentence);
             continue;
         }
         // A single run-on sentence past the window: fall back to words.
-        for word in sentence.split_inclusive(char::is_whitespace) {
-            let candidate = format!("{current}{word}");
-            if fits(&candidate) {
-                current = candidate;
+        for word in text[sentence.0..sentence.1].split_inclusive(char::is_whitespace) {
+            let word = range_of(word);
+            let candidate = extend(current, word);
+            if fits(candidate) {
+                current = Some(candidate);
             } else {
                 push(&mut current);
-                current = word.to_string();
+                current = Some(word);
             }
         }
         push(&mut current);
@@ -254,4 +299,27 @@ fn split_to_fit(text: &str) -> Vec<String> {
 /// Split into pieces, each ending just after one of `stops` (or at the end).
 fn split_after<'a>(text: &'a str, stops: &'a [char]) -> impl Iterator<Item = &'a str> {
     text.split_inclusive(move |c| stops.contains(&c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_to_fit;
+
+    #[test]
+    fn long_text_splits_into_ordered_ranges_that_fit() {
+        let sentence = "The quick brown fox jumps over the lazy dog again and again. ";
+        let text = sentence.repeat(40);
+        let chunks = split_to_fit(&text);
+        assert!(chunks.len() > 1);
+        let mut at = 0;
+        for (start, end) in &chunks {
+            assert!(*start >= at && end > start);
+            assert!(crate::g2p::tokens(&text[*start..*end]).len() <= crate::g2p::MAX_TOKENS + 1);
+            at = *end;
+        }
+        // Nothing but whitespace is left out.
+        let kept: String = chunks.iter().map(|(a, b)| &text[*a..*b]).collect();
+        assert_eq!(kept.split_whitespace().count(), text.split_whitespace().count());
+        assert_eq!(split_to_fit("Short."), vec![(0, 6)]);
+    }
 }

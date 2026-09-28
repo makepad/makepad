@@ -4,21 +4,21 @@
 # child processes (iOS), and the way to test that build on a desktop in
 # the iOS skin. Nothing of the desk lives here: this crate is the
 # `WmBuild` (which app crates, no processes, the iOS style, the assistant
-# in-process) around `makepad-wm`'s App.
+# in-process) around `makepad-app-wm`'s App.
 #
 # iOS simulator: cargo makepad apple ios --org=nl.makepad --app=wmall
-#   run-sim -p makepad-wm-all --release
-# macOS (the iOS skin): cargo build --release -p makepad-wm-all, then
-#   target/release/wm-all from the repo root.
+#   run-sim -p makepad-app-wm-all --release
+# macOS (the iOS skin): cargo build --release -p makepad-app-wm-all, then
+#   target/release/makepad-app-wm-all from the repo root.
 
 [package]
-name = "makepad-wm-all"
+name = "makepad-app-wm-all"
 version = "0.1.0"
 edition = "2021"
-default-run = "wm-all"
+default-run = "makepad-app-wm-all"
 
 [[bin]]
-name = "wm-all"
+name = "makepad-app-wm-all"
 path = "src/main.rs"
 
 [features]
@@ -29,27 +29,27 @@ tweaker = ["makepad-widgets/tweaker"]
 # The pane's chat with the machine's own model (Qwen on the local runtime)
 # and the chat backends. Off by default: the in-process pane has no model
 # (NoModel and the tool console). `--features localai` adds both.
-localai = ["makepad-aichat/localai"]
+localai = ["makepad-app-aichat/localai"]
 
 [dependencies]
 # Without the window manager's defaults: the design overlay is this app's
 # own `tweaker` feature.
-makepad-wm = { path = "../wm", default-features = false }
+makepad-app-wm = { path = "../wm", default-features = false }
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-app-module = { path = "../../libs/app_module" }
 # The apps, as modules only: no standalone window, no model runtime.
-makepad-sheets = { path = "../sheets", default-features = false }
-makepad-photos = { path = "../photos", default-features = false }
-makepad-files = { path = "../files", default-features = false }
+makepad-app-sheets = { path = "../sheets", default-features = false }
+makepad-app-photos = { path = "../photos", default-features = false }
+makepad-app-files = { path = "../files", default-features = false }
 makepad-app-route = { path = "../route", default-features = false }
-makepad-finance = { path = "../finance", default-features = false }
-makepad-clock = { path = "../clock", default-features = false }
-makepad-weather = { path = "../weather", default-features = false }
-makepad-mail = { path = "../mail", default-features = false }
-makepad-notes = { path = "../notes", default-features = false }
-makepad-calendar = { path = "../calendar", default-features = false }
-makepad-reminders = { path = "../reminders", default-features = false }
-makepad-calculator = { path = "../calculator", default-features = false }
+makepad-app-finance = { path = "../finance", default-features = false }
+makepad-app-clock = { path = "../clock", default-features = false }
+makepad-app-weather = { path = "../weather", default-features = false }
+makepad-app-mail = { path = "../mail", default-features = false }
+makepad-app-notes = { path = "../notes", default-features = false }
+makepad-app-calendar = { path = "../calendar", default-features = false }
+makepad-app-reminders = { path = "../reminders", default-features = false }
+makepad-app-calculator = { path = "../calculator", default-features = false }
 # The assistant seated in the pane in-process. Without the engine: no
 # model runtime in this build — NoModel and the tool console.
-makepad-aichat = { path = "../aichat", default-features = false }
+makepad-app-aichat = { path = "../aichat", default-features = false }

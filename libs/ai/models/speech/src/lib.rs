@@ -16,6 +16,8 @@ pub use makepad_ai_common::{
 };
 
 pub mod convert;
+#[cfg(any(feature = "whisper", feature = "indextts"))]
+mod gpt2_split;
 #[cfg(feature = "kokoro")]
 pub mod g2p;
 #[cfg(feature = "indextts")]
@@ -48,4 +50,4 @@ pub mod vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
-pub use tts::{SpeechAudio, TtsError};
+pub use tts::{SpeechAudio, TtsError, WordTiming};

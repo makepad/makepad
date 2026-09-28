@@ -5,7 +5,7 @@
 # manager as a special child seated in the pane slot (this binary,
 # `--stdin-loop`), standalone as its own window (this binary), and inside
 # any app's Window as the F10 overlay or inside the mobile/web superbuild
-# (this crate's lib, `makepad_aichat::script_mod` + `AiChatPanel{}`).
+# (this crate's lib, `makepad_app_aichat::script_mod` + `AiChatPanel{}`).
 #
 # The panel widget OWNS the engine: the service registry, the model, the
 # transcript. Hosts only feed it links (in-process) or bus frames (the
@@ -14,17 +14,17 @@
 # Plan of record: repo-root aicontrol.md.
 
 [package]
-name = "makepad-aichat"
+name = "makepad-app-aichat"
 version = "0.1.0"
 edition = "2021"
-default-run = "aichat"
+default-run = "makepad-app-aichat"
 
 [lib]
-name = "makepad_aichat"
+name = "makepad_app_aichat"
 path = "src/lib.rs"
 
 [[bin]]
-name = "aichat"
+name = "makepad-app-aichat"
 path = "src/main.rs"
 
 [features]

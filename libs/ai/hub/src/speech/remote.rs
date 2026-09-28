@@ -6,8 +6,9 @@
 use super::SpeechReach;
 use crate::client::{ContentProvider, LocalService};
 use crate::protocol::{
-    GenerateRequestJson, TranscriptJson, JOB_STATE_CANCELLED, JOB_STATE_DONE, JOB_STATE_ERROR,
-    MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED, MODEL_STATE_READY,
+    ArtifactRefJson, GenerateRequestJson, SpeechTimingsJson, TranscriptJson, JOB_STATE_CANCELLED,
+    JOB_STATE_DONE, JOB_STATE_ERROR, MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED, MODEL_STATE_READY,
+    SPEECH_TIMINGS_FORMAT,
 };
 use crate::registry::Domain;
 use crate::wav;
@@ -100,7 +101,14 @@ impl RemotePipe {
         })
     }
 
-    pub(crate) fn synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<SpeechAudio, String> {
+    /// The PCM, and the word timings when the node sent them (a node that
+    /// predates them sends the WAV alone).
+    pub(crate) fn synthesize(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<(SpeechAudio, Option<Vec<super::WordTiming>>), String> {
         let request = GenerateRequestJson {
             model: self.model.clone(),
             text: Some(text.to_string()),
@@ -108,12 +116,45 @@ impl RemotePipe {
             speed: Some(speed as f64),
             ..Default::default()
         };
-        let bytes = self.run_job(Domain::Speech, &request)?;
+        let artifacts = self.run_job_artifacts(Domain::Speech, &request)?;
+        let first = artifacts.first().ok_or_else(|| "job finished without an artifact".to_string())?;
+        let bytes = self.fetch(&first.id)?;
         let (samples, sample_rate) = wav::decode_wav_to_mono_f32(&bytes)?;
-        Ok(SpeechAudio { samples, sample_rate })
+        // Timings are a nicety: an unreadable sidecar costs the timings, not
+        // the take.
+        let timings = artifacts
+            .iter()
+            .skip(1)
+            .find(|artifact| artifact.content_type.starts_with("application/json"))
+            .and_then(|artifact| self.fetch(&artifact.id).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| SpeechTimingsJson::deserialize_json(&text).ok())
+            .filter(|json| json.format == SPEECH_TIMINGS_FORMAT)
+            .map(|json| {
+                json.words
+                    .into_iter()
+                    .map(|w| super::WordTiming { word: w.word, start: w.start, end: w.end })
+                    .collect()
+            });
+        Ok((SpeechAudio { samples, sample_rate }, timings))
     }
 
+    fn fetch(&self, artifact_id: &str) -> Result<Vec<u8>, String> {
+        self.service
+            .fetch_artifact(artifact_id)
+            .map(|a| a.bytes)
+            .map_err(|e| format!("{}: {e}", self.base_url))
+    }
+
+    /// The first artifact's bytes.
     fn run_job(&self, domain: Domain, request: &GenerateRequestJson) -> Result<Vec<u8>, String> {
+        let artifacts = self.run_job_artifacts(domain, request)?;
+        let artifact = artifacts.first().ok_or_else(|| "job finished without an artifact".to_string())?;
+        self.fetch(&artifact.id)
+    }
+
+    /// Run one job to completion; its artifacts, in order.
+    fn run_job_artifacts(&self, domain: Domain, request: &GenerateRequestJson) -> Result<Vec<ArtifactRefJson>, String> {
         let job_id = self
             .service
             .request(domain, request)
@@ -125,17 +166,7 @@ impl RemotePipe {
                 .poll(&job_id)
                 .map_err(|e| format!("{}: {e}", self.base_url))?;
             match status.state.as_str() {
-                JOB_STATE_DONE => {
-                    let artifact = status
-                        .artifacts
-                        .first()
-                        .ok_or_else(|| "job finished without an artifact".to_string())?;
-                    return self
-                        .service
-                        .fetch_artifact(&artifact.id)
-                        .map(|a| a.bytes)
-                        .map_err(|e| format!("{}: {e}", self.base_url));
-                }
+                JOB_STATE_DONE => return Ok(status.artifacts),
                 JOB_STATE_ERROR => {
                     return Err(status.error.unwrap_or_else(|| "job failed".to_string()));
                 }

@@ -367,6 +367,14 @@ impl Cx {
                     } else {
                         continue;
                     };
+                    if crate::os::cx_shared::samples_incomplete_target(
+                        &self.passes,
+                        &self.textures,
+                        texture_id,
+                        draw_pass_id,
+                    ) {
+                        self.passes[draw_pass_id].paint_dirty = true;
+                    }
 
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec() {

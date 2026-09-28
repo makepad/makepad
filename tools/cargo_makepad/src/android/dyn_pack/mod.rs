@@ -2,7 +2,7 @@
 //! super-app (`apps/wm-dyn`), whose tile apps are compiled ON THE PHONE
 //! against the engine dylib the APK ships.
 //!
-//! The binary is the host (`makepad-wm-dyn`): the WM desk with no statically
+//! The binary is the host (`makepad-app-wm-dyn`): the WM desk with no statically
 //! linked apps. Opening a tile runs `cargo rustc --lib --crate-type dylib`
 //! against the checkout the APK carries, then `dlopen`s `makepad_app_module`.
 //! The engine (`apps/wm-dyn/engine`, one Rust dylib) is in the APK; the app
@@ -299,7 +299,7 @@ pub struct Dyn {
     pub kind: Kind,
     /// The checkout (the working directory of the command).
     pub checkout: PathBuf,
-    /// The host package (`makepad-wm-dyn`).
+    /// The host package (`makepad-app-wm-dyn`).
     pub host: String,
     /// The engine package (`metadata.makepad.dyn.engine`).
     pub engine: String,

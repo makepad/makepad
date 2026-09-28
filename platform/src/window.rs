@@ -608,6 +608,17 @@ impl ScriptHook for ScriptWindowHandle {
             cx.windows[window_id].create_position = self.position;
         }
         cx.windows[window_id].kind_id = self.kind_id;
+        // `--window WxH@scale` sizes the first window before it exists, so its
+        // first frame is already at the capture size. The native size here
+        // assumes a display at scale 1; backends that know the display's
+        // scale before creating the window (macOS) divide it out.
+        if !cx.windows[window_id].is_created {
+            if let Some(launch) = crate::remote::app_clock::launch_window_for(window_id.id()) {
+                let (width, height) = launch.native_size(1.0);
+                cx.windows[window_id].create_inner_size = Some(dvec2(width, height));
+                self.dpi_override = Some(launch.scale);
+            }
+        }
         if self.dpi_override.is_some() {
             cx.windows[window_id].dpi_override = self.dpi_override;
         }

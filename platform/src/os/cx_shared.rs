@@ -1359,6 +1359,10 @@ impl Cx {
             return;
         }
         crate::remote::note_user_event(self, event);
+        if let Event::Shutdown = event {
+            // An open `/cap/start` file is finished before the app goes.
+            crate::remote::finish_capture_on_shutdown(self);
+        }
         if let Some(drag) = self.drag_drop.internal_drag_event(event) {
             // The pointer event goes out first and the drag one is appended, the
             // way every other backend orders it: a widget that ends its gesture on
@@ -1494,6 +1498,7 @@ impl Cx {
     }*/
 
     pub(crate) fn call_draw_event(&mut self, time: f64) {
+        let time = crate::remote::app_clock::now().unwrap_or(time);
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
@@ -1531,6 +1536,12 @@ impl Cx {
     }
 
     pub(crate) fn call_next_frame_event(&mut self, time: f64) {
+        // Under the virtual clock a NextFrame is a frame of `/step`, never
+        // of the backend's paint beat; the pending set waits for one.
+        if crate::remote::app_clock::enabled() && !self.app_clock.dispatching_frame {
+            return;
+        }
+        let time = crate::remote::app_clock::now().unwrap_or(time);
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
 
@@ -1539,9 +1550,45 @@ impl Cx {
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {
             set,
             time: time,
-            frame: self.repaint_id,
+            frame: if crate::remote::app_clock::enabled() {
+                crate::remote::app_clock::frame()
+            } else {
+                self.repaint_id
+            },
         }));
     }
+}
+
+/// Does the pass `consumer` sample the colour target of another pass that
+/// has yet to paint, or painted with draws left out (still dirty)?
+///
+/// The repaint order only knows the parent chain (a parent is painted after
+/// its children), but a pass can sample any other pass's target: siblings
+/// under one host (a compositor's source and output passes), or a target a
+/// later pass in the order renders. Such a consumer records pixels that are
+/// about to change, so the backends keep it dirty and paint it again after
+/// its source, as they do for their own skipped draws. Without this a
+/// consumer painted before its source (or while a pipeline of the source
+/// was still compiling, which only showed under load) came out clean with
+/// a black or stale sample, and a host waiting for a clean paint read it.
+/// Cheap: only render-target textures are looked up, against the passes.
+pub(crate) fn samples_incomplete_target(
+    passes: &crate::draw_pass::CxDrawPassPool,
+    textures: &crate::texture::CxTexturePool,
+    texture: crate::texture::TextureId,
+    consumer: DrawPassId,
+) -> bool {
+    if !textures[texture].format.is_render() {
+        return false;
+    }
+    passes.id_iter().any(|producer| {
+        producer != consumer
+            && passes[producer].paint_dirty
+            && passes[producer]
+                .color_textures
+                .iter()
+                .any(|attachment| attachment.texture.texture_id() == texture)
+    })
 }
 
 #[cfg(test)]
@@ -1549,6 +1596,45 @@ mod tests {
     use super::*;
     use crate::{draw_list::DrawList, draw_pass::DrawPass};
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn a_pass_sampling_a_target_still_to_paint_is_incomplete() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureSize};
+        // A compositor's shape: two sibling passes, the consumer samples the
+        // producer's target. The consumer is painted first among equals; if
+        // the producer is still dirty then (not painted yet, or it left draws
+        // out while a pipeline compiled), the consumer's sample is not final.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let target = |cx: &mut Cx| {
+            Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width: 4, height: 4 },
+                initial: true,
+            })
+        };
+        let consumer = DrawPass::new(&mut cx);
+        let producer = DrawPass::new(&mut cx);
+        let (consumer_target, producer_target) = (target(&mut cx), target(&mut cx));
+        consumer.add_color_texture(&mut cx, &consumer_target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        producer.add_color_texture(&mut cx, &producer_target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
+        let sampled = producer_target.texture_id();
+
+        cx.passes[p].paint_dirty = true;
+        assert!(samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        // painted: the sample is final
+        cx.passes[p].paint_dirty = false;
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        // a pass reading its own target (ping-pong) is not waiting on itself
+        cx.passes[c].paint_dirty = true;
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, consumer_target.texture_id(), c));
+        // only render targets have a producer
+        let image = Texture::new_with_format(&mut cx, TextureFormat::VecBGRAu8_32 {
+            width: 1, height: 1, data: Some(vec![0]), updated: crate::texture::TextureUpdated::Full,
+        });
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, image.texture_id(), c));
+    }
 
     #[test]
     fn orphaned_child_pass_is_not_repainted_until_reattached() {

@@ -87,6 +87,17 @@ impl AppDef {
         }
     }
 
+    /// Its build/run identity, for the shared registry's checkout helpers.
+    pub fn target(&self) -> makepad_app_registry::AppTarget<'_> {
+        makepad_app_registry::AppTarget {
+            id: &self.id,
+            package: &self.package,
+            dir: &self.dir,
+            bin: &self.bin,
+            manifest: self.manifest.as_deref(),
+        }
+    }
+
     /// Its binary exists: starting it runs it, no compile.
     pub fn is_built(&self) -> bool {
         built_binary(self, repo_root().as_deref()).is_some()
@@ -114,97 +125,59 @@ impl AppDef {
     /// filter behind the menu (no row that cannot run). Out of a checkout
     /// that includes a deck app that is not built yet: opening it builds it.
     pub fn is_available(&self) -> bool {
-        if let Some(root) = repo_root() {
-            let manifest = self
-                .manifest
-                .clone()
-                .unwrap_or_else(|| format!("{}/Cargo.toml", self.dir));
-            return root.join(manifest).exists();
+        match repo_root() {
+            Some(root) => makepad_app_registry::has_sources(&self.target(), &root),
+            None => resolve_bin(&self.bin).is_some(),
         }
-        resolve_bin(&self.bin).is_some()
     }
 }
 
-/// The curated applications, in menu order. Every one of these is a real
+/// A shared registry entry as the WM launches it: its launch model plus the
+/// WM's own runtime defaults on top.
+fn registry_app(entry: &makepad_app_registry::AppEntry) -> AppDef {
+    let policy = match entry.policy {
+        makepad_app_registry::LaunchPolicy::AlwaysNew => LaunchPolicy::AlwaysNew,
+        makepad_app_registry::LaunchPolicy::OrFocus => LaunchPolicy::OrFocus,
+    };
+    let mut app = AppDef::app(
+        entry.id,
+        entry.label,
+        entry.package,
+        entry.dir,
+        entry.bin,
+        policy,
+    );
+    app.manifest = entry.manifest.map(str::to_string);
+    app.args = entry.args.iter().map(|arg| (*arg).to_string()).collect();
+    match entry.id {
+        // Recording default: the menu opens the demo VFS, unless the
+        // person explicitly asks to browse the real disk.
+        "files" if std::env::var("MAKEPAD_WM_FILES_REAL").is_err() => {
+            app.args.push("--demo".to_string());
+        }
+        "fab" => {
+            // Children run from the checkout; use the built-in demo house
+            // when the converted model is not there.
+            let house = "local/fab/models/woodside.glb";
+            if repo_root().map(|r| r.join(house).exists()).unwrap_or(false) {
+                app.args.push("--open".to_string());
+                app.args.push(house.to_string());
+            }
+        }
+        _ => {}
+    }
+    app
+}
+
+/// The curated applications, in menu order: the menu rows of the shared
+/// registry (`libs/app_registry/apps.json`). Every one of these is a real
 /// window we host; servers and headless tools are deliberately absent.
 fn curated() -> Vec<AppDef> {
-    use LaunchPolicy::*;
-    vec![
-        AppDef::app("browser", "Browser", "makepad-browser", "apps/browser", "browser", OrFocus),
-        {
-            // Recording default: the Files row in the menu opens the demo
-            // VFS (virtual home over repo assets), never the real disk.
-            // Drop the arg (or set MAKEPAD_WM_FILES_REAL=1) to browse for real.
-            let mut files =
-                AppDef::app("files", "Files", "makepad-files", "apps/files", "files", OrFocus);
-            if std::env::var("MAKEPAD_WM_FILES_REAL").is_err() {
-                files.args.push("--demo".to_string());
-            }
-            files
-        },
-        AppDef::app("terminal", "Terminal", "makepad-terminal", "apps/terminal", "terminal", AlwaysNew),
-        AppDef::app("mixer", "Mixer", "makepad-mixer", "apps/mixer", "makepad-mixer", OrFocus),
-        AppDef::app("task", "Task Manager", "makepad-task", "apps/task", "task", OrFocus),
-        AppDef::app("sheets", "Sheets", "makepad-sheets", "apps/sheets", "sheets", OrFocus),
-        // The picture wall over a baked library.
-        AppDef::app("photos", "Photos", "makepad-photos", "apps/photos", "photos", OrFocus),
-        AppDef::app("clock", "Clock", "makepad-clock", "apps/clock", "clock", OrFocus),
-        AppDef::app("weather", "Weather", "makepad-weather", "apps/weather", "weather", OrFocus),
-        // The ledger: accounts, imports and charts over its own database.
-        AppDef::app("finance", "Finance", "makepad-finance", "apps/finance", "finance", OrFocus),
-        AppDef::app("mail", "Mail", "makepad-mail", "apps/mail", "mail", OrFocus),
-        AppDef::app("notes", "Notes", "makepad-notes", "apps/notes", "notes", OrFocus),
-        AppDef::app("calendar", "Calendar", "makepad-calendar", "apps/calendar", "calendar", OrFocus),
-        AppDef::app("reminders", "Reminders", "makepad-reminders", "apps/reminders", "reminders", OrFocus),
-        AppDef::app("calculator", "Calculator", "makepad-calculator", "apps/calculator", "calculator", OrFocus),
-        // Sewing patterns from a body measurement: camera, body model, PDF/SVG.
-        AppDef::app("fabric", "Fabric", "makepad-fabric", "apps/fabric", "makepad-fabric", OrFocus),
-        AppDef::app(
-            "score",
-            "Score",
-            "makepad-app-score",
-            "apps/score",
-            "makepad-app-score",
-            OrFocus,
-        ),
-        // A viewer instance per file, so previews never steal each other's
-        // window.
-        // Image and PDF viewers are NOT menu rows — they open through
-        // Files / previews (see find_app's hidden entries).
-        AppDef::app("video", "Video Player", "makepad-video", "apps/video", "video", AlwaysNew),
-        AppDef::app(
-            "route",
-            "Route",
-            "makepad-app-route",
-            "apps/route",
-            "makepad-app-route",
-            OrFocus,
-        ),
-        {
-            // Fab opens the pretty house when the converted model is
-            // around (children run with cwd = repo root); the built-in
-            // demo house otherwise.
-            let mut fab = AppDef::app("fab", "Fab", "makepad-fab", "apps/fab", "makepad-fab", OrFocus);
-            let house = "local/fab/models/woodside.glb";
-            let exists = repo_root().map(|r| r.join(house).exists()).unwrap_or(false);
-            if exists {
-                fab.args.push("--open".to_string());
-                fab.args.push(house.to_string());
-            }
-            fab
-        },
-        AppDef::app(
-            "studio",
-            "Studio",
-            "makepad-studio",
-            "apps/studio",
-            "studio",
-            OrFocus,
-        ),
-        // Scope is an optional private checkout; cloned into apps/scope it is
-        // a member of this workspace and builds into its target/.
-        AppDef::app("scope", "Scope", "makepad-scope", "apps/scope", "scope", OrFocus),
-    ]
+    makepad_app_registry::apps()
+        .iter()
+        .filter(|entry| entry.menu_visible && entry.wm_launchable)
+        .map(registry_app)
+        .collect()
 }
 
 /// One `name = "..."` value out of a Cargo.toml `[package]` table.
@@ -246,64 +219,19 @@ pub fn find_app(id: &str) -> Option<AppDef> {
     if let Some(app) = registry().iter().find(|a| a.id == id) {
         return Some(app.clone());
     }
-    // The file associations (`makepad_wm_api::viewer_for`) name binaries, since
-    // standalone apps spawn them as siblings; here those resolve to their
-    // curated entries (terminal → terminal, browser → browser, …).
+    // A binary name (`makepad-app-terminal`, as a standalone app's sibling
+    // spawn or a process list names it) resolves to its curated entry too.
     if let Some(app) = registry().iter().find(|a| a.bin == id) {
         return Some(app.clone());
     }
-    use LaunchPolicy::*;
-    match id {
-        // The file viewers: launchable (previews, Open With) but not menu
-        // rows.
-        "image" => Some(AppDef::app(
-            "image",
-            "Image Viewer",
-            "makepad-image",
-            "apps/image",
-            "image",
-            AlwaysNew,
-        )),
-        "pdf" => Some(AppDef::app(
-            "pdf",
-            "PDF Viewer",
-            "makepad-pdf",
-            "apps/pdf",
-            "pdf",
-            AlwaysNew,
-        )),
-        // A continuously animating client: the pacing/hiccup instrument.
-        "splash" => Some(AppDef::app(
-            "splash",
-            "Splash",
-            "makepad-example-splash",
-            "examples/splash",
-            "makepad-example-splash",
-            AlwaysNew,
-        )),
-        "counter" => Some(AppDef::app(
-            "counter",
-            "Counter",
-            "makepad-example-counter",
-            "examples/counter",
-            "makepad-example-counter",
-            AlwaysNew,
-        )),
-        // The assistant: a special child seated in the pane slot, never a
-        // menu row or a tile (see ai_bus.rs / shell/ai_pane.rs). The WM
-        // launches it through its own pane path, never `launch_app`, so
-        // the policy is moot — AlwaysNew keeps launch-or-focus's window
-        // scan from ever "focusing" a pane.
-        "aichat" => Some(AppDef::app(
-            "aichat",
-            "AI",
-            "makepad-aichat",
-            "apps/aichat",
-            "aichat",
-            AlwaysNew,
-        )),
-        _ => None,
-    }
+    // The hidden entries, by id only: the file viewers (previews, Open
+    // With), the pacing/protocol rigs (splash, counter) and the assistant,
+    // which the WM seats in the pane slot through its own path, never
+    // `launch_app` (AlwaysNew keeps launch-or-focus from "focusing" a
+    // pane). Builder-only entries are not WM clients.
+    makepad_app_registry::find(id)
+        .filter(|entry| entry.wm_launchable && !entry.menu_visible)
+        .map(registry_app)
 }
 
 /// `bin/omarchy-launch-or-focus`'s window test, verbatim:
@@ -335,141 +263,23 @@ pub fn word_match(haystack: &str, pattern: &str) -> bool {
     false
 }
 
-/// The checkout root: `MAKEPAD_WM_ROOT`, else the checkout above the
-/// running exe (`target/<profile>/wm`), else the checkout at or above the
-/// current directory — a wm started from the repo root with its target
-/// dir elsewhere (CARGO_TARGET_DIR) is still running out of a checkout,
-/// and every app of the deck is one `cargo build` away.
+/// The checkout root (`makepad_app_registry::repo_root`: `MAKEPAD_WM_ROOT`,
+/// else a Builder installation's sources, else the checkout above the
+/// running exe or at/above the cwd). The WM and Stage share this answer.
 pub fn repo_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("MAKEPAD_WM_ROOT") {
-        return Some(PathBuf::from(root));
-    }
-    // A wm the Makepad Builder published: its sources are in the Builder's
-    // folder, whether the Builder started it (in them) or it was opened on
-    // its own (wm.exe, the Dock, the wm command).
-    if let Some(install) = builder_install() {
-        return install.checkout();
-    }
-    let from_exe = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .and_then(|dir| checkout_at_or_above(&dir));
-    from_exe.or_else(|| std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)))
+    makepad_app_registry::repo_root()
 }
 
-/// The Makepad Builder installation a published wm runs from: `home` is the
-/// folder people see (makepad-builder.exe or the `makepad` command, and the
-/// apps), `state` the Builder's own `builder/` folder in it (sources,
-/// toolchains, the Unix `<app>.bin`s). Found from the executable: Windows
-/// `home/wm.exe`, Unix `builder/wm.bin`, a macOS bundle's `installation`
-/// link. Apps build through the Builder there (`build_argv`), so they get its
-/// compiler, flags, features and target however wm was started.
-pub struct BuilderInstall {
-    pub home: PathBuf,
-    pub state: PathBuf,
-}
-
-impl BuilderInstall {
-    /// The Builder's command that builds one app offline.
-    fn command(&self) -> Option<PathBuf> {
-        let command = if cfg!(windows) { self.home.join("makepad-builder.exe") } else { self.home.join("makepad") };
-        command.is_file().then_some(command)
-    }
-    /// Where the Builder publishes `bin`.
-    fn published(&self, bin: &str) -> PathBuf {
-        if cfg!(windows) {
-            self.home.join(format!("{bin}.exe"))
-        } else {
-            self.state.join(format!("{bin}.bin"))
-        }
-    }
-    /// The Makepad source wm builds from: the snapshot the working directory
-    /// is in (the Builder starts wm there), else the newest one with wm in it.
-    fn checkout(&self) -> Option<PathBuf> {
-        let sources = self.state.join("sources");
-        if let Some(cwd) = std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)) {
-            if cwd.starts_with(&sources) {
-                return Some(cwd);
-            }
-        }
-        std::fs::read_dir(&sources).ok()?.flatten()
-            .map(|snapshot| snapshot.path().join("makepad"))
-            .filter(|root| root.join("apps/wm/Cargo.toml").is_file())
-            .max_by_key(|root| std::fs::metadata(root.join("Cargo.toml")).and_then(|m| m.modified()).ok())
-    }
-}
-
-pub fn builder_install() -> Option<BuilderInstall> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    for state in [dir.join("builder"), dir.to_path_buf(), dir.join("installation")] {
-        // Its downloaded sources and its compiler (the email record is
-        // missing in a folder nobody logged into).
-        if state.join("sources").is_dir() && state.join("toolchain").is_dir() {
-            let state = state.canonicalize().unwrap_or(state);
-            // An installation from before the builder/ folder keeps
-            // everything in the folder itself.
-            let home = if state.file_name().is_some_and(|name| name == "builder") {
-                state.parent()?.to_path_buf()
-            } else {
-                state.clone()
-            };
-            return Some(BuilderInstall { home, state });
-        }
-    }
-    None
-}
-
-/// The nearest directory at or above `start` (four levels at most) that is
-/// a makepad checkout: the workspace `Cargo.toml` with this wm's own crate
-/// in it. A developer's clone and the source a Makepad Builder downloaded
-/// (which starts wm in it, with its compiler environment) both are; the
-/// Builder's has no `local/`.
-fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    for _ in 0..5 {
-        if dir.join("Cargo.toml").exists() && dir.join("apps/wm/Cargo.toml").exists() {
-            return Some(dir);
-        }
-        dir = dir.parent()?.to_path_buf();
-    }
-    None
-}
-
-/// The release binary a checkout's cargo builds for `app`: under
-/// `CARGO_TARGET_DIR` when set (the Makepad Builder points it at its one
-/// shared target), else the workspace's own `target/`.
-fn checkout_binary(app: &AppDef, root: &Path, target_dir: Option<&std::ffi::OsStr>) -> PathBuf {
-    let workspace = app
-        .manifest
-        .as_ref()
-        .and_then(|manifest| root.join(manifest).parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| root.to_path_buf());
-    // A relative target dir is cargo's, relative to where it runs: here.
-    let target = target_dir
-        .map(|dir| workspace.join(dir))
-        .unwrap_or_else(|| workspace.join("target"));
-    let mut path = target.join("release").join(&app.bin);
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
-}
-
-/// The binary that starts `app` without compiling anything: the checkout's
-/// release build when wm runs out of a checkout, else the sibling of an
-/// installed wm. None: not built.
+/// The binary that starts `app` without compiling anything
+/// (`makepad_app_registry::built_binary`: a Builder's published one, the
+/// checkout's release build, or an installed sibling). None: not built.
 pub fn built_binary(app: &AppDef, root: Option<&Path>) -> Option<PathBuf> {
-    if let Some(install) = builder_install() {
-        return Some(install.published(&app.bin)).filter(|path| path.is_file());
+    // Android: every app is a library the launcher runs (host.rs).
+    #[cfg(target_os = "android")]
+    if root.is_none() {
+        return resolve_bin(&app.bin);
     }
-    match root {
-        Some(root) => {
-            let target_dir = std::env::var_os("CARGO_TARGET_DIR");
-            Some(checkout_binary(app, root, target_dir.as_deref())).filter(|path| path.is_file())
-        }
-        None => resolve_bin(&app.bin),
-    }
+    makepad_app_registry::built_binary(&app.target(), root)
 }
 
 /// Newer than every file in the dep-info cargo writes beside it
@@ -513,29 +323,10 @@ pub fn resolve_bin(bin: &str) -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        let mut path = dir.join(bin);
-        if cfg!(windows) {
-            path.set_extension("exe");
-        }
-        path.exists().then_some(path)
+        makepad_app_registry::installed_binary(bin)
     }
 }
 
-/// The cargo to launch with: whatever is on PATH, else the rustup default.
-fn cargo_bin() -> PathBuf {
-    if let Ok(cargo) = std::env::var("CARGO") {
-        return PathBuf::from(cargo);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let rustup = PathBuf::from(home).join(".cargo/bin/cargo");
-        if rustup.exists() {
-            return rustup;
-        }
-    }
-    PathBuf::from("cargo")
-}
 
 // ======================================================================
 // The warm-instance pool
@@ -1189,31 +980,14 @@ pub fn launch_argv(
     Ok((program, args))
 }
 
-/// The build of a deck app the person opened while it was not built:
-/// `cargo build --release` of exactly its package and binary (children are
-/// ALWAYS release builds, never debug). `--manifest-path` keeps it
-/// independent of the cwd.
+/// The build of a deck app the person opened while it was not built
+/// (`makepad_app_registry::build_argv`): `cargo build --release` of exactly
+/// its package and binary (children are ALWAYS release builds, never
+/// debug), or the Builder's own build in a Builder installation.
 pub fn build_argv(app: &AppDef, root: &Path) -> (PathBuf, Vec<String>) {
-    // In a Builder installation the Builder builds it: the same command,
-    // flags, features and target as its own builds, so nothing it compiled
-    // compiles again (`makepad-builder build APP`, Unix `makepad build APP`).
-    if let Some(command) = builder_install().and_then(|install| install.command()) {
-        return (command, vec!["build".to_string(), app.id.clone()]);
-    }
-    let manifest = root.join(app.manifest.as_deref().unwrap_or("Cargo.toml"));
-    let manifest = manifest.to_string_lossy();
-    let args = [
-        "build",
-        "--release",
-        "--manifest-path",
-        &manifest,
-        "-p",
-        &app.package,
-        "--bin",
-        &app.bin,
-    ];
-    (cargo_bin(), args.iter().map(|arg| arg.to_string()).collect())
+    makepad_app_registry::build_argv(&app.target(), root)
 }
+
 
 /// What starts in a building slot once its build succeeds.
 #[derive(Clone, Debug, Default)]
@@ -1385,10 +1159,10 @@ mod tests {
 
     #[test]
     fn cargo_progress_keeps_the_build_stage_readable() {
-        assert_eq!(cargo_progress("   Compiling makepad-photos v0.1.0 (/a/checkout)"), Some(("compiling makepad-photos v0.1.0…".into(), false)));
+        assert_eq!(cargo_progress("   Compiling makepad-app-photos v0.1.0 (/a/checkout)"), Some(("compiling makepad-app-photos v0.1.0…".into(), false)));
         assert_eq!(cargo_progress("Blocking waiting for file lock on build directory"), Some(("waiting for another build…".into(), false)));
         assert_eq!(cargo_progress("    Finished `release` profile in 2s"), Some(("launching…".into(), true)));
-        assert_eq!(cargo_progress("     Running `/a/checkout/target/release/photos`"), Some(("launching…".into(), true)));
+        assert_eq!(cargo_progress("     Running `/a/checkout/target/release/makepad-app-photos`"), Some(("launching…".into(), true)));
         // The super-app's provisioning lines reach the desk verbatim.
         for line in ["extracting tc: already on disk", "inflating tc 120/292 MB · 88 files", "provisioning wmdyn x: resuming", "provision failed: unpack tc.tar.lz4: archive is truncated", "provisioned in 212 s"] {
             assert_eq!(cargo_progress(line), Some((line.into(), false)), "{line}");
@@ -1408,17 +1182,17 @@ mod tests {
         assert!(program.to_string_lossy().ends_with("cargo"), "{:?}", program);
         assert_eq!(&args[..2], &["build", "--release"], "{:?}", args);
         assert!(args.contains(&"/checkout/Cargo.toml".to_string()), "{:?}", args);
-        assert!(args.windows(2).any(|w| w == ["-p", "makepad-terminal"]), "{:?}", args);
-        assert!(args.windows(2).any(|w| w == ["--bin", "terminal"]), "{:?}", args);
+        assert!(args.windows(2).any(|w| w == ["-p", "makepad-app-terminal"]), "{:?}", args);
+        assert!(args.windows(2).any(|w| w == ["--bin", "makepad-app-terminal"]), "{:?}", args);
         // Starting it runs the release binary in the checkout's target
         // (CARGO_TARGET_DIR when set: the Builder's shared one).
-        let binary = checkout_binary(&app, &root, None);
-        let exe = if cfg!(windows) { "terminal.exe" } else { "terminal" };
+        let binary = makepad_app_registry::checkout_binary(&app.target(), &root, None);
+        let exe = if cfg!(windows) { "makepad-app-terminal.exe" } else { "makepad-app-terminal" };
         assert_eq!(binary, root.join("target/release").join(exe));
-        let shared = checkout_binary(&app, &root, Some(std::ffi::OsStr::new("/builder/target")));
+        let shared = makepad_app_registry::checkout_binary(&app.target(), &root, Some(std::ffi::OsStr::new("/builder/target")));
         assert_eq!(shared, std::path::Path::new("/builder/target/release").join(exe));
         let missing = std::env::temp_dir().join(format!("wm-release-test-{}", std::process::id()));
-        assert_eq!(launch_argv(&app, Some(&missing), &[]).unwrap_err(), "not built yet: terminal");
+        assert_eq!(launch_argv(&app, Some(&missing), &[]).unwrap_err(), "not built yet: makepad-app-terminal");
     }
 
     #[test]
@@ -1464,9 +1238,9 @@ mod tests {
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(root.join("apps/wm")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
-        assert_eq!(checkout_at_or_above(&app), None, "a workspace without wm is not one");
+        assert_eq!(makepad_app_registry::checkout_at_or_above(&app), None, "a workspace without wm is not one");
         std::fs::write(root.join("apps/wm/Cargo.toml"), "[package]\n").unwrap();
-        assert_eq!(checkout_at_or_above(&app), Some(root.clone()));
+        assert_eq!(makepad_app_registry::checkout_at_or_above(&app), Some(root.clone()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1494,7 +1268,7 @@ mod tests {
         assert!(word_match("files", "files"));
         assert!(word_match("Files", "files"));
         assert!(word_match("~/Pictures — files", "FILES"));
-        assert!(word_match("makepad-files - files (2)", "files"));
+        assert!(word_match("makepad-app-files - files (2)", "files"));
         // Not a word boundary: no match.
         assert!(!word_match("makepadfiles", "files"));
         assert!(!word_match("filesystem", "files"));
@@ -1553,6 +1327,13 @@ mod tests {
             let app = find_app(id).expect(id);
             assert_eq!(app.policy, LaunchPolicy::AlwaysNew, "{}", id);
         }
+        // Builder-only registry rows are not WM clients, and hidden entries
+        // resolve by id only, never by binary.
+        for id in ["wm", "wm-all", "director", "ai-hub", "stage"] {
+            assert!(find_app(id).is_none(), "{} must not be launchable by the WM", id);
+        }
+        assert!(find_app("splash").is_some());
+        assert!(find_app("makepad-example-splash").is_none());
         for (id, policy) in [
             ("terminal", LaunchPolicy::AlwaysNew),
             ("video", LaunchPolicy::AlwaysNew),
@@ -1567,13 +1348,13 @@ mod tests {
 
     #[test]
     fn the_association_table_resolves_by_binary_name() {
-        // `makepad_wm_api::viewer_for` names binaries (standalone apps spawn
-        // them as siblings); the WM must resolve those to curated entries
-        // or every text/html/csv preview dies with "no app".
+        // Binary names (what a standalone app spawns as a sibling) resolve
+        // to their curated entries, as do the registry ids
+        // `makepad_wm_api::viewer_for` answers.
         for (bin, id) in [
-            ("terminal", "terminal"),
-            ("browser", "browser"),
-            ("sheets", "sheets"),
+            ("makepad-app-terminal", "terminal"),
+            ("makepad-app-browser", "browser"),
+            ("makepad-app-sheets", "sheets"),
         ] {
             assert_eq!(find_app(bin).expect(bin).id, id);
         }
@@ -1832,7 +1613,7 @@ mod tests {
         }
         let files = find_app("files").unwrap();
         let root = std::env::temp_dir().join(format!("wm-warm-test-{}", std::process::id()));
-        let binary = checkout_binary(&files, &root, None);
+        let binary = makepad_app_registry::checkout_binary(&files.target(), &root, None);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, b"").unwrap();
         let (program, args) = launch_argv(&files, Some(&root), &[]).unwrap();

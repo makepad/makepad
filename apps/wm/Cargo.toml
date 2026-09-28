@@ -12,7 +12,7 @@
 # crates linked in as MODULES (libs/app_module), one splash isolate each,
 # drawn into the desk's own texture. This crate is a LIBRARY for that: the
 # `wm` binary here is the desktop build (src/main.rs), and an all-in-one
-# project links `makepad-wm` plus its app crates and sets the `WmBuild`
+# project links `makepad-app-wm` plus its app crates and sets the `WmBuild`
 # (src/build.rs). No app crate is a dependency of wm itself.
 #
 # Session mode (later, Linux only): the same layout/chrome/protocol with a
@@ -21,17 +21,17 @@
 # nested-mode assumptions for that reason.
 
 [package]
-name = "makepad-wm"
+name = "makepad-app-wm"
 version = "0.1.0"
 edition = "2021"
-default-run = "wm"
+default-run = "makepad-app-wm"
 
 [lib]
-name = "makepad_wm"
+name = "makepad_app_wm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "wm"
+name = "makepad-app-wm"
 path = "src/main.rs"
 
 [features]
@@ -45,6 +45,7 @@ makepad-widgets = { path = "../../widgets", default-features = false, features =
 makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-app-registry = { path = "../../libs/app_registry" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }

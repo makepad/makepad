@@ -6,7 +6,7 @@
 //!
 //! Run explicitly (skipped without the env):
 //! ```sh
-//! FAB_PROBE_GLB=/abs/path/woodside.glb cargo test -p makepad-fab --release --test roof_probe -- --nocapture
+//! FAB_PROBE_GLB=/abs/path/woodside.glb cargo test -p makepad-app-fab --release --test roof_probe -- --nocapture
 //! ```
 
 use fab::model::{LoadCancel, Loader, Scene, SceneSnapshot};

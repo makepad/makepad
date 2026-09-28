@@ -615,6 +615,7 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         self.escape_value(value);
+        let key = key.unescape_id();
         if let Some(key_id) = key.as_id() {
             let object = &self.objects[ptr];
             if !object.tag.is_deep() {
@@ -967,6 +968,7 @@ impl ScriptHeap {
     }
 
     pub fn value(&self, ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        let key = key.unescape_id();
         if key.is_id() {
             return self.value_deep(ptr, key, trap);
         }
@@ -1172,7 +1174,7 @@ impl ScriptHeap {
 
     pub fn map_delete(&mut self, ptr: ScriptObject, key: &ScriptValue) -> Option<ScriptValue> {
         let object = &mut self.objects[ptr];
-        object.map_delete(key)
+        object.map_delete(&key.unescape_id())
     }
 
     pub fn map_len(&self, ptr: ScriptObject) -> usize {

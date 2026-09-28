@@ -508,10 +508,10 @@ Android super-app (apps/wm-dyn: tiles compiled on the phone against the shipped 
   --dyn-stage=<dir>                       default: <target>/makepad-android-dyn/<crate>/stage\n\
   --dyn-no-rehearsal                      stop after packing\n\
   The host's Cargo.toml names the engine and the tiles:\n\
-    [package.metadata.makepad.dyn]  engine = \"makepad-wm-engine\"  apps = [\"makepad-clock\", ...]\n\
+    [package.metadata.makepad.dyn]  engine = \"makepad-wm-engine\"  apps = [\"makepad-app-clock\", ...]\n\
   Example:\n\
     cargo makepad android --abi=aarch64 --package-name=nl.makepad.wmdyn --app-label=wmdyn \\\n\
-        dyn-pack --dyn-toolchain=/path/to/tc -p makepad-wm-dyn --release --no-default-features\n\
+        dyn-pack --dyn-toolchain=/path/to/tc -p makepad-app-wm-dyn --release --no-default-features\n\
 \n\
 build-aab signing options (defaults: bundled debug.keystore — Play Store will reject):\n\
   --keystore=<path>                       JKS/PKCS12 keystore file (alias auto-discovered\n\

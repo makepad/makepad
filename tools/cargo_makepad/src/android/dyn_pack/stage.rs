@@ -219,7 +219,7 @@ pub fn stage(d: &Dyn) -> Result<(), String> {
          [source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
          [source.vendored-sources]\ndirectory = \"vendor\"\n\n[net]\noffline = true\n\n\
          # Features resolve across ALL members, whichever package is selected:\n\
-         # the engine cross-build (-p makepad-wm-dyn) and every on-device\n\
+         # the engine cross-build (-p makepad-app-wm-dyn) and every on-device\n\
          # `-p <app>` build then share one unit graph, and the app's manifest\n\
          # needs no engine dependency. Nightly-gated on this cargo: honored only\n\
          # with RUSTC_BOOTSTRAP=1 in the environment (dyn-pack, env.txt), and\n\

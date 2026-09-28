@@ -678,7 +678,7 @@ mod cost_of_a_switch {
     /// this was measured in: every story file is ~99% of a reload, the whole
     /// widget library is the other 1%, and the one page on the canvas is a
     /// fraction of one file.
-    /// `cargo test -p makepad-storybook where_a_theme_switch -- --ignored --nocapture`
+    /// `cargo test -p makepad-app-storybook where_a_theme_switch -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn where_a_theme_switch_spends_its_time() {

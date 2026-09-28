@@ -9,7 +9,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_photos::{ai, view, PhotosView};
+use makepad_app_photos::{ai, view, PhotosView};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -105,7 +105,7 @@ impl AppMain for App {
         makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
         makepad_image_tiles::script_mod(vm);
         view::script_mod(vm);
         self::script_mod(vm)

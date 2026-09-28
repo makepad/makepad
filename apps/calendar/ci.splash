@@ -7,10 +7,10 @@ use mod.std.*
 use mod.ci;
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-calendar"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-calendar"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-calendar" binary: "calendar" cwd: "."})
+let app = ci.launch({package: "makepad-app-calendar" binary: "makepad-app-calendar" cwd: "."})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

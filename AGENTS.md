@@ -18,15 +18,15 @@ use current source for API signatures and working examples.
 
 ## Current agent workflow
 
-- Codex manages the work and reviews Fable's designs and results.
-- Fable designs and executes the difficult implementation work.
-- Grok handles bounded mechanical work and validation under precise briefs.
-- Keep one persistent Fable session for related tasks; send follow-ups to that
-  session or resume it with its existing context. Do not repeatedly start fresh
-  Fable sessions and repay the same input context. Idle without polling/model
-  turns while waiting for related work.
-- This is the user's current workflow (2026-09-16) and supersedes older role
-  assignments in local skills or memories. Preserve the manager/implementer split.
+- Opus 5.5 does all work that takes judgement: implementation lanes, reviews
+  of every lane's diff, research and design.
+- Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
+  transcription, log sweeps) under precise briefs.
+- Codex, Sol and Fable are not used for now.
+- Resume a finished lane with its context for follow-ups instead of starting
+  a fresh one that repays the same input. Idle without polling while waiting.
+- This is the user's current workflow (2026-09-27) and supersedes older role
+  assignments in local skills or memories (including the 2026-09-16 one).
 
 ## Software installation requires explicit approval
 
@@ -142,6 +142,11 @@ use current source for API signatures and working examples.
   visual verification is needed. Avoid unrelated or routine captures.
 - Command-line builds, tests, linting, and file operations run directly in
   the shell.
+- Never pass a variable that could be empty or unset to `rm` (or `rm -rf`),
+  e.g. `rm -rf "$DIR/"*` or `rm -rf $TMP/build`: an empty value turns it into
+  a delete at `/` or `$HOME` and raises a macOS permission popup for the
+  user. Delete literal, absolute paths inside the repo or scratchpad, or
+  guard first (`: "${DIR:?}"` / `[ -n "$DIR" ] || exit 1`).
 - Rendering is verified on the real GPU backend, never on the gpusim
   raster (the CPU simulated-GPU backend, `MAKEPAD=gpusim`, formerly called
   "headless"; user, 2026-09-11: "chasing bugs in headless is useless"). Any

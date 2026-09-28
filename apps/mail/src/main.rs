@@ -2,7 +2,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_mail::{ai, view::MailView, local_view::LocalMailView, source::LocalConfig};
+use makepad_app_mail::{ai, view::MailView, local_view::LocalMailView, source::LocalConfig};
 use makepad_strict_json::Value;
 use makepad_widgets::*;
 
@@ -209,7 +209,7 @@ impl AppMain for App {
         }
         makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        makepad_mail::script_mod(vm);
+        makepad_app_mail::script_mod(vm);
         self::script_mod(vm)
     }
 

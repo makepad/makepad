@@ -2,7 +2,7 @@
 //! `mod.browser_theme.*` (tab strip, toolbar, omnibox, icon roles), which this
 //! module evaluates into the VM before the UI modules.
 //!
-//! Under makepad-wm the roles come from the WM's theme.splash
+//! Under makepad-app-wm the roles come from the WM's theme.splash
 //! (`MAKEPAD_WM_THEME_SPLASH`, line-scanned by `makepad_wm_theme`, the family bridge);
 //! standalone runs get Chrome's own dark palette.
 

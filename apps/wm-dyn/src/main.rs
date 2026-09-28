@@ -1,8 +1,8 @@
 //! Desktop binary of the Android super-app (`src/lib.rs` is the Android
 //! cdylib): the same desk, apps compiled on demand to Rust `dylib`s.
 
-use makepad_wm::makepad_widgets::*;
-use makepad_wm::App;
+use makepad_app_wm::makepad_widgets::*;
+use makepad_app_wm::App;
 
 app_main!(
     App,
@@ -14,7 +14,7 @@ app_main!(
         ROBOTO_FLEX_FONT_ASSET,
     ],
     configure: |cx: &mut Cx| {
-        cx.set_global(makepad_wm_dyn::wm_build());
+        cx.set_global(makepad_app_wm_dyn::wm_build());
     }
 );
 

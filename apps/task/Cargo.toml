@@ -1,10 +1,10 @@
 [package]
-name = "makepad-task"
+name = "makepad-app-task"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "task"
+name = "makepad-app-task"
 path = "src/main.rs"
 
 [features]

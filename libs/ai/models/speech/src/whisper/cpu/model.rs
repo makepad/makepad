@@ -1,7 +1,9 @@
 use crate::whisper::quant::*;
 use crate::whisper::tensor::{RawTensor, Tensor};
+use crate::whisper::tokenizer::WhisperTokenizer;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek};
+use std::sync::OnceLock;
 
 const GGML_FILE_MAGIC: u32 = 0x67676d6c;
 
@@ -36,6 +38,10 @@ pub struct Vocab {
     pub n_vocab: i32,
     pub token_to_id: HashMap<String, i32>,
     pub id_to_token: HashMap<i32, String>,
+    /// The file's tokens as raw bytes, by id. `id_to_token` is their lossy
+    /// UTF-8 view; a token that is part of a multi-byte character is only
+    /// exact here.
+    pub token_bytes: Vec<Vec<u8>>,
     // special tokens
     pub token_eot: i32,
     pub token_sot: i32,
@@ -132,6 +138,9 @@ pub struct WhisperModel {
     pub d_ln_w: Tensor, // ln.weight [n_text_state]
     pub d_ln_b: Tensor, // ln.bias [n_text_state]
     pub decoder_layers: Vec<DecoderLayer>,
+
+    /// The text encoder over `vocab.token_bytes`, built on first use.
+    tokenizer: OnceLock<WhisperTokenizer>,
 }
 
 fn read_i32<R: Read>(r: &mut R) -> io::Result<i32> {
@@ -156,10 +165,14 @@ fn read_f32_vec<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<f32>> {
     Ok(data)
 }
 
-fn read_string<R: Read>(r: &mut R, len: usize) -> io::Result<String> {
+fn read_bytes<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    Ok(buf)
+}
+
+fn read_string<R: Read>(r: &mut R, len: usize) -> io::Result<String> {
+    Ok(String::from_utf8_lossy(&read_bytes(r, len)?).to_string())
 }
 
 fn ggml_type_for_ftype(ftype: i32) -> u32 {
@@ -219,22 +232,22 @@ impl WhisperModel {
         let n_vocab_file = read_i32(r)?;
         let mut token_to_id = HashMap::new();
         let mut id_to_token = HashMap::new();
+        let mut token_bytes = Vec::with_capacity(n_vocab_file.max(0) as usize);
 
         for i in 0..n_vocab_file {
             let len = read_u32(r)? as usize;
-            let word = if len > 0 {
-                read_string(r, len)?
-            } else {
-                String::new()
-            };
+            let bytes = read_bytes(r, len)?;
+            let word = String::from_utf8_lossy(&bytes).to_string();
             token_to_id.insert(word.clone(), i);
             id_to_token.insert(i, word);
+            token_bytes.push(bytes);
         }
 
         let mut vocab = Vocab {
             n_vocab: hparams.n_vocab,
             token_to_id,
             id_to_token,
+            token_bytes,
             token_eot: 50256,
             token_sot: 50257,
             token_translate: 50357,
@@ -485,7 +498,16 @@ impl WhisperModel {
             d_ln_w,
             d_ln_b,
             decoder_layers,
+            tokenizer: OnceLock::new(),
         })
+    }
+
+    /// Whisper's text encoder for this model's vocab (see
+    /// [`WhisperTokenizer`]): what [`crate::whisper::WhisperState::align_text`]
+    /// turns known text into tokens with.
+    pub fn tokenizer(&self) -> &WhisperTokenizer {
+        self.tokenizer
+            .get_or_init(|| WhisperTokenizer::new(&self.vocab.token_bytes, self.vocab.token_eot.max(0) as usize))
     }
 
     pub fn load_file(path: &str) -> io::Result<Self> {

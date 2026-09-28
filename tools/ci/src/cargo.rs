@@ -445,7 +445,7 @@ mod tests {
         };
         let narrowed = check.without_packages(&["makepad-app-terminal".to_string()]);
         assert_eq!(narrowed.args.join(" "),
-            "check --target wasm32-unknown-unknown --lib -p makepad-wm -p makepad-notes --message-format=json");
+            "check --target wasm32-unknown-unknown --lib -p makepad-app-wm -p makepad-app-notes --message-format=json");
     }
     #[test]
     fn other_targets_are_check_only_and_host_is_omitted() {
@@ -534,17 +534,17 @@ mod tests {
     fn upstream_diagnostics_do_not_colour_the_app() {
         let output = r#"{"reason":"compiler-message","package_id":"path+file:///repo/libs/vulkan/libloading#0.8.9","target":{"name":"wm"},"message":{"level":"warning","rendered":"warning: unused function\n  --> lib.rs:3\n"}}
 {"reason":"compiler-message","package_id":"path+file:///repo/platform#makepad-platform@2.0.0","target":{"name":"wm"},"message":{"level":"warning","rendered":"warning: unexpected cfg\n"}}
-{"reason":"compiler-artifact","package_id":"path+file:///repo/apps/wm#makepad-wm@0.1.0"}"#;
+{"reason":"compiler-artifact","package_id":"path+file:///repo/apps/wm#makepad-app-wm@0.1.0"}"#;
         let mut result = CargoResult::parse(Output { code: 0, out: output.into() });
         assert_eq!(result.warnings, BTreeMap::from([("libloading".into(), 1), ("makepad-platform".into(), 1)]));
-        assert!(!result.own_warnings(Some("makepad-wm")));
+        assert!(!result.own_warnings(Some("makepad-app-wm")));
         assert!(result.own_warnings(None));
-        assert_eq!(result.warning_text(Some("makepad-wm")), "upstream warnings: libloading: 1, makepad-platform: 1");
+        assert_eq!(result.warning_text(Some("makepad-app-wm")), "upstream warnings: libloading: 1, makepad-platform: 1");
         let rendered = output.lines().filter_map(rendered_diagnostic).collect::<Vec<_>>();
         assert_eq!(rendered, vec!["warning: unused function\n  --> lib.rs:3", "warning: unexpected cfg"]);
-        result.warnings.insert("makepad-wm".into(), 2);
-        assert!(result.own_warnings(Some("makepad-wm")));
-        assert!(result.warning_text(Some("makepad-wm")).starts_with("makepad-wm: 2 warnings\nupstream warnings:"));
+        result.warnings.insert("makepad-app-wm".into(), 2);
+        assert!(result.own_warnings(Some("makepad-app-wm")));
+        assert!(result.warning_text(Some("makepad-app-wm")).starts_with("makepad-app-wm: 2 warnings\nupstream warnings:"));
     }
 
 }

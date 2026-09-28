@@ -119,8 +119,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
         static SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut seed = Cx::time_now().to_bits()
-            ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // `--seed N` / `MAKEPAD_SEED` replaces the clock, so a reseed is
+        // as reproducible as the first seed.
+        let base = crate::remote::app_clock::seed().unwrap_or_else(|| Cx::time_now().to_bits());
+        let mut seed = base ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if seed == 0 {
             seed = sequence.max(1);
         }
@@ -129,7 +131,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
     fn ensure_seeded(cx: &mut Cx) {
         if cx.script_data.random_seed == 0 {
-            cx.script_data.random_seed = fresh_seed();
+            cx.script_data.random_seed = crate::remote::app_clock::seed()
+                .map(|seed| next_hash(&seed.to_le_bytes()).max(1))
+                .unwrap_or_else(fresh_seed);
         }
     }
 

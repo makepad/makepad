@@ -4,18 +4,18 @@
 # or, hosted in-process, one module instance in its own isolate (src/module.rs).
 
 [package]
-name = "makepad-clock"
+name = "makepad-app-clock"
 version = "0.1.0"
 edition = "2021"
-default-run = "clock"
+default-run = "makepad-app-clock"
 
 [[bin]]
-name = "clock"
+name = "makepad-app-clock"
 path = "src/main.rs"
 required-features = ["standalone"]
 
 [lib]
-name = "makepad_clock"
+name = "makepad_app_clock"
 path = "src/lib.rs"
 
 [features]
@@ -28,19 +28,19 @@ default = ["tweaker", "standalone"]
 # builds; the Builder's releases build without it (--no-default-features).
 tweaker = ["makepad-widgets/tweaker"]
 # The standalone window: the F10 overlay and the port toward it. A host
-# that links the MODULE (makepad-wm) leaves this off and gets the lib only.
-standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
+# that links the MODULE (makepad-app-wm) leaves this off and gets the lib only.
+standalone = ["dep:makepad-app-aichat", "dep:makepad-wm-api"]
 # The machine's own model in this window's chat (Qwen on the local
 # runtime). Off by default: the chat offers the Claude Code / Codex CLIs,
 # Claude Desktop (MCP) and the Claude API. `--features localai` adds it.
-localai = ["makepad-aichat?/localai"]
+localai = ["makepad-app-aichat?/localai"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-civil-time = { path = "../../libs/civil_time" }
 # The assistant: the F10 overlay in this window, and the clock's one tool.
-makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
+makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
 # The window manager's vocabulary for the standalone window: the bar's
 # title and the polite close (the module has no window of its own).
 makepad-wm-api = { path = "../../libs/wm_api", optional = true }

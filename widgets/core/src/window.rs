@@ -15,6 +15,8 @@ use crate::{
     widget::*,
 };
 
+use makepad_platform::remote::synthetic_cursor::{synthetic_cursor, SyntheticCursorStyle};
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
@@ -143,6 +145,23 @@ script_mod! {
         pixel: fn() {
             let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
             return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+    }
+
+    // The press ripple of the synthetic cursor (`/cursor` on the remote
+    // bridge): a ring that grows and fades over `progress` 0..1.
+    mod.widgets.DrawCursorRipple = mod.draw.DrawQuad {
+        progress: instance(0.0)
+
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let c = self.rect_size * 0.5
+            let r = mix(0.2, 0.5, self.progress) * min(self.rect_size.x, self.rect_size.y) - 1.5
+            let fade = 1.0 - self.progress
+            sdf.circle(c.x, c.y, r)
+            sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.25 * fade))
+            sdf.stroke(vec4(0.0, 0.0, 0.0, 0.6 * fade), 1.5)
+            return sdf.result
         }
     }
 
@@ -288,6 +307,8 @@ script_mod! {
         cursor: MouseCursor.Default
         mouse_cursor_size: vec2(24 24)
         draw_cursor: mod.widgets.DrawMouseCursor {}
+        draw_synthetic_cursor: mod.widgets.DrawMouseCursor {}
+        draw_synthetic_ripple: mod.widgets.DrawCursorRipple {}
         draw_note +: {
             color: theme.color_label_inner
             text_style: theme.font_regular{font_size: theme.font_size_p}
@@ -329,6 +350,19 @@ pub struct Window {
     cursor_draw_list: DrawList2d,
     #[live]
     draw_cursor: DrawQuad,
+    /// The remote bridge's synthetic cursor (`/cursor`), drawn into this
+    /// window's pass so grabs and captures show where input goes.
+    #[live]
+    draw_synthetic_cursor: DrawQuad,
+    #[live]
+    draw_synthetic_ripple: DrawQuad,
+    #[new]
+    synthetic_cursor_list: DrawList2d,
+    /// The cursor state last drawn (its generation), 0 when none was.
+    #[rust]
+    synthetic_cursor_drawn: u64,
+    #[rust]
+    synthetic_cursor_frame: NextFrame,
     //#[live] debug_view: DebugView,
     //#[live] performance_view: PerformanceView,
     #[live]
@@ -1298,6 +1332,8 @@ impl Window {
             });
             self.cursor_draw_list.end(cx);
         }
+        // The remote bridge's synthetic cursor, above every child likewise.
+        self.draw_synthetic_cursor(cx);
 
         if self.use_sploded {
             // End the body pass first, then composite it, then let the overlay
@@ -1403,6 +1439,64 @@ impl Window {
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass.handle);
     }
+    /// The synthetic cursor, when the remote bridge shows one in this window.
+    /// Costs nothing while it is off.
+    fn draw_synthetic_cursor(&mut self, cx: &mut Cx2d) {
+        let window_id = self.window.handle.window_id().id();
+        let Some(cursor) = synthetic_cursor().filter(|cursor| cursor.shows_in(window_id)) else {
+            self.synthetic_cursor_drawn = 0;
+            return;
+        };
+        self.synthetic_cursor_drawn = cursor.generation;
+        let shape = match cursor.style {
+            SyntheticCursorStyle::Fixed(shape) => shape,
+            SyntheticCursorStyle::App => match cx.mouse_cursor() {
+                MouseCursor::Hidden => MouseCursor::Arrow,
+                shape => shape,
+            },
+        };
+        self.synthetic_cursor_list.begin_overlay_last(cx);
+        if let Some(progress) = cursor.ripple_progress(cx.seconds_since_app_start()) {
+            let size = self.mouse_cursor_size.x.max(self.mouse_cursor_size.y) * 2.0;
+            self.draw_synthetic_ripple.draw_vars.set_dyn_instance(cx, id!(progress), &[progress as f32]);
+            self.draw_synthetic_ripple.draw_abs(
+                cx,
+                Rect {
+                    pos: cursor.pos - dvec2(size, size) * 0.5,
+                    size: dvec2(size, size),
+                },
+            );
+            self.synthetic_cursor_frame = cx.new_next_frame();
+        }
+        self.draw_synthetic_cursor.draw_vars.set_dyn_instance(
+            cx,
+            id!(shape),
+            &[crate::cursor::shape_value(shape)],
+        );
+        self.draw_synthetic_cursor.draw_abs(
+            cx,
+            Rect {
+                pos: cursor.pos - crate::cursor::hotspot(shape, self.mouse_cursor_size),
+                size: self.mouse_cursor_size,
+            },
+        );
+        self.synthetic_cursor_list.end(cx);
+    }
+
+    /// Redraw when the synthetic cursor moved, pressed, changed or went away,
+    /// and on each frame of a press ripple.
+    fn handle_synthetic_cursor(&mut self, cx: &mut Cx, event: &Event) {
+        let window_id = self.window.handle.window_id().id();
+        let generation = synthetic_cursor()
+            .filter(|cursor| cursor.shows_in(window_id))
+            .map_or(0, |cursor| cursor.generation);
+        if generation != self.synthetic_cursor_drawn
+            || self.synthetic_cursor_frame.is_event(event).is_some()
+        {
+            self.main_draw_list.redraw(cx);
+        }
+    }
+
     pub fn resize(&self, cx: &mut Cx, size: Vec2d) {
         self.window.handle.resize(cx, size);
     }
@@ -2266,6 +2360,7 @@ impl Widget for Window {
             self.step_crossfade(cx);
         }
         self.handle_direct_mouse_cursor(cx, event);
+        self.handle_synthetic_cursor(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
             if let Some(keyboard) = makepad_platform::ime::HostedKeyboard::parse(json) {

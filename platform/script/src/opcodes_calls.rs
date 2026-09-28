@@ -186,6 +186,7 @@ impl<'a> ScriptVm<'a> {
                             body: self.bx.threads.cur_ref().trap.ip.body,
                         }),
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
+                        body_root: false,
                     };
                     if !self.bx.threads.cur().push_call_frame(call) {
                         return false;

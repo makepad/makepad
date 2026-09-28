@@ -7,17 +7,17 @@
 # Escape/Q/Space quits. `--preview <path>` sizes the window as a popup.
 
 [package]
-name = "makepad-image"
+name = "makepad-app-image"
 version = "0.1.0"
 edition = "2021"
-default-run = "image"
+default-run = "makepad-app-image"
 
 [lib]
-name = "makepad_image"
+name = "makepad_app_image"
 path = "src/lib.rs"
 
 [[bin]]
-name = "image"
+name = "makepad-app-image"
 path = "src/main.rs"
 
 [features]

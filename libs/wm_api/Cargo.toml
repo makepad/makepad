@@ -16,3 +16,8 @@ path = "src/lib.rs"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
+
+# The registry turns a viewer's app id into its binary for the standalone
+# sibling spawn (wasm has no processes to spawn).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-app-registry = { path = "../app_registry" }

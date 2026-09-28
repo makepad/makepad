@@ -10,7 +10,7 @@ ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-app-route"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-app-route" binary: "route" cwd: "."})
+let app = ci.launch({package: "makepad-app-route" binary: "makepad-app-route" cwd: "."})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

@@ -10,4 +10,4 @@ if test -f /etc/makepad/aihub.env; then
 fi
 MAKEPAD_AI_HUB_ROOT=${MAKEPAD_AI_HUB_ROOT:-/home/arch/makepad}
 cd "$MAKEPAD_AI_HUB_ROOT"
-exec target/release/makepad-ai-hub --host "${MAKEPAD_AI_HUB_HOST:-0.0.0.0}" --port "${MAKEPAD_ASSET_AI_PORT:-8785}" --cache-dir "${MAKEPAD_ASSET_AI_CACHE:-$HOME/.makepad/weights}" "$@"
+exec target/release/makepad-app-ai-hub --host "${MAKEPAD_AI_HUB_HOST:-0.0.0.0}" --port "${MAKEPAD_ASSET_AI_PORT:-8785}" --cache-dir "${MAKEPAD_ASSET_AI_CACHE:-$HOME/.makepad/weights}" "$@"

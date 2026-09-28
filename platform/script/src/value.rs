@@ -1424,6 +1424,29 @@ impl ScriptValue {
         self.0 >= Self::TYPE_ID | Self::ESCAPED_ID
     }
 
+    /// The plain id for an escaped id (`@name`), else the value unchanged.
+    /// Object maps store id keys plain, so a key that arrives from script
+    /// as `@name` (or as a `for k, v in obj` key) is unescaped before a
+    /// map lookup, insert or delete.
+    pub const fn unescape_id(self) -> Self {
+        if self.is_escaped_id() {
+            Self(self.0 & !Self::ESCAPED_ID)
+        } else {
+            self
+        }
+    }
+
+    /// The escaped id (`@name`) for a plain id, else the value unchanged.
+    /// A plain id on the operand stack is a variable reference, so an id
+    /// handed to script as data (an object key) is escaped.
+    pub const fn escape_id(self) -> Self {
+        if self.is_id() {
+            Self(self.0 | Self::ESCAPED_ID)
+        } else {
+            self
+        }
+    }
+
     // regex
     // Layout: bits 0-31 = index, bits 32-39 = generation (when check_gen enabled)
 

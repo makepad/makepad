@@ -54,11 +54,22 @@ and raw grabs are PNG. Errors carry an `err` field.
 | `/t?t=TEXT`, `/k?t=TEXT` | Text/IME input |
 | `/drop?path=ABSOLUTE_PATH&x=X&y=Y` | One file through native drag, drop, and drag-end events |
 | `/log?n=50&since=N` | App log tail; `n` in the reply is the latest sequence |
+| `/step?frames=K&fps=60` | Run K virtual-clock frames (needs `--virtual-clock`), see below |
+| `/settled` | Whether anything is still pending: `{"settled":bool,"reasons":[...]}` |
+| `/cap/start?path=ABS.mp4&fps=60`, `/cap/stop` | In-process mp4 capture of the window, see below |
+| `/cursor?show=1&style=arrow` | Synthetic cursor drawn into the frame |
 | `/close?w=ID` | Close one window normally |
 | `/quit` | Graceful shutdown without a final grab |
 
 `/snap` entries include `window_id` and `enabled`, plus `selected` when the
 widget exposes a selection, alongside the compact `i`/`ty`/`r`/`w` fields.
+When the app's widgets layer registers id paths (`Cx::widget_paths_callback`)
+each entry also carries `p`, the dotted id path from the window root (named
+widgets only, e.g. `main.new_note`), and `/snap?q=path:main.new_note` (or
+`/snap?path=main.new_note`) matches a path exactly or as a suffix of whole
+segments: `new_note` finds `main.new_note`, `note` does not (paths match
+case-sensitively; the plain `q=` search does not). `/d?paths=1`
+lists every visible widget as `path type x y w h`.
 
 Query parameters are optional unless needed for the operation. Input routes
 accept `w=ID` to target a window and `wait=1` to answer after the next frame.
@@ -106,6 +117,87 @@ curl --fail --silent --show-error 'http://127.0.0.1:53412/gq?scale=0.5'
 Read a returned PNG with the local image viewer when visual inspection is
 needed. Confirm the owned process exits after cleanup. Use `/quit` if a
 backend cannot grab; do not replace a failed grab with an OS screenshot.
+
+## Deterministic runs and in-process capture
+
+A scripted demo or a pixel test that must come out the same every time pins
+the four inputs that otherwise vary between runs, at launch:
+
+```sh
+MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 ./target/release/APP --remote \
+  --virtual-clock --window 360x640@3 --seed 1
+```
+
+- `--virtual-clock` (or `MAKEPAD_VIRTUAL_CLOCK=1`): the app's time
+  (`seconds_since_app_start`, `Cx::time_now`, NextFrame and Draw stamps,
+  pass uniforms, `start_timeout`/`start_interval` timers, and with them
+  animators and the caret blink) starts at 0 and moves only through
+  `/step?frames=K[&fps=60]`, which runs exactly K frames of `1/fps` each:
+  due timers, then NextFrame, then the draw, then the present. It answers
+  `{"frame":N,"time":T}` after the K-th frame is presented (and captured,
+  with `"captured":M`, while a capture runs). Input and grabs between steps
+  see the app at the current time; nothing advances on its own. `Cx::time_now`
+  reads 2026-01-01T00:00:00Z plus the virtual time. Without the flag nothing
+  changes; `/step` then refuses. The flag needs `--remote` (only `/step`
+  moves the clock); without it, it is ignored with a log line. Children an
+  app spawns inherit `MAKEPAD_VIRTUAL_CLOCK`/`MAKEPAD_SEED`; prefer the flags.
+  Timers fire once per frame at most: one a handler starts or re-arms fires
+  on the next frame. Two injected clicks with no step between them carry
+  the same timestamp (a double click); step the frames a person would take.
+  OS input and a few widgets that read the wall clock directly are not on
+  the virtual clock.
+  Every `/step` answers within a bound: a frame that cannot be presented,
+  or a capture encoder that falls behind or loses frames, fails the step
+  with an error after 20 s; a failed capture is reported once and later
+  steps go on uncaptured.
+- `--window WxH@scale`: the first window's logical size and dpi scale,
+  applied before its first frame (hidden windows too, and not fitted to the
+  displays). `/s` then reports `sz:[W,H]` and `px:[W*scale,H*scale]`. The
+  first window applied claims it. Off macOS the native size assumes a display
+  at scale 1, so check `/s` there; and only macOS stops its paint beat for a
+  NextFrame waiting on `/step` (other backends keep ticking, harmlessly).
+- `--seed N` (or `MAKEPAD_SEED=N`): Splash `random`/`random_u32` start from
+  N instead of the wall clock.
+- `/settled` answers `{"settled":bool,"reasons":[...]}`: `next_frame` (an
+  animator or anything else waiting on a frame), `redraw`, `repaint`,
+  `timer` (a virtual timer due within the next frame), `step` (one is
+  running), `shaders` (Metal pipelines still compiling). Step until it
+  settles rather than sleeping.
+- `/cap/start?path=/ABS/file.mp4[&fps=60][&audio=1][&overwrite=1][&w=ID]`
+  starts an in-process H.264 recording of the window at native pixels. The
+  directory must exist and an existing file needs `overwrite=1`; both are
+  checked before the capture starts. Requests with an `Origin` header (a
+  browser) are refused. `/cap/stop`
+  answers once the file is finalized, with `frames`, `sz`, `missing` and a
+  `hash` of the raw frames (`hashes=1` adds one per frame). Under the virtual
+  clock exactly one frame per `/step` frame is written, at `pts = n / fps`
+  counted from the first captured step; a `/step` at another fps than the
+  capture's is refused. Frames presented for input or grabs between steps
+  are not written. Without the virtual clock, every presented frame is
+  written at its wall time, and frames the encoder cannot keep up with are
+  dropped (counted in `missing`). `audio=1` adds the app's own output (the
+  audio tap) on the frames' sample clock, padded with silence; the device
+  runs in real time, so under the virtual clock only the last 0.1 s the
+  device played is kept per frame and the sound is not deterministic (run
+  with `SANDBOX_MUTE=1`). Quitting, or the app closing, with a capture open
+  finishes the file. `/cap/pause` and `/cap/resume` stop and restart
+  writing without stopping the clock: while paused, `/step` frames advance
+  the app but are not written (nor is sound), and the file stays gapless, as
+  pts count written frames (`{"ok":1,"paused":1,"frames":N}` /
+  `{"ok":1,"resumed":1,"frames":N}`, N written so far; an error without a
+  capture). In wall-clock mode the paused time comes off the file's clock.
+  The red hands-off frame and ScreenCap's REC dot are
+  never in the file; the tweaker overlay is, if it is on.
+- `/cursor?show=1[&style=arrow|hand|text|crosshair|app]` draws a synthetic
+  pointer into the window's frame (so grabs and captures show it), moved by
+  every injected mouse event, with a ripple after each press (0.4 s of app
+  time). `x=&y=` places it without an event; `show=0` hides it. Off by
+  default.
+
+A typical run: launch as above, check `/s`, `/cursor?show=1`,
+`/cap/start?path=...`, `/step?frames=30`, then for each action locate the
+target with `/snap?q=path:...`, inject it, and `/step` the frames it should
+take; `/cap/stop`; `/quit`.
 
 ## GPU runs, hidden windows, and the simulated-GPU backend
 

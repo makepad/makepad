@@ -5,7 +5,7 @@
 //! (`src/view.rs`). The standalone binary is a `Window` around that view.
 
 pub use makepad_widgets;
-use makepad_files::view::FilesView;
+use makepad_app_files::view::FilesView;
 use makepad_widgets::*;
 
 app_main!(App);
@@ -50,7 +50,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        makepad_files::script_mod(vm);
+        makepad_app_files::script_mod(vm);
         self::script_mod(vm)
     }
 

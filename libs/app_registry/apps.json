@@ -1,0 +1,163 @@
+[
+  {
+    "id": "browser", "label": "Browser", "package": "makepad-app-browser",
+    "dir": "apps/browser", "bin": "makepad-app-browser", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "files", "label": "Files", "package": "makepad-app-files",
+    "dir": "apps/files", "bin": "makepad-app-files", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "terminal", "label": "Terminal", "package": "makepad-app-terminal",
+    "dir": "apps/terminal", "bin": "makepad-app-terminal", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "mixer", "label": "Mixer", "package": "makepad-app-mixer",
+    "dir": "apps/mixer", "bin": "makepad-app-mixer", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "task", "label": "Task Manager", "package": "makepad-app-task",
+    "dir": "apps/task", "bin": "makepad-app-task", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "sheets", "label": "Sheets", "package": "makepad-app-sheets",
+    "dir": "apps/sheets", "bin": "makepad-app-sheets", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "photos", "label": "Photos", "package": "makepad-app-photos",
+    "dir": "apps/photos", "bin": "makepad-app-photos", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "clock", "label": "Clock", "package": "makepad-app-clock",
+    "dir": "apps/clock", "bin": "makepad-app-clock", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "weather", "label": "Weather", "package": "makepad-app-weather",
+    "dir": "apps/weather", "bin": "makepad-app-weather", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "finance", "label": "Finance", "package": "makepad-app-finance",
+    "dir": "apps/finance", "bin": "makepad-app-finance", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "mail", "label": "Mail", "package": "makepad-app-mail",
+    "dir": "apps/mail", "bin": "makepad-app-mail", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "notes", "label": "Notes", "package": "makepad-app-notes",
+    "dir": "apps/notes", "bin": "makepad-app-notes", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "calendar", "label": "Calendar", "package": "makepad-app-calendar",
+    "dir": "apps/calendar", "bin": "makepad-app-calendar", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "reminders", "label": "Reminders", "package": "makepad-app-reminders",
+    "dir": "apps/reminders", "bin": "makepad-app-reminders", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "calculator", "label": "Calculator", "package": "makepad-app-calculator",
+    "dir": "apps/calculator", "bin": "makepad-app-calculator", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"]
+  },
+  {
+    "id": "fabric", "label": "Fabric", "package": "makepad-app-fabric",
+    "dir": "apps/fabric", "bin": "makepad-app-fabric", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "score", "label": "Score", "package": "makepad-app-score",
+    "dir": "apps/score", "bin": "makepad-app-score", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "video", "label": "Video Player", "package": "makepad-app-video",
+    "dir": "apps/video", "bin": "makepad-app-video", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "route", "label": "Route", "package": "makepad-app-route",
+    "dir": "apps/route", "bin": "makepad-app-route", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone", "localai"]
+  },
+  {
+    "id": "fab", "label": "Fab", "package": "makepad-app-fab",
+    "dir": "apps/fab", "bin": "makepad-app-fab", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["gltf"]
+  },
+  {
+    "id": "studio", "label": "Studio", "package": "makepad-studio",
+    "dir": "apps/studio", "bin": "studio", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "scope", "label": "Scope", "package": "makepad-scope",
+    "dir": "apps/scope", "bin": "scope", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "image", "label": "Image Viewer", "package": "makepad-app-image",
+    "dir": "apps/image", "bin": "makepad-app-image", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "pdf", "label": "PDF Viewer", "package": "makepad-app-pdf",
+    "dir": "apps/pdf", "bin": "makepad-app-pdf", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "splash", "label": "Splash", "package": "makepad-example-splash",
+    "dir": "examples/splash", "bin": "makepad-example-splash", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "counter", "label": "Counter", "package": "makepad-example-counter",
+    "dir": "examples/counter", "bin": "makepad-example-counter", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": []
+  },
+  {
+    "id": "aichat", "label": "AI", "package": "makepad-app-aichat",
+    "dir": "apps/aichat", "bin": "makepad-app-aichat", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": ["engine", "gen"]
+  },
+  {
+    "id": "ai-hub", "label": "AI Hub", "package": "makepad-app-ai-hub",
+    "dir": "apps/ai-hub", "bin": "makepad-app-ai-hub", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": false,
+    "features": ["localai", "flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"]
+  },
+  {
+    "id": "director", "label": "Director", "package": "makepad-app-director",
+    "dir": "apps/scope/director", "bin": "makepad-app-director", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": []
+  },
+  {
+    "id": "wm", "label": "Makepad WM", "package": "makepad-app-wm",
+    "dir": "apps/wm", "bin": "makepad-app-wm", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": false, "features": []
+  },
+  {
+    "id": "wm-all", "label": "Window Manager (all apps)", "package": "makepad-app-wm-all",
+    "dir": "apps/wm-all", "bin": "makepad-app-wm-all", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": false, "features": []
+  },
+  {
+    "id": "stage", "label": "Stage", "package": "makepad-stage",
+    "dir": "apps/stage/app", "bin": "makepad-stage", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": []
+  }
+]

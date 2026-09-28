@@ -162,7 +162,9 @@ impl WhisperState {
             self.kv_cache.clear();
 
             // One capture per chunk: rows are appended in decode order, so
-            // row (n_prompt + i) is generated token i.
+            // row (n_prompt + i) is the input position of generated token i,
+            // and generated token i is timed by row (n_prompt - 1 + i), the
+            // one that predicted it (`align::token_rows`).
             let mut capture = heads.as_ref().map(|heads| {
                 crate::whisper::align::AlignCapture::new(
                     heads,
@@ -319,18 +321,13 @@ impl WhisperState {
             // cross-attention, against only the encoder frames that cover
             // real audio (decoding continues over the zero padding, but the
             // model was not listening to it).
-            let n_prompt_rows = n_prompt;
+            let mut lead = 0;
             let alignment = capture.as_ref().and_then(|capture| {
-                let n_generated = result_tokens
-                    .len()
-                    .min(capture.n_rows.saturating_sub(n_prompt_rows));
                 let n_frames = (mel_end - seek).min(2 * n_ctx).div_ceil(2);
-                crate::whisper::align::align_rows(
-                    capture,
-                    n_prompt_rows,
-                    n_prompt_rows + n_generated,
-                    n_frames,
-                )
+                let (row_from, row_to, row_lead) =
+                    crate::whisper::align::token_rows(n_prompt, result_tokens.len(), capture.n_rows);
+                lead = row_lead;
+                crate::whisper::align::align_rows(capture, row_from, row_to, n_frames)
             });
 
             // 8. Convert tokens to segments
@@ -338,7 +335,10 @@ impl WhisperState {
             let words_for = |tokens: &[(usize, &str)]| -> Vec<crate::whisper::align::WordSpan> {
                 match &alignment {
                     Some(alignment) => {
-                        crate::whisper::align::words_from_tokens(tokens, alignment, chunk_start_ms)
+                        // Generated token index -> its aligned row.
+                        let rows: Vec<(usize, &str)> =
+                            tokens.iter().map(|(index, text)| (lead + index, *text)).collect();
+                        crate::whisper::align::words_from_tokens(&rows, alignment, chunk_start_ms)
                     }
                     None => Vec::new(),
                 }
@@ -442,6 +442,27 @@ impl WhisperState {
         tokens: &[i32],
         language: &str,
     ) -> Option<Vec<crate::whisper::align::WordSpan>> {
+        let (alignment, lead) = self.force_align_rows(model, samples, tokens, language)?;
+        let vocab = &model.vocab;
+        let texts: Vec<(usize, &str)> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (lead + index, vocab.token_to_str(*id)))
+            .collect();
+        Some(crate::whisper::align::words_from_tokens(&texts, &alignment, 0))
+    }
+
+    /// The DTW behind [`Self::force_align`]: the alignment, and `lead`, the
+    /// row offset at which text token `i`'s row (`lead + i`) sits (see
+    /// [`crate::whisper::align::token_rows`]). Frames are window-relative,
+    /// on the [`crate::whisper::AUDIO_FRAME_MS`] grid.
+    pub(crate) fn force_align_rows(
+        &mut self,
+        model: &WhisperModel,
+        samples: &[f32],
+        tokens: &[i32],
+        language: &str,
+    ) -> Option<(crate::whisper::align::TokenAlignment, usize)> {
         if tokens.is_empty() || samples.is_empty() {
             return None;
         }
@@ -496,18 +517,12 @@ impl WhisperState {
 
         let n_frames = n_mel_len_org.min(n_mel_len).min(chunk_len).div_ceil(2);
         // Rows: [not] + text tokens + [eot]; text rows are offset by one.
-        let alignment = crate::whisper::align::align_rows(
-            &capture,
-            n_prompt - 1,
-            n_prompt + tokens.len() + 1,
-            n_frames,
-        )?;
-        let texts: Vec<(usize, &str)> = tokens
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (index + 1, vocab.token_to_str(*id)))
-            .collect();
-        Some(crate::whisper::align::words_from_tokens(&texts, &alignment, 0))
+        // The text tokens and eot are all forced, so all are timed; the eot
+        // row and the one after absorb the audio past the text.
+        let (row_from, row_to, lead) =
+            crate::whisper::align::token_rows(n_prompt, tokens.len() + 1, capture.n_rows);
+        let alignment = crate::whisper::align::align_rows(&capture, row_from, row_to, n_frames)?;
+        Some((alignment, lead))
     }
 }
 

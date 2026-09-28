@@ -571,7 +571,11 @@ impl Cx {
 
                 let sh = &self.draw_shaders.shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
-                    // shader didnt compile somehow
+                    // Not compiled yet: the pass paints again once it is. A
+                    // shader that failed to compile is skipped for good.
+                    if self.draw_shaders.compile_set.contains(&draw_call.draw_shader_id.index) {
+                        self.passes[draw_pass_id].paint_dirty = true;
+                    }
                     continue;
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
@@ -1036,6 +1040,14 @@ impl Cx {
                         } else {
                             continue;
                         };
+                        if crate::os::cx_shared::samples_incomplete_target(
+                            &self.passes,
+                            &self.textures,
+                            texture_id,
+                            draw_pass_id,
+                        ) {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                        }
                         let cxtexture = &mut self.textures[texture_id];
 
                         if cxtexture.format.is_vec() {

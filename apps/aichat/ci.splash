@@ -7,10 +7,10 @@ use mod.std.*
 use mod.ci;
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-aichat"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-aichat"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-aichat" binary: "aichat" cwd: "."})
+let app = ci.launch({package: "makepad-app-aichat" binary: "makepad-app-aichat" cwd: "."})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

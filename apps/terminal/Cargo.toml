@@ -6,21 +6,21 @@
 # makepad-terminal-core, which had already solved spawn/resize/controlling-tty
 # on macOS, Linux and Windows (ConPTY).
 #
-# terminal runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# terminal runs standalone, and unmodified inside makepad-app-wm / Studio tiles via
 # the shared --stdin-loop client runtime every Makepad app has.
 
 [package]
-name = "makepad-terminal"
+name = "makepad-app-terminal"
 version = "0.1.0"
 edition = "2021"
-default-run = "terminal"
+default-run = "makepad-app-terminal"
 
 [lib]
-name = "makepad_terminal"
+name = "makepad_app_terminal"
 path = "src/lib.rs"
 
 [[bin]]
-name = "terminal"
+name = "makepad-app-terminal"
 path = "src/main.rs"
 
 [features]

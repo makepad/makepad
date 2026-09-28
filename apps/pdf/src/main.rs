@@ -4,10 +4,10 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_pdf::preview::{PreviewAction, PreviewState};
-use makepad_pdf::theme::Palette;
-use makepad_pdf::widget::{FitMode, MpPdfAction, MpPdfView, PdfStatus};
-use makepad_pdf::Args;
+use makepad_app_pdf::preview::{PreviewAction, PreviewState};
+use makepad_app_pdf::theme::Palette;
+use makepad_app_pdf::widget::{FitMode, MpPdfAction, MpPdfView, PdfStatus};
+use makepad_app_pdf::Args;
 
 app_main!(App);
 
@@ -258,7 +258,7 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let args: Args = makepad_pdf::parse_args(std::env::args().skip(1));
+        let args: Args = makepad_app_pdf::parse_args(std::env::args().skip(1));
 
         // makepad_wm_theme::apply already retinted theme.color_bg_app and
         // mod.widgets.Window.pass.clear_color from a theme.splash when one
@@ -491,8 +491,8 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);
-        makepad_pdf::thumbs::script_mod(vm);
-        makepad_pdf::widget::script_mod(vm);
+        makepad_app_pdf::thumbs::script_mod(vm);
+        makepad_app_pdf::widget::script_mod(vm);
         self::script_mod(vm)
     }
 

@@ -18,9 +18,7 @@
 use makepad_widgets::makepad_micro_serde::*;
 use makepad_widgets::makepad_platform::studio::AppToStudio;
 use makepad_widgets::*;
-use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What an app can ask the window manager.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -191,7 +189,7 @@ pub fn set_cwd(cx: &Cx, path: &Path) {
 }
 
 /// The file associations, shared by the WM and the file browser:
-/// extension → viewer app id (a registry id, also the binary name).
+/// extension → viewer app id (a registry id; `spawn_sibling` finds its binary).
 pub fn viewer_for(path: &Path) -> &'static str {
     let ext = path
         .extension()
@@ -207,22 +205,31 @@ pub fn viewer_for(path: &Path) -> &'static str {
     }
 }
 
-/// Spawn a sibling binary of the running executable, detached.
+/// The app `id`'s binary (the registry's `makepad-app-<id>`) beside the
+/// running executable, when it is there: where a standalone app finds the
+/// viewers and the terminal it opens.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_sibling(bin: &str, args: &[&str]) -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    let Some(dir) = exe.parent() else {
-        return false;
-    };
-    let mut path: PathBuf = dir.join(bin);
+pub fn sibling_app(id: &str) -> Option<PathBuf> {
+    let entry = makepad_app_registry::find(id)?;
+    let exe = std::env::current_exe().ok()?;
+    let mut path = exe.parent()?.join(entry.bin);
     if cfg!(windows) {
         path.set_extension("exe");
     }
-    if !path.exists() {
+    path.exists().then_some(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn sibling_app(_id: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Spawn the app `id`'s sibling binary ([`sibling_app`]), detached.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_sibling(id: &str, args: &[&str]) -> bool {
+    let Some(path) = sibling_app(id) else {
         return false;
-    }
+    };
     let mut command = std::process::Command::new(path);
     // Windows: a sibling linked as a console program (a plain `cargo
     // build`) would open a console window of its own; its output goes
@@ -243,7 +250,7 @@ fn spawn_sibling(bin: &str, args: &[&str]) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_sibling(_bin: &str, _args: &[&str]) -> bool {
+fn spawn_sibling(_id: &str, _args: &[&str]) -> bool {
     false
 }
 
@@ -310,5 +317,14 @@ mod tests {
         assert_eq!(viewer_for(Path::new("paper.PDF")), "pdf");
         assert_eq!(viewer_for(Path::new("README.md")), "terminal");
         assert_eq!(viewer_for(Path::new("noext")), "terminal");
+    }
+
+    #[test]
+    fn every_viewer_is_a_registry_app() {
+        for name in ["a.png", "a.mp4", "a.csv", "a.pdf", "a.html", "a.txt"] {
+            let id = viewer_for(Path::new(name));
+            let entry = makepad_app_registry::find(id).expect(id);
+            assert_eq!(entry.bin, format!("makepad-app-{id}"));
+        }
     }
 }

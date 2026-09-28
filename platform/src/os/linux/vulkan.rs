@@ -6891,6 +6891,10 @@ impl CxVulkan {
                     id
                 } else {
                     draw_stats.skipped_no_os_shader += 1;
+                    // Not compiled yet: the pass paints again once it is.
+                    if cx.draw_shaders.compile_set.contains(&draw_call.draw_shader_id.index) {
+                        cx.passes[draw_pass_id].paint_dirty = true;
+                    }
                     continue;
                 };
                 let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
@@ -6989,6 +6993,17 @@ impl CxVulkan {
                     })
                     .collect();
                 let texture_types = sh.mapping.textures.iter().map(|t| t.tex_type).collect();
+                // A source still to paint: this pass paints again after it.
+                if draw_call.texture_slots.iter().flatten().any(|texture| {
+                    crate::os::cx_shared::samples_incomplete_target(
+                        &cx.passes,
+                        &cx.textures,
+                        texture.texture_id(),
+                        draw_pass_id,
+                    )
+                }) {
+                    cx.passes[draw_pass_id].paint_dirty = true;
+                }
 
                 VulkanDrawPacket {
                     shader_index: draw_call.draw_shader_id.index,

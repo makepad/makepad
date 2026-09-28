@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 default = ["localai", "stt"]
 # The local model runtime an app's chat runs on (the local chat session,
 # prompt expansion, vision, OCR): `llm`, under the name every AI crate
-# and app uses for it (makepad-ai-services / makepad-aichat `localai`).
+# and app uses for it (makepad-ai-services / makepad-app-aichat `localai`).
 localai = ["llm"]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native

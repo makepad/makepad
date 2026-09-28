@@ -3,17 +3,17 @@
 # local/agent_state/wm-all/apps/notes-redesign.md; contract: .../CONTRACT.md.
 
 [package]
-name = "makepad-notes"
+name = "makepad-app-notes"
 version = "0.1.0"
 edition = "2021"
-default-run = "notes"
+default-run = "makepad-app-notes"
 
 [lib]
-name = "makepad_notes"
+name = "makepad_app_notes"
 path = "src/lib.rs"
 
 [[bin]]
-name = "notes"
+name = "makepad-app-notes"
 path = "src/main.rs"
 required-features = ["standalone"]
 

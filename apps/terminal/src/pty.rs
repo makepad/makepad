@@ -299,7 +299,7 @@ impl Pty {
         cmd.env_remove("NO_COLOR");
         cmd.env("TERM_PROGRAM", "terminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // A terminal spawned inside makepad-wm inherits the compositor's
+        // A terminal spawned inside makepad-app-wm inherits the compositor's
         // studio vars; the shell's children must not think they are hosted
         // makepad clients.
         cmd.env_remove("STUDIO_HOST");

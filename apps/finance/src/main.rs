@@ -3,19 +3,19 @@
 //! narrow.
 //!
 //! The ledger, budgets, reports, charts and CSV import all live in the
-//! library crate (`makepad_finance`), around one root widget
-//! ([`makepad_finance::view::Finance`]); this binary is just a `Window`
+//! library crate (`makepad_app_finance`), around one root widget
+//! ([`makepad_app_finance::view::Finance`]); this binary is just a `Window`
 //! around it, plus the one thing only a checkout-relative run needs: the
 //! standalone database path. Run from the repo root and the file lives at
 //! `local/finance/finance.db` — a first run fills it with a generated
 //! household so there is something to click. The same crate's module
-//! (`makepad_finance::module`) seats the same root in-process, one
+//! (`makepad_app_finance::module`) seats the same root in-process, one
 //! instance per isolate, with the database under the shared makepad home
 //! instead (see `Finance::set_db_path`).
 
 pub use makepad_widgets;
 
-use makepad_finance::{chart, theme, view};
+use makepad_app_finance::{chart, theme, view};
 use makepad_widgets::*;
 
 app_main!(App);

@@ -6,10 +6,10 @@
 //! Everything that makes it a weather app — the fetch (over the
 //! platform's own HTTP request API), the tick timer and the last good
 //! forecast — lives in `WeatherView` (`src/view.rs`), and none of it
-//! depends on this binary, so `cargo test -p makepad-weather` covers it
+//! depends on this binary, so `cargo test -p makepad-app-weather` covers it
 //! without a window.
 //!
-//! weather runs standalone, and unmodified inside makepad-wm / Studio
+//! weather runs standalone, and unmodified inside makepad-app-wm / Studio
 //! tiles via the shared --stdin-loop client runtime every Makepad app
 //! has. Either way it exposes its one bounded read tool to the assistant
 //! (src/ai.rs): under the WM over the bus, standalone to the F10 overlay
@@ -17,8 +17,8 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_weather::model::{SkyInputs, SkyKind};
-use makepad_weather::{ai, view::WeatherView};
+use makepad_app_weather::model::{SkyInputs, SkyKind};
+use makepad_app_weather::{ai, view::WeatherView};
 use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
 use makepad_widgets::*;
 
@@ -172,12 +172,12 @@ impl AppMain for App {
         makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
-        makepad_weather::sky::script_mod(vm);
-        makepad_weather::hourly::script_mod(vm);
-        makepad_weather::daily::script_mod(vm);
-        makepad_weather::parts::script_mod(vm);
-        makepad_weather::view::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
+        makepad_app_weather::sky::script_mod(vm);
+        makepad_app_weather::hourly::script_mod(vm);
+        makepad_app_weather::daily::script_mod(vm);
+        makepad_app_weather::parts::script_mod(vm);
+        makepad_app_weather::view::script_mod(vm);
         self::script_mod(vm)
     }
 

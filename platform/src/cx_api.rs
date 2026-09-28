@@ -1759,6 +1759,10 @@ impl Cx {
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
+        if let Some(now) = crate::remote::app_clock::now() {
+            self.app_clock.start_timer(self.timer_id, delay, false, now);
+            return Timer(self.timer_id);
+        }
         self.platform_ops.push_back(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval: delay,
@@ -1769,6 +1773,10 @@ impl Cx {
 
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
+        if let Some(now) = crate::remote::app_clock::now() {
+            self.app_clock.start_timer(self.timer_id, interval, true, now);
+            return Timer(self.timer_id);
+        }
         self.platform_ops.push_back(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
@@ -1778,6 +1786,10 @@ impl Cx {
     }
 
     pub fn stop_timer(&mut self, timer: Timer) {
+        if crate::remote::app_clock::enabled() {
+            self.app_clock.stop_timer(timer.0);
+            return;
+        }
         if timer.0 != 0 {
             self.platform_ops.push_back(CxOsOp::StopTimer(timer.0));
         }
@@ -2797,9 +2809,37 @@ impl Cx {
             .collect()
     }
 
+    /// Drain completed readbacks of these tickets only, leaving every other
+    /// ticket for its own requester. Several consumers in one process (a
+    /// thumbnail renderer and a frame exporter, say) each call this with
+    /// the tickets their `Texture::read_back` calls returned; a finished
+    /// ticket is returned once and then forgotten. The same results and
+    /// budget accounting as [`Cx::try_take_texture_readbacks`], which
+    /// takes all of them and suits a process with a single consumer.
+    pub fn try_take_texture_readbacks_for(
+        &mut self,
+        tickets: &[crate::texture::ReadbackTicket],
+    ) -> Vec<crate::texture::TextureReadback> {
+        if tickets.is_empty() {
+            return Vec::new();
+        }
+        self.take_texture_readback_results_where(false, |ticket| tickets.contains(&ticket))
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect()
+    }
+
     pub(crate) fn take_texture_readback_results(
         &mut self,
         legacy: bool,
+    ) -> Vec<(TextureId, crate::texture::TextureReadback)> {
+        self.take_texture_readback_results_where(legacy, |_| true)
+    }
+
+    fn take_texture_readback_results_where(
+        &mut self,
+        legacy: bool,
+        wanted: impl Fn(crate::texture::ReadbackTicket) -> bool,
     ) -> Vec<(TextureId, crate::texture::TextureReadback)> {
         use crate::texture::ReadbackError;
         if self.textures.1.readbacks.slots.is_empty() {
@@ -2812,7 +2852,7 @@ impl Cx {
         let mut index = 0;
         while index < state.slots.len() {
             let slot = &mut state.slots[index];
-            if slot.legacy != legacy {
+            if slot.legacy != legacy || !wanted(slot.result.ticket) {
                 index += 1;
                 continue;
             }
@@ -2989,3 +3029,56 @@ mod host_io_tests {
     }
 }
 
+
+#[cfg(test)]
+mod readback_routing_tests {
+    use super::*;
+    use crate::draw_pass::{DrawPass, DrawPassClearColor};
+    use crate::texture::{ReadbackError, ReadbackRequest, TextureFormat, TextureSize};
+
+    /// A render target with a pass that has yet to paint it, so a
+    /// readback is admitted and stays pending until the pass renders.
+    fn pending_target(cx: &mut Cx) -> (Texture, DrawPass) {
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Fixed { width: 8, height: 8 },
+                initial: true,
+            },
+        );
+        let pass = DrawPass::new(cx);
+        pass.add_color_texture(cx, &texture, DrawPassClearColor::ClearWith(crate::makepad_math::vec4(0.0, 0.0, 0.0, 1.0)));
+        pass.set_size(cx, dvec2(8.0, 8.0));
+        cx.passes[pass.draw_pass_id()].dpi_factor = Some(1.0);
+        cx.passes[pass.draw_pass_id()].paint_dirty = true;
+        (texture, pass)
+    }
+
+    #[test]
+    fn readbacks_go_to_the_requester_holding_the_ticket() {
+        // Two consumers in one process: each takes only its own tickets,
+        // once; the take-all API still drains whatever is left.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let targets: Vec<_> = (0..3).map(|_| pending_target(&mut cx)).collect();
+        let tickets: Vec<_> = targets
+            .iter()
+            .map(|(texture, _)| texture.read_back(&mut cx, ReadbackRequest::default()).unwrap())
+            .collect();
+        assert!(cx.try_take_texture_readbacks_for(&tickets).is_empty(), "still pending");
+        // Cancellation finishes a ticket without a GPU: its result is final.
+        for ticket in &tickets {
+            assert!(cx.cancel_texture_readback(*ticket));
+        }
+        let first = cx.try_take_texture_readbacks_for(&tickets[..1]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].ticket, tickets[0]);
+        assert!(matches!(first[0].data, Err(ReadbackError::Cancelled)));
+        assert!(cx.try_take_texture_readbacks_for(&tickets[..1]).is_empty(), "taken once");
+        let second = cx.try_take_texture_readbacks_for(&tickets[1..2]);
+        assert_eq!(second.iter().map(|r| r.ticket).collect::<Vec<_>>(), vec![tickets[1]]);
+        assert!(cx.try_take_texture_readbacks_for(&[]).is_empty());
+        let rest = cx.try_take_texture_readbacks();
+        assert_eq!(rest.iter().map(|r| r.ticket).collect::<Vec<_>>(), vec![tickets[2]]);
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, 0);
+    }
+}

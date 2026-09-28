@@ -1595,6 +1595,9 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
+        if let Some(time) = crate::remote::app_clock::now() {
+            return time;
+        }
         (Self::monotonic_now() - self.os.start_time).max(0.0)
     }
 
@@ -1649,6 +1652,9 @@ impl CxOsApi for Cx {
 
 impl Cx {
     pub fn time_now() -> f64 {
+        if let Some(time) = crate::remote::app_clock::epoch_now() {
+            return time;
+        }
         unsafe { js_time_now() }
     }
 

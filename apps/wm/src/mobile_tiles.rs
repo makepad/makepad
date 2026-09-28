@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn placeholders_read_the_launcher_status() {
-        assert_eq!(placeholder_text("compiling makepad-clock v0.1.0…", false, false).0, "Compiling…");
+        assert_eq!(placeholder_text("compiling makepad-app-clock v0.1.0…", false, false).0, "Compiling…");
         assert_eq!(placeholder_text("", false, false).0, "Starting…");
         assert_eq!(placeholder_text("", true, false).0, "Loading…");
         assert_eq!(placeholder_text("build failed — see the app log", false, false).0, "Could not build");

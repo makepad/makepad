@@ -5,9 +5,9 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_video::preview::{PreviewAction, PreviewState};
-use makepad_video::theme::Palette;
-use makepad_video::widget::{format_time, MpVideoAction, MpVideoView};
+use makepad_app_video::preview::{PreviewAction, PreviewState};
+use makepad_app_video::theme::Palette;
+use makepad_app_video::widget::{format_time, MpVideoAction, MpVideoView};
 use std::path::PathBuf;
 
 app_main!(App);
@@ -76,8 +76,8 @@ pub struct App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         let argv: Vec<String> = std::env::args().skip(1).collect();
-        // Silent start for test/agent runs — see `makepad_video::wants_mute`.
-        let muted = makepad_video::wants_mute(&argv, |key| std::env::var(key).ok());
+        // Silent start for test/agent runs — see `makepad_app_video::wants_mute`.
+        let muted = makepad_app_video::wants_mute(&argv, |key| std::env::var(key).ok());
         let mut preview = false;
         let mut path: Option<PathBuf> = None;
         for arg in argv.iter().cloned() {
@@ -95,7 +95,7 @@ impl MatchEvent for App {
         // Speakers: the clip's soundtrack, mixed from the decode queue.
         cx.audio_output(0, move |info, output| {
             output.zero();
-            makepad_video::player::mix_into(output, info.sample_rate);
+            makepad_app_video::player::mix_into(output, info.sample_rate);
         });
 
         // makepad_wm_theme::apply already retinted theme.color_bg_app and
@@ -231,7 +231,7 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);
-        makepad_video::widget::script_mod(vm);
+        makepad_app_video::widget::script_mod(vm);
         self::script_mod(vm)
     }
 

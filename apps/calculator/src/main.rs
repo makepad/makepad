@@ -2,7 +2,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_calculator::{ai, view::CalculatorView};
+use makepad_app_calculator::{ai, view::CalculatorView};
 use makepad_strict_json as json;
 use makepad_widgets::*;
 
@@ -114,7 +114,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        makepad_calculator::script_mod(vm);
+        makepad_app_calculator::script_mod(vm);
         self::script_mod(vm)
     }
 

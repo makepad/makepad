@@ -1,0 +1,24 @@
+# makepad-app-registry — the one table of Makepad's apps.
+#
+# `apps.json` holds every app the WM hosts, Builder builds and Stage runs:
+# id, label, package, directory, binary, launch policy, menu visibility and
+# Builder features. build.rs turns it into a static table at compile time,
+# so a bad row is a compile error and reading it costs nothing at runtime.
+# (strict_json's errors carry no position: a syntax error names only the
+# reason, which is fine for a table this size.)
+
+[package]
+name = "makepad-app-registry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "makepad_app_registry"
+path = "src/lib.rs"
+
+[build-dependencies]
+makepad-strict-json = { path = "../strict_json" }
+
+[dev-dependencies]
+makepad-strict-json = { path = "../strict_json" }

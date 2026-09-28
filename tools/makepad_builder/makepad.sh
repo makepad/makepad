@@ -1393,6 +1393,7 @@ publish_app() {
     put "$rel_directory/.builder-built" "$rel_id $rel_release"
     write_launcher "$rel_binary"
     if [ "$plat" = mac ]; then mac_bundle || return 1; fi
+    remove_renamed_binary
     mkdir -p "$root/installed"
     # Linux: built with CUDA or not; the app compiles again when that changes.
     if [ "$plat" = linux ]; then cuda_mode; put "$root/installed/$rel_id.toolchain" "$triple $cm"; fi
@@ -1400,6 +1401,20 @@ publish_app() {
     mv -f "$root/installed/$rel_id.json.next" "$root/installed/$rel_id.json"
     cp "$root/installed/$rel_id.json" "$root/installed-release.json"
     cp "$root/installed/$rel_id.json" "$rel_directory/$rel_id.json"
+}
+
+# remove_renamed_binary: an app whose binary was renamed (notes became
+# makepad-app-notes) leaves the old name's files from the build recorded in
+# installed/<app>.json (not yet replaced when this runs); they go, so the
+# folder shows the app once. The old command only when a Builder wrote it.
+remove_renamed_binary() {
+    rb_old=$(json flat < "$root/installed/$rel_id.json" 2>/dev/null | awk -F'\t' '$1 == "binary" { print $2; exit }')
+    case "$rb_old" in ''|.*|*/*|"$rel_binary") return 0 ;; esac
+    rm -f "$root/$rb_old.bin" "$root/$rb_old.bin.makepad-package-paths" "$root/installed/$rb_old.project"
+    if grep -q builder_directory "$home/$rb_old" 2>/dev/null && grep -q "$rb_old.bin" "$home/$rb_old" 2>/dev/null; then
+        rm -f "$home/$rb_old"
+    fi
+    log "Removed the old $rb_old files: the app's binary is now $rel_binary"
 }
 
 # write_launcher BINARY: the <binary> command beside this script. It keeps

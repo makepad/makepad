@@ -1363,6 +1363,26 @@ impl ScriptParser {
         }
     }
 
+    /// Whether the statement that just ended leaves no value on the stack:
+    /// a loop (FOR_END), a `me` assignment, `break`/`continue`, a splat into
+    /// `me` or a `let`. Such a statement is not popped to `me`, both while
+    /// parsing and when the source ends on it (auto-close).
+    fn last_stmt_leaves_no_value(&self) -> bool {
+        let Some(code) = self.opcodes.last() else {
+            return false;
+        };
+        let Some((opcode, _)) = code.as_opcode() else {
+            return false;
+        };
+        opcode == Opcode::FOR_END
+            || opcode == Opcode::ASSIGN_ME
+            || opcode == Opcode::ASSIGN_ME_VEC
+            || opcode == Opcode::BREAK
+            || opcode == Opcode::CONTINUE
+            || opcode == Opcode::ME_SPLAT
+            || code.is_let_opcode()
+    }
+
     fn has_pop_to_me(&self) -> bool {
         if let Some(code) = self.opcodes.last() {
             if let Some((opcode, args)) = code.as_opcode() {
@@ -4806,43 +4826,11 @@ impl ScriptParser {
                 }
                 // in a function call we need the
 
-                if let Some(code) = self.opcodes.last_mut() {
-                    if let Some((opcode, _)) = code.as_opcode() {
-                        if opcode == Opcode::FOR_END {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::ASSIGN_ME || opcode == Opcode::ASSIGN_ME_VEC {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::BREAK || opcode == Opcode::CONTINUE {
-                            //code.set_opcode_is_statement();
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if opcode == Opcode::ME_SPLAT {
-                            // ME_SPLAT already handles merging into me, no pop_to_me needed
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                        if code.is_let_opcode() {
-                            self.state.push(State::BeginStmt {
-                                last_was_sep: false,
-                            });
-                            return 0;
-                        }
-                    }
+                if self.last_stmt_leaves_no_value() {
+                    self.state.push(State::BeginStmt {
+                        last_was_sep: false,
+                    });
+                    return 0;
                 }
                 // otherwise pop to me
                 self.set_pop_to_me();
@@ -4928,8 +4916,9 @@ impl ScriptParser {
                 State::EndStmt { .. } => {
                     // The EndStmt of an auto-closed `let` must NOT mark a
                     // statement value: LET consumed it, the final RETURN
-                    // would pop an empty stack.
-                    if !let_closed {
+                    // would pop an empty stack. Same for a statement that
+                    // leaves no value, such as a loop ending the source.
+                    if !let_closed && !self.last_stmt_leaves_no_value() {
                         self.set_pop_to_me();
                     }
                     let_closed = false;
@@ -5213,8 +5202,9 @@ impl ScriptParser {
                 State::EndStmt { .. } => {
                     // The EndStmt of an auto-closed `let` must NOT mark a
                     // statement value: LET consumed it, the final RETURN
-                    // would pop an empty stack.
-                    if !let_closed {
+                    // would pop an empty stack. Same for a statement that
+                    // leaves no value, such as a loop ending the source.
+                    if !let_closed && !self.last_stmt_leaves_no_value() {
                         self.set_pop_to_me();
                     }
                     let_closed = false;

@@ -6,9 +6,9 @@
 //! Everything that makes it a clock — the tick and fast timers, the
 //! stopwatch and countdown state, the alarm book and its persistence —
 //! lives in `ClockView` (`src/view.rs`), and none of it depends on this
-//! binary, so `cargo test -p makepad-clock` covers it without a window.
+//! binary, so `cargo test -p makepad-app-clock` covers it without a window.
 //!
-//! clock runs standalone, and unmodified inside makepad-wm / Studio tiles
+//! clock runs standalone, and unmodified inside makepad-app-wm / Studio tiles
 //! via the shared --stdin-loop client runtime every Makepad app has.
 //! Either way it exposes its one bounded read tool to the assistant
 //! (src/ai.rs): under the WM over the bus, standalone to the F10 overlay
@@ -16,7 +16,7 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_clock::{ai, view::ClockView};
+use makepad_app_clock::{ai, view::ClockView};
 use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
 use makepad_widgets::*;
 
@@ -150,15 +150,15 @@ impl AppMain for App {
         makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
-        makepad_aichat::script_mod(vm);
-        makepad_clock::face::script_mod(vm);
-        makepad_clock::wheel::script_mod(vm);
-        makepad_clock::alarm_list::script_mod(vm);
-        makepad_clock::digits::script_mod(vm);
-        makepad_clock::tabs::script_mod(vm);
-        makepad_clock::ring::script_mod(vm);
-        makepad_clock::laps::script_mod(vm);
-        makepad_clock::view::script_mod(vm);
+        makepad_app_aichat::script_mod(vm);
+        makepad_app_clock::face::script_mod(vm);
+        makepad_app_clock::wheel::script_mod(vm);
+        makepad_app_clock::alarm_list::script_mod(vm);
+        makepad_app_clock::digits::script_mod(vm);
+        makepad_app_clock::tabs::script_mod(vm);
+        makepad_app_clock::ring::script_mod(vm);
+        makepad_app_clock::laps::script_mod(vm);
+        makepad_app_clock::view::script_mod(vm);
         self::script_mod(vm)
     }
 

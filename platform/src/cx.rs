@@ -268,6 +268,12 @@ pub struct Cx {
     /// as the widget hierarchy changes require parent views to rebuild their widget queries.
     pub widget_query_invalidation_event: Option<u64>,
 
+    /// The app's timers while `--virtual-clock` runs (see `remote::app_clock`).
+    pub app_clock: crate::remote::app_clock::AppClock,
+    /// The widget snapshot with each widget's dotted id path from its window
+    /// root (named widgets only), registered by the widgets layer; the remote
+    /// bridge's `/snap` path addressing reads it.
+    pub widget_paths_callback: Option<fn(&Cx) -> Vec<(WidgetSnapshot, String)>>,
     pub widget_tree_ptr: *mut (),
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
@@ -1062,6 +1068,8 @@ impl Cx {
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),
             widget_query_invalidation_event: None,
+            app_clock: Default::default(),
+            widget_paths_callback: None,
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
             widget_query_callback: None,

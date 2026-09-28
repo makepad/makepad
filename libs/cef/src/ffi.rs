@@ -85,6 +85,7 @@ pub type cef_channel_layout_t = c_int;
 pub type cef_transition_type_t = c_int;
 pub type cef_errorcode_t = c_int;
 pub type cef_window_open_disposition_t = c_int;
+pub type cef_jsdialog_type_t = c_int;
 pub type cef_cursor_type_t = c_int;
 pub type cef_cursor_handle_t = *mut c_void;
 pub type cef_cursor_info_t = c_void;
@@ -936,6 +937,48 @@ pub struct cef_popup_features_t {
     pub height: c_int,
     pub height_set: c_int,
     pub is_popup: c_int,
+}
+
+#[repr(C)]
+pub struct cef_jsdialog_callback_t {
+    pub base: cef_base_ref_counted_t,
+    pub cont: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_callback_t,
+            success: c_int,
+            user_input: *const cef_string_t,
+        ),
+    >,
+}
+
+#[repr(C)]
+pub struct cef_jsdialog_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_jsdialog: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_handler_t,
+            browser: *mut cef_browser_t,
+            origin_url: *const cef_string_t,
+            dialog_type: cef_jsdialog_type_t,
+            message_text: *const cef_string_t,
+            default_prompt_text: *const cef_string_t,
+            callback: *mut cef_jsdialog_callback_t,
+            suppress_message: *mut c_int,
+        ) -> c_int,
+    >,
+    pub on_before_unload_dialog: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_jsdialog_handler_t,
+            browser: *mut cef_browser_t,
+            message_text: *const cef_string_t,
+            is_reload: c_int,
+            callback: *mut cef_jsdialog_callback_t,
+        ) -> c_int,
+    >,
+    pub on_reset_dialog_state:
+        Option<unsafe extern "system" fn(self_: *mut cef_jsdialog_handler_t, browser: *mut cef_browser_t)>,
+    pub on_dialog_closed:
+        Option<unsafe extern "system" fn(self_: *mut cef_jsdialog_handler_t, browser: *mut cef_browser_t)>,
 }
 
 #[repr(C)]

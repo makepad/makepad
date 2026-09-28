@@ -1,4 +1,4 @@
-//! makepad-wm (wm): an Omarchy-behaving tiling window manager as a
+//! makepad-app-wm (wm): an Omarchy-behaving tiling window manager as a
 //! Makepad app. Nested mode: this window is the desktop; tiles host other
 //! Makepad apps as child processes over the studio runview protocol, or
 //! in-process as modules (module_host.rs) where the build links them.

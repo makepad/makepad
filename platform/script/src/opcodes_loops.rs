@@ -88,7 +88,7 @@ impl<'a> ScriptVm<'a> {
             } else {
                 self.bx
                     .heap
-                    .set_value_def(new_scope, key_id.into(), first_key);
+                    .set_value_def(new_scope, key_id.into(), first_key.escape_id());
             }
         }
         if let Some(index_id) = index_id {
@@ -394,7 +394,12 @@ impl<'a> ScriptVm<'a> {
                             .set_value_def(scope, index_id.into(), index.into());
                     }
                     if let Some(key_id) = key_id {
-                        self.bx.heap.set_value_def(scope, key_id.into(), kv.key);
+                        // An id key is escaped: a plain id read back from
+                        // the variable (or from an array it was pushed into)
+                        // would resolve as a variable reference.
+                        self.bx
+                            .heap
+                            .set_value_def(scope, key_id.into(), kv.key.escape_id());
                     }
 
                     self.bx.threads.cur().trap.goto(start_ip);

@@ -18,7 +18,7 @@
 //! either way.
 //!
 //! SAFETY: colours only. Nothing here can name an OSC address — see
-//! `makepad_mixer::safety`.
+//! `makepad_app_mixer::safety`.
 
 use makepad_widgets::*;
 

@@ -145,7 +145,7 @@ impl ShellAiPane {
     }
 
     /// Seat the chat's module root here, made BY NAME: `mod.widgets.
-    /// AiChatOverlay{}` exists when this build links `makepad-aichat` and
+    /// AiChatOverlay{}` exists when this build links `makepad-app-aichat` and
     /// called its `script_mod`. False, with one log line, when it does not.
     pub fn ensure_overlay(&mut self, cx: &mut Cx) -> bool {
         if self.overlay.is_some() {

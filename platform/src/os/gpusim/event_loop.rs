@@ -813,6 +813,9 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
+        if let Some(time) = crate::remote::app_clock::now() {
+            return time;
+        }
         Instant::now()
             .duration_since(self.os.start_time.unwrap_or_else(Instant::now))
             .as_secs_f64()

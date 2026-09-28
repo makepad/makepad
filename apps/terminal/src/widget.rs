@@ -324,7 +324,7 @@ struct CachedGlyph {
     y_offset_in_lpxs: f32,
 }
 
-/// The tokyo-night terminal palette (terminal's default look; makepad-wm
+/// The tokyo-night terminal palette (terminal's default look; makepad-app-wm
 /// re-themes at spawn time via --theme args later).
 pub fn default_theme() -> ([Rgb; 16], Rgb, Rgb) {
     let base16 = [
@@ -455,7 +455,7 @@ pub struct MpTerm {
     #[rust]
     last_mouse_cell: Option<(u32, u32, u8)>,
     /// Background alpha (focused, unfocused): Omarchy's window opacity rule
-    /// "0.78 0.70", handed down by makepad-wm via MAKEPAD_TERMINAL_OPACITY. Standalone
+    /// "0.78 0.70", handed down by makepad-app-wm via MAKEPAD_TERMINAL_OPACITY. Standalone
     /// runs are opaque. The shared swapchain is BGRA and the compositor
     /// blends premultiplied, so the wallpaper shows through for free.
     #[rust((1.0, 1.0))]
@@ -678,7 +678,7 @@ impl MpTerm {
             self.command.as_deref(),
         ) {
             Ok(mut session) => {
-                // makepad-wm hands the splash theme's terminal palette down
+                // makepad-app-wm hands the splash theme's terminal palette down
                 // via MAKEPAD_TERMINAL_COLORS; standalone runs use the bundled default.
                 let (mut base16, mut fg, mut bg) = default_theme();
                 if let Ok(env) = std::env::var("MAKEPAD_TERMINAL_COLORS") {

@@ -3,7 +3,7 @@
 //! Screens: DISCOVERY (scan a user-entered target for consoles, list the
 //! replies, connect) and the SURFACE (a splash-layout channel-strip board
 //! driven entirely by the console's own state). See src/surface.rs for the
-//! layout slot contract and makepad_mixer::safety for the wire rules.
+//! layout slot contract and makepad_app_mixer::safety for the wire rules.
 //!
 //! It runs itself: at launch one `/xinfo` query goes to the local
 //! broadcast, repeated about once a second until a console answers, and the
@@ -16,7 +16,7 @@
 //! preamp gain, EQ — and phantom power, scenes and presets are not
 //! expressible on it at all.
 //!
-//!   makepad-mixer                the app
+//!   makepad-app-mixer                the app
 //!   --layout=compact             start on a different surface layout
 //!   MIXER_RX_LOG=1               log every answer the console sends
 //!
@@ -28,11 +28,11 @@
 //!   MAKEPAD_APP_ICON_64=$R/icon_64.png MAKEPAD_APP_ICON_128=$R/icon_128.png \
 //!   MAKEPAD_APP_ICON_256=$R/icon_256.png MAKEPAD_APP_ICON_512=$R/icon_512.png \
 //!   MAKEPAD_APP_ICON_1024=$R/icon_1024.png MAKEPAD_APP_ICON_ICO=$R/icon.ico \
-//!   cargo build --release -p makepad-mixer
+//!   cargo build --release -p makepad-app-mixer
 
 pub use makepad_widgets;
-use makepad_mixer::client::{guess_directed_broadcast, Client, Cmd, Evt};
-use makepad_mixer::model::MixerModel;
+use makepad_app_mixer::client::{guess_directed_broadcast, Client, Cmd, Evt};
+use makepad_app_mixer::model::MixerModel;
 use makepad_widgets::*;
 use std::net::SocketAddr;
 use std::sync::Arc;

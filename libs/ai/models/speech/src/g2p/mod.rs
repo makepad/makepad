@@ -26,7 +26,9 @@ pub fn pronounce(word: &str) -> String {
 pub const MAX_TOKENS: usize = 510;
 
 enum Token {
-    Word(String),
+    /// A word to pronounce and the byte offset in the input text where it
+    /// came from (every word of a spelled-out number shares its digits').
+    Word(String, usize),
     Punct(char),
 }
 
@@ -80,14 +82,16 @@ pub fn spell_number(value: u64) -> String {
 fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut word = String::new();
+    let mut word_at = 0;
     let mut digits = String::new();
+    let mut digits_at = 0;
 
-    let flush_word = |word: &mut String, tokens: &mut Vec<Token>| {
+    let flush_word = |word: &mut String, at: usize, tokens: &mut Vec<Token>| {
         if !word.is_empty() {
-            tokens.push(Token::Word(std::mem::take(word)));
+            tokens.push(Token::Word(std::mem::take(word), at));
         }
     };
-    let flush_digits = |digits: &mut String, tokens: &mut Vec<Token>| {
+    let flush_digits = |digits: &mut String, at: usize, tokens: &mut Vec<Token>| {
         if digits.is_empty() {
             return;
         }
@@ -97,31 +101,37 @@ fn tokenize(text: &str) -> Vec<Token> {
             .unwrap_or_else(|_| std::mem::take(digits));
         digits.clear();
         for part in spelled.split_whitespace() {
-            tokens.push(Token::Word(part.to_string()));
+            tokens.push(Token::Word(part.to_string(), at));
         }
     };
 
-    for ch in text.chars() {
+    for (at, ch) in text.char_indices() {
         if ch.is_ascii_digit() {
-            flush_word(&mut word, &mut tokens);
+            flush_word(&mut word, word_at, &mut tokens);
+            if digits.is_empty() {
+                digits_at = at;
+            }
             digits.push(ch);
             continue;
         }
-        flush_digits(&mut digits, &mut tokens);
+        flush_digits(&mut digits, digits_at, &mut tokens);
 
         if ch.is_alphabetic() || ch == '\'' {
+            if word.is_empty() {
+                word_at = at;
+            }
             word.push(ch);
             continue;
         }
-        flush_word(&mut word, &mut tokens);
+        flush_word(&mut word, word_at, &mut tokens);
 
         // Keep only punctuation the model actually has a token for.
         if vocab::token(ch).is_some() && ch != ' ' {
             tokens.push(Token::Punct(ch));
         }
     }
-    flush_digits(&mut digits, &mut tokens);
-    flush_word(&mut word, &mut tokens);
+    flush_digits(&mut digits, digits_at, &mut tokens);
+    flush_word(&mut word, word_at, &mut tokens);
     tokens
 }
 
@@ -152,19 +162,26 @@ fn function_word(word: &str, next_sound: Option<char>) -> Option<&'static str> {
 
 /// English text to a Kokoro phoneme string.
 pub fn phonemize(text: &str) -> String {
+    phonemize_with_sources(text).into_iter().map(|(sound, _)| sound).collect()
+}
+
+/// [`phonemize`], one symbol at a time, each with the byte offset in `text`
+/// of the word it was pronounced for (`None` for spaces and punctuation).
+/// This is the phoneme→word map Kokoro's word timings are read through.
+pub fn phonemize_with_sources(text: &str) -> Vec<(char, Option<usize>)> {
     let tokens = tokenize(text);
 
     let mut sounds: Vec<Option<String>> = tokens
         .iter()
         .map(|token| match token {
-            Token::Word(word) => Some(pronounce(word)),
+            Token::Word(word, _) => Some(pronounce(word)),
             Token::Punct(_) => None,
         })
         .collect();
 
     // Second pass: some words depend on the sound that follows them.
     for index in 0..tokens.len() {
-        let Token::Word(word) = &tokens[index] else {
+        let Token::Word(word, _) = &tokens[index] else {
             continue;
         };
         let next_sound = sounds[index + 1..]
@@ -177,16 +194,16 @@ pub fn phonemize(text: &str) -> String {
         }
     }
 
-    let mut out = String::new();
+    let mut out: Vec<(char, Option<usize>)> = Vec::new();
     for (token, sound) in tokens.iter().zip(&sounds) {
         match (token, sound) {
-            (Token::Word(_), Some(ipa)) => {
-                if !out.is_empty() && !out.ends_with(' ') {
-                    out.push(' ');
+            (Token::Word(_, at), Some(ipa)) => {
+                if out.last().is_some_and(|(last, _)| *last != ' ') {
+                    out.push((' ', None));
                 }
-                out.push_str(ipa);
+                out.extend(ipa.chars().map(|sound| (sound, Some(*at))));
             }
-            (Token::Punct(ch), _) => out.push(*ch),
+            (Token::Punct(ch), _) => out.push((*ch, None)),
             _ => {}
         }
     }
@@ -195,24 +212,34 @@ pub fn phonemize(text: &str) -> String {
 
 /// Phoneme token ids, zero-padded at both ends the way Kokoro expects.
 pub fn tokens(text: &str) -> Vec<u16> {
-    let phonemes = phonemize(text);
+    tokens_with_sources(text).0
+}
+
+/// [`tokens`] plus, per token id, the byte offset in `text` of the word it
+/// sounds (`None` for the pads, spaces and punctuation).
+pub fn tokens_with_sources(text: &str) -> (Vec<u16>, Vec<Option<usize>>) {
+    let phonemes = phonemize_with_sources(text);
     let mut ids = Vec::with_capacity(phonemes.len() + 2);
+    let mut sources = Vec::with_capacity(phonemes.len() + 2);
     ids.push(0);
-    for symbol in phonemes.chars() {
+    sources.push(None);
+    for (symbol, source) in phonemes {
         if ids.len() > MAX_TOKENS {
             break;
         }
         if let Some(id) = vocab::token(symbol) {
             ids.push(id);
+            sources.push(source);
         }
     }
     ids.push(0);
-    ids
+    sources.push(None);
+    (ids, sources)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{phonemize, tokens, vocab, MAX_TOKENS};
+    use super::{phonemize, phonemize_with_sources, tokens, tokens_with_sources, vocab, MAX_TOKENS};
 
     #[test]
     fn every_emitted_symbol_is_in_vocab() {
@@ -244,5 +271,31 @@ mod tests {
         // `ðə` before a consonant, `ði` before a vowel.
         assert!(phonemize("the game").starts_with("ðə"));
         assert!(phonemize("the apple").starts_with("ði"));
+    }
+
+    #[test]
+    fn sources_point_at_the_words_they_sound() {
+        let text = "Hi, the apple 42.";
+        let sounds = phonemize_with_sources(text);
+        // The symbols are exactly `phonemize`'s.
+        assert_eq!(sounds.iter().map(|(c, _)| *c).collect::<String>(), phonemize(text));
+        let mut words: Vec<usize> = Vec::new();
+        for (sound, source) in &sounds {
+            match source {
+                Some(at) => {
+                    if words.last() != Some(at) {
+                        words.push(*at);
+                    }
+                }
+                // Spaces and punctuation belong to no word.
+                None => assert!(!sound.is_alphabetic() || *sound == ' ', "{sound:?}"),
+            }
+        }
+        // "Hi" at 0, "the" at 4, "apple" at 8, "forty two" both at 14.
+        assert_eq!(words, vec![0, 4, 8, 14]);
+        let (ids, sources) = tokens_with_sources(text);
+        assert_eq!(ids, tokens(text));
+        assert_eq!(ids.len(), sources.len());
+        assert_eq!((sources[0], *sources.last().unwrap()), (None, None));
     }
 }

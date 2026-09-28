@@ -5,7 +5,7 @@
 //! hardcoded, zero cost while off. The slot owns nothing of the chat — it
 //! is a place. On the first F10 it instantiates the chat's module root BY
 //! NAME, `mod.widgets.AiChatOverlay{}`, which exists when the app links
-//! the `makepad-aichat` crate and calls its `script_mod` (the same two
+//! the `makepad-app-aichat` crate and calls its `script_mod` (the same two
 //! lines every app already does for widgets). An app that did not link it
 //! gets one log line and nothing on screen. Generic window-manager tiles
 //! leave F10 to the WM. Studio evaluation apps with a feedback identity keep
@@ -392,7 +392,7 @@ impl AiChatSlot {
     }
 
     /// Make the chat's root, by name. `mod.widgets.AiChatOverlay` exists
-    /// when the app linked `makepad-aichat`; a miss is one log line.
+    /// when the app linked `makepad-app-aichat`; a miss is one log line.
     fn ensure_overlay(&mut self, cx: &mut Cx) -> bool {
         if self.overlay.is_some() {
             return true;
@@ -419,7 +419,7 @@ impl AiChatSlot {
             None => {
                 if !self.missing_logged {
                     self.missing_logged = true;
-                    log!("F10: this app does not link makepad-aichat (no mod.widgets.AiChatOverlay); nothing to show");
+                    log!("F10: this app does not link makepad-app-aichat (no mod.widgets.AiChatOverlay); nothing to show");
                 }
                 false
             }

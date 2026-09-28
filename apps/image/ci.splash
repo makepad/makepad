@@ -7,10 +7,10 @@ use mod.std.*
 use mod.ci;
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-image"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-image"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-image" binary: "image" cwd: "."})
+let app = ci.launch({package: "makepad-app-image" binary: "makepad-app-image" cwd: "."})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

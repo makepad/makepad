@@ -533,11 +533,11 @@ mod tests {
 
     #[test]
     fn options_split_from_cargo_args() {
-        let args: Vec<String> = ["-p", "makepad-task", "--install=/tmp/apps", "--adhoc"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["-p", "makepad-app-task", "--install=/tmp/apps", "--adhoc"].iter().map(|s| s.to_string()).collect();
         let (options, cargo) = parse_options(&args).unwrap();
         assert_eq!(options.install, Some(PathBuf::from("/tmp/apps")));
         assert!(options.adhoc);
-        assert_eq!(cargo, vec!["-p".to_string(), "makepad-task".to_string()]);
+        assert_eq!(cargo, vec!["-p".to_string(), "makepad-app-task".to_string()]);
         let args: Vec<String> = ["--adhoc", "--cert=X"].iter().map(|s| s.to_string()).collect();
         assert!(parse_options(&args).is_err());
     }

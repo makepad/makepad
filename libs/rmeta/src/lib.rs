@@ -262,7 +262,7 @@ mod tests {
     fn reads_a_real_proc_macro_when_present() {
         let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") else { return };
         let dir = format!(
-            "{manifest_dir}/../../target/android/makepad-android-dyn/makepad_wm_dyn/stage/target/release/deps"
+            "{manifest_dir}/../../target/android/makepad-android-dyn/makepad_app_wm_dyn/stage/target/release/deps"
         );
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {

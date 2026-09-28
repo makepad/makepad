@@ -15,7 +15,7 @@ def main():
     root = Path(sys.argv[1]).resolve()
     if not (root/'Cargo.toml').is_file():
         raise RuntimeError(f'Not a Makepad checkout: {root}')
-    binaries = {name: root/'target/release'/name for name in ('wm', 'makepad-ai-hub')}
+    binaries = {name: root/'target/release'/name for name in ('makepad-app-wm', 'makepad-app-ai-hub')}
     for name, path in binaries.items():
         with path.open('rb') as stream:
             if stream.read(4) != b'\x7fELF':

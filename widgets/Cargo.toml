@@ -81,7 +81,7 @@ voice = ["dep:makepad-widgets-voice"]
 maps = ["dep:makepad-widgets-maps"]
 pdf = ["dep:makepad-widgets-pdf"]
 cef = ["dep:makepad-widgets-cef"]
-# The AI chat slot (F10) in every Window. Not a default: `makepad-aichat`
+# The AI chat slot (F10) in every Window. Not a default: `makepad-app-aichat`
 # turns it on, so exactly the apps that link the chat get the slot.
 ai = ["dep:makepad-widgets-ai"]
 

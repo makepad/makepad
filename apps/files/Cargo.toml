@@ -2,18 +2,18 @@
 # module (src/module.rs) the window manager seats in-process.
 
 [package]
-name = "makepad-files"
+name = "makepad-app-files"
 version = "0.1.0"
 edition = "2021"
-default-run = "files"
+default-run = "makepad-app-files"
 
 [[bin]]
-name = "files"
+name = "makepad-app-files"
 path = "src/main.rs"
 required-features = ["standalone"]
 
 [lib]
-name = "makepad_files"
+name = "makepad_app_files"
 path = "src/lib.rs"
 
 [features]
@@ -24,7 +24,7 @@ default = ["tweaker", "standalone"]
 tweaker = ["makepad-widgets/tweaker"]
 demo = []
 # The standalone window and the local model. A host that links the MODULE
-# (makepad-wm) leaves this off and gets the lib only.
+# (makepad-app-wm) leaves this off and gets the lib only.
 standalone = ["localai"]
 # The ask panel runs the machine's own model (Qwen on the local runtime):
 # files is one of the apps whose code needs it, so the window has it on.

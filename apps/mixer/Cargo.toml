@@ -14,10 +14,10 @@
 # an in-process fake mixer on UDP loopback.
 
 [package]
-name = "makepad-mixer"
+name = "makepad-app-mixer"
 version = "0.1.0"
 edition = "2021"
-default-run = "makepad-mixer"
+default-run = "makepad-app-mixer"
 
 [features]
 default = ["tweaker"]

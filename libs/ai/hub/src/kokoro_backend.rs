@@ -19,12 +19,16 @@
 //! the service cache, then the makepad-tts conventions (env override /
 //! working dir / next to the exe) as a dev fallback, then download+convert.
 //!
-//! Request: `{model: "kokoro", text, voice, speed}` -> one `audio/wav`
-//! artifact (mono 16-bit PCM, 24 kHz).
+//! Request: `{model: "kokoro", text, voice, speed}` -> an `audio/wav`
+//! artifact (mono 16-bit PCM, 24 kHz), then an `application/json`
+//! [`SpeechTimingsJson`] with every word's start and end, read off Kokoro's
+//! duration predictor (absent when the synth has no timings: the stub).
 
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
 use crate::error::AssetAiError;
+use crate::protocol::{SpeechTimingsJson, WordTimingJson, SPEECH_TIMINGS_FORMAT, SPEECH_TIMINGS_VERSION};
 use crate::wav::encode_wav_pcm16_mono;
+use makepad_micro_serde::SerJson;
 
 pub const DEFAULT_VOICE: &str = "bm_daniel";
 
@@ -126,8 +130,11 @@ impl ContentBackend for KokoroBackend {
         };
         cancel.check()?;
         progress("synthesize", 0.1);
-        let (samples, sample_rate) = match &mut self.synth {
-            Synth::Stub(synth) => synth(&job)?,
+        let (samples, sample_rate, timings) = match &mut self.synth {
+            Synth::Stub(synth) => {
+                let (samples, sample_rate) = synth(&job)?;
+                (samples, sample_rate, None)
+            }
             #[cfg(feature = "tts")]
             Synth::Kokoro(synth) => synth.synthesize(&job, &mut *progress, cancel)?,
         };
@@ -139,12 +146,29 @@ impl ContentBackend for KokoroBackend {
         }
         progress("encode", 0.9);
         let wav = encode_wav_pcm16_mono(&samples, sample_rate);
-        progress("done", 1.0);
-        Ok(vec![ArtifactData {
+        let mut artifacts = vec![ArtifactData {
             content_type: "audio/wav",
             ext: "wav",
             bytes: wav,
-        }])
+        }];
+        if let Some(words) = timings {
+            artifacts.push(ArtifactData {
+                content_type: "application/json",
+                ext: "json",
+                bytes: timings_json(words).serialize_json().into_bytes(),
+            });
+        }
+        progress("done", 1.0);
+        Ok(artifacts)
+    }
+}
+
+/// The timings sidecar for one synthesis.
+pub fn timings_json(words: Vec<WordTimingJson>) -> SpeechTimingsJson {
+    SpeechTimingsJson {
+        format: SPEECH_TIMINGS_FORMAT.to_string(),
+        version: SPEECH_TIMINGS_VERSION,
+        words,
     }
 }
 
@@ -157,6 +181,7 @@ mod kokoro_synth {
     use super::SpeechJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
+    use crate::protocol::WordTimingJson;
     use crate::registry::FileSpec;
     use makepad_ai_speech::kokoro::KokoroSpeaker;
     use std::path::{Path, PathBuf};
@@ -329,12 +354,13 @@ mod kokoro_synth {
             })
         }
 
+        /// `(samples, sample_rate, word timings)`.
         pub fn synthesize(
             &mut self,
             job: &SpeechJob,
             progress: ProgressSink,
             cancel: &CancelToken,
-        ) -> Result<(Vec<f32>, u32), AssetAiError> {
+        ) -> Result<(Vec<f32>, u32, Option<Vec<WordTimingJson>>), AssetAiError> {
             let model_path = self
                 .model_path
                 .clone()
@@ -365,7 +391,13 @@ mod kokoro_synth {
                 .synthesize_with_speed_observed(&job.text, job.speed, &mut on_chunk)
                 .map_err(|e| AssetAiError::Backend(format!("kokoro synthesize: {e:?}")))?;
             cancel.check()?;
-            Ok((audio.samples, audio.sample_rate))
+            let timings = audio.timings.map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| WordTimingJson { word: w.word, start: w.start, end: w.end })
+                    .collect()
+            });
+            Ok((audio.samples, audio.sample_rate, timings))
         }
     }
 }
@@ -426,6 +458,22 @@ mod tests {
             u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
             24_000
         );
+    }
+
+    #[test]
+    fn timings_sidecar_round_trips() {
+        use makepad_micro_serde::DeJson;
+        let json = timings_json(vec![
+            WordTimingJson { word: "Hello,".into(), start: 0.35, end: 0.675 },
+            WordTimingJson { word: "world.".into(), start: 0.725, end: 1.35 },
+        ])
+        .serialize_json();
+        let back = SpeechTimingsJson::deserialize_json(&json).unwrap();
+        assert_eq!(back.format, "tts-timings");
+        assert_eq!(back.version, 1);
+        assert_eq!(back.words.len(), 2);
+        assert_eq!(back.words[0].word, "Hello,");
+        assert!((back.words[1].end - 1.35).abs() < 1e-9);
     }
 
     #[test]

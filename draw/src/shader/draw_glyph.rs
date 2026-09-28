@@ -33,9 +33,6 @@ script_mod! {
         aa_2x2: 0.0
         aa_4x4: 0.0
         aa_pad_px: uniform(float(1.0))
-        slug_matrix_0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        slug_matrix_1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        slug_matrix_3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         slug_viewport_px: uniform(vec2(1.0, 1.0))
         axis_relief: 0.0
         stem_darken: 0.0
@@ -51,17 +48,17 @@ script_mod! {
 
         slug_dilate: fn(pos: vec2, tex: vec2, jac: vec4, normal: vec2) -> vec4 {
             let n = normalize(normal)
-            let s = dot(self.slug_matrix_3.xy, pos) + self.slug_matrix_3.w
-            let t = dot(self.slug_matrix_3.xy, n)
+            // The camera and list transform the GPU renders with: baked in when
+            // the text was drawn they were the previous paint's (identity for a
+            // new pass), and the first draw came out different from later ones.
+            let m = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.draw_list.view_transform)
+            let hp = m * vec4(pos.x, pos.y, 0.0, 1.0)
+            let hn = m * vec4(n.x, n.y, 0.0, 0.0)
+            let s = hp.w
+            let t = hn.w
 
-            let u = (
-                s * dot(self.slug_matrix_0.xy, n)
-                    - t * (dot(self.slug_matrix_0.xy, pos) + self.slug_matrix_0.w)
-            ) * self.slug_viewport_px.x
-            let v = (
-                s * dot(self.slug_matrix_1.xy, n)
-                    - t * (dot(self.slug_matrix_1.xy, pos) + self.slug_matrix_1.w)
-            ) * self.slug_viewport_px.y
+            let u = (s * hn.x - t * hp.x) * self.slug_viewport_px.x
+            let v = (s * hn.y - t * hp.y) * self.slug_viewport_px.y
 
             let s2 = s * s
             let st = s * t
@@ -1033,14 +1030,8 @@ impl DrawGlyph {
     fn update_draw_vars(&mut self, cx: &mut Cx2d) {
         self.ensure_initialized();
         self.upload_textures(cx.cx.cx);
-        let pass_id = cx.pass_stack.last().unwrap().pass_id;
-        let draw_list_id = *cx.draw_list_stack.last().unwrap();
-        let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
-        let view_transform = cx.draw_lists[draw_list_id]
-            .draw_list_uniforms
-            .view_transform;
-        let model_view = Mat4f::mul(&pass_uniforms.camera_view, &view_transform);
-        let slug_matrix = Mat4f::mul(&pass_uniforms.camera_projection, &model_view);
+        // The camera itself is read by the shader at render time
+        // (`slug_dilate`); only the viewport is the draw's.
         let viewport = cx.current_pass_size();
         let dpi_factor = cx.current_dpi_factor() as f32;
         let viewport_px = [
@@ -1048,12 +1039,6 @@ impl DrawGlyph {
             (viewport.y as f32 * dpi_factor).max(1.0),
         ];
 
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(slug_matrix_0), &mat4_row(&slug_matrix, 0));
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(slug_matrix_1), &mat4_row(&slug_matrix, 1));
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(slug_matrix_3), &mat4_row(&slug_matrix, 3));
         self.draw_vars
             .set_uniform(cx.cx, live_id!(slug_viewport_px), &viewport_px);
         self.draw_vars.texture_slots[0] = self.curve_texture.clone();
@@ -1143,9 +1128,6 @@ fn normalize_point(p: P2, bounds: BBox, inv_w: f32, inv_h: f32) -> P2 {
     }
 }
 
-fn mat4_row(mat: &Mat4f, row: usize) -> [f32; 4] {
-    [mat.v[row], mat.v[row + 4], mat.v[row + 8], mat.v[row + 12]]
-}
 
 fn path_to_quads(path: &VectorPath) -> (Vec<QuadCurve>, BBox) {
     let mut curves = Vec::new();

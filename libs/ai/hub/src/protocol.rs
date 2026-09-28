@@ -1461,3 +1461,32 @@ pub struct TranscriptJson {
     pub text: String,
     pub segments: Vec<TranscriptSegmentJson>,
 }
+
+// ---------------------------------------------------------------------------
+// Text-to-speech (speech domain) word timings artifact
+// ---------------------------------------------------------------------------
+
+/// `SpeechTimingsJson::format`.
+pub const SPEECH_TIMINGS_FORMAT: &str = "tts-timings";
+/// `SpeechTimingsJson::version`.
+pub const SPEECH_TIMINGS_VERSION: u32 = 1;
+
+/// One input word and when it is spoken, seconds from the start of the audio.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct WordTimingJson {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// The `application/json` artifact a speech job adds AFTER its `audio/wav`
+/// when the engine knows when it spoke each word (Kokoro does): every
+/// whitespace-separated word of the text, in order. Clients that only want
+/// the audio keep taking the first artifact.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct SpeechTimingsJson {
+    /// Always [`SPEECH_TIMINGS_FORMAT`].
+    pub format: String,
+    pub version: u32,
+    pub words: Vec<WordTimingJson>,
+}

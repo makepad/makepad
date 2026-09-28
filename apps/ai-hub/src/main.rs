@@ -1,8 +1,8 @@
-//! makepad-ai-hub service binary. Runs on each GPU box; wraps all AI
+//! makepad-app-ai-hub service binary. Runs on each GPU box; wraps all AI
 //! content generation behind a port.
 //!
 //! ```text
-//! makepad-ai-hub [--port N] [--host ADDR] [--cache-dir PATH] [--registry PATH]
+//! makepad-app-ai-hub [--port N] [--host ADDR] [--cache-dir PATH] [--registry PATH]
 //!
 //!   --port      listen port          (env MAKEPAD_ASSET_AI_PORT, default 8765)
 //!   --host      bind address         (default 0.0.0.0)
@@ -166,7 +166,7 @@ fn run() -> Result<(), AssetAiError> {
 /// The machine node's life: register in ~/.makepad/run so the apps on this
 /// machine find it, then idle down and exit once nothing has needed it for
 /// the TTL — it reads as a cache, not a daemon (aicore §3). Visible in any
-/// process list as makepad-ai-hub.
+/// process list as makepad-app-ai-hub.
 fn run_machine_node(handle: makepad_ai_hub::server::ServiceHandle) -> Result<(), AssetAiError> {
     use makepad_ai_hub::machine::{write_node_entry, NodeEntry};
     use std::time::{Duration, Instant};

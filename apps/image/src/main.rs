@@ -4,8 +4,8 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_image::preview::{PreviewAction, PreviewState};
-use makepad_image::widget::{MpImageAction, MpImageView};
+use makepad_app_image::preview::{PreviewAction, PreviewState};
+use makepad_app_image::widget::{MpImageAction, MpImageView};
 use std::path::PathBuf;
 
 app_main!(App);
@@ -174,7 +174,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        makepad_image::widget::script_mod(vm);
+        makepad_app_image::widget::script_mod(vm);
         self::script_mod(vm)
     }
 

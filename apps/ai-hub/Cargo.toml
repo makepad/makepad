@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [[bin]]
-name = "makepad-ai-hub"
+name = "makepad-app-ai-hub"
 path = "src/main.rs"
 
 [dependencies]

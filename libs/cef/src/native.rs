@@ -1593,8 +1593,8 @@ fn ensure_initialized() -> Result<()> {
     // survive restarts (the per-pid temp dir made every launch incognito:
     // the Google cookie banner on each start). MAKEPAD_CEF_EPHEMERAL=1
     // restores the throwaway profile; MAKEPAD_CEF_PROFILE_DIR overrides
-    // the location. Chromium locks the profile, so a second concurrent
-    // instance of the same app should run ephemeral.
+    // the location. A profile in use by another process is never shared:
+    // that instance runs ephemeral (`profile_root_cache_path`).
     let root_cache_path = profile_root_cache_path()?;
     // macOS: Chromium's subprocesses are the helper app inside the synthetic
     // bundle. Windows: this executable is its own subprocess — `bootstrap()`
@@ -1704,9 +1704,14 @@ fn temp_root_cache_path() -> Result<PathBuf> {
 /// The browser profile directory: stable across launches so cookies and
 /// logins persist. `MAKEPAD_CEF_PROFILE_DIR` overrides; `MAKEPAD_CEF_
 /// EPHEMERAL=1` (or no resolvable home) falls back to the per-pid temp
-/// profile. Chromium locks a profile per process — if the stable dir is
-/// locked by a live sibling (SingletonLock points at a running pid on this
-/// host), fall back to ephemeral instead of failing CEF init.
+/// profile. One process per profile: `claim_profile` takes it atomically
+/// for this process (a second instance of the same app runs ephemeral), and
+/// a profile Chromium's own SingletonLock names a live pid for (a process
+/// without that claim) is left alone too. Two processes on one profile
+/// meet in Chromium's process singleton: measured on CEF 154, the earlier
+/// one dies on a check in its IO thread and the later one hangs inside
+/// `cef_initialize`; a relaunch the earlier one does take opens a native
+/// Chrome window by default (`browser_process_on_already_running_app_relaunch`).
 fn profile_root_cache_path() -> Result<PathBuf> {
     if env::var("MAKEPAD_CEF_EPHEMERAL").is_ok() {
         return temp_root_cache_path();
@@ -1715,6 +1720,9 @@ fn profile_root_cache_path() -> Result<PathBuf> {
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)
             .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
+        if !claim_profile(&path) {
+            return temp_root_cache_path();
+        }
         return Ok(path);
     }
     let Some(home) = home_dir() else {
@@ -1730,6 +1738,14 @@ fn profile_root_cache_path() -> Result<PathBuf> {
     let path = home.join(".makepad-cef").join(&stem);
     std::fs::create_dir_all(&path)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
+    // Claim the profile before looking at Chromium's own lock: Chromium
+    // takes that only inside `cef_initialize`, so two instances starting
+    // together both found it free and both used the profile (see above).
+    // This lock is atomic and held until the process ends (the OS drops it
+    // on any exit, so it is never stale).
+    if !claim_profile(&path) {
+        return temp_root_cache_path();
+    }
     // Live-lock check: Chromium's SingletonLock is a symlink "host-pid"
     // (unix; Windows: `lockfile`, below).
     #[cfg(unix)]
@@ -1761,6 +1777,27 @@ fn profile_root_cache_path() -> Result<PathBuf> {
         }
     }
     Ok(path)
+}
+
+/// Take this process's exclusive hold on the profile at `path`, kept for
+/// the rest of the process. False when another live process holds it (or
+/// the lock file cannot be opened): the caller runs on a throwaway profile.
+fn claim_profile(path: &Path) -> bool {
+    static HELD: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.join("MakepadProfileLock"))
+    else {
+        return false;
+    };
+    if file.try_lock().is_err() {
+        return false;
+    }
+    HELD.lock().unwrap().push(file);
+    true
 }
 
 /// True when `pid` is alive (signal 0 probe).
@@ -2090,10 +2127,14 @@ fn ensure_synthetic_app_bundle(
         .unwrap_or("makepad-browser");
     let bundle_id = format!("dev.makepad.{}", bundle_id_component(app_name));
 
-    let root_dir = env::temp_dir()
-        .join("makepad-cef")
-        .join("bundle")
-        .join(app_name);
+    // One bundle per distinct build of the executable, held in use by this
+    // process (see `synthetic_bundle_root`, `hold_synthetic_bundle`). The
+    // bundle's executable keeps the app's own name, so everything keyed by
+    // that name (the CEF profile, the bundle id) stays as it was.
+    let root_dir = synthetic_bundle_root(main_executable, app_name);
+    std::fs::create_dir_all(&root_dir)
+        .map_err(|err| Error::new(format!("failed to create {}: {err}", root_dir.display())))?;
+    hold_synthetic_bundle(&root_dir)?;
     let bundle_dir = root_dir.join(format!("{app_name}.app"));
     let contents_dir = bundle_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
@@ -2180,6 +2221,167 @@ fn ensure_synthetic_app_bundle(
     })
 }
 
+/// Where the synthetic bundles live, one directory each.
+#[cfg(target_os = "macos")]
+fn synthetic_bundle_base() -> PathBuf {
+    env::temp_dir().join("makepad-cef").join("bundle")
+}
+
+/// The file every process running from (or about to run from) a synthetic
+/// bundle holds a shared lock on; a bundle nobody holds is not in use.
+#[cfg(target_os = "macos")]
+const SYNTHETIC_BUNDLE_LOCK: &str = "bundle.lock";
+
+/// The directory of `main_executable`'s synthetic bundle. Already running
+/// from one, it is that one's. Otherwise it is named for this exact build:
+/// the executable's canonical path, size and modification time. Two builds
+/// (a copy elsewhere, a rebuild) launched together each get their own, so
+/// neither replaces the other's executable while it starts or runs.
+#[cfg(target_os = "macos")]
+fn synthetic_bundle_root(main_executable: &Path, app_name: &str) -> PathBuf {
+    let base = synthetic_bundle_base();
+    let inside = main_executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .filter(|root| {
+            is_running_inside_app_bundle(&main_executable.to_path_buf())
+                && root.parent().and_then(|parent| parent.canonicalize().ok()) == base.canonicalize().ok()
+        });
+    if let Some(root) = inside {
+        return root.to_path_buf();
+    }
+    let canonical = main_executable.canonicalize().unwrap_or_else(|_| main_executable.to_path_buf());
+    let metadata = std::fs::metadata(&canonical).ok();
+    let modified_ns = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |time| time.as_nanos());
+    let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
+    base.join(format!(
+        "{app_name}-{:016x}",
+        build_key(&canonical.to_string_lossy(), len, modified_ns)
+    ))
+}
+
+/// FNV-1a over a build's identity: stable across processes and compilers,
+/// unlike std's hasher.
+#[cfg(target_os = "macos")]
+fn build_key(path: &str, len: u64, modified_ns: u128) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let bytes = path
+        .bytes()
+        .chain(len.to_le_bytes())
+        .chain(modified_ns.to_le_bytes());
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Held shared locks on the synthetic bundles this process runs from.
+#[cfg(target_os = "macos")]
+static HELD_BUNDLES: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
+
+/// Mark the bundle at `root` in use for the rest of this process (and, via
+/// `keep_bundle_hold_across_exec`, the process it execs into). A cleanup
+/// that removed the bundle between opening its lock and taking it leaves
+/// the lock file unlinked: then the bundle is made again.
+#[cfg(target_os = "macos")]
+fn hold_synthetic_bundle(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut held = HELD_BUNDLES.lock().unwrap();
+    if held.iter().any(|(path, _)| path == root) {
+        return Ok(());
+    }
+    let lock_path = root.join(SYNTHETIC_BUNDLE_LOCK);
+    loop {
+        std::fs::create_dir_all(root)
+            .map_err(|err| Error::new(format!("failed to create {}: {err}", root.display())))?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|err| Error::new(format!("failed to open {}: {err}", lock_path.display())))?;
+        file.lock_shared()
+            .map_err(|err| Error::new(format!("failed to lock {}: {err}", lock_path.display())))?;
+        let same = match (file.metadata(), std::fs::metadata(&lock_path)) {
+            (Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+            _ => false,
+        };
+        if same {
+            held.push((root.to_path_buf(), file));
+            return Ok(());
+        }
+    }
+}
+
+/// The held bundle locks survive `exec`: the re-exec'd process keeps the
+/// bundle in use from its first instruction, before it takes its own hold.
+#[cfg(target_os = "macos")]
+fn keep_bundle_hold_across_exec() {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    }
+    const F_GETFD: c_int = 1;
+    const F_SETFD: c_int = 2;
+    const FD_CLOEXEC: c_int = 1;
+    for (_, file) in HELD_BUNDLES.lock().unwrap().iter() {
+        let fd = file.as_raw_fd();
+        unsafe {
+            let flags = fcntl(fd, F_GETFD);
+            if flags >= 0 {
+                fcntl(fd, F_SETFD, flags & !FD_CLOEXEC);
+            }
+        }
+    }
+}
+
+/// Whether `name` is a directory name `synthetic_bundle_root` makes: an
+/// app name, a dash and sixteen hex digits.
+#[cfg(target_os = "macos")]
+fn is_keyed_bundle_name(name: &str) -> bool {
+    name.rsplit_once('-').is_some_and(|(app, key)| {
+        !app.is_empty() && key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// Remove the keyed synthetic bundles no process holds (older builds, and
+/// builds whose processes all ended), except `keep`. A bundle is removed
+/// only while this process holds its lock exclusively, so a process
+/// starting from it waits and then makes it again. Bundles of the older
+/// unkeyed layout carry no lock and are never touched.
+#[cfg(target_os = "macos")]
+fn remove_unused_synthetic_bundles(keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(synthetic_bundle_base()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep || !entry.file_name().to_str().is_some_and(is_keyed_bundle_name) {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(lock) = std::fs::OpenOptions::new().read(true).write(true).open(path.join(SYNTHETIC_BUNDLE_LOCK)) else {
+            continue;
+        };
+        if lock.try_lock().is_ok() {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => makepad_error_log::trace!("cef", "removed unused synthetic bundle {}", path.display()),
+                Err(err) => makepad_error_log::trace!("cef", "could not remove {}: {err}", path.display()),
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn is_running_inside_app_bundle(executable: &PathBuf) -> bool {
     let Some(macos_dir) = executable.parent() else {
@@ -2247,6 +2449,10 @@ pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
         command.env("MAKEPAD_CEF_EXEC_AT_MS", launch_ms.to_string());
     }
     command.env("MallocNanoZone", "0");
+    if let Some(root) = synthetic_bundle.bundle_executable.ancestors().nth(4) {
+        remove_unused_synthetic_bundles(root);
+    }
+    keep_bundle_hold_across_exec();
     let err = command.exec();
     Err(Error::new(format!(
         "failed to exec {}: {err}",
@@ -2477,6 +2683,23 @@ unsafe extern "system" fn browser_process_has_at_least_one_ref(
     ((*handler).ref_count.load(Ordering::Acquire) >= 1) as c_int
 }
 
+/// Another process started CEF on this process's profile (the same
+/// `root_cache_path`): Chromium's process singleton forwarded its launch here
+/// and that process exits. Unhandled, Chromium's default is to open a new
+/// Chrome-styled NATIVE browser window in this process — a full Chromium
+/// window beside an embedder whose browsers are all windowless. Every
+/// browser here is the embedder's own, so the relaunch is handled by doing
+/// nothing; `profile_root_cache_path` keeps a second instance off a profile
+/// that is in use, so this is only the last line.
+unsafe extern "system" fn browser_process_on_already_running_app_relaunch(
+    _self: *mut ffi::cef_browser_process_handler_t,
+    _command_line: *mut ffi::cef_command_line_t,
+    _current_directory: *const ffi::cef_string_t,
+) -> c_int {
+    say!("CEF: another process tried to start on this profile; no browser window opened for it");
+    1
+}
+
 unsafe extern "system" fn browser_process_on_schedule_message_pump_work(
     _self: *mut ffi::cef_browser_process_handler_t,
     delay_ms: i64,
@@ -2658,6 +2881,83 @@ unsafe extern "system" fn client_get_life_span_handler(
 ) -> *mut c_void {
     let client = self_ as *mut ClientHandler;
     add_ref_and_return((*client).life_span_handler) as *mut c_void
+}
+
+/// JavaScript dialogs (`alert`, `confirm`, `prompt`, "leave this page?")
+/// never become native windows: CEF's default for them is a native panel
+/// of its own, shown on screen even for a windowless browser in a hidden
+/// app, and modal to the page until someone answers it. One handler serves
+/// every browser; it holds no state.
+unsafe extern "system" fn client_get_jsdialog_handler(_self: *mut ffi::cef_client_t) -> *mut c_void {
+    static HANDLER: OnceLock<usize> = OnceLock::new();
+    *HANDLER.get_or_init(|| {
+        Box::into_raw(Box::new(ffi::cef_jsdialog_handler_t {
+            base: ffi::cef_base_ref_counted_t {
+                size: std::mem::size_of::<ffi::cef_jsdialog_handler_t>(),
+                add_ref: Some(static_add_ref),
+                release: Some(static_release),
+                has_one_ref: Some(static_has_one_ref),
+                has_at_least_one_ref: Some(static_has_at_least_one_ref),
+            },
+            on_jsdialog: Some(jsdialog_on_jsdialog),
+            on_before_unload_dialog: Some(jsdialog_on_before_unload_dialog),
+            on_reset_dialog_state: None,
+            on_dialog_closed: None,
+        })) as usize
+    }) as *mut c_void
+}
+
+/// Reference counting for an object that lives as long as the process.
+unsafe extern "system" fn static_add_ref(_self: *mut ffi::cef_base_ref_counted_t) {}
+unsafe extern "system" fn static_release(_self: *mut ffi::cef_base_ref_counted_t) -> c_int {
+    0
+}
+unsafe extern "system" fn static_has_one_ref(_self: *mut ffi::cef_base_ref_counted_t) -> c_int {
+    0
+}
+unsafe extern "system" fn static_has_at_least_one_ref(_self: *mut ffi::cef_base_ref_counted_t) -> c_int {
+    1
+}
+
+/// `alert`/`confirm`/`prompt`: suppressed, as a page sees a dismissed
+/// dialog (confirm false, prompt null). Suppressing rather than answering
+/// is what Chromium expects of an embedder that shows no dialog.
+unsafe extern "system" fn jsdialog_on_jsdialog(
+    _self: *mut ffi::cef_jsdialog_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    _origin_url: *const ffi::cef_string_t,
+    dialog_type: ffi::cef_jsdialog_type_t,
+    message_text: *const ffi::cef_string_t,
+    _default_prompt_text: *const ffi::cef_string_t,
+    callback: *mut ffi::cef_jsdialog_callback_t,
+    suppress_message: *mut c_int,
+) -> c_int {
+    release_param(browser);
+    release_param(callback);
+    makepad_error_log::trace!("cef", "javascript dialog {} suppressed: {}", dialog_type, cef_string_to_string(message_text));
+    if !suppress_message.is_null() {
+        *suppress_message = 1;
+    }
+    0
+}
+
+/// "Leave this page?": answered yes at once, as if confirmed.
+unsafe extern "system" fn jsdialog_on_before_unload_dialog(
+    _self: *mut ffi::cef_jsdialog_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    _message_text: *const ffi::cef_string_t,
+    _is_reload: c_int,
+    callback: *mut ffi::cef_jsdialog_callback_t,
+) -> c_int {
+    release_param(browser);
+    if callback.is_null() {
+        return 0;
+    }
+    if let Some(cont) = (*callback).cont {
+        cont(callback, 1, ptr::null());
+    }
+    release_param(callback);
+    1
 }
 
 /// Null unless the embedder enabled capture on this browser. CEF asks each
@@ -3709,7 +4009,7 @@ impl ClientHandler {
                 get_focus_handler: Some(client_null_handler),
                 get_frame_handler: Some(client_null_handler),
                 get_permission_handler: Some(client_null_handler),
-                get_jsdialog_handler: Some(client_null_handler),
+                get_jsdialog_handler: Some(client_get_jsdialog_handler),
                 get_keyboard_handler: Some(client_null_handler),
                 get_life_span_handler: Some(client_get_life_span_handler),
                 get_load_handler: Some(client_get_load_handler),
@@ -3742,7 +4042,7 @@ impl BrowserProcessHandler {
                 on_register_custom_preferences: None,
                 on_context_initialized: None,
                 on_before_child_process_launch: None,
-                on_already_running_app_relaunch: None,
+                on_already_running_app_relaunch: Some(browser_process_on_already_running_app_relaunch),
                 on_schedule_message_pump_work: Some(browser_process_on_schedule_message_pump_work),
                 get_default_client: None,
                 get_default_request_context_handler: None,
@@ -4749,6 +5049,38 @@ mod tests {
             ("disable-features", Some("A,B=c"))
         );
         assert_eq!(split_switch("bare"), ("bare", None));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_build_gets_its_own_bundle_and_only_keyed_ones_are_swept() {
+        let a = build_key("/x/target/release/app", 10, 1);
+        assert_eq!(a, build_key("/x/target/release/app", 10, 1));
+        assert_ne!(a, build_key("/y/copy/app", 10, 1));
+        assert_ne!(a, build_key("/x/target/release/app", 11, 1));
+        assert_ne!(a, build_key("/x/target/release/app", 10, 2));
+        assert!(is_keyed_bundle_name(&format!("makepad-stage-{a:016x}")));
+        for unkeyed in ["makepad-stage", "stage-rec1a-047ddc06c0e3", "-0123456789abcdef", "app-0123456789abcdeg"] {
+            assert!(!is_keyed_bundle_name(unkeyed), "{unkeyed}");
+        }
+        // Running from a keyed bundle maps back to that bundle.
+        let root = synthetic_bundle_base().join(format!("app-{a:016x}"));
+        let exe = root.join("app.app/Contents/MacOS/app");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(synthetic_bundle_root(&exe, "app").canonicalize().unwrap(), root.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_claimed_profile_is_not_claimed_again() {
+        let dir = env::temp_dir().join(format!("makepad-cef-claim-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(claim_profile(&dir));
+        // A second claim (another open of the lock, as another process
+        // would make) is refused while the first is held.
+        assert!(!claim_profile(&dir));
+        let _ = std::fs::remove_file(dir.join("MakepadProfileLock"));
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

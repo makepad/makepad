@@ -579,6 +579,20 @@ impl Cx {
         }
     }
 
+    /// Draw whatever is pending for a `/step` frame and queue its shaders,
+    /// without presenting: true once every pipeline the frame needs is
+    /// compiled, so the frame is presented complete rather than with the
+    /// draws of a still-compiling shader left out.
+    fn prepare_remote_frame(&mut self, metal_cx: &mut MetalCx) -> bool {
+        self.handle_actions();
+        if self.need_redrawing() {
+            let time = with_macos_app(|app| app.time_now());
+            self.call_draw_event(time);
+        }
+        self.mtl_compile_shaders(metal_cx);
+        self.metal_pipelines_pending() == 0
+    }
+
     fn update_macos_pointer_capture_pacing(&mut self) {
         // Capture pacing drives the AppKit display link. A --stdin-loop
         // child has no AppKit app and is paced by its host's Tick, so the
@@ -749,9 +763,8 @@ impl Cx {
             return;
         }
         self.repaint_id += 1;
-        let time_now = self
-            .os
-            .link_flip_time
+        let time_now = crate::remote::app_clock::now()
+            .or(self.os.link_flip_time)
             .map(|t| t as f32)
             .unwrap_or_else(|| with_macos_app(|app| app.time_now() as f32));
         let scope = self.os.link_scope;
@@ -1099,8 +1112,11 @@ impl Cx {
         // exclusive ownership of their supplied drawable; remote wakes and
         // deadlines use a separate unscoped event after that callback returns.
         if self.os.link_scope.is_none() && !matches!(&event, MacosEvent::LinkFire { .. }) {
-            let pending = crate::remote::poll_macos(self, |cx, window| {
-                cx.present_remote_window(window, metal_windows, metal_cx)
+            let pending = crate::remote::poll_macos(self, |cx, window, stage| match stage {
+                crate::remote::PresentStage::Prepare => Some(cx.prepare_remote_frame(metal_cx)),
+                crate::remote::PresentStage::Present => {
+                    cx.present_remote_window(window, metal_windows, metal_cx)
+                }
             });
             let mut deadline = crate::remote::next_grab_deadline();
             if pending {
@@ -1206,9 +1222,14 @@ impl Cx {
                     }
                     self.handle_actions();
 
+                    // Under the virtual clock a pending NextFrame waits for
+                    // `/step`, which keeps its own beat; it is no reason to
+                    // tick at the display rate meanwhile.
+                    let next_frames_due = !self.new_next_frames.is_empty()
+                        && !crate::remote::app_clock::enabled();
                     if self.any_passes_dirty()
                         || self.need_redrawing()
-                        || !self.new_next_frames.is_empty()
+                        || next_frames_due
                         || self.demo_time_repaint
                         || self
                             .os
@@ -1554,6 +1575,10 @@ impl Cx {
                 if needs_redrawing {
                     self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
+                } else if !self.draw_shaders.compile_set.is_empty() {
+                    // A shader queued outside a draw (a pass a host renders
+                    // itself) compiles now, so the pass it keeps dirty paints.
+                    self.mtl_compile_shaders(&metal_cx);
                 }
                 let has_dirty_passes = self.any_passes_dirty();
                 with_macos_app(|app| {
@@ -1561,7 +1586,7 @@ impl Cx {
                     app.frame_trace.maybe_print(now);
                 });
                 // Start timer if we have work
-                if has_next_frames
+                if (has_next_frames && !crate::remote::app_clock::enabled())
                     || needs_redrawing
                     || has_dirty_passes
                     || self.screenshot_requests.len() > 0
@@ -2574,6 +2599,9 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
+        if let Some(time) = crate::remote::app_clock::now() {
+            return time;
+        }
         Instant::now()
             .duration_since(self.os.start_time.unwrap())
             .as_secs_f64()

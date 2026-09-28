@@ -36,7 +36,6 @@ files = [
     { path = "platform/network/src/web_socket_parser.rs", hash = "ac0366882e8ee22e66331db5f88d5bc028ebbbda" },
     { path = "platform/network/tests/blocking_http.rs", hash = "0bc15240c992774486f2f8ed027b9a52fae68fc1" },
     { path = "platform/network/tests/network_integration.rs", hash = "e40aee0156cdf8dbe079e51fc52c0f28123e78e8" },
-    { path = "platform/script/build.rs", hash = "f328e4d9d04c31d0d70d16d21a07d1613be9d577" },
     { path = "platform/script/derive/src/derive_scriptable.rs", hash = "bbf5f617604927375e4409c1cede5a93361a9af0" },
     { path = "platform/script/derive/src/error.rs", hash = "ca82409d9334685cbecbabd065bd478992d964d8" },
     { path = "platform/script/derive/src/lib.rs", hash = "4734669d2e2b8ebbcaae218f965b97b540fe812d" },

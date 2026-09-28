@@ -5,13 +5,13 @@
 # The whole graph is built with `RUSTFLAGS="-C prefer-dynamic"` so that the
 # engine (`engine/`, one Rust dylib) is shared by the host and every app
 # dylib. Desktop check: `MAKEPAD_WM_ROOT=<checkout> RUSTFLAGS="-C
-# prefer-dynamic" cargo run -p makepad-wm-dyn --release`.
+# prefer-dynamic" cargo run -p makepad-app-wm-dyn --release`.
 #
 # Android: the whole pack (stage the tree, cross-build, prove every tile,
 # pack the APK with the phone toolchain, rehearse from the packed APK) is
 #   cargo makepad android --abi=aarch64 --package-name=nl.makepad.wmdyn
 #     --app-label=wmdyn dyn-pack --dyn-toolchain=<musl rustc tree>
-#     -p makepad-wm-dyn --release --no-default-features
+#     -p makepad-app-wm-dyn --release --no-default-features
 # (tools/cargo_makepad/src/android/dyn_pack). The packaged workspace unifies
 # features across all of its members, so an app built on the phone resolves
 # the same engine units (apps/wm/src/dylib_host.rs); `--no-default-features`
@@ -21,36 +21,36 @@
 # fingerprints the on-device cargo needs).
 
 [package]
-name = "makepad-wm-dyn"
+name = "makepad-app-wm-dyn"
 version = "0.1.0"
 edition = "2021"
-default-run = "wm-dyn"
+default-run = "makepad-app-wm-dyn"
 
 # What `cargo makepad android dyn-pack` stages, proves and packs: the engine
 # dylib every tile binds, and the tile packages the phone may compile.
 [package.metadata.makepad.dyn]
 engine = "makepad-wm-engine"
 apps = [
-    "makepad-calculator",
-    "makepad-calendar",
-    "makepad-clock",
-    "makepad-files",
-    "makepad-finance",
-    "makepad-mail",
-    "makepad-notes",
-    "makepad-photos",
-    "makepad-reminders",
+    "makepad-app-calculator",
+    "makepad-app-calendar",
+    "makepad-app-clock",
+    "makepad-app-files",
+    "makepad-app-finance",
+    "makepad-app-mail",
+    "makepad-app-notes",
+    "makepad-app-photos",
+    "makepad-app-reminders",
     "makepad-app-route",
-    "makepad-sheets",
-    "makepad-weather",
+    "makepad-app-sheets",
+    "makepad-app-weather",
 ]
 
 [lib]
-name = "makepad_wm_dyn"
+name = "makepad_app_wm_dyn"
 path = "src/lib.rs"
 
 [[bin]]
-name = "wm-dyn"
+name = "makepad-app-wm-dyn"
 path = "src/main.rs"
 
 [features]
@@ -62,6 +62,6 @@ tweaker = ["makepad-widgets/tweaker"]
 [dependencies]
 # Without the window manager's defaults: the design overlay is this app's
 # own `tweaker` feature.
-makepad-wm = { path = "../wm", default-features = false }
+makepad-app-wm = { path = "../wm", default-features = false }
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-wm-engine = { path = "engine" }

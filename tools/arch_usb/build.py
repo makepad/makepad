@@ -152,7 +152,7 @@ def prepare_seed(args, output):
         clone, manifest = verify_source(args.assets)
         for name in ('makepad-source.tgz', 'cargo-cache.tar', 'source-revision.txt'):
             copy(clone/name, seed/name)
-        for name in ('wm', 'makepad-ai-hub'):
+        for name in ('makepad-app-wm', 'makepad-app-ai-hub'):
             copy(clone/'binaries'/name, seed/name)
         (seed/'clone.json').write_text(json.dumps(manifest, indent=2)+'\n')
     elif args.cached_source:

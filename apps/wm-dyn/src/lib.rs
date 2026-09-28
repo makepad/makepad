@@ -12,7 +12,7 @@
 // embedding them (an unnamed `--extern` is never loaded).
 extern crate makepad_wm_engine;
 
-use makepad_wm::{DesktopStyle, WmBuild};
+use makepad_app_wm::{DesktopStyle, WmBuild};
 
 /// The build: no modules linked, every tile a dylib compiled on demand.
 pub fn wm_build() -> WmBuild {
@@ -27,9 +27,9 @@ pub fn wm_build() -> WmBuild {
 }
 
 #[cfg(target_os = "android")]
-use makepad_wm::makepad_widgets::*;
+use makepad_app_wm::makepad_widgets::*;
 #[cfg(target_os = "android")]
-use makepad_wm::App;
+use makepad_app_wm::App;
 
 #[cfg(target_os = "android")]
 app_main!(

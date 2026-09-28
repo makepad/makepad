@@ -4,8 +4,8 @@
 # the host's widgets/platform/std, not a copy: rustc links an rlib that is
 # already inside an upstream dylib as `IncludedFromDylib` instead of
 # embedding it again. This crate is that upstream dylib: it re-exports the
-# union of everything the twelve tile apps and `makepad-wm` use, so the host
-# (`makepad-wm-dyn`) and every app dylib share one engine `.so`. Build the
+# union of everything the twelve tile apps and `makepad-app-wm` use, so the host
+# (`makepad-app-wm-dyn`) and every app dylib share one engine `.so`. Build the
 # whole super-app graph with `RUSTFLAGS="-C prefer-dynamic"`.
 #
 # Only the super-app graph depends on this crate; desktop/APK builds of the

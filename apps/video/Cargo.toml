@@ -18,17 +18,17 @@
 # textures and the pixel shader does the colour conversion.
 
 [package]
-name = "makepad-video"
+name = "makepad-app-video"
 version = "0.1.0"
 edition = "2021"
-default-run = "video"
+default-run = "makepad-app-video"
 
 [lib]
-name = "makepad_video"
+name = "makepad_app_video"
 path = "src/lib.rs"
 
 [[bin]]
-name = "video"
+name = "makepad-app-video"
 path = "src/main.rs"
 
 [features]

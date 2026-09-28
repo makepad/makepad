@@ -143,6 +143,9 @@ impl Cx {
     }
 
     pub fn time_now() -> f64 {
+        if let Some(time) = crate::remote::app_clock::epoch_now() {
+            return time;
+        }
         if let Ok(elapsed) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             return elapsed.as_secs_f64();
         }

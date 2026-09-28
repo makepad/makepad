@@ -95,8 +95,8 @@ unused deeper passes are skipped. Explicit producer/consumer links preserve GPU
 ordering when pass IDs are recycled. `MAKEPAD_WM_TRACE_BLUR=1` logs stack and pass
 counts when they change; normal operation does not log each frame.
 
-In a checkout, build with `cargo build --release -p makepad-wm`, then launch
-`./target/release/wm --remote` from the checkout root.
+In a checkout, build with `cargo build --release -p makepad-app-wm`, then launch
+`./target/release/makepad-app-wm --remote` from the checkout root.
 Applications launch on demand with `cargo run --release -p <package>`; there is
 no binary collection to prepare. The app's window shows Cargo's compiling or
 build-wait stage before the process connects, then fades into its first frame.

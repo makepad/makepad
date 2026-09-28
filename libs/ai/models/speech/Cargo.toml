@@ -24,6 +24,11 @@ makepad-ai-loader = { path = "../../loader" }
 # Only the IndexTTS modules use the SA3/MOSS/Woosh kernels (and so pull in ai-h3).
 makepad-ai-sfx = { path = "../sfx", optional = true }
 
+# Model-dependent word-timing checks (ignored by default; see the file).
+[[test]]
+name = "timings"
+required-features = ["kokoro", "whisper"]
+
 [[bin]]
 name = "g2p_test"
 path = "src/bin/g2p_test.rs"

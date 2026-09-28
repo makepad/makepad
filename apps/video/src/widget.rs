@@ -44,7 +44,7 @@ script_mod! {
         tex_uv: texture_2d(float)
 
         // Biplanar NV12, BT.709 LIMITED range — the same arithmetic the
-        // VJ's present pass and the CPU converter in makepad-video speak.
+        // VJ's present pass and the CPU converter in makepad-app-video speak.
         pixel: fn() {
             let yv = self.tex_y.sample(self.pos).x
             let uv = self.tex_uv.sample(self.pos).xy

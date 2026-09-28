@@ -3,17 +3,17 @@
 # local/agent_state/wm-all/apps/calculator-spec.md; contract: .../CONTRACT.md.
 
 [package]
-name = "makepad-calculator"
+name = "makepad-app-calculator"
 version = "0.1.0"
 edition = "2021"
-default-run = "calculator"
+default-run = "makepad-app-calculator"
 
 [lib]
-name = "makepad_calculator"
+name = "makepad_app_calculator"
 path = "src/lib.rs"
 
 [[bin]]
-name = "calculator"
+name = "makepad-app-calculator"
 path = "src/main.rs"
 required-features = ["standalone"]
 

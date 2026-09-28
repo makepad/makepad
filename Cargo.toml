@@ -23,6 +23,7 @@ workspace.members = [
     "libs/civil_time",
     "libs/wm_api",
     "libs/app_module",
+    "libs/app_registry",
     "apps/task",
     "apps/image",
     "apps/video",

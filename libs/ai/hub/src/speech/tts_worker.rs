@@ -3,7 +3,7 @@
 
 use super::remote::RemotePipe;
 use super::weights;
-use super::{SpeechAudio, SpeechReach, TtsConfig, TtsEngine, TtsEngineInfo, TtsEvent, TtsMsg};
+use super::{SpeechAudio, SpeechReach, TtsConfig, TtsEngine, TtsEngineInfo, TtsEvent, TtsMsg, WordTiming};
 use crate::pipe::PipeId;
 use crate::registry::Domain;
 use makepad_system_speech as sys;
@@ -42,11 +42,11 @@ pub(crate) fn run(
         }
         let started = Instant::now();
         match engine.synthesize(text, &config) {
-            Ok(audio) if !audio.is_empty() => {
+            Ok((audio, timings)) if !audio.is_empty() => {
                 // Synthesis is slow enough that a cancel can land while it
                 // runs; a stale utterance must never be heard.
                 if mine == generation.load(Ordering::Relaxed) {
-                    send(TtsEvent::Audio { utterance, audio, secs: started.elapsed().as_secs_f64() });
+                    send(TtsEvent::Audio { utterance, audio, timings, secs: started.elapsed().as_secs_f64() });
                 }
             }
             Ok(_) => send(TtsEvent::Error { utterance, message: "engine produced no audio".into() }),
@@ -55,9 +55,13 @@ pub(crate) fn run(
     }
 }
 
+/// What an engine renders for one text: the PCM, and the words' times when
+/// it knows them.
+type Spoken = (SpeechAudio, Option<Vec<WordTiming>>);
+
 trait Engine {
     fn info(&self) -> TtsEngineInfo;
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<SpeechAudio, String>;
+    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String>;
 }
 
 // ----------------------------------------------------------------- choosing
@@ -130,14 +134,15 @@ impl Engine for SystemTts {
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<SpeechAudio, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
         let options = sys::TtsOptions {
             voice: config.voice.clone(),
             language: config.language.clone(),
             rate: config.rate,
             pitch: config.pitch,
         };
-        sys::tts::synthesize(text, &options).map_err(|e| e.to_string())
+        let audio = sys::tts::synthesize(text, &options).map_err(|e| e.to_string())?;
+        Ok((audio, None))
     }
 }
 
@@ -158,7 +163,7 @@ impl Engine for RemoteTts {
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<SpeechAudio, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
         self.pipe.synthesize(text, &kokoro_voice_name(config), config.rate)
     }
 }
@@ -196,7 +201,7 @@ mod kokoro {
             }
         }
 
-        fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<SpeechAudio, String> {
+        fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
             let wanted = kokoro_voice_name(config);
             if wanted != self.voice {
                 // A voice is a 510x256 style table; the speaker reloads with
@@ -215,7 +220,13 @@ mod kokoro {
                 .speaker
                 .synthesize_with_speed(text, config.rate)
                 .map_err(|e| format!("kokoro: {e:?}"))?;
-            Ok(SpeechAudio { samples: audio.samples, sample_rate: audio.sample_rate })
+            let timings = audio.timings.map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| WordTiming { word: w.word, start: w.start, end: w.end })
+                    .collect()
+            });
+            Ok((SpeechAudio { samples: audio.samples, sample_rate: audio.sample_rate }, timings))
         }
     }
 

@@ -7,7 +7,7 @@ use mod.std.*
 use mod.ci;
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-terminal"] targets: ci.host.targets})
+    ci.check_targets({packages: ["makepad-app-terminal"] targets: ci.host.targets})
 })
 
 // On macOS the terminal starts its shell through the pty helper that lives
@@ -16,7 +16,7 @@ ci.step("build the pty helper", fn(){
     ci.build({package: "makepad-agents" binary: "agents"})
 })
 
-let app = ci.launch({package: "makepad-terminal" binary: "terminal" cwd: "."})
+let app = ci.launch({package: "makepad-app-terminal" binary: "makepad-app-terminal" cwd: "."})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

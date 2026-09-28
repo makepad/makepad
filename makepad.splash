@@ -67,8 +67,8 @@ hub.set_run_items([
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-app-route"}
-    RunStudioRelease{name: "makepad-clock"}
-    RunStudioRelease{name: "makepad-weather"}
+    RunStudioRelease{name: "makepad-app-clock"}
+    RunStudioRelease{name: "makepad-app-weather"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-skeuomorph"}
@@ -80,6 +80,6 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-studio"}
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
-    RunStudioRelease{name: "makepad-fab"}
+    RunStudioRelease{name: "makepad-app-fab"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
 ])

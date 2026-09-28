@@ -6,19 +6,19 @@
 # the phone window manager seats in-process, one instance per isolate.
 
 [package]
-name = "makepad-finance"
+name = "makepad-app-finance"
 version = "0.1.0"
 edition = "2021"
 description = "Personal finance: ledger, budgets, reports and CSV import"
 license = "MIT OR Apache-2.0"
-default-run = "finance"
+default-run = "makepad-app-finance"
 
 [lib]
-name = "makepad_finance"
+name = "makepad_app_finance"
 path = "src/lib.rs"
 
 [[bin]]
-name = "finance"
+name = "makepad-app-finance"
 path = "src/main.rs"
 required-features = ["standalone"]
 

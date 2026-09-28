@@ -238,6 +238,23 @@ impl MacosWindow {
             } else {
                 NSPoint { x: 0., y: 0. }
             };
+            // `--window WxH@scale`: the layout size at that scale, whatever
+            // the display runs at. Its native size divides out the display's
+            // own scale (checked again once the window has one, below).
+            let launch_window = crate::remote::app_clock::launch_window_for(self.window_id.id());
+            let size = match launch_window {
+                Some(launch) => {
+                    let screen: ObjcId = msg_send![class!(NSScreen), mainScreen];
+                    let scale: f64 = if screen != nil {
+                        msg_send![screen, backingScaleFactor]
+                    } else {
+                        1.0
+                    };
+                    let (width, height) = launch.native_size(scale);
+                    dvec2(width, height)
+                }
+                None => size,
+            };
             let ns_size = NSSize {
                 width: size.x as f64,
                 height: size.y as f64,
@@ -335,7 +352,14 @@ impl MacosWindow {
             if position.is_none() {
                 let () = msg_send![self.window, center];
             }
-            if !is_fullscreen {
+            if let Some(launch) = launch_window {
+                // An exact capture size is not fitted to the displays: it may
+                // be larger than any of them (a hidden window is never shown).
+                let (width, height) = launch.native_size(self.get_dpi_factor());
+                if (width, height) != (size.x, size.y) {
+                    let () = msg_send![self.window, setContentSize: NSSize { width, height }];
+                }
+            } else if !is_fullscreen {
                 // A restored size and position are only as good as the display arrangement
                 // they were saved on; a fullscreen window is AppKit's to place.
                 self.fit_to_screens();

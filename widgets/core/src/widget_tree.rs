@@ -2447,6 +2447,18 @@ impl WidgetTree {
     }
 
     pub fn snapshot(&self, cx: &Cx) -> Vec<WidgetSnapshot> {
+        self.snapshot_with_paths(cx)
+            .into_iter()
+            .map(|(widget, _)| widget)
+            .collect()
+    }
+
+    /// [`Self::snapshot`] with each row's dotted id path from its window
+    /// root: the names of the widget and its ancestors below the `Window`,
+    /// unnamed ones left out (`main.new_note`). A part or dock row extends
+    /// its widget's path with its own id. The remote bridge's `/snap` path
+    /// addressing reads this through `Cx::widget_paths_callback`.
+    pub fn snapshot_with_paths(&self, cx: &Cx) -> Vec<(WidgetSnapshot, String)> {
         self.sync_dirty();
         let inner = self.inner.borrow();
         let widget_type_names = widget_type_names(cx);
@@ -2507,11 +2519,33 @@ impl WidgetTree {
             }
         };
 
+        let node_path = |index: usize| -> String {
+            let mut names = Vec::new();
+            let mut current = index;
+            // The window itself and everything above it are not in the path.
+            while !window_contexts.contains_key(&current) {
+                let name = inner.names[current];
+                if name != LiveId(0) {
+                    names.push(live_id_token(name));
+                }
+                let parent = inner.nodes[current].parent;
+                if parent == NONE || parent as usize >= inner.nodes.len() {
+                    break;
+                }
+                current = parent as usize;
+            }
+            names.reverse();
+            names.join(".")
+        };
+
         let mut widgets = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
         for (index, node) in inner.nodes.iter().enumerate() {
             let Some(widget) = node.widget.upgrade() else {
                 continue;
             };
+            let path = node_path(index);
+            let first_row = widgets.len();
             let id = live_id_token(inner.names[index]);
             let widget_type = widget
                 .widget_type_id()
@@ -2696,9 +2730,19 @@ impl WidgetTree {
                     });
                 }
             }
+            // The widget's own row, then its parts and dock rows under it.
+            for row in first_row..widgets.len() {
+                paths.push(if row == first_row {
+                    path.clone()
+                } else if path.is_empty() {
+                    widgets[row].id.clone()
+                } else {
+                    format!("{path}.{}", widgets[row].id)
+                });
+            }
         }
 
-        widgets
+        widgets.into_iter().zip(paths).collect()
     }
 
     /// The live widget hierarchy flattened depth-first for the tweaker's
@@ -3038,6 +3082,10 @@ fn widget_snapshot_callback(cx: &Cx) -> Vec<WidgetSnapshot> {
     cx.widget_tree().snapshot(cx)
 }
 
+fn widget_paths_callback(cx: &Cx) -> Vec<(WidgetSnapshot, String)> {
+    cx.widget_tree().snapshot_with_paths(cx)
+}
+
 /// One row of the flattened widget hierarchy (`WidgetTree::flat_tree`).
 #[derive(Clone, Debug)]
 pub struct FlatTreeRow {
@@ -3077,6 +3125,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
+    cx.widget_paths_callback = Some(widget_paths_callback);
     if let Some(tweaker) = WidgetHooks::tweaker(cx) {
         cx.tweak_callback = Some(tweaker.tweak_callback);
     }

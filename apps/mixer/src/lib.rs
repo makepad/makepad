@@ -1,4 +1,4 @@
-//! makepad-mixer library: protocol, safety, model and the session client.
+//! makepad-app-mixer library: protocol, safety, model and the session client.
 //! The UI binary lives in main.rs; everything here is plain std so the
 //! whole safety surface is testable headless.
 //!

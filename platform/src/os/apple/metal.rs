@@ -593,7 +593,13 @@ impl Cx {
 
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
-                    // shader didnt compile somehow
+                    // Not compiled yet (still in the compile set): the frame
+                    // is partial, so the pass stays dirty and paints again
+                    // once it is, like the other not-ready skips. A shader
+                    // that failed to compile is skipped without repainting.
+                    if self.draw_shaders.compile_set.contains(&draw_call.draw_shader_id.index) {
+                        self.passes[draw_pass_id].paint_dirty = true;
+                    }
                     self.pipeline_skips += 1;
                         self.skip_reasons[1] += 1;
                     self.pipeline_skip_repaint = Some(self.repaint_id);
@@ -969,6 +975,14 @@ impl Cx {
                         continue;
                     };
 
+                    if crate::os::cx_shared::samples_incomplete_target(
+                        &self.passes,
+                        &self.textures,
+                        texture_id,
+                        draw_pass_id,
+                    ) {
+                        self.passes[draw_pass_id].paint_dirty = true;
+                    }
                     let cxtexture = &mut self.textures[texture_id];
 
                     if cxtexture.format.is_shared() {

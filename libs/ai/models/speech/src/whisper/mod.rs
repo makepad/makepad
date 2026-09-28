@@ -20,11 +20,15 @@ mod quant;
 mod settings;
 #[path = "cpu/tensor.rs"]
 mod tensor;
+mod text_align;
+mod tokenizer;
 
 pub use accel::backend_name as accel_backend_name;
-pub use align::{AlignmentHeads, WordSpan, AUDIO_FRAME_MS};
+pub use align::{token_rows, AlignmentHeads, WordSpan, AUDIO_FRAME_MS, LEAD_ROWS};
 pub use decode_loop::{AlignedSegment, Segment, WhisperParams, WhisperState};
-pub use model::WhisperModel;
+pub use model::{Vocab, WhisperModel};
+pub use text_align::{align_text, AlignTextError, TimedWord, ALIGN_SAMPLE_RATE, MAX_ALIGN_SECS};
+pub use tokenizer::WhisperTokenizer;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

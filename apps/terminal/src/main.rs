@@ -1,5 +1,5 @@
 //! terminal: a full-window terminal app. Runs standalone or inside
-//! makepad-wm / Studio tiles (the shared --stdin-loop client runtime).
+//! makepad-app-wm / Studio tiles (the shared --stdin-loop client runtime).
 //!
 //! Command line:
 //!   --cwd <dir>        open the shell in <dir> (wm passes the focused
@@ -10,7 +10,7 @@
 //!                      viewer app claims.
 
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_terminal::widget::{MpTerm, MpTermAction};
+use makepad_app_terminal::widget::{MpTerm, MpTermAction};
 pub use makepad_widgets;
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
@@ -260,7 +260,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
-        makepad_terminal::widget::script_mod(vm);
+        makepad_app_terminal::widget::script_mod(vm);
         self::script_mod(vm)
     }
 
