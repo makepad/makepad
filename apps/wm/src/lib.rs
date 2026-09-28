@@ -1823,6 +1823,10 @@ impl App {
             desk.remove_client(client);
         }
         self.focus_after_layout(cx);
+        // `layout.remove` clears the workspace's fullscreen when the closing
+        // client held it; a client that exits on its own reaches here
+        // outside `do_action`, so restore the bar on this path too.
+        self.sync_bar_for_fullscreen(cx);
         self.redraw_all(cx);
     }
 
@@ -3754,7 +3758,6 @@ impl App {
             }
             WmAction::Fullscreen(mode) => {
                 self.state_mut().layout.toggle_fullscreen_mode(mode);
-                self.sync_bar_for_fullscreen(cx);
             }
             WmAction::TiledFullscreen => {
                 if let Some(focus) = focus {
@@ -3819,7 +3822,6 @@ impl App {
             WmAction::Workspace(n) => {
                 self.state_mut().layout.switch_workspace(n);
                 self.focus_after_layout(cx);
-                self.sync_bar_for_fullscreen(cx);
             }
             WmAction::MoveToWorkspace(n) => {
                 self.state_mut().layout.move_focused_to_ex(n, true, area, gap);
@@ -3880,6 +3882,9 @@ impl App {
                 let visible = bar.visible();
                 bar.set_visible(cx, !visible);
                 self.bar_hidden_by_fullscreen = false;
+                self.update_bar(cx);
+                self.redraw_all(cx);
+                return;
             }
             WmAction::ArmAltLayer => {
                 self.alt_armed = true;
@@ -3888,6 +3893,14 @@ impl App {
             }
             WmAction::ToggleAi => self.toggle_ai_pane(cx),
         }
+        // Every action that can enter or leave a workspace's fullscreen
+        // funnels through here, so the bar's fullscreen sync is done once,
+        // for all of them, instead of per-arm (where it was missing from
+        // ToggleFloat/PopOut, the whole workspace-switch family, the
+        // scratchpad moves, and window close — the bar stayed hidden after
+        // fullscreen ended). ToggleBar returns before this: it is the user
+        // overriding bar visibility by hand, not a fullscreen transition.
+        self.sync_bar_for_fullscreen(cx);
         self.update_bar(cx);
         self.redraw_all(cx);
     }
