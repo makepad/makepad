@@ -1344,6 +1344,11 @@ pub struct DrawText {
     #[rust]
     pub align_row_height: Option<f32>,
 
+    /// The enclosing wrap flow's spacing when this text draws as one of its runs (see
+    /// `LayoutOptions::flow_wrap_spacing_in_lpxs`); TextFlow sets it before each run.
+    #[rust]
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
+
     /// Per-row horizontal alignment applied by the text layouter when the
     /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
     /// `0.5` = center, `1.0` = right. `y` is currently unused by the
@@ -2396,6 +2401,7 @@ impl DrawText {
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = self.resumable_first_row_min_spacing(cx) as f64;
+        let first_row_drop = self.first_row_anchor_drop(cx);
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -2436,10 +2442,7 @@ impl DrawText {
         // Per-row batching gives each visual row its own AlignEntry so that
         // finish_row alignment shifts apply independently per row. This
         // requires a fresh draw (no `many_instances` reuse buffer).
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        let per_row = self.many_instances.is_none() && text.rows.len() > 1;
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let per_row = false;
+        let per_row = !self.draws_wrapped_run_as_single_walk() && text.rows.len() > 1;
 
 
         if per_row {
@@ -2554,6 +2557,12 @@ impl DrawText {
             self.flush_slug_textures_if_allowed(cx);
         } else {
             // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
+            // A wrapped run's rows share one batch, so the whole run drops to center its first
+            // row on taller content before it. The layout already pulled the later rows up by it.
+            let run_drop = if text.rows.len() > 1 { first_row_drop } else { 0.0 };
+            let row_top_in_lpxs = origin_in_lpxs.y as f64;
+            let origin_in_lpxs = Point::new(origin_in_lpxs.x, origin_in_lpxs.y + run_drop as f32);
+            let new_turtle_pos = new_turtle_pos + dvec2(0.0, run_drop);
             let align_list_start = cx.align_list_len();
             if callback_before_text {
                 for (row_index, row) in text.rows.iter().enumerate() {
@@ -2652,9 +2661,9 @@ impl DrawText {
 
                 let first_row = &text.rows[0];
                 let turtle = cx.turtle_mut();
-                turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+                turtle.move_to(dvec2(origin_in_lpxs.x as f64, row_top_in_lpxs));
                 turtle.allocate_width(used_size_in_lpxs.width as f64);
-                turtle.allocate_height(row_height(first_row));
+                turtle.allocate_height(run_drop + row_height(first_row));
 
                 // The first row's walk owns every align entry this run emitted
                 // and is immovable — shifting it would displace the later
@@ -2673,30 +2682,28 @@ impl DrawText {
                 };
                 cx.emit_turtle_walk_with_role(
                     Rect {
-                        pos: dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64),
+                        pos: dvec2(origin_in_lpxs.x as f64, row_top_in_lpxs),
                         size: dvec2(
                             (first_row.width_in_lpxs * self.font_scale) as f64,
-                            row_height(first_row),
+                            run_drop + row_height(first_row),
                         ),
                     },
                     align_list_start,
                     Metrics::default(),
-                    self.align_row_height.map(|h| (h * self.font_scale) as f64),
+                    // Padding the centering height by the drop on both sides keeps the row's
+                    // center on the dropped text's center.
+                    self.align_row_height
+                        .map(|h| (h * self.font_scale) as f64 + 2.0 * run_drop),
                     first_row_role,
                 );
 
-                for row_index in 1..text.rows.len() {
-                    // A new turtle row starts at origin.y + used_height +
-                    // spacing. Anchoring the spacing to the turtle's real used
-                    // bottom — which includes any inline content on the
-                    // previous visual row that is taller than the text — lands
-                    // the turtle exactly on this laidout row's top, so turtle
-                    // geometry and glyph geometry agree at every internal row
-                    // boundary.
-                    let used_bottom = cx.turtle().origin().y + cx.turtle().used_height();
-                    let spacing = row_top(&text.rows[row_index]) - used_bottom;
-                    cx.turtle_new_line_with_spacing(spacing);
-                    cx.turtle_mut().allocate_height(row_height(&text.rows[row_index]));
+                for row in &text.rows[1..] {
+                    // Finishing a row can forgive part of its height, so rather than trusting
+                    // the advance we put the turtle right on this row's glyphs, which can't move.
+                    cx.turtle_new_line();
+                    let x = cx.turtle().pos().x;
+                    cx.turtle_mut().move_to(dvec2(x, row_top(row)));
+                    cx.turtle_mut().allocate_height(row_height(row));
                 }
 
                 let turtle = cx.turtle_mut();
@@ -2720,7 +2727,11 @@ impl DrawText {
                     },
                     empty_range,
                     Metrics::default(),
-                    Some(row_height(last_row)),
+                    // Center on the line's height like the first row does, so a scaled
+                    // run (code, sub/superscript) doesn't drag the row's center line.
+                    self.align_row_height
+                        .map(|h| (h * self.font_scale) as f64)
+                        .or(Some(row_height(last_row))),
                     crate::turtle::RowAlignRole::Anchor,
                 );
             }
@@ -2729,14 +2740,12 @@ impl DrawText {
         (text.rows.len(), text.is_truncated)
     }
 
-    /// Returns the `first_row_min_line_spacing_below_in_lpxs` a resumable run
-    /// passes to the layouter for the current turtle. In a centering wrap flow
-    /// this is the offset to the next turtle row (converted into layout units
-    /// by dividing out `font_scale`), so a continuation run's second row
-    /// clears inline content on its first visual row that is taller than the
-    /// text. Other flows pass zero and keep pure font-metric row spacing.
-    /// Every layout of the same run (draw, selection capture, wrap probes)
-    /// must use this same value so they share one layout-cache entry.
+    /// Returns the `first_row_min_line_spacing_below_in_lpxs` a resumable run passes to the
+    /// layouter: in a centering wrap flow, the current row's box less the text's centering in
+    /// it (`font_scale` divided out), so a continuation run's second row clears taller inline
+    /// content on its first row once the layouter adds the wrap gap. Other flows pass zero.
+    /// Every layout of one run (draw, selection capture, wrap probes) must use this same
+    /// value so they share one layout-cache entry.
     pub fn resumable_first_row_min_spacing(&self, cx: &Cx2d) -> f32 {
         if matches!(
             cx.turtle().layout().flow,
@@ -2746,28 +2755,35 @@ impl DrawText {
                 ..
             }
         ) {
-            // When the current row holds inline content taller than the text
-            // line (pills), the following row is expected to hold the same
-            // kind of content beside this run's text, and RowAlign::Center
-            // will seat that content's center on the text's center — placing
-            // its top (row_height − text_height)/2 ABOVE the text's top. The
-            // floor therefore positions the second row's text one full
-            // current-row advance below, plus that overhang, so centered
-            // content on the next row starts exactly one wrap gap below the
-            // current row's content with zero residual shift. When the text
-            // is the tallest content, the floor equals `next_row_offset()`
-            // and pure font-metric spacing wins where it is larger.
+            // The per-row path finishes this run's first row like any other: the row is as tall
+            // as its tallest item and the text centers on that, so the floor is the row's box
+            // measured from the centered text's top; the layouter adds the wrap gap below it.
             let row_height = cx.turtle().row_height();
             let text_row_height = self
                 .align_row_height
                 .map(|h| (h * self.font_scale) as f64)
                 .unwrap_or(row_height);
-            let overhang = ((row_height - text_row_height) * 0.5).max(0.0);
-            ((row_height + cx.turtle().wrap_spacing() + overhang)
-                / self.font_scale.max(0.0001) as f64) as f32
+            let centering = ((row_height - text_row_height) * 0.5).max(0.0);
+            ((row_height - centering) / self.font_scale.max(0.0001) as f64) as f32
         } else {
             0.0
         }
+    }
+
+    /// Whether a wrapped run draws as one immovable batch. The per-row path (macOS, iOS,
+    /// Android, web) centers each row on its own and needs a fresh draw.
+    fn draws_wrapped_run_as_single_walk(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "windows")) || self.many_instances.is_some()
+    }
+
+    /// How far a single-walk run's first row must sit below the turtle row's top so that
+    /// taller content before it on the row can center on it (see `Cx2d::row_center_anchor_drop`).
+    fn first_row_anchor_drop(&self, cx: &Cx2d) -> f64 {
+        if !self.draws_wrapped_run_as_single_walk() {
+            return 0.0;
+        }
+        self.align_row_height
+            .map_or(0.0, |h| cx.row_center_anchor_drop((h * self.font_scale) as f64))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2799,6 +2815,7 @@ impl DrawText {
                 wrap,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing,
+                flow_wrap_spacing_in_lpxs: self.flow_wrap_spacing_in_lpxs,
                 max_rows: if self.max_lines > 0 {
                     Some(self.max_lines)
                 } else {
