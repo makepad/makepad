@@ -1329,7 +1329,7 @@ mod tests {
         }
         // Builder-only registry rows are not WM clients, and hidden entries
         // resolve by id only, never by binary.
-        for id in ["wm", "wm-all", "director", "ai-hub", "stage"] {
+        for id in ["wm", "wm-all", "ai-hub", "stage"] {
             assert!(find_app(id).is_none(), "{} must not be launchable by the WM", id);
         }
         assert!(find_app("splash").is_some());

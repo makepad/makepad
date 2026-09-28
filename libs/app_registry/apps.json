@@ -141,11 +141,6 @@
     "features": ["localai", "flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"]
   },
   {
-    "id": "director", "label": "Director", "package": "makepad-app-director",
-    "dir": "apps/scope/director", "bin": "makepad-app-director", "manifest": null, "args": [],
-    "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": []
-  },
-  {
     "id": "wm", "label": "Makepad WM", "package": "makepad-app-wm",
     "dir": "apps/wm", "bin": "makepad-app-wm", "manifest": null, "args": [],
     "policy": "always_new", "menu_visible": false, "wm_launchable": false, "features": []

@@ -24,7 +24,7 @@
 //!   the row.
 //! - studio (apps/studio) is absent in this checkout today; its row stays
 //!   and is filtered out the same way.
-//! - wm, wm-all, director and ai-hub are built by Builder but are not
+//! - wm, wm-all and ai-hub are built by Builder but are not
 //!   windows the WM hosts (`wm_launchable: false`).
 
 use std::ffi::OsStr;
