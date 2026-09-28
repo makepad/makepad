@@ -70,6 +70,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::turtle::script_mod(vm);
     crate::shader::sdf::script_mod(vm);
     crate::shader::surface::script_mod(vm);
+    crate::shader::finish::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
     crate::shader::draw_cube::script_mod(vm);

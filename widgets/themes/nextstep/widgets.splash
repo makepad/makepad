@@ -153,8 +153,8 @@ mod.widgets.DropDown.draw_bg.pixel = fn() {
     }
     return field
 }
-true
 
 // Square two-line panel frames; the app keeps the same resident widgets.
 mod.widgets.PanelView.draw_bg.bevel = 1.0
 mod.widgets.PanelView.draw_bg.border_radius = 0.0
+true

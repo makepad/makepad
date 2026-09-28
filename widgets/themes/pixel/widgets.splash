@@ -1,0 +1,1824 @@
+use mod.prelude.widgets_internal.*
+
+// Pixel art: a pale green dot-matrix glass, every control framed in
+// square pixels.
+// Everything is drawn on a grid of big pixels, two device pixels square,
+// counted in window space so that every control shares one grid: a face
+// finds the big pixel a point lies in and tests its shape at that pixel's
+// centre, so every edge is a hard stair and no edge is ever soft. Controls
+// are caps: a frame of ink with its corners stepped off, a light row along
+// the top and left of the face, a shade row along the right and the foot,
+// a dark thickness under the face and a one-pixel shadow to the lower
+// right. A chosen cap is pushed in, dark, and lit by a small lamp. Wells
+// are dark and hold lit words. Panels are dithered.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 3.0 bottom: 4.5}
+mod.widgets.ButtonFlat.min_height = 26.0
+mod.widgets.ButtonFlat.spacing = 6.0
+mod.widgets.Button.draw_bg.border_radius = 0.0
+mod.widgets.Button.draw_bg.border_size = 0.67
+// A ROW OF FIELDS IS ONE HEIGHT: the box metrics are stated once here and
+// handed to each field below. Buttons stand at the same 26.
+let field_height = 26.0
+let field_pad_v = 3.0
+let field_radius = 0.0
+let field_border = 0.67
+
+// The room a Fit field takes: where a field is Fit, the padding IS its
+// height.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it takes
+// the height alone: a padding would displace its line.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+mod.widgets.Window.pass.clear_color = #a0b588
+
+// Plain views stop clipping, so a shadow pixel or a focus ring may fall
+// into the gap beside a control. Scroll views keep theirs.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+
+// ---------------------------------------------------------------------------
+// SHARED PARTS. Distances in points, negative inside, y down; `px` is one
+// device pixel in points and `b` one big pixel (two device pixels); `o` the
+// quad's origin in the window.
+
+// The palette: ink, the dark of wells and thickness, a second dark, the
+// deepest shade, the mid green of shade rows, the mute of a disabled face,
+// the glass, a cap's face, its face under the pointer and held, the light
+// row of a bevel, and the lit green of lamps and words on dark.
+let pa_ink = fn() -> vec3 { return vec3(0.051, 0.129, 0.090) }
+let pa_dark = fn() -> vec3 { return vec3(0.184, 0.282, 0.212) }
+let pa_dark2 = fn() -> vec3 { return vec3(0.243, 0.341, 0.267) }
+let pa_deep = fn() -> vec3 { return vec3(0.118, 0.200, 0.149) }
+let pa_mid = fn() -> vec3 { return vec3(0.369, 0.463, 0.341) }
+let pa_mute = fn() -> vec3 { return vec3(0.482, 0.569, 0.439) }
+let pa_ground = fn() -> vec3 { return vec3(0.627, 0.710, 0.533) }
+let pa_face = fn() -> vec3 { return vec3(0.667, 0.741, 0.565) }
+let pa_hi = fn() -> vec3 { return vec3(0.733, 0.796, 0.620) }
+let pa_down = fn() -> vec3 { return vec3(0.576, 0.659, 0.494) }
+let pa_light = fn() -> vec3 { return vec3(0.769, 0.827, 0.639) }
+let pa_lit = fn() -> vec3 { return vec3(0.839, 0.878, 0.698) }
+let pa_red = fn() -> vec3 { return vec3(0.420, 0.118, 0.094) }
+let pa_redd = fn() -> vec3 { return vec3(0.353, 0.110, 0.086) }
+
+let pa_g3 = fn(v: float) -> vec3 { return vec3(v, v, v) }
+
+// Premultiplied source-over, and a colour laid at a coverage.
+let pa_over = fn(dst: vec4, src: vec4) -> vec4 {
+    return src + dst * (1.0 - src.a)
+}
+let pa_lay = fn(dst: vec4, col: vec3, a: float) -> vec4 {
+    return pa_over(dst, vec4(col * a, a))
+}
+
+let pa_grow = fn(rp: vec2, rs: vec2, m: float) -> vec4 {
+    return vec4(rp.x - m, rp.y - m, rs.x + 2.0 * m, rs.y + 2.0 * m)
+}
+
+// The big pixel p lies in, counted in the window, and its centre in the
+// quad's own points.
+let pa_idx = fn(p: vec2, o: vec2, b: float) -> vec2 {
+    return floor((p + o) / b + vec2(0.001, 0.001))
+}
+let pa_cell = fn(p: vec2, o: vec2, b: float) -> vec2 {
+    return (pa_idx(p, o, b) + vec2(0.5, 0.5)) * b - o
+}
+// A local coordinate moved to the nearest line of the grid.
+let pa_snap = fn(v: float, o: float, b: float) -> float {
+    return floor((o + v) / b + 0.5) * b - o
+}
+// A box snapped to the grid: .xy the low corner, .zw the high one.
+let pa_sbox = fn(o: vec2, lo: vec2, hi: vec2, b: float) -> vec4 {
+    return vec4(pa_snap(lo.x, o.x, b), pa_snap(lo.y, o.y, b), pa_snap(hi.x, o.x, b), pa_snap(hi.y, o.y, b))
+}
+// The distance from a pixel centre to a box with its corners stepped off
+// by `notch` big pixels.
+let pa_dbox = fn(pc: vec2, sb: vec4, notch: float, b: float) -> float {
+    let c = (sb.xy + sb.zw) * 0.5
+    let h = (sb.zw - sb.xy) * 0.5
+    return Finish.sd_chamfer(pc, c, h, notch * b * 1.2 + 0.001)
+}
+// Dithers on the big pixels: a checker, one pixel in four, and the ordered
+// 2 x 2 threshold (0.125 .. 0.875).
+let pa_checker = fn(p: vec2, o: vec2, b: float) -> float {
+    let q = pa_idx(p, o, b)
+    return step(0.5, fract((q.x + q.y) * 0.5))
+}
+let pa_quarter = fn(p: vec2, o: vec2, b: float) -> float {
+    let q = pa_idx(p, o, b)
+    return step(0.5, fract(q.x * 0.5)) * step(0.5, fract(q.y * 0.5))
+}
+let pa_bayer = fn(p: vec2, o: vec2, b: float) -> float {
+    let q = pa_idx(p, o, b)
+    let x = step(0.5, fract(q.x * 0.5))
+    let y = step(0.5, fract(q.y * 0.5))
+    return (mix(mix(0.0, 2.0, x), mix(3.0, 1.0, x), y) + 0.5) * 0.25
+}
+// A ring of pixels outside a shape: the k-th ring out (0 touches it).
+let pa_ring_out = fn(d: float, k: float, b: float) -> float {
+    return step(k * b, d) * step(d, (k + 1.0) * b)
+}
+
+// A RAISED CAP. `sb` its box on the grid; `notch` the corner step; `th`
+// the rows of thickness under its face; `face` its face, `hl` the light row
+// along its top and left, `sh` the shade row along its right and above its
+// foot, `base` the thickness, `rim` the frame; `shadow` the alpha of the
+// shadow one pixel to the lower right. Premultiplied.
+let pa_cap = fn(pc: vec2, b: float, sb: vec4, notch: float, th: float, face: vec3, hl: vec3, sh: vec3, base: vec3, rim: vec3, shadow: float) -> vec4 {
+    let d = pa_dbox(pc, sb, notch, b)
+    let inside = step(d, 0.0)
+    let ds = pa_dbox(pc - vec2(b, b), sb, notch, b)
+    let sa = step(ds, 0.0) * (1.0 - inside) * shadow
+    let out = vec4(pa_ink() * sa, sa)
+    let rim_a = inside * step(-b, d)
+    let foot = sb.w - (th + 1.0) * b
+    let band = inside * (1.0 - rim_a) * step(foot, pc.y)
+    let top = step(pc.y, sb.y + 2.0 * b)
+    let left = step(pc.x, sb.x + 2.0 * b)
+    let right = step(sb.z - 2.0 * b, pc.x)
+    let bot = step(foot - b, pc.y)
+    let lit = max(top, left)
+    let shd = max(right, bot) * (1.0 - lit)
+    var col = face
+    col = mix(col, hl, lit)
+    col = mix(col, sh, shd)
+    col = mix(col, base, band)
+    col = mix(col, rim, rim_a)
+    return pa_over(out, vec4(col * inside, inside))
+}
+
+// A PUSHED-IN CAP, the chosen one of a group: sunk a pixel, dark, a deep
+// row under its top edge and down its left, and a small lamp lit under its
+// word (`lamp` 0 draws it unlit).
+let pa_sunk = fn(pc: vec2, b: float, sb: vec4, notch: float, face: vec3, rim: vec3, lamp: float, lampw: float) -> vec4 {
+    let d = pa_dbox(pc, sb, notch, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    let top = step(pc.y, sb.y + 2.0 * b)
+    let left = step(pc.x, sb.x + 2.0 * b)
+    var col = face
+    col = mix(col, pa_deep(), max(top, left))
+    // the lamp: a row of lit pixels over the bottom rim, the label's width
+    // at most
+    let cx = (sb.x + sb.z) * 0.5
+    let ly = step(sb.w - 3.0 * b, pc.y) * step(pc.y, sb.w - 2.0 * b)
+    let la = step(abs(pc.x - cx), lampw * b) * ly * inside
+    col = mix(col, mix(pa_dark2(), pa_lit(), lamp), la)
+    col = mix(col, rim, rim_a)
+    return vec4(col * inside, inside)
+}
+
+// The dotted focus ring: every other pixel of the second ring out.
+let pa_focus = fn(d: float, p: vec2, o: vec2, b: float) -> float {
+    return pa_ring_out(d, 1.0, b) * pa_checker(p, o, b)
+}
+
+// A chevron pointing down, in whole pixels: 7 across and 4 deep, its top
+// row at `at` (a pixel centre); coverage of the pixel at pc. Rows 0 and 1
+// are two arms two pixels thick, row 2 the three middle pixels, row 3 the
+// tip.
+let pa_chevron = fn(pc: vec2, at: vec2, b: float) -> float {
+    let q = floor((pc - at) / b + vec2(0.5, 0.5))
+    let row = q.y
+    let ax = abs(q.x)
+    let arms = step(-0.5, row) * step(row, 1.5) * step(2.0 - row - 0.5, ax) * step(ax, 3.0 - row + 0.5)
+    let r2 = step(abs(row - 2.0), 0.5) * step(ax, 1.5)
+    let r3 = step(abs(row - 3.0), 0.5) * step(ax, 0.5)
+    return max(arms, max(r2, r3))
+}
+
+// ---------------------------------------------------------------------------
+// BUTTONS. One face for the family; the template picks the kind:
+// 0 the raised cap (frame 1 adds an ink keyline inside its light row, frame
+//   2 dithers its face); 1 the primary, a dark cap in an ink, lit and ink
+//   frame with a lamp under its word; 2 the outline, a frame with no cap;
+//   3 the flat, bare until the pointer comes; 4 the warning cap, its
+//   thickness and its word a dark red.
+// The quad is grown 4 points for the shadow and the focus ring.
+let pa_button_face = fn(p: vec2, o: vec2, size: vec2, b: float, kind: float, frame: float, hover: float, down: float, focus: float, disabled: float) -> vec4 {
+    let dis = step(0.5, disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, hover) * live
+    let held = step(0.5, down) * live
+    let foc = step(0.5, focus) * live
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size, b)
+    let pc = pa_cell(p, o, b)
+    let flat = step(1.5, kind) * step(kind, 3.5)
+    let primary = step(0.5, kind) * step(kind, 1.5)
+    let danger = step(3.5, kind)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the cap drops a pixel while held
+    let sbc = vec4(sb.x, sb.y + held * b * (1.0 - flat), sb.z, sb.w)
+    let d = pa_dbox(pc, sbc, 1.0, b)
+    if flat < 0.5 {
+        let th = 1.0 - held
+        var face = mix(mix(pa_face(), pa_hi(), hov), pa_down(), held)
+        var hl = mix(pa_light(), pa_mute(), held)
+        var sh = mix(pa_mute(), pa_down(), held)
+        var base = mix(pa_deep(), pa_redd(), danger)
+        face = mix(face, mix(mix(pa_dark(), pa_dark2(), hov), pa_deep(), held), primary)
+        hl = mix(hl, mix(pa_lit(), pa_mid(), held), primary)
+        sh = mix(sh, mix(pa_lit(), pa_dark(), held), primary)
+        face = mix(face, pa_mute(), dis)
+        hl = mix(hl, vec3(0.541, 0.627, 0.494), dis)
+        sh = mix(sh, pa_mute(), dis)
+        base = mix(base, pa_mid(), dis)
+        let rim = mix(pa_ink(), pa_mid(), dis)
+        out = pa_cap(pc, b, sbc, 1.0, th, face, hl, sh, base, rim, 0.30 * (1.0 - held) * live)
+        // the face box: the cap above its thickness
+        let foot = sbc.w - (th + 1.0) * b
+        let df = pa_dbox(pc, vec4(sbc.x, sbc.y, sbc.z, foot), 1.0, b)
+        // a keyline two pixels in: the primary's inner ink, the second
+        // action's frame
+        let second = step(0.5, frame) * step(frame, 1.5)
+        let kl = step(-3.0 * b, df) * step(df, -2.0 * b) * max(primary, second) * step(pc.y, foot)
+        out = pa_lay(out, mix(pa_ink(), pa_mid(), dis), kl)
+        // the third action: its face dithered with the light row's colour
+        let dith = step(1.5, frame) * step(df, -2.0 * b) * pa_checker(p, o, b) * step(pc.y, foot)
+        out = pa_lay(out, mix(mix(pa_hi(), pa_light(), hov), pa_face(), held), dith * live)
+        // the primary's lamp, in the thickness band under its word
+        let cx = (sbc.x + sbc.z) * 0.5
+        let ly = step(sbc.w - 2.0 * b, pc.y) * step(pc.y, sbc.w - b)
+        let la = step(abs(pc.x - cx), 3.0 * b) * ly * primary
+        out = pa_lay(out, mix(mix(pa_lit(), vec3(0.910, 0.933, 0.839), hov), pa_mid(), dis), la)
+    } else {
+        let bare = step(2.5, kind)
+        // the frame: always for the outline, under the pointer or held for
+        // the flat
+        let show = max(1.0 - bare, max(hov, held))
+        let inside = step(d, 0.0)
+        let rim_a = inside * step(-b, d) * show
+        let inner = inside * step(d, -b)
+        let da = inner * pa_checker(p, o, b) * hov * (1.0 - held)
+        out = pa_lay(out, pa_light(), da)
+        out = pa_lay(out, pa_down(), inner * held)
+        let rcol = mix(mix(pa_ink(), pa_mid(), bare * (1.0 - held)), pa_mid(), dis)
+        out = pa_lay(out, rcol, rim_a)
+        // the outline's light row under its top frame, a hint of a cap
+        let hlr = inner * step(pc.y, sbc.y + 2.0 * b) * (1.0 - bare) * (1.0 - held)
+        out = pa_lay(out, pa_light(), hlr * 0.0)
+    }
+    let kf = pa_focus(pa_dbox(pc, sb, 1.0, b), p, o, b) * foc
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+
+// The wait spinner the stock face drew, which this one must draw too: eight
+// two-pixel blocks round the middle of the face, the lit one walking on the
+// button's own animation clock.
+let pa_wait = fn(p: vec2, o: vec2, c: vec2, b: float, anim: float, ink: vec3, ghost: vec3) -> vec4 {
+    let pc = pa_cell(p, o, b)
+    let v = pc - c
+    var th = atan2(v.x, -v.y)
+    if th < 0.0 {
+        th = th + 2.0 * PI
+    }
+    let k = floor(th / (PI * 0.25) + 0.5)
+    let ang = k * PI * 0.25
+    let dir = vec2(sin(ang), -cos(ang))
+    let q = v - dir * 4.0 * b
+    let a = step(max(abs(q.x), abs(q.y)), b * 1.01)
+    let head = floor(fract(anim) * 8.0)
+    let age = fract((head - k) / 8.0 + 1.0)
+    let lit = step(age, 0.2)
+    let col = mix(ghost, ink, lit)
+    return vec4(col * a, a)
+}
+
+let pa_button = fn(pos: vec2, size: vec2, o: vec2, px: float, kind: float, frame: float, hover: float, down: float, focus: float, disabled: float, loading: float, anim: float, m: float) -> vec4 {
+    let b = 2.0 * px
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    var out = pa_button_face(p, o, size, b, kind, frame, hover, down, focus, disabled)
+    if loading > 0.001 {
+        let c = vec2(pa_snap(size.x * 0.5, o.x, b), pa_snap(size.y * 0.5 - b, o.y, b))
+        let dark = step(0.5, kind) * step(kind, 1.5)
+        let ink = mix(pa_ink(), pa_lit(), dark)
+        let ghost = mix(pa_mute(), pa_dark2(), dark)
+        let w = pa_wait(p, o, c, b, anim, ink, ghost)
+        out = pa_over(out, w * loading)
+    }
+    return out
+}
+
+mod.widgets.ButtonFlat.draw_bg.kind = uniform(3.0)
+mod.widgets.ButtonFlat.draw_bg.frame = uniform(0.0)
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return pa_button(self.pos, self.rect_size, self.rect_pos, px, self.kind, self.frame, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, 4.0)
+}
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+
+// Inks: ink on the glass and on a cap.
+mod.widgets.ButtonFlat.draw_text.color = #0d2117
+mod.widgets.ButtonFlat.draw_text.color_hover = #0d2117
+mod.widgets.ButtonFlat.draw_text.color_down = #0d2117
+mod.widgets.ButtonFlat.draw_text.color_focus = #0d2117
+mod.widgets.ButtonFlat.draw_text.color_disabled = #435c42
+mod.widgets.ButtonFlat.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonFlat.draw_icon.color = #0d2117
+mod.widgets.ButtonFlat.icon_walk.width = 14.0
+
+// The caps: the standard key and everything cut from it. They are handed a
+// draw object of their own, since most of them share the flat button's.
+let pa_cap_bg = mod.widgets.ButtonFlat.draw_bg{
+    kind: 0.0
+    frame: 0.0
+}
+let pa_capped = fn(w) {
+    w.draw_bg = pa_cap_bg
+}
+pa_capped(mod.widgets.Button)
+pa_capped(mod.widgets.ButtonGradientX)
+pa_capped(mod.widgets.ButtonGradientY)
+pa_capped(mod.widgets.ButtonIcon)
+pa_capped(mod.widgets.ButtonGradientXIcon)
+pa_capped(mod.widgets.ButtonGradientYIcon)
+pa_capped(mod.widgets.ButtonXs)
+pa_capped(mod.widgets.ButtonSm)
+pa_capped(mod.widgets.ButtonLg)
+pa_capped(mod.widgets.ButtonXl)
+pa_capped(mod.widgets.ButtonCompound)
+
+// The primary: the dark cap, lit words, the one dark key of a row.
+mod.widgets.ButtonPrimary.draw_bg.kind = 1.0
+mod.widgets.ButtonPrimary.draw_text.color = #d6e0b2
+mod.widgets.ButtonPrimary.draw_text.color_hover = #e8eed6
+mod.widgets.ButtonPrimary.draw_text.color_down = #c0cf9f
+mod.widgets.ButtonPrimary.draw_text.color_focus = #d6e0b2
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #3e5744
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.ButtonPrimary.draw_icon.color = #d6e0b2
+
+// The second action: the cap with an ink keyline inside its light row.
+mod.widgets.ButtonSecondary.draw_bg.kind = 0.0
+mod.widgets.ButtonSecondary.draw_bg.frame = 1.0
+mod.widgets.ButtonSecondary.draw_text.color = #0d2117
+mod.widgets.ButtonSecondary.draw_text.color_hover = #0d2117
+mod.widgets.ButtonSecondary.draw_text.color_down = #0d2117
+mod.widgets.ButtonSecondary.draw_text.color_focus = #0d2117
+mod.widgets.ButtonSecondary.draw_text.color_disabled = #435c42
+mod.widgets.ButtonSecondary.draw_icon.color = #0d2117
+
+// The tonal action: the cap with a dithered face.
+mod.widgets.ButtonTertiary.draw_bg.kind = 0.0
+mod.widgets.ButtonTertiary.draw_bg.frame = 2.0
+mod.widgets.ButtonTertiary.draw_text.color = #0d2117
+mod.widgets.ButtonTertiary.draw_text.color_hover = #0d2117
+mod.widgets.ButtonTertiary.draw_text.color_down = #0d2117
+mod.widgets.ButtonTertiary.draw_text.color_focus = #0d2117
+mod.widgets.ButtonTertiary.draw_text.color_disabled = #435c42
+mod.widgets.ButtonTertiary.draw_icon.color = #0d2117
+
+// The destructive action: the cap with a dark red thickness and word, the
+// one other colour of the sheet and only where it means a warning.
+mod.widgets.ButtonDanger.draw_bg.kind = 4.0
+mod.widgets.ButtonDanger.draw_bg.frame = 0.0
+mod.widgets.ButtonDanger.draw_text.color = #6b1e18
+mod.widgets.ButtonDanger.draw_text.color_hover = #6b1e18
+mod.widgets.ButtonDanger.draw_text.color_down = #6b1e18
+mod.widgets.ButtonDanger.draw_text.color_focus = #6b1e18
+mod.widgets.ButtonDanger.draw_text.color_disabled = #435c42
+mod.widgets.ButtonDanger.draw_icon.color = #6b1e18
+
+// The outline: a frame of ink round the glass, no cap.
+mod.widgets.ButtonOutline.draw_bg.kind = 2.0
+mod.widgets.ButtonOutline.draw_bg.frame = 0.0
+mod.widgets.ButtonOutline.draw_text.color = #0d2117
+mod.widgets.ButtonOutline.draw_text.color_hover = #0d2117
+mod.widgets.ButtonOutline.draw_text.color_down = #0d2117
+mod.widgets.ButtonOutline.draw_text.color_focus = #0d2117
+mod.widgets.ButtonOutline.draw_text.color_disabled = #435c42
+mod.widgets.ButtonOutline.draw_icon.color = #0d2117
+mod.widgets.ButtonDashed.draw_bg.kind = 2.0
+
+// The flatter faces: bare until the pointer comes.
+mod.widgets.ButtonFlatter.draw_bg.kind = 3.0
+mod.widgets.ButtonFlatter.draw_bg.frame = 0.0
+
+// The size rungs keep the family's padding; a small key is 20 tall, a
+// large one 32.
+mod.widgets.ButtonSm.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 1.5 bottom: 3.0}
+mod.widgets.ButtonSm.min_height = 21.33
+mod.widgets.ButtonXs.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 1.0 bottom: 2.5}
+mod.widgets.ButtonXs.min_height = 18.67
+mod.widgets.ButtonLg.padding = mod.turtle.Inset{left: 13.0 right: 13.0 top: 3.0 bottom: 5.0}
+mod.widgets.ButtonLg.min_height = 32.0
+mod.widgets.ButtonXl.padding = mod.turtle.Inset{left: 16.0 right: 16.0 top: 4.0 bottom: 6.0}
+mod.widgets.ButtonXl.min_height = 37.33
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 3.0 bottom: 4.5}
+
+// HELD STATES. The stock tracks write the pointer's hover and the press as
+// snapped values, and a snapped value never arrives when a state is held
+// from the start (a still page, a restored screen). The same states with
+// plain values and a snapped entry look and move the same under a live
+// pointer, and hold.
+let pa_held_states = fn(w) {
+    w.animator.hover.on.from = {all: Snap}
+    w.animator.hover.on.apply = {draw_bg: {down: 0.0, hover: 1.0} draw_text: {down: 0.0, hover: 1.0}}
+    w.animator.hover.down.from = {all: Snap}
+    w.animator.hover.down.apply = {draw_bg: {down: 1.0, hover: 1.0} draw_text: {down: 1.0, hover: 1.0}}
+}
+pa_held_states(mod.widgets.ButtonFlat)
+pa_held_states(mod.widgets.CheckBoxFlat)
+pa_held_states(mod.widgets.ToggleFlat)
+pa_held_states(mod.widgets.RadioButtonFlat)
+pa_held_states(mod.widgets.RadioButtonTabFlat)
+pa_held_states(mod.widgets.TextInputFlat)
+pa_held_states(mod.widgets.DropDownFlat)
+
+// ---------------------------------------------------------------------------
+// CHECK BOXES. A box ten pixels square: an ink frame with its corners
+// stepped off, a light well inside with a shade row under its top and down
+// its left, and a lit lip under its foot where the cut catches the light.
+// On, the well is dark and holds a lit pixel check; mixed, a lit bar.
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 5.0 bottom: 5.0}
+mod.widgets.CheckBoxFlat.label_walk.margin = mod.turtle.Inset{left: 20.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = 13.34
+mod.widgets.CheckBoxFlat.draw_bg.border_size = 0.67
+mod.widgets.CheckBoxFlat.draw_bg.border_radius = 0.0
+mod.widgets.CheckBoxFlat.draw_text.color_error = #0d2117
+
+// The mark box of a check box, radio or toggle, on the grid.
+let pa_markbox = fn(size: vec2, o: vec2, w: float, hgt: float, at_end: float, b: float) -> vec4 {
+    let x = (size.x - w) * at_end
+    let y0 = pa_snap(size.y * 0.5 - hgt * 0.5, o.y, b)
+    let x0 = pa_snap(x, o.x, b)
+    return vec4(x0, y0, x0 + floor(w / b + 0.5) * b, y0 + floor(hgt / b + 0.5) * b)
+}
+
+// A segment from a to b: the distance to it.
+let pa_seg = fn(p: vec2, a: vec2, c: vec2) -> float {
+    let pa = p - a
+    let ba = c - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * t)
+}
+
+// A sunk well of pixels (check boxes, radio wells): its fill, a shade row
+// along the top and left inside the frame, a lit lip outside its foot.
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, self.hover) * live
+    let held = step(0.5, self.down) * live
+    let sb = pa_markbox(self.rect_size, o, self.size, self.size, self.mark_at_end, b)
+    let pc = pa_cell(p, o, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    let on = step(0.5, self.active) * (1.0 - step(0.5, self.mixed))
+    let mixd = step(0.5, self.mixed)
+    let dark = max(on, mixd)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the lit lip under the foot and down the right, outside the frame
+    let lip = pa_ring_out(d, 0.0, b) * max(step(sb.w, pc.y), step(sb.z, pc.x)) * live
+    out = pa_lay(out, pa_light(), lip)
+    // the well
+    var col = mix(mix(pa_face(), pa_hi(), hov), pa_down(), held)
+    col = mix(col, mix(mix(pa_dark(), pa_dark2(), hov), pa_deep(), held), dark)
+    let tl = step(min(pc.x - sb.x, pc.y - sb.y), 2.0 * b)
+    col = mix(col, mix(mix(pa_mute(), pa_mid(), held), pa_deep(), dark), tl)
+    // disabled: a dithered mute
+    let dcol = mix(pa_mute(), vec3(0.541, 0.627, 0.494), pa_checker(p, o, b))
+    col = mix(col, dcol, dis)
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), rim_a)
+    out = pa_lay(out, col, inside)
+    // the check: a stepped stroke two pixels thick, ten pixels to the box
+    let u = (pc - sb.xy) / max(sb.zw - sb.xy, vec2(b, b)) * 10.0
+    // the check's pixels, one row mask per line of the ten: rows 2 to 6
+    let ci = floor(u.x)
+    let cj = floor(u.y)
+    var mask = 0.0
+    mask = mix(mask, 128.0, step(abs(cj - 2.0), 0.5))
+    mask = mix(mask, 192.0, step(abs(cj - 3.0), 0.5))
+    mask = mix(mask, 100.0, step(abs(cj - 4.0), 0.5))
+    mask = mix(mask, 60.0, step(abs(cj - 5.0), 0.5))
+    mask = mix(mask, 24.0, step(abs(cj - 6.0), 0.5))
+    let bit = step(0.5, fract(floor(mask / pow(2.0, ci) + 0.001) * 0.5))
+    let ck = bit * on * (1.0 - rim_a) * step(0.0, ci) * step(ci, 9.0)
+    let bar = step(2.0, u.x) * step(u.x, 8.0) * step(4.0, u.y) * step(u.y, 6.0) * mixd
+    let mk = max(ck, bar)
+    out = pa_lay(out, mix(mix(pa_lit(), pa_light(), held), pa_mid(), dis), mk)
+    // an error doubles the frame
+    let er = pa_ring_out(d, 0.0, b) * step(0.5, self.error)
+    out = pa_lay(out, pa_ink(), er)
+    let kf = pa_focus(d, p, o, b) * step(0.5, self.focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+
+// TOGGLES. A dark slot in an ink frame, two cells long; the knob is a
+// light cap standing in one cell, and the other cell holds a small lamp,
+// lit when the switch is on.
+mod.widgets.ToggleFlat.label_walk.margin = mod.turtle.Inset{left: 39.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleFlat.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
+mod.widgets.ToggleFlat.draw_bg.size = 16.0
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = 2.0
+mod.widgets.ToggleFlat.draw_bg.knob_inset = 1.33
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, self.hover) * live
+    let held = step(0.5, self.down) * live
+    let tw = self.size * self.pill_aspect
+    let sb = pa_markbox(self.rect_size, o, tw, self.size, self.mark_at_end, b)
+    let pc = pa_cell(p, o, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    let t = step(0.5, mix(self.active, self.drag_pos, self.drag))
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the lit lip under the foot
+    let lip = pa_ring_out(d, 0.0, b) * step(sb.w, pc.y) * live
+    out = pa_lay(out, pa_light(), lip)
+    // the slot: dark, a deep row under its top edge; dithered under the
+    // pointer
+    var col = mix(pa_dark(), pa_deep(), step(pc.y, sb.y + 2.0 * b))
+    col = mix(col, pa_dark2(), hov * pa_checker(p, o, b))
+    col = mix(col, mix(pa_mute(), pa_mid(), pa_checker(p, o, b)), dis)
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), rim_a)
+    out = pa_lay(out, col, inside)
+    // the knob: a cap in one half, a pixel in from the frame
+    let hw = (sb.z - sb.x) * 0.5
+    let kx = sb.x + t * hw
+    let kb = vec4(kx + b, sb.y + b, kx + hw - b * 0.0 + b * 0.0, sb.w - b)
+    let kb2 = vec4(kb.x, kb.y, kx + hw, kb.w)
+    let kface = mix(mix(pa_light(), pa_lit(), hov), pa_down(), held)
+    let khl = mix(pa_lit(), pa_mute(), held)
+    let ksh = mix(pa_mute(), pa_down(), held)
+    let kf2 = mix(kface, vec3(0.604, 0.678, 0.541), dis)
+    let knob = pa_cap(pc, b, kb2, 1.0, 1.0 - held, kf2, mix(khl, kf2, dis), mix(ksh, pa_mute(), dis), mix(pa_mid(), pa_mute(), dis), mix(pa_ink(), pa_mid(), dis), 0.0)
+    out = pa_over(out, knob)
+    // the lamp in the free half: two by two pixels, lit when on
+    let lx = mix(sb.z - hw * 0.5, sb.x + hw * 0.5, t)
+    let lc = vec2(pa_snap(lx, o.x, b), (sb.y + sb.w) * 0.5)
+    let lq = abs(pc - lc)
+    let la = step(max(lq.x, lq.y), b) * (1.0 - step(0.5, knob.a))
+    let lcol = mix(pa_mid(), pa_lit(), t * live)
+    out = pa_lay(out, lcol, la)
+    let el = pa_ring_out(d, 0.0, b) * step(0.5, self.error)
+    out = pa_lay(out, pa_ink(), el)
+    let kf = pa_focus(d, p, o, b) * step(0.5, self.focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+mod.widgets.ToggleFlat.clip_x = false
+mod.widgets.ToggleFlat.clip_y = false
+
+// RADIOS. A pixel circle ten across: an ink ring, a light well with a shade
+// arc under its top and left, a lit lip under its foot. Chosen, a dark disc
+// in the well with a lit two by two lamp in its middle.
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 0.0 right: 8.0 top: 5.0 bottom: 5.0}
+mod.widgets.RadioButtonFlat.label_walk.margin = mod.turtle.Inset{left: 20.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonFlat.draw_bg.size = 13.34
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, self.hover) * live
+    let held = step(0.5, self.down) * live
+    let sb = pa_markbox(self.rect_size, o, self.size, self.size, 0.0, b)
+    let c = (sb.xy + sb.zw) * 0.5
+    let rad = (sb.z - sb.x) * 0.5 - 0.15 * b
+    let pc = pa_cell(p, o, b)
+    let v = pc - c
+    let r = length(v)
+    let d = r - rad
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    let on = step(0.5, self.active)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let lip = step(rad, r) * step(r, rad + b) * step(0.35 * rad, v.y) * live
+    out = pa_lay(out, pa_light(), lip)
+    var col = mix(mix(pa_face(), pa_hi(), hov), pa_down(), held)
+    // the shade arc: the ring inside the frame, on its upper left half
+    let arc = step(-2.0 * b, d) * step(v.x + v.y, 0.0)
+    col = mix(col, mix(pa_mute(), pa_mid(), held), arc)
+    let dcol = mix(pa_mute(), vec3(0.541, 0.627, 0.494), pa_checker(p, o, b))
+    col = mix(col, dcol, dis)
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), rim_a)
+    out = pa_lay(out, col, inside)
+    // the chosen disc and its lamp
+    let disc = step(r, rad - 1.9 * b) * on
+    out = pa_lay(out, mix(mix(pa_dark(), pa_deep(), held), pa_mid(), dis), disc)
+    let lq = abs(v)
+    let lamp = step(max(lq.x, lq.y), b) * on
+    out = pa_lay(out, mix(pa_lit(), pa_light(), dis), lamp)
+    let kf = step(rad + b, r) * step(r, rad + 2.0 * b) * pa_checker(p, o, b) * step(0.5, self.focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+
+// A caption cap, the cell of a tab row or a radio tab: raised at rest, the
+// light row dithered under the pointer; chosen or held, pushed in and dark
+// with its lamp lit.
+let pa_caption = fn(p: vec2, o: vec2, sb: vec4, b: float, chosen: float, hover: float, held: float, focus: float, disabled: float, lampw: float) -> vec4 {
+    let dis = step(0.5, disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, hover) * live
+    let hd = step(0.5, held) * live
+    let sel = step(0.5, chosen)
+    let pc = pa_cell(p, o, b)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if sel + hd > 0.5 {
+        let sbs = vec4(sb.x, sb.y + b, sb.z, sb.w)
+        let face = mix(mix(pa_dark(), pa_dark2(), hov), pa_mute(), dis)
+        out = pa_sunk(pc, b, sbs, 1.0, face, mix(pa_ink(), pa_mid(), dis), sel * live, lampw)
+    } else {
+        let face = mix(mix(pa_face(), pa_hi(), hov), pa_mute(), dis)
+        let hl = mix(pa_light(), vec3(0.541, 0.627, 0.494), dis)
+        let sh = mix(pa_mute(), pa_mute(), dis)
+        out = pa_cap(pc, b, sb, 1.0, 1.0, face, hl, sh, mix(pa_deep(), pa_mid(), dis), mix(pa_ink(), pa_mid(), dis), 0.30 * live)
+    }
+    let kf = pa_focus(pa_dbox(pc, sb, 1.0, b), p, o, b) * step(0.5, focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+
+// RADIO TABS: caption caps.
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 5.0 bottom: 6.5}
+mod.widgets.RadioButtonTabFlat.label_walk.margin = mod.turtle.Inset{left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #0d2117
+mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #0d2117
+mod.widgets.RadioButtonTabFlat.draw_text.color_down = #d6e0b2
+mod.widgets.RadioButtonTabFlat.draw_text.color_focus = #0d2117
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #d6e0b2
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #435c42
+mod.widgets.RadioButtonTabFlat.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sb = pa_sbox(self.rect_pos, vec2(0.0, 0.0), self.rect_size, b)
+    return pa_caption(p, self.rect_pos, sb, b, self.active, self.hover, self.down, self.focus, self.disabled, 3.0)
+}
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTab.clip_x = false
+mod.widgets.RadioButtonTab.clip_y = false
+
+// ---------------------------------------------------------------------------
+// SLIDERS. A rail five pixels deep: an ink frame, dark inside with a deep
+// row under its top, the value's run lit with a light row along its top,
+// and a lit lip under the frame's foot. The thumb is a raised cap eight
+// pixels wide with a grip line down its middle; it drops a pixel while
+// dragged.
+let pa_rail = fn(p: vec2, o: vec2, b: float, sb: vec4, lo: float, hi: float, dis: float) -> vec4 {
+    let pc = pa_cell(p, o, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let lip = pa_ring_out(d, 0.0, b) * step(sb.w, pc.y) * (1.0 - dis)
+    out = pa_lay(out, pa_light(), lip)
+    let top = step(pc.y, sb.y + 2.0 * b)
+    let lit = step(lo, pc.x) * step(pc.x, hi)
+    var col = mix(pa_dark(), pa_deep(), top)
+    col = mix(col, mix(pa_lit(), vec3(0.910, 0.933, 0.839), top), lit)
+    col = mix(col, mix(mix(pa_mute(), vec3(0.541, 0.627, 0.494), pa_checker(p, o, b)), pa_light(), lit), dis)
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), rim_a)
+    return pa_lay(out, col, inside)
+}
+
+let pa_thumb = fn(p: vec2, o: vec2, b: float, hx: float, yc: float, w: float, hgt: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
+    let live = 1.0 - dis
+    let hov = step(0.5, hover) * live
+    let dr = step(0.5, drag) * live
+    let pc = pa_cell(p, o, b)
+    let x0 = pa_snap(hx - w * b * 0.5, o.x, b)
+    let y0 = pa_snap(yc - hgt * b * 0.5, o.y, b)
+    let sb = vec4(x0, y0 + dr * b, x0 + w * b, y0 + hgt * b)
+    let face = mix(mix(mix(pa_light(), pa_lit(), hov), pa_down(), dr), pa_mute(), dis)
+    let hl = mix(mix(pa_lit(), pa_mute(), dr), pa_mute(), dis)
+    let sh = mix(mix(pa_mute(), pa_down(), dr), pa_mute(), dis)
+    var out = pa_cap(pc, b, sb, 1.0, 1.0 - dr, face, hl, sh, mix(pa_deep(), pa_mid(), dis), mix(pa_ink(), pa_mid(), dis), 0.32 * (1.0 - dr) * live)
+    // the grip: one ink column down the middle of the face
+    let gy = step(sb.y + 3.0 * b, pc.y) * step(pc.y, sb.w - 3.0 * b - (1.0 - dr) * b)
+    let ga = step(abs(pc.x - (x0 + w * b * 0.5) + 0.5 * b), 0.51 * b) * gy
+    out = pa_lay(out, pa_mid(), ga)
+    let kf = pa_focus(pa_dbox(pc, vec4(x0, y0, x0 + w * b, y0 + hgt * b), 1.0, b), p, o, b) * step(0.5, focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+
+let pa_slider = fn(p: vec2, o: vec2, size: vec2, px: float, top: float, slide: float, origin: float, arc_origin: float, hover: float, focus: float, drag: float, disabled: float, x0: float, x1: float, thumb: float) -> vec4 {
+    let b = 2.0 * px
+    let dis = step(0.5, disabled)
+    let yc = (top + size.y) * 0.5
+    let tw = 8.0
+    let lo_t = min(origin, slide) * arc_origin
+    let hi_t = mix(slide, max(origin, slide), arc_origin)
+    let span0 = x0 + tw * b * 0.5 * thumb
+    let span1 = x1 - tw * b * 0.5 * thumb
+    let hx = span0 + slide * (span1 - span0)
+    let rh = mix(3.0, 5.0, thumb)
+    let ry = pa_snap(yc - rh * b * 0.5, o.y, b)
+    let sb = vec4(pa_snap(x0, o.x, b), ry, pa_snap(x1, o.x, b), ry + rh * b)
+    let lo = mix(sb.x, span0 + lo_t * (span1 - span0), step(0.001, lo_t))
+    let hi = span0 + hi_t * (span1 - span0)
+    var out = pa_rail(p, o, b, sb, lo, hi, dis)
+    if thumb > 0.5 {
+        out = pa_over(out, pa_thumb(p, o, b, hx, yc, tw, 11.0, hover, drag, focus, dis))
+    } else {
+        // the minimal slider: under the pointer or in focus, an ink tick
+        // standing at the value
+        let pc = pa_cell(p, o, b)
+        let tk = step(abs(pc.x - pa_snap(hx, o.x, b) - 0.5 * b), 0.51 * b) * step(sb.y - b, pc.y) * step(pc.y, sb.w + b)
+        out = pa_lay(out, pa_ink(), tk * max(step(0.5, hover), max(step(0.5, focus), step(0.5, drag))) * (1.0 - dis))
+    }
+    return out
+}
+
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_slider(p, self.rect_pos, self.rect_size, px, self.offset_y, self.slide_pos, self.origin_pos, self.arc_origin, self.hover, self.focus, self.drag, self.disabled, 0.0, self.rect_size.x, 1.0)
+}
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+
+// The minimal slider: the rail alone, three pixels deep.
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_slider(p, self.rect_pos, self.rect_size, px, self.offset_y, self.slide_pos, self.origin_pos, self.arc_origin, self.hover, self.focus, self.drag, self.disabled, 0.0, self.rect_size.x, 0.0)
+}
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+
+// The value read out beside a slider: tabular digits in the ink.
+let pa_value_style = mod.theme.font_regular{font_size: 8.0 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/jetbrains_mono_variable.ttf") weight: 700.0 asc: 0.0 desc: 0.0}}}
+// The value beside a slider is printed on the glass, bare: no box, ink.
+let pa_bare_value = fn(t) {
+    t.draw_text.text_style = pa_value_style
+    t.draw_text.color = #0d2117
+    t.draw_text.color_hover = #0d2117
+    t.draw_text.color_focus = #0d2117
+    t.draw_text.color_down = #0d2117
+    t.draw_text.color_disabled = #4f6a4c
+    t.draw_text.color_empty = #1e3326
+    t.draw_text.color_empty_hover = #1e3326
+    t.draw_text.color_empty_focus = #1e3326
+    t.draw_bg.pixel = fn() {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+}
+pa_bare_value(mod.widgets.SliderMinimal.text_input)
+pa_bare_value(mod.widgets.SliderFlat.text_input)
+pa_bare_value(mod.widgets.SliderRoundFlat.text_input)
+
+// The round slider: the same rail and thumb in the room after its label,
+// its number at the right.
+mod.widgets.SliderRoundFlat.height = 22.0
+mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
+mod.widgets.SliderRoundFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 2.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_slider(p, self.rect_pos, self.rect_size, px, 0.0, self.slide_pos, self.origin_pos, self.arc_origin, self.hover, self.focus, self.drag, self.disabled, self.label_size, self.rect_size.x - 36.0, 1.0)
+}
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+
+// FADERS. An ink slot two pixels wide, dotted ladders on both sides, a
+// long dot every fifth step; the cap is a raised cap twelve pixels across
+// and seven along, a grip line of ink across its middle, the line the
+// value is read off.
+mod.widgets.SliderFader.cap_size = 9.33
+mod.widgets.SliderFader.track_inset = 6.0
+mod.widgets.SliderFaderY.width = 24.0
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let m = 3.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let size = self.rect_size
+    let vert = step(0.5, self.is_vertical)
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let pc = pa_cell(p, o, b)
+    let along = mix(size.x, size.y, vert)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    // the slot's middle line, on the grid
+    let midx = pa_snap(size.x * 0.5, o.x, b)
+    let midy = pa_snap(size.y * 0.5, o.y, b)
+    // coordinates: `a` along from the low end, `c` across from the middle
+    let a = mix(pc.x, size.y - pc.y, vert)
+    let c = mix(pc.y - midy, pc.x - midx, vert)
+    let icol = mix(pa_ink(), pa_mid(), dis)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the ladders: a dot every tenth of the travel, three pixels out from
+    // the slot on both sides; the fifth ones two pixels long
+    let st = travel / 10.0
+    let kk = floor((a - foot) / st + 0.5)
+    let ya = foot + kk * st
+    let on_step = step(abs(a - ya), 0.5 * b) * step(-0.5, kk) * step(kk, 10.5)
+    let major = step(fract(kk / 5.0 + 0.01), 0.1)
+    let ac = abs(c)
+    let dot_at = step(3.0 * b, ac) * step(ac, mix(4.0, 5.0, major) * b)
+    out = pa_lay(out, icol, on_step * dot_at)
+    // the slot: two pixels wide, dark with an ink frame a pixel wide
+    let s0 = self.inset_px
+    let s1 = along - self.inset_px
+    let in_slot = step(s0, a) * step(a, s1) * step(ac, 1.51 * b)
+    let slot_rim = in_slot * step(0.99 * b, ac)
+    out = pa_lay(out, mix(pa_dark(), pa_mute(), dis), in_slot)
+    out = pa_lay(out, icol, slot_rim * 0.0)
+    out = pa_lay(out, icol, in_slot * (1.0 - step(abs(c + 0.5 * b), 0.51 * b)) * 0.0)
+    // the cap, in window space
+    let at = foot + self.slide_pos * travel
+    let cw = 12.0 * b
+    let chh = 7.0 * b
+    let ccx = mix(at, size.x * 0.5, vert)
+    let ccy = mix(size.y * 0.5, size.y - at, vert)
+    let wx = mix(chh, cw, vert)
+    let wy = mix(cw, chh, vert)
+    let x0 = pa_snap(ccx - wx * 0.5, o.x, b)
+    let y0 = pa_snap(ccy - wy * 0.5, o.y, b)
+    let dr = step(0.5, self.drag) * live
+    let hov = step(0.5, self.hover) * live
+    let sb = vec4(x0, y0 + dr * b, x0 + wx, y0 + wy)
+    let face = mix(mix(mix(pa_light(), pa_lit(), hov), pa_down(), dr), pa_mute(), dis)
+    let hl = mix(mix(pa_lit(), pa_mute(), dr), pa_mute(), dis)
+    let sh = mix(pa_mute(), pa_mute(), dis)
+    let cap = pa_cap(pc, b, sb, 1.0, 1.0 - dr, face, hl, sh, mix(pa_deep(), pa_mid(), dis), icol, 0.32 * (1.0 - dr) * live)
+    out = pa_over(out, cap)
+    // the grip line across the cap's face, through its middle
+    let gm = pa_snap((sb.y + sb.w - (1.0 - dr) * b) * 0.5, o.y, b)
+    let gline_v = step(abs(pc.y - gm + 0.5 * b), 0.51 * b) * step(sb.x + 2.0 * b, pc.x) * step(pc.x, sb.z - 2.0 * b)
+    let gmx = pa_snap((sb.x + sb.z) * 0.5, o.x, b)
+    let gline_h = step(abs(pc.x - gmx + 0.5 * b), 0.51 * b) * step(sb.y + 2.0 * b, pc.y) * step(pc.y, sb.w - 3.0 * b)
+    let gl = mix(gline_h, gline_v, vert)
+    out = pa_lay(out, icol, gl)
+    let kf = pa_focus(pa_dbox(pc, vec4(x0, y0, x0 + wx, y0 + wy), 1.0, b), p, o, b) * step(0.5, self.focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// KNOBS. A pixel disc: a shadow a pixel to the lower right, an ink ring, a
+// dark bezel carrying the value as a lit arc, an ink ring, and a light face
+// shaded from lit at its upper left to mute at its lower right by an
+// ordered dither; an ink pointer one pixel wide from near the middle out
+// to the bezel.
+let pa_knob = fn(p: vec2, o: vec2, cx: float, cy: float, rad: float, px: float, slide: float, origin: float, arc_origin: float, gap: float, hover: float, focus: float, drag: float, disabled: float) -> vec4 {
+    let b = 2.0 * px
+    let dis = step(0.5, disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, hover) * live
+    let dr = step(0.5, drag) * live
+    let c = vec2(pa_snap(cx, o.x, b), pa_snap(cy, o.y, b))
+    let rr = floor(rad / b) * b
+    let pc = pa_cell(p, o, b)
+    let v = pc - c
+    let r = length(v)
+    let bw = mix(2.0, 3.0, step(34.0, rr * 2.0)) * b
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the shadow
+    let rs = length(v - vec2(b, b))
+    let sa = step(rs, rr) * step(rr, r) * 0.32 * live
+    out = pa_lay(out, pa_ink(), sa)
+    let inside = step(r, rr)
+    // the bezel and the value arc on it
+    let start = gap * 0.5 * PI / 180.0
+    let sweep = 2.0 * PI - gap * PI / 180.0
+    var ta = atan2(-v.x, v.y)
+    if ta < 0.0 {
+        ta = ta + 2.0 * PI
+    }
+    let t = (ta - start) / sweep
+    let lo = min(origin, slide) * arc_origin
+    let hi = mix(slide, max(origin, slide), arc_origin)
+    let on_arc = step(lo, t) * step(t, hi) * step(0.0, t) * step(t, 1.0)
+    let in_bez = step(rr - b - bw, r) * step(r, rr - b)
+    var bcol = mix(pa_dark(), pa_deep(), step(0.0, v.y + v.x))
+    bcol = mix(bcol, mix(pa_lit(), pa_light(), dr), on_arc)
+    bcol = mix(bcol, mix(pa_mute(), pa_mid(), step(0.5, on_arc)), dis)
+    // the face: an ordered dither between four greens
+    let fr = rr - 2.0 * b - bw
+    let s = clamp(0.4 - 0.6 * dot(v / max(fr, 1.0), vec2(0.7071, 0.7071)), 0.0, 1.0) + 0.18 * hov - 0.2 * dr
+    let lvl = clamp(floor(s * 3.0 + pa_bayer(p, o, b)), 0.0, 3.0)
+    var fcol = mix(pa_mute(), pa_face(), step(0.5, lvl))
+    fcol = mix(fcol, pa_light(), step(1.5, lvl))
+    fcol = mix(fcol, pa_lit(), step(2.5, lvl))
+    fcol = mix(fcol, mix(pa_mute(), vec3(0.541, 0.627, 0.494), pa_checker(p, o, b)), dis)
+    let in_face = step(r, fr)
+    var col = mix(pa_ink(), bcol, in_bez)
+    col = mix(col, fcol, in_face)
+    col = mix(col, pa_mid(), (1.0 - in_bez) * (1.0 - in_face) * dis)
+    // the pointer
+    let av = start + sweep * slide
+    let dir = vec2(-sin(av), cos(av))
+    let pd = pa_seg(v, dir * fr * 0.18, dir * (fr - 0.5 * b))
+    let pa = step(pd, 0.62 * b) * in_face
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), pa)
+    out = pa_lay(out, col, inside)
+    // focus: a dotted ring a pixel out
+    let kf = step(rr + b, r) * step(r, rr + 2.0 * b) * pa_checker(p, o, b) * step(0.5, focus) * live
+    out = pa_lay(out, pa_ink(), kf)
+    return out
+}
+
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y)
+    let rad = dia * 0.5 - 1.5
+    return pa_knob(p, self.rect_pos, self.rect_size.x * 0.5, self.rect_size.y - dia * 0.5, rad, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.focus, self.drag, self.disabled)
+}
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y - 24.0)
+    let rad = dia * 0.5 - 2.0
+    return pa_knob(p, self.rect_pos, self.rect_size.x * 0.5, 24.0 + dia * 0.5, rad, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.focus, self.drag, self.disabled)
+}
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.text_input.padding = mod.turtle.Inset{left: 4.0 right: 4.0 top: 1.0 bottom: 1.0}
+mod.widgets.RotaryFlat.text_input.min_height = 0.0
+mod.widgets.RotaryFlat.text_input.draw_text.text_style = pa_value_style
+
+// ---------------------------------------------------------------------------
+// FIELDS. A dark well let into the glass: an ink frame with its corners
+// stepped off, a deep row under its top and down its left, a lit lip under
+// its foot and down its right where the cut catches the light, lit words.
+// Under the pointer the well lifts a shade; in focus a lit keyline runs
+// inside the frame. Read only, the well is a dithered mute.
+let pa_well = fn(p: vec2, o: vec2, sb: vec4, b: float, hover: float, focus: float, disabled: float) -> vec4 {
+    let dis = step(0.5, disabled)
+    let live = 1.0 - dis
+    let hov = step(0.5, hover) * live
+    let foc = step(0.5, focus) * live
+    let pc = pa_cell(p, o, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let lip = pa_ring_out(d, 0.0, b) * max(step(sb.w, pc.y), step(sb.z, pc.x))
+    out = pa_lay(out, pa_light(), lip)
+    var col = mix(pa_dark(), pa_dark2(), hov)
+    let tl = step(min(pc.x - sb.x, pc.y - sb.y), 2.0 * b)
+    col = mix(col, pa_deep(), tl)
+    let r1 = step(-2.0 * b, d) * step(d, -b)
+    col = mix(col, pa_lit(), r1 * foc)
+    let dcol = mix(pa_mute(), vec3(0.435, 0.529, 0.408), pa_checker(p, o, b))
+    col = mix(col, mix(dcol, pa_mid(), tl), dis)
+    col = mix(col, mix(pa_ink(), pa_mid(), dis), rim_a)
+    return pa_lay(out, col, inside)
+}
+
+mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 2.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    let m = 2.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sb = pa_sbox(self.rect_pos, vec2(0.0, 0.0), self.rect_size, b)
+    let vis = step(0.001, self.border_size)
+    return pa_well(p, self.rect_pos, sb, b, self.hover, self.focus, self.disabled) * vis
+}
+mod.widgets.TextInputFlat.clip_x = false
+mod.widgets.TextInputFlat.clip_y = false
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 9.0 right: 9.0 top: 3.0 bottom: 3.0}
+mod.widgets.TextInputFlat.draw_text.color = #d6e0b2
+mod.widgets.TextInputFlat.draw_text.color_hover = #d6e0b2
+mod.widgets.TextInputFlat.draw_text.color_focus = #e8eed6
+mod.widgets.TextInputFlat.draw_text.color_down = #d6e0b2
+mod.widgets.TextInputFlat.draw_text.color_disabled = #243a2b
+mod.widgets.TextInputFlat.draw_text.color_empty = #a4b98c
+mod.widgets.TextInputFlat.draw_text.color_empty_hover = #b0c296
+mod.widgets.TextInputFlat.draw_text.color_empty_focus = #a4b98c
+// The caret is a lit block a big pixel wide.
+mod.widgets.TextInputFlat.draw_cursor.pixel = fn() {
+    let a = (1.0 - self.blink) * self.focus * (1.0 - self.disabled)
+    return vec4(vec3(0.910, 0.933, 0.839) * a, a)
+}
+mod.widgets.TextInputFlat.draw_selection.border_radius = 0.0
+mod.widgets.TextInputFlat.draw_selection.pixel = fn() {
+    let a = 0.36 * self.focus * (1.0 - self.disabled)
+    return vec4(vec3(0.839, 0.878, 0.698) * a, a)
+}
+
+// The number field: the same dark well, its stepper a raised light cap at
+// the right, split across its middle by an ink rule, a pixel arrow in each
+// half; a half lifts under the pointer and drops while pressed.
+mod.widgets.NumberField.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 2.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let m = 2.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sb = pa_sbox(self.rect_pos, vec2(0.0, 0.0), self.rect_size, b)
+    return pa_well(p, self.rect_pos, sb, b, self.hover, self.focus, self.disabled)
+}
+mod.widgets.NumberField.clip_x = false
+mod.widgets.NumberField.clip_y = false
+mod.widgets.NumberField.pad_left = 9.0
+mod.widgets.NumberField.input.draw_text.color = #d6e0b2
+mod.widgets.NumberField.input.draw_text.color_hover = #d6e0b2
+mod.widgets.NumberField.input.draw_text.color_focus = #e8eed6
+mod.widgets.NumberField.input.draw_text.color_down = #d6e0b2
+mod.widgets.NumberField.input.draw_text.color_disabled = #243a2b
+mod.widgets.NumberField.input.draw_text.color_empty = #a4b98c
+mod.widgets.NumberField.input.draw_text.color_empty_hover = #b0c296
+mod.widgets.NumberField.input.draw_text.color_empty_focus = #a4b98c
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let size = self.rect_size
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let pc = pa_cell(p, o, b)
+    // the cap stands two pixels in from the well's frame
+    let sb = pa_sbox(o, vec2(b * 0.0, 2.0 * b), vec2(size.x - 2.0 * b, size.y - 2.0 * b), b)
+    let mid = pa_snap((sb.y + sb.w) * 0.5, o.y, b)
+    let upper = step(pc.y, mid)
+    let hot = mix(max(0.0, -self.hot), max(0.0, self.hot), upper) * live
+    let dn = mix(max(0.0, -self.down), max(0.0, self.down), upper) * live
+    let face = mix(mix(mix(pa_light(), pa_lit(), step(0.5, hot)), pa_down(), step(0.5, dn)), pa_mute(), dis)
+    var out = pa_cap(pc, b, sb, 1.0, 0.0, face, mix(pa_lit(), pa_mute(), dis), pa_mute(), pa_deep(), mix(pa_ink(), pa_mid(), dis), 0.0)
+    let icol = mix(pa_ink(), pa_mid(), dis)
+    // the rule across the middle
+    let rule = step(abs(pc.y - mid), 0.51 * b) * step(sb.x, pc.x) * step(pc.x, sb.z)
+    out = pa_lay(out, icol, rule)
+    // the arrows: stepped triangles, five pixels across
+    let cx = pa_snap((sb.x + sb.z) * 0.5, o.x, b)
+    let qx = floor((pc.x - cx) / b)
+    let yu = pa_snap((sb.y + mid) * 0.5, o.y, b)
+    let yd = pa_snap((mid + sb.w) * 0.5, o.y, b)
+    let ru = floor((pc.y - yu) / b) + 2.0
+    let rd = 1.0 - floor((pc.y - yd) / b)
+    let au = step(0.0, ru) * step(ru, 2.5) * step(abs(qx + 0.5), ru + 0.6)
+    let ad = step(0.0, rd) * step(rd, 2.5) * step(abs(qx + 0.5), rd + 0.6)
+    out = pa_lay(out, icol, max(au, ad))
+    return out
+}
+// The printed arrow glyphs are hidden; the face draws the arrows.
+mod.widgets.NumberSpin.draw_text.color = #0d211700
+mod.widgets.NumberSpin.draw_text.color_disabled = #0d211700
+
+// DROP-DOWNS. A raised cap with a cell twelve pixels wide split off at its
+// right by an ink rule, a pixel chevron in it; open or held, the cap is
+// pushed in.
+let pa_choice = fn(p: vec2, o: vec2, size: vec2, b: float, hover: float, open: float, focus: float, disabled: float) -> vec4 {
+    let dis = step(0.5, disabled)
+    let live = 1.0 - dis
+    let pc = pa_cell(p, o, b)
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size, b)
+    var out = pa_button_face(p, o, size, b, 0.0, 0.0, hover, open, focus, disabled)
+    let held = step(0.5, open) * live
+    let rx = pa_snap(size.x - 16.0, o.x, b)
+    let icol = mix(pa_ink(), pa_mid(), dis)
+    let rule = step(abs(pc.x - rx - 0.5 * b), 0.51 * b) * step(sb.y + (1.0 + held) * b, pc.y) * step(pc.y, sb.w - 2.0 * b)
+    out = pa_lay(out, icol, rule)
+    let cxc = pa_snap((rx + sb.z) * 0.5, o.x, b)
+    let cyc = pa_snap(size.y * 0.5 - 2.0 * b + held * b, o.y, b)
+    let ch = pa_chevron(pc, vec2(cxc + 0.5 * b, cyc + 0.5 * b), b)
+    out = pa_lay(out, icol, ch)
+    return out
+}
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 10.0 right: 26.0 top: 3.0 bottom: 4.5}
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_choice(p, self.rect_pos, self.rect_size, 2.0 * px, self.hover, max(self.active, self.down * self.hover), self.focus, self.disabled)
+}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_text.color = #0d2117
+mod.widgets.DropDownFlat.draw_text.color_hover = #0d2117
+mod.widgets.DropDownFlat.draw_text.color_focus = #0d2117
+mod.widgets.DropDownFlat.draw_text.color_down = #0d2117
+mod.widgets.DropDownFlat.draw_text.color_disabled = #435c42
+mod.widgets.DropDownFlat.draw_text.text_style = mod.theme.font_label{}
+
+// The select wears a button built before this sheet: it is given the
+// drop-down's cap and cell here, by its own path.
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_choice(p, self.rect_pos, self.rect_size, 2.0 * px, self.hover, self.down, self.focus, self.disabled)
+}
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_choice(p, self.rect_pos, self.rect_size, 2.0 * px, self.hover, self.down, self.focus, self.disabled)
+}
+mod.widgets.Select.face.padding = mod.turtle.Inset{left: 10.0 right: 26.0 top: 3.0 bottom: 4.5}
+mod.widgets.MultiSelect.face.padding = mod.turtle.Inset{left: 10.0 right: 26.0 top: 3.0 bottom: 4.5}
+mod.widgets.Select.face.min_height = 26.0
+mod.widgets.MultiSelect.face.min_height = 26.0
+mod.widgets.Select.face.draw_text.color = #0d2117
+mod.widgets.Select.face.draw_text.color_hover = #0d2117
+mod.widgets.Select.face.draw_text.color_down = #0d2117
+mod.widgets.Select.face.draw_text.color_focus = #0d2117
+mod.widgets.MultiSelect.face.draw_text.color = #0d2117
+mod.widgets.MultiSelect.face.draw_text.color_hover = #0d2117
+mod.widgets.MultiSelect.face.draw_text.color_down = #0d2117
+mod.widgets.MultiSelect.face.draw_text.color_focus = #0d2117
+
+// The combo box: the dark well with lit words, and at its right a small
+// raised cap holding the chevron, pushed in while its list is open.
+mod.widgets.ComboBoxFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 2.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
+    let m = 2.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let size = self.rect_size
+    let dis = step(0.5, self.disabled)
+    let live = 1.0 - dis
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size, b)
+    var out = pa_well(p, o, sb, b, self.hover, self.focus, self.disabled)
+    let pc = pa_cell(p, o, b)
+    let held = step(0.5, self.down * self.hover) * live
+    let kb = vec4(pa_snap(size.x - 18.0, o.x, b), sb.y + 2.0 * b + held * b, sb.z - 2.0 * b, sb.w - 2.0 * b)
+    let face = mix(mix(mix(pa_light(), pa_lit(), step(0.5, self.hover) * live), pa_down(), held), pa_mute(), dis)
+    let cap = pa_cap(pc, b, kb, 1.0, 1.0 - held, face, mix(pa_lit(), pa_mute(), dis), pa_mute(), mix(pa_deep(), pa_mid(), dis), mix(pa_ink(), pa_mid(), dis), 0.0)
+    out = pa_over(out, cap)
+    let cxc = pa_snap((kb.x + kb.z) * 0.5, o.x, b)
+    let cyc = pa_snap((kb.y + kb.w) * 0.5 - 2.5 * b, o.y, b)
+    let ch = pa_chevron(pc, vec2(cxc + 0.5 * b, cyc + 0.5 * b), b)
+    out = pa_lay(out, mix(pa_ink(), pa_mid(), dis), ch)
+    return out
+}
+mod.widgets.ComboBoxFlat.clip_x = false
+mod.widgets.ComboBoxFlat.clip_y = false
+mod.widgets.ComboBoxFlat.padding = mod.turtle.Inset{left: 9.0 right: 28.0 top: 3.0 bottom: 3.0}
+mod.widgets.ComboBoxFlat.input.draw_text.color = #d6e0b2
+mod.widgets.ComboBoxFlat.input.draw_text.color_hover = #d6e0b2
+mod.widgets.ComboBoxFlat.input.draw_text.color_focus = #e8eed6
+mod.widgets.ComboBoxFlat.input.draw_text.color_down = #d6e0b2
+mod.widgets.ComboBoxFlat.input.draw_text.color_disabled = #243a2b
+mod.widgets.ComboBoxFlat.input.draw_text.color_empty = #a4b98c
+mod.widgets.ComboBoxFlat.input.draw_text.color_empty_hover = #b0c296
+mod.widgets.ComboBoxFlat.input.draw_text.color_empty_focus = #a4b98c
+mod.widgets.ComboBoxFlat.draw_popup_bg.color = #b3c599
+mod.widgets.ComboBoxFlat.draw_popup_bg.border_color = #0d2117
+mod.widgets.ComboBoxFlat.draw_popup_bg.border_radius = 0.0
+mod.widgets.ComboBoxFlat.draw_item.color_hover = #c0cf9f
+mod.widgets.ComboBoxFlat.draw_item.color_active = #2f4836
+mod.widgets.ComboBoxFlat.draw_item_text.color_active = #d6e0b2
+mod.widgets.ComboBoxFlat.item_height = 20.0
+// the input inside the box takes no row of its own
+mod.widgets.ComboBoxFlat.input.min_height = 0.0
+
+// ---------------------------------------------------------------------------
+// TABS. A row of caption caps; the tab in use is pushed in, dark, its lamp
+// lit under its lit word.
+mod.widgets.Tabs.height = 26.0
+mod.widgets.Tabs.draw_bg.color = #00000000
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+let pa_tab = fn(pos: vec2, size: vec2, o: vec2, px: float, chosen: float, hover: float) -> vec4 {
+    let m = 3.0
+    let b = 2.0 * px
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size - vec2(b, 0.0), b)
+    return pa_caption(p, o, sb, b, chosen, hover, 0.0, 0.0, 0.0, 3.0)
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return pa_tab(self.pos, self.rect_size, self.rect_pos, px, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return pa_tab(self.pos, self.rect_size, self.rect_pos, px, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return pa_tab(self.pos, self.rect_size, self.rect_pos, px, 1.0, 0.0)
+}
+mod.widgets.Tabs.draw_sep.color = #00000000
+mod.widgets.Tabs.draw_mark.color = #0d2117
+// The close mark is a stepped x in lit pixels (it stands on the dark tab in
+// use), the add mark a plus in ink pixels.
+mod.widgets.Tabs.draw_mark.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let is_plus = step(0.5, self.plus)
+    let cx0 = mix(self.rect_size.x - 6.0, self.rect_size.x * 0.5, is_plus)
+    let c = vec2(pa_snap(cx0, o.x, b), pa_snap(self.rect_size.y * 0.5, o.y, b))
+    let pc = pa_cell(p, o, b)
+    let q = floor((pc - c) / b)
+    let r = mix(2.0, 4.0, is_plus)
+    let inbox = step(abs(q.x + 0.5), r + 0.5) * step(abs(q.y + 0.5), r + 0.5)
+    let cross = max(step(abs(q.x - q.y), 0.5), step(abs(q.x + q.y + 1.0), 0.5)) * inbox
+    let plus = max(step(abs(q.x + 0.5), 1.0), step(abs(q.y + 0.5), 1.0)) * inbox
+    let a = mix(cross, plus, is_plus) * self.color.a
+    let col = mix(vec3(0.839, 0.878, 0.698), vec3(0.051, 0.129, 0.090), is_plus)
+    return vec4(col * a, a)
+}
+mod.widgets.Tabs.draw_text.color = #0d2117
+mod.widgets.Tabs.draw_text_active.color = #d6e0b2
+mod.widgets.Tabs.draw_text.ink_centered = true
+mod.widgets.Tabs.draw_text_active.ink_centered = true
+let pa_tab_type = mod.theme.font_label{font_size: 8.0 line_spacing: 1.0}
+mod.widgets.Tabs.draw_text.text_style = pa_tab_type
+mod.widgets.Tabs.draw_text_active.text_style = pa_tab_type
+
+// The segmented group: one raised strip; the chosen answer is pushed in,
+// dark, framed in ink on both sides, its lamp lit under its word.
+mod.widgets.SegmentedControlFlat.segment_height = 26.0
+mod.widgets.SegmentedControlFlat.segment_padding = 10.0
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sb = pa_sbox(o, vec2(0.0, 0.0), self.rect_size, b)
+    let pc = pa_cell(p, o, b)
+    return pa_cap(pc, b, sb, 1.0, 1.0, pa_face(), pa_light(), pa_mute(), pa_deep(), pa_ink(), 0.30)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 2.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 2.0
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sb = pa_sbox(o, vec2(0.0, 0.0), self.rect_size, b)
+    let sbs = vec4(sb.x, sb.y + b, sb.z, sb.w)
+    let pc = pa_cell(p, o, b)
+    return pa_sunk(pc, b, sbs, 0.0, pa_dark(), pa_ink(), 1.0, 3.0)
+}
+mod.widgets.SegmentedControlFlat.draw_text.color = #0d2117
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #d6e0b2
+mod.widgets.SegmentedControlFlat.draw_text.text_style = mod.theme.font_label{}
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style = mod.theme.font_label{}
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #d6e0b2
+
+// The dock's tabs: the tab in use is a light cap with an ink bar along its
+// top; the others lay the checker under the pointer.
+mod.widgets.Tab.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let sb = pa_sbox(o, vec2(0.0, 0.0), self.rect_size, b)
+    let pc = pa_cell(p, o, b)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let da = pa_checker(p, o, b) * step(0.5, self.hover) * (1.0 - step(0.5, self.active))
+    out = pa_lay(out, pa_light(), da)
+    let act = step(0.5, self.active)
+    out = pa_lay(out, pa_face(), act)
+    let bar = step(pc.y, sb.y + 2.0 * b) * act
+    let side = max(step(pc.x, sb.x + b), step(sb.z - b, pc.x)) * act
+    out = pa_lay(out, pa_ink(), max(bar, side))
+    return out
+}
+mod.widgets.TabBar.draw_fill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let yb = pa_snap(self.rect_size.y, self.rect_pos.y, b)
+    let la = step(yb - b, p.y) * step(p.y, yb)
+    return vec4(pa_ink() * la, la)
+}
+
+// ---------------------------------------------------------------------------
+// PROGRESS. A rail six pixels deep in an ink frame, dark inside, the done
+// run lit with a light row along its top. The amount that is not known
+// cannot move without a clock, so it stands still: a lit run across the
+// middle third.
+mod.widgets.ProgressBarFlat.height = 9.33
+mod.widgets.ProgressBarFlat.draw_bg.thickness = 8.0
+mod.widgets.ProgressBarFlat.draw_bg.border_radius = 0.0
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let size = self.rect_size
+    let hgt = 6.0 * b
+    let y0 = pa_snap((size.y - hgt) * 0.5, o.y, b)
+    let x0 = size.x * self.start
+    let x1 = size.x * self.end
+    let sb = vec4(pa_snap(x0, o.x, b), y0, pa_snap(x1, o.x, b), y0 + hgt)
+    var lo = sb.x
+    var hi = sb.x + clamp((self.value - self.start) / max(self.end - self.start, 0.0001), 0.0, 1.0) * (sb.z - sb.x)
+    if self.value < 0.0 {
+        lo = sb.x + (sb.z - sb.x) * 0.36
+        hi = sb.x + (sb.z - sb.x) * 0.64
+    }
+    return pa_rail(p, o, b, sb, lo, hi, 0.0) * self.opacity
+}
+
+// LEVEL METERS. A dark rail in an ink frame holding segments two pixels
+// long and one apart, lit to the level and dark beyond; the held peak a
+// segment of ink-framed lit; the over lamp a small cap at the end, lit
+// when the level has gone over.
+mod.widgets.LevelMeter.height = 9.33
+mod.widgets.LevelMeterColumn.width = 9.33
+mod.widgets.LevelMeter.draw_bg.lamp_size = 8.0
+mod.widgets.LevelMeter.draw_bg.lamp_gap = 3.0
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let size = self.rect_size
+    let vert = step(0.5, self.vertical)
+    let pc = pa_cell(p, o, b)
+    let along = mix(size.x, size.y, vert)
+    let lamp_room = self.lamp * (self.lamp_size + self.lamp_gap)
+    let bar = max(4.0 * b, along - lamp_room)
+    // the rail's box in window space: horizontal runs from the left, a
+    // column from the foot
+    let sbh = pa_sbox(o, vec2(0.0, 0.0), vec2(bar, size.y), b)
+    let sbv = pa_sbox(o, vec2(0.0, size.y - bar), size, b)
+    let sb = mix(sbh, sbv, vert)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    // position along from the low end, in pixels from the rail's start
+    let s = mix(pc.x - sb.x, sb.w - pc.y, vert)
+    let len = mix(sb.z - sb.x, sb.w - sb.y, vert)
+    let k = floor((s - b) / (3.0 * b))
+    let within = s - b - k * 3.0 * b
+    let n = floor((len - 2.0 * b + b) / (3.0 * b))
+    let seg = step(within, 2.0 * b) * step(0.0, k) * step(k, n - 1.0) * step(b, s) * step(s, len - b)
+    let lit = step((k + 0.5) / max(n, 1.0), self.level + 0.0001) * step(0.0001, self.level)
+    let hk = floor(self.hold * n - 0.0001)
+    let peak = step(abs(k - hk), 0.5) * step(0.002, self.hold)
+    var col = pa_dark()
+    col = mix(col, mix(pa_dark2(), pa_lit(), max(lit, peak)), seg)
+    col = mix(col, pa_ink(), rim_a)
+    var out = vec4(col * inside, inside)
+    if self.lamp > 0.5 {
+        let ls = floor(self.lamp_size / b + 0.5) * b
+        let lh = pa_sbox(o, vec2(bar + self.lamp_gap, (size.y - ls) * 0.5), vec2(bar + self.lamp_gap + ls, (size.y + ls) * 0.5), b)
+        let lv = pa_sbox(o, vec2((size.x - ls) * 0.5, size.y - bar - self.lamp_gap - ls), vec2((size.x + ls) * 0.5, size.y - bar - self.lamp_gap), b)
+        let lb = mix(lh, lv, vert)
+        let on = step(0.5, self.over)
+        let lamp = pa_cap(pc, b, lb, 1.0, 0.0, mix(pa_dark2(), pa_lit(), on), mix(pa_dark2(), vec3(0.910, 0.933, 0.839), on), mix(pa_deep(), pa_light(), on), pa_deep(), pa_ink(), 0.0)
+        out = pa_over(out, lamp)
+    }
+    return out * self.opacity
+}
+
+// SCROLL BARS. Ten points: a dark trough in an ink frame, the thumb a
+// raised light cap a pixel inside it, lifted under the pointer and pushed
+// in while dragged.
+mod.widgets.ScrollBar.bar_size = 10.67
+mod.widgets.ScrollBar.bar_side_margin = 0.0
+mod.widgets.ScrollBar.draw_bg.size = 10.67
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let size = self.rect_size
+    let vert = step(0.5, self.is_vertical)
+    let pc = pa_cell(p, o, b)
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    let rim_a = inside * step(-b, d)
+    var col = mix(pa_dark(), pa_dark2(), pa_quarter(p, o, b))
+    col = mix(col, pa_ink(), rim_a)
+    var out = vec4(col * inside, inside)
+    let len = mix(size.x, size.y, vert)
+    let t0 = len * self.norm_scroll
+    let t1 = len * (self.norm_scroll + self.norm_handle)
+    let th = mix(pa_sbox(o, vec2(t0, 0.0), vec2(t1, size.y), b), pa_sbox(o, vec2(0.0, t0), vec2(size.x, t1), b), vert)
+    let tb = vec4(th.x, th.y, th.z, th.w)
+    let hov = step(0.5, max(self.hover, self.drag))
+    let dr = step(0.5, self.drag)
+    let face = mix(mix(pa_light(), pa_lit(), hov), pa_down(), dr)
+    let cap = pa_cap(pc, b, tb, 1.0, 0.0, face, mix(pa_lit(), pa_mute(), dr), pa_mute(), pa_deep(), pa_ink(), 0.0)
+    out = pa_over(out, cap)
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// PANELS. A raised panel is a large cap: an ink frame with its corners
+// stepped off twice, a light row along its top and left, a shade row along
+// its right and above its foot, a dark thickness, a shadow a pixel to the
+// lower right, and a face dithered in a checker of two mid greens. The
+// inset is let in: an ink frame, two deep rows under its top and down its
+// left, a light row inside its right and foot, and a lighter face with one
+// pixel in four darkened.
+let pa_panel = fn(p: vec2, o: vec2, size: vec2, b: float, sunk: float, card: float) -> vec4 {
+    let pc = pa_cell(p, o, b)
+    let sb = pa_sbox(o, vec2(0.0, 0.0), size, b)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if sunk > 0.5 {
+        let d = pa_dbox(pc, sb, 2.0, b)
+        let inside = step(d, 0.0)
+        let rim_a = inside * step(-b, d)
+        let lip = pa_ring_out(d, 0.0, b) * max(step(sb.w, pc.y), step(sb.z, pc.x))
+        out = pa_lay(out, pa_light(), lip)
+        var col = mix(vec3(0.490, 0.576, 0.431), vec3(0.455, 0.537, 0.416), pa_quarter(p, o, b))
+        let dt = min(pc.x - sb.x, pc.y - sb.y)
+        let db = min(sb.z - pc.x, sb.w - pc.y)
+        col = mix(col, pa_mid(), step(dt, 4.0 * b) * step(dt, db))
+        col = mix(col, pa_dark2(), step(dt, 3.0 * b) * step(dt, db))
+        col = mix(col, pa_deep(), step(dt, 2.0 * b) * step(dt, db))
+        col = mix(col, vec3(0.604, 0.690, 0.529), step(db, 2.0 * b) * step(db, dt))
+        col = mix(col, pa_ink(), rim_a)
+        out = pa_lay(out, col, inside)
+    } else {
+        let face = mix(vec3(0.561, 0.647, 0.478), vec3(0.620, 0.706, 0.533), card)
+        let face2 = mix(vec3(0.518, 0.604, 0.443), vec3(0.588, 0.675, 0.506), card)
+        let f = mix(face, face2, pa_checker(p, o, b))
+        out = pa_cap(pc, b, sb, 2.0, 1.0, f, pa_light(), pa_mute(), pa_deep(), pa_ink(), 0.32)
+        // the checker stays inside the bevel: the bevel rows are solid
+    }
+    return out
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 3.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    return pa_panel(p, self.rect_pos, self.rect_size, 2.0 * px, step(0.5, self.sunken), 0.0)
+}
+
+// The card: the raised panel with a lighter face; the pointer lays the
+// light row's checker over it, a press darkens it a step.
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let g = pa_grow(self.rect_pos, self.rect_size, 3.0)
+    return self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let m = 3.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    var out = pa_panel(p, self.rect_pos, self.rect_size, b, 0.0, 1.0)
+    let pc = pa_cell(p, self.rect_pos, b)
+    let sb = pa_sbox(self.rect_pos, vec2(0.0, 0.0), self.rect_size, b)
+    let d = pa_dbox(pc, sb, 2.0, b)
+    let inner = step(d, -2.0 * b) * step(pc.y, sb.w - 3.0 * b)
+    let la = inner * pa_quarter(p, self.rect_pos, b) * max(step(0.5, self.hover), step(0.5, self.down))
+    return pa_lay(out, mix(pa_light(), pa_mute(), step(0.5, self.down)), la)
+}
+
+// The plain rounded view keeps the colours its caller gives it; its edge
+// is stepped on the grid.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let sb = pa_sbox(o, lo, hi, b)
+    let pc = pa_cell(p, o, b)
+    let notch = clamp(floor(self.border_radius / 3.0 + 0.5), 0.0, 2.0)
+    let d = pa_dbox(pc, sb, notch, b)
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    let inside = step(d, 0.0)
+    var out = vec4(fill.rgb * fill.a * inside, fill.a * inside)
+    if self.border_size > 0.0 {
+        let la = inside * step(-b, d) * self.border_color.a
+        out = pa_over(out, vec4(self.border_color.rgb * la, la))
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// LISTS. Rows of 22 points. The row's words have no chosen ink, so a chosen
+// row cannot turn dark: it is a lit bar framed in ink with the pointer of a
+// handheld's menu at its head. The pointer's row lays the light checker.
+mod.widgets.ListItemOne.height = 22.0
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 18.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_text.color = #0d2117
+mod.widgets.ListItem.draw_text_2.color = #1e3326
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - step(0.5, self.disabled)
+    let sel = step(0.5, self.selected)
+    let pc = pa_cell(p, o, b)
+    let sb = pa_sbox(o, vec2(1.0, 1.0), self.rect_size - vec2(12.0, 1.0), b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let ba = inside * pa_checker(p, o, b) * max(step(0.5, self.hover), step(0.5, self.down)) * live * (1.0 - sel)
+    out = pa_lay(out, pa_light(), ba)
+    // the chosen row
+    var col = mix(pa_lit(), pa_light(), step(sb.w - 2.0 * b, pc.y))
+    col = mix(col, pa_ink(), step(-b, d))
+    out = pa_lay(out, col, inside * sel)
+    // the menu pointer: a stepped triangle four pixels deep at the head
+    let cy = pa_snap(self.rect_size.y * 0.5, o.y, b)
+    let q = floor((pc - vec2(sb.x + 2.0 * b, cy)) / b)
+    let tri = step(0.0, q.x) * step(q.x, 3.5) * step(abs(q.y + 0.5), 4.0 - q.x) * sel
+    out = pa_lay(out, pa_ink(), tri)
+    return out
+}
+
+// The open list of a drop-down: a light sheet in an ink frame with its
+// corners stepped off; the pointer's row lays the checker, the chosen row
+// is dark with lit words.
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let sb = pa_sbox(o, vec2(0.0, 0.0), self.rect_size, b)
+    let pc = pa_cell(p, o, b)
+    return pa_cap(pc, b, sb, 1.0, 0.0, vec3(0.702, 0.773, 0.600), pa_lit(), pa_face(), pa_deep(), pa_ink(), 0.0)
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - step(0.5, self.disabled)
+    let inrow = step(1.0, p.x) * step(p.x, self.rect_size.x - 1.0)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let ha = pa_checker(p, o, b) * step(0.5, self.hover) * live * (1.0 - step(0.5, self.active)) * inrow
+    out = pa_lay(out, pa_light(), ha)
+    let ia = step(0.5, self.active) * inrow
+    out = pa_lay(out, pa_dark(), ia)
+    return out
+}
+mod.widgets.PopupMenuItem.draw_text.color_active = #d6e0b2
+
+// THE SPINNER. Eight blocks two pixels square round a circle: one in ink,
+// the next ones stepping down through the dark and the mid to the mute. A
+// sheet may not read the pass clock and the spinner carries no other, so
+// it stands still.
+mod.widgets.SpinnerFlat.size = 18.67
+mod.widgets.SpinnerFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let c = vec2(pa_snap(self.rect_size.x * 0.5, o.x, b), pa_snap(self.rect_size.y * 0.5, o.y, b))
+    let pc = pa_cell(p, o, b)
+    let v = pc - c
+    var th = atan2(v.x, -v.y)
+    if th < 0.0 {
+        th = th + 2.0 * PI
+    }
+    let k = floor(th / (PI * 0.25) + 0.5)
+    let ang = k * PI * 0.25
+    let rr = floor(min(self.rect_size.x, self.rect_size.y) * 0.5 / b - 1.0) * b
+    let bc = c + vec2(sin(ang), -cos(ang)) * (rr - b)
+    let q = abs(pc - vec2(pa_snap(bc.x, o.x, b), pa_snap(bc.y, o.y, b)))
+    let a = step(max(q.x, q.y), b) * self.alpha
+    var col = pa_mid()
+    col = mix(col, pa_dark2(), step(abs(k - 6.0), 0.5))
+    col = mix(col, pa_dark(), step(abs(k - 7.0), 0.5))
+    col = mix(col, pa_ink(), step(abs(k - 8.0), 0.5) + step(k, 0.5))
+    return vec4(col * a, a)
+}
+
+// Chips: a small raised cap 20 points tall inside the room its size rung
+// takes; a chosen chip (light letters) is the dark pushed-in cap.
+mod.widgets.ChipFlat.radius = 0.0
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let inset = max((self.rect_size.y - 21.33) * 0.5, 0.0)
+    let sb = pa_sbox(o, vec2(0.0, inset), vec2(self.rect_size.x - b, self.rect_size.y - inset), b)
+    let pc = pa_cell(p, o, b)
+    let chosen = step(0.6, dot(self.ink.rgb, vec3(0.299, 0.587, 0.114)))
+    let hov = step(0.5, self.hover)
+    let held = step(0.5, self.down)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if chosen > 0.5 {
+        out = pa_sunk(pc, b, vec4(sb.x, sb.y + b, sb.z, sb.w), 1.0, mix(pa_dark(), pa_dark2(), hov), pa_ink(), 1.0, 2.0)
+    } else {
+        let face = mix(mix(pa_face(), pa_hi(), hov), pa_down(), held)
+        out = pa_cap(pc, b, vec4(sb.x, sb.y + held * b, sb.z, sb.w), 1.0, 0.0, face, mix(pa_light(), pa_mute(), held), pa_mute(), pa_deep(), pa_ink(), 0.3 * (1.0 - held))
+    }
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let kf = step(-3.0 * b, d) * step(d, -2.0 * b) * self.keyed
+    out = pa_lay(out, mix(pa_ink(), pa_lit(), chosen), kf)
+    return out
+}
+// Badges: a small light cell in an ink frame with ink digits.
+mod.widgets.BadgePalette.neutral = #c0cf9f
+mod.widgets.BadgePalette.on_neutral = #0d2117
+mod.widgets.BadgePalette.neutral_container = #93a87e
+mod.widgets.BadgePalette.on_neutral_container = #0d2117
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let bh = min(17.33, self.rect_size.y)
+    let sb = pa_sbox(o, vec2(0.0, (self.rect_size.y - bh) * 0.5), vec2(self.rect_size.x, (self.rect_size.y + bh) * 0.5), b)
+    let pc = pa_cell(p, o, b)
+    let d = pa_dbox(pc, sb, 1.0, b)
+    let inside = step(d, 0.0)
+    var col = self.color.rgb
+    col = mix(col, pa_ink(), step(-b, d))
+    let a = inside * self.color.a
+    return vec4(col * a, a)
+}
+
+// Rules between groups: one big pixel of ink.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let y = pa_snap(self.rect_size.y * 0.5, self.rect_pos.y, b)
+    let a = step(y - b, p.y) * (1.0 - step(y, p.y))
+    return vec4(pa_ink() * a, a)
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let b = 2.0 * px
+    let p = self.pos * self.rect_size
+    let x = pa_snap(self.rect_size.x * 0.5, self.rect_pos.x, b)
+    let a = step(x - b, p.x) * (1.0 - step(x, p.x))
+    return vec4(pa_ink() * a, a)
+}
+
+// ---------------------------------------------------------------------------
+// THE GROUND. The whole window is the glass: pale green, a faint dot
+// matrix (one device pixel row and column of every big pixel a shade
+// darker, so the glass shows its pixels), a sheen lighter to the upper
+// left, and a grain one device pixel fine that never repeats.
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let w = p + self.rect_pos
+    let q = floor(w / px + vec2(0.01, 0.01))
+    let gx = step(0.5, fract(q.x * 0.5))
+    let gy = step(0.5, fract(q.y * 0.5))
+    let grid = max(gx, gy)
+    var col = vec3(0.627, 0.710, 0.533)
+    col = col * (1.0 + 0.025 * (0.5 - self.pos.y) + 0.015 * (0.5 - self.pos.x))
+    col = col * (1.0 - 0.012 * grid)
+    col = col + pa_g3(Finish.grain(w / px, 0.02))
+    return vec4(col, 1.0)
+}
+true

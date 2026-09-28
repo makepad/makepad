@@ -1249,6 +1249,8 @@ impl App {
             return;
         }
         let hosted = Self::hosted(cx);
+        // Before the selection, which is clamped to the rows there are.
+        picker.set_labels(cx, appearance::picker_labels());
         picker.set_selected_item(cx, appearance::picker_index(&self.settings));
         picker.set_disabled(cx, hosted);
         let toggle = self.ui.check_box(cx, ids!(dark_toggle));

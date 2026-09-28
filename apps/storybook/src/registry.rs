@@ -362,7 +362,7 @@ mod tests {
     /// The approved tree: every category in order, every component in order
     /// inside it, and every page in order inside its component.
     const TREE: &[(&str, &[(&str, &[&str])])] = &[
-        ("Overview", &[("Welcome", &["Welcome"]), ("Coverage", &["Coverage"]), ("Large text", &["Overview"])]),
+        ("Overview", &[("Welcome", &["Welcome"]), ("Coverage", &["Coverage"]), ("Large text", &["Overview"]), ("Kitchen sink", &["Overview", "States", "Instruments"])]),
         (
             "Foundations",
             &[
@@ -391,13 +391,14 @@ mod tests {
         (
             "Containers",
             &[
-                ("View", &["Overview", "Corner caps"]),
+                ("View", &["Overview", "Corner caps", "Grounds"]),
                 ("Card", &["Overview"]),
                 ("Accordion", &["Overview"]),
                 ("Carousel", &["Overview"]),
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
+                ("ScreenView", &["Overview"]),
                 ("Material", &["Overview", "Knob presets", "Knob cost"]),
                 ("Splash", &["Overview"]),
             ],
@@ -453,7 +454,7 @@ mod tests {
         (
             "Selection",
             &[
-                ("CheckBox", &["Overview", "Icon toggle"]),
+                ("CheckBox", &["Overview", "Icon toggle", "Switches"]),
                 ("RadioGroup", &["Overview"]),
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),
@@ -496,6 +497,8 @@ mod tests {
                 ("Alert", &["Overview"]),
                 ("Toast", &["Overview"]),
                 ("Progress", &["Overview", "Level meter"]),
+                ("Lamp", &["Overview"]),
+                ("NeedleMeter", &["Overview"]),
                 ("Spinner", &["Overview", "Stopped, and the comet"]),
                 ("Placeholder", &["Overview"]),
                 ("EmptyState", &["Overview"]),
@@ -519,6 +522,7 @@ mod tests {
                 ("Badge", &["Overview"]),
                 ("Avatar", &["Overview"]),
                 ("Kbd", &["Overview"]),
+                ("Readout", &["Overview"]),
                 ("Charts", &["Overview", "Shapes"]),
                 ("Timeline", &["Overview"]),
                 ("ChatBubble", &["Overview"]),

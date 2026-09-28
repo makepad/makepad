@@ -15,6 +15,12 @@ use crate::registry::{Control, ControlKind, Story};
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+    // The panel that edits a story stays the same panel whichever sheet the
+    // story is shown under: its templates and its theme are the library's
+    // as it stands without a sheet (`desktop_style::keep_stock`), which no
+    // sheet's tokens or writes reach (`nothing_a_sheet_sets_reaches_the_controls_panel`).
+    use mod.prelude.stock_internal.*
+    use mod.stock_widgets.*
 
     let ControlRow = View{
         width: Fill
@@ -762,6 +768,44 @@ mod tests {
             assert!(value.as_object().is_some(), "no ControlsPanel template");
             WidgetRef::script_from_value(vm, value)
         })
+    }
+
+    /// Nothing a sheet sets reaches the panel: under a sheet that sets
+    /// everything a sheet may on every stock template -- every token, and
+    /// every number, colour, switch, inset, text style and face -- the whole
+    /// panel as it resolves, every row template and every part the rows'
+    /// controls hold or inherit, reads line for line as it does with no
+    /// sheet: the same boxes, faces, fonts and timings.
+    #[test]
+    fn nothing_a_sheet_sets_reaches_the_controls_panel() {
+        use crate::makepad_widgets::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
+        use crate::makepad_widgets::makepad_script::trap::NoTrap;
+        let read = |vm: &mut ScriptVm| {
+            let storybook = vm.module(id!(storybook));
+            let value = vm.bx.heap.value(storybook, id!(ControlsPanel).into(), NoTrap);
+            resolution(vm, value, "ControlsPanel")
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            super::script_mod(vm);
+            let plain = read(vm);
+            assert!(plain.len() > 1_000, "only {} lines were read off the panel", plain.len());
+            let sheet = everything_sheet(vm, &|_| false);
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(|vm| {
+                crate::theme::widgets_script_mod(vm);
+                crate::shell::script_mod(vm);
+                super::script_mod(vm);
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the panel does not evaluate under the sheet: {errors:?}");
+            let moved = resolution_diff(&plain, &read(vm), 20);
+            assert!(moved.is_empty(), "a sheet reaches the controls panel at:\n{}", moved.join("\n"));
+            uninstall(vm);
+        });
     }
 
     /// A curve row builds from its template with no error, and filling it

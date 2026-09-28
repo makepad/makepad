@@ -1,0 +1,1729 @@
+use mod.prelude.widgets_internal.*
+
+// White porcelain on a pale plate. Every face is drawn in true points (one
+// device pixel is `px`); every shadow, lip and lamp halo falls OUTSIDE the
+// layout box: the quad is grown in `vertex`, the templates that throw light
+// or shadow stop clipping, and no padding is spent on either. Form comes
+// from light: a white hairline on every upper edge, a grey contact line at
+// every foot, a soft cool shadow under what stands, an inner shade in what
+// is pressed in. The one colour is a small warm lamp.
+
+// ---------------------------------------------------------------- helpers
+
+// One device pixel in points.
+let po_px = fn(dpi: float) -> float {
+    return 1.0 / max(dpi, 0.5)
+}
+
+// An edge rounded to a whole device pixel in window space, handed back in
+// box space: a hairline on it lands on one pixel row.
+let po_snap = fn(v: float, o: float, px: float) -> float {
+    return Finish.snap(o + v, px) - o
+}
+
+// Distance from p to the segment a..b, in points.
+let po_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * t)
+}
+
+// The plate the controls stand on (#e4e6eb), for a face that fades to it.
+let po_ground = fn() -> vec3 {
+    return vec3(0.894, 0.902, 0.922)
+}
+
+// The cool grey every shadow is cast in; laid at a coverage, never black.
+let po_shade = fn() -> vec3 {
+    return vec3(0.20, 0.22, 0.28)
+}
+
+// Which way the outline of a rounded box faces at p: the edge lines follow
+// it, so a pill gets arcs where a square cap gets straight lines.
+let po_normal = fn(p: vec2, c: vec2, h: vec2, r: float) -> vec2 {
+    let s = vec2(step(0.0, p.x - c.x) * 2.0 - 1.0, step(0.0, p.y - c.y) * 2.0 - 1.0)
+    let q = abs(p - c) - (h - vec2(r, r))
+    let qc = max(q, vec2(0.0, 0.0))
+    var n = vec2(0.0, s.y)
+    if q.x > q.y {
+        n = vec2(s.x, 0.0)
+    }
+    if q.x > 0.0 && q.y > 0.0 {
+        n = qc / max(length(qc), 0.0001) * s
+    }
+    return n
+}
+
+// Anything drawn in a grown quad fades out over its last points, so a soft
+// shadow never ends on a hard edge where the quad stops.
+let po_fade = fn(pos: vec2, size: vec2, m: float) -> float {
+    let q = pos * (size + vec2(2.0 * m, 2.0 * m))
+    let e = min(min(q.x, q.y), min(size.x + 2.0 * m - q.x, size.y + 2.0 * m - q.y))
+    return smoothstep(0.0, 4.0, e)
+}
+
+// The warm light that leaks from under a lit control's lower edge. On a
+// white plate light cannot brighten, so it tints: a peach pool, warm white
+// where it is strongest. `hh` is the control height it is sized by, `s` its
+// strength. Premultiplied.
+let po_spot = fn(p: vec2, cx: float, by: float, hh: float, s: float) -> vec4 {
+    let dx = p.x - cx
+    let dy = p.y - by
+    let sx = 0.30 * hh
+    let sy = 0.08 * hh
+    let tx = 0.48 * hh
+    let ty = 0.20 * hh
+    let core = exp(-(dx * dx) / (2.0 * sx * sx) - (dy * dy) / (2.0 * sy * sy))
+    let tail = exp(-(dx * dx) / (2.0 * tx * tx) - (dy * dy) / (2.0 * ty * ty))
+    let g = clamp((0.85 * core + 0.55 * tail) * s, 0.0, 1.0)
+    var col = mix(vec3(0.96, 0.58, 0.26), vec3(1.0, 0.76, 0.46), smoothstep(0.15, 0.6, g))
+    col = mix(col, vec3(1.0, 0.95, 0.82), smoothstep(0.7, 1.0, g))
+    let a = g * 0.5
+    return vec4(col * a, a)
+}
+
+// What a raised control throws on the plate: a soft ambient shadow falling
+// down, drawn in from the sides so it never reaches a neighbour, and a tight
+// contact shadow one device pixel under the edge. Sized by the control's
+// height up to a 26 point row and no further. Returns the coverage.
+let po_shadow = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, sh_h: float, lift: float, hover: float, down: float, dis: float) -> float {
+    let amb = Finish.drop(p, c, h - vec2(0.10 * sh_h, 0.12 * sh_h), r, vec2(0.0, (0.2 + 0.08 * hover) * sh_h), (0.12 + 0.03 * hover) * sh_h) * (0.46 + 0.2 * hover) * lift * (1.0 - down) * (1.0 - 0.8 * dis)
+    let con = Finish.drop(p, c, h - vec2(px, px), r, vec2(0.0, px * 2.0), px * 1.3) * mix(0.5, 0.2, down) * (1.0 - 0.6 * dis)
+    return 1.0 - (1.0 - amb) * (1.0 - con)
+}
+
+// The little warm light the focus frame spills outward: a tint one device
+// pixel out, gone within 2.5 points. Premultiplied, laid under the face.
+let po_leak = fn(d: float, a: float) -> vec4 {
+    let s = 1.1
+    let g = 0.42 * exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * s * s)) * (1.0 - a)
+    return vec4(vec3(0.97, 0.66, 0.32) * g, g)
+}
+
+// The lit frame of what has focus: an amber line just inside the rim with a
+// warm-white core, and a warm tint bleeding inward a few points.
+let po_frame = fn(face: vec3, d: float, px: float, fo: float, hh: float) -> vec3 {
+    if fo < 0.001 {
+        return face
+    }
+    let x = max(-d, 0.0)
+    let k = clamp(0.1 * hh, 1.0, 2.2)
+    let bleed = exp(-max(x - 1.4, 0.0) / k) * fo
+    var f = mix(face, vec3(1.0, 0.86, 0.66), bleed * 0.35)
+    let lw = clamp(0.06 * hh, 1.1, 1.6)
+    let line = Finish.band(d, 0.0, lw, px) * fo
+    f = mix(f, vec3(0.93, 0.58, 0.22), line * 0.9)
+    let core = Finish.band(d, lw * 0.35, lw * 0.7, px) * fo
+    return mix(f, vec3(1.0, 0.80, 0.52), core * 0.6)
+}
+// The same frame laid over what is already drawn (premultiplied `res`,
+// coverage `a` of the shape): for a well or an outline.
+let po_frame_over = fn(res: vec4, d: float, px: float, fo: float, a: float, hh: float) -> vec4 {
+    if fo < 0.001 {
+        return res
+    }
+    let x = max(-d, 0.0)
+    let fb = exp(-max(x - 1.6, 0.0) / clamp(0.1 * hh, 1.0, 2.2)) * fo * a * 0.3
+    var out = Finish.over(res, vec4(vec3(1.0, 0.86, 0.66) * fb, fb))
+    let lw = clamp(0.06 * hh, 1.1, 1.6)
+    let fl = Finish.band(d, 0.0, lw, px) * fo * 0.9
+    out = Finish.over(out, vec4(vec3(0.93, 0.58, 0.22) * fl, fl))
+    let fc = Finish.band(d, lw * 0.35, lw * 0.7, px) * fo * 0.6
+    return Finish.over(out, vec4(vec3(1.0, 0.80, 0.52) * fc, fc))
+}
+
+// A small lamp: off, a pale dimple pressed into the glaze; lit, a warm-white
+// core in an amber rim with a peach halo of barely two points. `rl` its
+// radius in points.
+let po_lamp = fn(dst: vec4, p: vec2, c: vec2, rl: float, px: float, lit: float, dis: float) -> vec4 {
+    let q = p - c
+    let ql = length(q)
+    let d = ql - rl
+    let on = lit * (1.0 - dis)
+    let hs = 1.2 + 0.25 * rl
+    let hg = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * hs * hs)) * (1.0 - Finish.cover(d, px)) * 0.55 * on
+    var res = Finish.over(dst, vec4(vec3(0.99, 0.66, 0.30) * hg, hg))
+    let k = clamp(ql / max(rl, 0.5), 0.0, 1.0)
+    let lit_col = mix(vec3(1.0, 0.98, 0.88), vec3(0.95, 0.60, 0.22), smoothstep(0.3, 1.0, k))
+    let off_col = mix(vec3(0.80, 0.815, 0.845), vec3(0.95, 0.955, 0.965), smoothstep(-1.0, 1.0, q.y / max(rl, 0.5)))
+    let col = mix(off_col, lit_col, on)
+    let a = Finish.cover(d, px)
+    return Finish.over(res, vec4(col * a, a))
+}
+
+// A white glazed cap: its shadows, the warm light from under it when lit,
+// the glaze with a bright upper band, one white device pixel on top and a
+// grey contact line under the foot. `lift` 1 casts the ambient shadow, 0
+// seats the cap with the contact shadow only; `tone` 1 a shade cooler for
+// the small controls; `spot` the strength of the light from under it.
+let po_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, dis: float, focus: float, lift: float, tone: float, spot: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = hi.y - lo.y
+    let sh_h = min(hh, 26.0)
+    let d = Material.sd_box(p, c, h, r)
+    let live = 1.0 - dis
+    let up = (1.0 - down) * live
+    let a = Finish.cover(d, px)
+    let n = po_normal(p, c, h, r)
+    let sc = po_shadow(p, c, h, r, px, sh_h, lift, hover, down, dis)
+    var res = vec4(po_shade() * sc, sc)
+    let lit = spot * live
+    if lit > 0.001 {
+        res = Finish.over(res, po_spot(p, c.x, hi.y + 0.02 * sh_h, sh_h, lit))
+    }
+    let fo = focus * live
+    if fo > 0.001 {
+        res = Finish.over(res, po_leak(d, a) * fo)
+    }
+    // The glaze: a white band over the upper third, the body #f1f2f5, the
+    // foot turning to #e2e4e9 where the cap curves under.
+    let t = clamp((p.y - lo.y) / max(hh, 1.0), 0.0, 1.0)
+    let body = mix(vec3(0.946, 0.950, 0.960), vec3(0.930, 0.935, 0.948), tone)
+    var face = mix(body, vec3(1.0, 1.0, 1.0), (1.0 - smoothstep(0.18, 0.5, t)) * mix(0.85, 0.7, tone) * (1.0 - 0.8 * down))
+    let inside = -d
+    face = face - vec3(0.05, 0.048, 0.042) * (1.0 - smoothstep(0.0, 0.22 * hh, inside)) * smoothstep(0.15, 0.95, n.y) * up
+    face = face + vec3(0.025, 0.024, 0.02) * hover * up
+    // Held: pushed in, the glaze a step lower and a shade falling from the
+    // top rim over the upper third.
+    let shade = 0.07 * (1.0 - smoothstep(0.0, 0.35 * hh, p.y - lo.y))
+    face = mix(face, face - vec3(0.045 + shade, 0.043 + shade, 0.038 + shade), down * live)
+    // Chosen (the light from under at full): the foot of the cap glows warm
+    // from inside over its middle, so a row that clips its foot still says
+    // chosen.
+    let inl = smoothstep(0.85, 1.0, spot) * live
+    if inl > 0.001 {
+        let wx = abs(p.x - c.x) / max(h.x, 1.0)
+        let low = 1.0 - smoothstep(0.0, 0.55 * hh, hi.y - p.y)
+        let warm = low * (1.0 - smoothstep(0.3, 0.95, wx)) * inl
+        face = mix(face, vec3(1.0, 0.87, 0.70), 0.45 * warm)
+        let hot = Finish.band(d, px, px * 2.5, px) * smoothstep(0.3, 0.9, n.y) * (1.0 - smoothstep(0.35, 0.65, wx)) * inl
+        face = mix(face, vec3(1.0, 0.80, 0.55), hot * 0.35)
+    }
+    face = min(face, vec3(1.0, 1.0, 1.0))
+    face = mix(face, po_ground(), 0.55 * dis)
+    // The edge: white on top, the grey contact line below; held, the top
+    // edge greys where the rim of the plate stands over it.
+    let ring = Finish.band(d, 0.0, px, px)
+    let upper = smoothstep(-0.35, 0.35, -n.y)
+    let cl = mix(vec3(0.70, 0.72, 0.77), vec3(0.66, 0.68, 0.73), tone)
+    var edge = mix(cl, mix(vec3(1.0, 1.0, 1.0), vec3(0.76, 0.78, 0.82), down), upper)
+    edge = mix(edge, face, 0.7 * dis)
+    face = mix(face, edge, ring)
+    face = po_frame(face, d, px, fo, hh)
+    return Finish.over(res, vec4(face * a, a))
+}
+
+// A shape pressed into the plate: its fill, the rim of the plate shading it
+// from the top (and a little from the sides), a grey line on its upper
+// edge and a white lip on the plate under its foot. `fill` its colour,
+// `depth` the strength of the inner shade.
+let po_sunk = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, fill: vec3, hover: float, down: float, dis: float, depth: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = hi.y - lo.y
+    let sh_h = min(hh, 26.0)
+    let d = Material.sd_box(p, c, h, r)
+    let n = po_normal(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let lipa = Finish.ring_out(d, 0.0, px * 1.5, px) * smoothstep(0.1, 0.9, n.y) * (1.0 - 0.6 * dis)
+    var res = vec4(vec3(1.0, 1.0, 1.0) * lipa, lipa)
+    var col = fill + vec3(0.012, 0.012, 0.01) * hover * (1.0 - down) - vec3(0.022, 0.022, 0.02) * down
+    let sg = clamp(0.1 * sh_h, 1.0, 2.6)
+    let insh = Finish.inset(p, c, h, r, vec2(0.0, sg * 0.6), sg)
+    col = mix(col, vec3(0.56, 0.585, 0.64), clamp(insh * depth * (1.0 + 0.5 * down) * (1.0 - 0.6 * dis), 0.0, 1.0))
+    let ring = Finish.band(d, 0.0, px, px)
+    let edge = mix(vec3(0.66, 0.685, 0.73), vec3(0.86, 0.87, 0.895), smoothstep(-0.2, 0.9, n.y))
+    col = mix(col, mix(edge, col, 0.5 * dis), ring)
+    col = mix(col, po_ground(), 0.4 * dis)
+    return Finish.over(res, vec4(col * a, a))
+}
+
+// A lit value inside a well (`wlo`..`whi`, corner `wr`): a slim amber rod,
+// deep #e0852b where the value starts to #ffb85a at its head, a warm-white
+// line down its middle, its edge a shade deeper so it reads as a lit rod
+// and holds against the white. Its bloom only tints the floor of the
+// groove round it. `hot` (the hand on it, a drag, focus) whitens the core.
+let po_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, dis: float, glow: float, hot: float, wlo: vec2, whi: vec2, wr: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.01, 0.01))
+    let d = Material.sd_box(p, c, h, min(r, min(h.x, h.y)))
+    let a = Finish.cover(d, px)
+    let live = 1.0 - dis
+    let dw = Material.sd_box(p, (wlo + whi) * 0.5, (whi - wlo) * 0.5, wr)
+    let inw = Finish.cover(dw, px)
+    let bl = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 1.4 * 1.4)) * (1.0 - a) * glow * live * step(0.5, h.x) * inw
+    var res = Finish.over(dst, vec4(vec3(0.99, 0.70, 0.38) * bl * 0.35, bl * 0.35))
+    let across_x = step(hi.y - lo.y, hi.x - lo.x)
+    let along = mix(clamp((hi.y - p.y) / max(hi.y - lo.y, 0.5), 0.0, 1.0), clamp((p.x - lo.x) / max(hi.x - lo.x, 0.5), 0.0, 1.0), across_x)
+    let hk = max(mix(h.x, h.y, across_x), 0.01)
+    let thin = 1.0 - smoothstep(0.9, 1.6, hk)
+    let ramp = smoothstep(0.0, 1.0, along)
+    var col = mix(vec3(0.88, 0.50, 0.16), vec3(1.0, 0.70, 0.33), ramp)
+    col = mix(col, vec3(0.78, 0.42, 0.12), Finish.band(d, 0.0, px, px) * (1.0 - thin) * 0.8)
+    let ax = mix(abs(p.x - c.x), abs(p.y - c.y), across_x)
+    let q = ax / max(0.40 * hk, px * mix(0.6, 0.85, thin))
+    let line = exp(-q * q) * mix(0.55, 0.9, ramp) * (1.0 - 0.4 * thin)
+    col = mix(col, mix(vec3(1.0, 0.88, 0.66), vec3(1.0, 0.97, 0.88), hot), line)
+    col = mix(col, vec3(0.80, 0.81, 0.84), dis)
+    return Finish.over(res, vec4(col * a, a))
+}
+
+// The three-quarter arc a waiting button turns in place of its label.
+let po_spinner = fn(dst: vec4, p: vec2, c: vec2, rad: float, t: float, amt: float, stroke: float, ink: vec3) -> vec4 {
+    let sdf = Sdf2d.viewport(p)
+    let a0 = t * 2.0 * PI
+    sdf.arc_round_caps(c.x, c.y, rad, a0, a0 + 1.5 * PI, stroke)
+    sdf.fill(vec4(ink, amt))
+    return Finish.over(dst, sdf.result)
+}
+
+// ---------------------------------------------------------------- buttons
+
+// Every button is a slim white pill: 26 points on a 12 point line, 12
+// points either side. Its shadow and its light fall outside the box.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlat.min_height = 26.0
+mod.widgets.ButtonFlat.icon_walk.width = 14.0
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+mod.widgets.ButtonFlatterIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 4.0 bottom: 4.0}
+// The size rungs keep heights of their own.
+mod.widgets.ButtonXs.min_height = 18.0
+mod.widgets.ButtonSm.min_height = 22.0
+mod.widgets.ButtonLg.min_height = 30.0
+mod.widgets.ButtonXl.min_height = 34.0
+mod.widgets.ButtonFlat.draw_bg.border_radius = 6.5
+mod.widgets.ButtonFlat.draw_bg.border_size = 0.34
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+
+// The button and its variants share one face; `kind` picks it: 0 seated
+// cap, 1 raised cap, 2 lit primary (raised, lit from under at rest), 3
+// pressed-in pill, 4 seated cool cap, 5 danger (raised, red words),
+// 6 outline, 7 flatter.
+let po_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, dis: float, focus: float, loading: float, anim: float, kind: float, dash: float) -> vec4 {
+    let m = 14.0
+    let px = po_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = hi.y - lo.y
+    // Pills; an icon alone gets a square cap with a 0.26H corner.
+    var r = min(h.x, h.y)
+    if size.x < size.y * 1.35 {
+        r = 0.26 * hh
+    }
+    let live = 1.0 - dis
+    let spot = (0.35 * hover + 0.3 * down) * (1.0 - step(0.5, dis))
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    var ink = vec3(0.169, 0.180, 0.208)
+    if kind > 5.5 {
+        let d = Material.sd_box(p, c, h, r)
+        let a = Finish.cover(d, px)
+        let n = po_normal(p, c, h, r)
+        let sh_h = min(hh, 26.0)
+        if focus * live > 0.001 {
+            res = Finish.over(res, po_leak(d, a) * focus * live)
+        }
+        // Under the hand a faint white wash, held a faint grey one.
+        let wash = (0.5 * hover * (1.0 - down)) * live * a
+        res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * wash * 0.6, wash * 0.6))
+        let press = 0.06 * down * live * a
+        res = Finish.over(res, vec4(po_shade() * press, press))
+        if kind < 6.5 {
+            // Outline: a device pixel of grey, white under its foot.
+            var ring = Finish.band(d, 0.0, px, px)
+            if dash > 0.0 {
+                ring = ring * step(0.5, fract((p.x + p.y) / (dash * 2.0)))
+            }
+            let col = mix(vec3(0.62, 0.645, 0.69), vec3(0.72, 0.74, 0.78), smoothstep(-0.35, 0.35, n.y))
+            let ra = ring * mix(1.0, 0.45, dis)
+            res = Finish.over(res, vec4(col * ra, ra))
+            let lip = Finish.ring_out(d, 0.0, px, px) * smoothstep(0.2, 0.9, n.y) * (1.0 - dis)
+            res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * lip, lip))
+        }
+        res = po_frame_over(res, d, px, focus * live, a, hh)
+    } else {
+        if kind > 2.5 && kind < 3.5 {
+            res = po_sunk(p, lo, hi, r, px, vec3(0.955, 0.958, 0.967), hover, down, dis, 0.55)
+            let d = Material.sd_box(p, c, h, r)
+            res = po_frame_over(res, d, px, focus * live, Finish.cover(d, px), hh)
+        } else {
+            var lift = 1.0
+            if kind < 0.5 || (kind > 3.5 && kind < 4.5) {
+                lift = 0.0
+            }
+            var tone = 0.0
+            if kind > 3.5 && kind < 4.5 {
+                tone = 1.0
+            }
+            var sp = spot
+            if kind > 1.5 && kind < 2.5 {
+                // The primary: lit from under at rest, brighter in the hand.
+                sp = mix(0.95 + 0.05 * hover, 0.9, down) * (1.0 - step(0.5, dis))
+            }
+            res = po_cap(p, lo, hi, r, px, hover, down, dis, focus, lift, tone, sp)
+        }
+    }
+    if loading > 0.001 {
+        let rad = max(min(h.x, h.y) - 5.5, 2.0)
+        res = po_spinner(res, p, c, rad, anim, loading, 1.5, ink)
+    }
+    return res * po_fade(pos, size, m)
+}
+
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 0.0, 0.0)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 1.0, 0.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 2.0, 0.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 3.0, 0.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 4.0, 0.0)
+}
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 5.0, 0.0)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 6.0, self.border_dash)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    return po_button(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.disabled, self.focus, self.loading, self.anim_time, 7.0, 0.0)
+}
+
+// Label ink: graphite on every white face; the primary's words a shade
+// darker, the danger's a deep red (6:1 on the glaze).
+mod.widgets.ButtonFlat.draw_text.color = #2b2e35
+mod.widgets.ButtonFlat.draw_text.color_hover = #1f2227
+mod.widgets.ButtonFlat.draw_text.color_down = #1f2227
+mod.widgets.ButtonFlat.draw_text.color_focus = #2b2e35
+mod.widgets.ButtonFlat.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonFlat.draw_icon.color = #2b2e35
+mod.widgets.ButtonPrimary.draw_text.color = #1f2227
+mod.widgets.ButtonPrimary.draw_text.color_hover = #1a1c20
+mod.widgets.ButtonPrimary.draw_text.color_down = #1a1c20
+mod.widgets.ButtonPrimary.draw_text.color_focus = #1f2227
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonPrimary.draw_icon.color = #1f2227
+mod.widgets.ButtonSecondary.draw_text.color = #2b2e35
+mod.widgets.ButtonSecondary.draw_text.color_hover = #1f2227
+mod.widgets.ButtonSecondary.draw_text.color_down = #1f2227
+mod.widgets.ButtonSecondary.draw_text.color_focus = #2b2e35
+mod.widgets.ButtonSecondary.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonSecondary.draw_icon.color = #2b2e35
+mod.widgets.ButtonTertiary.draw_text.color = #3a3e46
+mod.widgets.ButtonTertiary.draw_text.color_hover = #1f2227
+mod.widgets.ButtonTertiary.draw_text.color_down = #1f2227
+mod.widgets.ButtonTertiary.draw_text.color_focus = #3a3e46
+mod.widgets.ButtonTertiary.draw_icon.color = #3a3e46
+mod.widgets.ButtonDanger.draw_text.color = #a8261c
+mod.widgets.ButtonDanger.draw_text.color_hover = #9a2016
+mod.widgets.ButtonDanger.draw_text.color_down = #8a1c13
+mod.widgets.ButtonDanger.draw_text.color_focus = #a8261c
+mod.widgets.ButtonDanger.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonDanger.draw_icon.color = #a8261c
+mod.widgets.ButtonOutline.draw_text.color = #2b2e35
+mod.widgets.ButtonOutline.draw_text.color_hover = #1f2227
+mod.widgets.ButtonOutline.draw_text.color_down = #1f2227
+mod.widgets.ButtonOutline.draw_text.color_focus = #2b2e35
+mod.widgets.ButtonOutline.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonOutline.draw_icon.color = #2b2e35
+mod.widgets.ButtonFlatter.draw_text.color = #2b2e35
+mod.widgets.ButtonFlatter.draw_text.color_hover = #1f2227
+mod.widgets.ButtonFlatter.draw_text.color_down = #1f2227
+mod.widgets.ButtonFlatter.draw_text.color_focus = #2b2e35
+mod.widgets.ButtonFlatter.draw_text.color_disabled = #a0a4ac
+mod.widgets.ButtonFlatter.draw_icon.color = #2b2e35
+// A compound button's second line: the second voice.
+mod.widgets.ButtonFlat.draw_description.color = #555a63
+mod.widgets.ButtonSecondary.draw_description.color = #555a63
+mod.widgets.ButtonOutline.draw_description.color = #555a63
+mod.widgets.ButtonFlatter.draw_description.color = #555a63
+// A link is words on the plate: graphite, warming to the amber under the
+// hand.
+mod.widgets.LinkLabel.draw_text.color = #2b2e35
+mod.widgets.LinkLabel.draw_text.color_hover = #9a4a12
+mod.widgets.LinkLabel.draw_text.color_down = #86400f
+mod.widgets.LinkLabel.draw_text.color_focus = #1f2227
+mod.widgets.LinkLabel.draw_text.color_disabled = #a0a4ac
+mod.widgets.CloseButton.draw_bg.cross_color = #4f545d
+
+// ---------------------------------------------------------------- selection
+
+// The small controls' quads grow by this much, for their shadow, their
+// focus leak and their lamp.
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = 14.0
+mod.widgets.CheckBoxFlat.draw_bg.border_radius = 2.0
+mod.widgets.CheckBoxFlat.label_walk.margin.left = 14.0
+
+// The check box: a 14 point white cap with a 4 point corner; on, it is
+// pushed into the plate and carries a graphite check.
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let x0 = (self.rect_size.x - sz) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let lo = vec2(po_snap(x0, o.x, px), po_snap(y0, o.y, px))
+    let hi = vec2(po_snap(x0 + sz, o.x, px), po_snap(y0 + sz, o.y, px))
+    let c = (lo + hi) * 0.5
+    let r = min(self.border_radius * 2.0, sz * 0.5)
+    let held = max(self.down, self.pressed)
+    let on = max(self.active, self.mixed)
+    let live = 1.0 - self.disabled
+    let spot = 0.3 * self.hover * (1.0 - held) * (1.0 - on) * live
+    let up = po_cap(p, lo, hi, r, px, self.hover, held, self.disabled, self.focus, 0.7, 1.0, spot)
+    var sunk = po_sunk(p, lo, hi, r, px, vec3(0.93, 0.935, 0.946), self.hover, held, self.disabled, 0.9)
+    let d = Material.sd_box(p, c, (hi - lo) * 0.5, r)
+    sunk = po_frame_over(sunk, d, px, self.focus * live, Finish.cover(d, px), sz)
+    var res = mix(up, sunk, on)
+    // The error: the edge turns red.
+    res = Finish.over(res, vec4(0.78, 0.18, 0.12, 1.0) * Finish.band(d, 0.0, px, px) * self.error * live)
+    // The mark: a check 7 points across in a 1.6 point stroke, or a dash.
+    let ink = mix(mix(vec3(0.169, 0.180, 0.208), vec3(0.66, 0.15, 0.11), self.error), vec3(0.62, 0.64, 0.68), self.disabled)
+    let dm = min(po_seg(p, vec2(c.x - 3.2, c.y + 0.2), vec2(c.x - 1.0, c.y + 2.4)), po_seg(p, vec2(c.x - 1.0, c.y + 2.4), vec2(c.x + 3.3, c.y - 2.4)))
+    let dd = po_seg(p, vec2(c.x - 3.0, c.y), vec2(c.x + 3.0, c.y))
+    let dk = mix(dm - 0.8, dd - 0.8, self.mixed)
+    let mk = Finish.cover(dk, px) * on
+    res = Finish.over(res, vec4(ink * mk, mk))
+    return res * po_fade(self.pos, self.rect_size, m)
+}
+
+// The toggle: a 32 x 18 point track pressed into the plate, a 14 point
+// white knob standing in it with its own shadow. On, the knob stands at
+// the right and a small warm lamp is lit in the track where it was.
+mod.widgets.ToggleFlat.draw_bg.size = 18.0
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = 1.78
+mod.widgets.ToggleFlat.label_walk.margin.left = 32.0
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let tw = self.size * self.pill_aspect
+    let th = self.size
+    let x0 = (self.rect_size.x - tw) * self.mark_at_end
+    let y0 = self.rect_size.y * 0.5 - th * 0.5
+    let lo = vec2(po_snap(x0, o.x, px), po_snap(y0, o.y, px))
+    let hi = vec2(po_snap(x0 + tw, o.x, px), po_snap(y0 + th, o.y, px))
+    let r = th * 0.5
+    let held = max(self.pressed, self.down)
+    let live = 1.0 - self.disabled
+    let on = self.active
+    var res = po_sunk(p, lo, hi, r, px, mix(vec3(0.94, 0.945, 0.955), vec3(0.965, 0.955, 0.945), on), self.hover, held * 0.5, self.disabled, 0.85)
+    let ed = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, r)
+    res = po_frame_over(res, ed, px, self.focus * live, Finish.cover(ed, px), th)
+    // The lamp where the knob stood when off.
+    let lc = vec2(lo.x + th * 0.5 + 1.0, (lo.y + hi.y) * 0.5)
+    res = po_lamp(res, p, lc, 2.2, px, on, self.disabled)
+    // The knob follows the value, or the pointer while it is dragged.
+    let kt = mix(on, self.drag_pos, self.drag)
+    let kr = 7.0
+    let inset = (th - kr * 2.0) * 0.5
+    let kc = vec2(lo.x + inset + kr + (tw - inset * 2.0 - kr * 2.0) * kt, (lo.y + hi.y) * 0.5)
+    let knob = po_cap(p, kc - vec2(kr, kr), kc + vec2(kr, kr), kr, px, self.hover, held * 0.6, self.disabled, 0.0, 0.8, 0.0, 0.0)
+    res = Finish.over(res, knob)
+    // The error: the track's edge turns red.
+    res = Finish.over(res, vec4(0.78, 0.18, 0.12, 1.0) * Finish.band(ed, 0.0, px, px) * self.error * live)
+    return res * po_fade(self.pos, self.rect_size, m)
+}
+
+// The radio: a 14 point white disc; chosen, it is pushed in and a small
+// warm lamp is lit in its middle.
+mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonFlat.clip_x = false
+mod.widgets.RadioButtonFlat.clip_y = false
+mod.widgets.RadioButtonFlat.draw_bg.size = 14.0
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonFlat.label_walk.margin.left = 14.0
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let sz = self.size
+    let y0 = self.rect_size.y * 0.5 - sz * 0.5
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(y0, o.y, px))
+    let hi = vec2(po_snap(sz, o.x, px), po_snap(y0 + sz, o.y, px))
+    let c = (lo + hi) * 0.5
+    let live = 1.0 - self.disabled
+    let on = self.active
+    let up = po_cap(p, lo, hi, sz * 0.5, px, self.hover, self.down, self.disabled, self.focus, 0.7, 1.0, 0.3 * self.hover * (1.0 - self.down) * live)
+    var sunk = po_sunk(p, lo, hi, sz * 0.5, px, vec3(0.93, 0.935, 0.946), self.hover, self.down, self.disabled, 0.9)
+    let d = Finish.sd_circle(p, c, sz * 0.5)
+    sunk = po_frame_over(sunk, d, px, self.focus * live, Finish.cover(d, px), sz)
+    var res = mix(up, sunk, on)
+    // The lamp, with a graphite ring under it so the chosen one reads
+    // without its colour.
+    let rd = Finish.sd_circle(p, c, 3.4)
+    let rr = Finish.band(-rd, 0.0, px, px) * on
+    res = Finish.over(res, vec4(vec3(0.42, 0.44, 0.49) * rr, rr))
+    res = po_lamp(res, p, c, 3.0, px, on, self.disabled)
+    let dg = Finish.cover(Finish.sd_circle(p, c, 3.0), px) * on * self.disabled
+    res = Finish.over(res, vec4(vec3(0.62, 0.64, 0.68) * dg, dg))
+    return res * po_fade(self.pos, self.rect_size, m)
+}
+
+// The radio tab: words on the plate at rest; under the hand a quiet pill
+// pressed in; chosen, a raised white cap lit from under.
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 0.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.RadioButtonTabFlat.min_height = 26.0
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let m = 14.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    let r = (hi.y - lo.y) * 0.5
+    let sel = self.active
+    let quiet = po_sunk(p, lo, hi, r, px, vec3(0.925, 0.933, 0.949), self.hover, self.down, self.disabled, 0.6) * max(self.hover, self.down) * (1.0 - self.disabled)
+    let chosen = po_cap(p, lo, hi, r, px, self.hover, self.down, self.disabled, self.focus, 1.0, 0.0, 1.0)
+    return mix(quiet, chosen, sel) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #4f545d
+mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #1f2227
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #1f2227
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #a0a4ac
+
+// ---------------------------------------------------------------- sliders
+
+// A white disc handle standing in the groove with its own shadow and a
+// graphite dimple; held, the warm light shows from under it.
+let po_handle = fn(dst: vec4, p: vec2, c: vec2, rad: float, px: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
+    let lo = c - vec2(rad, rad)
+    let hi = c + vec2(rad, rad)
+    let spot = (0.3 * hover * (1.0 - drag) + 0.6 * drag) * (1.0 - dis)
+    var res = Finish.over(dst, po_cap(p, lo, hi, rad, px, hover, drag * 0.5, dis, focus, 0.8, 0.0, spot))
+    let d = Finish.sd_circle(p, c, 1.6)
+    let da = Finish.cover(d, px) * (1.0 - 0.6 * dis)
+    return Finish.over(res, vec4(vec3(0.30, 0.32, 0.37) * da, da))
+}
+
+// The bar slider: a 6 point groove pressed in under its label row, the lit
+// amber value, and a 16 point white disc riding it.
+mod.widgets.SliderFlat.clip_x = false
+mod.widgets.SliderFlat.clip_y = false
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let rad = 8.0
+    let cy = po_snap(20.0 + (self.rect_size.y - 20.0) * 0.5, o.y, px)
+    let lo = vec2(po_snap(0.0, o.x, px), cy - 3.0)
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), cy + 3.0)
+    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, self.disabled, 0.9)
+    let span = self.rect_size.x - rad * 2.0
+    let hx = rad + self.slide_pos * span
+    let ox = rad + self.origin_pos * span
+    let f0 = mix(lo.x + px, min(ox, hx), self.arc_origin)
+    let f1 = mix(hx, max(ox, hx), self.arc_origin)
+    res = po_fill(res, p, vec2(f0, lo.y + px * 1.5), vec2(f1, hi.y - px * 1.5), 2.0, px, self.disabled, 0.6, max(max(self.hover, self.drag), self.focus), lo, hi, 3.0)
+    return po_handle(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+
+// The minimal slider: a hairline groove and the lit value; a slim white
+// cap shows under the hand.
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let cy = po_snap(self.offset_y + (self.rect_size.y - self.offset_y) * 0.5, o.y, px)
+    let lo = vec2(po_snap(0.0, o.x, px), cy - 1.5)
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), cy + 1.5)
+    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.90, 0.907, 0.922), 0.0, 0.0, self.disabled, 0.7)
+    let lo2 = min(self.origin_pos, self.slide_pos)
+    let hi2 = max(self.origin_pos, self.slide_pos)
+    let f0 = mix(0.0, lo2, self.arc_origin) * self.rect_size.x
+    let f1 = mix(self.slide_pos, hi2, self.arc_origin) * self.rect_size.x
+    res = po_fill(res, p, vec2(max(f0, lo.x), lo.y), vec2(min(f1, hi.x), hi.y), 1.5, px, self.disabled, 0.0, max(self.hover, self.drag), lo, hi, 1.5)
+    let hx = self.slide_pos * self.rect_size.x
+    let show = max(self.hover, self.drag)
+    let cap = po_cap(p, vec2(hx - 3.0, cy - 5.0), vec2(hx + 3.0, cy + 5.0), 3.0, px, 0.0, 0.0, self.disabled, 0.0, 0.0, 0.0, 0.0)
+    return Finish.over(res, cap * show)
+}
+
+// The round slider: a label column, then the bar slider's groove, value
+// and disc; the groove ends short of the right edge for the value.
+mod.widgets.SliderRoundFlat.clip_x = false
+mod.widgets.SliderRoundFlat.clip_y = false
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let rad = 7.0
+    let cy = po_snap(self.rect_size.y * 0.5, o.y, px)
+    let x0 = po_snap(self.label_size, o.x, px)
+    let lo = vec2(x0, cy - 3.0)
+    let hi = vec2(po_snap(self.rect_size.x - 37.0, o.x, px), cy + 3.0)
+    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, self.disabled, 0.9)
+    let span = hi.x - lo.x - rad * 2.0
+    let hx = lo.x + rad + self.slide_pos * span
+    res = po_fill(res, p, vec2(lo.x + px, lo.y + px * 1.5), vec2(hx, hi.y - px * 1.5), 2.0, px, self.disabled, 0.6, max(max(self.hover, self.drag), self.focus), lo, hi, 3.0)
+    return po_handle(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+
+// The fader: a 3 point slot, lit amber below the cap; a white cap 20 x 11
+// points with a graphite value line and two grip lines; a tick scale
+// beside the slot with an amber mark at unity.
+mod.widgets.SliderFader.cap_size = 11.0
+mod.widgets.SliderFader.draw_bg.track_size = 3.0
+mod.widgets.SliderFader.draw_bg.cap_cross = 0.5
+mod.widgets.SliderFader.clip_x = false
+mod.widgets.SliderFader.clip_y = false
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let m = 6.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * (sz + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let v = self.is_vertical
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    let a = mix(p.x, sz.y - p.y, v)
+    let b = mix(p.y, p.x, v)
+    let mid = across * 0.5
+    let slo = mix(vec2(self.inset_px, mid - 1.5), vec2(mid - 1.5, self.inset_px), v)
+    let shi = mix(vec2(sz.x - self.inset_px, mid + 1.5), vec2(mid + 1.5, sz.y - self.inset_px), v)
+    let lo = vec2(po_snap(slo.x, o.x, px), po_snap(slo.y, o.y, px))
+    let hi = vec2(po_snap(shi.x, o.x, px), po_snap(shi.y, o.y, px))
+    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.90, 0.907, 0.922), 0.0, 0.0, self.disabled, 0.8)
+    let cap_at = foot + self.slide_pos * travel
+    let flo = mix(vec2(lo.x, lo.y), vec2(lo.x, sz.y - cap_at), v)
+    let fhi = mix(vec2(cap_at, hi.y), vec2(hi.x, hi.y), v)
+    res = po_fill(res, p, flo, fhi, 1.5, px, self.disabled, 0.4, max(self.hover, self.drag), lo, hi, 1.5)
+    // The scale: a device pixel tick every 5 points on one side, longer at
+    // the ends and the middle; the unity mark amber.
+    let pitch = 5.0
+    let k = floor((a - foot) / pitch + 0.5)
+    let ka = foot + k * pitch
+    let inrange = step(0.0, k) * step(ka, foot + travel + 0.1)
+    let tk = mid + 6.0
+    let midk = floor(travel / pitch * 0.5 + 0.5)
+    let major = step(abs(k - midk), 0.1) + step(k, 0.1) + step(abs(ka - (foot + travel)), 0.1)
+    let tlen = mix(3.0, 5.0, clamp(major, 0.0, 1.0))
+    let tick = (1.0 - smoothstep(px * 0.4, px * 0.6, abs(a - ka))) * step(tk, b) * step(b, tk + tlen) * inrange
+    let unity = step(abs(k - floor(travel / pitch * 0.75 + 0.5)), 0.1)
+    let tcol = mix(vec3(0.55, 0.575, 0.625), vec3(0.90, 0.55, 0.20), unity)
+    res = Finish.over(res, vec4(tcol, 1.0) * tick * (1.0 - 0.6 * self.disabled))
+    let cw = min(max(across * self.cap_cross, 4.0), across)
+    let cc = mix(vec2(cap_at, mid), vec2(mid, sz.y - cap_at), v)
+    let ch = mix(vec2(self.cap_px * 0.5, cw * 0.5), vec2(cw * 0.5, self.cap_px * 0.5), v)
+    let clo = vec2(po_snap(cc.x - ch.x, o.x, px), po_snap(cc.y - ch.y, o.y, px))
+    let chi = vec2(po_snap(cc.x + ch.x, o.x, px), po_snap(cc.y + ch.y, o.y, px))
+    let spot = (0.25 * self.hover + 0.5 * self.drag) * (1.0 - self.disabled)
+    res = Finish.over(res, po_cap(p, clo, chi, 3.0, px, self.hover, 0.0, self.disabled, self.focus, 0.7, 0.0, spot))
+    let ccs = (clo + chi) * 0.5
+    let g = mix(p.x - ccs.x, p.y - ccs.y, v)
+    let gx = mix(abs(p.y - ccs.y), abs(p.x - ccs.x), v)
+    let inx = step(gx, cw * 0.5 - 2.0)
+    let line = 1.0 - smoothstep(px * 0.4, px * 0.6, abs(g))
+    let dark = (1.0 - smoothstep(px * 0.4, px * 0.6, abs(abs(g) - 2.5)))
+    let light = (1.0 - smoothstep(px * 0.4, px * 0.6, abs(abs(g) - 2.5 - px)))
+    res = Finish.over(res, vec4(0.20, 0.215, 0.25, 1.0) * line * inx * (1.0 - 0.5 * self.disabled))
+    res = Finish.over(res, vec4(0.72, 0.74, 0.78, 1.0) * dark * inx * 0.8)
+    res = Finish.over(res, vec4(1.0, 1.0, 1.0, 1.0) * light * inx * 0.9)
+    return res * po_fade(self.pos, self.rect_size, m)
+}
+
+// ---------------------------------------------------------------- knobs
+
+// A knob: a white dome in a slim groove pressed into the plate; the value
+// burns in the groove as a slim amber arc, haloed only while the knob is
+// held or focused; the pointer is a graphite line on the glaze. Angles run
+// from straight down, clockwise, the gap at the bottom.
+let po_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: float, arc_origin: float, gap: float, hover: float, held: float, focus: float, dis: float) -> vec4 {
+    let ring_w = min(max(0.13 * rr, 3.0), 4.5)
+    let ring_out = rr
+    let ring_in = rr - ring_w
+    let ring_mid = (ring_in + ring_out) * 0.5
+    let rc = ring_in - min(max(0.04 * rr, 1.0), 2.0)
+    let dr = Finish.sd_ring(p, c, ring_mid, ring_w)
+    let q = p - c
+    let rl = length(q)
+    let live = 1.0 - dis
+    let dir_n = q / max(rl, 0.01)
+    // The groove: pressed in, shaded along its upper wall, a white lip on
+    // the plate under its lower outer edge.
+    var res = vec4(1.0, 1.0, 1.0, 1.0) * Finish.ring_out(rl - ring_out, 0.0, px * 1.5, px) * smoothstep(0.2, 0.9, dir_n.y)
+    var col = mix(vec3(0.80, 0.815, 0.845), vec3(0.905, 0.912, 0.93), smoothstep(-0.8, 0.8, dir_n.y))
+    col = mix(col, vec3(0.68, 0.70, 0.745), Finish.band(dr, 0.0, px, px) * smoothstep(0.2, -0.8, dir_n.y))
+    col = mix(col, po_ground(), 0.4 * dis)
+    let ra = Finish.cover(dr, px)
+    res = Finish.over(res, vec4(col * ra, ra))
+    let one = PI / 180.0
+    let sweep = 2.0 * PI - gap * one
+    let start = gap * one * 0.5
+    let ve = start + sweep * slide
+    let oe = start + sweep * origin
+    let a0 = mix(start, min(oe, ve), arc_origin)
+    let a1 = mix(ve, max(oe, ve), arc_origin)
+    let sdf = Sdf2d.viewport(p)
+    sdf.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w - px * 2.0)
+    sdf.fill(vec4(1.0, 1.0, 1.0, 1.0))
+    let arc = sdf.result.w
+    let hot = 1.0 - smoothstep(0.1, 0.4 * ring_w, abs(rl - ring_mid))
+    let core = mix(vec3(1.0, 0.86, 0.62), vec3(1.0, 0.96, 0.86), max(max(hover, held), focus))
+    let edge = smoothstep(0.25 * ring_w, 0.5 * ring_w, abs(rl - ring_mid))
+    let acol = mix(mix(vec3(0.95, 0.56, 0.18), vec3(0.78, 0.40, 0.10), edge), core, hot * 0.55)
+    let halo = max(held, focus) * live
+    if halo > 0.001 {
+        let sdh = Sdf2d.viewport(p)
+        sdh.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w + 4.0)
+        sdh.fill(vec4(1.0, 1.0, 1.0, 1.0))
+        let hb = sdh.result.w * (1.0 - arc) * exp(-max(abs(rl - ring_mid) - ring_w * 0.5, 0.0) / 1.4) * 0.45 * halo
+        res = Finish.over(res, vec4(vec3(0.99, 0.70, 0.36) * hb, hb))
+    }
+    let aa = arc * mix(1.0, 0.4, dis)
+    res = Finish.over(res, vec4(mix(acol, vec3(0.80, 0.81, 0.84), dis) * aa, aa))
+    // The dome, standing on the plate inside the groove.
+    let spot = (0.25 * hover + 0.45 * held) * live
+    res = Finish.over(res, po_cap(p, c - vec2(rc, rc), c + vec2(rc, rc), rc, px, hover, 0.0, dis, focus, 1.0, 0.0, spot))
+    // The dome's roundness: a soft light upper left, a shade lower right.
+    let dq = q / max(rc, 1.0)
+    let dome = Finish.cover(rl - rc + px, px)
+    let lightk = exp(-dot(dq + vec2(0.3, 0.45), dq + vec2(0.3, 0.45)) * 2.2) * 0.5
+    res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * lightk * dome, lightk * dome))
+    let shadek = smoothstep(0.35, 1.0, length(dq - vec2(-0.25, -0.35))) * 0.10 * dome
+    res = Finish.over(res, vec4(po_shade() * shadek, shadek))
+    let dir = vec2(-sin(ve), cos(ve))
+    let len = 0.4 * rc
+    let tip = rc - 0.18 * rc
+    let pd = po_seg(p, c + dir * (tip - len), c + dir * tip) - max(0.05 * rc, 0.85)
+    let pa = Finish.cover(pd, px) * mix(1.0, 0.45, dis)
+    return Finish.over(res, vec4(vec3(0.20, 0.215, 0.25) * pa, pa))
+}
+
+mod.widgets.RotaryKnob.clip_x = false
+mod.widgets.RotaryKnob.clip_y = false
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let m = 14.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + self.rect_size.y - dia * 0.5, px) - self.rect_pos.y)
+    return po_knob(p, c, dia * 0.5 - 1.0, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.RotaryFlat.clip_x = false
+mod.widgets.RotaryFlat.clip_y = false
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let m = 14.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let dia = min(self.rect_size.x, self.rect_size.y - 22.0)
+    let c = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x, Finish.snap(self.rect_pos.y + 20.0 + dia * 0.5, px) - self.rect_pos.y)
+    return po_knob(p, c, dia * 0.5 - 1.0, px, self.slide_pos, self.origin_pos, self.arc_origin, self.gap, self.hover, self.drag, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+// The dial's readout stands as a plain line under it.
+mod.widgets.Rotary.text_input.min_height = 0.0
+mod.widgets.Rotary.text_input.padding.top = 0.0
+mod.widgets.Rotary.text_input.padding.bottom = 0.0
+
+// ---------------------------------------------------------------- fields
+
+// A text field: a white pill pressed into the plate, whiter than the plate,
+// shaded under its top rim, a white lip under its foot. Focused, the lit
+// frame burns just inside its rim.
+let po_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, focus: float, dis: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let hh = hi.y - lo.y
+    let d = Material.sd_box(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let fo = focus * (1.0 - dis)
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if fo > 0.001 {
+        res = po_leak(d, a) * fo
+    }
+    let fill = vec3(0.978, 0.980, 0.986) + vec3(0.01, 0.01, 0.01) * fo
+    res = Finish.over(res, po_sunk(p, lo, hi, r, px, fill, hover, down, dis, 0.6))
+    return po_frame_over(res, d, px, fo, a, hh)
+}
+
+mod.widgets.TextInputFlat.clip_x = false
+mod.widgets.TextInputFlat.clip_y = false
+mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    let r = min((hi.y - lo.y) * 0.5, 13.0)
+    return po_field(p, lo, hi, r, px, self.hover, self.down, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+mod.widgets.TextInputFlat.draw_cursor.color = #2b2e35
+mod.widgets.TextInputFlat.draw_text.color = #2b2e35
+mod.widgets.TextInputFlat.draw_text.color_empty = #676c75
+mod.widgets.TextInputFlat.draw_text.color_disabled = #9ba0a8
+
+// The number field: the same well; its stepper two small white caps
+// stacked at the right, parted by a grey device pixel.
+mod.widgets.NumberField.clip_x = false
+mod.widgets.NumberField.clip_y = false
+mod.widgets.NumberField.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    return po_field(p, lo, hi, 6.0, px, self.hover, 0.0, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.NumberField.spin_width = 16.0
+mod.widgets.NumberSpin.width = 16.0
+mod.widgets.NumberSpin.draw_text.color = #00000000
+mod.widgets.NumberSpin.draw_text.color_disabled = #00000000
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let x0 = po_snap(1.0, o.x, px)
+    let x1 = po_snap(self.rect_size.x - 2.0, o.x, px)
+    let y0 = po_snap(2.5, o.y, px)
+    let y1 = po_snap(self.rect_size.y - 3.0, o.y, px)
+    let mid = po_snap(self.rect_size.y * 0.5 - 0.25, o.y, px)
+    let live = 1.0 - self.disabled
+    // Each half a small white cap, lifted under the hand, pressed when held.
+    let tu = step(p.y, mid)
+    let hot = mix(max(0.0, -self.hot), max(0.0, self.hot), tu) * live
+    let dn = mix(max(0.0, -self.down), max(0.0, self.down), tu) * live
+    let lo = vec2(x0, mix(mid + px, y0, tu))
+    let hi = vec2(x1, mix(y1, mid - px * 0.5, tu))
+    let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, 3.0)
+    let a = Finish.cover(d, px)
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    var col = mix(vec3(1.0, 1.0, 1.0), vec3(0.93, 0.935, 0.948), t) + vec3(0.02, 0.02, 0.02) * hot - vec3(0.06, 0.06, 0.055) * dn
+    col = mix(col, vec3(0.72, 0.74, 0.78), Finish.band(d, 0.0, px, px) * smoothstep(-0.5, 0.5, p.y - (hi.y - 1.5)))
+    col = mix(col, po_ground(), 0.5 * self.disabled)
+    var res = vec4(min(col, vec3(1.0, 1.0, 1.0)) * a, a)
+    // The chevrons: 5 x 3 points, a 1.4 point graphite line.
+    let cx = (x0 + x1) * 0.5
+    let cu = (y0 + mid) * 0.5
+    let cd = (mid + y1) * 0.5
+    let du = min(po_seg(p, vec2(cx - 2.5, cu + 1.2), vec2(cx, cu - 1.3)), po_seg(p, vec2(cx, cu - 1.3), vec2(cx + 2.5, cu + 1.2)))
+    let dd = min(po_seg(p, vec2(cx - 2.5, cd - 1.2), vec2(cx, cd + 1.3)), po_seg(p, vec2(cx, cd + 1.3), vec2(cx + 2.5, cd - 1.2)))
+    let k = Finish.cover(min(du, dd) - 0.65, px) * mix(1.0, 0.4, self.disabled)
+    let ink = mix(vec3(0.30, 0.32, 0.37), vec3(0.85, 0.48, 0.15), max(hot, dn))
+    return Finish.over(res, vec4(ink * k, k))
+}
+
+// The chevron of a drop-down: 8 x 4.5 points in a 1.5 point graphite
+// stroke; open, it turns amber.
+let po_chevron = fn(dst: vec4, p: vec2, cc: vec2, ink: vec3, open: float, dis: float) -> vec4 {
+    let dk = min(po_seg(p, vec2(cc.x - 4.0, cc.y - 2.0), vec2(cc.x, cc.y + 2.2)), po_seg(p, vec2(cc.x, cc.y + 2.2), vec2(cc.x + 4.0, cc.y - 2.0))) - 0.75
+    let px = 0.67
+    let col = mix(mix(ink, vec3(0.85, 0.48, 0.15), open), vec3(0.66, 0.68, 0.72), dis)
+    let k = Finish.cover(dk, px)
+    return Finish.over(dst, vec4(col * k, k))
+}
+
+// The drop-down: a raised white pill with its chevron 13 points in from the
+// right; open, it is pressed in and the chevron turns amber.
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+let po_dropdown = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, open: float, dis: float, focus: float) -> vec4 {
+    let m = 14.0
+    let px = po_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px))
+    let r = (hi.y - lo.y) * 0.5
+    let live = 1.0 - dis
+    let spot = (0.35 * hover + 0.3 * down) * live
+    var res = po_cap(p, lo, hi, r, px, hover, max(down, open), dis, focus, 1.0, 0.0, spot)
+    res = po_chevron(res, p, vec2(hi.x - 13.0, (lo.y + hi.y) * 0.5), vec3(0.24, 0.255, 0.295), open, dis)
+    return res * po_fade(pos, size, m)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.active, self.disabled, self.focus)
+}
+mod.widgets.DropDownFlat.draw_text.color = #2b2e35
+mod.widgets.DropDownFlat.draw_text.color_hover = #1f2227
+mod.widgets.DropDownFlat.draw_text.color_focus = #2b2e35
+mod.widgets.DropDownFlat.draw_text.color_disabled = #9ba0a8
+
+// The select wears a button of its own, built before this sheet: it is
+// given the drop-down's face, its grown quad and its room here.
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus)
+}
+mod.widgets.Select.face.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
+mod.widgets.MultiSelect.face.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
+mod.widgets.Select.face.min_height = 26.0
+mod.widgets.MultiSelect.face.min_height = 26.0
+
+// The combo box: a white pill one can type in, pressed into the plate like
+// a field, the drop-down's chevron at its right.
+mod.widgets.ComboBoxFlat.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBoxFlat.input.min_height = 0.0
+mod.widgets.ComboBoxFlat.clip_x = false
+mod.widgets.ComboBoxFlat.clip_y = false
+mod.widgets.ComboBoxFlat.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, 0.0, 0.0, self.disabled, self.focus)
+}
+
+// Open lists: a white card with a soft shadow line; rows shade a little
+// under the hand; the chosen row a raised white pill with the warm light
+// under its middle.
+let po_menu = fn(p: vec2, size: vec2, px: float) -> vec4 {
+    let c = size * 0.5
+    let d = Material.sd_box(p, c, c, 8.0)
+    let t = clamp(p.y / max(size.y, 1.0), 0.0, 1.0)
+    var col = mix(vec3(1.0, 1.0, 1.0), vec3(0.965, 0.968, 0.975), t)
+    col = mix(col, vec3(0.74, 0.76, 0.80), Finish.band(d, 0.0, px, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+let po_row = fn(p: vec2, size: vec2, px: float, hover: float, active: float, dis: float) -> vec4 {
+    let wash = 0.05 * hover * (1.0 - dis)
+    var res = vec4(po_shade() * wash, wash)
+    if active > 0.001 {
+        let lo = vec2(3.0, 2.0)
+        let hi = size - vec2(3.0, 3.0)
+        let sel = po_cap(p, lo, hi, (hi.y - lo.y) * 0.5, px, 0.0, 0.0, 0.0, 0.0, 0.4, 0.0, 1.0)
+        res = mix(res, sel, active)
+    }
+    return res
+}
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    return po_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    return po_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, self.disabled)
+}
+mod.widgets.PopupMenuItem.draw_text.color_active = #1f2227
+mod.widgets.ComboBoxFlat.draw_popup_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    return po_menu(self.pos * self.rect_size, self.rect_size, px)
+}
+mod.widgets.ComboBoxFlat.draw_item.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    return po_row(self.pos * self.rect_size, self.rect_size, px, self.hover, self.active, 0.0)
+}
+mod.widgets.ComboBoxFlat.draw_item_text.color_active = #1f2227
+
+// ---------------------------------------------------------------- tabs
+
+// The segmented control: a track pressed into the plate; the chosen answer
+// a raised white cap 2 points in, lit warm from inside at its foot.
+mod.widgets.SegmentedControl.segment_height = 22.0
+mod.widgets.SegmentedControlFlat.segment_height = 22.0
+mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
+    let m = 8.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let m = 8.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    return po_sunk(p, lo, hi, (hi.y - lo.y) * 0.5, px, vec3(0.905, 0.912, 0.928), 0.0, 0.0, 0.0, 0.8) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 12.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    return po_cap(p, lo, hi, (hi.y - lo.y) * 0.5, px, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.0) * po_fade(self.pos, self.rect_size, m)
+}
+mod.widgets.SegmentedControlFlat.draw_text.text_style.font_size = 9.0
+mod.widgets.SegmentedControlFlat.draw_text_selected.text_style.font_size = 9.0
+mod.widgets.SegmentedControlFlat.draw_text.color = #4f545d
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #1f2227
+// The chosen word takes its ink from the role palette: graphite on the
+// glaze.
+mod.widgets.SegmentedControlFlat.palette.on_primary_container = #1f2227
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #1f2227
+mod.widgets.SegmentedControlFlat.palette.on_secondary_container = #1f2227
+mod.widgets.SegmentedControl.palette.on_primary_container = #1f2227
+mod.widgets.SegmentedControl.palette.on_neutral_container = #1f2227
+mod.widgets.SegmentedControl.palette.on_secondary_container = #1f2227
+
+// Tabs: quiet words on the plate, parted by a short grey line; the tab in
+// use a raised white pill 2 points in, lit from under; under the hand a
+// quiet pill pressed in.
+mod.widgets.Tabs.height = 26.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+let po_tab = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, active: float) -> vec4 {
+    let m = 14.0
+    let px = po_px(dpi)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(1.0, o.x, px), po_snap(2.0, o.y, px))
+    let hi = vec2(po_snap(size.x - 1.0, o.x, px), po_snap(size.y - 2.0, o.y, px))
+    let r = (hi.y - lo.y) * 0.5
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if active > 0.5 {
+        res = po_cap(p, lo, hi, r, px, hover, 0.0, 0.0, 0.0, 0.8, 0.0, 1.0)
+    } else {
+        if hover > 0.001 {
+            res = po_sunk(p, lo, hi, r, px, vec3(0.925, 0.933, 0.949), 0.0, 0.0, 0.0, 0.55) * hover
+        }
+    }
+    return res * po_fade(pos, size, m)
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    return po_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    return po_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 1.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    return po_tab(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let span = step(self.rect_size.y * 0.3, p.y) * step(p.y, self.rect_size.y * 0.7)
+    let l = step(x, p.x) * step(p.x, x + px) * span
+    let w = step(x + px, p.x) * step(p.x, x + px * 2.0) * span
+    return vec4(0.76, 0.78, 0.82, 1.0) * l + vec4(1.0, 1.0, 1.0, 1.0) * w * (1.0 - l)
+}
+mod.widgets.Tabs.draw_mark.color = #6b7079
+mod.widgets.Tabs.draw_text.color = #4f545d
+mod.widgets.Tabs.draw_text_active.color = #1f2227
+mod.widgets.Tabs.draw_text.text_style.font_size = 9.0
+mod.widgets.Tabs.draw_text_active.text_style.font_size = 9.0
+
+// ---------------------------------------------------------------- feedback
+
+// The progress bar: a 6 point groove pressed in, the amber rod in it, the
+// whole bar standing in an 8 point row.
+mod.widgets.ProgressBarFlat.height = 8.0
+mod.widgets.ProgressBarFlat.clip_x = false
+mod.widgets.ProgressBarFlat.clip_y = false
+mod.widgets.ProgressBarFlat.draw_bg.vertex = fn() {
+    let m = 4.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let m = 4.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let th = min(6.0, self.rect_size.y)
+    let y0 = po_snap((self.rect_size.y - th) * 0.5, o.y, px)
+    let x0 = po_snap(self.rect_size.x * self.start, o.x, px)
+    let x1 = po_snap(self.rect_size.x * self.end, o.x, px)
+    let lo = vec2(x0, y0)
+    let hi = vec2(x1, y0 + th)
+    var res = vec4(0.0, 0.0, 0.0, 0.0)
+    if self.track > 0.5 {
+        res = po_sunk(p, lo, hi, th * 0.5, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, 0.0, 0.9)
+    }
+    let span = hi.x - lo.x - px * 2.0
+    var f0 = lo.x + px
+    var f1 = f0 + span * clamp((self.value - self.start) / max(self.end - self.start, 0.001), 0.0, 1.0)
+    if self.value < 0.0 {
+        // Still: the sweep would need the pass clock, which a sheet may not
+        // read, so the unknown is a lit stretch in the middle, ends fading.
+        f0 = lo.x + span * 0.3
+        f1 = lo.x + span * 0.7
+    }
+    var fill = po_fill(vec4(0.0, 0.0, 0.0, 0.0), p, vec2(f0, lo.y + px * 1.5), vec2(f1, hi.y - px * 1.5), th * 0.5, px, 0.0, 0.8, 0.0, lo, hi, th * 0.5)
+    // An intent other than the plain one tints the light with its colour.
+    let ic = self.fill_color()
+    let tint = step(0.5, self.intent)
+    fill = vec4(mix(fill.rgb, ic.rgb * fill.a, tint * 0.75), fill.a)
+    if self.value < 0.0 {
+        fill = fill * smoothstep(f0 - 1.0, f0 + span * 0.1, p.x) * smoothstep(f1 + 1.0, f1 - span * 0.1, p.x)
+    }
+    res = Finish.over(res, fill)
+    return res * self.opacity * po_fade(self.pos, self.rect_size, m)
+}
+
+// The level meter: cells 3 points long with 1.5 point gaps in a groove
+// pressed into the plate; amber to 70 %, a hotter amber to 90 %, red past
+// it; unlit cells a pale dimple; a cell held at the peak; the clip lamp.
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.vertical
+    let along = mix(sz.x, sz.y, v)
+    let across = mix(sz.y, sz.x, v)
+    let a = mix(p.x, sz.y - p.y, v)
+    let b = mix(p.y, p.x, v)
+    let lamp_room = self.lamp * (across + 3.0)
+    let bar = max(4.0, along - lamp_room)
+    let wa = min(across, 8.0)
+    let wb0 = (across - wa) * 0.5
+    let wlo = mix(vec2(0.0, wb0), vec2(wb0, sz.y - bar), v)
+    let whi = mix(vec2(bar, wb0 + wa), vec2(wb0 + wa, sz.y), v)
+    let lo = vec2(po_snap(wlo.x, o.x, px), po_snap(wlo.y, o.y, px))
+    let hi = vec2(po_snap(whi.x, o.x, px), po_snap(whi.y, o.y, px) - px)
+    var res = po_sunk(p, lo, hi, 2.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, 0.0, 0.8)
+    let pad = 2.0
+    let span = max(1.0, bar - pad * 2.0)
+    let pitch = 4.5
+    let ca = a - pad
+    let cell = Finish.cover(abs(fract(ca / pitch) * pitch - 1.5) - 1.5, px)
+    let share = clamp((floor(ca / pitch) * pitch + 1.5) / span, 0.0, 1.0)
+    let inb = step(pad, a) * step(a, bar - pad) * step(wb0 + 1.5, b) * step(b, wb0 + wa - 1.5)
+    let ha = max(self.hot_at, 0.7)
+    var lit = mix(vec3(0.90, 0.52, 0.17), vec3(1.0, 0.70, 0.33), smoothstep(0.0, 1.0, share / ha))
+    lit = mix(lit, vec3(0.96, 0.46, 0.14), step(ha, share))
+    lit = mix(lit, vec3(0.84, 0.20, 0.13), step(max(self.hot_to, 0.9), share))
+    let qm = (b - (wb0 + wa * 0.5)) / max(0.3 * (wa - 3.0), px * 0.8)
+    lit = mix(lit, vec3(1.0, 0.90, 0.70), exp(-qm * qm) * 0.5 * (1.0 - step(max(self.hot_to, 0.9), share)))
+    let on = step(share, self.level) * step(0.001, self.level)
+    let ghost = vec3(0.86, 0.868, 0.885)
+    let col = mix(ghost, lit, on)
+    res = Finish.over(res, vec4(col, 1.0) * cell * inb * self.opacity)
+    let hold_at = floor((span * self.hold) / pitch) * pitch
+    let hc = step(abs(floor(ca / pitch) * pitch - hold_at), 0.1) * step(0.002, self.hold)
+    res = Finish.over(res, vec4(vec3(0.95, 0.60, 0.24), 1.0) * hc * cell * inb * 0.9)
+    if self.lamp > 0.5 {
+        let lc = mix(vec2(bar + 3.0 + across * 0.5, sz.y * 0.5), vec2(sz.x * 0.5, across * 0.5), v)
+        let rl = max(across * 0.5 - 2.0, 1.0)
+        let ld = Finish.sd_circle(p, lc, rl)
+        let over = step(0.5, self.over)
+        let halo = exp(-max(ld, 0.0) / 0.8) * (1.0 - Finish.cover(ld, px)) * 0.4 * over
+        res = Finish.over(res, vec4(vec3(0.90, 0.30, 0.20) * halo, halo))
+        let la = Finish.cover(ld, px)
+        let lcol = mix(vec3(0.84, 0.85, 0.875), mix(vec3(0.86, 0.22, 0.14), vec3(1.0, 0.86, 0.80), 1.0 - smoothstep(0.0, rl, length(p - lc))), over)
+        res = Finish.over(res, vec4(lcol * la, la))
+    }
+    return res * self.opacity
+}
+
+// The spinner keeps the library's own turning face and takes the amber.
+mod.widgets.SpinnerFlat.draw_bg.color = #e8963a
+mod.widgets.SpinnerFlat.draw_bg.track_alpha = 0.15
+
+// The rings, the arc and the stock bars keep their own faces; the plain
+// intent reads amber, the one accent.
+mod.widgets.ProgressRingFlat.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressRing.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressArc.draw_bg.color_primary = #e8963a
+mod.widgets.ActivityRings.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressBarFlat.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressBar.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressBarGradientX.draw_bg.color_primary = #e8963a
+mod.widgets.ProgressBarGradientY.draw_bg.color_primary = #e8963a
+
+// Words in the error intent beside a check box or a toggle: a deep red that
+// reads on the plate.
+mod.widgets.CheckBoxFlat.draw_text.color_error = #a8261c
+mod.widgets.ToggleFlat.draw_text.color_error = #a8261c
+
+// ---------------------------------------------------------------- surfaces
+
+// The scroll bar: an 8 point gutter with no fill; the thumb a 5 point grey
+// pill, darker under the hand.
+mod.widgets.ScrollBar.bar_size = 8.0
+mod.widgets.ScrollBar.bar_side_margin = 1.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let sz = self.rect_size
+    let p = self.pos * sz
+    let v = self.is_vertical
+    let t0 = mix(sz.x * self.norm_scroll, sz.y * self.norm_scroll, v)
+    let t1 = t0 + mix(sz.x * self.norm_handle, sz.y * self.norm_handle, v)
+    let mid = mix(sz.y * 0.5, sz.x * 0.5, v)
+    let tlo = mix(vec2(t0, mid - 2.5), vec2(mid - 2.5, t0), v)
+    let thi = mix(vec2(t1, mid + 2.5), vec2(mid + 2.5, t1), v)
+    let lo = vec2(po_snap(tlo.x, o.x, px), po_snap(tlo.y, o.y, px))
+    let hi = vec2(po_snap(thi.x, o.x, px), po_snap(thi.y, o.y, px))
+    let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, 2.5)
+    let a = Finish.cover(d, px) * (0.30 + 0.22 * max(self.hover, self.drag))
+    return vec4(vec3(0.42, 0.45, 0.51) * a, a) * self.opacity
+}
+
+// The fine grain of the glaze: monochrome, one value per two device pixels,
+// laid in window space so it never repeats and never swims.
+let po_grain = fn(p: vec2, o: vec2, px: float) -> float {
+    return Finish.grain((p + o) / (2.0 * px), 0.008)
+}
+
+// A raised panel: a white porcelain slab standing on the plate. Its soft
+// shadow stays inside the gap to its neighbours; its face is whiter than
+// the plate, brightest at the top, with a white hairline along its top and
+// a 3 point shoulder inside its edge that catches the light above and
+// turns into shade at its foot. `leak` 1 lets the warm light show from
+// under its foot (a pressable card under the hand).
+let po_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: float, leak: float, lift: float) -> vec4 {
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let n = po_normal(p, c, h, r)
+    let amb = Finish.drop(p, c, h - vec2(3.0, 1.5), r, vec2(0.0, 3.0 + 1.0 * hover), 3.2) * (0.26 + 0.06 * hover) * lift
+    let con = Finish.drop(p, c, h, r, vec2(0.0, px * 1.2), px * 1.2) * 0.35
+    let sc = (1.0 - (1.0 - amb) * (1.0 - con)) * (1.0 - a)
+    var res = vec4(po_shade() * sc, sc)
+    if leak > 0.001 {
+        res = Finish.over(res, po_spot(p, c.x, hi.y + 1.0, min(size.x * 0.5, 60.0), 0.5 * leak) * (1.0 - a))
+    }
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    var col = mix(vec3(0.985, 0.987, 0.992), vec3(0.960, 0.963, 0.972), t) + vec3(0.008, 0.008, 0.006) * hover
+    col = col + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    let upper = smoothstep(0.0, 0.9, -n.y)
+    let lower = smoothstep(0.2, 0.9, n.y)
+    let x = max(-d, 0.0)
+    let sh = 1.0 - smoothstep(0.0, 3.0, x)
+    col = mix(col, vec3(1.0, 1.0, 1.0), sh * upper * 0.7)
+    col = mix(col, vec3(0.86, 0.87, 0.89), sh * lower * 0.5)
+    let ring = Finish.band(d, 0.0, px, px)
+    col = mix(col, mix(vec3(0.74, 0.76, 0.80), vec3(1.0, 1.0, 1.0), upper), ring)
+    col = min(col, vec3(1.0, 1.0, 1.0))
+    return Finish.over(res, vec4(col * a, a))
+}
+// A tray: the same box pressed into the plate, shaded from its top rim, a
+// white lip on the plate under its foot.
+let po_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px) - px)
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, r)
+    let n = po_normal(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let lipa = Finish.ring_out(d, 0.0, px * 1.5, px) * smoothstep(0.2, 0.9, n.y)
+    var res = vec4(vec3(1.0, 1.0, 1.0) * lipa, lipa)
+    var col = vec3(0.862, 0.870, 0.890) + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    col = mix(col, vec3(0.56, 0.585, 0.64), 0.7 * Finish.inset(p, c, h, r, vec2(0.0, 2.6), 4.2))
+    col = mix(col, vec3(0.68, 0.70, 0.745), Finish.band(d, 0.0, px, px) * smoothstep(0.3, -0.9, n.y))
+    return Finish.over(res, vec4(col * a, a))
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 10.0 bottom: 10.0}
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let m = 10.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let m = 10.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    if self.sunken > 0.5 {
+        return po_tray(p, self.rect_size, self.rect_pos, px, 10.0) * po_fade(self.pos, self.rect_size, m)
+    }
+    return po_panel(p, self.rect_size, self.rect_pos, px, 10.0, 0.0, 0.0, 1.0) * po_fade(self.pos, self.rect_size, m)
+}
+
+// The rounded view keeps the colour its caller gives it, with a true
+// corner and, when it is opaque, a one device pixel edge.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let c = (lo + hi) * 0.5
+    let h = max((hi - lo) * 0.5, vec2(0.5, 0.5))
+    let r = min(2.0 * max(1.0, self.border_radius), min(h.x, h.y))
+    let d = Material.sd_box(p, c, h, r)
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    var ink = self.border_color
+    if self.border_size < 0.01 {
+        ink = vec4(0.80, 0.815, 0.845, fill.a)
+    }
+    let a = Finish.cover(d, px)
+    let bd = Finish.band(d, 0.0, max(self.border_size, px), px)
+    var col = mix(fill.rgb, ink.rgb, bd * ink.a)
+    return vec4(col * a * fill.a, a * fill.a) + vec4(ink.rgb * ink.a, ink.a) * bd * a * (1.0 - fill.a)
+}
+
+// The card: its three appearances told apart. Elevated, a white slab
+// standing well off the plate; filled, a slab seated with its contact
+// shadow only; outlined, the plate inside one grey device pixel. Under the
+// hand the warm light shows from under a pressable card's foot.
+mod.widgets.Card.clip_x = false
+mod.widgets.Card.clip_y = false
+mod.widgets.Card.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 10.0 bottom: 10.0}
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let m = 14.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let m = 14.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let fade = po_fade(self.pos, self.rect_size, m)
+    if self.border_size > 0.01 {
+        let o = self.rect_pos
+        let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+        let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+        let c = (lo + hi) * 0.5
+        let h = (hi - lo) * 0.5
+        let d = Material.sd_box(p, c, h, 10.0)
+        let n = po_normal(p, c, h, 10.0)
+        let ring = Finish.band(d, 0.0, px, px)
+        let col = mix(vec3(0.70, 0.72, 0.77), vec3(0.78, 0.80, 0.84), smoothstep(-0.3, 0.9, -n.y))
+        let lip = Finish.ring_out(d, 0.0, px, px) * smoothstep(0.2, 0.9, n.y)
+        let wash = 0.3 * self.hover * Finish.cover(d, px)
+        var res = vec4(vec3(1.0, 1.0, 1.0) * wash, wash)
+        res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * lip, lip))
+        return Finish.over(res, vec4(col * ring, ring)) * fade
+    }
+    if self.shadow_radius < 0.01 {
+        return po_panel(p, self.rect_size, self.rect_pos, px, 10.0, self.hover, 0.0, 0.0) * fade
+    }
+    return po_panel(p, self.rect_size, self.rect_pos, px, 10.0, self.hover, self.hover, 1.4) * fade
+}
+
+// List rows: 10 points in, a grey device pixel divider under each with a
+// white one under it; under the hand the row shades a little; the chosen
+// row rises as a white slab with the warm light under its middle.
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let live = 1.0 - self.disabled
+    let yb = po_snap(self.rect_size.y, o.y, px)
+    let inx = step(10.0, p.x) * step(p.x, self.rect_size.x - 10.0)
+    let div = step(yb - px * 2.0, p.y) * step(p.y, yb - px) * inx
+    let lipl = step(yb - px, p.y) * step(p.y, yb) * inx
+    var res = vec4(0.82, 0.835, 0.86, 1.0) * div * (1.0 - self.selected)
+    res = Finish.over(res, vec4(1.0, 1.0, 1.0, 1.0) * lipl * (1.0 - self.selected))
+    let wash = (0.035 * self.hover + 0.03 * self.down) * live
+    res = Finish.over(res, vec4(po_shade() * wash, wash))
+    if self.selected > 0.001 {
+        let lo = vec2(po_snap(3.0, o.x, px), po_snap(3.0, o.y, px))
+        let hi = vec2(po_snap(self.rect_size.x - 3.0, o.x, px), yb - px * 4.0)
+        let sl = po_cap(p, lo, hi, 6.0, px, 0.0, 0.0, 0.0, 0.0, 0.35, 0.0, 1.0)
+        res = mix(res, sl, self.selected)
+    }
+    return res
+}
+mod.widgets.ListItem.draw_text.color = #2b2e35
+mod.widgets.ListItem.draw_text_2.color = #555a63
+
+// A chip is a small seated white pill; its label graphite whatever its role.
+mod.widgets.ChipFlat.draw_text.text_style.font_size = 9.0
+mod.widgets.ChipFlat.palette.on_neutral = #2b2e35
+mod.widgets.ChipFlat.palette.on_neutral_container = #2b2e35
+mod.widgets.ChipFlat.palette.neutral = #2b2e35
+mod.widgets.ChipFlat.palette.on_primary = #2b2e35
+mod.widgets.ChipFlat.palette.on_primary_container = #2b2e35
+mod.widgets.ChipFlat.palette.primary = #2b2e35
+mod.widgets.ChipFlat.palette.on_secondary_container = #2b2e35
+mod.widgets.ChipFlat.palette.on_tertiary_container = #2b2e35
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let m = 12.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let m = 12.0
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
+    let spot = 0.35 * self.hover + 0.3 * self.down
+    var res = po_cap(p, lo, hi, (hi.y - lo.y) * 0.5, px, self.hover, self.down, 0.0, self.keyed, 0.3, 0.0, spot)
+    return res * po_fade(self.pos, self.rect_size, m)
+}
+
+// A count is a small white pill with graphite figures.
+mod.widgets.BadgePalette.neutral = #fafbfc
+mod.widgets.BadgePalette.on_neutral = #2b2e35
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let o = self.rect_pos
+    let p = self.pos * self.rect_size
+    let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
+    let hi = vec2(po_snap(self.rect_size.x - px * 0.49, o.x, px), po_snap(self.rect_size.y - px * 0.49, o.y, px))
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let r = min(h.x, h.y)
+    let d = Material.sd_box(p, c, h, r)
+    let n = po_normal(p, c, h, r)
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    var col = self.color.rgb + vec3(0.02, 0.02, 0.02) * (1.0 - t) - vec3(0.035, 0.035, 0.03) * t
+    let ring = Finish.band(d, 0.0, px, px)
+    col = mix(min(col, vec3(1.0, 1.0, 1.0)), mix(vec3(0.70, 0.72, 0.77), vec3(1.0, 1.0, 1.0), smoothstep(-0.35, 0.35, -n.y)), ring)
+    let a = Finish.cover(d, px) * max(self.color.a, ring)
+    return vec4(col * a, a)
+}
+
+// Dividers are engraved: a grey device pixel with a white one under it.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let y = Finish.snap(self.rect_pos.y + self.rect_size.y * 0.5, px) - self.rect_pos.y
+    let l = step(y, p.y) * step(p.y, y + px)
+    let w = step(y + px, p.y) * step(p.y, y + px * 2.0) * (1.0 - l)
+    return vec4(0.78, 0.795, 0.83, 1.0) * l + vec4(1.0, 1.0, 1.0, 1.0) * w
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let l = step(x, p.x) * step(p.x, x + px)
+    let w = step(x + px, p.x) * step(p.x, x + px * 2.0) * (1.0 - l)
+    return vec4(0.78, 0.795, 0.83, 1.0) * l + vec4(1.0, 1.0, 1.0, 1.0) * w
+}
+
+// ---------------------------------------------------------------- own faces
+
+// Templates that draw a face of their own on top of these roots keep the
+// plain quad: the grown one is only for the faces written here.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CheckBoxCustom.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.CutButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.glass.RadioButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+// The icon of a face-less icon button stands on the plate: graphite.
+mod.widgets.ButtonFlatterIcon.draw_icon.color = #2b2e35
+mod.widgets.BurgerButton.draw_bg.bar_color = #3a3e46
+mod.widgets.BurgerButton.draw_bg.bar_color_hover = #1f2227
+mod.widgets.BurgerButton.draw_bg.bar_color_disabled = #a0a4ac
+mod.widgets.CloseButton.draw_bg.cross_color_hover = #1f2227
+
+// ---------------------------------------------------------------- field row
+
+// A ROW OF FIELDS IS ONE HEIGHT. Left to themselves the library's fields each
+// come out at a size of their own -- in the widget catalogue's toolbar the
+// search box, the number beside it and the drop down after it stood at three
+// different heights -- and a sheet that reshapes the text box alone widens
+// that gap instead of closing it. So the box metrics are stated ONCE here and
+// handed to each field below, and a field added to the library later joins
+// the row by being named here rather than by having these numbers copied
+// into it.
+// Fields and buttons share the one 26 point row.
+let field_height = 26.0
+let field_pad_v = 4.0
+// Stock faces draw the corner doubled: 3 is a 6 point corner.
+let field_radius = 3.0
+// One device pixel; the faces written above draw their own edges.
+let field_border = 0.34
+
+// The room a Fit field takes: where a field is Fit, the padding IS its
+// height.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it takes
+// the height alone: a padding would displace its line.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+
+// ---------------------------------------------------------------- ground
+
+// Plain views stop clipping so a shadow or a light can fall past their
+// edge; scroll views keep clipping their content.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+mod.widgets.Window.pass.clear_color = #e4e6eb
+// The window's own ground: the pale porcelain plate, lit from above: a
+// broad soft brightening high in the middle, falling a little toward the
+// foot and the corners, and a free grain under it all so the glaze is a
+// material and not a fill.
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = po_px(self.draw_pass.dpi_factor)
+    let p = self.pos * self.rect_size
+    let sz = self.rect_size
+    let q = (p - vec2(sz.x * 0.5, sz.y * 0.1)) / vec2(max(sz.x * 0.8, 1.0), max(sz.y * 1.1, 1.0))
+    let v = smoothstep(0.0, 1.0, length(q))
+    var col = mix(vec3(0.918, 0.926, 0.944), vec3(0.868, 0.877, 0.900), v)
+    let g = Finish.grain(p / (2.0 * px), 0.009)
+    return vec4(col + vec3(g, g, g), 1.0)
+}
+
+// ---------------------------------------------------------------- states
+
+// Every held state is written as a plain value that cuts in at once (the
+// library writes some as snap() values, which a state held as a default --
+// the states page -- never applies). Live, the cut is the same as the snap.
+mod.widgets.ButtonFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.ButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.ButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.CheckBoxFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.CheckBoxFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.RadioButtonFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.RadioButtonFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.TextInputFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.TextInputFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.on.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.on.apply = {draw_bg: {down: 0.0 hover: 1.0} draw_text: {down: 0.0 hover: 1.0}}
+mod.widgets.DropDownFlat.animator.hover.down.from = {all: Snap}
+mod.widgets.DropDownFlat.animator.hover.down.apply = {draw_bg: {down: 1.0 hover: 1.0} draw_text: {down: 1.0 hover: 1.0}}
+true

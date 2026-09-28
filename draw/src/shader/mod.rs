@@ -10,4 +10,5 @@ pub mod draw_text;
 pub mod draw_text_3d;
 pub mod draw_vector;
 pub mod sdf;
+pub mod finish;
 pub mod surface;

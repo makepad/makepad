@@ -2219,4 +2219,41 @@ mod open_tests {
             }
         });
     }
+
+    /// A sheet's face reaches the finish library by its bare name, as a
+    /// sheet writes it after the widgets prelude, and compiles.
+    #[test]
+    fn a_sheet_face_reaches_the_finish_library() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            crate::script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                mod.widgets.Button.draw_bg.pixel = fn() {
+                    let p = self.pos * self.rect_size
+                    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                    let c = self.rect_size * 0.5
+                    let h = c - vec2(3.0, 3.0)
+                    let d = Finish.sd_chamfer(p, c, h, 4.0)
+                    let sh = Finish.drop(p, c, h, 0.0, vec2(0.0, 1.0), 2.0)
+                    var face = vec3(0.2, 0.22, 0.25) * (1.0 + 0.2 * Finish.bevel(d, vec2(0.0, -1.0), 1.5, vec2(-0.3, -0.9)))
+                    face = Finish.lift(face, 0.3 * self.hover + Finish.grain(p / px, 0.01))
+                    let a = Finish.cover(d, px)
+                    return Finish.over(vec4(0.0, 0.0, 0.0, sh * 0.4), vec4(face * a, a))
+                }
+            });
+            let value = crate::script_eval!(vm, {
+                mod.shader.test_compile_draw_source(mod.widgets.Button.draw_bg, "glsl", false)
+            });
+            let text = vm
+                .bx
+                .heap
+                .string_with(value, |_heap, text| text.to_string())
+                .expect("the compiler answers with source");
+            assert!(!text.starts_with("ERRORS:"), "the sheet face did not compile: {text}");
+            for name in ["sd_chamfer", "drop", "bevel", "lift", "grain", "cover", "over"] {
+                assert!(text.contains(&format!("_{name}(")), "{name} is not in the face: {text}");
+            }
+        });
+    }
 }

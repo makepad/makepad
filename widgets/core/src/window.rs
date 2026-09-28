@@ -151,6 +151,23 @@ script_mod! {
         demo: false
         show_caption_bar: true
         pass +: { clear_color: theme.color_bg_app }
+        // The window's ground. A window clears to `pass.clear_color` and
+        // draws nothing of its own, so today's pixels are the clear. A sheet
+        // that lays a ground recipe (a gradient, grain, brushed lines, a
+        // weave, a vignette) turns this on and replaces the pixel:
+        //     mod.widgets.Window.show_bg = true
+        //     mod.widgets.Window.draw_bg.pixel = fn() { ... }
+        // Written out here rather than left to the view's defaults, so a
+        // style switch back to a sheet without a ground turns it off again,
+        // and a sheet that only turns it on gets the plain ground back.
+        show_bg: false
+        draw_bg +: {
+            /** the ground a replaced pixel starts from */
+            color: uniform(theme.color_bg_app)
+            pixel: fn() {
+                return Pal.premul(self.color)
+            }
+        }
         flow: Down
         nav_control: NavControl {}
         // CTRL+F10 records this window to local/screencap/*.mp4, picture and

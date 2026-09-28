@@ -1,0 +1,193 @@
+mod.theme = mod.themes.light
+
+// Clear glass on a plain grey ground.
+// The controls are thick clear glass lying on a nearly flat grey: a face is
+// almost the ground's own colour, so a control is drawn by its edges (a
+// white hairline on top, a darker line inside it, a bright exit line along
+// the bottom, a dark contact line under that) and by the cool shadow it
+// throws, with the light that came through it pooled in the middle. Colour
+// is only tinted glass. The faces are drawn in widgets.splash; the tokens
+// here carry the ground, the inks and the stock parts the sheet leaves be.
+mod.theme.color_bg_app = #cfd0d4
+mod.theme.color_fg_app = #d3d4d8
+mod.theme.color_bg_container = #d3d4d8
+mod.theme.color_bg_even = #d3d4d8
+mod.theme.color_bg_odd = #cdced3
+
+// The surface ladder stays pale, as glass on grey does; its inks are held to
+// the darkest rung.
+mod.theme.color_surface_container_lowest = #dadbdf
+mod.theme.color_surface_container_high = #c6c8cd
+mod.theme.color_surface_container_highest = #bfc1c6
+mod.theme.color_surface_dim = #c2c4c9
+mod.theme.color_surface_bright = #e2e3e6
+mod.theme.color_on_surface = #1c1e22
+mod.theme.color_on_surface_variant = #3d4048
+
+// Raised faces the sheet does not draw: clear glass, a hair lighter than
+// the ground at the top of the face.
+mod.theme.color_outset = #d6d8dd
+mod.theme.color_outset_1 = #d9dbe1
+mod.theme.color_outset_2 = #c3c6ce
+mod.theme.color_outset_hover = #dcdee3
+mod.theme.color_outset_1_hover = #dfe1e6
+mod.theme.color_outset_2_hover = #c9ccd3
+mod.theme.color_outset_down = #cbcdd3
+mod.theme.color_outset_1_down = #cfd1d7
+mod.theme.color_outset_2_down = #bdc0c8
+mod.theme.color_outset_active = #b6c1d4
+mod.theme.color_outset_focus = #d6d8dd
+mod.theme.color_outset_drag = #dcdee3
+mod.theme.color_outset_disabled = #d0d1d5
+mod.theme.color_outset_1_disabled = #d0d1d5
+mod.theme.color_outset_2_disabled = #d0d1d5
+
+// Wells: fields, tracks, boxes. A track is the ground seven hundredths
+// down; a field is the ground itself behind glass.
+mod.theme.color_inset = #d1d2d6
+mod.theme.color_inset_1 = #bcbfc5
+mod.theme.color_inset_2 = #c3c6cc
+mod.theme.color_inset_hover = #d4d5d9
+mod.theme.color_inset_1_hover = #c0c3c9
+mod.theme.color_inset_2_hover = #c6c9cf
+mod.theme.color_inset_focus = #d4d5d9
+mod.theme.color_inset_1_focus = #c0c3c9
+mod.theme.color_inset_2_focus = #c6c9cf
+mod.theme.color_inset_active = #d4d5d9
+mod.theme.color_inset_1_active = #c0c3c9
+mod.theme.color_inset_2_active = #c6c9cf
+mod.theme.color_inset_down = #cbccd1
+mod.theme.color_inset_1_down = #b8bbc1
+mod.theme.color_inset_2_down = #bfc2c8
+mod.theme.color_inset_drag = #d4d5d9
+mod.theme.color_inset_1_drag = #c0c3c9
+mod.theme.color_inset_2_drag = #c6c9cf
+mod.theme.color_inset_empty = #d1d2d6
+mod.theme.color_inset_1_empty = #bcbfc5
+mod.theme.color_inset_2_empty = #c3c6cc
+mod.theme.color_inset_disabled = #d0d1d5
+mod.theme.color_inset_1_disabled = #c9cace
+mod.theme.color_inset_2_disabled = #c9cace
+
+// The glass outline, one device pixel: the ground at 0.85.
+mod.theme.color_bevel = #aeb0b6
+mod.theme.color_bevel_hover = #a4a7ae
+mod.theme.color_bevel_focus = #4f7fd1
+mod.theme.color_bevel_down = #a4a7ae
+mod.theme.color_bevel_disabled = #c2c3c7
+mod.theme.color_bevel_inset_1 = #a4a7ae
+mod.theme.color_bevel_inset_2 = #f6f8fc
+mod.theme.color_bevel_outset_1 = #f6f8fc
+mod.theme.color_bevel_outset_2 = #aeb0b6
+mod.theme.beveling = 0.67
+
+// Near-black type, never embossed, never glowing; the dim voice for
+// placeholders and captions still reads 4.5:1 on the ground.
+mod.theme.color_text = #1c1e22
+mod.theme.color_text_val = #3d4048
+mod.theme.color_text_hover = #121417
+mod.theme.color_text_focus = #121417
+mod.theme.color_text_down = #1c1e22
+mod.theme.color_text_active = #121417
+mod.theme.color_text_meta = #4a4e56
+mod.theme.color_text_placeholder = #53575f
+mod.theme.color_text_placeholder_hover = #4a4e56
+mod.theme.color_text_disabled = #a4a6ab
+mod.theme.color_text_cursor = #3a67b8
+mod.theme.color_cursor = #3a67b8
+mod.theme.color_label = #1c1e22
+mod.theme.color_label_inner = #1c1e22
+mod.theme.color_label_inner_hover = #121417
+mod.theme.color_label_inner_focus = #1c1e22
+mod.theme.color_label_inner_down = #1c1e22
+mod.theme.color_label_inner_drag = #1c1e22
+mod.theme.color_label_inner_active = #0d0f14
+mod.theme.color_label_inner_inactive = #3d4048
+mod.theme.color_label_inner_disabled = #a4a6ab
+mod.theme.color_label_outer = #1c1e22
+mod.theme.color_label_outer_off = #1c1e22
+mod.theme.color_label_outer_hover = #121417
+mod.theme.color_label_outer_down = #1c1e22
+mod.theme.color_label_outer_drag = #1c1e22
+mod.theme.color_label_outer_focus = #1c1e22
+mod.theme.color_label_outer_active = #121417
+mod.theme.color_label_outer_active_focus = #121417
+mod.theme.color_label_outer_disabled = #a4a6ab
+mod.theme.color_icon = #1c1e22
+mod.theme.color_icon_inactive = #3d4048
+mod.theme.color_icon_active = #0d0f14
+mod.theme.color_icon_disabled = #a4a6ab
+
+// The one accent: blue glass. The seed is carried a little deeper than the
+// glass tint so that ink drawn on the grown primary reads; the faces tint
+// their glass with the lighter blue themselves.
+mod.theme.color_ctrl_selected = #3a67b8
+mod.theme.color_focus = #4f7fd1
+mod.theme.color_ctrl_active = #4f7fd1
+mod.theme.color_val = #4f7fd1
+mod.theme.color_val_hover = #4f7fd1
+mod.theme.color_val_focus = #4f7fd1
+mod.theme.color_val_drag = #4f7fd1
+mod.theme.color_val_disabled = #a9b4c6
+mod.theme.color_val_1 = #4f7fd1
+mod.theme.color_val_2 = #7f9bc4
+mod.theme.color_mark = #0d0f14
+mod.theme.color_mark_active = #0d0f14
+mod.theme.color_mark_active_hover = #0d0f14
+mod.theme.color_mark_focus = #0d0f14
+mod.theme.color_mark_disabled = #a4a6ab
+mod.theme.color_handle = #e3e5ea
+mod.theme.color_handle_hover = #e8eaee
+mod.theme.color_handle_1 = #e3e5ea
+mod.theme.color_handle_2 = #cfd2d8
+mod.theme.color_bg_highlight = #c4ccda
+mod.theme.color_bg_highlight_inline = #4f7fd138
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #00000000
+mod.theme.color_selection_down = #4f7fd138
+mod.theme.color_selection_focus = #4f7fd138
+
+mod.theme.color_terminal_bg = #161c32
+mod.theme.color_terminal_text = #d8e2f0
+
+// SLIM. Rows of 26, gaps of 8, panels padded 12. The base froze these rungs
+// as numbers when it was read, so each is stated again.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 20.0
+mod.theme.space_6 = 24.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 22.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 32.0
+mod.theme.tab_height = 26.0
+mod.theme.tab_flat_height = 26.0
+mod.theme.data_item_height = 24.0
+// Stock shaders draw twice the corner written; the faces in widgets.splash
+// draw true capsules and a 12 point panel corner themselves.
+mod.theme.corner_radius = 3.0
+mod.theme.container_corner_radius = 6.0
+mod.theme.textselection_corner_radius = 2.0
+
+// TYPE. The library's own grotesque. A 26 point row wants a cap height of
+// about 8 points, so the body size is 8.75 (it draws 1.333 points a unit).
+mod.theme.font_size_p = 8.75
+mod.theme.font_size_base = 8.75
+
+// No stock material: every face that matters is drawn by the sheet.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+true

@@ -1,0 +1,2009 @@
+use mod.prelude.widgets_internal.*
+
+// Minimal instrument hardware. Keys are square-ish caps standing on a pale
+// case: a flat face with a hair of gradient, one device pixel of light on
+// its top edge, a short skirt below it, a one-pixel contact line and a
+// short, crisp drop. Wells are cut in: a shade under the top edge and a
+// light catch under the lower one. The case is grained, not painted. Orange
+// marks the main action, the chosen answer and the lit lamp; nothing glows.
+mod.widgets.Button.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 3.0 bottom: 5.0}
+mod.widgets.Button.draw_bg.border_radius = 2.5
+mod.widgets.Button.draw_bg.border_size = 0.5
+// A ROW OF FIELDS IS ONE HEIGHT: the box metrics are stated once here and
+// handed to each field below. Keys take the same 26: 24 of face and a skirt
+// of 2.
+let field_height = 26.0
+let field_pad_v = mod.theme.mspace_1.top
+let field_radius = 1.5
+let field_border = 0.5
+
+// The room a Fit field takes: where a field is Fit, the padding IS its
+// height.
+let field_room = fn(w) {
+    w.min_height = field_height
+    w.padding.top = field_pad_v
+    w.padding.bottom = field_pad_v
+}
+// The box a field draws. Given the draw object and not the widget, because
+// not every field draws its own box.
+let field_face = fn(d) {
+    d.border_radius = field_radius
+    d.border_size = field_border
+}
+// A field that states a frame and lays its own parts out inside it takes
+// the height alone: a padding would displace its line.
+let field_frame = fn(w) {
+    w.min_height = field_height
+}
+
+field_room(mod.widgets.TextInput)
+field_face(mod.widgets.TextInput.draw_bg)
+field_room(mod.widgets.ComboBox)
+field_face(mod.widgets.ComboBox.draw_bg)
+field_room(mod.widgets.DropDown)
+field_face(mod.widgets.DropDown.draw_bg)
+field_room(mod.widgets.DropDown2)
+field_face(mod.widgets.DropDown2.draw_bg)
+field_room(mod.widgets.FieldWell)
+field_face(mod.widgets.FieldWell.draw_bg)
+field_room(mod.widgets.TagField)
+field_face(mod.widgets.TagField.draw_bg)
+field_frame(mod.widgets.NumberField)
+mod.widgets.NumberField.draw_bg.border_radius = field_radius
+field_frame(mod.widgets.ValueInput)
+field_frame(mod.widgets.DateField)
+field_frame(mod.widgets.TimeField)
+field_frame(mod.widgets.DatePicker)
+field_frame(mod.widgets.DateRangePicker)
+// The chrome-less input a well holds must impose no height of its own.
+mod.widgets.WellInput.min_height = 0.0
+mod.widgets.Window.pass.clear_color = #efedea
+
+// Plain views stop clipping, so a key's drop and contact line may fall into
+// the gap beside it. Scroll views keep their own clip.
+mod.widgets.View.clip_x = false
+mod.widgets.View.clip_y = false
+
+// A held state on the still states page must show: the stock hover and
+// press arrive as snapped values, which a state held from the start never
+// receives, so both are restated with plain values and a snapped entry.
+let fk_held_states = fn(w) {
+    w.animator.hover.on.from = {all: Snap}
+    w.animator.hover.on.apply = {draw_bg: {down: 0.0, hover: 1.0} draw_text: {down: 0.0, hover: 1.0}}
+    w.animator.hover.down.from = {all: Snap}
+    w.animator.hover.down.apply = {draw_bg: {down: 1.0, hover: 1.0} draw_text: {down: 1.0, hover: 1.0}}
+}
+fk_held_states(mod.widgets.ButtonFlat)
+fk_held_states(mod.widgets.CheckBoxFlat)
+fk_held_states(mod.widgets.ToggleFlat)
+fk_held_states(mod.widgets.RadioButtonFlat)
+fk_held_states(mod.widgets.RadioButtonTabFlat)
+fk_held_states(mod.widgets.TextInputFlat)
+fk_held_states(mod.widgets.DropDownFlat)
+
+// ---------------------------------------------------------------------------
+// SHARED PARTS. Distances in points, negative inside, y down; `px` is one
+// device pixel in points. Colours are sRGB values.
+
+let g3 = fn(v: float) -> vec3 {
+    return vec3(v, v, v)
+}
+
+// A rounded box, true radius.
+let fk_rbox = fn(p: vec2, c: vec2, h: vec2, r: float) -> float {
+    let rr = clamp(r, 0.0, min(h.x, h.y))
+    let q = abs(p - c) - h + vec2(rr, rr)
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - rr
+}
+
+// The same with a radius per corner: (top left, top right, bottom right,
+// bottom left).
+let fk_rbox4 = fn(p: vec2, c: vec2, h: vec2, r4: vec4) -> float {
+    let q = p - c
+    let rt = mix(r4.x, r4.y, step(0.0, q.x))
+    let rb = mix(r4.w, r4.z, step(0.0, q.x))
+    return fk_rbox(p, c, h, mix(rt, rb, step(0.0, q.y)))
+}
+
+// A key's corners from the stock corner uniforms: -1 follows the key's own
+// radius; a group squares its joints with 0; nothing rounder than the key.
+let fk_corner = fn(v: float, r: float) -> float {
+    return mix(min(max(v, 0.0), r), r, step(v, -0.5))
+}
+let fk_corners = fn(tl: float, tr: float, br: float, bl: float, r: float) -> vec4 {
+    return vec4(fk_corner(tl, r), fk_corner(tr, r), fk_corner(br, r), fk_corner(bl, r))
+}
+
+let fk_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
+    let pa = p - a
+    let ba = b - a
+    let k = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return length(pa - ba * k)
+}
+
+// A crisp horizontal or vertical run of device pixels: 1 inside a..b.
+let fk_run = fn(v: float, a: float, b: float) -> float {
+    return step(a, v) * (1.0 - step(b, v))
+}
+
+let fk_grow = fn(rp: vec2, rs: vec2, m: float) -> vec4 {
+    return vec4(rp.x - m, rp.y - m, rs.x + 2.0 * m, rs.y + 2.0 * m)
+}
+
+// The case: pale warm grey, one-pixel monochrome grain (sd about 0.005)
+// and a paper fibre three pixels long and one and a half tall (sd about
+// 0.006). No fall, no vignette. Two hashes of different lattices are mixed
+// so no period shows.
+let fk_grain = fn(q: vec2) -> float {
+    let i = floor(q)
+    let a = Finish.hash(i * 0.7548776662 + vec2(i.y * 0.5698402910, 13.71))
+    let b = Finish.hash(vec2(i.y, i.x) * 1.3247179572 + vec2(41.3, i.x * 0.3819660113))
+    return a - b
+}
+let fk_fibre = fn(q: vec2) -> float {
+    let s = vec2(q.x / 3.0, q.y / 1.5)
+    return Finish.noise(s + vec2(Finish.hash(vec2(floor(s.y), 7.0)) * 57.0, 0.0)) - 0.5
+}
+let fk_case = fn(base: vec3, p: vec2, px: float) -> vec3 {
+    let q = p / px
+    return base + g3(fk_grain(q) * 0.0115 + fk_fibre(q) * 0.021)
+}
+// A plate's face: the grain alone at the brief's sd 0.005 (window
+// coordinates, so plates and ground share one lattice); no fibre, which
+// began to structure on the smaller fields of a plate.
+let fk_plate_grain = fn(base: vec3, w: vec2, px: float) -> vec3 {
+    return base + g3(fk_grain(w / px) * 0.0125)
+}
+
+// The colours of a keycap by tone: 0 white, 1 signal orange, 2 black,
+// 3 grey. `k` picks the part: 0 face top, 1 face foot, 2 roll-off at the
+// very foot, 3 top light line, 4 skirt, 5 pressed top, 6 pressed foot.
+let fk_tone = fn(tone: float, k: float) -> vec3 {
+    let wh = step(tone, 0.5)
+    let orng = step(0.5, tone) * step(tone, 1.5)
+    let bk = step(1.5, tone) * step(tone, 2.5)
+    let gr = step(2.5, tone)
+    var w = vec3(0.961, 0.961, 0.961)
+    var o = vec3(0.933, 0.353, 0.141)
+    var b = vec3(0.220, 0.220, 0.220)
+    var g = vec3(0.816, 0.800, 0.796)
+    if k > 0.5 {
+        w = vec3(0.922, 0.922, 0.922)
+        o = vec3(0.925, 0.345, 0.137)
+        b = vec3(0.208, 0.208, 0.208)
+        g = vec3(0.796, 0.780, 0.776)
+    }
+    if k > 1.5 {
+        w = vec3(0.900, 0.900, 0.898)
+        o = vec3(0.863, 0.220, 0.094)
+        b = vec3(0.150, 0.150, 0.150)
+        g = vec3(0.720, 0.706, 0.702)
+    }
+    if k > 2.5 {
+        w = vec3(1.0, 1.0, 1.0)
+        o = vec3(0.984, 0.643, 0.365)
+        b = vec3(0.624, 0.624, 0.624)
+        g = vec3(0.961, 0.961, 0.961)
+    }
+    if k > 3.5 {
+        w = vec3(0.831, 0.831, 0.831)
+        o = vec3(0.761, 0.255, 0.059)
+        b = vec3(0.110, 0.110, 0.110)
+        g = vec3(0.690, 0.675, 0.671)
+    }
+    if k > 4.5 {
+        w = vec3(0.871, 0.867, 0.867)
+        o = vec3(0.835, 0.251, 0.059)
+        b = vec3(0.180, 0.180, 0.180)
+        g = vec3(0.741, 0.725, 0.722)
+    }
+    if k > 5.5 {
+        w = vec3(0.918, 0.918, 0.918)
+        o = vec3(0.835, 0.251, 0.059)
+        b = vec3(0.196, 0.196, 0.196)
+        g = vec3(0.788, 0.773, 0.769)
+    }
+    return w * wh + o * orng + b * bk + g * gr
+}
+
+// The shade a key throws on the case: a short drop down and a little to
+// the right (reach under 6 points), the one-pixel contact line under its
+// foot and a faint pixel round its sides. `lift` 1 at rest, 0 pressed.
+let fk_shade = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, lift: float, dis: float, drop_a: float) -> vec4 {
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let dr = Finish.drop(p, c, h, r, vec2(0.45, 1.1), 2.0) * drop_a * 1.12 * lift * (1.0 - dis)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, dr))
+    let d = fk_rbox(p, c, h, r)
+    let foot = smoothstep(c.y + h.y - r - 0.5, c.y + h.y - 0.2, p.y)
+    let ring = Finish.ring_out(d, 0.0, px, px)
+    let con = ring * mix(0.09, mix(0.18, 0.32, lift), foot) * mix(1.0, 0.4, dis)
+    return Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+}
+
+// A keycap in the box lo..hi (quad-local, snapped): the skirt `sk` tall at
+// the foot, the face above it with its gradient, its one-pixel top light
+// line, a roll-off at the foot of coloured faces, and pressed in: the skirt
+// gone, the face one pixel lower, its gradient turned and a shade under its
+// top edge. `rim` the strength of a dark hairline round it.
+let fk_cap4 = fn(p: vec2, lo: vec2, hi: vec2, r4: vec4, px: float, sk: float, tone: float, hover: float, press: float, dis: float, rim: float) -> vec4 {
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox4(p, c, h, r4)
+    let flo = vec2(lo.x, lo.y + press * px)
+    let fhi = vec2(hi.x, hi.y - sk * (1.0 - press))
+    let fh = (fhi - flo) * 0.5
+    let fc = flo + fh
+    let fd = fk_rbox4(p, fc, fh, r4)
+    let r = mix(mix(r4.x, r4.y, step(fc.x, p.x)), mix(r4.w, r4.z, step(fc.x, p.x)), step(fc.y, p.y))
+    let t = clamp((p.y - flo.y) / max(fhi.y - flo.y, 1.0), 0.0, 1.0)
+    // the face
+    var face = mix(fk_tone(tone, 0.0), fk_tone(tone, 1.0), t)
+    let roll = (1.0 - smoothstep(0.0, 4.0 * px, fhi.y - p.y)) * step(0.5, tone)
+    face = mix(face, fk_tone(tone, 2.0), roll * 0.8)
+    // hover lifts the face: +0.045 on the pale caps, +0.03 on orange,
+    // +0.08 on black, so it reads at arm's length and not only in a probe
+    let is_o = step(0.5, tone) * step(tone, 1.5)
+    let is_b = step(1.5, tone) * step(tone, 2.5)
+    let hv = mix(mix(0.045, 0.03, is_o), 0.08, is_b)
+    face = face + g3(hv * hover * (1.0 - press))
+    let pf = mix(fk_tone(tone, 5.0), fk_tone(tone, 6.0), t)
+    face = mix(face, pf, press)
+    // pressed in: a shade two pixels deep under the top edge
+    let ytop = p.y - flo.y
+    face = face - g3(0.10 * press * (1.0 - smoothstep(px, 2.0 * px, ytop)))
+    // the top light line, inset by the corner at its ends
+    let tl = fk_run(p.y, flo.y, flo.y + px) * step(abs(p.x - fc.x), fh.x - r + 0.5 * px)
+    face = mix(face, fk_tone(tone, 3.0), tl * (1.0 - press) * (1.0 - dis))
+    // wide caps catch the light on their left edge too, at half strength
+    let ll = fk_run(p.x, flo.x, flo.x + px) * step(abs(p.y - fc.y), fh.y - r) * step(4.0 * fh.y, 2.0 * fh.x)
+    face = mix(face, fk_tone(tone, 3.0), ll * 0.5 * (1.0 - press) * (1.0 - dis))
+    var skirt = fk_tone(tone, 4.0)
+    // disabled: the face most of the way to the case, the skirt paler
+    face = mix(face, vec3(0.925, 0.918, 0.906), dis * 0.6)
+    skirt = mix(skirt, vec3(0.878, 0.871, 0.859), dis)
+    let rl = Finish.band(d, 0.0, px, px) * rim
+    skirt = mix(skirt, vec3(0.0, 0.0, 0.0), rl)
+    face = mix(face, face * (1.0 - rim * 0.9), Finish.band(fd, 0.0, px, px))
+    let a = Finish.cover(d, px)
+    var out = vec4(skirt * a, a)
+    let fa = Finish.cover(fd, px)
+    return Finish.over(out, vec4(face * fa, fa))
+}
+let fk_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, sk: float, tone: float, hover: float, press: float, dis: float, rim: float) -> vec4 {
+    return fk_cap4(p, lo, hi, vec4(r, r, r, r), px, sk, tone, hover, press, dis, rim)
+}
+
+// The focus ring: one pixel of signal orange two pixels out. Never a glow.
+let fk_focus = fn(d: float, px: float, focus: float) -> vec4 {
+    let f = Finish.ring_out(d, 2.0 * px, 3.0 * px, px) * focus
+    return vec4(0.933 * f, 0.353 * f, 0.141 * f, f)
+}
+
+// A well cut into the case: the fill, a shade under the top edge `depth`
+// deep, a hairline mouth darkest at the top, and a light catch under the
+// lower rim, outside it (premultiplied, drawn first by the caller).
+let fk_well = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, fill: vec3, shade: float, mouth: vec3, mouth_a: float) -> vec3 {
+    let d = fk_rbox(p, c, h, r)
+    let top = c.y - h.y
+    let sh = 1.0 - smoothstep(0.0, px, p.y - top - px)
+    var col = mix(fill, vec3(0.0, 0.0, 0.0), sh * shade)
+    let low = smoothstep(-0.5, 0.5, p.y - c.y)
+    col = mix(col, mouth, Finish.band(d, 0.0, px, px) * mouth_a * mix(1.0, 0.7, low))
+    return col
+}
+let fk_catch = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, a: float) -> vec4 {
+    let d = fk_rbox(p, c, h, r)
+    let l = Finish.ring_out(d, 0.0, px, px) * smoothstep(c.y + h.y - r - 0.5, c.y + h.y, p.y) * a
+    return vec4(l, l, l, l)
+}
+
+// ---------------------------------------------------------------------------
+// BUTTONS. One key for the family; `kind` picks the dressing: 0 white key,
+// 1 orange key (the main action), 2 black key, 3 grey key, 4 engraved
+// outline in the case, 5 bare until touched, 6 a flat printed key with no
+// skirt. The quad grows by `m` (6 points) for the drop and the focus ring.
+let fk_button = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, down: float, focus: float, disabled: float, loading: float, anim: float, r4: vec4, kind: float, m: float) -> vec4 {
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - disabled
+    let press = down * live
+    let hov = hover * live
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox4(p, c, h, r4)
+    let r = max(max(r4.x, r4.y), max(r4.z, r4.w))
+    let raised = step(kind, 3.5)
+    let flat = step(5.5, kind)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    if kind < 3.5 {
+        // hovered, the key lifts: its drop from 0.17 to 0.24
+        out = fk_shade(p, c, h, r, px, 1.0 - press, disabled, mix(0.15, 0.215, hov))
+        out = Finish.over(out, fk_cap4(p, lo, hi, r4, px, 3.0 * px, kind, hov, press, disabled, 0.0))
+        // a joint in a group of keys: a seam pixel on each side of it
+        let jl = step(r4.x + r4.w, 0.01) * fk_run(p.x, lo.x, lo.x + px)
+        let jr = step(r4.y + r4.z, 0.01) * fk_run(p.x, hi.x - px, hi.x)
+        let sm = (jl + jr) * fk_run(p.y, lo.y, hi.y) * 0.28
+        out = Finish.over(out, vec4(0.0, 0.0, 0.0, sm))
+    }
+    if kind > 5.5 {
+        // flat: a printed key with no skirt, a faint edge and contact line
+        out = fk_shade(p, c, h, r, px, (1.0 - press) * 0.6, disabled, 0.0)
+        out = Finish.over(out, fk_cap4(p, lo, hi, r4, px, 0.0, 0.0, hov, press, disabled, 0.10))
+    }
+    if kind > 3.5 && kind < 5.5 {
+        let bare = step(4.5, kind)
+        // the engraving: a dark pixel on the edge, a light one under it
+        let dk = Finish.band(d, 0.0, px, px) * (1.0 - bare) * mix(0.24, 0.10, disabled)
+        let d2 = fk_rbox4(p - vec2(0.0, px), c, h, r4)
+        let lt = Finish.band(d2, 0.0, px, px) * (1.0 - Finish.band(d, 0.0, px, px)) * step(c.y, p.y) * (1.0 - bare) * 0.55
+        out = Finish.over(out, vec4(lt, lt, lt, lt))
+        // touched: a faint face comes up out of the case, pressed a shade
+        let fa = Finish.cover(d, px) * (hov * (1.0 - press) * mix(0.55, 0.45, bare))
+        out = Finish.over(out, vec4(fa, fa, fa, fa))
+        let da = Finish.cover(d, px) * press * 0.07
+        out = Finish.over(out, vec4(0.0, 0.0, 0.0, da))
+        let ed = Finish.band(d, 0.0, px, px) * max(dk, bare * (hov + press) * 0.14)
+        out = Finish.over(out, vec4(0.0, 0.0, 0.0, ed))
+    }
+    // focus: one orange pixel two pixels out
+    out = Finish.over(out, fk_focus(d, px, focus * live))
+    // the wait spinner, which the stock face drew and this one must too
+    if loading > 0.0 {
+        let sdf = Sdf2d.viewport(p)
+        let rr = max(min(h.x, h.y) - 5.0, 2.0)
+        let a0 = anim * 2.0 * PI
+        sdf.arc_round_caps(c.x, c.y - 1.0, rr, a0, a0 + 1.5 * PI, 1.5)
+        var ink = vec3(0.114, 0.114, 0.114)
+        if kind > 0.5 && kind < 2.5 {
+            ink = vec3(1.0, 1.0, 1.0)
+        }
+        sdf.fill(vec4(ink, loading))
+        out = Finish.over(out, sdf.result)
+    }
+    return out
+}
+
+// The root is the flat printed key; the sizes and the compound button are
+// handed the standard key's draw object below, so they stand as keys.
+mod.widgets.ButtonFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 6.0, 6.0)
+}
+mod.widgets.ButtonFlat.clip_x = false
+mod.widgets.ButtonFlat.clip_y = false
+mod.widgets.ButtonFlatter.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonFlatter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 5.0, 6.0)
+}
+mod.widgets.Button.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Button.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 0.0, 6.0)
+}
+mod.widgets.ButtonPrimary.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonPrimary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 1.0, 6.0)
+}
+mod.widgets.ButtonSecondary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 2.0, 6.0)
+}
+mod.widgets.ButtonTertiary.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 3.0, 6.0)
+}
+// The destructive action is a white key; the red is in its legend only.
+mod.widgets.ButtonDanger.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 0.0, 6.0)
+}
+mod.widgets.ButtonOutline.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ButtonOutline.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_button(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled, self.loading, self.anim_time, fk_corners(self.border_radius_tl, self.border_radius_tr, self.border_radius_br, self.border_radius_bl, 2.5), 4.0, 6.0)
+}
+mod.widgets.Button.clip_x = false
+mod.widgets.Button.clip_y = false
+mod.widgets.ButtonPrimary.clip_x = false
+mod.widgets.ButtonPrimary.clip_y = false
+mod.widgets.ButtonOutline.clip_x = false
+mod.widgets.ButtonOutline.clip_y = false
+mod.widgets.ButtonFlatter.clip_x = false
+mod.widgets.ButtonFlatter.clip_y = false
+
+// The sizes and the compound button share the root's draw object; they are
+// handed one of their own, the standard key's.
+mod.widgets.ButtonXs.draw_bg = mod.widgets.Button.draw_bg{}
+mod.widgets.ButtonSm.draw_bg = mod.widgets.Button.draw_bg{}
+mod.widgets.ButtonLg.draw_bg = mod.widgets.Button.draw_bg{}
+mod.widgets.ButtonXl.draw_bg = mod.widgets.Button.draw_bg{}
+mod.widgets.ButtonCompound.draw_bg = mod.widgets.Button.draw_bg{}
+
+// Faces of their own under the root keep their own quad: the grown one is
+// the keys' alone.
+mod.widgets.CloseButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.CopyButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.BurgerButton.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloating.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+mod.widgets.ButtonFloatingSm.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+}
+
+// Key geometry: 26 points, 24 of face and 2 of skirt; the legend is centred
+// on the face, a point above the middle of the box.
+mod.widgets.ButtonFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 3.0 bottom: 5.0}
+mod.widgets.ButtonFlat.min_height = 26.0
+mod.widgets.Button.min_height = 26.0
+mod.widgets.ButtonIcon.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 3.0 bottom: 5.0}
+mod.widgets.Button.icon_walk = mod.turtle.Walk{width: 14.0 height: Fit}
+mod.widgets.ButtonXs.min_height = 0.0
+mod.widgets.ButtonSm.min_height = 0.0
+mod.widgets.ButtonXs.padding = mod.turtle.Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 2.0}
+mod.widgets.ButtonSm.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 0.0 bottom: 2.0}
+mod.widgets.ButtonLg.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 0.0 bottom: 2.0}
+mod.widgets.ButtonXl.padding = mod.turtle.Inset{left: 16.0 right: 16.0 top: 0.0 bottom: 2.0}
+
+// Legends: print ink on the pale keys, white on the orange and the black
+// ones; the main action at the heavier weight; the danger key's legend red.
+mod.widgets.ButtonPrimary.draw_text.color = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_down = #fff2ed
+mod.widgets.ButtonPrimary.draw_text.color_focus = #ffffff
+mod.widgets.ButtonPrimary.draw_text.color_disabled = #a9a7a4
+mod.widgets.ButtonPrimary.draw_icon.color = #ffffff
+mod.widgets.ButtonPrimary.draw_text.text_style = mod.theme.font_bold{font_size: 8.0}
+mod.widgets.ButtonSecondary.draw_text.color = #f5f5f5
+mod.widgets.ButtonSecondary.draw_text.color_hover = #ffffff
+mod.widgets.ButtonSecondary.draw_text.color_down = #e6e6e6
+mod.widgets.ButtonSecondary.draw_text.color_focus = #f5f5f5
+mod.widgets.ButtonSecondary.draw_icon.color = #f5f5f5
+mod.widgets.ButtonSecondary.draw_text.text_style = mod.theme.font_regular{font_size: 8.0}
+mod.widgets.ButtonTertiary.draw_text.color = #1d1d1d
+mod.widgets.ButtonTertiary.draw_text.color_hover = #111111
+mod.widgets.ButtonTertiary.draw_text.color_down = #1d1d1d
+mod.widgets.ButtonTertiary.draw_text.color_focus = #1d1d1d
+mod.widgets.ButtonTertiary.draw_icon.color = #1d1d1d
+mod.widgets.ButtonTertiary.draw_text.text_style = mod.theme.font_regular{font_size: 8.0}
+mod.widgets.ButtonDanger.draw_text.color = #b42318
+mod.widgets.ButtonDanger.draw_text.color_hover = #a51f15
+mod.widgets.ButtonDanger.draw_text.color_down = #a51f15
+mod.widgets.ButtonDanger.draw_text.color_focus = #b42318
+mod.widgets.ButtonDanger.draw_icon.color = #b42318
+mod.widgets.ButtonDanger.draw_text.text_style = mod.theme.font_regular{font_size: 8.0}
+mod.widgets.ButtonOutline.draw_text.color = #1d1d1d
+mod.widgets.ButtonOutline.draw_text.color_hover = #111111
+mod.widgets.ButtonOutline.draw_text.color_down = #1d1d1d
+mod.widgets.ButtonOutline.draw_text.color_focus = #1d1d1d
+mod.widgets.ButtonOutline.draw_text.color_disabled = #a9a7a4
+mod.widgets.ButtonOutline.draw_icon.color = #1d1d1d
+mod.widgets.ButtonFlat.draw_bg.loading_color = #1d1d1d
+// Icons: print ink on the white and grey keys (the root's icon kept the
+// SVG's own white, invisible on a white key); white on the orange and black
+// keys, whose trailing icon is handed an object of its own.
+mod.widgets.ButtonFlat.draw_icon.color = #1d1d1d
+mod.widgets.ButtonFlat.draw_icon_end.color = #1d1d1d
+mod.widgets.ButtonPrimary.draw_icon_end = mod.widgets.ButtonFlat.draw_icon_end{color: #ffffff}
+mod.widgets.ButtonSecondary.draw_icon_end = mod.widgets.ButtonFlat.draw_icon_end{color: #f5f5f5}
+
+// ---------------------------------------------------------------------------
+// ENGRAVED PRINT. A label printed on the case carries one device pixel of
+// light under each glyph, read from the glyph one pixel above: one more
+// sample and nothing else. One literal per template.
+mod.widgets.Label.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    var s = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.sdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.msdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    let e = s * 0.6 * c.a * (1.0 - step(0.35, Finish.lum(c.rgb)))
+    return main + vec4(e, e, e, e) * (1.0 - main.a)
+}
+// The small heading (a card's title) is engraved like the labels; it was
+// built from Label before this sheet ran, so it takes its own literal.
+mod.widgets.H4.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    var s = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.sdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.msdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    let e = s * 0.6 * c.a * (1.0 - step(0.45, Finish.lum(c.rgb)))
+    return main + vec4(e, e, e, e) * (1.0 - main.a)
+}
+mod.widgets.CheckBoxFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    var s = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.sdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.msdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    let e = s * 0.6 * c.a
+    return main + vec4(e, e, e, e) * (1.0 - main.a)
+}
+mod.widgets.RadioButtonFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    var s = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.sdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.msdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    let e = s * 0.6 * c.a
+    return main + vec4(e, e, e, e) * (1.0 - main.a)
+}
+mod.widgets.ToggleFlat.draw_text.pixel = fn() {
+    let main = self.sample_text_pixel()
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    var s = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.sdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    if self.texture_index > 1.5 && self.texture_index < 2.5 {
+        let tex_size = self.msdf_texture.size()
+        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
+        s = self.msdf((dxt + dyt) * tex_size.x * 0.5, ps, c)
+    }
+    let e = s * 0.6 * c.a
+    return main + vec4(e, e, e, e) * (1.0 - main.a)
+}
+
+// ---------------------------------------------------------------------------
+// CHECK BOXES. A 14 point key with a short skirt, three points in from the
+// row so its focus ring has room. Set: a flat orange square on the face, an
+// indicator rather than a tick; mixed: an orange bar. Error: a red rim.
+mod.widgets.CheckBoxFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.CheckBoxFlat.label_walk.margin = mod.turtle.Inset{left: 23.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.CheckBoxFlat.draw_bg.size = 14.0
+mod.widgets.CheckBoxFlat.min_height = 24.0
+mod.widgets.CheckBoxFlat.align.y = 0.5
+mod.widgets.CheckBoxFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.CheckBoxFlat.clip_x = false
+mod.widgets.CheckBoxFlat.clip_y = false
+mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = self.size
+    let x0 = mix(3.0, self.rect_size.x - sz - 3.0, self.mark_at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (self.rect_size.y - sz) * 0.5, px)) - o
+    let hi = lo + vec2(Finish.snap(sz, px), Finish.snap(sz, px))
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    // the round box keeps its round key
+    let r = mix(2.0, h.y, step(20.0, self.border_radius))
+    let d = fk_rbox(p, c, h, r)
+    let live = 1.0 - self.disabled
+    let press = self.down * live
+    var out = fk_shade(p, c, h, r, px, 1.0 - press, self.disabled, mix(0.13, 0.19, self.hover * live))
+    out = Finish.over(out, fk_cap(p, lo, hi, r, px, 2.0 * px, 0.0, self.hover * live, press, self.disabled, 0.06))
+    // the indicator: a 6 point square of orange, its rim a shade deeper
+    let fy = press * px - px
+    let mc = c + vec2(0.0, fy)
+    let sq = fk_rbox(p, mc, vec2(3.0, 3.0), mix(0.5, 3.0, step(20.0, self.border_radius)))
+    let bar = fk_rbox(p, mc, vec2(3.5, 1.0), 0.5)
+    let show = self.active * (1.0 - self.mixed)
+    let md = mix(mix(1000.0, sq, show), bar, self.mixed)
+    let lit = mix(vec3(0.933, 0.353, 0.141), vec3(0.83, 0.78, 0.76), self.disabled)
+    var mk = mix(lit, lit * 0.85, Finish.band(md, 0.0, px, px))
+    let ma = Finish.cover(md, px)
+    out = Finish.over(out, vec4(mk * ma, ma))
+    // error: the rim of the key turns red
+    let er = Finish.band(d, 0.0, px, px) * self.error
+    out = Finish.over(out, vec4(0.706 * er, 0.137 * er, 0.094 * er, er))
+    return Finish.over(out, fk_focus(d, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// TOGGLES. A 30 by 16 track cut into the case in two flat tones, dark
+// upper half over a lighter lower half (orange when on), and a 12 point
+// square keycap riding in it two points from its ends.
+mod.widgets.ToggleFlat.label_walk.margin = mod.turtle.Inset{left: 39.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.ToggleFlat.draw_bg.size = 16.0
+mod.widgets.ToggleFlat.min_height = 24.0
+mod.widgets.ToggleFlat.align.y = 0.5
+mod.widgets.ToggleFlat.draw_bg.pill_aspect = 1.875
+mod.widgets.ToggleFlat.draw_bg.knob_inset = 2.0
+mod.widgets.ToggleFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 4.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ToggleFlat.clip_x = false
+mod.widgets.ToggleFlat.clip_y = false
+mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 4.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let sz = vec2(self.size * self.pill_aspect, self.size)
+    let x0 = mix(3.0, self.rect_size.x - sz.x - 3.0, self.mark_at_end)
+    let lo = vec2(Finish.snap(o.x + x0, px), Finish.snap(o.y + (self.rect_size.y - sz.y) * 0.5, px)) - o
+    let hi = vec2(Finish.snap(o.x + x0 + sz.x, px), Finish.snap(o.y + (self.rect_size.y - sz.y) * 0.5 + sz.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let r = h.y
+    let d = fk_rbox(p, c, h, r)
+    let live = 1.0 - self.disabled
+    let on = self.active
+    // the track: two flat tones split at mid-height
+    let upper = step(p.y, Finish.snap(o.y + c.y, px) - o.y)
+    let off_col = mix(vec3(0.216, 0.216, 0.216), vec3(0.125, 0.125, 0.125), upper)
+    let on_col = mix(vec3(0.835, 0.251, 0.059), vec3(0.933, 0.353, 0.141), upper)
+    var fill = mix(off_col, on_col, on)
+    fill = fill + g3(0.035 * self.hover * live)
+    fill = mix(fill, vec3(0.80, 0.792, 0.780), self.disabled * 0.75)
+    var col = fk_well(p, c, h, r, px, fill, 0.30, vec3(0.0, 0.0, 0.0), 0.35 * live)
+    // error: the rim of the track turns red
+    col = mix(col, vec3(0.706, 0.137, 0.094), Finish.band(d, 0.0, px, px) * self.error)
+    let a = Finish.cover(d, px)
+    var out = fk_catch(p, c, h, r, px, 0.75)
+    out = Finish.over(out, vec4(col * a, a))
+    out = Finish.over(out, fk_focus(d, px, self.focus * live))
+    // the thumb: a square keycap, its left edge on a pixel boundary
+    let ki = self.knob_inset
+    let kw = sz.y - 2.0 * ki
+    let knob_t = mix(on, self.drag_pos, self.drag)
+    let kx = Finish.snap(o.x + lo.x + ki + knob_t * (sz.x - 2.0 * ki - kw), px) - o.x
+    let ky = Finish.snap(o.y + lo.y + ki, px) - o.y
+    let klo = vec2(kx, ky)
+    let khi = klo + vec2(Finish.snap(kw, px), Finish.snap(kw, px))
+    let kh = (khi - klo) * 0.5
+    let kc = klo + kh
+    let kd = fk_rbox(p, kc, kh, 2.0)
+    // the thumb is the white cap: hovered it lifts, its drop deepening
+    let khov = self.hover * live
+    let con = Finish.ring_out(kd, 0.0, px, px) * smoothstep(kc.y, khi.y, p.y) * mix(0.40, 0.50, khov)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+    let kdr = Finish.drop(p, kc, kh, 2.0, vec2(0.3, 0.8), 1.2) * 0.22 * khov * (1.0 - self.down * live)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, kdr))
+    out = Finish.over(out, fk_cap(p, klo, khi, 2.0, px, 2.0 * px, 0.0, khov, self.down * live, self.disabled, 0.26))
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// RADIOS. A lamp in a collar: the collar a pale dish with a light line on
+// its lower inner edge, the lens a flat grey dot off and flat LED orange
+// on, its rim a shade deeper. Lit, never glowing.
+mod.widgets.RadioButtonFlat.padding = mod.turtle.Inset{left: 0.0 right: 3.0 top: 3.0 bottom: 3.0}
+mod.widgets.RadioButtonFlat.label_walk.margin = mod.turtle.Inset{left: 23.0 right: 3.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonFlat.draw_bg.size = 14.0
+mod.widgets.RadioButtonFlat.min_height = 24.0
+mod.widgets.RadioButtonFlat.align.y = 0.5
+mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let sz = self.size
+    let lo = vec2(Finish.snap(o.x + 3.0, px), Finish.snap(o.y + (self.rect_size.y - sz) * 0.5, px)) - o
+    let rad = Finish.snap(sz, px) * 0.5
+    let c = lo + vec2(rad, rad)
+    let live = 1.0 - self.disabled
+    let q = p - c
+    let d = length(q) - rad
+    // the collar: a shallow dish, shaded under its top, lit on its lower lip
+    let v = clamp(q.y / rad * 0.5 + 0.5, 0.0, 1.0)
+    var collar = mix(vec3(0.800, 0.800, 0.800), vec3(0.867, 0.867, 0.867), smoothstep(0.1, 0.7, v))
+    collar = collar + g3(0.03 * self.hover * live)
+    collar = mix(collar, vec3(0.90, 0.894, 0.886), self.disabled * 0.6)
+    let low = smoothstep(-0.2, 0.3, q.y / rad)
+    collar = mix(collar, vec3(1.0, 1.0, 1.0), Finish.band(d, px, 2.0 * px, px) * low * 0.9 * live)
+    collar = mix(collar, vec3(0.62, 0.62, 0.62), Finish.band(d, 0.0, px, px) * (1.0 - low) * 0.6)
+    let a = Finish.cover(d, px)
+    var out = fk_catch(p, c, vec2(rad, rad), rad, px, 0.6)
+    out = Finish.over(out, vec4(collar * a, a))
+    // the lens, 8 points
+    let lr = 4.0
+    let ld = length(q) - lr
+    let off = vec3(0.478, 0.475, 0.467)
+    let lit = vec3(0.992, 0.518, 0.196)
+    var lens = mix(off, lit, self.active)
+    // hovered, the lens itself brightens (off #8c8b89), not only its collar
+    lens = lens + g3(0.07 * self.hover * live * (1.0 - self.down))
+    lens = lens - g3(0.08 * self.down * live)
+    lens = mix(lens, vec3(0.80, 0.792, 0.780), self.disabled * 0.7)
+    lens = mix(lens, lens * 0.84, Finish.band(ld, 0.0, px, px))
+    let la = Finish.cover(ld, px)
+    out = Finish.over(out, vec4(lens * la, la))
+    return Finish.over(out, fk_focus(d, px, self.focus * live))
+}
+
+// Radio tabs: keys in a row; the chosen one is latched in, its legend in
+// the deep signal orange.
+mod.widgets.RadioButtonTabFlat.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 3.0 bottom: 5.0}
+mod.widgets.RadioButtonTabFlat.label_walk.margin = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.RadioButtonTabFlat.min_height = 24.0
+mod.widgets.RadioButtonTabFlat.clip_x = false
+mod.widgets.RadioButtonTabFlat.clip_y = false
+mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 5.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 5.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let r = 2.0
+    let d = fk_rbox(p, c, h, r)
+    let live = 1.0 - self.disabled
+    let press = max(self.active, self.down) * live
+    var out = fk_shade(p, c, h, r, px, 1.0 - press, self.disabled, mix(0.13, 0.19, self.hover * live))
+    out = Finish.over(out, fk_cap(p, lo, hi, r, px, 3.0 * px, 0.0, self.hover * live, press, self.disabled, 0.0))
+    return Finish.over(out, fk_focus(d, px, self.focus * live))
+}
+mod.widgets.RadioButtonTabFlat.draw_text.color = #1d1d1d
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #b53c0b
+mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #a9a7a4
+
+// ---------------------------------------------------------------------------
+// TEXT FIELDS. A white well cut into the case: a grey hairline mouth, one
+// pixel of shade under its top edge, the light catch on the last row of the
+// box. Focus: the mouth turns signal orange with a second orange row inside
+// it, drawn in the box so an inner field needs no room outside itself.
+// The well fills its whole box; the light catch lies one device row BELOW
+// it, outside, so a field whose quad is grown down (see `fk_field_vertex`)
+// shows it and one that is not simply has none.
+let fk_field = fn(p: vec2, size: vec2, o: vec2, px: float, hover: float, focus: float, dis: float, r: float) -> vec4 {
+    // the side rims land on whole pixels INSIDE the box: a rim rounded out
+    // past it is cut by the field's own clip
+    let lo = vec2(ceil(o.x / px - 0.001) * px, Finish.snap(o.y, px)) - o
+    let hi = vec2(floor((o.x + size.x) / px + 0.001) * px, Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, r)
+    var col = mix(vec3(0.992, 0.992, 0.988), vec3(1.0, 1.0, 1.0), hover)
+    col = mix(col, vec3(0.945, 0.941, 0.933), dis)
+    // cut in: two rows of shade under the top rim, 16 % then 7 %
+    let yt = p.y - lo.y
+    let sh = fk_run(yt, px, 2.0 * px) * 0.16 + fk_run(yt, 2.0 * px, 3.0 * px) * 0.07
+    col = mix(col, vec3(0.0, 0.0, 0.0), sh * mix(1.0, 0.4, dis))
+    // the rim: the top edge dark (0.49), the sides and foot the pale edge
+    // #a3a2a1, so the field reads as a recess lit from above
+    let upper = 1.0 - smoothstep(lo.y + r, lo.y + r + px, p.y)
+    let top_rim = mix(vec3(0.49, 0.486, 0.478), vec3(0.40, 0.396, 0.388), hover)
+    let low_rim = mix(vec3(0.639, 0.635, 0.631), vec3(0.58, 0.576, 0.57), hover)
+    var rim = mix(low_rim, top_rim, max(upper, fk_run(yt, 0.0, px)))
+    rim = mix(rim, vec3(0.76, 0.755, 0.745), dis)
+    col = mix(col, rim, Finish.band(d, 0.0, px, px))
+    let orange = vec3(0.933, 0.353, 0.141)
+    col = mix(col, orange, Finish.band(d, 0.0, px, px) * focus)
+    col = mix(col, orange, Finish.band(d, px, 2.0 * px, px) * focus * 0.45)
+    let a = Finish.cover(d, px)
+    // the catch: one row of #fcfbf9 under the foot, outside the box
+    let cl = fk_run(p.y, hi.y, hi.y + px) * step(abs(p.x - c.x), h.x - r) * 0.92
+    let out = vec4(0.988 * cl, 0.984 * cl, 0.976 * cl, cl)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+mod.widgets.TextInputFlat.padding = mod.turtle.Inset{left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+// The field's quad reaches 2 points below its box for the catch; the
+// field stops clipping downward only (its text still clips at its sides).
+mod.widgets.TextInputFlat.clip_y = false
+mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 2.0))
+}
+mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
+    // The value field inside a slider or a well draws no box of its own.
+    if self.color.a < 0.01 {
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    }
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_field(self.pos * (self.rect_size + vec2(0.0, 2.0)), self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 1.5)
+}
+mod.widgets.TextInputFlat.draw_text.color_empty = #72716f
+mod.widgets.TextInputFlat.draw_text.color_disabled = #a9a7a4
+mod.widgets.TextInputFlat.draw_cursor.color = #ee5a24
+
+mod.widgets.NumberField.clip_y = false
+mod.widgets.NumberField.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 2.0))
+}
+mod.widgets.NumberField.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_field(self.pos * (self.rect_size + vec2(0.0, 2.0)), self.rect_size, self.rect_pos, px, self.hover, self.focus, self.disabled, 1.5)
+}
+// The toolbar number: a small white well, the value's share a faint orange
+// wash behind the digits, print ink.
+mod.widgets.ValueInput.arrow_color = #5c5b59
+mod.widgets.ValueInput.draw_text.color = #1d1d1d
+mod.widgets.ValueInput.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    var out = fk_field(p, self.rect_size, self.rect_pos, px, max(self.hover, self.drag), self.focus, 0.0, 1.5)
+    if self.fill >= 0.0 {
+        let w = (self.rect_size.x - 2.0) * self.fill
+        let f = fk_run(p.x, 1.0, 1.0 + w) * fk_run(p.y, 2.0 * px, self.rect_size.y - 2.0 * px) * 0.14
+        out = Finish.over(out, vec4(0.933 * f, 0.353 * f, 0.141 * f, f))
+    }
+    return out
+}
+
+// The stepper: two small white keys stacked in the field's end, split by a
+// seam; each half lights or presses on its own.
+mod.widgets.NumberSpin.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o + vec2(px, px)
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o - vec2(px, 2.0 * px)
+    let live = 1.0 - self.disabled
+    let mid = Finish.snap(o.y + (lo.y + hi.y) * 0.5, px) - o.y
+    let upper = step(p.y, mid)
+    let hot_u = max(0.0, self.hot) * live
+    let hot_d = max(0.0, -self.hot) * live
+    let dn_u = max(0.0, self.down) * live
+    let dn_d = max(0.0, -self.down) * live
+    // each half the main key in small: the 3 pixel skirt, the white top line
+    var out = Finish.over(vec4(0.0, 0.0, 0.0, 0.0), fk_cap(p, lo, vec2(hi.x, mid - px), 1.0, px, 3.0 * px, 0.0, hot_u, dn_u, self.disabled, 0.08) * upper)
+    out = Finish.over(out, fk_cap(p, vec2(lo.x, mid + px), hi, 1.0, px, 3.0 * px, 0.0, hot_d, dn_d, self.disabled, 0.08) * (1.0 - upper))
+    // the seam between them
+    let seam = fk_run(p.y, mid - px, mid + px) * step(lo.x, p.x) * step(p.x, hi.x) * 0.45
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, seam))
+    // the legends, plus above and minus below, 1.5 pixel strokes on the
+    // pixel grid, centred on each face (the face sits above its skirt and
+    // travels one pixel when pressed)
+    let cx = Finish.snap(o.x + (lo.x + hi.x) * 0.5, px) - o.x
+    let cu = Finish.snap(o.y + (lo.y + mid - px - 3.0 * px) * 0.5, px) - o.y + dn_u * px
+    let cd = Finish.snap(o.y + (mid + px + hi.y - 3.0 * px) * 0.5, px) - o.y + dn_d * px
+    let arm = 2.25
+    let sw = 0.75 * px
+    let hbar_u = step(abs(p.x - cx), arm) * step(abs(p.y - cu), sw)
+    let vbar_u = step(abs(p.y - cu), arm) * step(abs(p.x - cx), sw)
+    let hbar_d = step(abs(p.x - cx), arm) * step(abs(p.y - cd), sw)
+    let g = max(max(hbar_u, vbar_u) * upper, hbar_d * (1.0 - upper))
+    let gink = mix(vec3(0.114, 0.114, 0.114), vec3(0.663, 0.655, 0.643), self.disabled)
+    out = Finish.over(out, vec4(gink * g, g))
+    return out
+}
+// The stock triangles give way to the drawn plus and minus.
+mod.widgets.NumberSpin.draw_text.color = #1d1d1d00
+mod.widgets.NumberSpin.draw_text.color_disabled = #a9a7a400
+
+// ---------------------------------------------------------------------------
+// SLIDERS. A 3 point dark track with a light catch under it, the orange
+// fill in it up to the handle, hairline ticks printed above at a 6 point
+// pitch, and a narrow dark cap with a light index line across its middle.
+// Every face of the slider file grows its quad by 6 points for the cap's
+// drop and the focus ring.
+mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderMinimal.clip_x = false
+mod.widgets.SliderMinimal.clip_y = false
+
+// The dark track `th` tall from lo, `w` long, filled orange from `f0` to
+// `fx` (a fill from the origin runs either way).
+let fk_track = fn(p: vec2, lo: vec2, w: float, th: float, px: float, f0: float, fx: float, dis: float) -> vec4 {
+    let h = vec2(w * 0.5, th * 0.5)
+    let c = lo + h
+    let r = h.y
+    let d = fk_rbox(p, c, h, r)
+    let filled = step(p.x, max(f0, fx)) * step(min(f0, fx), p.x)
+    var col = mix(vec3(0.173, 0.173, 0.173), vec3(0.933, 0.353, 0.141), filled)
+    // the fill's top line, one pixel
+    col = mix(col, vec3(0.984, 0.643, 0.365), filled * fk_run(p.y, lo.y, lo.y + px) * 0.6)
+    col = mix(col, vec3(0.80, 0.792, 0.780), dis * 0.7)
+    let a = Finish.cover(d, px)
+    let out = fk_catch(p, c, h, r, px, 0.8)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// A cap standing on a track: the drop and contact line, the dark face with
+// its top light line, and the index line across it, orange while dragged.
+let fk_slider_cap = fn(p: vec2, lo: vec2, hi: vec2, px: float, hover: float, drag: float, focus: float, dis: float, vert: float) -> vec4 {
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    var out = fk_shade(p, c, h, 1.5, px, 1.0, dis, mix(0.18, 0.24, hover))
+    out = Finish.over(out, fk_cap(p, lo, hi, 1.5, px, 2.0 * px, 2.0, hover, 0.0, dis, 0.0))
+    // the index line: 1.5 points across the middle of the face
+    let fc = c - vec2(0.0, px)
+    let ix = mix(fk_run(p.y, fc.y - 0.75, fc.y + 0.75) * step(abs(p.x - c.x), h.x - 2.0), fk_run(p.x, c.x - 0.75, c.x + 0.75) * step(abs(p.y - fc.y), h.y - 2.5), vert)
+    let ink = mix(mix(mix(vec3(0.812, 0.812, 0.812), vec3(1.0, 1.0, 1.0), hover), vec3(0.933, 0.353, 0.141), drag), vec3(0.6, 0.6, 0.6), dis)
+    out = Finish.over(out, vec4(ink * ix, ix))
+    let d = fk_rbox(p, c, h, 1.5)
+    return Finish.over(out, fk_focus(d, px, focus))
+}
+
+mod.widgets.SliderFlat.height = 38.0
+mod.widgets.SliderFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let hw = 5.0
+    let hh = 9.0
+    let cy = size.y - hh - 1.0
+    let th = 3.0
+    let top = Finish.snap(o.y + cy - th * 0.5, px) - o.y
+    let x0 = Finish.snap(o.x + 1.0, px) - o.x
+    let w = Finish.snap(o.x + size.x - 1.0, px) - o.x - x0
+    let kx = x0 + hw + self.slide_pos * (w - 2.0 * hw)
+    let f0 = mix(x0 - 1.0, x0 + hw + self.fill_lo * (w - 2.0 * hw), step(0.001, self.fill_lo))
+    let f1 = x0 + hw + self.fill_hi * (w - 2.0 * hw)
+    var out = fk_track(p, vec2(x0, top), w, th, px, f0, f1, self.disabled)
+    // printed ticks above the track: a 6 point pitch, a longer one every
+    // fifth, each one device-pixel column at half ink
+    let span = w - 2.0 * hw
+    let nt = max(floor(span / 6.0 + 0.5), 1.0)
+    let pitch = span / nt
+    let fi = floor((p.x - x0 - hw) / pitch + 0.5)
+    let tx = Finish.snap(o.x + x0 + hw + fi * pitch, px) - o.x
+    let major = 1.0 - step(0.3, abs(fract(fi / 5.0 + 0.5) - 0.5))
+    let tl = mix(3.0, 4.5, major)
+    let ty = Finish.snap(o.y + top - 2.0, px) - o.y
+    let ty0 = Finish.snap(o.y + top - 2.0 - tl, px) - o.y
+    let in_x = step(-0.5, fi) * step(fi, nt + 0.5)
+    let tick = fk_run(p.x, tx, tx + px) * fk_run(p.y, ty0, ty) * in_x
+    let ta = tick * mix(0.36, 0.5, major) * mix(1.0, 0.45, self.disabled)
+    out = Finish.over(out, vec4(0.114 * ta, 0.114 * ta, 0.114 * ta, ta))
+    // the cap, 10 by 18, on the pixel grid
+    let clo = vec2(Finish.snap(o.x + kx - hw, px), Finish.snap(o.y + cy - hh, px)) - o
+    let chi = clo + vec2(Finish.snap(2.0 * hw, px), Finish.snap(2.0 * hh, px))
+    let lifted = max(self.hover, self.drag) * live
+    out = Finish.over(out, fk_slider_cap(p, clo, chi, px, lifted, self.drag * live, self.focus * live, self.disabled, 0.0))
+    return out
+}
+mod.widgets.SliderFlat.text_input.draw_text.text_style = mod.theme.font_code{font_size: 7.25}
+mod.widgets.SliderFlat.text_input.draw_text.color = #4a4947
+mod.widgets.SliderFlat.text_input.draw_text.color_hover = #1d1d1d
+mod.widgets.SliderFlat.text_input.draw_text.color_focus = #1d1d1d
+
+// The minimal slider is the stepped one: a printed hairline with a dot at
+// every step, lit orange up to the value, and a small round white cap.
+let fk_disc = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, press: float, dis: float) -> vec4 {
+    let q = p - c
+    let d = length(q) - rad
+    var out = fk_shade(p, c, vec2(rad, rad), rad, px, 1.0 - press, dis, 0.16)
+    let t = clamp(q.y / rad * 0.5 + 0.5, 0.0, 1.0)
+    var face = mix(vec3(0.969, 0.969, 0.969), vec3(0.902, 0.902, 0.902), t)
+    face = face + g3(0.045 * hover * (1.0 - press)) - g3(0.05 * press)
+    face = mix(face, vec3(0.925, 0.918, 0.906), dis * 0.6)
+    let up = 1.0 - smoothstep(-0.55, -0.25, q.y / rad)
+    face = mix(face, vec3(1.0, 1.0, 1.0), Finish.band(d, 0.0, px, px) * up * (1.0 - press))
+    face = mix(face, face * 0.78, Finish.band(d, 0.0, px, px) * (1.0 - up) * 0.8)
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+
+mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let tr = 5.0
+    let cy = Finish.snap(o.y + size.y - 6.0, px) - o.y
+    let span = size.x - 2.0 * tr
+    let kx = tr + self.slide_pos * span
+    let inx = step(0.0, p.x) * step(p.x, size.x)
+    // the printed line: one dark pixel over one light
+    let dk = fk_run(p.y, cy - px, cy) * inx * 0.30
+    let lt = fk_run(p.y, cy, cy + px) * inx * 0.6
+    var out = vec4(lt, lt, lt, lt)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, dk))
+    // the step dots, 2 points, every 8 points or so
+    let nt = max(floor(span / 8.0 + 0.5), 1.0)
+    let pitch = span / nt
+    let fi = clamp(floor((p.x - tr) / pitch + 0.5), 0.0, nt)
+    let dc = vec2(tr + fi * pitch, cy - 0.5 * px)
+    let dd = length(p - dc) - 1.0
+    let lit = step(fi * pitch, self.slide_pos * span + 0.01)
+    var dcol = mix(vec3(0.639, 0.635, 0.631), vec3(0.933, 0.353, 0.141), lit)
+    dcol = mix(dcol, vec3(0.80, 0.792, 0.780), self.disabled * 0.7)
+    let da = Finish.cover(dd, px)
+    out = Finish.over(out, vec4(dcol * da, da))
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, cy - 0.5 * px)
+    out = Finish.over(out, fk_disc(p, kc, tr, px, self.hover * live, self.drag * live, self.disabled))
+    return Finish.over(out, fk_focus(length(p - kc) - tr, px, self.focus * live))
+}
+mod.widgets.SliderMinimal.text_input.draw_text.text_style = mod.theme.font_code{font_size: 7.25}
+
+// The round slider is the slot slider: a 12 point dark slot beside its
+// label, a groove along its middle lit orange up to the thumb, and the
+// thumb a ring that fills white while held or hovered, a lamp in the slot.
+mod.widgets.SliderRoundFlat.height = 14.0
+mod.widgets.SliderRoundFlat.text_input.margin = mod.turtle.Inset{left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
+mod.widgets.SliderRoundFlat.text_input.padding = mod.turtle.Inset{left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+mod.widgets.SliderRoundFlat.text_input.draw_text.text_style = mod.theme.font_code{font_size: 7.25}
+mod.widgets.SliderRoundFlat.text_input.draw_text.color = #d9d9d9
+mod.widgets.SliderRoundFlat.text_input.draw_text.color_hover = #f0f0f0
+mod.widgets.SliderRoundFlat.text_input.draw_text.color_focus = #f0f0f0
+mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let x0 = Finish.snap(o.x + self.label_size, px) - o.x
+    let y0 = Finish.snap(o.y + 1.0, px) - o.y
+    let hi = vec2(Finish.snap(o.x + size.x, px) - o.x, Finish.snap(o.y + size.y - 1.0, px) - o.y)
+    let h = (hi - vec2(x0, y0)) * 0.5
+    let c = vec2(x0, y0) + h
+    let r = h.y
+    let d = fk_rbox(p, c, h, r)
+    var slot = mix(vec3(0.118, 0.118, 0.118), vec3(0.62, 0.615, 0.605), self.disabled)
+    slot = slot + g3(0.03 * self.hover * live)
+    var col = fk_well(p, c, h, r, px, slot, 0.40, vec3(0.0, 0.0, 0.0), 0.5)
+    // the lower lip inside, a little lighter
+    col = col + g3(0.04 * fk_run(p.y, hi.y - 2.0 * px, hi.y - px) * step(abs(p.x - c.x), h.x - r))
+    // the thumb's travel, and the groove lit up to it
+    let tr = 4.0
+    let kx = x0 + r + self.slide_pos * (2.0 * h.x - 2.0 * r)
+    let gy = Finish.snap(o.y + c.y, px) - o.y
+    let groove = fk_run(p.y, gy - px, gy) * step(x0 + r * 0.6, p.x) * step(p.x, hi.x - r * 0.6)
+    col = mix(col, vec3(0.0, 0.0, 0.0), groove * 0.6)
+    let lit = fk_run(p.y, gy - px, gy + px) * step(x0 + r * 0.6, p.x) * step(p.x, kx)
+    col = mix(col, mix(vec3(0.933, 0.353, 0.141), vec3(0.72, 0.71, 0.70), self.disabled), lit)
+    let a = Finish.cover(d, px)
+    var out = fk_catch(p, c, h, r, px, 0.8)
+    out = Finish.over(out, vec4(col * a, a))
+    // the thumb: a ring 1.5 pixels wide on the dark, filled while held
+    let kc = vec2(Finish.snap(o.x + kx, px) - o.x, gy - 0.5 * px)
+    let kd = length(p - kc) - tr
+    let full = max(self.hover, self.drag) * live
+    let ring = mix(Finish.band(kd, 0.0, 1.5 * px, px), Finish.cover(kd, px), full)
+    let ink = mix(vec3(0.941, 0.941, 0.941), vec3(0.75, 0.745, 0.735), self.disabled)
+    let dark = Finish.cover(kd, px) * (1.0 - full)
+    out = Finish.over(out, vec4(0.09 * dark, 0.09 * dark, 0.09 * dark, dark))
+    out = Finish.over(out, vec4(ink * ring, ring))
+    return Finish.over(out, fk_focus(d, px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// KNOBS. A white cap on a grey skirt ring, a short crisp drop, a flat
+// orange pointer bar, and round the cap a ring of fifteen dots lit orange up
+// to the value: a meter drawn, not glowing.
+let fk_knob = fn(p: vec2, c: vec2, rad: float, px: float, val: float, f0: float, f1: float, gap: float, hover: float, press: float, dis: float, dot_r: float, dot_gap: float) -> vec4 {
+    let dia = rad * 2.0
+    let q = p - c
+    let live = 1.0 - dis
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    // the dot ring
+    let sweep = 2.0 * PI - gap
+    var ang = atan2(-q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let fi = clamp(floor((ang - gap * 0.5) / sweep * 14.0 + 0.5), 0.0, 14.0)
+    let da = gap * 0.5 + sweep * fi / 14.0
+    let rs = rad + max(1.0, dia * 0.05)
+    let rd = rs + dot_gap + dot_r
+    let dc = c + vec2(-sin(da), cos(da)) * rd
+    let dd = length(p - dc) - dot_r
+    let lit = step(fi / 14.0, f1 + 0.02) * step(f0 - 0.02, fi / 14.0)
+    var dcol = mix(vec3(0.784, 0.773, 0.757), vec3(0.933, 0.353, 0.141), lit)
+    dcol = mix(dcol, vec3(0.84, 0.835, 0.825), dis * 0.7)
+    let dca = Finish.cover(dd, px)
+    out = Finish.over(out, vec4(dcol * dca, dca))
+    // drop and contact
+    let hh = vec2(rs, rs)
+    let dr = Finish.drop(p, c, hh, rs, vec2(0.3, dia * 0.06), dia * 0.085) * 0.20 * (1.0 - press * 0.5) * mix(1.0, 0.3, dis)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, dr))
+    let sd = length(q) - rs
+    let con = Finish.ring_out(sd, 0.0, px, px) * smoothstep(-0.2, 0.6, q.y / rs) * 0.30
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+    // the skirt ring: grey, lit at the top, darker at the foot
+    let st = clamp(q.y / rs * 0.5 + 0.5, 0.0, 1.0)
+    var skirt = mix(vec3(0.678, 0.675, 0.667), vec3(0.451, 0.451, 0.447), smoothstep(0.15, 0.95, st))
+    skirt = mix(skirt, vec3(0.82, 0.815, 0.805), dis * 0.6)
+    skirt = mix(skirt, skirt * 0.72, Finish.band(sd, 0.0, px, px))
+    let sa = Finish.cover(sd, px)
+    out = Finish.over(out, vec4(skirt * sa, sa))
+    // the cap: a vertical fall of -0.06, a pixel of light over its top third
+    let d = length(q) - rad
+    let t = clamp(q.y / rad * 0.5 + 0.5, 0.0, 1.0)
+    var face = mix(vec3(0.973, 0.973, 0.973), vec3(0.906, 0.906, 0.906), t)
+    face = face + g3(0.035 * hover * live) - g3(0.035 * press * live)
+    face = mix(face, vec3(0.925, 0.918, 0.906), dis * 0.5)
+    let up = 1.0 - smoothstep(-0.55, -0.4, q.y / rad)
+    face = mix(face, vec3(1.0, 1.0, 1.0), Finish.band(d, px, 2.0 * px, px) * up * live)
+    face = mix(face, vec3(0.62, 0.62, 0.615), Finish.band(d, 0.0, px, px) * 0.55)
+    // the pointer: a flat bar 0.05 D wide from 0.15 D to 0.45 D, round ends
+    let pa = gap * 0.5 + sweep * val
+    let dir = vec2(-sin(pa), cos(pa))
+    let pl = fk_seg(p, c + dir * dia * 0.15, c + dir * dia * 0.43) - max(dia * 0.025, 0.75)
+    let pink = mix(vec3(0.878, 0.337, 0.122), vec3(0.72, 0.71, 0.70), dis)
+    face = mix(face, pink, Finish.cover(pl, px))
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+
+mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let dia = min(size.x, size.y)
+    let rr = dia * 0.5
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + size.y - rr, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    // the ring's room scales with the knob; under 32 points the dots are
+    // 1.5 points and stand 3 points clear of the cap's skirt, so the ring
+    // and the skirt read as two edges, not one fuzzy one
+    let small = 1.0 - step(16.0, rr)
+    let dg = mix(clamp(rr * 0.16, 1.5, 4.0), 3.0, small)
+    let dr = mix(clamp(rr * 0.045, 0.6, 1.0), 0.75, small)
+    let rad = floor((rr - dg - 2.0 * dr - 0.5) / 1.1 / px) * px
+    let lifted = max(self.hover, max(self.focus, self.drag)) * live
+    var out = fk_knob(p, c, rad, px, self.slide_pos, self.fill_lo, self.fill_hi, gap, lifted, self.drag * live, self.disabled, dr, dg)
+    return Finish.over(out, fk_focus(length(p - c) - rad - max(1.0, rad * 0.1), px, self.focus * live))
+}
+
+mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let room = vec2(size.x, size.y - 22.0)
+    let dia = min(room.x, room.y)
+    let rr = dia * 0.5
+    let c = vec2(Finish.snap(o.x + size.x * 0.5, px) - o.x, Finish.snap(o.y + 22.0 + room.y * 0.5, px) - o.y)
+    let gap = self.gap * PI / 180.0
+    let small = 1.0 - step(16.0, rr)
+    let dg = mix(clamp(rr * 0.12, 1.5, 4.5), 3.0, small)
+    let dr = mix(clamp(rr * 0.035, 0.6, 1.25), 0.75, small)
+    let rad = floor((rr - dg - 2.0 * dr - 0.5) / 1.1 / px) * px
+    let lifted = max(self.hover, max(self.focus, self.drag)) * live
+    var out = fk_knob(p, c, rad, px, self.slide_pos, self.fill_lo, self.fill_hi, gap, lifted, self.drag * live, self.disabled, dr, dg)
+    return Finish.over(out, fk_focus(length(p - c) - rad - max(1.0, rad * 0.1), px, self.focus * live))
+}
+
+// The dial's readout: a black display window. A pixel of light on the case
+// under it, a dark rim, the glass with faint scanlines and one pixel of
+// shade under its top edge, cool white monospace digits. No glow.
+let fk_display = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o - vec2(0.0, px)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, r)
+    let row = floor((p.y + o.y) / px)
+    var col = vec3(0.102, 0.102, 0.102) + g3(0.012 * (fract(row * 0.5) * 2.0 - 0.5))
+    col = mix(col, vec3(0.0, 0.0, 0.0), fk_run(p.y, lo.y + px, lo.y + 2.0 * px) * 0.4)
+    col = mix(col, vec3(0.184, 0.184, 0.184), Finish.band(d, 0.0, px, px))
+    let a = Finish.cover(d, px)
+    let out = fk_catch(p, c, h, r, px, 0.75)
+    return Finish.over(out, vec4(col * a, a))
+}
+mod.widgets.RotaryFlat.text_input.padding = mod.turtle.Inset{left: 5.0 right: 5.0 top: 3.0 bottom: 3.0}
+mod.widgets.RotaryFlat.text_input.min_height = 0.0
+mod.widgets.RotaryFlat.text_input.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_display(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, 1.0)
+}
+mod.widgets.RotaryFlat.text_input.draw_text.color = #e5eff8
+mod.widgets.RotaryFlat.text_input.draw_text.color_hover = #e5eff8
+mod.widgets.RotaryFlat.text_input.draw_text.color_focus = #ffffff
+mod.widgets.RotaryFlat.text_input.draw_text.color_empty = #767676
+mod.widgets.RotaryFlat.text_input.draw_text.text_style = mod.theme.font_code{font_size: 8.25}
+
+// ---------------------------------------------------------------------------
+// FADERS. A 2 point black slot with a light catch on its lower side,
+// printed ticks either side, a longer one every fourth, and a white cap
+// with a skirt and a dark index line across it (orange while dragged).
+// The cap: 16 points across the slot, 24 along the travel (0.61 H by
+// 1.03 H), a 2 point skirt on its lower side.
+mod.widgets.SliderFader.cap_size = 24.0
+mod.widgets.SliderFader.draw_bg.cap_cross = 0.55
+mod.widgets.SliderFader.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let size = self.rect_size
+    let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let vert = self.is_vertical
+    // track space: `a` along the travel from its zero, `b` across
+    let a = mix(p.x, size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let along = mix(size.x, size.y, vert)
+    let across = mix(size.y, size.x, vert)
+    let ob = mix(o.y, o.x, vert)
+    let travel = max(along - self.inset_px * 2.0 - self.cap_px, 1.0)
+    let foot = self.inset_px + self.cap_px * 0.5
+    let mid = Finish.snap(ob + across * 0.5, px) - ob
+    // the slot, 2 points, black
+    let sw = 2.0
+    let sh = vec2((along - self.inset_px * 2.0) * 0.5, sw * 0.5)
+    let sc = vec2(self.inset_px + sh.x, mid)
+    let q = vec2(a, b)
+    let sd = fk_rbox(q, sc, sh, sh.y)
+    var slot = mix(vec3(0.102, 0.102, 0.102), vec3(0.62, 0.615, 0.605), self.disabled)
+    // the slot lit orange over the fill span, from the zero or the origin
+    let lit_s = step(foot + self.fill_lo * travel, a) * step(a, foot + self.fill_hi * travel) * step(0.001, self.fill_hi - self.fill_lo)
+    slot = mix(slot, mix(vec3(0.933, 0.353, 0.141), vec3(0.72, 0.71, 0.70), self.disabled), lit_s)
+    let sa = Finish.cover(sd, px)
+    let lip = Finish.ring_out(sd, 0.0, px, px) * step(sc.y, b) * 0.8
+    var out = vec4(lip, lip, lip, lip)
+    out = Finish.over(out, vec4(slot * sa, sa))
+    // ticks either side: 16 steps, 4 points long, 6 at every fourth
+    let f = (a - foot) / travel * 16.0
+    let fi = floor(f + 0.5)
+    let da = abs(a - (foot + fi / 16.0 * travel))
+    let major = 1.0 - step(0.3, abs(fract(fi / 4.0 + 0.5) - 0.5))
+    let tl = mix(3.0, 5.0, major)
+    let off = abs(b - mid)
+    let in_rng = step(-0.5, fi) * step(fi, 16.5)
+    let tk = (1.0 - smoothstep(px * 0.5 - 0.01, px * 0.5 + 0.01, da)) * step(sw * 0.5 + 3.0, off) * step(off, sw * 0.5 + 3.0 + tl) * in_rng * 0.5 * mix(1.0, 0.45, self.disabled)
+    out = Finish.over(out, vec4(0.114 * tk, 0.114 * tk, 0.114 * tk, tk))
+    // the cap, laid out in screen space so its skirt is at its foot
+    let cap_w = Finish.snap(min(16.0, across), px)
+    let cap_l = Finish.snap(self.cap_px, px)
+    let at = foot + self.slide_pos * travel
+    let cc_ab = vec2(at, mid)
+    let cc = mix(cc_ab, vec2(cc_ab.y, size.y - cc_ab.x), vert)
+    let ch = mix(vec2(cap_l, cap_w), vec2(cap_w, cap_l), vert) * 0.5
+    let clo = vec2(Finish.snap(o.x + cc.x - ch.x, px), Finish.snap(o.y + cc.y - ch.y, px)) - o
+    let chi = clo + 2.0 * ch
+    let cch = (chi - clo) * 0.5
+    let ccc = clo + cch
+    let lifted = max(self.hover, self.focus) * live
+    out = Finish.over(out, fk_shade(p, ccc, cch, 1.5, px, 1.0, self.disabled, mix(0.16, 0.22, lifted)))
+    out = Finish.over(out, fk_cap(p, clo, chi, 1.5, px, 3.0 * px, 0.0, lifted, 0.0, self.disabled, 0.10))
+    // the index line across the face (the face ends above its skirt), 1.5
+    // device pixels, on the pixel grid
+    let fy = Finish.snap(o.y + (clo.y + chi.y - 3.0 * px) * 0.5, px) - o.y
+    let fx = Finish.snap(o.x + ccc.x, px) - o.x
+    let ix = mix(fk_run(p.x, fx - 0.5, fx + 0.5) * step(abs(p.y - fy), cch.y - 3.0), fk_run(p.y, fy - 0.5, fy + 0.5) * step(abs(p.x - ccc.x), cch.x - 2.0), vert)
+    let ink = mix(mix(vec3(0.114, 0.114, 0.114), vec3(0.933, 0.353, 0.141), self.drag * live), vec3(0.7, 0.695, 0.685), self.disabled)
+    out = Finish.over(out, vec4(ink * ix, ix))
+    return Finish.over(out, fk_focus(fk_rbox(p, ccc, cch, 1.5), px, self.focus * live))
+}
+
+// ---------------------------------------------------------------------------
+// DROP-DOWNS. The white key with a readout: a seam 22 points from its right
+// end (a dark pixel and a light one) and a solid marker triangle, 6 by 4.
+let fk_marker = fn(p: vec2, c: vec2) -> float {
+    let q = p - c
+    // a downward triangle 6 wide, 4 tall, centred on c
+    let e = max(abs(q.x) * 0.8 + (q.y + 2.0) * 0.6 - 2.4, -(q.y + 2.0))
+    return max(e, q.y - 2.0)
+}
+let fk_dropdown = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, held: float, focus: float, dis: float) -> vec4 {
+    let m = 6.0
+    var out = fk_button(pos, size, o, px, hover, held, focus, dis, 0.0, 0.0, vec4(2.5, 2.5, 2.5, 2.5), 0.0, m)
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let live = 1.0 - dis
+    let dn = held * live * px
+    let dx = Finish.snap(o.x + size.x - 22.0, px) - o.x
+    let in_y = step(4.0 + dn, p.y) * step(p.y, size.y - 6.0 + dn)
+    let sd = fk_run(p.x, dx - px, dx) * in_y * 0.30
+    let sl = fk_run(p.x, dx, dx + px) * in_y * 0.9
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, sd))
+    out = Finish.over(out, vec4(sl, sl, sl, sl))
+    let mc = vec2(dx + 11.0, (size.y - 2.0) * 0.5 + dn)
+    let mk = Finish.cover(fk_marker(p, mc), px)
+    let ink = mix(vec3(0.114, 0.114, 0.114), vec3(0.663, 0.655, 0.643), dis)
+    return Finish.over(out, vec4(ink * mk, mk))
+}
+mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 3.0 bottom: 5.0}
+mod.widgets.DropDownFlat.clip_x = false
+mod.widgets.DropDownFlat.clip_y = false
+mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let held = max(self.down * self.hover, self.active)
+    return fk_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, held, self.focus, self.disabled)
+}
+mod.widgets.DropDown.draw_bg.color_disabled = #ecebe8
+// The stock drop-down restates its own padding: its marker's room, again.
+mod.widgets.DropDown.padding.left = 10.0
+mod.widgets.DropDown.padding.right = 30.0
+
+// The select wears a button of its own, built before this sheet: it is
+// handed the drop-down's key, its grown quad and its room for the marker.
+mod.widgets.Select.face.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Select.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled)
+}
+mod.widgets.Select.face.clip_x = false
+mod.widgets.Select.face.clip_y = false
+mod.widgets.Select.face.padding.right = 30.0
+mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_dropdown(self.pos, self.rect_size, self.rect_pos, px, self.hover, self.down, self.focus, self.disabled)
+}
+mod.widgets.MultiSelect.face.clip_x = false
+mod.widgets.MultiSelect.face.clip_y = false
+mod.widgets.MultiSelect.face.padding.right = 30.0
+mod.widgets.Select.clip_x = false
+mod.widgets.Select.clip_y = false
+mod.widgets.MultiSelect.clip_x = false
+mod.widgets.MultiSelect.clip_y = false
+
+// The combo box: the white well with a small key joined at its right end.
+mod.widgets.ComboBox.padding = mod.turtle.Inset{left: 8.0 right: 28.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBox.input.min_height = 0.0
+mod.widgets.ComboBox.clip_y = false
+mod.widgets.ComboBox.draw_bg.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 2.0))
+}
+mod.widgets.ComboBox.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * (self.rect_size + vec2(0.0, 2.0))
+    let size = self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    var out = fk_field(p, size, o, px, self.hover, self.focus, self.disabled, 1.5)
+    let kx = Finish.snap(o.x + size.x - 21.0, px) - o.x
+    let klo = vec2(kx, Finish.snap(o.y, px) - o.y + 3.0 * px)
+    let khi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o - vec2(2.0 * px, 2.0 * px)
+    let held = self.down * self.hover * live
+    out = Finish.over(out, fk_cap(p, klo, khi, 1.0, px, 2.0 * px, 0.0, self.hover * live, held, self.disabled, 0.10))
+    let mc = vec2((klo.x + khi.x) * 0.5, (klo.y + khi.y) * 0.5 - px + held * px)
+    let mk = Finish.cover(fk_marker(p, mc), px)
+    let ink = mix(vec3(0.114, 0.114, 0.114), vec3(0.663, 0.655, 0.643), self.disabled)
+    return Finish.over(out, vec4(ink * mk, mk))
+}
+
+// The open list: a pale plate with a grey hairline rim; the row under the
+// pointer a shade darker, the chosen row marked by a 3 point orange bar.
+mod.widgets.PopupMenuFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, 2.0)
+    var col = vec3(0.961, 0.961, 0.961)
+    col = mix(col, vec3(1.0, 1.0, 1.0), fk_run(p.y, lo.y + px, lo.y + 2.0 * px))
+    col = mix(col, vec3(0.639, 0.635, 0.631), Finish.band(d, 0.0, px, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+mod.widgets.PopupMenuItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let c = self.rect_size * 0.5
+    let live = 1.0 - self.disabled
+    let d = fk_rbox(p, c, c - vec2(1.0, 0.0), 1.0)
+    let wash = Finish.cover(d, px) * (0.05 * self.hover * live + 0.03 * self.active)
+    var out = vec4(0.0, 0.0, 0.0, wash)
+    let bar = fk_run(p.x, 1.0, 4.0) * fk_run(p.y, 3.0, self.rect_size.y - 3.0) * self.active
+    return Finish.over(out, vec4(0.933 * bar, 0.353 * bar, 0.141 * bar, bar))
+}
+mod.widgets.PopupMenuItem.draw_text.color = #1d1d1d
+
+// ---------------------------------------------------------------------------
+// SEGMENTED CONTROL. A black display window; the answers printed in pale
+// ink on the glass, the chosen one a lit orange pill with white ink.
+mod.widgets.SegmentedControlFlat.segment_height = 24.0
+mod.widgets.SegmentedControlFlat.segment_padding = 10.0
+mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_display(self.pos * self.rect_size, self.rect_size, self.rect_pos, px, 2.0)
+}
+mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o + vec2(2.0 * px, 2.0 * px)
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o - vec2(2.0 * px, 2.0 * px)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, h.y)
+    var col = vec3(0.933, 0.353, 0.141)
+    col = mix(col, vec3(0.835, 0.251, 0.059), step(c.y, p.y) * 0.35)
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+mod.widgets.SegmentedControlFlat.draw_text.color = #cfcfcf
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #ffffff
+
+// TABS. A row of keys joined by seams: each tab a white key with a dark
+// pixel at each of its ends, so two neighbours meet in a 2 pixel seam; the
+// hovered one a hair brighter; the one in use latched in, its legend in the
+// deep signal orange.
+let fk_tabkey = fn(pos: vec2, size: vec2, o: vec2, px: float, hover: float, active: float) -> vec4 {
+    let m = 4.0
+    let p = pos * (size + vec2(0.0, m))
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    // below the row only: the drop and the contact line
+    let under = step(hi.y, p.y)
+    let dr = Finish.drop(p, c, h, 0.0, vec2(0.0, 1.0), 1.6) * mix(0.13, 0.19, hover) * (1.0 - active) * under
+    var out = vec4(0.0, 0.0, 0.0, dr)
+    let con = fk_run(p.y, hi.y, hi.y + px) * mix(0.32, 0.18, active)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+    out = Finish.over(out, fk_cap(p, lo, hi, 0.0, px, 3.0 * px, 0.0, hover, active, 0.0, 0.0))
+    // the seam halves at both ends
+    let sm = (fk_run(p.x, lo.x, lo.x + px) + fk_run(p.x, hi.x - px, hi.x)) * step(p.y, hi.y) * 0.9
+    return Finish.over(out, vec4(0.714 * sm, 0.714 * sm, 0.706 * sm, sm))
+}
+mod.widgets.Tabs.height = 26.0
+mod.widgets.Tabs.clip_x = false
+mod.widgets.Tabs.clip_y = false
+mod.widgets.Tabs.draw_bg.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 4.0))
+}
+mod.widgets.Tabs.draw_tab.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_tabkey(self.pos, self.rect_size, self.rect_pos, px, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_hover.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 4.0))
+}
+mod.widgets.Tabs.draw_tab_hover.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_tabkey(self.pos, self.rect_size, self.rect_pos, px, 1.0, 0.0)
+}
+mod.widgets.Tabs.draw_tab_active.vertex = fn() {
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size + vec2(0.0, 4.0))
+}
+mod.widgets.Tabs.draw_tab_active.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    return fk_tabkey(self.pos, self.rect_size, self.rect_pos, px, 0.0, 1.0)
+}
+mod.widgets.Tabs.draw_sep.pixel = fn() {
+    return vec4(0.0, 0.0, 0.0, 0.0)
+}
+mod.widgets.Tabs.draw_mark.color = #1d1d1d
+mod.widgets.Tabs.draw_mark.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let c = vec2(Finish.snap(o.x + self.rect_size.x * 0.5, px), Finish.snap(o.y + self.rect_size.y * 0.5 - 1.0, px)) - o
+    // 7 points across, a 1 point stroke; the plus is the cross turned
+    let a = mix(0.7853981634, 0.0, self.plus)
+    let r = mix(3.2, 3.5, self.plus)
+    let u = vec2(cos(a), sin(a)) * r
+    let v = vec2(-sin(a), cos(a)) * r
+    let dd = min(fk_seg(p, c - u, c + u), fk_seg(p, c - v, c + v)) - 0.5
+    let k = Finish.cover(dd, px) * self.color.a
+    return vec4(self.color.rgb * k, k)
+}
+mod.widgets.Tabs.draw_text.color = #3a3937
+mod.widgets.Tabs.draw_text_active.color = #b53c0b
+
+// The dock's tabs: the bar is the case with an engraved line at its foot;
+// the tab in use is a white face standing on it, the others printed words
+// that brighten a little under the pointer.
+mod.widgets.Tab.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 3.0 bottom: 3.0}
+mod.widgets.Tab.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + 2.0, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o + vec2(0.0, 3.0)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, 2.5)
+    let t = clamp((p.y - lo.y) / max(self.rect_size.y - 2.0, 1.0), 0.0, 1.0)
+    var face = mix(vec3(0.961, 0.961, 0.961), vec3(0.941, 0.941, 0.941), t)
+    face = mix(face, vec3(1.0, 1.0, 1.0), fk_run(p.y, lo.y, lo.y + px))
+    face = mix(face, vec3(0.62, 0.62, 0.615), Finish.band(d, 0.0, px, px) * 0.5)
+    let a = Finish.cover(d, px) * self.active
+    let lift = Finish.cover(d, px) * 0.25 * self.hover * (1.0 - self.active)
+    return Finish.over(vec4(lift, lift, lift, lift), vec4(face * a, a))
+}
+mod.widgets.TabBar.draw_fill.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let yb = Finish.snap(self.rect_pos.y + self.rect_size.y, px) - self.rect_pos.y
+    var out = vec4(0.0, 0.0, 0.0, 0.03)
+    let dk = fk_run(p.y, yb - 2.0 * px, yb - px) * 0.14
+    let lt = fk_run(p.y, yb - px, yb) * 0.6
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, dk))
+    return Finish.over(out, vec4(lt, lt, lt, lt))
+}
+
+// ---------------------------------------------------------------------------
+// PROGRESS. A 6 point track cut into the case in two flat dark tones, the
+// fill flat signal orange with one pixel of light on its top. The unknown
+// amount is a still ladder of lit cells: a face may not run a clock.
+mod.widgets.ProgressBarFlat.height = 7.0
+mod.widgets.ProgressBarFlat.draw_bg.thickness = 7.0
+mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let w = self.rect_size.x
+    let th = Finish.snap(min(self.thickness, self.rect_size.y) - px, px)
+    let top = Finish.snap(o.y + (self.rect_size.y - th - px) * 0.5, px) - o.y
+    let x0 = Finish.snap(o.x + w * self.start, px) - o.x
+    let x1 = Finish.snap(o.x + w * self.end, px) - o.x
+    let h = vec2((x1 - x0) * 0.5, th * 0.5)
+    let c = vec2(x0, top) + h
+    let r = 1.0
+    let d = fk_rbox(p, c, h, r)
+    let dis = step(4.5, self.intent)
+    var ink = vec3(0.933, 0.353, 0.141)
+    if self.intent > 0.5 {
+        ink = self.fill_color().rgb
+    }
+    ink = mix(ink, vec3(0.72, 0.71, 0.70), dis)
+    let xv = x0 + (x1 - x0) * clamp(self.value, 0.0, 1.0)
+    var filled = step(p.x, xv) * step(0.0, self.value)
+    var ghost = 0.0
+    var unknown = 0.0
+    if self.value < 0.0 {
+        // a still ladder in the black well: cells of 4 points split by one
+        // dark pixel, every cell at a tenth of lit, and ONE run of six lit
+        // cells from 30 % of the way along (a face may not run a clock)
+        let rel = p.x - x0
+        let cell = floor(rel / 4.0)
+        let gapx = step(4.0 - px, rel - cell * 4.0)
+        let c0 = floor((x1 - x0) * 0.3 / 4.0)
+        filled = step(c0 - 0.5, cell) * step(cell, c0 + 5.5) * (1.0 - gapx)
+        ghost = (1.0 - gapx) * 0.10
+        unknown = 1.0
+    }
+    let upper = step(p.y, top + th * 0.5)
+    let track = mix(mix(vec3(0.216, 0.216, 0.216), vec3(0.125, 0.125, 0.125), upper), vec3(0.102, 0.102, 0.102), unknown)
+    var col = mix(mix(track, ink, ghost), ink, filled)
+    col = mix(col, Finish.lift(ink, 0.45), filled * fk_run(p.y, top, top + px) * 0.8)
+    col = mix(col, vec3(0.0, 0.0, 0.0), (1.0 - filled) * fk_run(p.y, top, top + px) * 0.3)
+    // a stacked segment is drawn without its track: its fill alone
+    let a = Finish.cover(d, px) * max(self.track, filled)
+    var out = fk_catch(p, c, h, r, px, 0.8 * self.track)
+    out = Finish.over(out, vec4(col * a, a))
+    return out * self.opacity
+}
+
+// LEVEL METERS. A ladder of cells in a black well with a hairline rim:
+// cells 3 device pixels long with one dark pixel between, lit LED orange,
+// deeper orange over the last fifth, the clip cell deepest; unlit cells a
+// tenth of their lit colour on the glass. No glow.
+mod.widgets.LevelMeter.height = 8.0
+mod.widgets.LevelMeterColumn.width = 8.0
+mod.widgets.LevelMeter.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let vert = self.vertical
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let a = mix(p.x, self.rect_size.y - p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let q = vec2(a, b)
+    let lamp_room = self.lamp * (across + 3.0)
+    let bar = max(4.0, along - lamp_room)
+    let h = vec2(bar * 0.5, across * 0.5 - px * 0.5)
+    let c = h
+    let r = 1.0
+    let d = fk_rbox(q, c, h, r)
+    let pad = 2.0 * px
+    let span = max(1.0, bar - pad * 2.0)
+    let share = clamp((a - pad) / span, 0.0, 1.0)
+    let pitch = 4.0 * px
+    let cell_i = floor((a - pad) / pitch)
+    let in_cell = step((a - pad) - cell_i * pitch, 3.0 * px)
+    let cell_share = clamp((cell_i * pitch + pitch * 0.5) / span, 0.0, 1.0)
+    let lit = step(cell_share, self.level) * step(pad, a) * step(a, pad + span) * in_cell
+    var ramp = mix(vec3(0.992, 0.518, 0.196), vec3(0.933, 0.353, 0.141), step(0.8, cell_share))
+    ramp = mix(ramp, vec3(0.835, 0.251, 0.059), step(0.95, cell_share))
+    let glass = vec3(0.102, 0.102, 0.102)
+    let rows = step(pad, b) * step(b, across - pad)
+    let cells = in_cell * step(pad, a) * step(a, pad + span) * rows
+    var col = mix(glass, mix(glass, ramp, 0.12), cells)
+    col = mix(col, ramp, lit * rows)
+    // the hold: one cell lit where the peak stood
+    if self.hold > 0.002 {
+        let hi_cell = floor(self.hold * span / pitch)
+        let hm = step(abs(cell_i - hi_cell), 0.5) * in_cell * rows
+        col = mix(col, ramp, hm)
+    }
+    col = mix(col, vec3(0.0, 0.0, 0.0), Finish.band(d, 0.0, px, px) * 0.8)
+    let ca = Finish.cover(d, px)
+    var out = Finish.over(fk_catch(q, c, h, r, px, 0.75 * (1.0 - vert)), vec4(col * ca, ca))
+    if self.lamp > 0.5 {
+        // the over lamp: a flat square LED in a black bezel, dark until it latches
+        let la = bar + 3.0 + across * 0.5
+        let lb = across * 0.5
+        let lc = vec2(mix(la, lb, vert), mix(lb, self.rect_size.y - la, vert))
+        let ld = fk_rbox(p, lc, vec2(across * 0.5 - px, across * 0.5 - px), 1.0)
+        let on = step(0.5, self.over)
+        var lcol = mix(vec3(0.478, 0.475, 0.467), vec3(0.835, 0.251, 0.059), on)
+        lcol = mix(lcol, vec3(0.04, 0.04, 0.04), Finish.band(ld, 0.0, px, px))
+        let lca = Finish.cover(ld, px)
+        out = Finish.over(out, vec4(lcol * lca, lca))
+    }
+    return out * self.opacity
+}
+
+// ---------------------------------------------------------------------------
+// SCROLL BARS. No track but an engraved line along the middle; a 6 point
+// white key for the thumb, darker under the pointer, orange while dragged.
+mod.widgets.ScrollBar.bar_size = 8.0
+mod.widgets.ScrollBar.bar_side_margin = 0.0
+mod.widgets.ScrollBar.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let vert = self.is_vertical
+    let a = mix(p.x, p.y, vert)
+    let b = mix(p.y, p.x, vert)
+    let along = mix(self.rect_size.x, self.rect_size.y, vert)
+    let across = mix(self.rect_size.y, self.rect_size.x, vert)
+    let q = vec2(a, b)
+    let ob = mix(self.rect_pos.y, self.rect_pos.x, vert)
+    let mid = Finish.snap(ob + across * 0.5, px) - ob
+    let seam = fk_run(b, mid - px, mid) * step(2.0, a) * step(a, along - 2.0)
+    let seam_l = fk_run(b, mid, mid + px) * step(2.0, a) * step(a, along - 2.0)
+    var out = vec4(0.0, 0.0, 0.0, seam * 0.14)
+    out = Finish.over(out, vec4(seam_l * 0.5, seam_l * 0.5, seam_l * 0.5, seam_l * 0.5))
+    // the thumb
+    let t0 = along * self.norm_scroll
+    let tl = along * self.norm_handle
+    let th = vec2(tl * 0.5 - 1.0, 3.0)
+    let tc = vec2(t0 + tl * 0.5, mid)
+    let td = fk_rbox(q, tc, th, 1.0)
+    let tt = clamp((b - (tc.y - th.y)) / 6.0, 0.0, 1.0)
+    var face = mix(vec3(0.855, 0.855, 0.855), vec3(0.816, 0.816, 0.816), tt)
+    face = face - g3(0.045 * self.hover)
+    face = mix(face, vec3(0.933, 0.353, 0.141), self.drag)
+    face = mix(face, vec3(1.0, 1.0, 1.0), fk_run(b, tc.y - th.y, tc.y - th.y + px) * step(abs(a - tc.x), th.x - 1.0) * (1.0 - self.drag))
+    let con = Finish.ring_out(td, 0.0, px, px) * step(tc.y, b) * 0.20
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+    let ta = Finish.cover(td, px)
+    out = Finish.over(out, vec4(face * ta, ta))
+    return out * self.opacity
+}
+
+// Rings and arcs keep their stock faces, restrung thin: a 2.5 point stroke,
+// butt ends, a pale track and the signal orange.
+mod.widgets.ProgressRingFlat.draw_bg.thickness = 2.5
+mod.widgets.ProgressRingFlat.draw_bg.rounded_caps = 0.0
+mod.widgets.ProgressRingFlat.draw_bg.track_color = #d4d4d4
+mod.widgets.ProgressRingFlat.draw_bg.color_primary = #ee5a24
+mod.widgets.ProgressArc.draw_bg.thickness = 3.0
+mod.widgets.ActivityRings.draw_bg.thickness = 3.0
+mod.widgets.ProgressBarFlat.draw_bg.color_primary = #ee5a24
+
+// ---------------------------------------------------------------------------
+// VIEWS AND PANELS. A plate a step darker than the case, laid on it with a
+// short drop and a contact line, one pixel of light along its top, the
+// case's grain and fibre in its face, and on a plate large enough four
+// slotted screws six points in from its corners. The sunken panel is cut
+// in: a shade under its top edge and a light catch under its lower one.
+// A screw 4 points across (6 device pixels): the plate -0.06, a rim of one
+// pixel at -0.15 and one slot a pixel wide at -0.25 across 0.8 of it.
+let fk_screw = fn(p: vec2, sc: vec2, base: vec3, px: float) -> vec4 {
+    let q = p - sc
+    let d = length(q) - 2.0
+    var col = base - g3(0.06)
+    col = mix(col, base - g3(0.15), Finish.band(d, 0.0, px, px))
+    // one slot, a pixel wide, at an angle of its own
+    let ang = Finish.hash(floor(sc * 3.1) + vec2(5.0, 11.0)) * PI
+    let dir = vec2(cos(ang), sin(ang))
+    let sl = fk_seg(p, sc - dir * 1.6, sc + dir * 1.6) - px * 0.5
+    col = mix(col, base - g3(0.25), Finish.cover(sl, px))
+    let a = Finish.cover(d, px)
+    return vec4(col * a, a)
+}
+
+// The family's pattern: a field of perforations on a square grid, 4 device
+// pixels apart (2.7 points), each hole 2 pixels (#2a2a2a), with one pixel of
+// light on its lower side (+0.05). `w` is the point in window pixels, `a`
+// and `b` the field's corners in window pixels (whole pixels).
+let fk_perf = fn(w: vec2, a: vec2, b: vec2, base: vec3) -> vec4 {
+    let inside = step(a.x, w.x) * step(w.x, b.x) * step(a.y, w.y) * step(w.y, b.y)
+    let l = w - a
+    let cell = floor(l / 4.0)
+    let k = l - cell * 4.0 - vec2(2.0, 2.0)
+    // a hole is two by two whole pixels: at this pitch a round one only
+    // smears into a grey halo
+    let hole = step(abs(k.x), 1.0) * step(abs(k.y), 1.0) * inside
+    let lip = step(abs(k.x), 1.0) * step(1.0, k.y) * step(k.y, 2.0) * inside
+    let lit = base + g3(0.05)
+    let out = vec4(lit * lip, lip)
+    let hc = vec3(0.165, 0.165, 0.165)
+    return Finish.over(out, vec4(hc * hole, hole))
+}
+
+let fk_plate = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, sunken: float, base: vec3, screws: float) -> vec4 {
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, r)
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let dr = Finish.drop(p, c, h, r, vec2(0.0, 1.5), 2.2) * 0.10 * (1.0 - sunken)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, dr))
+    let foot = smoothstep(c.y + h.y - r - 0.5, c.y + h.y - 0.2, p.y)
+    let con = Finish.ring_out(d, 0.0, px, px) * mix(0.07, 0.25, foot) * (1.0 - sunken)
+    out = Finish.over(out, vec4(0.0, 0.0, 0.0, con))
+    let lip = Finish.ring_out(d, 0.0, px, px) * foot * 0.75 * sunken
+    out = Finish.over(out, vec4(lip, lip, lip, lip))
+    var face = fk_plate_grain(base, p + o, px)
+    // sunken: the case's shade falling in under the top edge
+    let sh = Finish.inset(p, c, h, r, vec2(0.0, 2.0), 1.6)
+    face = mix(face, vec3(0.0, 0.0, 0.0), clamp(sh, 0.0, 1.0) * 0.30 * sunken)
+    let up = 1.0 - smoothstep(-0.5, 0.5, p.y - c.y)
+    let top = fk_run(p.y, lo.y, lo.y + px) * step(abs(p.x - c.x), h.x - r)
+    face = mix(face, vec3(1.0, 1.0, 1.0), top * 0.7 * (1.0 - sunken))
+    face = mix(face, vec3(0.0, 0.0, 0.0), Finish.band(d, 0.0, px, px) * mix(0.10, mix(0.10, 0.22, up), sunken))
+    let a = Finish.cover(d, px)
+    out = Finish.over(out, vec4(face * a, a))
+    if screws > 0.5 {
+        if min(size.x, size.y) > 60.0 && max(size.x, size.y) > 160.0 {
+            // a grille of perforations along the top edge, between the two
+            // upper screws: three rows, 14 points in from the sides
+            let wp = (p + o) / px
+            let ga = vec2(floor((o.x + lo.x + 14.0) / px), floor((o.y + lo.y + 2.5) / px))
+            let gw = floor((size.x - 28.0) / px / 4.0) * 4.0
+            let gs = ga + vec2(floor(((size.x - 28.0) / px - gw) * 0.5), 0.0)
+            out = Finish.over(out, fk_perf(wp, gs, gs + vec2(gw, 12.0), base) * Finish.cover(d, px))
+            let s0 = vec2(Finish.snap(o.x + lo.x + 6.0, px) - o.x, Finish.snap(o.y + lo.y + 6.0, px) - o.y)
+            let s1 = vec2(Finish.snap(o.x + hi.x - 6.0, px) - o.x, s0.y)
+            let s2 = vec2(s0.x, Finish.snap(o.y + hi.y - 6.0, px) - o.y)
+            let s3 = vec2(s1.x, s2.y)
+            let near = mix(mix(s0, s1, step(c.x, p.x)), mix(s2, s3, step(c.x, p.x)), step(c.y, p.y))
+            out = Finish.over(out, fk_screw(p, near, base, px))
+        }
+    }
+    return out
+}
+
+mod.widgets.PanelView.clip_x = false
+mod.widgets.PanelView.clip_y = false
+mod.widgets.PanelView.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 8.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.PanelView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 8.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let base = mix(vec3(0.894, 0.882, 0.863), vec3(0.906, 0.898, 0.882), self.sunken)
+    return fk_plate(p, self.rect_size, self.rect_pos, px, 6.0, self.sunken, base, 1.0 - self.sunken)
+}
+
+// The card is the plate too, without screws; its palette and shadow
+// numbers from Rust are not read.
+mod.widgets.Card.radius = 6.0
+mod.widgets.Card.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 8.0)
+    return self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.Card.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 8.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    var out = fk_plate(p, self.rect_size, self.rect_pos, px, 6.0, 0.0, vec3(0.894, 0.882, 0.863), 0.0)
+    let d = fk_rbox(p, self.rect_size * 0.5, self.rect_size * 0.5, 6.0)
+    let l = Finish.cover(d, px) * (0.06 * self.hover - 0.04 * self.down)
+    return Finish.over(out, vec4(max(l, 0.0), max(l, 0.0), max(l, 0.0), abs(l)))
+}
+
+// The plain rounded view keeps the colours its caller gives it; the edge is
+// a snapped hairline at the true radius.
+mod.widgets.RoundedView.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    var fill = self.color
+    if self.color_2.x > -0.5 {
+        fill = mix(self.color, self.color_2, mix(self.pos.y, self.pos.x, self.gradient_fill_horizontal))
+    }
+    let lo = vec2(self.border_inset.x, self.border_inset.y)
+    let hi = self.rect_size - vec2(self.border_inset.z, self.border_inset.w)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let d = fk_rbox(p, c, h, max(self.border_radius, 1.0))
+    var col = fill
+    if self.border_size > 0.0 {
+        col = mix(col, self.border_color, Finish.band(d, 0.0, max(self.border_size, px), px) * self.border_color.a)
+    }
+    let a = Finish.cover(d, px) * col.a
+    return vec4(col.rgb * a, a)
+}
+
+// ---------------------------------------------------------------------------
+// LISTS. Rows of 22 points with a faint hairline under each, inset 8 at the
+// left; a hovered row a shade darker; the chosen row a little darker still
+// with a 3 point orange bar at its left edge.
+mod.widgets.ListItemOne.height = 22.0
+mod.widgets.ListItem.padding = mod.turtle.Inset{left: 12.0 right: 8.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let live = 1.0 - self.disabled
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + self.rect_size.y, px)) - o
+    let sel = step(0.5, self.selected)
+    let lay = (self.hover * 0.04 + self.down * 0.04) * live + sel * 0.06
+    var out = vec4(0.0, 0.0, 0.0, lay)
+    let bar = fk_run(p.x, lo.x, lo.x + 3.0) * sel
+    out = Finish.over(out, vec4(0.933 * bar, 0.353 * bar, 0.141 * bar, bar))
+    let yb = hi.y
+    let sep = fk_run(p.y, yb - px, yb) * step(lo.x + 8.0, p.x) * 0.08
+    return Finish.over(out, vec4(0.0, 0.0, 0.0, sep))
+}
+mod.widgets.ListItem.draw_text.color = #1d1d1d
+
+// ---------------------------------------------------------------------------
+// CHIPS AND BADGES. A chip is a small white key with round ends (the chosen
+// one, which carries light ink, an orange key); a badge is a small black
+// plate with pale print.
+mod.widgets.ChipFlat.size = mod.widgets.ChipSize.Small
+mod.widgets.Chip.size = mod.widgets.ChipSize.Small
+mod.widgets.ChipFlat.draw_bg.vertex = fn() {
+    let g = fk_grow(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.ChipFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let m = 6.0
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let o = self.rect_pos
+    let ch = min(22.0, self.rect_size.y)
+    let dy = (self.rect_size.y - ch) * 0.5
+    let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y + dy, px)) - o
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px), Finish.snap(o.y + dy + ch, px)) - o
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    let r = h.y
+    let chosen = step(0.6, dot(self.ink.rgb, vec3(0.299, 0.587, 0.114)))
+    var out = fk_shade(p, c, h, r, px, 1.0 - self.down, 0.0, mix(0.13, 0.19, self.hover))
+    out = Finish.over(out, fk_cap(p, lo, hi, r, px, 2.0 * px, chosen, self.hover, self.down, 0.0, 0.0))
+    return Finish.over(out, fk_focus(fk_rbox(p, c, h, r), px, self.keyed))
+}
+mod.widgets.BadgePalette.neutral = #1a1a1a
+mod.widgets.BadgePalette.on_neutral = #f0f0f0
+mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_bold{font_size: 6.0}
+mod.widgets.Badge.draw_text.text_style = mod.theme.font_bold{font_size: 6.0}
+mod.widgets.BadgeFlat.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let o = self.rect_pos
+    let bh = min(15.0, self.rect_size.y)
+    let y0 = Finish.snap(o.y + (self.rect_size.y - bh) * 0.5, px) - o.y
+    let lo = vec2(Finish.snap(o.x, px) - o.x, y0)
+    let hi = vec2(Finish.snap(o.x + self.rect_size.x, px) - o.x, Finish.snap(o.y + y0 + bh, px) - o.y)
+    let h = (hi - lo) * 0.5
+    let c = lo + h
+    // a dot (as wide as tall and small) is round; a count is a plate
+    let r = mix(2.0, h.y, step(self.rect_size.x, self.rect_size.y + 0.5) * step(self.rect_size.y, 12.5))
+    let d = fk_rbox(p, c, h, r)
+    var col = vec3(0.102, 0.102, 0.102)
+    col = mix(col, vec3(0.30, 0.30, 0.30), fk_run(p.y, lo.y, lo.y + px) * step(abs(p.x - c.x), h.x - r))
+    let a = Finish.cover(d, px) * self.color.a
+    let out = fk_catch(p, c, h, r, px, 0.6)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// The spinner keeps its turning arc: in print ink, thin.
+mod.widgets.SpinnerFlat.size = 16.0
+mod.widgets.SpinnerFlat.draw_bg.color = #1d1d1d
+mod.widgets.SpinnerFlat.draw_bg.stroke_width = 1.5
+mod.widgets.SpinnerFlat.draw_bg.track_alpha = 0.24
+
+// Rules between groups: one dark device row over one light one, engraved.
+mod.widgets.Hr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let y = Finish.snap(self.rect_pos.y + self.rect_size.y * 0.5, px) - self.rect_pos.y
+    let dk = fk_run(p.y, y - px, y) * 0.12
+    let lt = fk_run(p.y, y, y + px) * 0.45
+    return Finish.over(vec4(0.0, 0.0, 0.0, dk), vec4(lt, lt, lt, lt))
+}
+mod.widgets.Vr.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    let x = Finish.snap(self.rect_pos.x + self.rect_size.x * 0.5, px) - self.rect_pos.x
+    let dk = fk_run(p.x, x - px, x) * 0.12
+    let lt = fk_run(p.x, x, x + px) * 0.45
+    return Finish.over(vec4(0.0, 0.0, 0.0, dk), vec4(lt, lt, lt, lt))
+}
+
+// ---------------------------------------------------------------------------
+// THE CASE under everything: the window's own ground, grain and fibre in
+// window coordinates, so nothing swims.
+mod.widgets.Window.show_bg = true
+mod.widgets.Window.draw_bg.pixel = fn() {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let p = self.pos * self.rect_size
+    return vec4(fk_case(vec3(0.937, 0.929, 0.918), p, px), 1.0)
+}
+true

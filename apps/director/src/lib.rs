@@ -98,18 +98,11 @@ script_mod! {
         appearance := Card{
             Row{
                 RowLabel{text: "Style"}
+                // The rows are handed in from `appearance::picker_labels`,
+                // made from the style list the picker selects from, so the
+                // two cannot fall out of step as styles are added.
                 style_picker := DropDown{
                     width: 220
-                    labels: [
-                        "Follow host OS"
-                        "Omarchy"
-                        "macOS"
-                        "Windows"
-                        "Windows 2000"
-                        "NeXTSTEP"
-                        "iOS"
-                        "Android"
-                    ]
                     selected_item: 0
                 }
             }
