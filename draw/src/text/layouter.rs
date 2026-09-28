@@ -540,6 +540,7 @@ impl LayoutContext {
             line_gap_in_lpxs,
             cap_height_in_lpxs,
             line_spacing_scale: self.options.line_spacing_scale,
+            flow_wrap_spacing_in_lpxs: self.options.flow_wrap_spacing_in_lpxs,
             glyphs,
         };
 
@@ -549,11 +550,12 @@ impl LayoutContext {
             if self.rows.len() == 1 {
                 // The first row can share its visual row with earlier inline
                 // content that is taller than the text; the caller passes that
-                // row's real height (plus wrap spacing) so the second row's
-                // top edge clears it. The floor is a top-to-top distance, so
-                // it converts to a baseline advance by adding the change in
-                // ascender between the two rows.
+                // row's real height so the second row's top edge clears it.
+                // Under the flow rule the wrap gap is ours to add. The floor is
+                // a top-to-top distance, so it converts to a baseline advance
+                // by adding the change in ascender between the two rows.
                 let min_advance_in_lpxs = self.options.first_row_min_line_spacing_below_in_lpxs
+                    + prev_row.wrap_spacing_below_in_lpxs().unwrap_or(0.0)
                     + row.ascender_in_lpxs
                     - prev_row.ascender_in_lpxs;
                 natural_in_lpxs.max(min_advance_in_lpxs)
@@ -1051,14 +1053,19 @@ pub struct LayoutOptions {
     /// Minimum distance in logical pixels from the first row's top edge to the
     /// second row's top edge. A continuation run's first row can share its
     /// visual row with earlier inline content that is taller than the text;
-    /// callers pass that row's real height (plus wrap spacing) so the second
-    /// row clears it. Zero keeps pure font-metric spacing. Only the first row
-    /// boundary is affected; later rows always use font-metric spacing.
+    /// callers pass that row's real height (plus wrap spacing, unless
+    /// `flow_wrap_spacing_in_lpxs` is set and the layouter adds it) so the
+    /// second row clears it. Zero keeps pure font-metric spacing. Only the
+    /// first row boundary is affected; later rows keep their natural spacing.
     pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub wrap: bool,
     pub align: f32,
     pub line_spacing_scale: f32,
+    /// The enclosing wrap flow's current wrap spacing, when the text draws as part of one. Rows
+    /// then advance like the flow's own rows: box height plus the larger of this and the row's
+    /// `ascender * (line_spacing_scale - 1)`, line gap ignored. `None` keeps font-metric spacing.
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
     /// Maximum number of rows to display. `None` means unlimited.
     /// When set and the text exceeds this many rows, excess rows are discarded.
     pub max_rows: Option<usize>,
@@ -1077,6 +1084,7 @@ impl Default for LayoutOptions {
             wrap: false,
             align: 0.0,
             line_spacing_scale: 1.0,
+            flow_wrap_spacing_in_lpxs: None,
             max_rows: None,
             ellipsis: false,
         }
@@ -1098,6 +1106,7 @@ impl Hash for LayoutOptions {
         self.wrap.hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
+        self.flow_wrap_spacing_in_lpxs.map(f32::to_bits).hash(hasher);
         self.max_rows.hash(hasher);
         self.ellipsis.hash(hasher);
     }
@@ -1112,6 +1121,8 @@ impl PartialEq for LayoutOptions {
             && self.wrap == other.wrap
             && self.align.to_bits() == other.align.to_bits()
             && self.line_spacing_scale.to_bits() == other.line_spacing_scale.to_bits()
+            && self.flow_wrap_spacing_in_lpxs.map(f32::to_bits)
+                == other.flow_wrap_spacing_in_lpxs.map(f32::to_bits)
             && self.max_rows == other.max_rows
             && self.ellipsis == other.ellipsis
     }
@@ -1298,13 +1309,30 @@ pub struct LaidoutRow {
     /// font has no capital to measure (see [`Font::cap_height_in_ems`]).
     pub cap_height_in_lpxs: f32,
     pub line_spacing_scale: f32,
+    /// See [`LayoutOptions::flow_wrap_spacing_in_lpxs`].
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
+    /// The wrap gap below this row under the flow rule: the flow's spacing or this row's own,
+    /// whichever is larger, as the flow itself would use. `None` under font-metric spacing.
+    pub fn wrap_spacing_below_in_lpxs(&self) -> Option<f32> {
+        self.flow_wrap_spacing_in_lpxs
+            .map(|spacing| spacing.max(self.ascender_in_lpxs * (self.line_spacing_scale - 1.0)))
+    }
+
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
-            * next_row.line_spacing_scale
+        match self.wrap_spacing_below_in_lpxs() {
+            // The wrap gap plus this row's box height down to the next row's top, then its ascender.
+            Some(wrap_spacing) => {
+                wrap_spacing - self.descender_in_lpxs + next_row.ascender_in_lpxs
+            }
+            None => {
+                (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
+                    * next_row.line_spacing_scale
+            }
+        }
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
