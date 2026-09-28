@@ -3,26 +3,6 @@
 //! This belongs to a separate crate!
 
 #[macro_export]
-/// Find an <init> method with given signature
-/// on $obj class
-/// and call a NewObject jni function with given extra arguments
-macro_rules! new_object {
-    ($env:expr, $class:expr, $sig:expr $(, $args:expr)*) => {{
-        let find_class = (**$env).FindClass.unwrap();
-        let get_method_id = (**$env).GetMethodID.unwrap();
-        let new_object = (**$env).NewObject.unwrap();
-
-        let class = std::ffi::CString::new($class).unwrap();
-        let sig = std::ffi::CString::new($sig).unwrap();
-        let class = find_class($env, class.as_ptr() as _);
-
-        let constructor = get_method_id($env, class, b"<init>\0".as_ptr() as _, sig.as_ptr() as _);
-
-        new_object($env, class, constructor, $($args,)*)
-    }};
-}
-
-#[macro_export]
 /// Call a JNI method on `$obj` with the given name and signature.
 ///
 /// Method IDs are cached per call site in a `static AtomicPtr`, so subsequent
@@ -133,5 +113,5 @@ macro_rules! new_local_ref {
 
 pub use {
     call_bool_method, call_float_method, call_int_method, call_long_method, call_method,
-    call_object_method, call_void_method, get_utf_str, new_global_ref, new_local_ref, new_object,
+    call_object_method, call_void_method, get_utf_str, new_global_ref, new_local_ref,
 };

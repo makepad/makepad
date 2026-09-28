@@ -2285,12 +2285,23 @@ pub unsafe fn to_java_create_oes_decode_surface(
     if oes_tex_id == 0 {
         return None;
     }
-    let bridge = crate::new_object!(
-        env,
-        "dev/makepad/android/OesDecodeSurface",
-        "(I)V",
-        oes_tex_id as jni_sys::jint
-    );
+    let class = find_app_class(env, "dev.makepad.android.OesDecodeSurface")?;
+    let constructor =
+        (**env).GetMethodID.unwrap()(env, class, c"<init>".as_ptr(), c"(I)V".as_ptr());
+    let bridge = if constructor.is_null() {
+        std::ptr::null_mut()
+    } else {
+        (**env).NewObject.unwrap()(env, class, constructor, oes_tex_id as jni_sys::jint)
+    };
+    (**env).DeleteLocalRef.unwrap()(env, class);
+    if (**env).ExceptionCheck.unwrap()(env) != 0 {
+        (**env).ExceptionClear.unwrap()(env);
+        if !bridge.is_null() {
+            (**env).DeleteLocalRef.unwrap()(env, bridge);
+        }
+        crate::error!("VIDEO: OesDecodeSurface construction failed; using the YUV upload path");
+        return None;
+    }
     if bridge.is_null() {
         return None;
     }
@@ -2306,6 +2317,48 @@ pub unsafe fn to_java_create_oes_decode_surface(
     } else {
         Some(global)
     }
+}
+
+/// An app class (`dev.makepad.android.*`, dotted) as a local ref, looked up
+/// through the Activity's ClassLoader: `FindClass` on Makepad's native
+/// thread only sees the system ClassLoader and returns null for app classes,
+/// and a `GetMethodID` on that null aborts the process.
+unsafe fn find_app_class(env: *mut jni_sys::JNIEnv, dotted_name: &str) -> Option<jni_sys::jobject> {
+    let loader = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "getClassLoader",
+        "()Ljava/lang/ClassLoader;"
+    );
+    if loader.is_null() {
+        return None;
+    }
+    let name = CString::new(dotted_name).ok()?;
+    let name = (**env).NewStringUTF.unwrap()(env, name.as_ptr());
+    let class = if name.is_null() {
+        std::ptr::null_mut()
+    } else {
+        ndk_utils::call_object_method!(
+            env,
+            loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            name
+        )
+    };
+    if !name.is_null() {
+        (**env).DeleteLocalRef.unwrap()(env, name);
+    }
+    (**env).DeleteLocalRef.unwrap()(env, loader);
+    if (**env).ExceptionCheck.unwrap()(env) != 0 {
+        (**env).ExceptionClear.unwrap()(env);
+        if !class.is_null() {
+            (**env).DeleteLocalRef.unwrap()(env, class);
+        }
+        crate::error!("android: class {dotted_name} not found by the app ClassLoader");
+        return None;
+    }
+    (!class.is_null()).then_some(class)
 }
 
 /// Borrow the `android.view.Surface` from an OES decode bridge (new local ref).
