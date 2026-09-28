@@ -1482,6 +1482,16 @@ impl CxGameInputApi for Cx {
         &mut []
     }
 
+    fn game_input_output(
+        &mut self,
+        id: crate::makepad_live_id::LiveId,
+    ) -> Option<crate::event::game_input::GameInputOutput> {
+        if self.in_makepad_studio {
+            return None;
+        }
+        self.os.windows_game_input.as_ref()?.output(id)
+    }
+
     fn game_input_infos(&mut self) -> Vec<crate::event::game_input::GameInputInfo> {
         if self.in_makepad_studio {
             return Vec::new();

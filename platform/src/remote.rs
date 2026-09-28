@@ -890,6 +890,13 @@ mod imp {
         ACTIVE.load(Ordering::Relaxed)
     }
 
+    /// True while a remote request (input, a grab or a grab sequence, a
+    /// step) is in flight: an app that paces its own frames when idle runs
+    /// at full rate for it, so a capture sees a live, ticking world.
+    pub fn request_in_flight() -> bool {
+        needs_ticks()
+    }
+
     /// True while a request is in flight, so the event loop knows to keep its
     /// paint clock at full rate instead of downshifting to the idle poll.
     /// Only macOS downshifts, so this is unused on the other backends — they

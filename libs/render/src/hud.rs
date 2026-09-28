@@ -482,12 +482,19 @@ pub struct HudDraws<'a> {
     /// these with the transform as its view matrix. Grown on demand; only
     /// elements that are transformed THIS frame take one.
     pub lists: &'a mut Vec<DrawList2d>,
+    /// How many of `lists` this redraw has already used. A list can hold
+    /// one recording per redraw, so every pane drawn in the same redraw
+    /// (split screen) continues from here instead of starting at 0 and
+    /// overwriting the pane before it; the host zeroes it once per redraw.
+    pub lists_used: &'a mut usize,
 }
 
 /// Draw the whole HUD document over `rect`, and report the fraction each
 /// gauge was asked to show so the host can settle its trailing chip bars.
 /// Every drawn element's rect is appended to `occupied`, so the slot HUD
 /// drawn after it (`draw_hud_overlay`) can keep its stacks clear of them.
+/// `pane` is which split-screen pane this is (0 = the main one): motion
+/// state is kept per pane, and moving elements report into `seen` with it.
 pub fn draw_hud_doc(
     cx: &mut Cx2d,
     rect: Rect,
@@ -498,6 +505,7 @@ pub fn draw_hud_doc(
     spread: f32,
     occupied: &mut Vec<Rect>,
     seen: &mut Vec<HudSeen>,
+    pane: usize,
 ) -> Vec<(String, f32)> {
     // The HUD is authored against a 1080-high pane. A pane narrower than
     // 1.2 : 1 (a split-screen slice) scales by its WIDTH instead, so a bar
@@ -557,7 +565,7 @@ pub fn draw_hud_doc(
     // its containers' (a panel that pops carries its children with it), and
     // its opacity likewise. Indexed like `doc.elements`; empty when still.
     let mut poses: Vec<Option<([f32; 6], f32)>> = Vec::new();
-    let mut lists_used = 0usize;
+    let mut lists_used = *draws.lists_used;
     if moving {
         let mut rects: Vec<Option<Rect>> = vec![None; doc.elements.len()];
         for p in &placed {
@@ -568,14 +576,14 @@ pub fn draw_hud_doc(
         }
         poses = vec![None; doc.elements.len()];
         for i in 0..doc.elements.len() {
-            pose_of(doc, i, &rects, scale, &mut poses);
+            pose_of(doc, i, pane, &rects, scale, &mut poses);
         }
     }
     for p in &placed {
         let e = &doc.elements[p.index];
         if !visible_in(doc, e, binder) {
             if moving && moves(e) {
-                seen.push(HudSeen { name: e.name.clone(), visible: false, rect: [0.0; 4], number: None, text_key: 0 });
+                seen.push(HudSeen { name: e.name.clone(), pane, visible: false, rect: [0.0; 4], number: None, text_key: 0 });
             }
             continue;
         }
@@ -597,13 +605,14 @@ pub fn draw_hud_doc(
         // them along from where they last stood.
         seen.push(HudSeen {
             name: e.name.clone(),
+            pane,
             visible: true,
             rect: [p.x, p.y, p.w, p.h],
             number,
             text_key,
         });
         // A counting number draws the value it has counted to so far.
-        let counted = number.filter(|_| e.motion.count > 0.0).map(|n| hud_counted(e, n)).filter(|c| Some(*c) != number);
+        let counted = number.filter(|_| e.motion.count > 0.0).map(|n| hud_counted(e, pane, n)).filter(|c| Some(*c) != number);
         let moved = (opacity < 1.0 || counted.is_some()).then(|| {
             let mut m = faded(e, opacity);
             if let Some(c) = counted {
@@ -632,8 +641,8 @@ pub fn draw_hud_doc(
             if placed_set[i] || !moves(e) {
                 continue;
             }
-            seen.push(HudSeen { name: e.name.clone(), visible: false, rect: [0.0; 4], number: None, text_key: 0 });
-            let st = &e.motion_state;
+            seen.push(HudSeen { name: e.name.clone(), pane, visible: false, rect: [0.0; 4], number: None, text_key: 0 });
+            let st = &e.motion_state(pane);
             if !(st.exit_age.is_finite() && st.exit_age < e.motion.exit.secs) || st.rect[2] <= 0.0 {
                 continue;
             }
@@ -641,14 +650,14 @@ pub fn draw_hud_doc(
                 pos: dvec2(rect.pos.x + st.rect[0] as f64, rect.pos.y + st.rect[1] as f64),
                 size: dvec2(st.rect[2] as f64, st.rect[3] as f64),
             };
-            let pose = hud_pose(e, scale);
+            let pose = hud_pose(e, pane, scale);
             let centre = vec2f((at.pos.x + at.size.x * 0.5) as f32, (at.pos.y + at.size.y * 0.5) as f32);
             let affine = pose.affine(centre);
             let fs = faded_style(style, pose.opacity);
             // The element and everything inside it, as they last stood.
             let mut going: Vec<(Rect, HudElement)> = vec![(at, faded(e, pose.opacity))];
             for c in doc.elements.iter().filter(|c| inside(doc, c, &e.name)) {
-                let r = c.motion_state.rect;
+                let r = c.motion_state(pane).rect;
                 if r[2] > 0.0 {
                     let cat = Rect {
                         pos: dvec2(rect.pos.x + r[0] as f64, rect.pos.y + r[1] as f64),
@@ -665,6 +674,7 @@ pub fn draw_hud_doc(
         }
     }
 
+    *draws.lists_used = lists_used;
     // The flight HUD owns the whole pane, under the markers and crosshair.
     for e in &doc.elements {
         if e.kind == HudKind::Flight && visible(e, binder) {
@@ -689,10 +699,11 @@ pub fn draw_hud_doc(
 /// Whether an element takes part in motion this frame: declared motion, or
 /// a one-shot punch still running.
 fn moves(e: &HudElement) -> bool {
-    let st = &e.motion_state;
     !e.motion.is_still()
-        || (st.punch_age.is_finite() && st.punch_age < st.punch.secs)
-        || (st.shake_age.is_finite() && st.shake_age < st.shake.secs)
+        || e.motion_panes.iter().any(|st| {
+            (st.punch_age.is_finite() && st.punch_age < st.punch.secs)
+                || (st.shake_age.is_finite() && st.shake_age < st.shake.secs)
+        })
 }
 
 /// The composed pose of element `i` (its own over its containers'), memoised
@@ -700,6 +711,7 @@ fn moves(e: &HudElement) -> bool {
 fn pose_of(
     doc: &HudDoc,
     i: usize,
+    pane: usize,
     rects: &[Option<Rect>],
     units: f32,
     poses: &mut Vec<Option<([f32; 6], f32)>>,
@@ -715,11 +727,11 @@ fn pose_of(
             .iter()
             .position(|p| p.name == e.parent)
             .filter(|p| *p != i)
-            .and_then(|p| pose_of(doc, p, rects, units, poses))
+            .and_then(|p| pose_of(doc, p, pane, rects, units, poses))
     };
     let own = if moves(e) {
         rects[i].map(|r| {
-            let pose = hud_pose(e, units);
+            let pose = hud_pose(e, pane, units);
             let centre = vec2f((r.pos.x + r.size.x * 0.5) as f32, (r.pos.y + r.size.y * 0.5) as f32);
             (pose.affine(centre), pose.opacity)
         })
@@ -1572,17 +1584,22 @@ fn draw_log(
         .rev()
         .take(e.lines.max(1) as usize)
         .collect();
-    // Newest at the bottom, the way every kill feed and console reads.
+    // Newest at the bottom, the way every kill feed and console reads. A
+    // line wider than the log wraps onto rows of its own (the newest line's
+    // rows stay in reading order, bottom row last).
     let mut y = at.pos.y + at.size.y - size;
     for line in mine {
         // The last fifth of a line's life is its fade; a message that
         // vanishes mid-word looks like a dropped frame.
         let fade = ((line.secs - line.age) / (line.secs * 0.25).max(0.05)).clamp(0.0, 1.0);
         let c = if line.color.w > 0.0 { line.color } else { style.ink };
+        let rows = wrap_rows(cx, draws.text, size_f, &line.text, at.size.x.max(40.0));
         draws.text.text_style.font_size = size_f;
         draws.text.color = vec4(c.x, c.y, c.z, c.w * fade);
-        draws.text.draw_abs(cx, dvec2(at.pos.x, y), &line.text);
-        y -= size * 1.35;
+        for row in rows.iter().rev() {
+            draws.text.draw_abs(cx, dvec2(at.pos.x, y), row);
+            y -= size * 1.35;
+        }
     }
 }
 

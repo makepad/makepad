@@ -15,10 +15,14 @@ pub struct MaterialSurface {
     pub alpha_cutoff: f32,
     pub base_alpha: f32,
     pub double_sided: bool,
+    /// UV scale (1/metres) of world-position triplanar texturing; 0 = the
+    /// mesh's own UVs. Generated terrain asks for it (glTF extras
+    /// `makepadTriplanar`) so cliffs keep a seamless, unstretched texture.
+    pub triplanar: f32,
 }
 impl Default for MaterialSurface {
     fn default()->Self {Self{fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
-        emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false}}
+        emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0}}
 }
 
 pub(crate) fn fur_params(fur: Option<makepad_gltf::GlbFurMaterial>) -> makepad_draw::Vec4f {
@@ -59,7 +63,58 @@ pub struct PreparedTexture {pub width:usize,pub height:usize,pub data:Vec<u32>,p
     pub hash:u64}
 fn linear(v:f32)->f32{if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)}}
 fn srgb(v:f32)->f32{if v<=0.0031308{v*12.92}else{1.055*v.max(0.0).powf(1.0/2.4)-0.055}}
+/// A host's cache of prepared (mipped) textures, keyed by
+/// [`prepared_texture_key`] of the SOURCE image bytes. Opt-in: a host that
+/// installs none prepares every image as before. `get` and `put` run on
+/// preparation workers; `put` must not block on I/O.
+pub trait PreparedTextureStore: Send + Sync {
+    fn get(&self, key: u64) -> Option<PreparedTexture>;
+    fn put(&self, key: u64, texture: &PreparedTexture);
+}
+static TEXTURE_STORE: std::sync::OnceLock<Box<dyn PreparedTextureStore>> = std::sync::OnceLock::new();
+/// Install the process's prepared-texture cache (first call wins).
+pub fn set_prepared_texture_store(store: Box<dyn PreparedTextureStore>) { let _ = TEXTURE_STORE.set(store); }
+pub(crate) fn prepared_texture_store() -> Option<&'static dyn PreparedTextureStore> { TEXTURE_STORE.get().map(|s| s.as_ref()) }
+/// Bumped whenever [`PreparedTexture::prepare`] or the serialized layout
+/// changes, so cached textures from an older build are never used.
+pub const PREPARED_TEXTURE_FORMAT: u32 = 1;
+/// Cache key of a source image: its bytes, its semantic (colour and masked
+/// colour mip differently) and the format version.
+pub fn prepared_texture_key(source: &[u8], semantic: PixelSemantic) -> u64 {
+    let h = source.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3));
+    h ^ (source.len() as u64).rotate_left(29) ^ ((semantic as u64) << 56) ^ ((PREPARED_TEXTURE_FORMAT as u64) << 48).rotate_left(7)
+}
+/// Images smaller than this prepare faster than a cache round trip.
+pub const PREPARED_TEXTURE_CACHE_MIN_TEXELS: usize = 256 * 256;
+/// Source images (encoded bytes) smaller than this are not looked up.
+pub const PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES: usize = 32 * 1024;
+
 impl PreparedTexture {
+    /// Serialized form: magic, format, width, height, max_level, hash, texels
+    /// (level 0 then every mip, BGRA8 little-endian words).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + self.data.len() * 4);
+        out.extend_from_slice(b"MPTX");
+        for v in [PREPARED_TEXTURE_FORMAT, self.width as u32, self.height as u32, self.max_level as u32] { out.extend_from_slice(&v.to_le_bytes()); }
+        out.extend_from_slice(&self.hash.to_le_bytes());
+        for t in &self.data { out.extend_from_slice(&t.to_le_bytes()); }
+        out
+    }
+    /// The inverse of [`Self::to_bytes`]; `None` for another format or a
+    /// truncated / inconsistent payload (the caller then prepares from source).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 28 || &bytes[..4] != b"MPTX" { return None; }
+        let word = |i: usize| u32::from_le_bytes(bytes[4 + i * 4..8 + i * 4].try_into().unwrap());
+        if word(0) != PREPARED_TEXTURE_FORMAT { return None; }
+        let (width, height, max_level) = (word(1) as usize, word(2) as usize, word(3) as usize);
+        let hash = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
+        // Texel count of the full chain this header promises.
+        let (mut w, mut h, mut texels) = (width, height, width * height);
+        for _ in 0..max_level { w = (w / 2).max(1); h = (h / 2).max(1); texels += w * h; }
+        if width == 0 || height == 0 || width > 16384 || height > 16384 || bytes.len() != 28 + texels * 4 { return None; }
+        let data = bytes[28..].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        Some(Self { width, height, data, max_level, hash })
+    }
     pub fn prepare(image:ImageBuffer,semantic:PixelSemantic)->Self {
         let (width,height)=(image.width,image.height);let mut data=image.data;
         let hash=data.iter().fold(0xcbf2_9ce4_8422_2325u64^((width as u64)<<32|height as u64)^(semantic as u64).rotate_left(17),|h,t|(h^*t as u64).wrapping_mul(0x100_0000_01b3));
@@ -171,5 +226,24 @@ mod tests{
         let texture=PreparedTexture::prepare(image,PixelSemantic::Color);let r=(texture.data[2]>>16)&255;assert!((187..=189).contains(&r));
         let mut image=ImageBuffer::default();image.width=2;image.height=1;image.data=vec![0xffff_0000,0x0000_00ff];
         let texture=PreparedTexture::prepare(image,PixelSemantic::Color);assert_eq!(texture.data[2]&0x00ff_ffff,0x00ff_0000);assert_eq!(texture.data[2]>>24,128);
+    }
+}
+
+#[cfg(test)]
+mod prepared_texture_bytes_tests {
+    use super::*;
+    #[test]
+    fn serialized_mip_chain_round_trips_and_refuses_other_formats() {
+        let mut image = ImageBuffer::default(); image.width = 5; image.height = 3;
+        image.data = (0..15u32).map(|i| 0xff00_0000 | i * 0x0102_03).collect();
+        let texture = PreparedTexture::prepare(image, PixelSemantic::MaskedColor);
+        let bytes = texture.to_bytes();
+        let back = PreparedTexture::from_bytes(&bytes).expect("round trip");
+        assert_eq!((back.width, back.height, back.max_level, back.hash), (texture.width, texture.height, texture.max_level, texture.hash));
+        assert_eq!(back.data, texture.data);
+        assert!(PreparedTexture::from_bytes(&bytes[..bytes.len() - 4]).is_none(), "truncated");
+        let mut other = bytes.clone(); other[4] = other[4].wrapping_add(1);
+        assert!(PreparedTexture::from_bytes(&other).is_none(), "another format version");
+        assert_ne!(prepared_texture_key(b"png", PixelSemantic::Color), prepared_texture_key(b"png", PixelSemantic::MaskedColor));
     }
 }

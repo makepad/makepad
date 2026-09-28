@@ -498,11 +498,11 @@ fn tween_at(pose: &mut HudPose, tw: &HudTween, age: f32, units: f32) {
     tween_pose(pose, tw, tw.ease.apply(linear), linear, units);
 }
 
-/// The element's pose this frame, from its static transform and whatever
-/// tweens are running. `units` converts HUD units to pixels.
-pub fn hud_pose(e: &HudElement, units: f32) -> HudPose {
+/// The element's pose this frame in `pane`, from its static transform and
+/// whatever tweens are running there. `units` converts HUD units to pixels.
+pub fn hud_pose(e: &HudElement, pane: usize, units: f32) -> HudPose {
     let m = &e.motion;
-    let st = &e.motion_state;
+    let st = &e.motion_state(pane);
     let mut pose = HudPose { skew: m.skew, rotate: m.rotate, ..HudPose::IDENTITY };
     if st.exit_age.is_finite() && !m.exit.is_none() {
         // The exit is the enter played backwards: progress runs 1 -> 0.
@@ -518,9 +518,10 @@ pub fn hud_pose(e: &HudElement, units: f32) -> HudPose {
     pose
 }
 
-/// The number a counting element shows this frame instead of `target`.
-pub fn hud_counted(e: &HudElement, target: f32) -> f32 {
-    let st = &e.motion_state;
+/// The number a counting element shows this frame in `pane` instead of
+/// `target`.
+pub fn hud_counted(e: &HudElement, pane: usize, target: f32) -> f32 {
+    let st = &e.motion_state(pane);
     if e.motion.count <= 0.0 || !st.count_age.is_finite() || st.count_age >= e.motion.count || st.count_to != target {
         return target;
     }
@@ -533,6 +534,8 @@ pub fn hud_counted(e: &HudElement, target: f32) -> f32 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HudSeen {
     pub name: String,
+    /// Which pane drew it (0 = the main pane).
+    pub pane: usize,
     pub visible: bool,
     pub rect: [f32; 4],
     /// Its number (a gauge's value, a numeric readout), when it has one.
@@ -657,9 +660,12 @@ pub struct HudElement {
     /// drawn in place when in range and as an arrow on the rim when not.
     pub targets: Vec<Vec2f>,
     pub target_color: Vec4f,
-    /// How it moves (tweens, transform, count-up) and the live state of that.
+    /// How it moves (tweens, transform, count-up), and the live state of
+    /// that PER PANE: split screen draws one document into several panes,
+    /// each with its own player, so each pane's copy of an element appears,
+    /// changes and counts on its own. Index = pane (0 = the main pane).
     pub motion: HudMotion,
-    pub motion_state: HudMotionState,
+    pub motion_panes: Vec<HudMotionState>,
 }
 
 impl Default for HudElement {
@@ -728,8 +734,28 @@ impl Default for HudElement {
             targets: Vec::new(),
             target_color: vec4(0.0, 0.0, 0.0, 0.0),
             motion: HudMotion::default(),
-            motion_state: HudMotionState::default(),
+            motion_panes: Vec::new(),
         }
+    }
+}
+
+impl HudElement {
+    /// This element's motion state in `pane` (at rest when it has none yet).
+    pub fn motion_state(&self, pane: usize) -> HudMotionState {
+        self.motion_panes.get(pane).copied().unwrap_or_default()
+    }
+    pub fn motion_state_mut(&mut self, pane: usize) -> &mut HudMotionState {
+        if self.motion_panes.len() <= pane {
+            self.motion_panes.resize(pane + 1, HudMotionState::default());
+        }
+        &mut self.motion_panes[pane]
+    }
+    /// Every pane this element has been drawn in (at least the main one).
+    pub fn motion_states_mut(&mut self) -> &mut [HudMotionState] {
+        if self.motion_panes.is_empty() {
+            self.motion_panes.push(HudMotionState::default());
+        }
+        &mut self.motion_panes
     }
 }
 
@@ -829,7 +855,7 @@ impl HudDoc {
             }
             element.pulse = slot.pulse;
             element.chip_value = slot.chip_value;
-            element.motion_state = slot.motion_state;
+            element.motion_panes = std::mem::take(&mut slot.motion_panes);
             *slot = element;
             return;
         }
@@ -922,10 +948,13 @@ impl HudDoc {
             if e.expires > 0.0 {
                 e.expires -= dt;
                 if e.expires <= 0.0 {
-                    if !e.motion.exit.is_none() && e.motion_state.shown {
-                        // Play the exit first; settle_motion removes it.
+                    if !e.motion.exit.is_none() && e.motion_panes.iter().any(|st| st.shown) {
+                        // Play the exit first (in every pane showing it);
+                        // settle_motion removes it once all have played.
                         e.show = false;
-                        e.motion_state.remove_after_exit = true;
+                        for st in e.motion_states_mut() {
+                            st.remove_after_exit = true;
+                        }
                     } else {
                         expired.push(e.name.clone());
                     }
@@ -942,12 +971,14 @@ impl HudDoc {
     /// punch slot, so a punch and a shake can play at once.
     pub fn punch(&mut self, name: &str, tween: HudTween) {
         if let Some(e) = self.get_mut(name) {
-            if tween.kind == HudTweenKind::Shake {
-                e.motion_state.shake = tween;
-                e.motion_state.shake_age = 0.0;
-            } else {
-                e.motion_state.punch = tween;
-                e.motion_state.punch_age = 0.0;
+            for st in e.motion_states_mut() {
+                if tween.kind == HudTweenKind::Shake {
+                    st.shake = tween;
+                    st.shake_age = 0.0;
+                } else {
+                    st.punch = tween;
+                    st.punch_age = 0.0;
+                }
             }
         }
     }
@@ -964,7 +995,7 @@ impl HudDoc {
         for s in seen {
             let Some(e) = self.get_mut(&s.name) else { continue };
             let m = e.motion;
-            let st = &mut e.motion_state;
+            let st = e.motion_state_mut(s.pane);
             for age in [&mut st.enter_age, &mut st.exit_age, &mut st.change_age, &mut st.punch_age, &mut st.shake_age, &mut st.count_age] {
                 if age.is_finite() {
                     *age += dt;
@@ -1007,10 +1038,16 @@ impl HudDoc {
                 st.exit_age = if m.exit.is_none() { f32::INFINITY } else { 0.0 };
             }
             let exiting = st.exit_age.is_finite() && st.exit_age < m.exit.secs;
-            if st.remove_after_exit && !exiting && !st.shown {
-                done.push(s.name.clone());
+            let settled = |st: &HudMotionState| {
+                !st.shown && !(st.exit_age.is_finite() && st.exit_age < m.exit.secs)
+            };
+            if st.remove_after_exit && !exiting && !st.shown && e.motion_panes.iter().all(settled) {
+                if !done.contains(&s.name) {
+                    done.push(s.name.clone());
+                }
                 continue;
             }
+            let st = e.motion_state(s.pane);
             animating |= exiting
                 || (st.enter_age.is_finite() && st.enter_age < m.enter.secs)
                 || (st.change_age.is_finite() && st.change_age < m.change.secs)
@@ -1264,7 +1301,11 @@ impl Measure<'_> {
             HudKind::Log => {
                 let size = if e.glyph > 0.0 { e.glyph } else { TEXT_SIZE } * s;
                 let rows = e.lines.max(1) as f32;
-                (220.0 * s, rows * size * 1.35)
+                // An explicit width (size: vec2(w, 0), w >= 60 — a bare
+                // number is the font size) is the wrap width; wrapped lines
+                // take their room above the newest.
+                let w = if e.size.x >= 60.0 { e.size.x } else { 220.0 } * s;
+                (w, rows * size * 1.35)
             }
             HudKind::Flash | HudKind::Marker | HudKind::Flight => (0.0, 0.0),
             // Square unless both axes were given: `size: 200` means a
@@ -1512,6 +1553,55 @@ impl HudMapFit {
 
 #[cfg(test)]
 mod tests {
+
+    fn seen(name: &str, pane: usize, visible: bool, number: Option<f32>) -> HudSeen {
+        HudSeen { name: name.into(), pane, visible, rect: [10.0, 10.0, 40.0, 20.0], number, text_key: 0 }
+    }
+
+    /// Split screen draws one document into several panes: each pane's copy
+    /// of an element appears, tweens and counts on its own clock, and a
+    /// punch reaches every pane.
+    #[test]
+    fn hud_motion_is_kept_per_pane() {
+        let mut doc = HudDoc::default();
+        let mut e = HudElement { name: "combo".into(), kind: HudKind::Text, ..Default::default() };
+        e.motion.enter = HudTween::of(HudTweenKind::Pop);
+        e.motion.count = 0.5;
+        doc.set(e);
+
+        // Pane 0 shows it; pane 1 does not yet.
+        doc.settle_motion(0.1, &[seen("combo", 0, true, Some(0.0)), seen("combo", 1, false, None)]);
+        doc.settle_motion(0.1, &[seen("combo", 0, true, Some(0.0)), seen("combo", 1, false, None)]);
+        let e = doc.get("combo").unwrap();
+        assert!(e.motion_state(0).shown);
+        assert!((e.motion_state(0).enter_age - 0.1).abs() < 1e-6);
+        assert!(!e.motion_state(1).shown);
+        assert!(!e.motion_state(1).enter_age.is_finite());
+
+        // Pane 1 appears later: its entrance starts from its own zero.
+        doc.settle_motion(0.1, &[seen("combo", 0, true, Some(0.0)), seen("combo", 1, true, Some(0.0))]);
+        let e = doc.get("combo").unwrap();
+        assert!((e.motion_state(0).enter_age - 0.2).abs() < 1e-6);
+        assert_eq!(e.motion_state(1).enter_age, 0.0);
+        let pop0 = hud_pose(e, 0, 1.0);
+        let pop1 = hud_pose(e, 1, 1.0);
+        assert!(pop1.scale < pop0.scale, "pane 1 is earlier in its pop than pane 0");
+
+        // Only pane 1's number changes: only pane 1 counts.
+        doc.settle_motion(0.05, &[seen("combo", 0, true, Some(0.0)), seen("combo", 1, true, Some(10.0))]);
+        let e = doc.get("combo").unwrap();
+        assert!(!e.motion_state(0).count_age.is_finite());
+        assert_eq!(e.motion_state(1).count_to, 10.0);
+        assert_eq!(hud_counted(e, 0, 0.0), 0.0);
+        let mid = hud_counted(e, 1, 10.0);
+        assert_eq!(mid, 0.0, "a count starts from where the pane was");
+
+        // A punch kicks every pane.
+        doc.punch("combo", HudTween::of(HudTweenKind::Punch));
+        let e = doc.get("combo").unwrap();
+        assert_eq!(e.motion_state(0).punch_age, 0.0);
+        assert_eq!(e.motion_state(1).punch_age, 0.0);
+    }
 
     #[test]
     fn map_polyline_is_decimated_evenly_with_both_ends() {

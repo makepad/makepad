@@ -482,6 +482,9 @@ script_mod! {
         lin_ctl: uniform(vec4(0.0, 1.0, 1.0, 1.0))
         // HDR lane water: true world eye for the Fresnel/reflection/glint.
         water_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // HDR height fog (same law as ClusteredLighting.scene_fog), per
+        // PIXEL: a sheet kilometres wide fogged per vertex shows wedges.
+        water_fog: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         v_wp: varying(vec3f)
         v_wn: varying(vec3f)
 
@@ -499,18 +502,62 @@ script_mod! {
             return vec3(wb.x * env * sin(phase), slope * wa.x, slope * wa.y)
         }
 
+        // Resolvability of a wave of wavenumber k sampled every `f` metres:
+        // 1 while its wavelength spans 8+ samples, 0 at 4 (Nyquist is 2;
+        // the margin keeps the fade ahead of the moire).
+        wave_fade: fn(k: float, f: float) -> float {
+            return clamp(2.0 - k * f / 0.7853982, 0.0, 1.0)
+        }
+
+        // PIXEL-stage twins of wave_term/wave_fade: a helper function is
+        // emitted for ONE stage on Metal, so the fragment stage cannot call
+        // the vertex stage's wave_term (it failed to compile). Same slope
+        // expression (envelope derivative omitted, like the sim).
+        px_fade: fn(k: float, f: float) -> float {
+            return clamp(2.0 - k * f / 0.7853982, 0.0, 1.0)
+        }
+        px_slope: fn(p: vec2, wa: vec4, wb: vec4, t: float, f: float) -> vec2 {
+            let phase = wa.z * (wa.x * p.x + wa.y * p.y) - wa.w * t + wb.y
+            var env = 1.0
+            if wb.z > 0.0 {
+                let e = 0.5 + 0.5 * cos(phase / wb.z)
+                env = e * e
+            }
+            let slope = wb.x * env * cos(phase) * wa.z * self.px_fade(wa.z, f)
+            return vec2(slope * wa.x, slope * wa.y)
+        }
+
+        // The wave sum's slope at p, each wave faded by the sample spacing
+        // `f` — per pixel, so a sheet with 100 m cells still shows its 28 m
+        // waves up close and never aliases them into stripes far away.
+        wave_slope: fn(p: vec2, t: float, f: float) -> vec2 {
+            var s = self.px_slope(p, self.wave_a0, self.wave_b0, t, f)
+            s = s + self.px_slope(p, self.wave_a1, self.wave_b1, t, f)
+            s = s + self.px_slope(p, self.wave_a2, self.wave_b2, t, f)
+            s = s + self.px_slope(p, self.wave_a3, self.wave_b3, t, f)
+            s = s + self.px_slope(p, self.wave_a4, self.wave_b4, t, f)
+            s = s + self.px_slope(p, self.wave_a5, self.wave_b5, t, f)
+            s = s + self.px_slope(p, self.wave_a6, self.wave_b6, t, f)
+            s = s + self.px_slope(p, self.wave_a7, self.wave_b7, t, f)
+            return s
+        }
+
         vertex: fn() {
             let pos_in = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
             let t = self.water_params.y
+            // The grid displaces only the waves its cells resolve
+            // (water_params.z = cell size): a shorter wave sampled per
+            // vertex aliases into long straight stripes across the sheet.
+            let cell = max(self.water_params.z, 0.001)
             var acc = vec3(0.0, 0.0, 0.0)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a0, self.wave_b0, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a1, self.wave_b1, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a2, self.wave_b2, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a3, self.wave_b3, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a4, self.wave_b4, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a5, self.wave_b5, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a6, self.wave_b6, t)
-            acc = acc + self.wave_term(pos_in.xz, self.wave_a7, self.wave_b7, t)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a0, self.wave_b0, t) * self.wave_fade(self.wave_a0.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a1, self.wave_b1, t) * self.wave_fade(self.wave_a1.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a2, self.wave_b2, t) * self.wave_fade(self.wave_a2.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a3, self.wave_b3, t) * self.wave_fade(self.wave_a3.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a4, self.wave_b4, t) * self.wave_fade(self.wave_a4.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a5, self.wave_b5, t) * self.wave_fade(self.wave_a5.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a6, self.wave_b6, t) * self.wave_fade(self.wave_a6.z, cell)
+            acc = acc + self.wave_term(pos_in.xz, self.wave_a7, self.wave_b7, t) * self.wave_fade(self.wave_a7.z, cell)
             let pos = vec3(pos_in.x, pos_in.y + acc.x, pos_in.z)
             // Analytic wave normal — same construction as
             // WaterVolume::surface_normal.
@@ -545,7 +592,12 @@ script_mod! {
             // ray), plus a tight GGX sun glint the bloom picks up. Output
             // is premultiplied: the body is translucent, the reflection is
             // not — at grazing angles water is a mirror.
-            let n = normalize(self.v_wn)
+            // Per-pixel wave normal, each wave faded by this pixel's
+            // footprint on the water: detail up close, a calm (never
+            // striped) surface toward the horizon.
+            let foot = max(length(dFdx(self.v_wp)), length(dFdy(self.v_wp)))
+            let ws = self.wave_slope(self.v_wp.xz, self.water_params.y, foot)
+            let n = normalize(vec3(0.0 - ws.x, 1.0, 0.0 - ws.y))
             let v = normalize(self.water_eye.xyz - self.v_wp)
             let ndv = max(dot(n, v), 0.0)
             let fr = 0.02 + 0.98 * pow(1.0 - ndv, 5.0)
@@ -560,7 +612,16 @@ script_mod! {
             let glint = self.sun_color * (a2 / max(den * den, 0.000001) * 0.25 * fr * ndl)
             let body = self.lit_color.w * (1.0 - fr)
             let rgb = c * body + sky * fr + glint
-            let fog = self.v_fog
+            var fog = self.v_fog
+            if self.water_fog.w > 0.5 {
+                let d = self.v_wp - self.water_eye.xyz
+                let k = self.water_fog.y
+                let a = min((self.water_fog.x - self.water_eye.y) * k, 30.0)
+                let dy = d.y * k
+                var slope = 1.0 - dy * 0.5 + dy * dy * 0.1666667
+                if abs(dy) > 0.05 { slope = (1.0 - exp(0.0 - dy)) / dy }
+                fog = 1.0 - exp(0.0 - length(d) * self.fog_density * exp(a) * slope)
+            }
             return vec4(mix(rgb, self.fog_color * (body + fr), fog), body + fr)
         }
 

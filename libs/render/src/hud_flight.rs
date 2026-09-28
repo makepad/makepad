@@ -387,8 +387,19 @@ pub fn draw_flight(cx: &mut Cx2d, rect: Rect, e: &HudElement, draws: &mut HudDra
 
     // ---- targets -------------------------------------------------------
     let edge = |p: (f64, f64)| p.0 < rect.pos.x + 20.0 || p.0 > rect.pos.x + rect.size.x - 20.0 || p.1 < rect.pos.y + 20.0 || p.1 > rect.pos.y + rect.size.y - 20.0;
+    // The off-screen arrow points at the radar's target, or at the nearest
+    // bandit when nothing is selected — someone to turn toward, always.
+    let selected_on = hud.targets.iter().any(|t| t.selected && !t.friend);
+    let nearest = hud
+        .targets
+        .iter()
+        .filter(|t| !t.friend && !t.missile)
+        .map(|t| t.dist)
+        .fold(None, |m: Option<f32>, d| Some(m.map_or(d, |m| m.min(d))));
+    let bandit = vec4(1.0, 0.36, 0.30, 0.95);
     for t in &hud.targets {
-        let color = if t.friend { friend } else if t.locked { warn } else { ink };
+        // Bandits read red at a glance; friends blue.
+        let color = if t.friend { friend } else if t.locked { warn } else { bandit };
         let on = t.at.map(|a| pen.px(a)).filter(|p| !edge(*p));
         match on {
             Some((x, y)) => {
@@ -441,7 +452,7 @@ pub fn draw_flight(cx: &mut Cx2d, rect: Rect, e: &HudElement, draws: &mut HudDra
                     pen.text(x, y + half + 32.0 * s, 13.0, color, &t.label, 0.5);
                 }
             }
-            None if t.selected && !t.friend => {
+            None if !t.friend && !t.missile && (t.selected || (!selected_on && Some(t.dist) == nearest)) => {
                 // Off screen: an arrow on a ring round the centre, pointing.
                 let r = 180.0 * s;
                 let (sn, cs) = (t.bearing as f64).sin_cos();

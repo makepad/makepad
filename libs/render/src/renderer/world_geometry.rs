@@ -169,6 +169,7 @@ impl Renderer {
                     geometry,
                     waves_a,
                     waves_b,
+                    cell: water_sheet_cell(volume),
                 });
             }
         }

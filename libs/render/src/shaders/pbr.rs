@@ -70,7 +70,22 @@ script_mod! {
                 if dn < dlo / 255.0 || dn >= dhi / 255.0 { discard() }
             }
             if self.fur_mask() < 0.5 { discard() }
-            let tex = self.base_texel()
+            var tex = self.base_texel()
+            if self.triplanar > 0.0 {
+                // World-position triplanar (generated terrain): three planar
+                // samples blended by the geometric normal, so a cliff keeps
+                // an unstretched texture with no per-triangle projection
+                // seams. Height (alpha) blends the same way for the masks.
+                let wp = self.v_csm.xyz * self.triplanar
+                let gn = abs(normalize(self.v_csm_n))
+                var bw = gn * gn
+                bw = bw * bw
+                bw = bw / max(bw.x + bw.y + bw.z, 0.0001)
+                let tx = self.tex.sample_as_bgra_repeat(vec2(wp.z, 0.0 - wp.y))
+                let ty = self.tex.sample_as_bgra_repeat(vec2(wp.x, wp.z))
+                let tz = self.tex.sample_as_bgra_repeat(vec2(wp.x, 0.0 - wp.y))
+                tex = tx * bw.x + ty * bw.y + tz * bw.z
+            }
             let alpha=tex.w*self.material_alpha*mix(1.0,self.v_tint.w,self.surface_on)
             if self.surface_on<0.5 && tex.w<0.5 {discard()}
             if self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff {discard()}

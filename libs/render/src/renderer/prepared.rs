@@ -148,11 +148,28 @@ impl PreparedStaticPreview {
                 None=>(0,0,fallback,kind),
             };
             if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
+            // A host cache of prepared textures skips the decode and the mips.
+            let store=crate::material_surface::prepared_texture_store();
+            // Small images prepare faster than a cache round trip.
+            let store_key=bytes.filter(|b|b.len()>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES).map(|b|crate::material_surface::prepared_texture_key(b,semantic));
+            if let (Some(store),Some(store_key))=(store,store_key) {
+                if let Some(texture)=store.get(store_key) {
+                    if texture.data.len()*4<=remaining.get() {
+                        remaining.set(remaining.get()-texture.width*texture.height*4);
+                        let texture=std::sync::Arc::new(texture);
+                        shared.borrow_mut().insert(key,texture.clone());
+                        return Ok(texture);
+                    }
+                }
+            }
             let decoded=if let Some(bytes)=bytes {
                 let image=decode_generated_png_within(bytes,4096,remaining.get())?;
                 remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
             } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
             let texture=std::sync::Arc::new(crate::material_surface::PreparedTexture::prepare(decoded,semantic));
+            if let (Some(store),Some(store_key))=(store,store_key) {
+                if texture.width*texture.height>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_TEXELS { store.put(store_key,&texture); }
+            }
             shared.borrow_mut().insert(key,texture.clone());
             Ok(texture)
         };

@@ -89,3 +89,41 @@ fn the_sheet_grid_spans_the_volume_at_the_still_level() {
     let count = (vertices.len() / 16) as u32;
     assert!(indices.iter().all(|i| *i < count));
 }
+
+/// A sea kilometres wide gets cells far longer than its waves (the grid is
+/// capped at 128 a side). Displacing those waves per vertex aliased them
+/// into long radial stripes (the "light shafts" of the flight review), so
+/// the shader must fade every wave by the cell it is sampled at, and shade
+/// normals per pixel by the pixel's footprint.
+#[test]
+fn waves_the_grid_cannot_resolve_fade_instead_of_striping() {
+    let mut sea = test_volume();
+    sea.min = vec3f(-30_000.0, -20.0, -30_000.0);
+    sea.max = vec3f(30_000.0, 0.0, 30_000.0);
+    sea.waves = vec![WaterWave::new(1.0, 0.0, 0.7, 70.0, 6.0), WaterWave::new(0.6, 0.8, 0.35, 28.0, 4.0)];
+    let cell = water_sheet_cell(&sea);
+    assert!(cell > 400.0, "a 60 km sea at 128 cells: {cell} m cells");
+    // Same fade the shader uses: 0 once a wavelength spans < 4 cells.
+    let fade = |k: f32, f: f32| (2.0 - k * f / std::f32::consts::FRAC_PI_4).clamp(0.0, 1.0);
+    for w in &sea.waves {
+        assert_eq!(fade(w.k, cell), 0.0, "a {:.0} m wave on {cell:.0} m cells must not displace", std::f32::consts::TAU / w.k);
+    }
+    assert_eq!(fade(sea.waves[1].k, 0.5), 1.0, "up close (0.5 m pixels) the 28 m wave shows");
+    assert_eq!(water_sheet_cell(&test_volume()) <= 16.0, true);
+
+    let src = crate::shaders::SHADER_SOURCE;
+    let at = src.find("mod.draw.DrawSceneWater").expect("water shader missing");
+    let end = src[at..].find("\n    mod.draw.").map_or(src.len(), |e| at + e);
+    let decl = &src[at..end];
+    assert!(decl.contains("return clamp(2.0 - k * f / 0.7853982, 0.0, 1.0)"));
+    for i in 0..MAX_WAVES {
+        assert!(decl.contains(&format!("self.wave_term(pos_in.xz, self.wave_a{i}, self.wave_b{i}, t) * self.wave_fade(self.wave_a{i}.z, cell)")));
+        assert!(decl.contains(&format!("self.px_slope(p, self.wave_a{i}, self.wave_b{i}, t, f)")));
+    }
+    assert!(decl.contains("let ws = self.wave_slope(self.v_wp.xz, self.water_params.y, foot)"));
+    // The pixel stage has its own copy of the slope: it must never call the
+    // vertex stage's helpers (Metal emits a helper for one stage only).
+    let pixel = &decl[decl.find("pixel: fn()").expect("water pixel")..];
+    assert!(!pixel.contains("self.wave_term(") && !pixel.contains("self.wave_fade("));
+    assert!(decl.contains("let slope = wb.x * env * cos(phase) * wa.z * self.px_fade(wa.z, f)"));
+}

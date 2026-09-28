@@ -29,9 +29,137 @@ use {
     },
 };
 
-// GUID_ConstantForce: {13541C20-8E33-11D0-9AD0-00A0C9A06E35}
+// GUID_ConstantForce / GUID_Spring / GUID_Damper: {13541C2x-8E33-11D0-9AD0-00A0C9A06E35}
 #[allow(non_upper_case_globals)]
 const GUID_ConstantForce: GUID = GUID::from_u128(0x13541C20_8E33_11D0_9AD0_00A0C9A06E35);
+#[allow(non_upper_case_globals)]
+const GUID_Spring: GUID = GUID::from_u128(0x13541C27_8E33_11D0_9AD0_00A0C9A06E35);
+#[allow(non_upper_case_globals)]
+const GUID_Damper: GUID = GUID::from_u128(0x13541C28_8E33_11D0_9AD0_00A0C9A06E35);
+
+/// `DICONDITION` (the vendored bindings do not carry it): one axis of a
+/// spring or damper.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct DiCondition {
+    offset: i32,
+    positive_coefficient: i32,
+    negative_coefficient: i32,
+    positive_saturation: u32,
+    negative_saturation: u32,
+    dead_band: i32,
+}
+
+/// One open DirectInput wheel. Its force feedback is three effects (constant
+/// force, spring, damper) that the app drives through `force`, applied here
+/// once per poll by `applier`.
+pub struct DiDevice {
+    pub id: LiveId,
+    device: IDirectInputDevice8W,
+    guid: GUID,
+    vendor_id: u32,
+    product_id: u32,
+    /// Constant, spring, damper — present only when exclusive access
+    /// allowed creating them.
+    effects: [Option<IDirectInputEffect>; 3],
+    force: GameInputForce,
+    applier: ForceApplier,
+}
+
+impl DiDevice {
+    fn has_force(&self) -> bool {
+        self.effects.iter().any(Option::is_some)
+    }
+
+    /// The app's latest target → the effects: changed parameters only, and
+    /// a restart that extends their finite duration while the target is
+    /// fresh. A stale target is zeroed and never restarted, so the effects
+    /// run out on their own.
+    unsafe fn apply_force(&mut self, now: std::time::Instant) {
+        if !self.has_force() {
+            return;
+        }
+        let (target, age) = self.force.latest();
+        let commands = self.applier.step(target, age, now);
+        if let (Some(e), Some(magnitude)) = (&self.effects[0], commands.constant) {
+            let mut params = DICONSTANTFORCE { lMagnitude: magnitude };
+            let _ = set_type_params(e, &mut params as *mut _ as *mut _, size_of::<DICONSTANTFORCE>());
+        }
+        for (slot, value) in [(1, commands.spring), (2, commands.damper)] {
+            if let (Some(e), Some(k)) = (&self.effects[slot], value) {
+                let mut params = condition(k);
+                let _ = set_type_params(e, &mut params as *mut _ as *mut _, size_of::<DiCondition>());
+            }
+        }
+        if commands.restart {
+            for e in self.effects.iter().flatten() {
+                let _ = e.Start(1, 0);
+            }
+        }
+    }
+}
+
+fn condition(k: i32) -> DiCondition {
+    DiCondition {
+        positive_coefficient: k,
+        negative_coefficient: k,
+        positive_saturation: FORCE_NOMINAL_MAX as u32,
+        negative_saturation: FORCE_NOMINAL_MAX as u32,
+        ..Default::default()
+    }
+}
+
+/// Update only an effect's type-specific parameters (no restart).
+unsafe fn set_type_params(effect: &IDirectInputEffect, params: *mut std::ffi::c_void, size: usize) -> windows::core::Result<()> {
+    let mut eff = DIEFFECT {
+        dwSize: size_of::<DIEFFECT>() as u32,
+        dwFlags: 0,
+        dwDuration: 0,
+        dwSamplePeriod: 0,
+        dwGain: 0,
+        dwTriggerButton: 0,
+        dwTriggerRepeatInterval: 0,
+        cAxes: 0,
+        rgdwAxes: std::ptr::null_mut(),
+        rglDirection: std::ptr::null_mut(),
+        lpEnvelope: std::ptr::null_mut(),
+        cbTypeSpecificParams: size as u32,
+        lpvTypeSpecificParams: params,
+        dwStartDelay: 0,
+    };
+    effect.SetParameters(&mut eff, DIEP_TYPESPECIFICPARAMS)
+}
+
+/// One effect on the X axis with a finite duration (`FORCE_EFFECT_DURATION`,
+/// renewed by each restart), downloaded but not started.
+unsafe fn create_effect(
+    device: &IDirectInputDevice8W,
+    kind: &GUID,
+    params: *mut std::ffi::c_void,
+    size: usize,
+) -> Option<IDirectInputEffect> {
+    let mut axes: [u32; 1] = [0]; // offset 0 = the X axis
+    let mut directions: [i32; 1] = [0];
+    let mut eff = DIEFFECT {
+        dwSize: size_of::<DIEFFECT>() as u32,
+        dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
+        dwDuration: FORCE_EFFECT_DURATION.as_micros() as u32,
+        dwSamplePeriod: 0,
+        dwGain: FORCE_NOMINAL_MAX as u32,
+        dwTriggerButton: DIEB_NOTRIGGER,
+        dwTriggerRepeatInterval: 0,
+        cAxes: 1,
+        rgdwAxes: axes.as_mut_ptr(),
+        rglDirection: directions.as_mut_ptr(),
+        lpEnvelope: std::ptr::null_mut(),
+        cbTypeSpecificParams: size as u32,
+        lpvTypeSpecificParams: params,
+        dwStartDelay: 0,
+    };
+    let mut out: Option<IDirectInputEffect> = None;
+    device.CreateEffect(kind, &mut eff, &mut out as *mut _ as *mut _, None).ok()?;
+    out
+}
 
 // Basic exact match for c_dfDIJoystick2 (DIJOYSTATE2)
 // This avoids linking against dinput8.lib/dxguid.lib data exports which might be missing.
@@ -104,15 +232,8 @@ pub struct WindowsGameInput {
     pub gamepads: Vec<GameInputInfo>,
     pub states: Vec<GameInputState>,
     pub direct_input: Option<IDirectInput8W>,
-    /// Open DirectInput wheels: id, device, instance GUID, the constant-force
-    /// effect when exclusive access allowed one, the magnitude last sent.
-    pub di_devices: Vec<(
-        LiveId,
-        IDirectInputDevice8W,
-        GUID,
-        Option<IDirectInputEffect>,
-        i32,
-    )>,
+    /// Open DirectInput wheels.
+    pub di_devices: Vec<DiDevice>,
     pub next_wheel_id: u64,
     pub enum_timer: u64,
     /// Which XInput slots (0..4) we believe hold a controller. Only these are polled from the
@@ -211,6 +332,17 @@ fn own_foreground_window() -> windows::Win32::Foundation::HWND {
 }
 
 impl WindowsGameInput {
+    /// The output handle of a DirectInput wheel: vendor/product always, the
+    /// platform force channel when its effects exist. XInput pads have none.
+    pub fn output(&self, id: LiveId) -> Option<GameInputOutput> {
+        let d = self.di_devices.iter().find(|d| d.id == id)?;
+        Some(if d.has_force() {
+            GameInputOutput::with_force(id, d.vendor_id, d.product_id, d.force.clone())
+        } else {
+            GameInputOutput::new(id, d.vendor_id, d.product_id, Arc::new(|_, _| false))
+        })
+    }
+
     /// XInput pads are ids 0..3 (their slot); both motors are addressable.
     pub fn haptic_capabilities(&self, id: LiveId) -> GamepadHapticCapabilities {
         let is_pad = id.0 < 4 && self.xinput_connected[id.0 as usize];
@@ -471,7 +603,7 @@ impl WindowsGameInput {
             unsafe {
                 // Enumeration context
                 struct EnumContext<'a> {
-                    found_devices: Vec<(GUID, String)>,
+                    found_devices: Vec<(GUID, String, u32)>,
                     _marker: std::marker::PhantomData<&'a ()>,
                 }
 
@@ -497,7 +629,8 @@ impl WindowsGameInput {
                         let name = String::from_utf16_lossy(&instance.tszInstanceName);
                         // Clean up null terminators
                         let name = name.trim_matches('\0').to_string();
-                        ctx.found_devices.push((instance.guidInstance, name));
+                        // The product GUID's first field is PID << 16 | VID.
+                        ctx.found_devices.push((instance.guidInstance, name, instance.guidProduct.data1));
                     }
 
                     BOOL(DIENUM_CONTINUE as i32)
@@ -520,11 +653,11 @@ impl WindowsGameInput {
 
                     let mut active_di_indices = Vec::new();
 
-                    for (guid, name) in ctx.found_devices {
+                    for (guid, name, product) in ctx.found_devices {
                         // Already open? Instance GUIDs are stable for the session.
                         let mut existing_index = None;
-                        for (idx, (_, _, existing_guid, _, _)) in self.di_devices.iter().enumerate() {
-                            if *existing_guid == guid {
+                        for (idx, existing) in self.di_devices.iter().enumerate() {
+                            if existing.guid == guid {
                                 existing_index = Some(idx);
                                 break;
                             }
@@ -563,57 +696,17 @@ impl WindowsGameInput {
                                             // Acquire
                                             let _ = device.Acquire();
 
-                                            // Try to create Constant Force Effect
-                                            let mut effect: Option<IDirectInputEffect> = None;
-
-                                            // Only try if we have a valid window handle, otherwise FFB creation might fail or be invalid
-                                            if hwnd.0 != std::ptr::null_mut() {
-                                                let mut axes: [u32; 1] = [0]; // Offset 0 is X axis
-                                                let mut directions: [i32; 1] = [0];
-                                                let mut cf_params =
-                                                    DICONSTANTFORCE { lMagnitude: 0 };
-
-                                                // DIEFFECT structure
-                                                // Note: windows crate might expect specific structure layout.
-                                                // We assume DIEFFECT is available.
-
-                                                let mut eff = DIEFFECT {
-                                                    dwSize: size_of::<DIEFFECT>() as u32,
-                                                    dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
-                                                    dwDuration: u32::MAX, // Infinite
-                                                    dwSamplePeriod: 0,
-                                                    dwGain: 10000, // Max gain
-                                                    dwTriggerButton: DIEB_NOTRIGGER,
-                                                    dwTriggerRepeatInterval: 0,
-                                                    cAxes: 1,
-                                                    rgdwAxes: axes.as_mut_ptr(),
-                                                    rglDirection: directions.as_mut_ptr(),
-                                                    lpEnvelope: std::ptr::null_mut(),
-                                                    cbTypeSpecificParams: size_of::<DICONSTANTFORCE>(
-                                                    )
-                                                        as u32,
-                                                    lpvTypeSpecificParams: &mut cf_params as *mut _
-                                                        as *mut _,
-                                                    dwStartDelay: 0,
-                                                };
-
-                                                let mut effect_out: Option<IDirectInputEffect> =
-                                                    None;
-                                                // We ignore error here, if it fails, we just don't have FFB
-                                                if device
-                                                    .CreateEffect(
-                                                        &GUID_ConstantForce,
-                                                        &mut eff,
-                                                        &mut effect_out as *mut _ as *mut _,
-                                                        None,
-                                                    )
-                                                    .is_ok()
-                                                {
-                                                    effect = effect_out;
-                                                    if let Some(e) = &effect {
-                                                        let _ = e.Start(1, 0);
-                                                    }
-                                                }
+                                            // Force feedback: constant, spring, damper,
+                                            // downloaded idle; the app's force channel
+                                            // starts them (see `DiDevice::apply_force`).
+                                            let mut effects = [None, None, None];
+                                            if !hwnd.0.is_null() {
+                                                let mut constant = DICONSTANTFORCE { lMagnitude: 0 };
+                                                effects[0] = create_effect(&device, &GUID_ConstantForce, &mut constant as *mut _ as *mut _, size_of::<DICONSTANTFORCE>());
+                                                let mut spring = condition(0);
+                                                effects[1] = create_effect(&device, &GUID_Spring, &mut spring as *mut _ as *mut _, size_of::<DiCondition>());
+                                                let mut damper = condition(0);
+                                                effects[2] = create_effect(&device, &GUID_Damper, &mut damper as *mut _ as *mut _, size_of::<DiCondition>());
                                             }
 
                                             // Register
@@ -621,13 +714,16 @@ impl WindowsGameInput {
                                             self.next_wheel_id += 1;
                                             let new_id = LiveId(id_val);
 
-                                            self.di_devices.push((
-                                                new_id,
-                                                device.clone(),
+                                            self.di_devices.push(DiDevice {
+                                                id: new_id,
+                                                device: device.clone(),
                                                 guid,
-                                                effect,
-                                                0,
-                                            ));
+                                                vendor_id: product & 0xffff,
+                                                product_id: product >> 16,
+                                                effects,
+                                                force: GameInputForce::new(),
+                                                applier: ForceApplier::default(),
+                                            });
                                             active_di_indices.push(self.di_devices.len() - 1);
 
                                             let info = GameInputInfo {
@@ -651,7 +747,7 @@ impl WindowsGameInput {
                     let mut i = 0;
                     while i < self.di_devices.len() {
                         if !active_di_indices.contains(&i) {
-                            let (id, _, _, _, _) = self.di_devices[i];
+                            let id = self.di_devices[i].id;
                             self.di_devices.remove(i);
                             if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
                                 let info = self.gamepads[index].clone();
@@ -667,7 +763,10 @@ impl WindowsGameInput {
                 }
 
                 // Poll active DI devices
-                for (id, device, _, effect, sent_magnitude) in &mut self.di_devices {
+                let now = std::time::Instant::now();
+                for dev in &mut self.di_devices {
+                    dev.apply_force(now);
+                    let (id, device) = (&dev.id, &dev.device);
                     // Poll() usually needed before GetDeviceState
                     let _ = device.Poll();
 
@@ -705,36 +804,6 @@ impl WindowsGameInput {
                                 wh_state.throttle = norm_trig(65535 - state.lY); // Often Y axis inverted
                                 wh_state.brake = norm_trig(65535 - state.lRz);
                                 wh_state.clutch = norm_trig(65535 - state.rglSlider[0]);
-
-                                // Force feedback: the app's `steer_force` (−1..1) as
-                                // the constant force's magnitude. The effect was
-                                // started once at creation; only the magnitude is
-                                // updated, and only when it changed.
-                                if let Some(eff) = effect {
-                                    let mag = (wh_state.steer_force.clamp(-1.0, 1.0) * 10000.0) as i32;
-                                    if mag != *sent_magnitude {
-                                        let mut cf_params = DICONSTANTFORCE { lMagnitude: mag };
-                                        let mut eff_struct = DIEFFECT {
-                                            dwSize: size_of::<DIEFFECT>() as u32,
-                                            dwFlags: 0,
-                                            dwDuration: 0,
-                                            dwSamplePeriod: 0,
-                                            dwGain: 0,
-                                            dwTriggerButton: 0,
-                                            dwTriggerRepeatInterval: 0,
-                                            cAxes: 0,
-                                            rgdwAxes: std::ptr::null_mut(),
-                                            rglDirection: std::ptr::null_mut(),
-                                            lpEnvelope: std::ptr::null_mut(),
-                                            cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
-                                            lpvTypeSpecificParams: &mut cf_params as *mut _ as *mut _,
-                                            dwStartDelay: 0,
-                                        };
-                                        if eff.SetParameters(&mut eff_struct, DIEP_TYPESPECIFICPARAMS).is_ok() {
-                                            *sent_magnitude = mag;
-                                        }
-                                    }
-                                }
                             }
                         }
                     }

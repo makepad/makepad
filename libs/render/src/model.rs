@@ -1612,6 +1612,7 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         alpha_mode:match material.get("alphaMode").and_then(Val::str){Some("MASK")=>1,Some("BLEND")=>2,_=>0},
         alpha_cutoff:value(Some(material),"alphaCutoff",0.5),base_alpha:alpha,
         double_sided:matches!(material.get("doubleSided"),Some(Val::Bool(true))),
+        triplanar:material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32,
     })
 }
 
@@ -3861,7 +3862,8 @@ pub(crate) mod tests {
     /// A splat terrain (level terrain_mesh → level glb): an opaque base part
     /// and an alpha-masked overlay part over the SAME triangles with the
     /// splat weight in COLOR_0 alpha. The overlay must become its own layer
-    /// AFTER the base, keep its MASK surface and carry the weight per vertex.
+    /// AFTER the base, keep its MASK surface and carry the weight per vertex,
+    /// and both keep the terrain's triplanar scale.
     #[test]
     fn splat_overlays_parse_as_masked_layers_after_their_base() {
         let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
@@ -3883,8 +3885,8 @@ pub(crate) mod tests {
               {{"attributes":{{"POSITION":0}},"material":0}},
               {{"attributes":{{"POSITION":0,"COLOR_0":1}},"material":1}}]}}],
             "materials":[
-              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true}}}},
-              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true}}}}],
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true,"makepadTriplanar":0.25}}}}],
             "textures":[{{"source":0}}],
             "images":[{{"bufferView":2,"mimeType":"image/png"}}],
             "accessors":[
@@ -3923,6 +3925,10 @@ pub(crate) mod tests {
         assert_eq!(modes, vec![Some(0), Some(1)], "base first, the MASK overlay after it");
         let alpha = |l: &StaticDrawLayer| l.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| (v[5].to_bits() >> 24) as u8).collect::<Vec<_>>();
         assert_eq!(alpha(&m.draw_layers[1]), vec![179; 3], "the splat weight rides the colour lane");
+        // Terrain asks for world-position triplanar texturing (cliffs).
+        for l in &m.draw_layers {
+            assert_eq!(l.pbr.surface.as_ref().map(|s| s.triplanar), Some(0.25));
+        }
     }
 
     /// The node transform must be folded into the vertices, not dropped —

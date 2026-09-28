@@ -71,6 +71,9 @@ pub struct WheelState {
     pub throttle: f32,
     pub brake: f32,
     pub clutch: f32,
+    /// No backend reads this any more; kept for the Studio wire format.
+    /// Force feedback goes through `GameInputOutput` (raw reports, or the
+    /// platform's [`GameInputForce`]).
     pub steer_force: f32,
     /// Button bitmask: bit n-1 = HID button usage n (paddles, face buttons,
     /// shifter). Which bit is which paddle is per device; the app maps it.

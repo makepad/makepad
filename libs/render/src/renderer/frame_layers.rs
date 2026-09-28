@@ -33,6 +33,8 @@ impl Renderer {
                 let lin = self.lin_ctl();
                 water_draw.draw_vars.set_uniform(cx.cx, live_id!(lin_ctl), &lin);
                 water_draw.draw_vars.set_uniform(cx.cx, live_id!(water_eye), &[camera_pos.x, camera_pos.y, camera_pos.z, 0.0]);
+                let fog_ctl = self.clustered.fog_ctl;
+                water_draw.draw_vars.set_uniform(cx.cx, live_id!(water_fog), &fog_ctl);
                 sun.write_into(
                     &mut water_draw.light_dir,
                     &mut water_draw.sun_color,
@@ -69,7 +71,7 @@ impl Renderer {
                     }
                     water_draw
                         .draw_vars
-                        .set_uniform(cx.cx, live_id!(water_params), &[0.0, t, 0.0, 0.0]);
+                        .set_uniform(cx.cx, live_id!(water_params), &[0.0, t, tile.cell, 0.0]);
                     water_draw.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
                     if water_draw.draw_vars.can_instance() {
                         let new_area = cx.add_instance(&water_draw.draw_vars);

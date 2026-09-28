@@ -440,7 +440,8 @@ pub struct DrawScenePbr {
     #[live(0.0)] pub occlusion_strength:f32,
     #[live(vec3(0.0,0.0,0.0))] pub emissive:Vec3f,
     #[live(0.0)] pub double_sided:f32,
-
+    /// Triplanar UV scale (1/metres), 0 = mesh UVs (MaterialSurface).
+    #[live(0.0)] pub triplanar:f32,
 }
 
 // DrawVars reads inherited instance fields as one contiguous float slice.

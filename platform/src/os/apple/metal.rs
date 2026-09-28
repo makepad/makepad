@@ -2406,7 +2406,7 @@ pub struct MetalCx {
     /// did encode around a dropped producer showed a consumer sampling a
     /// texture that had never rendered (the first frame of a new gauss
     /// stack: the desktop through the phone, one black frame).
-    aborted_repaint: Option<u64>,
+    pub(crate) aborted_repaint: Option<u64>,
     uniform_chunks: RefCell<Vec<MetalUniformChunk>>,
     retired_instances: RefCell<VecDeque<MetalBuffer>>,
     /// Shared-instance receipts encoded into the command buffer being built

@@ -558,18 +558,26 @@ impl Cx {
             started.elapsed().as_secs_f64() * 1000.0
         );
         self.ensure_timer0_started();
+        // Withheld by GPU backpressure (the submitter is saturated: a loaded
+        // machine, a heavy app): the repaint stopped before it could present.
+        // Not a failure: the grab stays armed and is retried on the next beats
+        // while the GPU drains, bounded only by the grab request's own
+        // deadline (remote.rs). Failing at the first full queue made /gseq
+        // on busy machines fail most of the time.
+        let backpressure = self.os.remote_presented == Some(false)
+            && metal_cx.aborted_repaint == Some(self.repaint_id);
         match self.os.remote_presented {
-            Some(presented) => {
+            Some(presented) if !backpressure => {
                 self.os.remote_present_waiting = None;
                 Some(presented)
             }
-            None => {
+            _ => {
                 let since = match self.os.remote_present_waiting {
                     Some((id, since)) if id == window_id => since,
                     _ => started,
                 };
                 self.os.remote_present_waiting = Some((window_id, since));
-                if started.duration_since(since) >= REMOTE_DRAWABLE_RETRY_LIMIT {
+                if !backpressure && started.duration_since(since) >= REMOTE_DRAWABLE_RETRY_LIMIT {
                     self.os.remote_present_waiting = None;
                     Some(false)
                 } else {

@@ -394,13 +394,13 @@ impl ModelDraw<'_> {
             d.roughness = m.roughness;
             d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
             d.surface_on=if m.surface.is_some(){1.0}else{0.0};
-            d.material_alpha=1.0;d.alpha_mode=0.0;d.alpha_cutoff=0.5;d.normal_scale=0.0;d.occlusion_strength=0.0;d.emissive=vec3f(0.0,0.0,0.0);d.double_sided=0.0;
+            d.material_alpha=1.0;d.alpha_mode=0.0;d.alpha_cutoff=0.5;d.normal_scale=0.0;d.occlusion_strength=0.0;d.emissive=vec3f(0.0,0.0,0.0);d.double_sided=0.0;d.triplanar=0.0;
             d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
                 d.skinned.fur = crate::material_surface::fur_params(definition.fur);
                 d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
-                d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                d.triplanar=definition.triplanar;d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {
