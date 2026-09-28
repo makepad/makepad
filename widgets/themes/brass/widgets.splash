@@ -1465,7 +1465,7 @@ mod.widgets.NumberField.spin.draw_bg.pixel = fn() {
 // DROP-DOWNS. A smoked face in an iron frame with an engraved split 22
 // points from its right end and a chevron behind it; open is pressed.
 mod.widgets.DropDownFlat.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 4.0 bottom: 4.0}
-mod.widgets.DropDown.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: 4.0 bottom: 4.0}
+mod.widgets.DropDown.padding = mod.turtle.Inset{left: 10.0 right: 30.0 top: field_pad_v bottom: field_pad_v}
 mod.widgets.DropDownFlat.clip_x = false
 mod.widgets.DropDownFlat.clip_y = false
 mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
@@ -1479,7 +1479,7 @@ mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
 mod.widgets.DropDownFlat.draw_text.text_style = mod.theme.font_regular{font_size: 8.25}
 
 // The combo box: the riveted well with a brass key at its right end.
-mod.widgets.ComboBox.padding = mod.turtle.Inset{left: 9.0 right: 28.0 top: 4.0 bottom: 4.0}
+mod.widgets.ComboBox.padding = mod.turtle.Inset{left: 9.0 right: 28.0 top: field_pad_v bottom: field_pad_v}
 mod.widgets.ComboBox.input.min_height = 0.0
 mod.widgets.ComboBox.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)

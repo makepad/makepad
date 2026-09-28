@@ -2475,7 +2475,10 @@ pub fn random_weights(seed: u64, n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for (rank, theme) in order.iter().enumerate() {
         let k = rank as f64 / sigma;
-        out[*theme] = (-(k * k)).exp();
+        // Held above exp(-700), about 1e-304: past twenty themes at the
+        // narrowest spread the tail would otherwise underflow to nought, and
+        // a random mix drops no theme.
+        out[*theme] = (-(k * k).min(700.0)).exp();
     }
     let total: f64 = out.iter().sum();
     for w in out.iter_mut() {

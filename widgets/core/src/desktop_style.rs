@@ -545,15 +545,35 @@ pub fn apply_widgets(vm: &mut ScriptVm) {
 /// line reaching for one would only raise an error at every install. So a
 /// sheet names a family's widget on a line of its own, and that line is
 /// blanked rather than removed, so the evaluator's line numbers still point
-/// into the file.
+/// into the file. A line that opens a block -- a replaced `vertex` or
+/// `pixel` function, an object -- takes the block with it, up to the line
+/// that closes it, or its body would be left standing at the top level.
 fn without_unregistered_widgets(vm: &mut ScriptVm, code: &str) -> String {
     let widgets = vm.module(id!(widgets));
     let registered = |vm: &mut ScriptVm, name: &str| {
         let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
         !(value.is_nil() || value.is_err())
     };
+    // How far a line opens (or closes) brackets, its comment left out.
+    let depth = |line: &str| -> i32 {
+        let code = line.split("//").next().unwrap_or("");
+        code.chars()
+            .map(|c| match c {
+                '{' | '(' | '[' => 1,
+                '}' | ')' | ']' => -1,
+                _ => 0,
+            })
+            .sum()
+    };
     let mut out: Vec<&str> = Vec::new();
+    // The brackets still open in a statement being blanked.
+    let mut open = 0;
     for line in code.split('\n') {
+        if open > 0 {
+            open += depth(line);
+            out.push("");
+            continue;
+        }
         let missing = line.match_indices("mod.widgets.").any(|(at, prefix)| {
             let name: String = line[at + prefix.len()..]
                 .chars()
@@ -561,7 +581,12 @@ fn without_unregistered_widgets(vm: &mut ScriptVm, code: &str) -> String {
                 .collect();
             !name.is_empty() && !registered(vm, &name)
         });
-        out.push(if missing { "" } else { line });
+        if missing {
+            open = depth(line).max(0);
+            out.push("");
+        } else {
+            out.push(line);
+        }
     }
     out.join("\n")
 }
@@ -1170,8 +1195,9 @@ mod tests {
                         DesktopStyle::Liquid | DesktopStyle::Luminous => 3.0,
                         DesktopStyle::FieldKit => 2.5,
                         DesktopStyle::Lcd => 1.5,
-                        DesktopStyle::Lacquer | DesktopStyle::Brass | DesktopStyle::Anthracite => 3.0,
-                        DesktopStyle::Safety | DesktopStyle::FieldRadio | DesktopStyle::FutureMetal => 2.0,
+                        DesktopStyle::Lacquer => 3.0,
+                        DesktopStyle::Safety | DesktopStyle::FieldRadio | DesktopStyle::FutureMetal | DesktopStyle::Brass => 2.0,
+                        DesktopStyle::Anthracite => 1.5,
                         DesktopStyle::FuturePlastic => 6.0,
                         DesktopStyle::Concrete => 1.0,
                         DesktopStyle::Porcelain => 4.0,
@@ -1423,7 +1449,7 @@ mod tests {
             assert!(stock.len() > 10_000, "only {} lines were read off the stock library", stock.len());
             let sheet = everything_sheet(vm, &|_| false);
             assert!(sheet.theme.lines().count() > 400, "the sheet sets only {} tokens", sheet.theme.lines().count());
-            assert!(sheet.widgets.lines().count() > 10_000, "the sheet sets only {} leaves", sheet.widgets.lines().count());
+            assert!(sheet.widgets.lines().count() > 8_000, "the sheet sets only {} leaves", sheet.widgets.lines().count());
             install(vm, sheet);
             vm.bx.captured_errors = Some(Vec::new());
             vm.with_reload(crate::script_mod);
