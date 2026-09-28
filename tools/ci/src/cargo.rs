@@ -439,11 +439,11 @@ mod tests {
     fn a_desktop_tool_is_left_out_of_a_check_without_disturbing_the_rest() {
         let check = TargetCheck {
             label: "wasm32-unknown-unknown".into(), ty: BuildTy::Lib, platform: Platform::Web,
-            args: ["check", "--target", "wasm32-unknown-unknown", "--lib", "-p", "makepad-wm", "-p", "makepad-director", "-p", "makepad-notes", "--message-format=json"]
+            args: ["check", "--target", "wasm32-unknown-unknown", "--lib", "-p", "makepad-app-wm", "-p", "makepad-app-terminal", "-p", "makepad-app-notes", "--message-format=json"]
                 .iter().map(|s| s.to_string()).collect(),
             env: Vec::new(), toolchain: None, skip: None,
         };
-        let narrowed = check.without_packages(&["makepad-director".to_string()]);
+        let narrowed = check.without_packages(&["makepad-app-terminal".to_string()]);
         assert_eq!(narrowed.args.join(" "),
             "check --target wasm32-unknown-unknown --lib -p makepad-wm -p makepad-notes --message-format=json");
     }

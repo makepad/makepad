@@ -130,8 +130,6 @@ workspace.members = [
     "libs/fabric/draft",
     # === xr app ===
     "xr",
-    # === director ===
-    "apps/director",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===

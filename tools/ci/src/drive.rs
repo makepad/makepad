@@ -1305,10 +1305,9 @@ mod tests {
             .collect();
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
-        // The terminal, and director which embeds one, also build the pty
-        // helper a terminal starts its shell through.
+        // The terminal also builds the pty helper it starts its shell through.
         scripts.extend(apps.into_iter().map(|app| {
-            let steps = if app == "terminal" || app == "director" { 3 } else { 2 };
+            let steps = if app == "terminal" { 3 } else { 2 };
             (format!("apps/{app}/ci.splash"), steps)
         }));
         for (path, count) in scripts.iter().map(|(path, count)| (path.as_str(), *count)) {

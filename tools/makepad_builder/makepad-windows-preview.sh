@@ -82,7 +82,6 @@ finance|Finance
 video|Video
 browser|Browser
 fab|Fab
-director|Director
 route|Route'
 
 scan() {

@@ -5,12 +5,10 @@
 use mod.std.*
 use mod.ci;
 
-// Director drives cargo builds and child processes: a desktop tool, so it is
-// warmed for the desktop rows only, as its own script asks.
-ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-director"]})
+ci.warm({packages: ci.apps, targets: ci.host.targets})
 
-// The pty helper a terminal starts its shell through. The terminal, director
-// and window manager scripts ask for it; built here it is a cache answer for
+// The pty helper a terminal starts its shell through. The terminal and
+// window manager scripts ask for it; built here it is a cache answer for
 // them instead of a cargo run that waits on the test build below.
 ci.step("build the pty helper", fn(){
     ci.build({package: "makepad-agents" binary: "agents"})

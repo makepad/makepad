@@ -306,7 +306,6 @@ registry_fallback='wm|Makepad WM|||||
 calculator|Calculator|||||other
 calendar|Calendar|||||other
 clock|Clock|||||other
-director|Director|||||other
 fab|Fab|||||other
 fabric|Fabric|||||other
 files|Files|||||other

@@ -85,15 +85,6 @@
     "menu": "other"
   },
   {
-    "id": "director",
-    "title": "Director",
-    "package": "makepad-director",
-    "binary": "director",
-    "workspace": "makepad/apps/director",
-    "features": [],
-    "menu": "other"
-  },
-  {
     "id": "fab",
     "title": "Fab",
     "package": "makepad-fab",
