@@ -1466,8 +1466,21 @@ public class MakepadActivity
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         // Navigation is handled asynchronously by the Makepad UI. The superclass
-        // would finish/background this activity before that UI can dismiss an overlay.
+        // would finish/background this activity before that UI can dismiss an overlay;
+        // when the UI does not take the press, it calls onBackUnhandled.
         MakepadNative.onBackPressed();
+    }
+
+    // The Makepad UI did not handle a back press: do what the system does by
+    // default (finish, or move a root task to the background on Android 12+).
+    @SuppressWarnings("deprecation")
+    public void onBackUnhandled() {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MakepadActivity.super.onBackPressed();
+                }
+            });
     }
 
     @Override

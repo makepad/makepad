@@ -548,9 +548,20 @@ impl Cx {
                 // This should not happen here, as it's handled in the main loop
             }
             FromJavaMessage::BackPressed => {
-                self.call_event_handler(&Event::BackPressed {
+                let event = Event::BackPressed {
                     handled: Cell::new(false),
-                });
+                };
+                self.call_event_handler(&event);
+                // Nothing in the app took it (no `back_pressed()`, no cancel
+                // scope in front): the system's default, which leaves the app.
+                if let Event::BackPressed { handled } = &event {
+                    if !handled.get() && !self.has_cancel_owner() {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_back_unhandled(env);
+                        }
+                    }
+                }
             }
             FromJavaMessage::SurfaceCreated { window } => {
                 #[cfg(use_vulkan)]

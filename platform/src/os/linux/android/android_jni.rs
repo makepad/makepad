@@ -1544,6 +1544,10 @@ pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_
     );
 }
 
+pub unsafe fn to_java_back_unhandled(env: *mut jni_sys::JNIEnv) {
+    ndk_utils::call_void_method!(env, get_activity(), "onBackUnhandled", "()V");
+}
+
 pub unsafe fn to_java_set_screen_orientation(env: *mut jni_sys::JNIEnv, orientation: i32) {
     ndk_utils::call_void_method!(
         env,
