@@ -133,7 +133,10 @@ script_mod! {
             ruler_color: uniform(theme.color_surface_container)
             stripe_color: uniform(theme.color_outline_variant)
             select_color: uniform(theme.color_selection_focus)
-            hover_color: uniform(theme.color_highlight)
+            // The selection's own hover wash: a track's name is the body
+            // ink, and `color_highlight` is a selected row's ground, held to
+            // the selected label's ink and not to the body text's.
+            hover_color: uniform(theme.color_selection_hover)
             tick_color: uniform(theme.color_on_surface_variant)
             grid_color: uniform(theme.color_outline_variant)
             line_color: uniform(theme.color_outline)
@@ -274,7 +277,7 @@ script_mod! {
         }
         draw_button +: {
             color: theme.color_surface_container_high
-            hover_color: uniform(theme.color_highlight)
+            hover_color: uniform(theme.color_selection_hover)
             border_color: uniform(theme.color_outline_variant)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)

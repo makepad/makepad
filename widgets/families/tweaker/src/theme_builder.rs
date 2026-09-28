@@ -2133,10 +2133,15 @@ const WRITTEN: &[Written] = {
         Written { widgets: &["tween_inspector.rs"], grounds: &["color_outset"], ink: "color_text", need: READABLE },
         // A Sequencer marker's label, beside its diamond on the track rows.
         Written { widgets: &["sequencer.rs"], grounds: &["color_inset"], ink: "color_on_surface_variant", need: LEGIBLE },
-        // A Sequencer track's name on a hovered or a selected row.
+        // A Sequencer track's name on a hovered or a selected row, and the
+        // zoom buttons' labels under the pointer. The hover is the
+        // selection's wash and not `color_highlight`: that is a chosen row's
+        // ground, which gives way to `color_label_inner_active` alone, and
+        // holding it to the body ink as well made it move with the text
+        // contrast and the saturation, and still not read on every palette.
         Written {
             widgets: &["sequencer.rs"],
-            grounds: &["color_highlight", "color_selection_focus"],
+            grounds: &["color_selection_hover", "color_selection_focus"],
             ink: "color_text",
             need: READABLE,
         },
@@ -7218,12 +7223,15 @@ mod theme_builder_tests {
     /// the three moved.
     #[test]
     fn every_seed_still_rolls_the_theme_it_rolled_before_the_words() {
-        // Re-pinned on the merge into work: the two numbers below had already
-        // gone stale on the builder's own branch (9a4314fd4 failed this test
-        // unmerged, with the same values), not moved by the merge.
-        assert_eq!(what_the_rolls_drew_besides_the_words(None), 0x11AD_D584_3BE3_9999);
+        // Re-pinned after the merge into work. The free-draw and light-page
+        // numbers pinned at the merge never matched the tree they came with:
+        // the builder's own branch (27cbb1076d) computes the two below, as
+        // work does. The dark page's number is still its first pin, so the
+        // draw order is unchanged, and `RolledWords::on` writes only the two
+        // text fields, so the words cannot be what moved the light rolls.
+        assert_eq!(what_the_rolls_drew_besides_the_words(None), 0x090F_B108_9D1F_1D70);
         assert_eq!(what_the_rolls_drew_besides_the_words(Some(true)), 0x3945_A53C_AA1E_6047);
-        assert_eq!(what_the_rolls_drew_besides_the_words(Some(false)), 0x5F3A_CD18_A0EF_9CFC);
+        assert_eq!(what_the_rolls_drew_besides_the_words(Some(false)), 0xD09C_3AE7_260D_CAD1);
     }
 
     /// Pure: the same settings are the same theme down to the script, and the
