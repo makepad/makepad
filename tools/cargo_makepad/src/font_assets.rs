@@ -16,9 +16,41 @@ pub struct FontAssetManifest {
 }
 
 impl FontAssetManifest {
+    /// A binary with several `app_main!` invocations (Stage picks one of two
+    /// windows at startup) links one manifest per invocation into the same
+    /// section, back to back. They must agree on the font set; their assets
+    /// are united.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| format!("{MANIFEST_SECTION} is not valid UTF-8"))?;
+        let mut merged: Option<Self> = None;
+        let mut block_start = 0;
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            if offset > block_start && line.starts_with("format=") {
+                merged = Some(Self::merge(merged, Self::parse_one(&text[block_start..offset])?)?);
+                block_start = offset;
+            }
+            offset += line.len();
+        }
+        Self::merge(merged, Self::parse_one(&text[block_start..])?)
+    }
+
+    fn merge(merged: Option<Self>, next: Self) -> Result<Self, String> {
+        let Some(mut merged) = merged else {
+            return Ok(next);
+        };
+        if merged.set != next.set {
+            return Err(format!(
+                "conflicting font sets {:?} and {:?} in {MANIFEST_SECTION}",
+                merged.set, next.set
+            ));
+        }
+        merged.assets.extend(next.assets);
+        Ok(merged)
+    }
+
+    fn parse_one(text: &str) -> Result<Self, String> {
         let mut format = None;
         let mut set = None;
         let mut assets = BTreeSet::new();
@@ -711,6 +743,20 @@ mod tests {
         assert!(FontAssetManifest::parse(traversal)
             .unwrap_err()
             .contains("invalid logical font asset path"));
+    }
+
+    #[test]
+    fn manifests_of_several_app_mains_are_united() {
+        let two = b"format=makepad.font-assets.v1\nset=Latin\nasset=app/resources/a.ttf\n\
+format=makepad.font-assets.v1\nset=Latin\nasset=app/resources/a.ttf\nasset=app/resources/b.ttf\n";
+        let manifest = FontAssetManifest::parse(two).unwrap();
+        assert!(manifest.allows("app/resources/a.ttf"));
+        assert!(manifest.allows("app/resources/b.ttf"));
+        let conflicting = b"format=makepad.font-assets.v1\nset=Latin\nasset=app/resources/a.ttf\n\
+format=makepad.font-assets.v1\nset=International\nasset=app/resources/a.ttf\n";
+        assert!(FontAssetManifest::parse(conflicting)
+            .unwrap_err()
+            .contains("conflicting font sets"));
     }
 
     #[test]

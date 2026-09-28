@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3354"/>
+      <stop offset="1" stop-color="#0b1627"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a52"/>
+      <stop offset="1" stop-color="#ff4f2b"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f4f7a"/><stop offset="1" stop-color="#2e6f9e"/></linearGradient>
+    <clipPath id="pic"><rect x="262" y="302" width="500" height="420" rx="36"/></clipPath>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- a single framed picture: sun over mountains -->
+  <rect x="222" y="262" width="580" height="500" rx="64" fill="#e8eef6"/>
+  <g clip-path="url(#pic)">
+    <rect x="262" y="302" width="500" height="420" fill="url(#sky)"/>
+    <circle cx="640" cy="410" r="56" fill="#f5c84c"/>
+    <path d="M240 740 L420 500 L520 620 L600 540 L790 740 Z" fill="#5ee0c8"/>
+    <path d="M420 500 L470 566 L440 580 L400 548 L372 566 Z" fill="#e8eef6" fill-opacity="0.9"/>
+  </g>
+</svg>

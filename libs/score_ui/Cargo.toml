@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 name = "score_ui"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
 makepad-score = { path = "../score", version = "1.0.0" }
 makepad-score-layout = { path = "../score_layout", version = "0.1.0" }
 makepad-score-render = { path = "../score_render", version = "0.1.0" }

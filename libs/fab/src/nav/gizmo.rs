@@ -545,7 +545,9 @@ impl Widget for FabNavGizmo {
                 }
             }
             Hit::FingerUp(fe) => {
-                if !self.dragged {
+                // A press taken away (a list or the host took the finger)
+                // frames, toggles and snaps nothing.
+                if !self.dragged && !fe.cancelled {
                     match self.press_button {
                         Some(NavButton::FrameAll) => {
                             cx.action(ShellAction::FrameAll(self.view));

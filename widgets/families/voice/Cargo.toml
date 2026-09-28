@@ -1,0 +1,17 @@
+[package]
+name = "makepad-widgets-voice"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: The voice input wave in a Window caption bar"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }
+# Silero VAD (the speech gate) from the speech model family; only that module.
+makepad-ai-speech = { path = "../../../libs/ai/models/speech", default-features = false, features = ["vad"] }
+# Speech-to-text sessions (Whisper here / machine / LAN, else the OS engine).
+# No default features: only the speech pipes, never the image/video backends.
+makepad-ai-hub = { path = "../../../libs/ai/hub", default-features = false, features = ["stt"] }

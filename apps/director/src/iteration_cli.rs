@@ -4,6 +4,9 @@ const CLI_REQUEST_LIMIT: usize = 64 * 1024;
 const CLI_REPLY_LIMIT: usize = 8 * 1024 * 1024;
 const CLI_HISTORY_LIMIT: usize = 4096;
 const CLI_REPLY_BYTES: u64 = 32 * 1024 * 1024;
+/// Admitted lane heads serviced per worker poll; the window rotates so every
+/// head is visited within a few polls regardless of how many lanes exist.
+const CLI_LANES_PER_POLL: usize = 4;
 
 fn cli_identifier(value: &str) -> bool {
     !value.is_empty()
@@ -35,6 +38,7 @@ pub fn cli_tool_name(name: &str) -> Result<&str, String> {
         "fetch" | "flow_fetch" => "flow_fetch",
         "diff" | "flow_diff" => "flow_diff",
         "test" | "flow_test" => "flow_test",
+        "agent" | "flow_agent" => "flow_agent",
         _ => return Err("Tool is unavailable through the per-flow terminal bridge".into()),
     })
 }
@@ -188,12 +192,12 @@ impl Host {
 
 #[cfg(windows)]
 fn cli_private_dir(path: &Path, create: bool) -> Result<(), String> {
-    makepad_screen::protocol::private_directory(path, create)
+    makepad_agents::protocol::private_directory(path, create)
 }
 
 #[cfg(windows)]
 fn cli_read(path: &Path, limit: usize) -> Result<String, String> {
-    String::from_utf8(makepad_screen::protocol::read_private(path, limit)?)
+    String::from_utf8(makepad_agents::protocol::read_private(path, limit)?)
         .map_err(|_| "Control input must be valid UTF-8".into())
 }
 
@@ -220,7 +224,7 @@ fn cli_publish_lane_binding(path: &Path, text: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(err(error)),
     }
-    makepad_screen::protocol::write_private(path, text.as_bytes())
+    makepad_agents::protocol::write_private(path, text.as_bytes())
 }
 
 #[cfg(windows)]
@@ -231,7 +235,7 @@ fn cli_publish(path: &Path, bytes: &[u8]) -> Result<(), String> {
         return Err("Control publication exceeds its bound".into());
     }
     let temporary = parent.join(format!(".tmp-{}", cli_request_id()));
-    makepad_screen::protocol::create_private(&temporary, bytes)?;
+    makepad_agents::protocol::create_private(&temporary, bytes)?;
     // A completed private file is linked into place exactly once. Never
     // replace another caller's request or a durable outcome under the same ID.
     let result = fs::hard_link(&temporary, path).map_err(err);
@@ -356,8 +360,8 @@ fn cli_private_read(path: &Path, limit: usize) -> Result<String, String> {
 /// Resolve every invocation through the stable daemon identity. A mirrored
 /// presentation cannot retarget the session by changing inherited flow vars.
 pub fn cli_environment_scope() -> Result<(String, PathBuf), String> {
-    let session = std::env::var_os("MAKEPAD_SCREEN_SESSION");
-    let state = std::env::var_os("MAKEPAD_SCREEN_STATE_DIR");
+    let session = std::env::var_os("MAKEPAD_AGENTS_SESSION");
+    let state = std::env::var_os("MAKEPAD_AGENTS_STATE_DIR");
     if session.is_some() || state.is_some() {
         let session = session
             .and_then(|value| value.into_string().ok())
@@ -787,7 +791,12 @@ fn cli_pending(directory: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 /// Any processing file found at a poll belongs to an interrupted attempt
 /// (a Studio restart between claim and reply). Its receipt is preserved and
 /// its reply says so; its contents are never executed again.
-fn cli_recover_interrupted(control: &Path, flow: &str, id: &str, path: &Path) -> Result<(), String> {
+fn cli_recover_interrupted(
+    control: &Path,
+    flow: &str,
+    id: &str,
+    path: &Path,
+) -> Result<(), String> {
     let receipt = control.join("receipts").join(format!("{id}.json"));
     if !receipt.try_exists().map_err(err)? {
         let recovered = json::obj(vec![
@@ -806,25 +815,41 @@ fn cli_recover_interrupted(control: &Path, flow: &str, id: &str, path: &Path) ->
         .to_json();
         cli_publish(&receipt, recovered.as_bytes())?;
     }
-    if cli_poll_reply(&control.join("replies").join(format!("{id}.json")), flow, id)?.is_none() {
-        cli_answer(control, flow, id, "uncertain", Err("Studio was interrupted after claiming this request. Its effects may already exist. Run studio-flow inspect before deciding the next action; this request will not be replayed.".into()))?;
+    if cli_poll_reply(
+        &control.join("replies").join(format!("{id}.json")),
+        flow,
+        id,
+    )?
+    .is_none()
+    {
+        cli_answer(control, flow, id, "uncertain", Err("Studio was interrupted after claiming this request. Its effects may already exist. Run director-flow inspect (or agent list for a delegate launch) before deciding the next action; this request will not be replayed.".into()))?;
     }
     fs::remove_file(path).map_err(err)
 }
 
 impl Host {
     /// Non-UI, bounded work shared by terminal and loopback HTTP requests.
+    /// Every admitted head is visited in rotation, a bounded window per
+    /// poll, so a chatty root never starves a quiet grandchild and tree
+    /// selection never decides which callbacks run.
     fn poll_cli(&mut self) {
-        let mut flows: Vec<_> = self
+        let mut heads: Vec<_> = self
             .engine
             .flows
             .values()
             .filter(|flow| {
                 flow.successor.is_none() && flow.lifecycle != iteration::FlowLifecycle::Archived
             })
-            .take(4)
             .map(|flow| flow.id.clone())
             .collect();
+        heads.sort();
+        let mut flows = Vec::new();
+        if !heads.is_empty() {
+            let start = self.cli_archive_cursor.wrapping_mul(CLI_LANES_PER_POLL) % heads.len();
+            for offset in 0..heads.len().min(CLI_LANES_PER_POLL) {
+                flows.push(heads[(start + offset) % heads.len()].clone());
+            }
+        }
         let aliases: Vec<_> = self
             .engine
             .flows
@@ -935,7 +960,9 @@ impl Host {
                         Ok::<_, String>((call, successor))
                     })();
                     let result = match scoped {
-                        Ok((call, _)) => cli_parse_request(&call).and_then(|request| self.request(request)),
+                        Ok((call, _)) => {
+                            cli_parse_request(&call).and_then(|request| self.request(request))
+                        }
                         Err(error) => Err(error),
                     };
                     let status = if result.is_ok() { "ok" } else { "error" };
@@ -962,7 +989,12 @@ mod cli_tests {
 
     fn scratch(name: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("studio-cli-{}-{}-{}", name, std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "studio-cli-{}-{}-{}",
+            name,
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         #[cfg(unix)]
@@ -984,12 +1016,19 @@ mod cli_tests {
         let control = cli_control_dir(&state, flow).unwrap();
         let call = cli_service_call("req-1", flow, "flow_diff", args("{}")).unwrap();
         let reply = cli_submit(&control, flow, &call).unwrap();
-        assert!(cli_poll_reply(&reply, flow, "req-1").unwrap().is_none(), "nothing answered yet");
+        assert!(
+            cli_poll_reply(&reply, flow, "req-1").unwrap().is_none(),
+            "nothing answered yet"
+        );
         // an identical repeat reuses the request; different arguments conflict
         assert_eq!(cli_submit(&control, flow, &call).unwrap(), reply);
-        let other = cli_service_call("req-1", flow, "flow_diff", args(r#"{"artifact":"other"}"#)).unwrap();
+        let other =
+            cli_service_call("req-1", flow, "flow_diff", args(r#"{"artifact":"other"}"#)).unwrap();
         let conflict = cli_submit(&control, flow, &other).unwrap_err();
-        assert!(conflict.contains("different tool or arguments"), "{conflict}");
+        assert!(
+            conflict.contains("different tool or arguments"),
+            "{conflict}"
+        );
         let tool = cli_service_call("req-1", flow, "flow_fetch", args("{}")).unwrap();
         assert!(cli_submit(&control, flow, &tool).is_err());
         // the host claims it: requests -> processing, receipt published
@@ -997,14 +1036,30 @@ mod cli_tests {
         assert_eq!(pending.len(), 1);
         let claimed = control.join("processing").join("req-1.json");
         fs::rename(&pending[0].1, &claimed).unwrap();
-        let request = json::parse(cli_read(&claimed, CLI_REQUEST_LIMIT).unwrap().as_bytes()).unwrap();
-        let receipt = json::obj(vec![("request", request), ("request_id", s("req-1")), ("flow_id", s(flow)), ("claimed_at_ms", Value::Int(now() as i64))]);
-        cli_publish(&control.join("receipts").join("req-1.json"), receipt.to_json().as_bytes()).unwrap();
+        let request =
+            json::parse(cli_read(&claimed, CLI_REQUEST_LIMIT).unwrap().as_bytes()).unwrap();
+        let receipt = json::obj(vec![
+            ("request", request),
+            ("request_id", s("req-1")),
+            ("flow_id", s(flow)),
+            ("claimed_at_ms", Value::Int(now() as i64)),
+        ]);
+        cli_publish(
+            &control.join("receipts").join("req-1.json"),
+            receipt.to_json().as_bytes(),
+        )
+        .unwrap();
         // ... and answers with an envelope
-        let envelope = json::obj(vec![("request_id", s("req-1")), ("tool", s("flow_diff")), ("rows", Value::Arr(vec![]))]);
+        let envelope = json::obj(vec![
+            ("request_id", s("req-1")),
+            ("tool", s("flow_diff")),
+            ("rows", Value::Arr(vec![])),
+        ]);
         cli_answer(&control, flow, "req-1", "ok", Ok(envelope.clone())).unwrap();
         fs::remove_file(&claimed).unwrap();
-        let answered = cli_poll_reply(&reply, flow, "req-1").unwrap().expect("reply published");
+        let answered = cli_poll_reply(&reply, flow, "req-1")
+            .unwrap()
+            .expect("reply published");
         assert_eq!(answered.get("status").and_then(Value::as_str), Some("ok"));
         assert_eq!(answered.get("result"), Some(&envelope));
         // a repeat after the answer returns the retained reply without a new request
@@ -1016,10 +1071,19 @@ mod cli_tests {
         let claimed2 = control.join("processing").join("req-2.json");
         fs::rename(control.join("requests").join("req-2.json"), &claimed2).unwrap();
         cli_recover_interrupted(&control, flow, "req-2", &claimed2).unwrap();
-        let recovered = cli_poll_reply(&reply2, flow, "req-2").unwrap().expect("uncertain reply");
-        assert_eq!(recovered.get("status").and_then(Value::as_str), Some("uncertain"));
+        let recovered = cli_poll_reply(&reply2, flow, "req-2")
+            .unwrap()
+            .expect("uncertain reply");
+        assert_eq!(
+            recovered.get("status").and_then(Value::as_str),
+            Some("uncertain")
+        );
         assert!(!claimed2.exists(), "the interrupted claim is retired");
-        let receipt = cli_read(&control.join("receipts").join("req-2.json"), CLI_REQUEST_LIMIT).unwrap();
+        let receipt = cli_read(
+            &control.join("receipts").join("req-2.json"),
+            CLI_REQUEST_LIMIT,
+        )
+        .unwrap();
         assert!(receipt.contains("\"interrupted\":true"), "{receipt}");
         // the id is never replayed: a repeat returns the uncertain reply
         assert_eq!(cli_submit(&control, flow, &second).unwrap(), reply2);

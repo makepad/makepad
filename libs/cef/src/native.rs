@@ -1,4 +1,21 @@
-use crate::{ffi, BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE};
+use crate::{
+    ffi, AudioCaptureConfig, AudioCaptureStats, AudioEvent, AudioFormat, AudioPacket,
+    BootstrapResult, CapturedFrame, CaptureTimestamp, ConsoleMessage, Error, Evaluation, Frame,
+    Result, TEXT_INPUT_MODE_NONE,
+};
+
+/// A diagnostic line on stderr that survives a closed pipe. A browser hosted
+/// by the window manager keeps painting for a moment after its host has gone
+/// and taken the pipe with it; `eprintln!` panics on that write ("failed
+/// printing to stderr"), and the panic took the browser down with a crash
+/// report on every quit of the desk.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 use libloading::Library;
 #[cfg(target_os = "macos")]
 use makepad_objc_sys::declare::ClassDecl;
@@ -18,7 +35,10 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -276,6 +296,9 @@ struct CefApi {
     cef_get_exit_code: unsafe extern "C" fn() -> c_int,
     cef_shutdown: unsafe extern "C" fn(),
     cef_do_message_loop_work: unsafe extern "C" fn(),
+    cef_cookie_manager_get_global_manager: unsafe extern "C" fn(
+        callback: *mut ffi::cef_completion_callback_t,
+    ) -> *mut ffi::cef_cookie_manager_t,
     cef_browser_host_create_browser_sync: unsafe extern "C" fn(
         window_info: *const ffi::cef_window_info_t,
         client: *mut ffi::cef_client_t,
@@ -320,6 +343,9 @@ struct Runtime {
     api: CefApi,
     _paths: RuntimePaths,
     state: Mutex<RuntimeState>,
+    /// Browsers created and not yet gone: counted up when one is made and
+    /// down when CEF says it has closed, which is what `shutdown` waits for.
+    live_browsers: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -359,10 +385,20 @@ struct CefString {
     clear: unsafe extern "C" fn(*mut ffi::cef_string_t),
 }
 
+struct CaptureClock(Instant);
+
+impl Default for CaptureClock {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
 #[derive(Default)]
 struct SharedBrowserState {
     view: Mutex<ViewState>,
-    frame: Mutex<Option<Frame>>,
+    frame: Mutex<Option<CapturedFrame>>,
+    capture_clock: CaptureClock,
+    navigation_epoch: AtomicU64,
     closing: AtomicBool,
     editable_focus: AtomicBool,
     /// Accelerated paint: the copy destination and the frame statistics.
@@ -381,6 +417,105 @@ struct SharedBrowserState {
     /// The latest decoded favicon bitmap (BGRA, premultiplied).
     favicon: Mutex<Option<Frame>>,
     favicon_url: Mutex<String>,
+    /// Audio capture, absent until the embedder asks for it: a browser that
+    /// never does hands CEF no audio handler at all.
+    audio: OnceLock<AudioTap>,
+    /// What the page wrote to its console, newest last, until the embedder
+    /// takes it; bounded, so a page that logs in a loop costs a few
+    /// kilobytes and nothing else.
+    console: Mutex<std::collections::VecDeque<ConsoleMessage>>,
+    /// Evaluations handed out so far: each one's answer comes back through
+    /// the console under its own number.
+    evaluations: AtomicU64,
+}
+
+/// Packets the queue to the embedder holds before the capture thread drops
+/// one: about ten seconds at the default packet size, so a UI thread stalled
+/// behind a dialog loses nothing.
+const AUDIO_QUEUE_PACKETS: usize = 512;
+/// Packet buffers made up front. The embedder hands each one back as it
+/// drains, so in a steady state the capture thread never allocates.
+const AUDIO_POOL_PACKETS: usize = 64;
+
+/// The half of a browser's audio capture that CEF's threads touch.
+///
+/// Chromium's capture thread must never wait on the embedder, so nothing here
+/// is a lock the embedder can hold: packets and stream changes go out through
+/// a bounded `try_send`, buffers come back through a `try_recv`, and the rest
+/// is atomics. `capture` is a mutex only to make the type `Sync`; it is taken
+/// with `try_lock`, by capture callbacks alone.
+struct AudioTap {
+    enabled: AtomicBool,
+    want_sample_rate: AtomicU32,
+    want_channels: AtomicU32,
+    want_frames_per_buffer: AtomicU32,
+    events: SyncSender<AudioEvent>,
+    capture: Mutex<AudioCaptureSide>,
+    /// The stream now running, for an embedder that lost a `Started` or a
+    /// `Stopped` to a full queue.
+    streaming: AtomicBool,
+    epoch: AtomicU32,
+    navigation_epoch: AtomicU64,
+    sample_rate: AtomicU32,
+    channels: AtomicU32,
+    channel_layout: AtomicU32,
+    frames_per_buffer: AtomicU32,
+    packets: AtomicU64,
+    dropped_packets: AtomicU64,
+    dropped_frames: AtomicU64,
+    pool_misses: AtomicU64,
+}
+
+struct AudioCaptureSide {
+    spare: Receiver<Vec<f32>>,
+    /// The buffer of a packet the queue refused, kept for the next one.
+    held: Option<Vec<f32>>,
+}
+
+/// The embedder's half: owned by the [`Browser`], on the thread that pumps.
+struct AudioDrain {
+    events: Receiver<AudioEvent>,
+    recycle: SyncSender<Vec<f32>>,
+    /// The stream the embedder has been told about.
+    streaming: bool,
+    epoch: u32,
+    /// Events made up to cover a lost `Started`/`Stopped`, and the packet
+    /// that revealed the loss, in the order the embedder must see them.
+    pending: VecDeque<AudioEvent>,
+}
+
+impl AudioDrain {
+    /// A stream the embedder has not heard of: the one before it ends first,
+    /// if its `Stopped` never arrived.
+    fn begin(&mut self, format: AudioFormat) {
+        if self.streaming {
+            self.pending.push_back(AudioEvent::Stopped);
+        }
+        self.streaming = true;
+        self.epoch = format.epoch;
+        self.pending.push_back(AudioEvent::Started(format));
+    }
+}
+
+impl AudioTap {
+    fn format(&self) -> AudioFormat {
+        AudioFormat {
+            epoch: self.epoch.load(Ordering::Acquire),
+            sample_rate: self.sample_rate.load(Ordering::Acquire),
+            channels: self.channels.load(Ordering::Acquire),
+            channel_layout: self.channel_layout.load(Ordering::Acquire) as i32,
+            frames_per_buffer: self.frames_per_buffer.load(Ordering::Acquire),
+        }
+    }
+
+    fn set_config(&self, config: AudioCaptureConfig) {
+        self.want_sample_rate
+            .store(config.sample_rate.clamp(8_000, 192_000), Ordering::Release);
+        self.want_channels
+            .store(if config.channels == 1 { 1 } else { 2 }, Ordering::Release);
+        self.want_frames_per_buffer
+            .store(config.frames_per_buffer.clamp(128, 8_192), Ordering::Release);
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -424,6 +559,14 @@ struct ClientHandler {
     display_handler: *mut DisplayHandler,
     load_handler: *mut LoadHandler,
     life_span_handler: *mut LifeSpanHandler,
+    audio_handler: *mut AudioHandler,
+}
+
+#[repr(C)]
+struct AudioHandler {
+    cef_audio_handler: ffi::cef_audio_handler_t,
+    ref_count: AtomicUsize,
+    state: Arc<SharedBrowserState>,
 }
 
 #[repr(C)]
@@ -447,6 +590,19 @@ struct LifeSpanHandler {
     state: Arc<SharedBrowserState>,
 }
 
+#[repr(C)]
+/// Told once when something CEF was asked to do is done. Holds a flag the
+/// asker polls while turning the loop; the object lives as long as CEF
+/// holds a reference to it.
+#[repr(C)]
+struct CompletionCallback {
+    cef_callback: ffi::cef_completion_callback_t,
+    ref_count: AtomicUsize,
+    done: Arc<AtomicBool>,
+}
+
+/// `#[repr(C)]` like every handler CEF is handed: CEF gets a pointer to
+/// the first field and hands it back as the whole struct.
 #[repr(C)]
 struct DownloadImageCallback {
     cef_callback: ffi::cef_download_image_callback_t,
@@ -492,6 +648,14 @@ macro_rules! impl_ref_counted {
 unsafe fn no_drop_hook<T>(_this: *mut T) {}
 
 impl_ref_counted!(
+    CompletionCallback,
+    completion_add_ref,
+    completion_release,
+    completion_has_one_ref,
+    completion_has_at_least_one_ref,
+    no_drop_hook
+);
+impl_ref_counted!(
     DisplayHandler,
     display_add_ref,
     display_release,
@@ -513,6 +677,14 @@ impl_ref_counted!(
     life_span_release,
     life_span_has_one_ref,
     life_span_has_at_least_one_ref,
+    no_drop_hook
+);
+impl_ref_counted!(
+    AudioHandler,
+    audio_add_ref,
+    audio_release,
+    audio_has_one_ref,
+    audio_has_at_least_one_ref,
     no_drop_hook
 );
 impl_ref_counted!(
@@ -571,6 +743,17 @@ struct ExternalPump {
     reentrancy_detected: AtomicBool,
 }
 
+/// How a browser is made, beyond its address and size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserOptions {
+    /// Deliver every frame as a CPU buffer through [`Browser::take_frame`]
+    /// even where GPU paint is available: for an embedder that reads the
+    /// pixels (records them, delays them, sends them on) rather than
+    /// showing the page as it is painted. Off, the browser paints the way
+    /// [`accelerated_paint_requested`] says.
+    pub software_frames: bool,
+}
+
 pub struct Browser {
     browser: *mut ffi::cef_browser_t,
     state: Arc<SharedBrowserState>,
@@ -579,6 +762,7 @@ pub struct Browser {
     scale_factor: f32,
     accelerated: bool,
     hidden: bool,
+    audio: Option<AudioDrain>,
 }
 
 /// A snapshot of the accelerated-paint statistics for reporting.
@@ -785,6 +969,10 @@ fn runtime() -> Result<&'static Runtime> {
                 cef_get_exit_code: load_symbol(&library, b"cef_get_exit_code\0")?,
                 cef_shutdown: load_symbol(&library, b"cef_shutdown\0")?,
                 cef_do_message_loop_work: load_symbol(&library, b"cef_do_message_loop_work\0")?,
+                cef_cookie_manager_get_global_manager: load_symbol(
+                    &library,
+                    b"cef_cookie_manager_get_global_manager\0",
+                )?,
                 cef_browser_host_create_browser_sync: load_symbol(
                     &library,
                     b"cef_browser_host_create_browser_sync\0",
@@ -802,6 +990,7 @@ fn runtime() -> Result<&'static Runtime> {
         }
 
         Ok(Runtime {
+            live_browsers: AtomicUsize::new(0),
             _library: library,
             api,
             _paths: paths,
@@ -2126,12 +2315,25 @@ impl SharedBrowserState {
         };
     }
 
-    fn set_frame(&self, frame: Frame) {
+    fn set_frame(&self, frame: CapturedFrame) {
         *self.frame.lock().unwrap() = Some(frame);
     }
 
-    fn take_frame(&self) -> Option<Frame> {
-        self.frame.lock().unwrap().take()
+    fn try_take_frame(&self) -> Option<CapturedFrame> {
+        let frame = self.frame.try_lock().ok()?.take()?;
+        // A queued paint from the previous document cannot be relabeled as
+        // content from a navigation that committed before the UI drained it.
+        (frame.timestamp.navigation_epoch == self.navigation_epoch.load(Ordering::Acquire))
+            .then_some(frame)
+    }
+
+    fn capture_timestamp(&self, navigation_epoch: u64) -> CaptureTimestamp {
+        let callback_elapsed_ns = self.capture_clock.0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let callback_unix_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(time) => time.as_millis().min(i64::MAX as u128) as i64,
+            Err(error) => -(error.duration().as_millis().min(i64::MAX as u128) as i64),
+        };
+        CaptureTimestamp { callback_unix_ms, callback_elapsed_ns, navigation_epoch }
     }
 
     fn editable_focus(&self) -> bool {
@@ -2194,6 +2396,9 @@ unsafe extern "system" fn client_release(self_: *mut ffi::cef_base_ref_counted_t
             release_ref_counted(
                 &mut (*(*client).life_span_handler).cef_life_span_handler.base as *mut _,
             );
+        }
+        if !(*client).audio_handler.is_null() {
+            release_ref_counted(&mut (*(*client).audio_handler).cef_audio_handler.base as *mut _);
         }
         drop(Box::from_raw(client));
         1
@@ -2455,6 +2660,190 @@ unsafe extern "system" fn client_get_life_span_handler(
     add_ref_and_return((*client).life_span_handler) as *mut c_void
 }
 
+/// Null unless the embedder enabled capture on this browser. CEF asks each
+/// time the page becomes audible, and a null answer leaves the page playing
+/// through the system device, exactly as it does with no handler bound.
+unsafe extern "system" fn client_get_audio_handler(self_: *mut ffi::cef_client_t) -> *mut c_void {
+    let client = self_ as *mut ClientHandler;
+    let audio = (*client).audio_handler;
+    if audio.is_null() {
+        return ptr::null_mut();
+    }
+    let enabled = audio_tap(&mut (*audio).cef_audio_handler)
+        .is_some_and(|tap| tap.enabled.load(Ordering::Acquire));
+    if !enabled {
+        return ptr::null_mut();
+    }
+    add_ref_and_return(audio) as *mut c_void
+}
+
+/// The capture state behind a handler CEF passed back, once capture has been
+/// enabled on its browser.
+unsafe fn audio_tap<'a>(self_: *mut ffi::cef_audio_handler_t) -> Option<&'a AudioTap> {
+    let handler = &*(self_ as *mut AudioHandler);
+    handler.state.audio.get()
+}
+
+/// UI thread. CEF pre-fills `params` with its defaults; returning 1 starts a
+/// loopback capture of the page in the embedder's format, and Chromium mutes
+/// the page's own output for as long as that capture runs.
+unsafe extern "system" fn audio_get_parameters(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    params: *mut ffi::cef_audio_parameters_t,
+) -> c_int {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return 0;
+    };
+    if params.is_null() || !tap.enabled.load(Ordering::Acquire) {
+        return 0;
+    }
+    (*params).channel_layout = if tap.want_channels.load(Ordering::Acquire) == 1 {
+        ffi::CEF_CHANNEL_LAYOUT_MONO
+    } else {
+        ffi::CEF_CHANNEL_LAYOUT_STEREO
+    };
+    (*params).sample_rate = tap.want_sample_rate.load(Ordering::Acquire) as c_int;
+    (*params).frames_per_buffer = tap.want_frames_per_buffer.load(Ordering::Acquire) as c_int;
+    1
+}
+
+/// Capture thread.
+unsafe extern "system" fn audio_on_stream_started(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    params: *const ffi::cef_audio_parameters_t,
+    channels: c_int,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    let state = &(*(self_ as *mut AudioHandler)).state;
+    tap.navigation_epoch.store(state.navigation_epoch.load(Ordering::Acquire), Ordering::Release);
+    if !params.is_null() {
+        let params = &*params;
+        tap.sample_rate
+            .store(params.sample_rate.max(0) as u32, Ordering::Release);
+        tap.channel_layout
+            .store(params.channel_layout as u32, Ordering::Release);
+        tap.frames_per_buffer
+            .store(params.frames_per_buffer.max(0) as u32, Ordering::Release);
+    }
+    tap.channels.store(channels.max(0) as u32, Ordering::Release);
+    tap.epoch.fetch_add(1, Ordering::AcqRel);
+    tap.streaming.store(true, Ordering::Release);
+    // A full queue loses this; the packets carry the epoch, and the drain
+    // makes the event up again from the atomics above.
+    let _ = tap.events.try_send(AudioEvent::Started(tap.format()));
+}
+
+/// Capture thread, once per packet: `data` is one plane of `frames` f32 per
+/// channel. Interleaved into a recycled buffer and handed over without ever
+/// waiting; a packet the embedder has no room for is dropped and counted.
+unsafe extern "system" fn audio_on_stream_packet(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    data: *const *const f32,
+    frames: c_int,
+    pts: i64,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    let state = &(*(self_ as *mut AudioHandler)).state;
+    let capture = state.capture_timestamp(tap.navigation_epoch.load(Ordering::Acquire));
+    if !tap.enabled.load(Ordering::Acquire) || data.is_null() || frames <= 0 {
+        return;
+    }
+    let frames = frames as usize;
+    let channels = tap.channels.load(Ordering::Acquire) as usize;
+    if channels == 0 {
+        return;
+    }
+    let dropped = |tap: &AudioTap| {
+        tap.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        tap.dropped_frames.fetch_add(frames as u64, Ordering::Relaxed);
+    };
+    let Ok(mut side) = tap.capture.try_lock() else {
+        dropped(tap);
+        return;
+    };
+    let mut samples = match side.held.take() {
+        Some(samples) => samples,
+        None => match side.spare.try_recv() {
+            Ok(samples) => samples,
+            Err(_) => {
+                tap.pool_misses.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        },
+    };
+    samples.clear();
+    samples.resize(frames * channels, 0.0);
+    for channel in 0..channels {
+        let plane = *data.add(channel);
+        if plane.is_null() {
+            continue;
+        }
+        let plane = slice::from_raw_parts(plane, frames);
+        for (frame, sample) in plane.iter().enumerate() {
+            samples[frame * channels + channel] = *sample;
+        }
+    }
+    let packet = AudioPacket {
+        epoch: tap.epoch.load(Ordering::Acquire),
+        channels: channels as u32,
+        frames,
+        pts_ms: pts,
+        capture,
+        samples,
+    };
+    match tap.events.try_send(AudioEvent::Packet(packet)) {
+        Ok(()) => {
+            tap.packets.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Full(event)) | Err(TrySendError::Disconnected(event)) => {
+            dropped(tap);
+            // Kept for the next packet, so an overflow frees nothing here.
+            if let AudioEvent::Packet(packet) = event {
+                side.held = Some(packet.samples);
+            }
+        }
+    }
+}
+
+/// UI thread.
+unsafe extern "system" fn audio_on_stream_stopped(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    tap.streaming.store(false, Ordering::Release);
+    let _ = tap.events.try_send(AudioEvent::Stopped);
+}
+
+/// UI thread while the stream is being set up, capture thread after. CEF
+/// stops the stream itself.
+unsafe extern "system" fn audio_on_stream_error(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    message: *const ffi::cef_string_t,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    let _ = tap
+        .events
+        .try_send(AudioEvent::Error(cef_string_to_string(message)));
+}
+
 unsafe extern "system" fn render_get_root_screen_rect(
     self_: *mut ffi::cef_render_handler_t,
     browser: *mut ffi::cef_browser_t,
@@ -2576,9 +2965,10 @@ unsafe extern "system" fn render_on_paint(
         return;
     }
     let render = self_ as *mut RenderHandler;
+    let state: &SharedBrowserState = &(*render).state;
+    let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
     let pixels =
         slice::from_raw_parts(buffer as *const u32, width as usize * height as usize).to_vec();
-    let state: &SharedBrowserState = &(*render).state;
     let n = state.software_frames.fetch_add(1, Ordering::AcqRel) + 1;
     let milestone = matches!(n, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000);
     let trace = cef_debug();
@@ -2590,13 +2980,17 @@ unsafe extern "system" fn render_on_paint(
         if trace {
             makepad_error_log::trace!("cef", "{}", message);
         } else {
-            eprintln!("[makepad-cef] {message}");
+            say!("[makepad-cef] {message}");
         }
     }
-    state.set_frame(Frame {
-        width: width as usize,
-        height: height as usize,
-        pixels,
+    state.set_frame(CapturedFrame {
+        frame: Frame {
+            width: width as usize,
+            height: height as usize,
+            pixels,
+        },
+        sequence: n,
+        timestamp,
     });
 }
 
@@ -2725,7 +3119,7 @@ unsafe extern "system" fn render_on_accelerated_paint(
             if trace {
                 makepad_error_log::trace!("cef", "{}", message);
             } else {
-                eprintln!("[makepad-cef] {message}");
+                say!("[makepad-cef] {message}");
             }
         }
     }
@@ -2765,6 +3159,42 @@ unsafe extern "system" fn display_on_title_change(
     let handler = self_ as *mut DisplayHandler;
     let title = cef_string_to_string(title);
     (*handler).state.update_nav(|nav| nav.title = title);
+}
+
+/// Console messages the embedder may take. A page that logs in a loop
+/// costs this many strings and no more.
+const CONSOLE_KEEP: usize = 256;
+
+/// What an evaluation's answer is written to the console as: the mark,
+/// the evaluation's number, then `ok:` and the JSON of the value or
+/// `err:` and the exception's text.
+const EVALUATION_MARK: &str = "\u{1}makepad-cef-evaluation\u{1}";
+
+unsafe extern "system" fn display_on_console_message(
+    self_: *mut ffi::cef_display_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    level: ffi::cef_log_severity_t,
+    message: *const ffi::cef_string_t,
+    source: *const ffi::cef_string_t,
+    line: c_int,
+) -> c_int {
+    release_param(browser);
+    let handler = self_ as *mut DisplayHandler;
+    let message = cef_string_to_string(message);
+    // An evaluation's answer is the embedder's, not the log's.
+    let ours = message.starts_with(EVALUATION_MARK);
+    let state: &SharedBrowserState = &(*handler).state;
+    let mut console = state.console.lock().unwrap();
+    if console.len() >= CONSOLE_KEEP {
+        console.pop_front();
+    }
+    console.push_back(ConsoleMessage {
+        level: level as i32,
+        message,
+        source: cef_string_to_string(source),
+        line: line as i32,
+    });
+    ours as c_int
 }
 
 unsafe extern "system" fn display_on_favicon_urlchange(
@@ -2941,6 +3371,23 @@ unsafe extern "system" fn load_on_loading_state_change(
     });
 }
 
+/// CEF calls this after navigation commit. Unlike the display generation,
+/// it excludes titles, favicons, failed navigations and same-page history.
+unsafe extern "system" fn load_on_load_start(
+    self_: *mut ffi::cef_load_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    frame: *mut ffi::cef_frame_t,
+    _transition_type: ffi::cef_transition_type_t,
+) {
+    let is_main = !frame.is_null() && (*frame).is_main.is_some_and(|is_main| is_main(frame) != 0);
+    release_param(frame);
+    release_param(browser);
+    if is_main {
+        let handler = &*(self_ as *mut LoadHandler);
+        handler.state.navigation_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 /// Popups (`window.open`, target=_blank) never become native windows here:
 /// the request is cancelled and its URL queued for the embedder to open as a
 /// tab.
@@ -2989,7 +3436,7 @@ impl DisplayHandler {
                 on_fullscreen_mode_change: None,
                 on_tooltip: None,
                 on_status_message: None,
-                on_console_message: None,
+                on_console_message: Some(display_on_console_message),
                 on_auto_resize: None,
                 on_loading_progress_change: None,
                 on_cursor_change: None,
@@ -3015,7 +3462,7 @@ impl LoadHandler {
                     has_at_least_one_ref: Some(load_has_at_least_one_ref),
                 },
                 on_loading_state_change: Some(load_on_loading_state_change),
-                on_load_start: None,
+                on_load_start: Some(load_on_load_start),
                 on_load_end: None,
                 on_load_error: None,
             },
@@ -3041,11 +3488,104 @@ impl LifeSpanHandler {
                 on_before_dev_tools_popup: None,
                 on_after_created: None,
                 do_close: None,
-                on_before_close: None,
+                on_before_close: Some(life_span_on_before_close),
             },
             ref_count: AtomicUsize::new(1),
             state,
         }))
+    }
+}
+
+/// The browser is gone: one fewer for `shutdown` to wait for.
+unsafe extern "system" fn life_span_on_before_close(
+    _self: *mut ffi::cef_life_span_handler_t,
+    browser: *mut ffi::cef_browser_t,
+) {
+    release_param(browser);
+    if let Ok(runtime) = runtime() {
+        let _ = runtime.live_browsers.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            Some(count.saturating_sub(1))
+        });
+    }
+}
+
+impl CompletionCallback {
+    fn allocate(done: Arc<AtomicBool>) -> *mut CompletionCallback {
+        Box::into_raw(Box::new(Self {
+            cef_callback: ffi::cef_completion_callback_t {
+                base: ffi::cef_base_ref_counted_t {
+                    size: std::mem::size_of::<ffi::cef_completion_callback_t>(),
+                    add_ref: Some(completion_add_ref),
+                    release: Some(completion_release),
+                    has_one_ref: Some(completion_has_one_ref),
+                    has_at_least_one_ref: Some(completion_has_at_least_one_ref),
+                },
+                on_complete: Some(completion_on_complete),
+            },
+            ref_count: AtomicUsize::new(1),
+            done,
+        }))
+    }
+}
+
+unsafe extern "system" fn completion_on_complete(self_: *mut ffi::cef_completion_callback_t) {
+    let callback = self_ as *mut CompletionCallback;
+    (*callback).done.store(true, Ordering::Release);
+}
+
+/// Write the profile out now — its cookies, which Chromium commits in
+/// batches half a minute apart and does not commit for a process that
+/// simply ends. Call it when the app is told it is shutting down: on macOS
+/// the platform terminates the process from inside the event loop, so
+/// nothing after `event_loop` (and so [`shutdown`]) ever runs, and a login
+/// made in the last half minute of a session would be gone at the next
+/// launch. Waits for the store's answer on the loop, bounded; harmless to
+/// call more than once or with pages still open.
+pub fn flush_profile() {
+    let Ok(runtime) = runtime() else {
+        return;
+    };
+    {
+        let state = runtime.state.lock().unwrap();
+        if !state.initialized || state.shutting_down {
+            return;
+        }
+    }
+    let flushed = flush_cookies(runtime);
+    say!("[makepad-cef] profile: cookie store {flushed}");
+}
+
+/// The cookie flush itself: asked of the global store, waited for on the
+/// loop, bounded so a store that never answers does not hold the process.
+fn flush_cookies(runtime: &Runtime) -> String {
+    let done = Arc::new(AtomicBool::new(false));
+    unsafe {
+        let manager = (runtime.api.cef_cookie_manager_get_global_manager)(ptr::null_mut());
+        if manager.is_null() {
+            return "not flushed: no global cookie manager".to_string();
+        }
+        let asked = match (*manager).flush_store {
+            Some(flush_store) => {
+                let callback = CompletionCallback::allocate(done.clone());
+                flush_store(manager, &mut (*callback).cef_callback) != 0
+            }
+            None => false,
+        };
+        release_ref_counted(&mut (*manager).base as *mut _);
+        if !asked {
+            return "not flushed: flush_store refused".to_string();
+        }
+    }
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
+    while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+        do_message_loop_work_impl();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if done.load(Ordering::Acquire) {
+        format!("flushed in {} ms", started.elapsed().as_millis())
+    } else {
+        "flush not confirmed within 2 s".to_string()
     }
 }
 
@@ -3118,12 +3658,36 @@ impl RenderHandler {
     }
 }
 
+impl AudioHandler {
+    fn allocate(state: Arc<SharedBrowserState>) -> *mut AudioHandler {
+        Box::into_raw(Box::new(Self {
+            cef_audio_handler: ffi::cef_audio_handler_t {
+                base: ffi::cef_base_ref_counted_t {
+                    size: std::mem::size_of::<ffi::cef_audio_handler_t>(),
+                    add_ref: Some(audio_add_ref),
+                    release: Some(audio_release),
+                    has_one_ref: Some(audio_has_one_ref),
+                    has_at_least_one_ref: Some(audio_has_at_least_one_ref),
+                },
+                get_audio_parameters: Some(audio_get_parameters),
+                on_audio_stream_started: Some(audio_on_stream_started),
+                on_audio_stream_packet: Some(audio_on_stream_packet),
+                on_audio_stream_stopped: Some(audio_on_stream_stopped),
+                on_audio_stream_error: Some(audio_on_stream_error),
+            },
+            ref_count: AtomicUsize::new(1),
+            state,
+        }))
+    }
+}
+
 impl ClientHandler {
     fn allocate(
         render_handler: *mut RenderHandler,
         display_handler: *mut DisplayHandler,
         load_handler: *mut LoadHandler,
         life_span_handler: *mut LifeSpanHandler,
+        audio_handler: *mut AudioHandler,
     ) -> *mut ClientHandler {
         Box::into_raw(Box::new(Self {
             cef_client: ffi::cef_client_t {
@@ -3134,7 +3698,7 @@ impl ClientHandler {
                     has_one_ref: Some(client_has_one_ref),
                     has_at_least_one_ref: Some(client_has_at_least_one_ref),
                 },
-                get_audio_handler: Some(client_null_handler),
+                get_audio_handler: Some(client_get_audio_handler),
                 get_command_handler: Some(client_null_handler),
                 get_context_menu_handler: Some(client_null_handler),
                 get_dialog_handler: Some(client_null_handler),
@@ -3159,6 +3723,7 @@ impl ClientHandler {
             display_handler,
             load_handler,
             life_span_handler,
+            audio_handler,
         }))
     }
 }
@@ -3287,6 +3852,17 @@ impl Browser {
     /// `width x height` pixels. Mouse coordinates handed to `send_mouse_*`
     /// are in points as well.
     pub fn new(url: &str, width: usize, height: usize, scale_factor: f32) -> Result<Self> {
+        Self::new_with_options(url, width, height, scale_factor, BrowserOptions::default())
+    }
+
+    /// [`Self::new`] with a say in how the browser paints.
+    pub fn new_with_options(
+        url: &str,
+        width: usize,
+        height: usize,
+        scale_factor: f32,
+        options: BrowserOptions,
+    ) -> Result<Self> {
         ensure_initialized()?;
         let runtime = runtime()?;
 
@@ -3296,13 +3872,15 @@ impl Browser {
         let display_handler = DisplayHandler::allocate(state.clone());
         let load_handler = LoadHandler::allocate(state.clone());
         let life_span_handler = LifeSpanHandler::allocate(state.clone());
+        let audio_handler = AudioHandler::allocate(state.clone());
         let client = ClientHandler::allocate(
             render_handler,
             display_handler,
             load_handler,
             life_span_handler,
+            audio_handler,
         );
-        let accelerated = accelerated_paint_available();
+        let accelerated = accelerated_paint_available() && !options.software_frames;
 
         let url = CefString::new(
             &runtime.api,
@@ -3379,6 +3957,7 @@ impl Browser {
                 "cef_browser_host_create_browser_sync returned null",
             ));
         }
+        runtime.live_browsers.fetch_add(1, Ordering::AcqRel);
 
         let mut this = Self {
             browser,
@@ -3388,6 +3967,7 @@ impl Browser {
             scale_factor: 0.0,
             accelerated,
             hidden: false,
+            audio: None,
         };
         let _ = this.resize(width, height, scale_factor);
         schedule_pump_work(0);
@@ -3610,6 +4190,72 @@ impl Browser {
         self.state.favicon.lock().unwrap().take()
     }
 
+    /// Whether Chromium last said a text field holds the page's focus
+    /// (`OnVirtualKeyboardRequested`, kept from the render thread). Desktop
+    /// OSR often never fires it, so `false` means "not said", not "no
+    /// field": key events from the widget are sent as field input either
+    /// way (`focus_on_editable_field` in [`Self::send_key_event`]). An
+    /// embedder that wants to keep its own single-letter shortcuts off a
+    /// page reads this as one more sign, not as the truth.
+    pub fn editable_focus(&self) -> bool {
+        self.state.editable_focus()
+    }
+
+    /// What the page wrote to its console since the last take, oldest
+    /// first: `console.log` and its siblings, and the errors Chromium
+    /// reports there. The answers to [`Self::evaluate_javascript`] are
+    /// taken out first (see [`Self::take_evaluations`]).
+    pub fn take_console_messages(&mut self) -> Vec<ConsoleMessage> {
+        let mut console = self.state.console.lock().unwrap();
+        let (ours, theirs): (Vec<_>, Vec<_>) =
+            console.drain(..).partition(|message| message.message.starts_with(EVALUATION_MARK));
+        console.extend(ours);
+        theirs
+    }
+
+    /// Run an expression in the main frame and have its value come back.
+    /// The value is JSON (`undefined` reads as `null`; what JSON cannot
+    /// carry, such as a DOM node, reads as `{}`), or the exception's text.
+    /// Returns the number the answer will carry in
+    /// [`Self::take_evaluations`], some pumps later; an expression that
+    /// never runs (no document yet) never answers. Statements are not
+    /// expressions: wrap them in `(function(){..})()`. Call on the thread
+    /// that pumps CEF.
+    pub fn evaluate_javascript(&mut self, expression: &str) -> Result<u64> {
+        let number = self.state.evaluations.fetch_add(1, Ordering::AcqRel) + 1;
+        let code = format!(
+            "(function(){{var m=\"\\u0001makepad-cef-evaluation\\u0001{number}:\";try{{var r=(function(){{return ({expression}\n);}})();console.log(m+\"ok:\"+JSON.stringify(r===undefined?null:r));}}catch(e){{console.log(m+\"err:\"+String(e&&e.message||e));}}}})()"
+        );
+        self.execute_javascript(&code)?;
+        Ok(number)
+    }
+
+    /// The answers that have come back, oldest first, each under the
+    /// number [`Self::evaluate_javascript`] gave out.
+    pub fn take_evaluations(&mut self) -> Vec<Evaluation> {
+        let mut console = self.state.console.lock().unwrap();
+        let mut answers = Vec::new();
+        console.retain(|message| {
+            let Some(rest) = message.message.strip_prefix(EVALUATION_MARK) else {
+                return true;
+            };
+            let Some((number, rest)) = rest.split_once(':') else {
+                return true;
+            };
+            let Ok(number) = number.parse::<u64>() else {
+                return true;
+            };
+            let result = match rest.split_once(':') {
+                Some(("ok", json)) => Ok(json.to_string()),
+                Some(("err", text)) => Err(text.to_string()),
+                _ => Err(rest.to_string()),
+            };
+            answers.push(Evaluation { number, result });
+            false
+        });
+        answers
+    }
+
     pub fn resize(&mut self, width: usize, height: usize, scale_factor: f32) -> Result<()> {
         let width = width.max(1);
         let height = height.max(1);
@@ -3624,14 +4270,24 @@ impl Browser {
         self.state.update_view(width, height, scale_factor);
 
         self.with_host(|host| unsafe {
-            if scale_changed {
-                if let Some(notify_screen_info_changed) = (*host).notify_screen_info_changed {
-                    notify_screen_info_changed(host);
-                }
+            if let Some(notify_screen_info_changed) = (*host).notify_screen_info_changed {
+                notify_screen_info_changed(host);
             }
             if let Some(was_resized) = (*host).was_resized {
                 was_resized(host);
             }
+            if let Some(invalidate) = (*host).invalidate {
+                invalidate(host, ffi::PET_VIEW);
+            }
+            Ok(())
+        })
+    }
+
+    /// Ask for a genuine repaint of the whole view (`invalidate(PET_VIEW)`):
+    /// a still page delivers a fresh paint with its own callback timestamp.
+    /// UI thread only; changes nothing about the page.
+    pub fn request_repaint(&mut self) -> Result<()> {
+        self.with_host(|host| unsafe {
             if let Some(invalidate) = (*host).invalidate {
                 invalidate(host, ffi::PET_VIEW);
             }
@@ -3650,6 +4306,26 @@ impl Browser {
                 .load_url
                 .ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(
                 frame, &url.value
+            );
+            Ok(())
+        })
+    }
+
+    /// Run `code` in the page's main frame, as a script of the page's own
+    /// would. Fire and forget: nothing comes back, and a frame that has no
+    /// document yet runs nothing. Call on the thread that pumps CEF.
+    pub fn execute_javascript(&mut self, code: &str) -> Result<()> {
+        let runtime = runtime()?;
+        let code = CefString::new(&runtime.api, code)?;
+        let script_url = CefString::new(&runtime.api, "")?;
+        self.with_main_frame(|frame| unsafe {
+            (*frame)
+                .execute_java_script
+                .ok_or_else(|| Error::new("cef_frame_t::execute_java_script missing"))?(
+                frame,
+                &code.value,
+                &script_url.value,
+                0,
             );
             Ok(())
         })
@@ -3683,6 +4359,19 @@ impl Browser {
                 &event,
                 mouse_leave as c_int,
             );
+            Ok(())
+        })
+    }
+
+    /// Tell the page it lost mouse capture: Chromium ends any drag or
+    /// pressed-button gesture it was tracking without delivering a mouse-up
+    /// (so nothing is clicked). For an embedder that stops routing input to
+    /// this browser mid-gesture.
+    pub fn send_capture_lost_event(&mut self) -> Result<()> {
+        self.with_host(|host| unsafe {
+            (*host)
+                .send_capture_lost_event
+                .ok_or_else(|| Error::new("cef_browser_host_t::send_capture_lost_event missing"))?(host);
             Ok(())
         })
     }
@@ -3749,7 +4438,11 @@ impl Browser {
             is_system_key: is_system_key as c_int,
             character,
             unmodified_character,
-            focus_on_editable_field: self.state.editable_focus() as c_int,
+            // The widget only sends keys when it has keyboard focus. Treat
+            // those as field input so the page's player shortcuts (YouTube
+            // L = skip 10s) do not steal letters meant for a text box.
+            // CEF's virtual-keyboard callback is also honoured when it fires.
+            focus_on_editable_field: 1,
         };
         self.with_host(|host| unsafe {
             (*host)
@@ -3777,14 +4470,164 @@ impl Browser {
         })
     }
 
+    /// Capture what the page plays instead of letting it reach the system
+    /// device. Off until called, and a browser that never calls it behaves
+    /// as if this API did not exist.
+    ///
+    /// CEF asks for the capture when the page next becomes audible, so call
+    /// this before the page plays. While a capture runs Chromium mutes the
+    /// page's own output: the embedder's mix is the only place it is heard.
+    /// Call on the thread that pumps CEF, and drain with [`Self::poll_audio`]
+    /// from the same thread.
+    pub fn enable_audio_capture(&mut self, config: AudioCaptureConfig) {
+        if self.audio.is_none() {
+            let (events, drain_events) = sync_channel(AUDIO_QUEUE_PACKETS);
+            let (recycle, spare) = sync_channel(AUDIO_QUEUE_PACKETS);
+            let packet_len = config.frames_per_buffer.clamp(128, 8_192) as usize * 2;
+            for _ in 0..AUDIO_POOL_PACKETS {
+                let _ = recycle.try_send(Vec::with_capacity(packet_len));
+            }
+            let tap = AudioTap {
+                enabled: AtomicBool::new(false),
+                want_sample_rate: AtomicU32::new(0),
+                want_channels: AtomicU32::new(0),
+                want_frames_per_buffer: AtomicU32::new(0),
+                events,
+                capture: Mutex::new(AudioCaptureSide { spare, held: None }),
+                streaming: AtomicBool::new(false),
+                epoch: AtomicU32::new(0),
+                navigation_epoch: AtomicU64::new(0),
+                sample_rate: AtomicU32::new(0),
+                channels: AtomicU32::new(0),
+                channel_layout: AtomicU32::new(0),
+                frames_per_buffer: AtomicU32::new(0),
+                packets: AtomicU64::new(0),
+                dropped_packets: AtomicU64::new(0),
+                dropped_frames: AtomicU64::new(0),
+                pool_misses: AtomicU64::new(0),
+            };
+            if self.state.audio.set(tap).is_err() {
+                return;
+            }
+            self.audio = Some(AudioDrain {
+                events: drain_events,
+                recycle,
+                streaming: false,
+                epoch: 0,
+                pending: VecDeque::new(),
+            });
+        }
+        if let Some(tap) = self.state.audio.get() {
+            tap.set_config(config);
+            tap.enabled.store(true, Ordering::Release);
+        }
+    }
+
+    /// Stop capturing. The page's next stream plays through the system
+    /// device again; one already running stays muted until Chromium stops
+    /// it, and its packets are discarded.
+    pub fn disable_audio_capture(&mut self) {
+        if let Some(tap) = self.state.audio.get() {
+            tap.enabled.store(false, Ordering::Release);
+        }
+    }
+
+    /// The next capture event, or `None` when there is nothing waiting. Never
+    /// blocks. Hand every packet back with [`Self::recycle_audio_packet`]
+    /// once its samples have been copied out.
+    pub fn poll_audio(&mut self) -> Option<AudioEvent> {
+        let tap = self.state.audio.get()?;
+        let drain = self.audio.as_mut()?;
+        loop {
+            if let Some(event) = drain.pending.pop_front() {
+                return Some(event);
+            }
+            match drain.events.try_recv() {
+                Ok(AudioEvent::Started(format)) => {
+                    if !(drain.streaming && drain.epoch == format.epoch) {
+                        drain.begin(format);
+                    }
+                }
+                Ok(AudioEvent::Packet(packet)) => {
+                    if !(drain.streaming && drain.epoch == packet.epoch) {
+                        // Its `Started` found the queue full.
+                        drain.begin(AudioFormat {
+                            epoch: packet.epoch,
+                            channels: packet.channels,
+                            ..tap.format()
+                        });
+                    }
+                    drain.pending.push_back(AudioEvent::Packet(packet));
+                }
+                Ok(AudioEvent::Stopped) => {
+                    if drain.streaming {
+                        drain.streaming = false;
+                        return Some(AudioEvent::Stopped);
+                    }
+                }
+                Ok(event @ AudioEvent::Error(_)) => return Some(event),
+                Err(_) => {
+                    // A `Stopped` that found the queue full.
+                    if drain.streaming
+                        && !tap.streaming.load(Ordering::Acquire)
+                        && tap.epoch.load(Ordering::Acquire) == drain.epoch
+                    {
+                        drain.streaming = false;
+                        return Some(AudioEvent::Stopped);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Return a drained packet's buffer to the capture thread.
+    pub fn recycle_audio_packet(&mut self, packet: AudioPacket) {
+        if let Some(drain) = &self.audio {
+            let _ = drain.recycle.try_send(packet.samples);
+        }
+    }
+
+    pub fn audio_capture_stats(&self) -> AudioCaptureStats {
+        let Some(tap) = self.state.audio.get() else {
+            return AudioCaptureStats::default();
+        };
+        AudioCaptureStats {
+            enabled: tap.enabled.load(Ordering::Acquire),
+            streaming: tap.streaming.load(Ordering::Acquire),
+            streams: tap.epoch.load(Ordering::Acquire),
+            packets: tap.packets.load(Ordering::Relaxed),
+            dropped_packets: tap.dropped_packets.load(Ordering::Relaxed),
+            dropped_frames: tap.dropped_frames.load(Ordering::Relaxed),
+            pool_misses: tap.pool_misses.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn take_frame(&mut self) -> Option<Frame> {
-        self.state.take_frame()
+        self.try_take_frame().map(|captured| captured.frame)
+    }
+
+    /// Take the latest software paint without waiting for its producer.
+    /// `None` also means the publication slot is currently busy; try again
+    /// on a later pump. The returned timestamps were sampled in the paint
+    /// callback, never at this drain. Must run on the CEF pump thread.
+    pub fn try_take_frame(&mut self) -> Option<CapturedFrame> {
+        self.state.try_take_frame()
+    }
+
+    /// Committed main-frame document epoch, independent of audio restarts
+    /// and display-state changes. Zero precedes the first committed load.
+    pub fn navigation_epoch(&self) -> u64 {
+        self.state.navigation_epoch.load(Ordering::Acquire)
     }
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
         self.state.closing.store(true, Ordering::Release);
+        if let Some(tap) = self.state.audio.get() {
+            tap.enabled.store(false, Ordering::Release);
+        }
         if let Ok(runtime) = runtime() {
             let state = runtime.state.lock().unwrap();
             if state.initialized && !state.shutting_down && !self.browser.is_null() {
@@ -3848,6 +4691,30 @@ pub fn shutdown() {
     let Ok(runtime) = runtime() else {
         return;
     };
+    {
+        let state = runtime.state.lock().unwrap();
+        if !state.initialized || state.shutting_down {
+            return;
+        }
+    }
+    // Browsers that were dropped have been told to close, and CEF closes
+    // them on its own loop: it has to be turned until they are gone, or
+    // the shutdown below finds them open and the profile they were using —
+    // the cookies of a session, kept in batches — never reaches the disk.
+    // Bounded, so a page that will not close does not hold the process.
+    let open = runtime.live_browsers.load(Ordering::Acquire);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
+    while runtime.live_browsers.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+        do_message_loop_work_impl();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let left = runtime.live_browsers.load(Ordering::Acquire);
+    let closed_ms = started.elapsed().as_millis();
+    let flushed = flush_cookies(runtime);
+    say!(
+        "[makepad-cef] shutdown: {open} browsers open, {left} left after {closed_ms} ms; cookie store {flushed}"
+    );
     let mut state = runtime.state.lock().unwrap();
     if !state.initialized || state.shutting_down {
         return;

@@ -1664,6 +1664,8 @@ mod imp {
         batch_command_buffer: Option<StrongId>,
         batch_encoder: Option<StrongId>,
         last_command_buffer: Option<StrongId>,
+        /// When the command buffer being recorded began (`GpuPacing`).
+        piece_at: Option<std::time::Instant>,
     }
 
     impl MetalContext {
@@ -1733,6 +1735,7 @@ mod imp {
                 batch_command_buffer: None,
                 batch_encoder: None,
                 last_command_buffer: None,
+                piece_at: None,
             })
         }
 
@@ -2517,6 +2520,28 @@ mod imp {
                 self.last_command_buffer = Some(command_buffer);
             }
 
+            Ok(())
+        }
+
+        /// A place the encoder may be cut (`GpuPacing`): with pacing on, commit
+        /// the command buffer being recorded (the outermost batch only) and
+        /// start the next, so other queues run between the two; with `duty`
+        /// under 1, wait for this piece and rest in proportion.
+        fn pace_point(&mut self) -> Result<(), String> {
+            let pacing = crate::whisper::gpu_pacing();
+            if pacing.pieces_per_layer == 0 || self.batch_depth != 1 {
+                return Ok(());
+            }
+            let since = self.piece_at.unwrap_or_else(std::time::Instant::now);
+            let duty = pacing.duty;
+            self.end_batch()?;
+            if duty < 1.0 {
+                self.wait_queue_idle()?;
+                let busy = since.elapsed().as_secs_f64();
+                std::thread::sleep(std::time::Duration::from_secs_f64((busy * (1.0 - duty as f64) / duty as f64).min(0.05)));
+            }
+            self.begin_batch()?;
+            self.piece_at = Some(std::time::Instant::now());
             Ok(())
         }
 
@@ -5199,6 +5224,9 @@ mod imp {
                 &x_shape,
                 &x_shape,
             )?;
+            if crate::whisper::gpu_pacing().pieces_per_layer >= 2 {
+                self.pace_point()?;
+            }
 
             // FFN sub-block
             let mlp_ln_w_id =
@@ -5370,7 +5398,11 @@ mod imp {
                 // Reuse the same intermediate-output tag set across encoder layers.
                 // Layers execute sequentially, so per-layer unique output tags only inflate
                 // persistent Metal intermediate buffers without improving correctness.
-                for layer in layers.iter() {
+                ctx.piece_at = Some(std::time::Instant::now());
+                for (at, layer) in layers.iter().enumerate() {
+                    if at > 0 {
+                        ctx.pace_point()?;
+                    }
                     let tag_base = 160u8;
                     let cur_id = cur_buf.as_id();
                     cur_buf = ctx.encoder_layer_from_buffer_f32(

@@ -7,6 +7,28 @@ use makepad_script::{ScriptValue, ScriptVm};
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
 
+/// Windows desktop apps are linked as windowed programs (no console of
+/// their own when started from Explorer). Started from a terminal, such a
+/// program has no stdout: join the terminal's console so its output shows
+/// there. A pipe — another program reading stdout, like an MCP client of
+/// `--mcp` — and console builds already have a stdout and are left alone.
+pub fn attach_parent_console() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn AttachConsole(process: u32) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if out == 0 || out == -1 {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 pub fn should_run_stdin_loop_from_env() -> bool {
     std::env::args().any(|v| v == "--stdin-loop")
         || std::env::var("MAKEPAD_STDIN_LOOP").is_ok_and(|v| {
@@ -268,6 +290,9 @@ macro_rules! _app_main_event_closure {
         $crate::_app_main_event_closure!($app, |_cx: &mut Cx| {})
     };
     ($app:ident, $configure:expr) => {{
+        // This app's build inputs (package dir, icons), read in the app
+        // crate so they never rebuild platform; before `init_cx_os`.
+        $crate::app_meta::set_app_build_meta($crate::_app_build_meta!());
         // Event dispatch already excludes synchronous re-entry. Plain captured slots
         // also survive a caught wasm panic=abort trap; a RefCell borrow flag would not
         // be released because wasm does not unwind the trapped Rust stack.
@@ -442,6 +467,24 @@ macro_rules! app_main {
             MAKEPAD_EXTRA_FONT_ASSETS,
         )] = $crate::extend_font_asset_manifest($manifest, MAKEPAD_EXTRA_FONT_ASSETS);
 
+        // The executable's own Info.plist (see app_meta.rs): the application
+        // menu's title of an unbundled launch. Read here, in the app crate,
+        // a bundle name rebuilds only the app.
+        #[cfg(target_os = "macos")]
+        const MAKEPAD_BUNDLE_NAME: &str = match option_env!("MAKEPAD_BUNDLE_NAME") {
+            Some(name) => name,
+            None => $crate::app_meta::DEFAULT_BUNDLE_NAME,
+        };
+        #[cfg(target_os = "macos")]
+        const MAKEPAD_BUNDLE_IDENTIFIER: Option<&str> = option_env!("MAKEPAD_BUNDLE_IDENTIFIER");
+        #[cfg(target_os = "macos")]
+        #[used]
+        #[link_section = "__TEXT,__info_plist"]
+        static MAKEPAD_INFO_PLIST: [u8; $crate::app_meta::info_plist_len(
+            MAKEPAD_BUNDLE_NAME,
+            MAKEPAD_BUNDLE_IDENTIFIER,
+        )] = $crate::app_meta::info_plist(MAKEPAD_BUNDLE_NAME, MAKEPAD_BUNDLE_IDENTIFIER);
+
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         fn main() {
             app_main();
@@ -449,6 +492,13 @@ macro_rules! app_main {
 
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
+            $crate::attach_parent_console();
+            // `--mcp`: a stdio relay to the running app's MCP endpoint for
+            // Claude Desktop. Before anything else exists: no window, no
+            // GPU, no audio, and stdout carries only JSON-RPC.
+            if $crate::mcp_relay::requested() {
+                std::process::exit($crate::mcp_relay::run());
+            }
             Cx::init_log();
             $crate::startup_trace("main-entered (dyld done)");
             if Cx::pre_start() {
@@ -522,6 +572,25 @@ macro_rules! app_main {
                 cx.init_cx_os();
                 cx
             })
+        }
+
+        /// The entry of a hosted child PROCESS on Android: the WM's launcher
+        /// `dlopen`s this library in a process of its own and calls this
+        /// (os/linux/android/android_hosted.rs). No JVM, no Activity: the app
+        /// talks to its host over the host's hub and draws into its frames.
+        #[cfg(target_os = "android")]
+        #[no_mangle]
+        pub extern "C" fn makepad_hosted_main() {
+            $crate::os::linux::android::android_hosted::set_hosted();
+            Cx::init_log();
+            let studio_http = $crate::resolve_studio_http();
+            let mut cx = Box::new($crate::new_cx_with_font_set(
+                $crate::_app_main_event_closure!($app, $configure),
+                $font_set,
+            ));
+            cx.init_websockets(&studio_http);
+            cx.init_cx_os();
+            cx.android_hosted_event_loop();
         }
 
         #[cfg(target_env = "ohos")]
@@ -631,7 +700,7 @@ mod font_set_macro_compile_test {
 
         let source = include_str!("app_main.rs");
         let constructor_call = ["$crate::new_cx", "_with_font_set("].concat();
-        assert_eq!(source.matches(constructor_call.as_str()).count(), 4);
+        assert_eq!(source.matches(constructor_call.as_str()).count(), 5);
     }
 }
 

@@ -6,8 +6,11 @@ use crate::mkmap::{
 };
 use makepad_mbtile_reader::{
     compress_tile, read_pb_len_slice, read_pb_varint, skip_pb_field, MkmapReader, MkmapTileRef,
-    TileCodec, TileCompression, DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS,
+    TileCodec, TileCompression,
 };
+pub use makepad_mbtile_reader::detail_key_allowed;
+use makepad_mbtile_reader::{detail_feature_used, DetailGeom};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -45,39 +48,40 @@ pub const POLICY_FILLS: usize = 4;
 pub const POLICY_TAGS: usize = 5;
 pub const POLICY_SYNTHETIC: usize = 6;
 pub const POLICY_SHADOWS: usize = 7;
+pub const POLICY_FEATURES: usize = 8;
 
 /// The archive data contract. Keep this table in lock-step with renderer
 /// reads; reports use the same rows, so every removed byte has a stated case.
-pub const DATA_POLICY: [PolicyRow; 8] = [
+pub const DATA_POLICY: [PolicyRow; 9] = [
     PolicyRow {
         action: PolicyAction::Keep,
         item: "shortbread base layers (non-osm_*)",
-        reader_or_reason: "widgets/src/map/tile.rs: LayerParseFilter::BaseNoDetailLayers",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: LayerParseFilter::BaseNoDetailLayers",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "six osm_* detail layers: geometry + whitelisted tags",
-        reader_or_reason: "widgets/src/map/tile.rs: LayerParseFilter::DetailLayers/tag_key_whitelist",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: LayerParseFilter::DetailLayers/tag_key_whitelist",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 101 painter-cascade REGIONS",
-        reader_or_reason: "widgets/src/map/tile.rs: parse_baked_faces/bake.regions cascade hit",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: parse_baked_faces/bake.regions cascade hit",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 101 v4 building groups",
-        reader_or_reason: "widgets/src/map/tile.rs: bake.building_signature/bake.buildings substitution",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: bake.building_signature/bake.buildings substitution",
     },
     PolicyRow {
         action: PolicyAction::Keep,
         item: "field 100 baked fill triangulations",
-        reader_or_reason: "widgets/src/map/tile.rs: parse_baked_fills",
+        reader_or_reason: "widgets/families/maps/src/map/tile.rs: parse_baked_fills",
     },
     PolicyRow {
         action: PolicyAction::Drop,
         item: "osm_* tags outside DETAIL_WAY_KEYS + DETAIL_POINT_EXTRA_KEYS",
-        reader_or_reason: "discarded by widgets/src/map/tile.rs: tag_key_whitelist",
+        reader_or_reason: "discarded by widgets/families/maps/src/map/tile.rs: tag_key_whitelist",
     },
     PolicyRow {
         action: PolicyAction::Drop,
@@ -87,7 +91,12 @@ pub const DATA_POLICY: [PolicyRow; 8] = [
     PolicyRow {
         action: PolicyAction::Drop,
         item: "field 101 shadow shapes + grounded footprints",
-        reader_or_reason: "widgets/src/map/view.rs: draw_shadow_mask_pass derives live shadows",
+        reader_or_reason: "widgets/families/maps/src/map/view.rs: draw_shadow_mask_pass derives live shadows",
+    },
+    PolicyRow {
+        action: PolicyAction::Drop,
+        item: "osm_* features no detail-pass path draws (address-only nodes, plain road/building lines, relation points)",
+        reader_or_reason: "makepad_mbtile_reader::detail_feature_used, enforced by tile.rs MvtLocalCollector::wants_feature",
     },
 ];
 
@@ -172,10 +181,6 @@ fn is_synthetic_key(key: &str) -> bool {
     )
 }
 
-pub fn detail_key_allowed(key: &str) -> bool {
-    DETAIL_WAY_KEYS.contains(&key) || DETAIL_POINT_EXTRA_KEYS.contains(&key)
-}
-
 fn layer_name(layer: &[u8]) -> Result<&str, String> {
     let mut pos = 0;
     while pos < layer.len() {
@@ -247,12 +252,67 @@ fn parse_layer_tables(layer: &[u8]) -> Result<LayerTables<'_>, String> {
     })
 }
 
+/// A feature's MVT geometry type (field 3), as the contract sees it.
+fn feature_geom(feature: &[u8]) -> Result<DetailGeom, String> {
+    let mut pos = 0;
+    let mut geom = DetailGeom::Line;
+    while pos < feature.len() {
+        let field = next_field(feature, &mut pos)?;
+        if (field.field, field.wire) == (3, 0) {
+            let mut value_pos = field.payload_start;
+            geom = match read_pb_varint(feature, &mut value_pos)? {
+                1 => DetailGeom::Point,
+                3 => DetailGeom::Polygon,
+                _ => DetailGeom::Line,
+            };
+        }
+    }
+    Ok(geom)
+}
+
+/// An MVT Value message as the renderer's tag string (tile.rs
+/// parse_mvt_value): strings verbatim, numbers and bools printed.
+fn mvt_value_text(value: &[u8]) -> Result<Cow<'_, str>, String> {
+    let mut pos = 0;
+    while pos < value.len() {
+        let field = next_field(value, &mut pos)?;
+        let payload = &value[field.payload_start..field.payload_end];
+        let mut value_pos = field.payload_start;
+        return Ok(match (field.field, field.wire) {
+            (1, 2) => Cow::Borrowed(
+                std::str::from_utf8(payload).map_err(|_| "MVT value is not UTF-8".to_string())?,
+            ),
+            (2, 5) => Cow::Owned(f32::from_le_bytes(payload.try_into().unwrap()).to_string()),
+            (3, 1) => Cow::Owned(f64::from_le_bytes(payload.try_into().unwrap()).to_string()),
+            (4, 0) => Cow::Owned((read_pb_varint(value, &mut value_pos)? as i64).to_string()),
+            (5, 0) => Cow::Owned(read_pb_varint(value, &mut value_pos)?.to_string()),
+            (6, 0) => {
+                let raw = read_pb_varint(value, &mut value_pos)?;
+                Cow::Owned((((raw >> 1) as i64) ^ -((raw & 1) as i64)).to_string())
+            }
+            (7, 0) => Cow::Borrowed(if read_pb_varint(value, &mut value_pos)? != 0 {
+                "true"
+            } else {
+                "false"
+            }),
+            _ => continue,
+        });
+    }
+    Ok(Cow::Borrowed(""))
+}
+
+/// Rewrite one detail layer: tags cut to `allowed`, and with `contract`
+/// the features `detail_feature_used` rejects (judged on the allowed tags,
+/// exactly what the renderer parses) are dropped.
 fn rewrite_detail_layer_with(
     layer: &[u8],
     allowed: impl Fn(&str) -> bool,
+    contract: bool,
 ) -> Result<Vec<u8>, String> {
     let tables = parse_layer_tables(layer)?;
+    let name = layer_name(layer)?;
     let mut kept_tags = Vec::with_capacity(tables.features.len());
+    let mut kept_features = Vec::with_capacity(tables.features.len());
     let mut used_keys = vec![false; tables.keys.len()];
     let mut used_values = vec![false; tables.values.len()];
     for feature in &tables.features {
@@ -266,12 +326,28 @@ fn rewrite_detail_layer_with(
                 return Err("MVT feature value index is out of range".to_string());
             }
             if allowed(key_name) {
-                used_keys[key] = true;
-                used_values[value] = true;
                 tags.push((key, value));
             }
         }
+        let keep = !contract || {
+            let mut text = Vec::with_capacity(tags.len());
+            for &(key, value) in &tags {
+                let key_name = tables.keys[key];
+                if detail_key_allowed(key_name) {
+                    text.push((key_name, mvt_value_text(tables.values[value])?));
+                }
+            }
+            detail_feature_used(name, feature_geom(feature)?, text.as_slice())
+        };
+        if !keep {
+            continue;
+        }
+        for &(key, value) in &tags {
+            used_keys[key] = true;
+            used_values[value] = true;
+        }
         kept_tags.push(tags);
+        kept_features.push(*feature);
     }
     let mut key_map = vec![None; tables.keys.len()];
     let mut retained_keys = Vec::new();
@@ -307,8 +383,8 @@ fn rewrite_detail_layer_with(
         };
         value_map[old] = Some(mapped);
     }
-    let mut rewritten_features = Vec::with_capacity(tables.features.len());
-    for (feature, tags) in tables.features.iter().zip(kept_tags) {
+    let mut rewritten_features = Vec::with_capacity(kept_features.len());
+    for (feature, tags) in kept_features.iter().zip(kept_tags) {
         let mut packed = Vec::new();
         for (key, value) in tags {
             write_varint(u64::from(key_map[key].unwrap()), &mut packed);
@@ -318,14 +394,19 @@ fn rewrite_detail_layer_with(
         rewritten_features.push(rewritten);
     }
     let mut out = Vec::with_capacity(layer.len());
-    let mut feature_index = 0;
+    let mut wrote_features = false;
     let mut wrote_keys = false;
     let mut wrote_values = false;
     for field in tables.fields {
         match (field.field, field.wire) {
             (2, 2) => {
-                write_len_field(2, &rewritten_features[feature_index], &mut out);
-                feature_index += 1;
+                // Kept features go out, in order, where the first one stood.
+                if !wrote_features {
+                    for feature in &rewritten_features {
+                        write_len_field(2, feature, &mut out);
+                    }
+                    wrote_features = true;
+                }
             }
             (3, 2) => {
                 if !wrote_keys {
@@ -558,16 +639,20 @@ pub fn rewrite_tile(input: &[u8]) -> Result<(Vec<u8>, TileRewriteStats), String>
             (3, 2) => {
                 let layer = &input[field.payload_start..field.payload_end];
                 if is_detail_layer(layer_name(layer)?) {
-                    let final_layer = rewrite_detail_layer_with(layer, detail_key_allowed)?;
+                    let final_layer = rewrite_detail_layer_with(layer, detail_key_allowed, true)?;
+                    let tags_only = rewrite_detail_layer_with(layer, detail_key_allowed, false)?;
                     let no_synthetic =
-                        rewrite_detail_layer_with(layer, |key| !is_synthetic_key(key))?;
+                        rewrite_detail_layer_with(layer, |key| !is_synthetic_key(key), false)?;
                     let old_size = field.end - field.start;
                     let total = old_size.saturating_sub(len_field_size(3, final_layer.len())) as u64;
+                    let tag_total =
+                        old_size.saturating_sub(len_field_size(3, tags_only.len())) as u64;
                     let synthetic = old_size
                         .saturating_sub(len_field_size(3, no_synthetic.len()))
                         as u64;
-                    stats.savings[POLICY_SYNTHETIC] += synthetic.min(total);
-                    stats.savings[POLICY_TAGS] += total.saturating_sub(synthetic);
+                    stats.savings[POLICY_SYNTHETIC] += synthetic.min(tag_total);
+                    stats.savings[POLICY_TAGS] += tag_total.saturating_sub(synthetic);
+                    stats.savings[POLICY_FEATURES] += total.saturating_sub(tag_total);
                     write_len_field(3, &final_layer, &mut out);
                 } else {
                     out.extend_from_slice(&input[field.start..field.end]);
@@ -763,10 +848,32 @@ fn verify_detail_tables_compact(tile: &[u8]) -> Result<(), String> {
 
 fn verify_kept_sections(before: &[u8], after: &[u8]) -> Result<(), String> {
     verify_detail_tables_compact(after)?;
-    let before = tile_sections(before)?;
+    let mut before = tile_sections(before)?;
     let after = tile_sections(after)?;
     if before.base_layers != after.base_layers {
         return Err("non-osm base layer bytes changed".to_string());
+    }
+    // Only features the detail contract rejects may be gone; every kept
+    // one must survive with identical geometry and its allowed tags.
+    for ((name, geometry), (_, tags)) in before
+        .detail_geometry
+        .iter_mut()
+        .zip(before.detail_tags.iter_mut())
+    {
+        let mut keep = Vec::with_capacity(geometry.len());
+        for (feature, feature_tags) in geometry.iter().zip(tags.iter()) {
+            let mut text = Vec::with_capacity(feature_tags.len());
+            for (key, value) in feature_tags {
+                if detail_key_allowed(key) {
+                    text.push((key.as_str(), mvt_value_text(value)?));
+                }
+            }
+            keep.push(detail_feature_used(name, feature_geom(feature)?, text.as_slice()));
+        }
+        let mut flags = keep.iter();
+        geometry.retain(|_| *flags.next().unwrap());
+        let mut flags = keep.iter();
+        tags.retain(|_| *flags.next().unwrap());
     }
     if before.detail_geometry != after.detail_geometry {
         return Err("detail feature geometry/non-tag fields changed".to_string());
@@ -917,13 +1024,13 @@ impl RepackReport {
 }
 
 #[derive(Clone, Debug)]
-struct ShardManifest {
+pub(crate) struct ShardManifest {
     input_root_hash: u128,
     selection_hash: u128,
     input_record: u32,
     output_shard: u32,
     brotli_quality: u32,
-    file_len: u64,
+    pub(crate) file_len: u64,
     tile_count: u64,
     unique_blobs: u64,
     start_tile_id: u64,
@@ -939,15 +1046,19 @@ struct ShardManifest {
     max_zoom: u8,
 }
 
-fn shard_path(dir: &Path, shard: u32) -> PathBuf {
+pub(crate) fn shard_path(dir: &Path, shard: u32) -> PathBuf {
     dir.join(format!("tiles-{shard:03}.mkshard"))
 }
 
-fn manifest_path(dir: &Path, shard: u32) -> PathBuf {
+pub(crate) fn manifest_path(dir: &Path, shard: u32) -> PathBuf {
     dir.join(format!("tiles-{shard:03}.mkrepack"))
 }
 
-fn encode_manifest(manifest: &ShardManifest) -> Vec<u8> {
+pub(crate) fn pending_manifest_path(dir: &Path, shard: u32) -> PathBuf {
+    dir.join(format!("tiles-{shard:03}.mkrepack-pending"))
+}
+
+pub(crate) fn encode_manifest(manifest: &ShardManifest) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(MANIFEST_MAGIC);
     out.extend_from_slice(&manifest.input_root_hash.to_le_bytes());
@@ -978,7 +1089,7 @@ fn encode_manifest(manifest: &ShardManifest) -> Vec<u8> {
     out
 }
 
-fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
+pub(crate) fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
     let expected_len = 8 + 16 + 16 + 4 + 4 + 4 + 11 * 8 + DATA_POLICY.len() * 8 + 2;
     if bytes.len() != expected_len || bytes.get(..8) != Some(MANIFEST_MAGIC) {
         return Err("invalid repack shard manifest".to_string());
@@ -1044,8 +1155,12 @@ fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
     })
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let partial = path.with_extension("partial");
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // Appended, never with_extension: `tiles-000.mkrepack` must not share
+    // `tiles-000.partial` with the shard being written next to it.
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
     match fs::remove_file(&partial) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1160,8 +1275,23 @@ fn display_duration(duration: Duration) -> String {
     format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
 
+/// Reads a tile ref's stored (compressed) bytes for [`process_shard`].
+type ReadRef<'a> = dyn FnMut(&MkmapTileRef) -> Result<Vec<u8>, String> + Send + 'a;
+
+/// How [`process_shard`] finishes its output shard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShardWrite {
+    /// Out-of-place: every tile is re-encoded at the requested quality.
+    Fresh,
+    /// In place over the input shard: tiles the policy leaves unchanged keep
+    /// their stored bytes, and the manifest is journaled before the rename
+    /// replaces the input, so a crash between the two is recoverable.
+    InPlace,
+}
+
 fn process_shard(
-    reader: &mut MkmapReader,
+    read: &mut ReadRef<'_>,
+    write_mode: ShardWrite,
     input_record: usize,
     output_shard: u32,
     refs: &[MkmapTileRef],
@@ -1225,7 +1355,7 @@ fn process_shard(
                 permit_rx
                     .recv()
                     .map_err(|_| "tile pipeline stopped before input was read".to_string())?;
-                let source = reader.read_tile_ref(&tile).map_err(|err| {
+                let source = read(&tile).map_err(|err| {
                     format!("read z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
                 })?;
                 job_tx
@@ -1255,6 +1385,14 @@ fn process_shard(
                         let (rewritten, stats) = rewrite_tile(&decoded).map_err(|err| {
                             format!("rewrite z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
                         })?;
+                        if write_mode == ShardWrite::InPlace && rewritten == decoded {
+                            return Ok(TileOutput {
+                                tile,
+                                source_len: source.len() as u64,
+                                compressed: source,
+                                stats,
+                            });
+                        }
                         let compressed = compress_tile(
                             &TileCompression::Brotli {
                                 quality: brotli_quality,
@@ -1368,11 +1506,6 @@ fn process_shard(
             .sync_all()
             .map_err(|err| format!("sync output shard {output_shard}: {err}"))?;
         drop(writer);
-        let partial = partial_path.as_ref().unwrap();
-        let final_path = final_path.as_ref().unwrap();
-        fs::rename(partial, final_path).map_err(|err| {
-            format!("rename {} to {}: {err}", partial.display(), final_path.display())
-        })?;
     }
     let manifest = ShardManifest {
         input_root_hash,
@@ -1395,10 +1528,79 @@ fn process_shard(
         min_zoom,
         max_zoom,
     };
-    if let Some(output) = output {
+    // In place, the caller verifies the partial against the still-present
+    // input before `finish_in_place` swaps it in.
+    if let (Some(output), ShardWrite::Fresh) = (output, write_mode) {
+        let partial = partial_path.as_ref().unwrap();
+        let final_path = final_path.as_ref().unwrap();
+        fs::rename(partial, final_path).map_err(|err| {
+            format!("rename {} to {}: {err}", partial.display(), final_path.display())
+        })?;
         write_atomic(&manifest_path(output, output_shard), &encode_manifest(&manifest))?;
     }
     Ok(manifest)
+}
+
+/// Every tile of a freshly written in-place partial, read back from disk,
+/// must be the deterministic policy rewrite of the input tile it replaces,
+/// with every kept section intact.
+fn verify_in_place_partial(
+    dir: &Path,
+    shard: u32,
+    refs: &[MkmapTileRef],
+    read: &mut ReadRef<'_>,
+    codec: &TileCodec,
+    manifest: &ShardManifest,
+) -> Result<(), String> {
+    use crate::repack::ReadExactAt;
+    let partial = shard_path(dir, shard).with_extension("partial");
+    let file = File::open(&partial).map_err(|err| format!("open {}: {err}", partial.display()))?;
+    let mut directory = vec![0_u8; manifest.dir_len as usize];
+    file.read_exact_at(&mut directory, manifest.dir_offset)
+        .map_err(|err| format!("read {} directory: {err}", partial.display()))?;
+    let leaf = makepad_mbtile_reader::MkmapLeaf::parse(&directory)?;
+    if leaf.len() != refs.len() {
+        return Err(format!(
+            "shard {shard:03} partial lists {} tiles, input {}",
+            leaf.len(),
+            refs.len()
+        ));
+    }
+    for tile in refs {
+        let blob = leaf
+            .find(tile.tile_id)
+            .ok_or_else(|| format!("shard {shard:03} partial lacks tile {}", tile.tile_id))?;
+        if blob.shard != shard {
+            return Err(format!("shard {shard:03} partial points into shard {}", blob.shard));
+        }
+        let mut stored = vec![0_u8; blob.len as usize];
+        file.read_exact_at(&mut stored, blob.offset)
+            .map_err(|err| format!("read {}: {err}", partial.display()))?;
+        let before = codec
+            .decode(&read(tile)?)
+            .map_err(|err| format!("decode input tile {}: {err}", tile.tile_id))?;
+        let after = codec
+            .decode(&stored)
+            .map_err(|err| format!("decode partial tile {}: {err}", tile.tile_id))?;
+        if rewrite_tile(&before)?.0 != after {
+            return Err(format!(
+                "shard {shard:03} tile {}: partial differs from the policy rewrite",
+                tile.tile_id
+            ));
+        }
+        verify_kept_sections(&before, &after)
+            .map_err(|err| format!("shard {shard:03} tile {}: {err}", tile.tile_id))?;
+    }
+    Ok(())
+}
+
+
+pub(crate) fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove {}: {err}", path.display())),
+    }
 }
 
 fn verify_archives(
@@ -1584,11 +1786,15 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
     let selection_hash = options.selection.fingerprint();
     let mut reader = MkmapReader::open(&options.input)
         .map_err(|err| format!("open {}: {err}", options.input.display()))?;
-    let metadata = reader
+    let mut metadata = reader
         .get_metadata()
         .map_err(|err| format!("read input metadata: {err}"))?;
     let codec = TileCodec::from_metadata(&metadata)
         .map_err(|err| format!("read input codec: {err}"))?;
+    metadata.insert(
+        makepad_mbtile_reader::DETAIL_CONTRACT_METADATA_KEY.to_string(),
+        makepad_mbtile_reader::DETAIL_CONTRACT.to_string(),
+    );
     if !codec.is_brotli() {
         return Err(format!(
             "input codec '{}' is unsupported; repack accepts br and br:dict-v1",
@@ -1657,7 +1863,8 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
         let refs = selected_refs(&mut reader, input_record, &options.selection)?;
         let shard_start = Instant::now();
         let manifest = process_shard(
-            &mut reader,
+            &mut |tile: &MkmapTileRef| reader.read_tile_ref(tile).map_err(|err| err.to_string()),
+            ShardWrite::Fresh,
             input_record,
             output_shard,
             &refs,
@@ -1760,6 +1967,493 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
     Ok(report)
 }
 
+/// Where an in-place conversion's archive lives. [`repack_in_place`] always
+/// works on a local directory; for a remote archive that directory is a
+/// mirror the host fills on demand and publishes back from.
+pub trait InPlaceHost {
+    /// Before the preflight: make every listed (shard, offset, len) range of
+    /// the ORIGINAL shards readable in the local directory.
+    fn fetch_ranges(&mut self, ranges: &[(u32, u64, u64)]) -> Result<(), String>;
+    /// Make original shard `shard` fully readable locally.
+    fn fetch_shard(&mut self, shard: u32) -> Result<(), String>;
+    /// Complete an interrupted publish of `shard`, if its journal says so.
+    fn recover(&mut self, shard: u32) -> Result<(), String>;
+    /// The manifest of a shard this run already published, if any.
+    fn completed(&mut self, shard: u32) -> Result<Option<Vec<u8>>, String>;
+    /// Publish the verified local `tiles-NNN.partial` as shard `shard`.
+    fn finish_shard(&mut self, shard: u32, manifest: &[u8]) -> Result<(), String>;
+    /// Every shard is published: install the local `root.mkidx`, clean up.
+    fn publish_root(&mut self, shard_count: u32) -> Result<(), String>;
+}
+
+/// The archive is the local directory itself.
+pub struct LocalHost {
+    pub dir: PathBuf,
+}
+
+impl InPlaceHost for LocalHost {
+    fn fetch_ranges(&mut self, _ranges: &[(u32, u64, u64)]) -> Result<(), String> {
+        Ok(())
+    }
+    fn fetch_shard(&mut self, _shard: u32) -> Result<(), String> {
+        Ok(())
+    }
+    fn recover(&mut self, shard: u32) -> Result<(), String> {
+        let dir = &self.dir;
+        let pending = pending_manifest_path(dir, shard);
+        if !pending.exists() {
+            return Ok(());
+        }
+        // Crashed between journal and rename, or between rename and the
+        // final manifest: finish what the journal records.
+        let bytes =
+            fs::read(&pending).map_err(|err| format!("read {}: {err}", pending.display()))?;
+        let manifest = decode_manifest(&bytes)?;
+        let partial = shard_path(dir, shard).with_extension("partial");
+        if partial.exists() {
+            let len = fs::metadata(&partial)
+                .map_err(|err| format!("stat {}: {err}", partial.display()))?
+                .len();
+            if len != manifest.file_len {
+                return Err(format!(
+                    "{} is {len} bytes, its journal says {}",
+                    partial.display(),
+                    manifest.file_len
+                ));
+            }
+            fs::rename(&partial, shard_path(dir, shard))
+                .map_err(|err| format!("rename {}: {err}", partial.display()))?;
+        }
+        write_atomic(&manifest_path(dir, shard), &bytes)?;
+        remove_if_present(&pending)
+    }
+    fn completed(&mut self, shard: u32) -> Result<Option<Vec<u8>>, String> {
+        let path = manifest_path(&self.dir, shard);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        let manifest = decode_manifest(&bytes)?;
+        let actual = fs::metadata(shard_path(&self.dir, shard))
+            .map_err(|err| format!("stat shard {shard:03}: {err}"))?
+            .len();
+        if actual != manifest.file_len {
+            return Err(format!(
+                "shard {shard:03} is {actual} bytes, its manifest says {}",
+                manifest.file_len
+            ));
+        }
+        Ok(Some(bytes))
+    }
+    fn finish_shard(&mut self, shard: u32, manifest: &[u8]) -> Result<(), String> {
+        let dir = &self.dir;
+        let pending = pending_manifest_path(dir, shard);
+        write_atomic(&pending, manifest)?;
+        let partial = shard_path(dir, shard).with_extension("partial");
+        fs::rename(&partial, shard_path(dir, shard))
+            .map_err(|err| format!("rename {}: {err}", partial.display()))?;
+        write_atomic(&manifest_path(dir, shard), manifest)?;
+        remove_if_present(&pending)
+    }
+    fn publish_root(&mut self, shard_count: u32) -> Result<(), String> {
+        remove_if_present(&stash_index_path(&self.dir))?;
+        remove_if_present(&stash_data_path(&self.dir))?;
+        for shard in 0..shard_count {
+            remove_if_present(&manifest_path(&self.dir, shard))?;
+        }
+        Ok(())
+    }
+}
+
+/// In-place conversion of a hosted archive whose disk has no room for a
+/// second copy (see [`repack_in_place`]).
+#[derive(Clone, Debug)]
+pub struct InPlaceOptions {
+    pub archive: PathBuf,
+    pub jobs: usize,
+    pub brotli_quality: u32,
+    pub log: Option<PathBuf>,
+    /// Preflight only: report what would be stashed, write nothing.
+    pub dry_run: bool,
+    /// Refuse when the blobs shared across shards exceed this.
+    pub max_stash_bytes: u64,
+}
+
+const STASH_MAGIC: &[u8; 8] = b"MKRPST01";
+
+/// Every shard's leaf-directory range, read straight from a root index
+/// (records are fixed 36-byte rows at the section in header slot 80).
+pub fn root_leaf_ranges(root: &[u8]) -> Result<Vec<(u32, u64, u64)>, String> {
+    let read_u64 = |at: usize| -> Result<u64, String> {
+        root.get(at..at + 8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .ok_or_else(|| "root index is truncated".to_string())
+    };
+    let (offset, len) = (read_u64(80)? as usize, read_u64(88)? as usize);
+    let rows = root
+        .get(offset..offset + len)
+        .ok_or_else(|| "root index records are truncated".to_string())?;
+    Ok(rows
+        .chunks_exact(crate::mkmap::ROOT_RECORD_LEN)
+        .map(|row| {
+            (
+                u32::from_le_bytes(row[16..20].try_into().unwrap()),
+                u64::from_le_bytes(row[20..28].try_into().unwrap()),
+                u64::from_le_bytes(row[28..36].try_into().unwrap()),
+            )
+        })
+        .collect())
+}
+
+pub(crate) fn stash_data_path(dir: &Path) -> PathBuf {
+    dir.join("repack-stash.bin")
+}
+
+pub(crate) fn stash_index_path(dir: &Path) -> PathBuf {
+    dir.join("repack-stash.idx")
+}
+
+/// Blobs one shard's leaf borrows from another shard (cross-shard dedup),
+/// in stash order, with the input root they were taken under.
+struct Stash {
+    root_hash: u128,
+    blobs: Vec<(u32, u64, u64)>,
+}
+
+fn encode_stash_index(stash: &Stash) -> Vec<u8> {
+    let mut out = STASH_MAGIC.to_vec();
+    out.extend_from_slice(&stash.root_hash.to_le_bytes());
+    write_varint(stash.blobs.len() as u64, &mut out);
+    for &(shard, offset, len) in &stash.blobs {
+        write_varint(u64::from(shard), &mut out);
+        write_varint(offset, &mut out);
+        write_varint(len, &mut out);
+    }
+    out
+}
+
+fn decode_stash_index(bytes: &[u8]) -> Result<Stash, String> {
+    if bytes.len() < 24 || &bytes[..8] != STASH_MAGIC {
+        return Err("repack stash index has a bad header".to_string());
+    }
+    let root_hash = u128::from_le_bytes(bytes[8..24].try_into().unwrap());
+    let mut pos = 24;
+    let count = read_pb_varint(bytes, &mut pos)? as usize;
+    let mut blobs = Vec::with_capacity(count.min(1 << 24));
+    for _ in 0..count {
+        let shard = u32::try_from(read_pb_varint(bytes, &mut pos)?)
+            .map_err(|_| "repack stash shard overflow".to_string())?;
+        blobs.push((shard, read_pb_varint(bytes, &mut pos)?, read_pb_varint(bytes, &mut pos)?));
+    }
+    if pos != bytes.len() {
+        return Err("repack stash index has trailing bytes".to_string());
+    }
+    Ok(Stash { root_hash, blobs })
+}
+
+/// Rewrite an `.mkmap` archive with the repack policy IN PLACE, one shard at
+/// a time, needing free space for one shard (plus the cross-shard stash)
+/// rather than a second archive.
+///
+/// 1. Preflight: every leaf is scanned for entries that point into ANOTHER
+///    shard (cross-shard dedup). Those blobs' original bytes are copied into
+///    `repack-stash.bin` before anything is replaced, because their home
+///    shard may be rewritten first.
+/// 2. Shard `N` is rewritten to `tiles-NNN.partial` exactly as the
+///    out-of-place repacker writes it (self-contained, deduplicated within
+///    the shard; unchanged tiles keep their stored bytes), synced, journaled
+///    (`.mkrepack-pending`), then renamed over `tiles-NNN.mkshard`. A crash
+///    at any point leaves either the original shard or a journaled
+///    replacement that the next run completes.
+/// 3. `root.mkidx` still describes the ORIGINAL shards until every shard is
+///    done; it is then replaced atomically and the stash and journals are
+///    removed.
+///
+/// While it runs the directory is a mix of old and new shards: do not serve
+/// it, and publish the result under a new name (CDN caches key on the URL).
+pub fn repack_in_place(
+    options: &InPlaceOptions,
+    host: &mut dyn InPlaceHost,
+) -> Result<RepackReport, String> {
+    use crate::repack::ReadExactAt;
+    if options.jobs == 0 {
+        return Err("--jobs must be at least 1".to_string());
+    }
+    if options.brotli_quality > 11 {
+        return Err("--brotli-quality must be in 0..=11".to_string());
+    }
+    let dir = options.archive.as_path();
+    let root_path = dir.join("root.mkidx");
+    let root_bytes =
+        fs::read(&root_path).map_err(|err| format!("read {}: {err}", root_path.display()))?;
+    let input_root_hash = content_hash(&root_bytes);
+    let selection = TileSelection::All;
+    let selection_hash = selection.fingerprint();
+    let mut reader =
+        MkmapReader::open(dir).map_err(|err| format!("open {}: {err}", dir.display()))?;
+    let mut metadata = reader
+        .get_metadata()
+        .map_err(|err| format!("read input metadata: {err}"))?;
+    let codec = TileCodec::from_metadata(&metadata)
+        .map_err(|err| format!("read input codec: {err}"))?;
+    if !codec.is_brotli() {
+        return Err(format!(
+            "input codec '{}' is unsupported; repack accepts br and br:dict-v1",
+            codec.metadata_value()
+        ));
+    }
+    let dict = codec.dict().map(<[u8]>::to_vec);
+    let stash_index = stash_index_path(dir);
+    let stash_data = stash_data_path(dir);
+    if metadata.get(makepad_mbtile_reader::DETAIL_CONTRACT_METADATA_KEY).map(String::as_str)
+        == Some(makepad_mbtile_reader::DETAIL_CONTRACT)
+        && !stash_index.exists()
+    {
+        return Err(format!(
+            "{} already follows detail contract {}",
+            dir.display(),
+            makepad_mbtile_reader::DETAIL_CONTRACT
+        ));
+    }
+    metadata.insert(
+        makepad_mbtile_reader::DETAIL_CONTRACT_METADATA_KEY.to_string(),
+        makepad_mbtile_reader::DETAIL_CONTRACT.to_string(),
+    );
+    let shard_count = reader.root_record_count();
+    let mut progress = ProgressLog::open(options.log.as_deref())?;
+
+    // 1. The cross-shard stash.
+    let stash = if stash_index.exists() {
+        let stash = decode_stash_index(
+            &fs::read(&stash_index)
+                .map_err(|err| format!("read {}: {err}", stash_index.display()))?,
+        )?;
+        if stash.root_hash != input_root_hash {
+            return Err(format!(
+                "{} was taken under a different root.mkidx; the archive changed mid-conversion",
+                stash_index.display()
+            ));
+        }
+        progress.line(&format!("resume: stash of {} shared blobs", stash.blobs.len()))?;
+        stash
+    } else {
+        if (0..shard_count as u32).any(|shard| {
+            manifest_path(dir, shard).exists() || pending_manifest_path(dir, shard).exists()
+        }) {
+            return Err("shard journals exist without a stash index; refusing to guess".to_string());
+        }
+        host.fetch_ranges(&root_leaf_ranges(&root_bytes)?)?;
+        let mut shared = BTreeSet::new();
+        let mut entries = 0_u64;
+        for record in 0..shard_count {
+            reader
+                .for_each_root_record_tile_ref(record, |tile| {
+                    entries += 1;
+                    if tile.shard as usize != record {
+                        shared.insert((tile.shard, tile.offset, tile.len));
+                    }
+                })
+                .map_err(|err| format!("scan root record {record}: {err}"))?;
+        }
+        let bytes: u64 = shared.iter().map(|blob| blob.2).sum();
+        progress.line(&format!(
+            "preflight: {shard_count} shards, {entries} tiles, {} cross-shard blobs ({bytes} bytes) to stash",
+            shared.len()
+        ))?;
+        if bytes > options.max_stash_bytes {
+            return Err(format!(
+                "cross-shard blobs need {bytes} bytes of stash, over the {} limit",
+                options.max_stash_bytes
+            ));
+        }
+        let stash = Stash {
+            root_hash: input_root_hash,
+            blobs: shared.into_iter().collect(),
+        };
+        if options.dry_run {
+            progress.line("dry run: nothing written")?;
+            return Ok(RepackReport::default());
+        }
+        host.fetch_ranges(&stash.blobs)?;
+        let partial = PathBuf::from(format!("{}.partial", stash_data.display()));
+        let mut out = BufWriter::new(
+            File::create(&partial).map_err(|err| format!("create {}: {err}", partial.display()))?,
+        );
+        for &(shard, offset, len) in &stash.blobs {
+            let bytes = reader
+                .read_tile_ref(&MkmapTileRef {
+                    tile_id: 0,
+                    zoom: 0,
+                    x: 0,
+                    y: 0,
+                    shard,
+                    offset,
+                    len,
+                })
+                .map_err(|err| format!("stash shard {shard} @{offset}: {err}"))?;
+            out.write_all(&bytes)
+                .map_err(|err| format!("write {}: {err}", partial.display()))?;
+        }
+        out.flush()
+            .and_then(|_| out.get_ref().sync_all())
+            .map_err(|err| format!("sync {}: {err}", partial.display()))?;
+        drop(out);
+        fs::rename(&partial, &stash_data)
+            .map_err(|err| format!("rename {}: {err}", partial.display()))?;
+        // The index lands last: its presence means the stash is complete.
+        write_atomic(&stash_index, &encode_stash_index(&stash))?;
+        stash
+    };
+    if options.dry_run {
+        progress.line("dry run: stash already taken; nothing written")?;
+        return Ok(RepackReport::default());
+    }
+    let mut stash_at = HashMap::with_capacity(stash.blobs.len());
+    let mut stash_len = 0_u64;
+    for &blob in &stash.blobs {
+        stash_at.insert(blob, stash_len);
+        stash_len += blob.2;
+    }
+    let stash_file =
+        File::open(&stash_data).map_err(|err| format!("open {}: {err}", stash_data.display()))?;
+    let actual = stash_file
+        .metadata()
+        .map_err(|err| format!("stat {}: {err}", stash_data.display()))?
+        .len();
+    if actual != stash_len {
+        return Err(format!(
+            "{} is {actual} bytes, its index says {stash_len}",
+            stash_data.display()
+        ));
+    }
+
+    // 2. Shard by shard.
+    let run_start = Instant::now();
+    let mut manifests = Vec::with_capacity(shard_count);
+    let mut report = RepackReport::default();
+    for record in 0..shard_count {
+        let shard = record as u32;
+        host.recover(shard)?;
+        if let Some(bytes) = host.completed(shard)? {
+            let manifest = decode_manifest(&bytes)?;
+            if manifest.input_root_hash != input_root_hash
+                || manifest.selection_hash != selection_hash
+                || manifest.input_record != shard
+                || manifest.output_shard != shard
+                || manifest.brotli_quality != options.brotli_quality
+            {
+                return Err(format!(
+                    "shard {shard:03} has a manifest from another run (other root or quality); refusing to reread a rewritten shard"
+                ));
+            }
+            report.add_manifest(&manifest);
+            manifests.push(manifest);
+            continue;
+        }
+        host.fetch_shard(shard)?;
+        let refs = selected_refs(&mut reader, record, &selection)?;
+        let shard_start = Instant::now();
+        let manifest = {
+            let reader = &mut reader;
+            let stash_file = &stash_file;
+            let stash_at = &stash_at;
+            let mut read = move |tile: &MkmapTileRef| -> Result<Vec<u8>, String> {
+                if tile.shard == shard {
+                    return reader.read_tile_ref(tile).map_err(|err| err.to_string());
+                }
+                let offset = stash_at
+                    .get(&(tile.shard, tile.offset, tile.len))
+                    .ok_or_else(|| {
+                        format!(
+                            "shard {shard} borrows shard {} @{} which the stash lacks",
+                            tile.shard, tile.offset
+                        )
+                    })?;
+                let mut bytes = vec![0_u8; tile.len as usize];
+                stash_file
+                    .read_exact_at(&mut bytes, *offset)
+                    .map_err(|err| format!("read stash: {err}"))?;
+                Ok(bytes)
+            };
+            let manifest = process_shard(
+                &mut read,
+                ShardWrite::InPlace,
+                record,
+                shard,
+                &refs,
+                &codec,
+                dict.as_deref(),
+                Some(dir),
+                input_root_hash,
+                selection_hash,
+                options.jobs,
+                options.brotli_quality,
+            )?;
+            verify_in_place_partial(dir, shard, &refs, &mut read, &codec, &manifest)?;
+            host.finish_shard(shard, &encode_manifest(&manifest))?;
+            manifest
+        };
+        report.add_manifest(&manifest);
+        let done = record + 1;
+        let eta = run_start.elapsed().mul_f64((shard_count - done) as f64 / done as f64);
+        progress.line(&format!(
+            "{done}/{shard_count} shard {shard:03} {} bytes → {} bytes, {} tiles, {}, ETA {}",
+            manifest.compressed_before,
+            manifest.file_len,
+            manifest.tile_count,
+            display_duration(shard_start.elapsed()),
+            display_duration(eta),
+        ))?;
+        manifests.push(manifest);
+    }
+
+    // 3. The new root, then cleanup.
+    let roots: Vec<_> = manifests
+        .iter()
+        .map(|manifest| RootRecord {
+            start_tile_id: manifest.start_tile_id,
+            end_tile_id: manifest.end_tile_id,
+            shard: manifest.output_shard,
+            dir_offset: manifest.dir_offset,
+            dir_len: manifest.dir_len,
+        })
+        .collect();
+    write_root_index_atomic(
+        dir,
+        &RootIndex {
+            metadata: &metadata,
+            dict: dict.as_deref(),
+            shard_cap: SHARD_HARD_CAP,
+            tile_count: report.tiles,
+            unique_blobs: report.unique_blobs,
+            min_zoom: manifests.iter().map(|m| m.min_zoom).min().unwrap_or(0),
+            max_zoom: manifests.iter().map(|m| m.max_zoom).max().unwrap_or(0),
+            records: &roots,
+        },
+    )?;
+    drop(stash_file);
+    host.publish_root(shard_count as u32)?;
+    progress.line(&format!(
+        "total: {} shards, {} tiles, {} bytes → {} bytes, elapsed {}; root.mkidx replaced",
+        report.shards,
+        report.tiles,
+        report.compressed_before,
+        manifests.iter().map(|m| m.file_len).sum::<u64>(),
+        display_duration(run_start.elapsed()),
+    ))?;
+    for (row, saved) in DATA_POLICY.iter().zip(report.savings) {
+        progress.line(&format!(
+            "{} | {} | {saved}",
+            match row.action {
+                PolicyAction::Keep => "KEEP",
+                PolicyAction::Drop => "DROP",
+            },
+            row.item
+        ))?;
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1772,7 +2466,7 @@ mod tests {
     fn detail_tables_are_compacted_without_touching_geometry() {
         let mut feature = Vec::new();
         let mut tags = Vec::new();
-        for value in [0_u64, 0, 1, 1, 2, 2] {
+        for value in [0_u64, 0, 1, 1, 2, 2, 3, 3] {
             write_varint(value, &mut tags);
         }
         write_len_field(2, &tags, &mut feature);
@@ -1780,10 +2474,10 @@ mod tests {
         let mut layer = Vec::new();
         write_len_field(1, b"osm_points", &mut layer);
         write_len_field(2, &feature, &mut layer);
-        for key in ["name", "addr:housenumber", "__makepad_osm_id"] {
+        for key in ["name", "addr:housenumber", "__makepad_osm_id", "amenity"] {
             write_len_field(3, key.as_bytes(), &mut layer);
         }
-        for value in [b"kept".as_slice(), b"gone", b"42"] {
+        for value in [b"kept".as_slice(), b"gone", b"42", b"bench"] {
             let mut message = Vec::new();
             write_len_field(1, value, &mut message);
             write_len_field(4, &message, &mut layer);
@@ -1799,7 +2493,7 @@ mod tests {
             .flat_map(|(_, features)| features.iter())
             .flat_map(|tags| tags.iter().map(|(key, _)| key.as_str()))
             .collect();
-        assert_eq!(retained_keys, ["name"]);
+        assert_eq!(retained_keys, ["name", "amenity"]);
         assert!(stats.savings[POLICY_TAGS] > 0);
         assert!(stats.savings[POLICY_SYNTHETIC] > 0);
     }
@@ -2552,5 +3246,52 @@ mod tests {
             }
         }
         println!("Amsterdam bake parity: {builds} builds renderer-equivalent");
+    }
+}
+
+/// `read_exact_at` and `write_all_at` on every platform: Unix's positioned
+/// reads and writes, and on Windows the same built from `seek_read` and
+/// `seek_write`, which also work at an offset.
+#[cfg(unix)]
+pub(crate) use std::os::unix::fs::FileExt as ReadExactAt;
+
+#[cfg(windows)]
+pub(crate) trait ReadExactAt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl ReadExactAt for File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 }

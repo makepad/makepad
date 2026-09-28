@@ -136,6 +136,37 @@ script_mod! {
     }
 }
 
+/// One tessellation of the document at one device scale, on the GPU. The
+/// fringe and flatten tolerance are baked for that scale (see
+/// [`DrawSvg::render_to_rect`]), so a draw at a scale more than 5% away gets
+/// a mesh of its own; at most [`DrawSvg::MAX_MESHES`] are kept, the least
+/// recently drawn going first.
+#[derive(Debug)]
+struct SvgMesh {
+    scale: f32,
+    geometry: Geometry,
+    /// The `redraw_id` of the last frame that drew it.
+    last_drawn: u64,
+}
+
+/// How one `render_to_rect` draws, decided before the uniforms are set and
+/// carried out after them (the draw call copies the uniforms it is issued
+/// with).
+enum SvgDraw {
+    /// An animated document: the fresh tessellation goes into the per-frame
+    /// geometry pool, as any `DrawVector` session does.
+    Pool,
+    /// A kept mesh of this scale: a draw call and an instance, nothing more.
+    Kept(GeometryId),
+    /// A fresh tessellation into a geometry of its own, kept afterwards.
+    Keep(Geometry),
+    /// A fresh tessellation into a geometry of its own for this draw call
+    /// only (the kept meshes are all in use this redraw).
+    Once(Geometry),
+    /// The document has no geometry.
+    Nothing,
+}
+
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawSvg {
@@ -156,19 +187,22 @@ pub struct DrawSvg {
     pub rotation: f32,
     #[rust]
     pub content_size: DVec2,
+    /// The document's meshes, one per device scale it has been drawn at,
+    /// each tessellated and uploaded once (see [`SvgMesh`]). A static icon
+    /// drawn every frame — the phone desk's, moving under a finger — costs
+    /// an instance per frame; a caller that draws one `DrawSvg` at several
+    /// sizes in a frame (a tile, a grid cell and a dock slot of the same
+    /// app) keeps a mesh for each instead of re-tessellating at every call.
     #[rust]
-    pub cached_verts: Vec<f32>,
-    #[rust]
-    pub cached_indices: Vec<u32>,
-    #[rust]
-    pub cached_gradient_data: Vec<u32>,
-    #[rust]
-    pub cached_gradient_row_count: usize,
+    meshes: Vec<SvgMesh>,
+    /// False drops every mesh before the next draw: set by whoever changes
+    /// the document, its bounds or anything else baked into the vertices.
+    /// Dropping a mesh is safe at any time: the geometry pool defers frees
+    /// until no live draw call names the slot (`CxGeometryPool`), so a draw
+    /// call recorded earlier this redraw, or one in a draw list not redrawn
+    /// since, keeps drawing the mesh it was recorded with.
     #[rust]
     pub cache_valid: bool,
-    /// Device scale the cached geometry was tessellated at; re-tessellate on change to keep the ~1px fringe.
-    #[rust]
-    pub cached_scale: f32,
     #[rust]
     pub has_animations: bool,
     #[live(true)]
@@ -267,35 +301,54 @@ impl DrawSvg {
         let fill_aa = (1.0 / device_scale).clamp(0.2, (content_ref / 6.0).max(4.0));
         // Curve flatten tolerance ~0.05 device px so curves/round caps stay smooth at any icon size.
         let tolerance = (0.05 / device_scale).clamp(0.01, 0.25);
-        // Re-tessellate when the scale moved enough that the baked fringe would be noticeably off.
-        let scale_changed = (self.cached_scale - device_scale).abs() > device_scale * 0.05;
 
-        let mut use_uploaded_cache = false;
-
-        if self.has_animations {
-            // Animated SVGs must re-tessellate every frame
-            self.draw_super.cur_fill_aa = fill_aa;
-            self.draw_super.cur_stroke_aa = fill_aa;
-            self.draw_super.cur_tolerance = tolerance;
-            self.draw_super.begin();
-            svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
-        } else if !self.cache_valid || scale_changed {
-            // Tessellate and cache on first render (or after invalidation / a scale change)
-            self.draw_super.cur_fill_aa = fill_aa;
-            self.draw_super.cur_stroke_aa = fill_aa;
-            self.draw_super.cur_tolerance = tolerance;
-            self.draw_super.begin();
-            svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
-            self.cached_verts = self.draw_super.acc_verts.clone();
-            self.cached_indices = self.draw_super.acc_indices.clone();
-            self.cached_gradient_data = self.draw_super.gradient_texture_data.clone();
-            self.cached_gradient_row_count = self.draw_super.gradient_row_count;
+        let redraw_id = cx.cx.cx.redraw_id;
+        if !self.cache_valid {
+            self.meshes.clear();
             self.cache_valid = true;
-            self.cached_scale = device_scale;
-        } else {
-            // Static SVG geometry is already uploaded; submit it directly.
-            use_uploaded_cache = true;
         }
+        // What this frame draws. An animated document is tessellated every
+        // frame into the per-frame pool; a static one draws the kept mesh of
+        // this scale, or tessellates one now — into a geometry of its own,
+        // kept for the next frames. A mesh whose baked fringe would be
+        // noticeably off (the scale moved more than 5%) does not count. The
+        // draw call itself is issued after the uniforms below are set.
+        let plan = if self.has_animations {
+            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time);
+            SvgDraw::Pool
+        } else if let Some(index) = self
+            .meshes
+            .iter()
+            .position(|mesh| (mesh.scale - device_scale).abs() <= device_scale * 0.05)
+        {
+            self.meshes[index].last_drawn = redraw_id;
+            SvgDraw::Kept(self.meshes[index].geometry.geometry_id())
+        } else {
+            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time);
+            if !self.draw_super.has_geometry() {
+                SvgDraw::Nothing
+            } else if self.meshes.len() < Self::MAX_MESHES {
+                SvgDraw::Keep(Geometry::new(cx.cx.cx))
+            } else if let Some(oldest) = self
+                .meshes
+                .iter()
+                .enumerate()
+                // A mesh drawn earlier in THIS redraw stays: a draw call of
+                // this frame names it.
+                .filter(|(_, mesh)| mesh.last_drawn != redraw_id)
+                .min_by_key(|(_, mesh)| mesh.last_drawn)
+                .map(|(index, _)| index)
+            {
+                self.meshes.swap_remove(oldest);
+                SvgDraw::Keep(Geometry::new(cx.cx.cx))
+            } else {
+                // Every kept mesh was drawn this redraw: a fifth size in one
+                // frame gets a geometry of its own for this draw call, not
+                // kept — never the per-frame pool, whose slots are rewritten
+                // next redraw under a draw list that may not be.
+                SvgDraw::Once(Geometry::new(cx.cx.cx))
+            }
+        };
 
         // Compute GPU-side scale + offset from content bounds to target rect
         let (bmin_x, bmin_y, bmax_x, bmax_y) = self.content_bounds;
@@ -336,27 +389,36 @@ impl DrawSvg {
             uniforms[5] = self.rotation;
         }
 
-        if use_uploaded_cache {
-            if !self.draw_super.submit_existing_geometry(cx) {
-                // Geometry cache is missing (e.g. after context loss); rebuild
-                // from CPU cache and re-upload once.
-                self.draw_super.begin();
-                self.draw_super
-                    .acc_verts
-                    .extend_from_slice(&self.cached_verts);
-                self.draw_super
-                    .acc_indices
-                    .extend_from_slice(&self.cached_indices);
-                self.draw_super
-                    .gradient_texture_data
-                    .extend_from_slice(&self.cached_gradient_data);
-                self.draw_super.gradient_row_count = self.cached_gradient_row_count;
-                self.draw_super.end(cx);
+        match plan {
+            SvgDraw::Pool => self.draw_super.end(cx),
+            SvgDraw::Kept(geometry_id) => self.draw_super.submit_geometry(cx, geometry_id),
+            SvgDraw::Keep(geometry) => {
+                self.draw_super.end_into(cx, &geometry);
+                self.meshes.push(SvgMesh { scale: device_scale, geometry, last_drawn: redraw_id });
             }
-        } else {
-            self.draw_super.end(cx);
+            // Dropped here; its slot is freed once no draw call names it.
+            SvgDraw::Once(geometry) => self.draw_super.end_into(cx, &geometry),
+            SvgDraw::Nothing => {}
         }
         self.svg_doc = Some(doc);
+    }
+
+    /// Meshes kept per `DrawSvg`: the sizes one icon is drawn at in a frame
+    /// (a tile, a grid cell, a dock slot) plus a spare. Beyond that, the
+    /// least recently drawn mesh of an EARLIER redraw is dropped; when every
+    /// kept mesh was drawn this redraw, the extra size gets a one-off
+    /// geometry instead, so the kept ones are not thrashed within a frame.
+    const MAX_MESHES: usize = 4;
+
+    /// Tessellates the document at the fringe and tolerance of one device
+    /// scale into `draw_super`'s accumulators; whoever calls this ends the
+    /// session with `end`, `end_into` or not at all.
+    fn tessellate(&mut self, doc: &SvgDocument, lw: f32, lh: f32, fill_aa: f32, tolerance: f32, time: f32) {
+        self.draw_super.cur_fill_aa = fill_aa;
+        self.draw_super.cur_stroke_aa = fill_aa;
+        self.draw_super.cur_tolerance = tolerance;
+        self.draw_super.begin();
+        svg::render_svg(&mut self.draw_super, doc, 0.0, 0.0, lw, lh, time);
     }
 
     fn resolve_walk(&self, walk: Walk) -> Walk {

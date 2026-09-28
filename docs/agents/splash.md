@@ -11,11 +11,11 @@ reference for current APIs.
 |---|---|
 | Small app and startup | [Counter example](../../examples/counter/src/main.rs) |
 | Broader widget examples | [Splash example](../../examples/splash/src/main.rs) |
-| Widget registration and exports | [widgets/src/lib.rs](../../widgets/src/lib.rs) |
-| Styling and animation | [Button](../../widgets/src/button.rs) |
-| Widget lookup and updates | [Widget API](../../widgets/src/widget.rs) |
-| Virtualized list templates | [PortalList](../../widgets/src/portal_list.rs) |
-| Tree drawing and open state | [FileTree](../../widgets/src/file_tree.rs) |
+| Widget registration and exports | [widgets/core/src/lib.rs](../../widgets/core/src/lib.rs), families in [widgets/src/lib.rs](../../widgets/src/lib.rs) |
+| Styling and animation | [Button](../../widgets/core/src/button.rs) |
+| Widget lookup and updates | [Widget API](../../widgets/core/src/widget.rs) |
+| Virtualized list templates | [PortalList](../../widgets/core/src/portal_list.rs) |
+| Tree drawing and open state | [FileTree](../../widgets/families/data/src/file_tree.rs) |
 | Generated widget APIs | [Widget derives](../../widgets/derive_widget/src/derive_widget.rs) |
 | Shader instance memory | [DrawVars](../../platform/src/draw_vars.rs) |
 | Script/compiler regression cases | [Script test crate](../../platform/script/test) |

@@ -105,9 +105,25 @@ fn child_pass_composites_into_the_window(app: TestApp) {
         "cached_pane has no rect: {pane:?}"
     );
 
-    let path = app.screenshot();
+    // The pane's rect exists one frame before its child pass has been
+    // composited into the window, so the first capture after `wait_visible`
+    // can still show the empty pane. What this test pins is what the composite
+    // looks like, not which frame it lands on: capture until every quadrant
+    // is there, for at most three seconds.
+    let min_share_for = |image: &Image| (image.width * image.height) / 10;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (path, image) = loop {
+        let path = app.screenshot();
+        let image = Image::read(&path);
+        let composited = QUADRANTS
+            .iter()
+            .all(|(_, color)| image.find(*color, 8).0 >= min_share_for(&image));
+        if composited || std::time::Instant::now() >= deadline {
+            break (path, image);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     println!("[render_to_texture] grab: {}", path.display());
-    let image = Image::read(&path);
 
     // A skipped child pass leaves the composite quad sampling an empty
     // texture, so the grab is one flat colour end to end.

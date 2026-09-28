@@ -29,6 +29,12 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> ComponentMap<K, V> {
         self.visible.clear();
     }
 
+    /// Whether `key` was touched (drawn) since the last retain: what the
+    /// next `retain_visible*` keeps.
+    pub fn is_visible(&self, key: &K) -> bool {
+        self.visible.contains(key)
+    }
+
     pub fn retain_visible_with<CB>(&mut self, mut cb: CB)
     where
         CB: FnMut(V),

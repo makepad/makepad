@@ -111,7 +111,12 @@ pub fn personalize(file: &mut File, bootstrap: &Bootstrap) -> Result<(u64, Vec<u
     { return Err("Unsupported runner ZIP directory".into()); }
     let directory = zip_read_central_directory(file).map_err(|_| "Invalid runner ZIP entries")?;
     // Keep old deployed bundles readable while rolling out the flat ZIP.
-    let name = if directory.file_headers.iter().any(|h| h.file_name == "makepad-builder.exe") {
+    // The Builder as source (makepad-builder.bat compiles it; the Builder
+    // keeps its files, this one too, in the builder folder beside it), or as
+    // the executable earlier downloads shipped.
+    let name = if directory.file_headers.iter().any(|h| h.file_name == "makepad-builder.bat") {
+        format!("builder/{BOOTSTRAP_FILE}")
+    } else if directory.file_headers.iter().any(|h| h.file_name == "makepad-builder.exe") {
         BOOTSTRAP_FILE.to_owned()
     } else if directory.file_headers.iter().any(|h| h.file_name == "makepad-loader.exe") {
         LEGACY_BOOTSTRAP_FILE.to_owned()

@@ -25,7 +25,10 @@ pub use codec::{
     compress_tile, compression_metadata_rows, TileCodec, TileCompression,
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
-pub use map_tags::{DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS};
+pub use map_tags::{
+    detail_feature_used, detail_key_allowed, DETAIL_CONTRACT, DETAIL_CONTRACT_METADATA_KEY, micro_icon, DetailGeom, DetailTags, MicroIconClass,
+    DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS,
+};
 pub use mkmap::{
     mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, LeafParseLimits, MkmapLeaf, MkmapRoot,
     MkmapTileRef, RootRecordRef, TileArchiveReader,

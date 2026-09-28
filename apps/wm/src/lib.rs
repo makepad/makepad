@@ -15,6 +15,7 @@
 #![allow(dead_code)] // shell surface (icons, OSD, panels) built ahead of the flows that use it
 pub use makepad_widgets;
 use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskHandle};
+use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
 use makepad_widgets::*;
 
 mod ai_bus;
@@ -29,6 +30,7 @@ mod desktop;
 mod desktop_app;
 mod snap;
 mod mobile;
+mod launcher_motion;
 mod mobile_surface;
 mod mobile_app;
 mod mobile_tiles;
@@ -47,8 +49,13 @@ use linux_controls::LinuxControls;
 use linux_gpu::LinuxGpuController;
 pub mod module_host;
 pub mod module_view;
+// Compiling an app to a dylib and dlopen-ing it needs a process, a linker and
+// a loader: none of that exists on the web, where the stand-in refuses.
+#[cfg(not(target_arch = "wasm32"))]
 mod dylib_host;
-mod rmeta;
+#[cfg(target_arch = "wasm32")]
+#[path = "dylib_host_web.rs"]
+mod dylib_host;
 mod pane_links;
 mod preview;
 mod run_view;
@@ -61,6 +68,8 @@ pub use desktop::DesktopStyle;
 pub use run_view::MpRunViewAction;
 pub use makepad_app_module;
 pub use makepad_wm_theme;
+#[cfg(target_os = "android")]
+pub use host::android_prepare_children;
 
 use std::collections::HashMap;
 
@@ -498,6 +507,11 @@ pub struct App {
     /// `--gallery`: the shell-surface gallery instead of a desktop.
     #[rust]
     gallery: bool,
+    /// What the WM does for hosted children that have no OS window or JVM
+    /// of their own (HTTP with TLS, the clipboard menu, URLs, permission
+    /// prompts, file pickers): platform hosted_relay.rs.
+    #[rust]
+    relay: HostRelayServer,
     /// What the shell bar's status modules show, sampled on the tick.
     #[rust]
     bar_sample: BarData,
@@ -565,6 +579,10 @@ pub struct App {
     /// The one-shot SUPER+ALT layer prefix (see binds.rs).
     #[rust]
     alt_armed: bool,
+    /// How many times the shell menu has opened: its open line carries the
+    /// number, so a script can wait for the one it asked for.
+    #[rust]
+    shell_menu_opens: u64,
     /// The bar was hidden because a window went fullscreen, not by
     /// SUPER+SHIFT+SPACE — so it comes back on its own.
     #[rust]
@@ -592,6 +610,11 @@ pub struct App {
     /// Drives the dormant instances (see `pump_warm`).
     #[rust]
     warm_tick: Timer,
+    /// What the bar last showed (`update_bar`): it redraws only when that
+    /// changes, not on every second's tick — an idle phone repainted once a
+    /// second for a clock that shows minutes.
+    #[rust]
+    bar_shown: String,
     /// When each warm client was last ticked. Kept apart from `WarmFrame`
     /// because the FIRST ticks are what make a frame possible at all — see
     /// `pump_warm`.
@@ -633,6 +656,7 @@ pub struct App {
     #[rust] phone_time: f64,
     /// The storage read of the home page's order, answered in `Event::Storage`.
     #[rust] home_order_request: Option<StorageRequestId>,
+    #[rust] shell_look_request: Option<StorageRequestId>,
 }
 
 /// A warm instance's own swapchain: the host end of the frames a DORMANT
@@ -868,20 +892,35 @@ impl App {
         let lines = self.line_sender();
         let pool = cx.task_pool();
         let state = self.state_mut();
-        match spawn_client(
-            &pool,
-            &cx.thread_spawner(),
-            app,
-            id,
-            hub_port,
-            cwd.as_ref(),
-            (app.id == "terminal").then_some(term_env.as_str()),
-            &[],
-            false,
-            lines,
-        ) {
+        // Opening an app builds it when it is missing or out of date: its
+        // tile shows the build, then the app.
+        let spawned = match clients::repo_root().filter(|_| !app.is_current()) {
+            Some(root) => clients::spawn_build(
+                &pool,
+                &cx.thread_spawner(),
+                app,
+                id,
+                &root,
+                clients::PendingLaunch { cwd: cwd.clone() },
+                lines,
+            ),
+            None => spawn_client(
+                &pool,
+                &cx.thread_spawner(),
+                app,
+                id,
+                hub_port,
+                cwd.as_ref(),
+                (app.id == "terminal").then_some(term_env.as_str()),
+                &[],
+                false,
+                lines,
+            ),
+        };
+        match spawned {
             Ok(slot) => {
-                log!("wm: launched {} as client {}", app.id, id);
+                let verb = if slot.build.is_some() { "building" } else { "launched" };
+                log!("wm: {} {} as client {}", verb, app.id, id);
                 state.clients.insert(id, slot);
                 let area = self.desk_area(cx);
                 let state = self.state_mut();
@@ -1042,6 +1081,11 @@ impl App {
         let Some(app) = crate::clients::find_app(app_id) else {
             return;
         };
+        // Warming never compiles: an app that is not built, or whose
+        // binary is out of date, stays cold until the person opens it.
+        if !self.warm_pool.warmable(&app) {
+            return;
+        }
         let hub_port = self.state_mut().hub_port;
         if hub_port == 0 {
             // No hub: a child could never connect, so warming is pointless.
@@ -1084,7 +1128,15 @@ impl App {
     /// four cargo builds into the same target-dir lock at once, and they
     /// would only queue behind each other anyway.
     fn top_up_warm_pool(&mut self, cx: &mut Cx) {
-        let Some(app) = self.warm_pool.next_missing(host::now()) else {
+        // A phone keeps no desktop warm pool: each child is a whole process
+        // (~190 MB), the desktop apps it warms (terminal, browser, task) are
+        // not in the APK, and the phone shell starts its own tile clients.
+        if cfg!(target_os = "android") {
+            return;
+        }
+        let pool = &self.warm_pool;
+        let built = |app: &str| crate::clients::find_app(app).is_some_and(|app| app.is_built() && !pool.known_stale(&app));
+        let Some(app) = self.warm_pool.next_missing(host::now(), built) else {
             return;
         };
         self.spawn_warm(cx, &app);
@@ -1256,6 +1308,14 @@ impl App {
             }
         }
         for (client, text, linked) in latest {
+            // Provisioning has no tile: its line goes on the desk itself
+            // until "provisioned" (or stays, as a failure to read).
+            if client == dylib_host::PROVISION_CLIENT {
+                let state = self.state_mut();
+                state.provision = if text.starts_with("provisioned") { None } else { Some(text) };
+                self.desk(cx).redraw(cx);
+                continue;
+            }
             let mut warm = false;
             let mut pane = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -1282,6 +1342,9 @@ impl App {
             // The pane's child has its own run view, never a desk tile.
             if pane {
                 self.with_pane_run_view(cx, |cx, v| v.set_status_line(cx, &text));
+                continue;
+            }
+            if !self.state_mut().clients.contains_key(&client) {
                 continue;
             }
             self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
@@ -1684,8 +1747,25 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Answers for hosted children's relays, each to its client.
+    fn send_relays(&self, answers: Vec<(ClientId, makepad_widgets::makepad_platform::studio::HostRelay)>) {
+        let Some(state) = self.state.as_ref() else { return };
+        for (client, relay) in answers {
+            if let Some(sender) = state.clients.get(&client).and_then(|slot| slot.sender.as_ref()) {
+                send_to_app(sender, vec![StudioToApp::Relay(relay)]);
+            }
+        }
+    }
+
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("wm: removing client {}", client);
+        self.relay.forget_client(cx, client);
+        // A finger held on the closing app lets go of it first.
+        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
+            if desk.phone_finger_on(client) {
+                desk.cancel_phone_finger(cx);
+            }
+        }
         // A module instance: the tile lets go of the root FIRST, then the
         // instance and its isolate go (module_host.rs). The bus hears an
         // Unregister for it below, like for any client.
@@ -1751,6 +1831,14 @@ impl App {
         // window on its first open — the same client, seated in the layout.
         self.promote_tile_client(cx, client);
         if self.state_mut().style.target.mobile() {
+            // Another app coming to the front takes the finger off the old one.
+            let held_elsewhere = self
+                .desk(cx)
+                .borrow::<WmDesk>()
+                .is_some_and(|d| d.phone_finger_active() && !d.phone_finger_on(client));
+            if held_elsewhere {
+                self.cancel_app_finger(cx);
+            }
             self.state_mut().phone.activate(client);
             // In front now: its full face and full viewport go out at once,
             // so the zoom-in never plays over a compact frame.
@@ -1876,21 +1964,83 @@ impl App {
                 }
             }
         }
-        let dead: Vec<ClientId> = self
-            .state_mut()
-            .clients
-            .iter_mut()
-            .filter_map(|(id, slot)| {
-                let exited = slot
-                    .child
-                    .as_mut()
-                    .map(|c| matches!(c.try_wait(), Ok(Some(_))))
-                    .unwrap_or(false);
-                exited.then_some(*id)
-            })
-            .collect();
+        let mut dead = Vec::new();
+        let mut built = Vec::new();
+        for (id, slot) in self.state_mut().clients.iter_mut() {
+            let exit = slot.child.as_mut().and_then(|c| c.try_wait().ok().flatten());
+            match exit {
+                // A finished build that nobody closed: the app starts now.
+                Some(status) if slot.build.is_some() && slot.closing.is_none() => built.push((*id, status.success())),
+                Some(_) => dead.push(*id),
+                // Closed with no process behind it (a failed build's tile).
+                None if slot.child.is_none() && slot.closing.is_some() => dead.push(*id),
+                None => {}
+            }
+        }
+        for (id, success) in built {
+            self.finish_build(cx, id, success);
+        }
         for id in dead {
             self.remove_client(cx, id);
+        }
+    }
+
+    /// The build `launch_app` started for a deck app is done: the app
+    /// starts in the same slot and tile, or the tile says the build failed
+    /// and where its log is.
+    fn finish_build(&mut self, cx: &mut Cx, id: ClientId, success: bool) {
+        let Some(slot) = self.state_mut().clients.get_mut(&id) else { return };
+        slot.child = None;
+        let launch = slot.build.take().unwrap_or_default();
+        let app_id = slot.app.clone();
+        let open_at = slot.open_at;
+        let pane = slot.pane;
+        let result = match clients::find_app(&app_id) {
+            Some(app) if success => {
+                let hub_port = self.state_mut().hub_port;
+                let term_env = self.state_mut().term_env.clone();
+                let lines = self.line_sender();
+                let pool = cx.task_pool();
+                spawn_client(
+                    &pool,
+                    &cx.thread_spawner(),
+                    &app,
+                    id,
+                    hub_port,
+                    launch.cwd.as_ref(),
+                    (app.id == "terminal").then_some(term_env.as_str()),
+                    &[],
+                    false,
+                    lines,
+                )
+            }
+            _ => Err("cargo build failed".to_string()),
+        };
+        match result {
+            Ok(mut next) => {
+                log!("wm: built {}, launched as client {}", app_id, id);
+                // The first frame counts from the click; the binary is
+                // fresh from the linker (macOS scans its first exec).
+                next.open_at = open_at;
+                next.pane = pane;
+                next.linked = true;
+                next.linked_at = Some(host::now());
+                self.state_mut().clients.insert(id, next);
+            }
+            Err(error) => {
+                log!("wm: building {} failed: {}", app_id, error);
+                let text = format!("build failed — see {}", clients::client_log(id, true).display());
+                if let Some(slot) = self.state_mut().clients.get_mut(&id) {
+                    slot.status = text.clone();
+                }
+                if pane {
+                    self.with_pane_run_view(cx, |cx, v| v.set_status_line(cx, &text));
+                } else {
+                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                        d.with_run_view(cx, id, |cx, v| v.set_status_line(cx, &text))
+                    });
+                }
+            }
         }
     }
 
@@ -1970,7 +2120,7 @@ impl App {
             if !self.ensure_local_pane(cx) {
                 return;
             }
-        } else if self.ai_bus.pane_client.is_none() && !self.launch_ai_pane(cx) {
+        } else if self.ai_bus.pane_client.is_none() && !self.launch_ai_pane(cx, true) {
             return;
         }
         self.sync_ai_pane_geometry(cx);
@@ -1994,9 +2144,12 @@ impl App {
     }
 
     /// Spawn the aichat child as the pane's client: the ordinary launch
-    /// path (cargo, env, per-client log) minus the layout — `launch_app`
-    /// is never used for it, since launch-or-focus would "focus" a pane.
-    fn launch_ai_pane(&mut self, cx: &mut Cx) -> bool {
+    /// path (env, per-client log) minus the layout — `launch_app` is never
+    /// used for it, since launch-or-focus would "focus" a pane. `opened`:
+    /// the person opened the pane, so an aichat that is not built or out of
+    /// date is built (in the pane); the desktop's own start runs only an
+    /// up-to-date aichat and never compiles.
+    fn launch_ai_pane(&mut self, cx: &mut Cx, opened: bool) -> bool {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         if self.linux_gpu.active() { self.linux_gpu.deferred_pane = true; return false; }
         let Some(app) = clients::find_app("aichat") else {
@@ -2012,7 +2165,17 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, lines) {
+        let root = clients::repo_root();
+        let current = app.is_current();
+        if !opened && !current {
+            log!("wm: aichat is not built or out of date; the pane builds it when opened");
+            return false;
+        }
+        let spawned = match root.filter(|_| !current) {
+            Some(root) => clients::spawn_build(&pool, &cx.thread_spawner(), &app, id, &root, Default::default(), lines),
+            None => spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, lines),
+        };
+        match spawned {
             Ok(mut slot) => {
                 slot.pane = true;
                 self.state_mut().clients.insert(id, slot);
@@ -2753,7 +2916,7 @@ impl App {
                 // Which of the phone's captures this frame may refresh: a
                 // tile client's frames are sorted by size, so a card never
                 // shows a stretched tile and a tile never a squeezed window.
-                let face = self.note_client_frame_face(client, pd.width, pd.height);
+                let face = self.note_client_frame_face(cx, client, pd.width, pd.height);
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.note_client_frame(client, face);
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
@@ -2793,6 +2956,13 @@ impl App {
                     }
                 }
             }
+            AppToStudio::RequestAnimationFrame => {
+                if !self.is_warm(client) && !self.ai_bus.is_pane(client) {
+                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                        d.with_run_view(cx, client, |cx, v| v.child_frame_request(cx))
+                    });
+                }
+            }
             AppToStudio::TickDone => {
                 crate::run_view::trace_host(&format!("rx-tickdone c{}", client));
                 // A warm instance is pumped by heartbeat, not by a tile.
@@ -2810,7 +2980,35 @@ impl App {
             AppToStudio::SetClipboard(text) => {
                 cx.copy_to_clipboard(&text);
             }
+            AppToStudio::Relay(relay) => {
+                // Only a client the WM launched and still holds a channel to
+                // is served (the hub listens on 127.0.0.1 with no per-launch
+                // token yet; see local/agent_state/wm-protocol/report.md).
+                let known = self.state.as_ref().is_some_and(|state| {
+                    state.clients.get(&client).is_some_and(|slot| slot.sender.is_some())
+                });
+                if !known {
+                    log!("wm: relay from unknown client {} ignored", client);
+                    return;
+                }
+                // The child's window starts where its view is drawn.
+                let origin = self
+                    .desk(cx)
+                    .borrow_mut::<WmDesk>()
+                    .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.area().rect(cx).pos))
+                    .unwrap_or_default();
+                let answers = self.relay.on_child(cx, client, origin, relay);
+                self.send_relays(answers);
+            }
             AppToStudio::Custom(json) => {
+                // What the child's pointer input understands: a child that
+                // never says so gets no `MouseCancel` (see MpRunView).
+                if let Some(caps) = makepad_platform::ime::HostedPointerCaps::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |_, v| v.set_pointer_caps(caps));
+                    }
+                    return;
+                }
                 if let Some(back) = makepad_platform::ime::HostedBack::parse(&json) {
                     if back.handled == Some(false) && self.state_mut().phone.client == Some(client) {
                         self.state_mut().phone.navigate(mobile::PhoneScreen::Home);
@@ -2818,7 +3016,22 @@ impl App {
                     }
                     return;
                 }
+                if let Some(fenced) = makepad_platform::ime::HostedFenced::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.set_child_fenced(cx, fenced.on));
+                    }
+                    return;
+                }
+                if let Some(wake) = makepad_platform::ime::HostedWake::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.child_wake_in(cx, wake.in_secs));
+                    }
+                    return;
+                }
                 if let Some(ime) = makepad_platform::ime::HostedImeState::parse(&json) {
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        d.with_run_view(cx, client, |cx, v| v.set_child_ime(cx, ime));
+                    }
                     self.state_mut().phone.ime.insert(client,ime);
                     self.sync_phone_keyboard(cx);
                     return;
@@ -2959,10 +3172,13 @@ impl App {
                 m.open_at(cx, path, skin);
             }
         }
+        self.shell_menu_opens += 1;
+        log!("wm: shell menu open #{} at {path:?}", self.shell_menu_opens);
         self.redraw_all(cx);
     }
 
     fn close_shell_menu(&mut self, cx: &mut Cx) {
+        log!("wm: shell menu closed");
         let menu = self.ui.widget(cx, ids!(shell_menu));
         {
             let mut borrowed = menu.borrow_mut::<ShellMenu>();
@@ -3066,11 +3282,13 @@ impl App {
     /// What a menu row does. The ids are the jsonc's dotted paths, with
     /// `apps.<id>` and `style.theme[.import].<name>` from the providers.
     fn shell_menu_activate(&mut self, cx: &mut Cx, target: &str) {
+        log!("wm: shell menu activate {target}");
         if target=="start.documents" {self.launch_app(cx,"files");return;}
         if target=="start.power" {self.toggle_shell_panel(cx,BarModule::Power);return;}
         if let Some(name) = target.strip_prefix("desktop.") {
             if let Some(style) = desktop::DesktopStyle::parse(name) {
-                if style.supports_dark() { self.state_mut().style.dark = name.ends_with("-dark"); }
+                // The appearance toggle owns dark or light; a style pick
+                // leaves it where it is.
                 self.set_desktop_style(cx, style);
                 return;
             }
@@ -3264,21 +3482,27 @@ impl App {
         data.open_panel = self.shell_panel_open;
         // The middle window control reads "restore" while maximized.
         data.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
+        let window_controls = shell::bar::window_controls_default()
+            && !matches!(cx.os_type(), OsType::LinuxDirect);
+        let shown = format!("{:?} {}", data, window_controls);
+        if shown == self.bar_shown {
+            return;
+        }
+        self.bar_shown = shown;
         let bar = self.ui.widget(cx, ids!(shell_bar));
         {
             let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
             if let Some(b) = borrowed.as_mut() {
                 b.data = data;
                 // The direct-display session has no outer window to control.
-                b.window_controls = shell::bar::window_controls_default()
-                    && !matches!(cx.os_type(), OsType::LinuxDirect);
+                b.window_controls = window_controls;
             }
         }
         self.redraw_all(cx);
     }
 
     /// The bar's window controls: the same three calls the stock caption
-    /// bar makes on its own buttons (widgets/src/window.rs).
+    /// bar makes on its own buttons (widgets/core/src/window.rs).
     fn window_control(&mut self, cx: &mut Cx, module: BarModule) -> bool {
         let window = self.ui.window(cx, ids!(main_window));
         match module {
@@ -3356,12 +3580,14 @@ impl App {
             self.bar_sample.muted = s.muted;
             self.bar_sample.battery = s.battery;
         }
-        // No sampler (no processes to fork `date` in: the web): the clock
-        // is formatted from the platform's own epoch seconds instead.
-        self.bar_sample.clock = match (self.clock_alt, s.clock.is_empty()) {
-            (alt, true) => host::fallback_clock(alt),
-            (true, false) => s.clock_alt,
-            (false, false) => s.clock,
+        // The clock is formatted here, on the UI thread: `localtime_r` reads
+        // the process environment, which this thread also writes (child env,
+        // MAKEPAD_WM_ROOT), so no worker may read it concurrently. Where
+        // there is no local clock (the web) the platform's own epoch seconds
+        // are formatted instead.
+        self.bar_sample.clock = {
+            let clock = shell::bar::sample_clock(self.clock_alt);
+            if clock.is_empty() { host::fallback_clock(self.clock_alt) } else { clock }
         };
         self.status_tick = self.status_tick.wrapping_add(1);
         self.bar_sample.network = s.network;
@@ -4395,6 +4621,7 @@ impl MatchEvent for App {
             style: Default::default(),
             launchable: Launchable::default(),
             accessibility: desktop::Accessibility::load(&theme::makepad_home().join("wm/accessibility.splash")),
+            provision: None,
         });
         self.next_id = 1;
         // The hosting registry: the build's linked modules, the person's
@@ -4423,6 +4650,12 @@ impl MatchEvent for App {
         // The warm pool's pump. Started even when the pool is off: it
         // costs one no-op wakeup and keeps the timer id stable.
         self.warm_tick = cx.start_interval(WARM_PUMP);
+        // Nothing to pump (no pool, or a phone, which keeps none): no 20 Hz
+        // wakeup of an idle WM.
+        if !self.warm_pool.enabled() || cfg!(target_os = "android") {
+            cx.stop_timer(self.warm_tick);
+            self.warm_tick = Timer::empty();
+        }
         if !self.warm_pool.enabled() {
             if self.processes() {
                 log!("wm: warm pool disabled (MAKEPAD_WM_NO_WARM)");
@@ -4486,7 +4719,7 @@ impl MatchEvent for App {
             if self.with_ai_pane(cx, |cx, p| p.ensure_overlay(cx)).unwrap_or(false) {
                 log!("wm: the assistant starts with the desktop (in-process)");
             }
-        } else if hub_port != 0 && self.launch_ai_pane(cx) {
+        } else if hub_port != 0 && self.launch_ai_pane(cx, false) {
             log!("wm: the assistant starts with the desktop (the aichat child)");
         }
 
@@ -4531,6 +4764,8 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let answers = self.relay.on_actions(cx, actions);
+        self.send_relays(answers);
         if self.gallery {
             let gallery = self.ui.widget(cx, ids!(shell_gallery));
             {
@@ -4774,6 +5009,10 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event, Event::NetworkResponses(_) | Event::PermissionResult(_)) {
+            let answers = self.relay.on_event(event);
+            self.send_relays(answers);
+        }
         if matches!(cx.os_type(), OsType::LinuxDirect) && matches!(event, Event::MouseMove(_)) {
             if let Some(mut window) = self.ui.window(cx, ids!(main_window)).borrow_mut() {
                 window.handle_direct_mouse_cursor(cx, event);
@@ -4800,6 +5039,7 @@ impl AppMain for App {
         self.phone_animation_event(cx,event);
         if let Event::Storage(responses) = event {
             self.home_order_response(cx, responses);
+            self.shell_look_response(cx, responses);
         }
         if let Some(ne) = self.style_frame.is_event(event) {
             if self.state.is_some() {
@@ -4812,6 +5052,12 @@ impl AppMain for App {
         if let Event::WindowGeomChange(ev) = event {
             if let Some(state) = self.state.as_mut() {
                 state.phone.chrome.set_insets(ev.new_geom.safe_area_insets);
+            }
+            // A new phone size takes the finger away (what it held moved).
+            if ev.old_geom.inner_size != ev.new_geom.inner_size
+                && self.state.as_ref().is_some_and(|s| s.style.target.mobile())
+            {
+                self.cancel_phone_input(cx);
             }
             if ev.old_geom.inner_size != ev.new_geom.inner_size {
                 if let Some(mut scene) = self.ui.widget(cx, ids!(scene)).borrow_mut::<scene::WmScene>() {scene.cut(cx);}
@@ -4830,6 +5076,11 @@ impl AppMain for App {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         if !self.gallery {
             self.linux_controls_event(cx, event);
+        }
+        if let Event::WindowLostFocus(_) = event {
+            if self.state.as_ref().is_some_and(|s| s.style.target.mobile()) {
+                self.cancel_phone_input(cx);
+            }
         }
         if let Event::WindowDragQuery(dq) = event {
             // Caption-less window: the bar strip is the drag handle; the
@@ -4856,6 +5107,11 @@ impl AppMain for App {
                 }
             }
         }
+        // The phone skin's simulated finger owns its press until it lifts:
+        // its moves and release go to the app before any shell surface.
+        if self.state.is_some() && self.phone_finger_route(cx, event) {
+            return;
+        }
         // The shell menu (and, for move/down/up, an open bar flyout) is
         // modal: while it is up, the pointer event is exclusively its own
         // — see `shell_menu_pointer` / `shell_panel_pointer`. Taken before
@@ -4864,7 +5120,7 @@ impl AppMain for App {
         if self.state.is_some()
             && matches!(
                 event,
-                Event::TouchUpdate(_) | Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
+                Event::TouchUpdate(_) | Event::FingerCancel(_) | Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_)
             )
             && (self.shell_menu_pointer(cx, event) || self.shell_panel_pointer(cx, event))
         {

@@ -1019,9 +1019,28 @@ impl MacosApp {
     }
 
     pub fn do_callback(event: MacosEvent) {
+        /// Hands the callback back when `do_callback` ends, also when a panic
+        /// unwinds through it to a callback boundary that contains it
+        /// (`shielded` in macos_delegates.rs). The callback owns the Metal
+        /// context and every window's `MacosWindow`, whose addresses Cocoa
+        /// keeps in view and delegate ivars: dropped on the unwind, they were
+        /// freed under AppKit (the next mouse move or layer display wrote into
+        /// the freed blocks) and the app stopped answering every event, quit
+        /// and SIGTERM included.
+        struct Restore(Option<Box<dyn FnMut(MacosEvent) -> EventFlow>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let mut callback = self.0.take();
+                if try_with_macos_app(|app| app.event_callback = callback.take()).is_none() {
+                    // Leaked rather than dropped: never free those under AppKit.
+                    std::mem::forget(callback);
+                }
+            }
+        }
         let cb = with_macos_app(|app| app.event_callback.take());
-        if let Some(mut callback) = cb {
-            let event_flow = callback(event);
+        if let Some(callback) = cb {
+            let mut callback = Restore(Some(callback));
+            let event_flow = (callback.0.as_mut().unwrap())(event);
             let should_terminate = with_macos_app(|app| {
                 app.event_flow = event_flow;
                 event_flow == EventFlow::Exit && !app.terminating_from_app_delegate
@@ -1032,7 +1051,6 @@ impl MacosApp {
                     let () = msg_send![ns_app, terminate: nil];
                 }
             }
-            with_macos_app(|app| app.event_callback = Some(callback));
         }
     }
 
@@ -1074,6 +1092,7 @@ impl MacosApp {
             if *window == native_window {
                 unsafe {
                     let () = msg_send![*link, invalidate];
+                    let () = msg_send![*link, release];
                 }
                 false
             } else {
@@ -1390,6 +1409,7 @@ impl MacosApp {
                     true
                 } else {
                     let () = msg_send![*link, invalidate];
+                    let () = msg_send![*link, release];
                     false
                 }
             });
@@ -1442,6 +1462,11 @@ impl MacosApp {
                 if link == nil {
                     continue;
                 }
+                // Our own reference, released after `invalidate`: the view's
+                // is gone once AppKit closes the window, which happens before
+                // the deferred WindowClosed retires it (macOS 15 aborted on
+                // the freed link's lock when the last window closed).
+                let () = msg_send![link, retain];
                 let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
                 let () = msg_send![link, addToRunLoop: nsrunloop forMode: NSRunLoopCommonModes];
                 if self.display_links_paused {

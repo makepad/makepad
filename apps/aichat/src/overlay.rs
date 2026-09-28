@@ -1,7 +1,7 @@
 //! The chat's module root: what a host seats in-process.
 //!
 //! `mod.widgets.AiChatOverlay{}` is what the Window's AI slot
-//! (`widgets/src/ai_slot.rs`) instantiates by name on F10, and what the
+//! (`widgets/families/ai/src/ai_slot.rs`) instantiates by name on F10, and what the
 //! superbuild seats in its pane. It is a `View` with the panel in it and
 //! three duties around it: adopt the in-process service links the apps
 //! parked on `Cx` ([`PendingServiceLinks`]) into the panel's registry,

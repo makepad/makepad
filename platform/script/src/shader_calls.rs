@@ -571,8 +571,16 @@ impl ShaderFnCompiler {
         } else if let ShaderType::IoSelf(_) = sself {
             write!(method_name_prefix, "io_").ok();
         } else if let ShaderType::ScopeObject(obj) = sself {
-            // Use the object index to create a unique prefix for scope object methods
-            write!(method_name_prefix, "scope{}_", obj.index).ok();
+            // A prefix unique within this shader and stable across module
+            // re-evaluation: the object's place in the order of first use.
+            let at = match output.scope_prefixes.iter().position(|&i| i == obj.index as usize) {
+                Some(at) => at,
+                None => {
+                    output.scope_prefixes.push(obj.index as usize);
+                    output.scope_prefixes.len() - 1
+                }
+            };
+            write!(method_name_prefix, "scope{}_", at).ok();
         }
 
         // First pass: resolve AbstractInt/AbstractFloat against declared parameter types

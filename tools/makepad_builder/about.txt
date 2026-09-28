@@ -1,1 +1,1 @@
-Makepad Builder compiles your {app} application from source, so you can tweak it with your own coding agents.
+Shipped as source code, so your coding agent can customize everything.

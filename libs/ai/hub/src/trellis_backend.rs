@@ -2132,7 +2132,7 @@ mod tests {
     #[cfg(feature = "mesh")]
     #[test]
     fn saved_yoshi_clean_and_floor_regression_match_quality_gate_when_present() {
-        let library = makepad_asset_client::paths::library_root();
+        let library = crate::home::test_asset_library_root();
         let verify = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../local/character_verify");
         let accepted = [

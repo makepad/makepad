@@ -229,6 +229,24 @@ pub struct Cx {
     pub post_draw_hook: Option<Box<dyn FnMut(&mut Cx)>>,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
+    /// Frames to copy for transitions (`window_snapshot.rs`).
+    pub(crate) window_snapshots: Vec<crate::window_snapshot::WindowSnapshotRequest>,
+    /// Draws skipped because their pipeline was still compiling: in all,
+    /// and the repaint that last skipped one (`window_snapshot.rs`).
+    pub(crate) pipeline_skips: u64,
+    /// The same by reason: instances not yet presentable, no compiled
+    /// shader, pipeline still compiling.
+    pub(crate) skip_reasons: [u64; 3],
+    #[cfg(all(target_vendor = "apple", not(gpusim)))]
+    pub(crate) pipeline_skip_repaint: Option<u64>,
+    /// Until then (seconds since start), a window frame with a draw skipped
+    /// for a compiling pipeline is not presented: the last whole frame stays.
+    pub(crate) whole_frames_until: f64,
+    /// When the current whole-frames hold began (for the `switch` trace).
+    pub(crate) whole_hold_began: Option<f64>,
+    /// The app knows the frame being drawn is not the finished one (it lays
+    /// out again next frame): hold it back, within a whole-frames hold.
+    pub(crate) hold_next_paint: bool,
     #[allow(dead_code)]
     pub(crate) run_view_frame_requests: Vec<RunViewFrameRequest>,
     #[allow(dead_code)]
@@ -254,7 +272,7 @@ pub struct Cx {
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
     pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
-    /// The tweaker overlay's remote dispatcher (widgets/src/tweaker.rs).
+    /// The tweaker overlay's remote dispatcher (widgets/families/tweaker/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
@@ -265,6 +283,14 @@ pub struct Cx {
     pub ai_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
+    /// A hosted child's host messages that the network drain took off the
+    /// shared queue: its event loop reads the host socket itself (from the
+    /// first read on this is `Some`), and a Tick also drains `net` for HTTP
+    /// and script sockets. A host batch landing in that drain went through
+    /// `dispatch_studio_msg`, which drops the loop's own messages (geometry,
+    /// swapchain, Tick): the child then kept drawing at the old size. The
+    /// drain parks them here and the loop's next read takes them first.
+    pub(crate) studio_backlog: Option<std::collections::VecDeque<crate::makepad_network::NetworkResponse>>,
 }
 
 #[derive(Clone)]
@@ -518,7 +544,7 @@ fn memory_budget_from_physical_memory(
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn apple_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn apple_physical_memory_bytes() -> Option<u64> {
     use makepad_objc_sys::{class, msg_send, runtime::Object, sel, sel_impl};
 
     unsafe {
@@ -533,7 +559,7 @@ fn apple_physical_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-fn linux_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn linux_physical_memory_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = meminfo.lines().find(|line| {
         line.split_once(':')
@@ -547,7 +573,7 @@ fn linux_physical_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_physical_memory_bytes() -> Option<u64> {
+pub(crate) fn windows_physical_memory_bytes() -> Option<u64> {
     #[allow(non_snake_case)]
     #[repr(C)]
     struct MemoryStatusEx {
@@ -972,6 +998,14 @@ impl Cx {
 
             post_draw_hook: None,
             screenshot_requests: Default::default(),
+            window_snapshots: Vec::new(),
+            pipeline_skips: 0,
+            skip_reasons: [0; 3],
+            #[cfg(all(target_vendor = "apple", not(gpusim)))]
+            pipeline_skip_repaint: None,
+            whole_frames_until: 0.0,
+            whole_hold_began: None,
+            hold_next_paint: false,
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
             run_view_frame_encode_in_flight: false,
@@ -1024,6 +1058,7 @@ impl Cx {
             tweak_callback: None,
             ai_callback: None,
             net,
+            studio_backlog: None,
 
             script_data: CxScriptData {
                 std: script_std,

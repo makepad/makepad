@@ -109,7 +109,16 @@ impl Overlay {
                     if let Some(cfp) = sub_draw_list.codeflow_parent_id {
                         // Also check the parent draw list safely
                         if let Some(parent_draw_list) = cx.draw_lists.checked_index(cfp) {
-                            if parent_draw_list.redraw_id != sub_draw_list.redraw_id {
+                            // A parent that did not redraw keeps its glass (a
+                            // cached view); one whose pass is no longer drawn
+                            // (a texture-cached view that went invisible) must
+                            // not: nothing will ever draw it again, and its
+                            // glass would stay on screen where it last was.
+                            if parent_draw_list.redraw_id != sub_draw_list.redraw_id
+                                || parent_draw_list
+                                    .draw_pass_id
+                                    .is_some_and(|pass_id| pass_chain_is_stale(cx, pass_id))
+                            {
                                 cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
                             }
                         } else {
@@ -151,4 +160,22 @@ impl Overlay {
         order.sort_by_key(|&i| keys[i]);
         cx.draw_lists[list_id].draw_item_reorder = Some(order);
     }
+}
+
+/// True when `pass_id`, or a texture pass it renders into, is no longer
+/// drawn by the list that attached it (`Cx::pass_attachment_is_stale`).
+fn pass_chain_is_stale(cx: &Cx2d, pass_id: DrawPassId) -> bool {
+    let mut pass_id = pass_id;
+    // Parent links of recycled pass slots can form a cycle; a chain longer
+    // than the pool is one.
+    for _ in 0..=cx.passes.id_iter().count() {
+        if cx.pass_attachment_is_stale(pass_id) {
+            return true;
+        }
+        match cx.passes[pass_id].parent {
+            CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+            _ => return false,
+        }
+    }
+    false
 }

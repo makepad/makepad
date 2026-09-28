@@ -1,0 +1,17 @@
+[package]
+name = "makepad-widgets-data"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: Data grid, tree view, file tree and the docking layout"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[features]
+## Serde derives on the dock layout, as `makepad-widgets/serde` asks for.
+serde = ["dep:serde", "makepad-widgets-core/serde"]

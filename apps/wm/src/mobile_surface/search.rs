@@ -69,6 +69,7 @@ impl PhoneSurface {
             Event::MouseDown(e) => Some((e.abs, true, false)),
             Event::MouseMove(e) => Some((e.abs, false, false)),
             Event::MouseUp(e) => Some((e.abs, false, true)),
+            Event::FingerCancel(_) => owned_cancel(event, self.search_pointer),
             Event::TouchUpdate(e) => e.touches.first().map(|t| {
                 (
                     t.abs,
@@ -134,20 +135,27 @@ impl PhoneSurface {
         let editing = state.phone.searching();
         // Under the status bar: the fake one, or the phone's real inset.
         let top = state.phone.chrome.top_reserve(screen);
+        // iOS: a 40-tall pill 20 in; Android: a 56-tall search bar 16 in.
+        let (inset, height) = if ios { (20.0, 40.0) } else { (16.0, 56.0) };
         let pill = rect(
-            screen.pos.x + 20.0,
-            screen.pos.y + top + 10.0,
-            screen.size.x - 40.0 - if editing { 64.0 } else { 0.0 },
-            40.0,
+            screen.pos.x + inset,
+            screen.pos.y + top + if ios { 10.0 } else { 8.0 },
+            screen.size.x - inset * 2.0 - if editing { 64.0 } else { 0.0 },
+            height,
         );
         self.search_rect = pill;
         if self.search_style != Some((ios, state.style.dark)) {
             let mut input = self.search.text_input(cx, ids!(input));
-            let muted = alpha(ink, 0.55);
+            // The empty text: iOS's soft grey; Android's on-surface-variant.
+            let muted = alpha(ink, if ios { 0.55 } else { 0.72 });
             if ios {
                 script_apply_eval!(cx,input,{draw_text.text_style: mod.widgets.PhoneSurface.ios_font{font_size: 14.0}});
+                script_apply_eval!(cx,input,{padding.left: 38.0});
             } else {
-                script_apply_eval!(cx,input,{draw_text.text_style: mod.widgets.PhoneSurface.android_font{font_size: 14.0}});
+                // Text 16 after the 24-pt glyph that sits 16 in.
+                script_apply_eval!(cx,input,{padding.left: 56.0});
+                // Body 16/24.
+                script_apply_eval!(cx,input,{draw_text.text_style: mod.widgets.PhoneSurface.android_font{font_size: 12.0}});
             }
             script_apply_eval!(cx, input, {
                 draw_text +: {
@@ -175,11 +183,13 @@ impl PhoneSurface {
             self.search_glass.apply_profile(cx, &profile);
             self.search_glass.set_lens_amplitude(cx, if state.accessibility.reduce_motion { 1.0 } else { amplitude });
             if state.phone.search_focused {
-                self.rounded(cx, rect(pill.pos.x - 1.5, pill.pos.y - 1.5, pill.size.x + 3.0, pill.size.y + 3.0), 13.5, alpha(accent, 0.65));
+                self.rounded(cx, rect(pill.pos.x - 1.5, pill.pos.y - 1.5, pill.size.x + 3.0, pill.size.y + 3.0), 27.0, alpha(accent, 0.65));
             }
             self.search_glass.draw_surface_with_backdrop(cx, pill, backdrop, 1.0);
         } else if state.phone.search_focused {
-            self.rounded(cx, pill, 14.0, alpha(accent, 0.65));
+            // iOS's field keeps its 28 corners; Android's bar is a full pill.
+            let (ring, face) = if ios { (28.0, 25.0) } else { (pill.size.y as f32, pill.size.y as f32 - 3.0) };
+            self.rounded(cx, pill, ring, alpha(accent, 0.65));
             self.rounded(
                 cx,
                 rect(
@@ -188,33 +198,43 @@ impl PhoneSurface {
                     pill.size.x - 3.0,
                     pill.size.y - 3.0,
                 ),
-                12.5,
-                if state.style.dark {
-                    rgb(40, 40, 48)
-                } else {
-                    rgb(238, 238, 245)
+                face,
+                match (ios, state.style.dark) {
+                    (true, true) => rgb(40, 40, 48),
+                    (true, false) => rgb(238, 238, 245),
+                    (false, true) => rgb(43, 41, 48),
+                    (false, false) => rgb(236, 230, 240),
                 },
             );
+        } else if ios {
+            self.rounded(cx, pill, 28.0, alpha(ink, 0.10));
         } else {
-            self.rounded(cx, pill, 14.0, alpha(ink, 0.10));
+            // Material's search bar: the raised tonal surface, a full pill.
+            self.rounded(cx, pill, pill.size.y as f32, if state.style.dark { rgb(43, 41, 48) } else { rgb(236, 230, 240) });
         }
+        let glyph = if ios { (8.0, 28.0, 15.0) } else { (16.0, 24.0, 24.0) };
         self.d.icon_centered(
             cx,
             Ico::Search,
-            rect(pill.pos.x + 8.0, pill.pos.y, 28.0, pill.size.y),
-            15.0,
-            alpha(ink, 0.55),
+            rect(pill.pos.x + glyph.0, pill.pos.y, glyph.1, pill.size.y),
+            glyph.2,
+            alpha(ink, if ios { 0.55 } else { 0.7 }),
         );
         self.search
             .draw_walk_all(cx, &mut Scope::empty(), Walk::abs_rect(pill));
+        // Clear and Cancel sit on the field's centre line: iOS's as they
+        // were (32 x 40 and 60 x 40), Android's 48-tall touch targets.
+        let target = if ios { 40.0 } else { 48.0 };
+        let mid = pill.pos.y + (pill.size.y - target) * 0.5;
         if !state.phone.search_query.is_empty() {
-            let clear = rect(pill.pos.x + pill.size.x - 32.0, pill.pos.y, 32.0, 40.0);
-            self.label(cx, clear, "×", 20.0, false, alpha(ink, 0.6));
+            let w = if ios { 32.0 } else { 48.0 };
+            let clear = rect(pill.pos.x + pill.size.x - w - if ios { 0.0 } else { 4.0 }, mid, w, target);
+            self.label(cx, clear, "×", if ios { 20.0 } else { 24.0 }, false, alpha(ink, 0.6));
             self.hits.push((clear, PhoneHit::ClearSearch));
         }
         if editing {
-            let cancel = rect(pill.pos.x + pill.size.x + 4.0, pill.pos.y, 60.0, 40.0);
-            self.label(cx, cancel, "Cancel", 13.0, false, accent);
+            let cancel = rect(pill.pos.x + pill.size.x + 4.0, mid, 60.0, target);
+            self.label(cx, cancel, "Cancel", if ios { 13.0 } else { 14.0 }, false, accent);
             self.hits.push((cancel, PhoneHit::CancelSearch));
         }
         pill
@@ -281,18 +301,44 @@ impl PhoneSurface {
                 alpha(ink, 0.12),
             );
             let y0 = y.max(top);
-            self.hits.push((
+            self.app_hit(
                 rect(row.pos.x, y0, row.size.x, (y + 56.0).min(bottom) - y0),
-                PhoneHit::App(id.clone()),
-            ));
+                id,
+                rect(row.pos.x + 4.0, y + 6.0, 44.0, 44.0),
+            );
         }
         cx.end_turtle();
+    }
+}
+
+/// A press taken away ends like a lift, but only for the gesture the field
+/// owns (`search_pointer`; its own capture gets its terminal FingerUp):
+/// any other gesture's cancel is not the field's and goes on to the shell's
+/// cancel/reset (`phone_pointer`).
+fn owned_cancel(event: &Event, owns_gesture: bool) -> Option<(DVec2, bool, bool)> {
+    match event {
+        Event::FingerCancel(e) if owns_gesture => Some((e.abs, false, true)),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_the_fields_own_gesture_ends_on_a_cancel_here() {
+        let cancel = Event::FingerCancel(makepad_platform::event::FingerCancelEvent {
+            window_id: makepad_platform::WindowId(0, 0),
+            digit_id: live_id_num!(touch, 3).into(),
+            device: makepad_platform::event::DigitDevice::Touch { uid: 3 },
+            abs: dvec2(10.0, 20.0),
+            time: 1.0,
+            modifiers: Default::default(),
+        });
+        assert_eq!(owned_cancel(&cancel, true), Some((dvec2(10.0, 20.0), false, true)), "the field's own press ends as a lift");
+        assert_eq!(owned_cancel(&cancel, false), None, "another gesture's cancel is left to the shell");
+        assert_eq!(owned_cancel(&Event::Signal, true), None);
+    }
     #[test]
     fn search_matches_every_word_in_names_and_ids_and_sorts_labels() {
         let apps = vec![

@@ -368,7 +368,8 @@ impl Widget for FabFileBrowser {
         let entries = self.entries.clone();
         for (i, e) in entries.iter().enumerate() {
             if let Some((_, item)) = list.get_item(i) {
-                if item.as_view().finger_up(actions).is_some() {
+                // A press taken away (the list scrolled under it) opens nothing.
+                if item.as_view().finger_up(actions).is_some_and(|up| !up.cancelled) {
                     if e.is_dir {
                         self.goto(cx, e.path.clone());
                     } else {

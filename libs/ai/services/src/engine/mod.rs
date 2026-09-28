@@ -11,8 +11,8 @@
 //!   [`crate::state::EngineState`] a panel draws;
 //! - [`Model`] — the seam to whatever answers: the local engine through
 //!   the hub, a cloud provider, or a scripted model in tests. Real models
-//!   live behind the `engine` cargo feature (`models`); the core does not
-//!   need them.
+//!   live behind the `engine` cargo feature (`models`), the local one
+//!   behind `localai` (`local_model`); the core does not need them.
 //!
 //! A host (the aichat app, the Window overlay) wraps the core in a thin
 //! `Cx` adapter: it calls `pump` on every event and redraws when the
@@ -23,13 +23,17 @@ pub mod no_model;
 pub mod registry;
 
 #[cfg(feature = "engine")]
+pub mod cli_model;
+#[cfg(feature = "localai")]
+pub mod local_model;
+#[cfg(feature = "engine")]
 pub mod models;
 
 pub use core::{
     EngineCore, EngineEvent, DOCTRINE, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
     WAKE_INTERVAL_SECS,
 };
-pub use no_model::{NoModel, NoModelWithReason};
+pub use no_model::{ClaudeDesktopModel, NoModel, NoModelWithReason};
 pub use registry::{RegistryUp, ServiceRegistry, MAX_INSTANCES};
 
 /// One tool as the model is told about it: the canonical dotted name, a
@@ -39,6 +43,16 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: String,
+}
+
+/// A picture for the model to look at with its next input: a reference
+/// image the person dropped into the chat, or a capture a tool made.
+/// Always PNG, normalised by whoever attaches it (at most 1024 px a side).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelImage {
+    /// What it is, in a few words (`reference: keys.webp`, `screenshot`).
+    pub label: String,
+    pub png: std::sync::Arc<[u8]>,
 }
 
 /// What a model reports back, in order.
@@ -98,5 +112,16 @@ pub trait Model {
     /// engine only rebinds mid-turn when this is true.
     fn can_rebind_mid_turn(&self) -> bool {
         false
+    }
+
+    /// Images the model sees with its next input (a user line or the
+    /// results of the tool round in flight). A model without vision says
+    /// so rather than pretending: the default refuses.
+    fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
+        if images.is_empty() {
+            Ok(())
+        } else {
+            Err("this model cannot look at images".into())
+        }
     }
 }

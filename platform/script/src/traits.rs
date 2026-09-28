@@ -234,6 +234,308 @@ fn register_type_inner(
     proto
 }
 
+// Non-generic body of the default `ScriptNew::script_proto`.
+#[inline(never)]
+fn script_proto_inner(
+    vm: &mut ScriptVm,
+    type_id: ScriptTypeId,
+    build: fn(&mut ScriptVm, &mut ScriptTypeProps) -> ScriptValue,
+    check: fn(&ScriptHeap, ScriptValue) -> bool,
+    name: fn() -> Option<LiveId>,
+    is_repr_u32_enum: fn() -> bool,
+) -> ScriptValue {
+    if let Some(check) = vm.bx.heap.registered_type(type_id) {
+        return check.object.as_ref().unwrap().proto;
+    }
+    let mut props = ScriptTypeProps::default();
+    let proto = build(vm, &mut props);
+    register_type_inner(vm, type_id, proto, props, check, name(), is_repr_u32_enum())
+}
+
+// Non-generic body of the default `ScriptNew::script_proto_build`.
+#[inline(never)]
+fn script_proto_build_inner(
+    vm: &mut ScriptVm,
+    props: &mut ScriptTypeProps,
+    proto_props: fn(&mut ScriptVm, ScriptObject, &mut ScriptTypeProps),
+    on_proto_build: fn(&mut ScriptVm, ScriptObject, &mut ScriptTypeProps),
+    on_proto_methods: fn(&mut ScriptVm, ScriptObject),
+) -> ScriptValue {
+    let proto = vm.bx.heap.new_object();
+    // build prototype here
+    proto_props(vm, proto, props);
+    on_proto_build(vm, proto, props);
+    on_proto_methods(vm, proto);
+    proto.into()
+}
+
+// Non-generic body of the default `ScriptNew::script_reload_default`.
+#[inline(never)]
+fn script_reload_default_inner(vm: &mut ScriptVm, type_id: ScriptTypeId) -> ScriptValue {
+    if let Some(default_obj) = vm.bx.heap.type_default_for_id(type_id) {
+        default_obj.into()
+    } else {
+        NIL
+    }
+}
+
+// Non-generic body of the default `ScriptNew::script_type_check`.
+#[inline(never)]
+fn script_type_check_inner(
+    heap: &ScriptHeap,
+    value: ScriptValue,
+    on_type_check: fn(&ScriptHeap, ScriptValue) -> bool,
+    type_id: fn() -> ScriptTypeId,
+) -> bool {
+    if on_type_check(heap, value) {
+        return true;
+    }
+    if let Some(o) = value.as_object() {
+        heap.type_matches_id(o, type_id())
+    } else {
+        false
+    }
+}
+
+// Helpers called by the `#[derive(Script)]` expansion. Each derived field is
+// one call here instead of an inline block, so the per-field work is compiled
+// once per field TYPE (or not generic at all) rather than once per struct and
+// field. Not meant to be called by hand.
+impl ScriptVm<'_> {
+    /// A `#[live]` / `#[apply_default]` field of `script_apply`: apply the
+    /// field's value from `value` (the prototype chain included), or on a
+    /// reload the type's registered default when the object doesn't set it.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_apply_field<T: ScriptNew>(
+        &mut self,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+        id: LiveId,
+        field: &mut T,
+    ) {
+        let mut field_value = self.bx.heap.value_for_apply(value, id.into(), apply);
+        if field_value.is_none() && apply.is_reload() {
+            let default_value = <T as ScriptNew>::script_reload_default(self);
+            if !default_value.is_nil() {
+                field_value = Some(default_value);
+            }
+        }
+        if let Some(v) = field_value {
+            <T as ScriptApply>::script_apply(field, self, apply, scope, v);
+        }
+    }
+
+    /// A `#[live]` / `#[apply_default]` field of `script_to_value_props`.
+    #[doc(hidden)]
+    #[inline(never)]
+    #[track_caller]
+    pub fn script_derive_field_to_value<T: ScriptApply + ?Sized>(
+        &mut self,
+        obj: ScriptObject,
+        name: &str,
+        field: &T,
+    ) {
+        let value: ScriptValue = <T as ScriptApply>::script_to_value(field, self);
+        self.script_derive_set_prop(obj, name, value);
+    }
+
+    #[inline(never)]
+    #[track_caller]
+    fn script_derive_set_prop(&mut self, obj: ScriptObject, name: &str, value: ScriptValue) {
+        self.bx.heap.set_value(
+            obj,
+            ScriptValue::from_id(LiveId::from_str_with_lut(name).unwrap()),
+            value,
+            self.bx.threads.cur().trap.pass(),
+        );
+    }
+
+    /// A `#[live]` / `#[apply_default]` field of `script_proto_props`.
+    #[doc(hidden)]
+    #[inline(never)]
+    #[track_caller]
+    pub fn script_derive_proto_field<T: ScriptNew>(
+        &mut self,
+        props: &mut ScriptTypeProps,
+        name: &str,
+    ) {
+        <T as ScriptNew>::script_proto(self);
+        props.insert(
+            LiveId::from_str_with_lut(name).unwrap(),
+            <T as ScriptNew>::script_type_id_static(),
+        );
+    }
+
+    /// A bare variant of a derived enum's `script_proto_build`.
+    /// `proto_name` is the variant's name, `key` its `id!`, `enum_name` the
+    /// enum's name; `repr_value` is the discriminant of a `repr(u32)` enum.
+    #[doc(hidden)]
+    #[inline(never)]
+    #[track_caller]
+    pub fn script_derive_enum_bare_variant(
+        &mut self,
+        enum_object: ScriptObject,
+        proto_name: &str,
+        key: LiveId,
+        enum_name: &str,
+        repr_value: Option<f64>,
+    ) {
+        let bare = self
+            .bx
+            .heap
+            .new_with_proto(LiveId::from_str_with_lut(proto_name).unwrap().into());
+        if let Some(repr_value) = repr_value {
+            self.bx.heap.set_value(
+                bare,
+                id!(_repr_u32_enum_value).into(),
+                ScriptValue::from(repr_value),
+                self.bx.threads.cur().trap.pass(),
+            );
+        }
+        self.bx.heap.set_value(
+            enum_object,
+            key.into(),
+            bare.into(),
+            self.bx.threads.cur().trap.pass(),
+        );
+        self.bx.heap.set_value(
+            bare,
+            LiveId::from_str_with_lut("__enum").unwrap().into(),
+            LiveId::from_str_with_lut(enum_name).unwrap().into(),
+            self.bx.threads.cur().trap.pass(),
+        );
+        self.bx.heap.freeze(bare);
+    }
+
+    /// The constructor method of a tuple variant of a derived enum: builds
+    /// the variant object from `args`, reporting a wrong argument count and
+    /// any argument `checks[i]` rejects as errors at `file`:`line`.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_enum_tuple_new(
+        &mut self,
+        args: ScriptObject,
+        key: LiveId,
+        enum_name: &str,
+        checks: &[fn(&ScriptHeap, ScriptValue) -> bool],
+        file: &str,
+        line: u32,
+    ) -> ScriptValue {
+        let tuple = self.bx.heap.new_with_proto(key.into());
+        self.bx.heap.set_value(
+            tuple,
+            LiveId::from_str_with_lut("__enum").unwrap().into(),
+            LiveId::from_str_with_lut(enum_name).unwrap().into(),
+            self.bx.threads.cur().trap.pass(),
+        );
+        if self.bx.heap.vec_len(args) != checks.len() {
+            self.script_derive_push_err(
+                ScriptValue::script_err_invalid_args,
+                "wrong argument count".to_string(),
+                file,
+                line,
+            );
+        }
+        for (i, check) in checks.iter().enumerate() {
+            if let Some(a) = self.bx.heap.vec_value_if_exist(args, i) {
+                if !check(&self.bx.heap, a) {
+                    self.script_derive_push_err(
+                        ScriptValue::script_err_type_mismatch,
+                        "argument type mismatch".to_string(),
+                        file,
+                        line,
+                    );
+                }
+            }
+        }
+        self.bx
+            .heap
+            .vec_push_vec(tuple, args, self.bx.threads.cur().trap.pass());
+        tuple.into()
+    }
+
+    /// A derived enum's `script_apply` met an object whose root id names no
+    /// variant.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_enum_unknown_variant(
+        &mut self,
+        enum_name: &str,
+        other: LiveId,
+        object: ScriptObject,
+        file: &str,
+        line: u32,
+    ) {
+        let obj_desc = self.format_object_for_error(object);
+        self.script_derive_push_err(
+            ScriptValue::script_err_unknown_type,
+            format!(
+                "unknown variant '{}' for enum {}, object: {}",
+                other, enum_name, obj_desc
+            ),
+            file,
+            line,
+        );
+    }
+
+    /// A derived enum's `script_apply` met an object without a variant id.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_enum_not_variant(
+        &mut self,
+        enum_name: &str,
+        object: ScriptObject,
+        file: &str,
+        line: u32,
+    ) {
+        let obj_desc = self.format_object_for_error(object);
+        self.script_derive_push_err(
+            ScriptValue::script_err_unknown_type,
+            format!(
+                "expected variant id for enum {}, got object: {}",
+                enum_name, obj_desc
+            ),
+            file,
+            line,
+        );
+    }
+
+    /// A derived enum's `script_apply` met a value that is not an object.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_enum_bad_value(
+        &mut self,
+        enum_name: &str,
+        value: ScriptValue,
+        file: &str,
+        line: u32,
+    ) {
+        let value_desc = self.format_enum_variant_error(value);
+        self.script_derive_push_err(
+            ScriptValue::script_err_unknown_type,
+            format!("expected variant for enum {}, got {}", enum_name, value_desc),
+            file,
+            line,
+        );
+    }
+
+    // What the `script_err_*!` macros do, with the origin passed in: the
+    // derive hands over the `file!()` / `line!()` of its own expansion.
+    fn script_derive_push_err(
+        &mut self,
+        err: fn(ScriptIp) -> ScriptValue,
+        message: String,
+        file: &str,
+        line: u32,
+    ) {
+        if let crate::trap::ScriptTrap::Inner(trap) = self.bx.threads.cur().trap.pass() {
+            trap.push_err(err(trap.ip), message, file.into(), line);
+        }
+    }
+}
+
 // implementation is procmacro generated
 pub trait ScriptNew: ScriptApply + ScriptHook
 where
@@ -253,14 +555,12 @@ where
     }
 
     fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
-        if <Self as ScriptHook>::on_type_check(heap, value) {
-            return true;
-        }
-        if let Some(o) = value.as_object() {
-            heap.type_matches_id(o, Self::script_type_id_static())
-        } else {
-            false
-        }
+        script_type_check_inner(
+            heap,
+            value,
+            <Self as ScriptHook>::on_type_check,
+            Self::script_type_id_static,
+        )
     }
 
     /// Builds a pod struct type from the macro-generated type reflection.
@@ -462,12 +762,7 @@ where
     where
         Self: Sized,
     {
-        let type_id = Self::script_type_id_static();
-        if let Some(default_obj) = vm.bx.heap.type_default_for_id(type_id) {
-            default_obj.into()
-        } else {
-            NIL
-        }
+        script_reload_default_inner(vm, Self::script_type_id_static())
     }
 
     fn script_type_id_static() -> ScriptTypeId {
@@ -523,31 +818,26 @@ where
     }
 
     fn script_proto(vm: &mut ScriptVm) -> ScriptValue {
-        let type_id = Self::script_type_id_static();
-        if let Some(check) = vm.bx.heap.registered_type(type_id) {
-            return check.object.as_ref().unwrap().proto;
-        }
-        let mut props = ScriptTypeProps::default();
-        let proto = Self::script_proto_build(vm, &mut props);
-        // Use non-generic helper for registration to reduce monomorphization
-        register_type_inner(
+        // The body lives in a non-generic function; this per-type copy only
+        // passes the type's functions along.
+        script_proto_inner(
             vm,
-            type_id,
-            proto,
-            props,
+            Self::script_type_id_static(),
+            Self::script_proto_build,
             Self::script_type_check,
-            Self::script_type_name(),
-            Self::is_repr_u32_enum(),
+            Self::script_type_name,
+            Self::is_repr_u32_enum,
         )
     }
 
     fn script_proto_build(vm: &mut ScriptVm, props: &mut ScriptTypeProps) -> ScriptValue {
-        let proto = vm.bx.heap.new_object();
-        // build prototype here
-        Self::script_proto_props(vm, proto, props);
-        Self::on_proto_build(vm, proto, props);
-        Self::on_proto_methods(vm, proto);
-        proto.into()
+        script_proto_build_inner(
+            vm,
+            props,
+            Self::script_proto_props,
+            <Self as ScriptHook>::on_proto_build,
+            <Self as ScriptHook>::on_proto_methods,
+        )
     }
 
     fn script_proto_props(_vm: &mut ScriptVm, _object: ScriptObject, _props: &mut ScriptTypeProps) {

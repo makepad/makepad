@@ -37,7 +37,7 @@ pub fn extract(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(out)
 }
 
-fn parse(data: &[u8]) -> Result<Parsed, String> {
+pub fn parse(data: &[u8]) -> Result<Parsed, String> {
     if data.len() < 36 || &data[0..4] != b"MSCF" {
         return Err("not a cabinet".into());
     }
@@ -110,26 +110,43 @@ fn skip_cstring(data: &[u8], off: &mut usize) -> Result<(), String> {
     Ok(())
 }
 
-struct Parsed {
-    folders: Vec<Folder>,
-    files: Vec<CabFile>,
+pub struct Parsed {
+    pub folders: Vec<Folder>,
+    pub files: Vec<CabFile>,
 }
 
-struct Folder {
+#[derive(Clone)]
+pub struct Folder {
     data_off: usize,
     blocks: usize,
     tcomp: u16,
     cb_data: usize,
 }
 
-struct CabFile {
-    name: String,
-    size: usize,
-    offset: usize,
-    folder: usize,
+#[derive(Clone)]
+pub struct CabFile {
+    pub name: String,
+    pub size: usize,
+    pub offset: usize,
+    pub folder: usize,
 }
 
-fn decompress_folder(data: &[u8], folder: &Folder) -> Result<Vec<u8>, String> {
+impl Folder {
+    /// Compressed blocks (up to 32 KB of output each): the folder's share
+    /// of its cabinet's work.
+    pub fn blocks(&self) -> usize {
+        self.blocks
+    }
+}
+
+pub fn decompress_folder(data: &[u8], folder: &Folder) -> Result<Vec<u8>, String> {
+    let mut span = crate::timing::span(crate::timing::Phase::Decompress);
+    let raw = decompress_folder_inner(data, folder)?;
+    span.bytes(raw.len() as u64);
+    Ok(raw)
+}
+
+fn decompress_folder_inner(data: &[u8], folder: &Folder) -> Result<Vec<u8>, String> {
     let method = folder.tcomp & 0x000f;
     let mut off = folder.data_off;
     let mut raw = Vec::new();
@@ -140,7 +157,9 @@ fn decompress_folder(data: &[u8], folder: &Folder) -> Result<Vec<u8>, String> {
         None
     };
     for index in 0..folder.blocks {
-        crate::progress::measured("Decompressing CAB", "Compressed blocks", index as u64, folder.blocks as u64, crate::progress::Unit::Blocks);
+        if index % 32 == 0 {
+            crate::progress::measured("Decompressing CAB", "Compressed blocks", index as u64, folder.blocks as u64, crate::progress::Unit::Blocks);
+        }
         if off + 8 > data.len() {
             return Err("cab data truncated".into());
         }

@@ -11,6 +11,22 @@ macro_rules! error {
     }
 }
 
+/// Structured parser feedback retained for hosts that need to validate source
+/// without executing it. Positions are zero-based and relative to the parser's
+/// configured source offsets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScriptParserDiagnostic {
+    pub line: u32,
+    pub column: u32,
+    pub message: String,
+}
+
+/// Maximum retained diagnostics for one parser instance.
+///
+/// The parser still marks `had_error` after this limit so callers cannot treat
+/// a malformed source as valid just because feedback was bounded.
+pub const MAX_PARSER_DIAGNOSTICS: usize = 64;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum State {
     BeginStmt {
@@ -96,8 +112,19 @@ enum State {
     TryTestExpr {
         try_start: u32,
     },
-    TryErrBlockOrExpr,
+    /// Between the protected branch and the fallback. `allow_catch` is true
+    /// until the one-shot contextual `catch` separator has been consumed, so
+    /// an append-only streaming continuation (whose checkpoint retains this
+    /// state) cannot reinterpret a later identifier named `catch` as another
+    /// separator. `catch` is not a global keyword.
+    TryErrBlockOrExpr {
+        allow_catch: bool,
+        canonical_catch: bool,
+        protected_was_block: bool,
+        try_start: u32,
+    },
     TryErrBlock {
+        canonical_catch: bool,
         err_start: u32,
         last_was_sep: bool,
     },
@@ -105,6 +132,7 @@ enum State {
         err_start: u32,
     },
     TryOk {
+        err_start: u32,
         was_block: bool,
     },
     TryOkBlockOrExpr,
@@ -443,9 +471,13 @@ enum State {
         index: u32,
     },
 
-    // Short-circuit evaluation - patches TEST opcode jump after second operand
+    // Short-circuit evaluation - patches TEST opcode jump after second operand.
+    // `what_op` is retained so a later, tighter-binding logical operator keeps
+    // this jump open until its whole right-hand expression has been emitted
+    // (`a || b && c` is `a || (b && c)`); it also survives streaming checkpoints.
     ShortCircuitEnd {
         test_slot: u32,
+        what_op: LiveId,
     },
     // Short-circuit ?= - emits ASSIGN after RHS, then patches jump
     ShortCircuitAssignEnd {
@@ -538,7 +570,8 @@ impl State {
             id!(|) => 13,
             id!(-:) => 14,
             id!(++) => 14,
-            id!(===) | id!(!==) | id!(==) | id!(!=) | id!(<) | id!(>) | id!(<=) | id!(>=) => 15,
+            id!(<) | id!(>) | id!(<=) | id!(>=) => 14,
+            id!(===) | id!(!==) | id!(==) | id!(!=) => 15,
             id!(is) => 15,
             id!(&&) => 16,
             id!(||) | id!(|?) => 17,
@@ -775,8 +808,18 @@ pub struct ScriptParser {
     /// recovered into an infinite empty loop and burned the whole
     /// instruction budget before this existed.
     pub parse_errors: Vec<String>,
+    /// Structured form of the same errors (zero-based line/column, message
+    /// without the `(from: file:line)` suffix), bounded by
+    /// `MAX_PARSER_DIAGNOSTICS`. Hosts that validate source without running
+    /// it read these instead of the formatted `parse_errors` strings.
+    pub diagnostics: Vec<ScriptParserDiagnostic>,
+    /// Set once `diagnostics` hit `MAX_PARSER_DIAGNOSTICS` and further errors
+    /// were dropped; `had_error` still reports the failure.
+    pub diagnostics_truncated: bool,
 
     state: Vec<State>,
+    /// Whether `report_error` also forwards to Makepad's global log.
+    emit_errors: bool,
     pub file: String,
     pub line_offset: usize,
     pub col_offset: usize,
@@ -819,6 +862,9 @@ impl Default for ScriptParser {
             source_map: Default::default(),
             had_error: false,
             parse_errors: Default::default(),
+            diagnostics: Default::default(),
+            diagnostics_truncated: false,
+            emit_errors: true,
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -847,6 +893,9 @@ pub struct ParserCheckpoint {
     /// The last opcode before the checkpoint, saved because auto-close's
     /// set_pop_to_me() mutates it in place. Must be restored on continuation.
     last_opcode: Option<ScriptValue>,
+    /// Auto-close patches pending logical jumps in place, not just the tail;
+    /// the original TEST opcodes are restored on continuation.
+    short_circuit_opcodes: Vec<(u32, ScriptValue)>,
     /// Open slot contexts at checkpoint time; restored wholesale so slot
     /// candidates logged after the checkpoint die with the restore.
     slot_ctxs: Vec<SlotCtx>,
@@ -854,29 +903,55 @@ pub struct ParserCheckpoint {
 }
 
 impl ScriptParser {
+    /// Controls whether parser errors are forwarded to Makepad's global log.
+    /// Diagnostics remain available through [`Self::diagnostics`] and
+    /// `parse_errors` either way.
+    pub fn set_emit_errors(&mut self, emit_errors: bool) {
+        self.emit_errors = emit_errors;
+    }
+
+    /// Structured diagnostics collected so far (bounded; see
+    /// [`Self::diagnostics_truncated`]).
+    pub fn diagnostics(&self) -> &[ScriptParserDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// True when more errors occurred than `diagnostics` retains.
+    pub fn diagnostics_truncated(&self) -> bool {
+        self.diagnostics_truncated
+    }
+
     pub fn report_error(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
         self.had_error = true;
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
+        let line = line as u32 + self.line_offset as u32;
+        let column = col as u32 + self.col_offset as u32;
         if self.parse_errors.len() < 16 {
             self.parse_errors.push(format!(
                 "{}:{}:{}: {}",
                 self.file,
-                line as usize + self.line_offset + 1,
-                col as usize + self.col_offset + 1,
+                line as usize + 1,
+                column as usize + 1,
                 msg
             ));
         }
-        log_with_level(
-            &self.file,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            msg,
-            LogLevel::Error,
-        );
+        if self.diagnostics.len() < MAX_PARSER_DIAGNOSTICS {
+            let message = msg
+                .split_once(" (from: ")
+                .map_or_else(|| msg.clone(), |(message, _)| message.to_owned());
+            self.diagnostics.push(ScriptParserDiagnostic {
+                line,
+                column,
+                message,
+            });
+        } else {
+            self.diagnostics_truncated = true;
+        }
+        if self.emit_errors {
+            log_with_level(&self.file, line, column, line, column, msg, LogLevel::Error);
+        }
     }
 
     /// Identifiers that may never be bound by `let`/`var`, function arguments,
@@ -1229,6 +1304,7 @@ impl ScriptParser {
     }
 
     fn push_code(&mut self, code: ScriptValue, index: u32) {
+        debug_assert!(self.opcodes.len() < crate::value::ScriptIp::MAX_INDEX, "script body exceeds the opcodes ScriptIp can address");
         self.opcodes.push(code);
         self.source_map.push(Some(index));
     }
@@ -1252,6 +1328,18 @@ impl ScriptParser {
             }
         }
         false
+    }
+
+    /// Inserts one opcode with its source-map entry, keeping both vectors in
+    /// lockstep. A malformed field chain can reach a rewrite with the
+    /// source-map sidecar shorter than the opcode stream; missing entries are
+    /// restored as synthetic metadata before either vector is mutated.
+    fn insert_code_with_source(&mut self, index: usize, code: ScriptValue, source: Option<u32>) {
+        debug_assert!(index <= self.opcodes.len());
+        self.source_map.truncate(self.opcodes.len());
+        self.source_map.resize(self.opcodes.len(), None);
+        self.opcodes.insert(index, code);
+        self.source_map.insert(index, source);
     }
 
     fn set_pop_to_me(&mut self) {
@@ -3249,7 +3337,7 @@ impl ScriptParser {
                 self.push_code(Opcode::ME_SPLAT.into(), index);
                 return 0;
             }
-            State::ShortCircuitEnd { test_slot } => {
+            State::ShortCircuitEnd { test_slot, .. } => {
                 // Patch the TEST opcode's jump to skip to current position (after second operand)
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                 self.last_jump_target = self.code_len();
@@ -3480,33 +3568,80 @@ impl ScriptParser {
                     try_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - try_start),
                 );
-                self.state.push(State::TryErrBlockOrExpr);
+                self.state.push(State::TryErrBlockOrExpr {
+                    allow_catch: true,
+                    canonical_catch: false,
+                    protected_was_block: false,
+                    try_start,
+                });
                 return 0;
             }
             State::TryTestBlock {
                 try_start,
                 last_was_sep,
             } => {
-                self.set_opcode_args(
-                    try_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - try_start),
-                );
                 if tok.is_close_curly() {
                     if !last_was_sep && self.has_pop_to_me() {
                         self.clear_pop_to_me();
                     }
-                    self.state.push(State::TryErrBlockOrExpr);
+                    self.set_opcode_args(
+                        try_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - try_start),
+                    );
+                    self.state.push(State::TryErrBlockOrExpr {
+                        allow_catch: true,
+                        canonical_catch: false,
+                        protected_was_block: true,
+                        try_start,
+                    });
                     return 1;
                 } else {
-                    self.state.push(State::TryErrBlockOrExpr);
+                    self.set_opcode_args(
+                        try_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - try_start),
+                    );
+                    self.state.push(State::TryErrBlockOrExpr {
+                        allow_catch: true,
+                        canonical_catch: false,
+                        protected_was_block: true,
+                        try_start,
+                    });
                     return 0;
                 }
             }
-            State::TryErrBlockOrExpr => {
+            State::TryErrBlockOrExpr {
+                allow_catch,
+                canonical_catch,
+                protected_was_block,
+                try_start,
+            } => {
+                if allow_catch && id == id!(catch) {
+                    // Canonical `try protected catch fallback`. A canonical
+                    // block ends its final expression with a separator, which
+                    // marked it pop-to-me; retain that tail value as the try
+                    // value, then repatch the jump after removing the marker.
+                    if protected_was_block && self.has_pop_to_me() {
+                        self.clear_pop_to_me();
+                    }
+                    self.set_opcode_args(
+                        try_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - try_start),
+                    );
+                    // One-shot: a following identifier named `catch` is the
+                    // fallback expression, never a second separator.
+                    self.state.push(State::TryErrBlockOrExpr {
+                        allow_catch: false,
+                        canonical_catch: true,
+                        protected_was_block,
+                        try_start,
+                    });
+                    return 1;
+                }
                 let err_start = self.code_len() as _;
                 self.push_code(Opcode::TRY_ERR.into(), self.index);
                 if tok.is_open_curly() {
                     self.state.push(State::TryErrBlock {
+                        canonical_catch,
                         err_start,
                         last_was_sep: false,
                     });
@@ -3525,31 +3660,58 @@ impl ScriptParser {
                     err_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
                 );
-                self.state.push(State::TryOk { was_block: false });
+                self.state.push(State::TryOk {
+                    err_start,
+                    was_block: false,
+                });
             }
             State::TryErrBlock {
+                canonical_catch,
                 err_start,
                 last_was_sep,
             } => {
-                self.last_jump_target = self.code_len();
-                self.set_opcode_args(
-                    err_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
-                );
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
+                    // Canonical fallback blocks keep their final expression as
+                    // the try value even when a separator terminated it.
+                    if (canonical_catch || !last_was_sep) && self.has_pop_to_me() {
                         self.clear_pop_to_me();
                     }
-                    self.state.push(State::TryOk { was_block: true });
+                    self.last_jump_target = self.code_len();
+                    self.set_opcode_args(
+                        err_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
+                    );
+                    self.state.push(State::TryOk {
+                        err_start,
+                        was_block: true,
+                    });
                     return 1;
                 } else {
+                    self.last_jump_target = self.code_len();
+                    self.set_opcode_args(
+                        err_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
+                    );
                     error!(self, tokenizer, "Expected }} not found");
-                    self.state.push(State::TryOk { was_block: false });
+                    self.state.push(State::TryOk {
+                        err_start,
+                        was_block: false,
+                    });
                     return 0;
                 }
             }
-            State::TryOk { was_block } => {
+            State::TryOk {
+                err_start,
+                was_block,
+            } => {
                 if id == id!(ok) {
+                    // A successful legacy try skips TRY_OK itself so it enters
+                    // the ok branch; without `ok`, TRY_ERR's encoded distance
+                    // lands directly on the opcode after the fallback.
+                    self.set_opcode_args(
+                        err_start,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - err_start + 1),
+                    );
                     self.state.push(State::TryOkBlockOrExpr);
                     return 1;
                 }
@@ -3751,7 +3913,12 @@ impl ScriptParser {
                     return 0;
                 }
                 if let Some(index) = tok.as_rust_value() {
-                    self.push_code(values[index as usize], self.index);
+                    let Some(value) = values.get(index as usize).copied() else {
+                        error!(self, tokenizer, "Rust value index {index} is unavailable");
+                        self.state.push(State::EndExpr);
+                        return 1;
+                    };
+                    self.push_code(value, self.index);
                     self.state.push(State::EndExpr);
                     return 1;
                 }
@@ -4153,8 +4320,13 @@ impl ScriptParser {
                             } else {
                                 break;
                             }
-                        } else if let State::ShortCircuitEnd { test_slot } = last {
-                            // Patch any higher-precedence short-circuit ops
+                        } else if let State::ShortCircuitEnd { test_slot, what_op } = last {
+                            // Keep a lower-precedence left operator open until
+                            // its entire right-hand expression has been emitted.
+                            if State::operator_order(*what_op) > op_order {
+                                break;
+                            }
+                            // Patch higher or equal precedence short-circuit ops
                             let test_slot = *test_slot;
                             self.state.pop();
                             self.set_opcode_args(
@@ -4172,7 +4344,10 @@ impl ScriptParser {
                     self.push_code(State::short_circuit_opcode(op).into(), self.index);
 
                     // Push state to patch the jump after second operand is parsed
-                    self.state.push(State::ShortCircuitEnd { test_slot });
+                    self.state.push(State::ShortCircuitEnd {
+                        test_slot,
+                        what_op: op,
+                    });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
@@ -4290,19 +4465,49 @@ impl ScriptParser {
                                         }
                                     }
 
+                                    // The chain must begin with an identifier; a
+                                    // malformed chain reaching here would put the
+                                    // paired PROTO_FIELD insert out of bounds.
+                                    let Some(proto_field_index) = chain_start.checked_add(2) else {
+                                        error!(self, tokenizer, "Malformed prototype field assignment");
+                                        self.state.push(State::BeginExpr { required: true });
+                                        return 1;
+                                    };
+                                    let chain_starts_with_id = self
+                                        .opcodes
+                                        .get(chain_start)
+                                        .is_some_and(ScriptValue::is_id);
+                                    let proto_field_slot_is_valid =
+                                        proto_field_index <= self.opcodes.len().saturating_add(1);
+                                    if !chain_starts_with_id || !proto_field_slot_is_valid {
+                                        error!(self, tokenizer, "Malformed prototype field assignment");
+                                        self.state.push(State::BeginExpr { required: true });
+                                        return 1;
+                                    }
                                     // Now insert ME at chain_start
-                                    self.opcodes.insert(chain_start, Opcode::ME.into());
-                                    self.source_map.insert(chain_start, Some(self.index));
-
+                                    self.insert_code_with_source(
+                                        chain_start,
+                                        Opcode::ME.into(),
+                                        Some(self.index),
+                                    );
                                     // Insert PROTO_FIELD after the first id (which is now at chain_start + 1)
                                     // The first id is at chain_start + 1, so PROTO_FIELD goes at chain_start + 2
-                                    self.opcodes
-                                        .insert(chain_start + 2, Opcode::PROTO_FIELD.into());
-                                    self.source_map.insert(chain_start + 2, Some(self.index));
+                                    self.insert_code_with_source(
+                                        proto_field_index,
+                                        Opcode::PROTO_FIELD.into(),
+                                        Some(self.index),
+                                    );
                                 }
 
                                 // Patch remaining FIELD to PROTO_FIELD
                                 for pair in self.opcodes.rchunks_mut(2) {
+                                    // A malformed partial field assignment can leave a
+                                    // trailing one-opcode chunk; stop instead of
+                                    // indexing past it and let the normal error path
+                                    // reject the source.
+                                    if pair.len() != 2 {
+                                        break;
+                                    }
                                     if pair[0].is_id() && pair[1] == Opcode::FIELD.into() {
                                         pair[1] = Opcode::PROTO_FIELD.into()
                                     } else if pair[1].is_id() && pair[0] == Opcode::FIELD.into() {
@@ -4752,7 +4957,7 @@ impl ScriptParser {
                         self.push_code(Opcode::CALL_EXEC.into(), index);
                     }
                 }
-                State::ShortCircuitEnd { test_slot } => {
+                State::ShortCircuitEnd { test_slot, .. } => {
                     // A short-circuit op at end of source: patch its jump so a
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
@@ -4846,6 +5051,17 @@ impl ScriptParser {
             destruct_defaults_len: self.destruct_defaults.len(),
             nested_patterns_len: self.nested_patterns.len(),
             last_opcode: self.opcodes.last().copied(),
+            short_circuit_opcodes: self
+                .state
+                .iter()
+                .filter_map(|state| {
+                    if let State::ShortCircuitEnd { test_slot, .. } = state {
+                        Some((*test_slot, self.opcodes[*test_slot as usize]))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             slot_ctxs: self.slot_ctxs.clone(),
             slot_frames_len: self.slot_frames.len(),
         }
@@ -4861,6 +5077,11 @@ impl ScriptParser {
             if let Some(last) = self.opcodes.last_mut() {
                 *last = saved;
             }
+        }
+        // Auto-close patched the pending short-circuit jumps in place; put
+        // the original TEST opcodes back so continuation re-patches them.
+        for (slot, opcode) in cp.short_circuit_opcodes {
+            self.opcodes[slot as usize] = opcode;
         }
         self.index = cp.token_index;
         self.state = cp.state;
@@ -5022,7 +5243,7 @@ impl ScriptParser {
                         self.push_code(Opcode::CALL_EXEC.into(), index);
                     }
                 }
-                State::ShortCircuitEnd { test_slot } => {
+                State::ShortCircuitEnd { test_slot, .. } => {
                     // A short-circuit op at end of source: patch its jump so a
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
@@ -5106,5 +5327,150 @@ impl ScriptParser {
             println!("{:3}: {:?}", i, op);
         }
         println!("=== END OPCODES ===");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_source(source: &str) -> ScriptParser {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize(source, &mut heap);
+        // Octoscript's compatibility preflight appends this terminal marker.
+        tokenizer.tokenize("\n;", &mut heap);
+        let mut parser = ScriptParser::default();
+        parser.parse(&tokenizer, "parser_test.octoscript", (0, 0), &[]);
+        parser
+    }
+
+    #[test]
+    fn diagnostics_are_structured_and_kept_alongside_parse_errors() {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize("let x = 1\n@(+", &mut heap);
+        tokenizer.tokenize("\n;", &mut heap);
+        let mut parser = ScriptParser::default();
+        parser.set_emit_errors(false);
+        parser.parse(&tokenizer, "diag.octoscript", (10, 5), &[]);
+
+        assert!(parser.had_error);
+        assert!(!parser.diagnostics_truncated());
+        let diagnostic = parser
+            .diagnostics()
+            .iter()
+            .find(|d| d.message.contains("Rust value index 0 is unavailable"))
+            .expect("structured diagnostic");
+        // Zero-based, offset-adjusted, and without the `(from: ...)` suffix.
+        assert_eq!(diagnostic.line, 11);
+        assert_eq!(diagnostic.column, 5 + 3);
+        assert!(!diagnostic.message.contains("(from:"));
+        // The formatted sink still carries the same error (one-based).
+        assert!(parser
+            .parse_errors
+            .iter()
+            .any(|e| e.starts_with("diag.octoscript:12:9: Rust value index 0 is unavailable")));
+        assert_eq!(parser.diagnostics.len(), parser.diagnostics().len());
+    }
+
+    #[test]
+    fn diagnostics_are_bounded_but_had_error_survives() {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize(&"let = 1\n".repeat(MAX_PARSER_DIAGNOSTICS * 2), &mut heap);
+        tokenizer.tokenize("\n;", &mut heap);
+        let mut parser = ScriptParser::default();
+        parser.set_emit_errors(false);
+        parser.parse(&tokenizer, "bounded.octoscript", (0, 0), &[]);
+
+        assert!(parser.had_error);
+        assert_eq!(parser.diagnostics().len(), MAX_PARSER_DIAGNOSTICS);
+        assert!(parser.diagnostics_truncated());
+        assert!(parser.parse_errors.len() <= 16);
+    }
+
+    #[test]
+    fn malformed_proto_field_assignment_keeps_opcode_metadata_in_lockstep() {
+        // Minimized fuzz input: the `:` rewrite used to insert its second
+        // paired opcode into a source-map sidecar that was already too short.
+        let source = concat!(
+            "H.-",
+            "\x17\x17\x17\x17\x0e",
+            "\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17",
+            "m: ",
+            "\x17\x17\x17\x17\x17\x17\x17\x17\x17",
+            "return ",
+            "\x17\x17\x17\x17\x17\x17\x17\x17\x17\x17",
+            "=!"
+        );
+        let parser = parse_source(source);
+
+        assert!(parser.had_error);
+        assert_eq!(parser.opcodes.len(), parser.source_map.len());
+        assert!(parser.state.is_empty());
+    }
+
+    #[test]
+    fn proto_field_assignment_accepts_an_identifier_chain() {
+        let parser = parse_source("draw_bg.color: 1");
+
+        assert!(!parser.had_error, "{:?}", parser.parse_errors);
+        assert_eq!(parser.opcodes.len(), parser.source_map.len());
+    }
+
+    #[test]
+    fn partial_field_assignment_stops_at_an_incomplete_opcode_pair() {
+        // The reverse-pair FIELD -> PROTO_FIELD walk indexed both elements of
+        // a trailing one-opcode chunk and panicked instead of reporting.
+        let parser = parse_source("@.b-=");
+
+        assert!(parser.had_error);
+        assert_eq!(parser.opcodes.len(), parser.source_map.len());
+    }
+
+    #[test]
+    fn unavailable_rust_value_is_a_parse_error_not_a_panic() {
+        let parser = parse_source("@(+");
+
+        assert!(parser.had_error);
+        assert!(parser
+            .parse_errors
+            .iter()
+            .any(|e| e.contains("Rust value index 0 is unavailable")));
+    }
+
+    #[test]
+    fn streaming_checkpoint_retains_the_consumed_catch_separator() {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        // Trailing space: the identifier is only emitted once a following
+        // char arrives, and the separator must be consumed in this pass.
+        tokenizer.tokenize("let catch = 1\ntry { 2 } catch ", &mut heap);
+        let mut parser = ScriptParser::default();
+        let cp = parser.parse_streaming(&tokenizer, "checkpoint.octoscript", (0, 0), &[], None);
+        parser.restore_checkpoint(cp);
+
+        assert!(
+            matches!(
+                parser.state.last(),
+                Some(State::TryErrBlockOrExpr {
+                    allow_catch: false,
+                    canonical_catch: true,
+                    protected_was_block: true,
+                    ..
+                })
+            ),
+            "{:?}",
+            parser.state.last()
+        );
+    }
+
+    #[test]
+    fn comparisons_bind_tighter_than_equality_and_logical_ops_by_precedence() {
+        assert!(State::operator_order(id!(<)) < State::operator_order(id!(==)));
+        assert!(State::operator_order(id!(>=)) < State::operator_order(id!(!=)));
+        assert!(State::operator_order(id!(==)) < State::operator_order(id!(&&)));
+        assert!(State::operator_order(id!(&&)) < State::operator_order(id!(||)));
     }
 }

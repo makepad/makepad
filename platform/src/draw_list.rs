@@ -958,7 +958,7 @@ impl CxDrawListPool {
             self.1.retirement_queued.store(true, Ordering::Release);
             return true;
         }
-        let started = std::time::Instant::now();
+        let started = crate::monotonic_seconds();
         let mut examined = 0;
         // At most 256 payloads / 512 metadata visits / 200 us, with four
         // bounded worker jobs. Larger prepared envelopes drain retired scene
@@ -971,7 +971,7 @@ impl CxDrawListPool {
                 break;
             };
             let mut count = 0;
-            while count < batch.items.len() && examined < 512 && started.elapsed().as_micros() < 200
+            while count < batch.items.len() && examined < 512 && (crate::monotonic_seconds() - started) < 200e-6
             {
                 examined += 1;
                 // Alternate account metadata and payloads while both are
@@ -1344,6 +1344,28 @@ impl CxDrawListPool {
             }
         }
         cleared
+    }
+
+    /// The geometries the draw calls of every live draw list name: what the
+    /// backend can still paint, since a list that was not redrawn is painted
+    /// as it stands. Only each list's active items count (`draw_items.len()`;
+    /// slots past it are recording spares). A dropped `Geometry` is freed
+    /// only when it is not in this set (`CxGeometryPool::release_unreferenced`).
+    pub fn referenced_geometries(&self) -> HashSet<GeometryId> {
+        let mut referenced = HashSet::new();
+        for list in 0..self.0.pool.len() {
+            let generation = self.0.pool[list].generation;
+            if !self.0.is_live_generation(list, generation) {
+                continue;
+            }
+            let items = &self.0.pool[list].item.draw_items;
+            for index in 0..items.len() {
+                if let Some(geometry_id) = items[index].kind.draw_call().and_then(|call| call.geometry_id) {
+                    referenced.insert(geometry_id);
+                }
+            }
+        }
+        referenced
     }
 }
 impl std::ops::Index<DrawListId> for CxDrawListPool {
@@ -2265,6 +2287,8 @@ impl CxDrawItems {
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.texture_slots = Default::default();
                     call.uniform_buffer_slots = Default::default();
+                    // A spare must not pin a geometry (`referenced_geometries`).
+                    call.geometry_id = None;
                 }
                 item.shared = None;
             }
@@ -3602,6 +3626,7 @@ mod uniform_generation_tests {
             dyn_uniforms: call.dyn_uniforms,
             texture_slots: call.texture_slots.clone(),
             uniform_buffer_slots: call.uniform_buffer_slots.clone(),
+            dyn_instances_pad: Default::default(),
             dyn_instances: [0.0; crate::draw_vars::DRAW_CALL_DYN_INSTANCES],
         };
         vars.dyn_uniforms[0] += 1.0;

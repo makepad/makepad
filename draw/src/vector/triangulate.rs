@@ -200,6 +200,19 @@ pub const ROAD_ZBIAS_MAX_EXACT_TICKS: f32 = 2048.0;
 /// strength for material 7, and coverage otherwise; the tessellator's
 /// complete u/v pair has its own slot.
 pub fn pack_road_record(record: &[f32]) -> RoadVertexTyped {
+    pack_road_record_with(record, true)
+}
+
+/// `pack_road_record` for streams whose paint-order z-bias may exceed the
+/// exact f16 tick range (the map's building outlines ride the ground-fill
+/// counter): ticks past `ROAD_ZBIAS_MAX_EXACT_TICKS` round to the nearest
+/// f16. Their layer depth dominates the tick term, so the rounding only
+/// moves the rare tie a thousand features apart.
+pub fn pack_road_record_rounding_zbias(record: &[f32]) -> RoadVertexTyped {
+    pack_road_record_with(record, false)
+}
+
+fn pack_road_record_with(record: &[f32], exact_zbias: bool) -> RoadVertexTyped {
     let expanded = record[10] >= EXPAND_STROKE_SHAPE_OFFSET - 0.5;
     debug_assert!(expanded || record[10].abs() < 0.5);
     let fringe = record[8] > 1.5e6;
@@ -250,9 +263,10 @@ pub fn pack_road_record(record: &[f32]) -> RoadVertexTyped {
     };
     let zbias_ticks = (record[18] / VECTOR_ZBIAS_STEP).round();
     debug_assert!(
-        (0.0..=ROAD_ZBIAS_MAX_EXACT_TICKS).contains(&zbias_ticks),
+        !exact_zbias || (0.0..=ROAD_ZBIAS_MAX_EXACT_TICKS).contains(&zbias_ticks),
         "road zbias tick {zbias_ticks} exceeds the exact f16 range"
     );
+    let zbias_ticks = zbias_ticks.clamp(0.0, 65504.0);
     RoadVertexTyped {
         pos: pack_position(record[0], record[1]),
         off: F16x2::from_f32(off_x, off_y),
@@ -324,6 +338,84 @@ pub fn pack_face_record(record: &[f32]) -> Option<FaceVertexTyped> {
     face_record_from_road(pack_road_record(record))
 }
 
+/// Project a packed road AA-fringe record onto the face layout. A grounded
+/// fringe (no expansion offset, no deck) carries its signed edge coordinate
+/// twice: `uv = (u, 1)` and `params.y = u + 1`. The face shader rebuilds
+/// `uv` from `params.y` for fringe-kind records, so only records whose uv is
+/// exactly that reconstruction project; lifted fringes stay on the road
+/// layout. The kept fields are copied bit-exact.
+#[inline]
+pub fn fringe_face_record_from_road(road: RoadVertexTyped) -> Option<FaceVertexTyped> {
+    let (meta, aux) = road.params.to_f32();
+    let kind = ((meta % ROAD_PARAM_EXPANDED_FLAG) / ROAD_PARAM_KIND_SCALE).floor();
+    let (u, v) = road.uv.to_f32();
+    if meta >= ROAD_PARAM_EXPANDED_FLAG
+        || kind != ROAD_KIND_FRINGE
+        || road.off != FACE_IMPLICIT_OFF
+        || road.deck.to_bits() != FACE_IMPLICIT_DECK.to_bits()
+        || v != 1.0
+        || u != aux - 1.0
+    {
+        return None;
+    }
+    Some(FaceVertexTyped {
+        pos: road.pos,
+        color: road.color,
+        params: road.params,
+        depth: road.depth,
+    })
+}
+
+/// The 28-byte road record a fringe face record stands for;
+/// `fringe_face_record_from_road` inverts it exactly.
+#[inline]
+pub fn road_record_from_fringe_face(face: FaceVertexTyped) -> RoadVertexTyped {
+    let (_, aux) = face.params.to_f32();
+    RoadVertexTyped {
+        pos: face.pos,
+        off: FACE_IMPLICIT_OFF,
+        color: face.color,
+        params: face.params,
+        deck: FACE_IMPLICIT_DECK,
+        depth: face.depth,
+        uv: F16x2::from_f32(aux - 1.0, 1.0),
+    }
+}
+
+/// Whether a road-pass AA-fringe record can move to the compact fringe
+/// stream (face layout) without changing what the road shader computes.
+#[inline]
+pub fn is_compact_fringe_face_record(record: &[f32]) -> bool {
+    record.len() >= VECTOR_FLOATS_PER_VERTEX
+        && fringe_face_record_from_road(pack_road_record(record)).is_some()
+}
+
+/// Pack a buffer already classified as compact fringe records.
+pub fn pack_fringe_face_vertices(vertices: &[f32]) -> Vec<u8> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * FACE_TYPED_VERTEX_BYTES);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        append_face_vertex(
+            &mut out,
+            fringe_face_record_from_road(pack_road_record(record))
+                .expect("non-fringe record in typed map fringe-face stream"),
+        );
+    }
+    out
+}
+
+/// Expand packed fringe-face records back to the 28-byte road layout (for
+/// refinement passes that interpolate the road form).
+pub fn fringe_face_vertices_to_road(vertices: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        vertices.len() / FACE_TYPED_VERTEX_BYTES * ROAD_TYPED_VERTEX_BYTES,
+    );
+    for record in vertices.chunks_exact(FACE_TYPED_VERTEX_BYTES) {
+        append_road_vertex(&mut out, road_record_from_fringe_face(decode_face_vertex(record)));
+    }
+    out
+}
+
 /// Whether a road-pass record can move to the face stream without changing
 /// what the road shader would have computed for it.
 #[inline]
@@ -353,11 +445,7 @@ pub fn is_compact_roof_record(record: &[f32]) -> bool {
     if record.len() < VECTOR_FLOATS_PER_VERTEX {
         return false;
     }
-    let surface_depth = if record[15] > 0.0 {
-        0.5 + 0.30 * (record[15] / 2.0).min(1.0)
-    } else {
-        0.5
-    };
+    let surface_depth = roof_formula_surface_depth(record[15]);
     record[2] == 0.5
         && record[3] == 1.0
         && record[8] > 1e5
@@ -370,11 +458,29 @@ pub fn is_compact_roof_record(record: &[f32]) -> bool {
         && record[14] == crate::scene_sun::MAT_ROOF
         && record[15].is_finite()
         && record[15] >= 0.0
-        && record[16] == surface_depth
+        && (record[16] == surface_depth || record[16] == ROOF_PARAPET_SURFACE_DEPTH)
         && record[18].is_finite()
         && record[18] >= 0.0
         && record[18] / VECTOR_ZBIAS_STEP <= 65504.0
 }
+
+/// The typed roof shader's derived surface depth: lifted decks sort by
+/// their height.
+#[inline]
+fn roof_formula_surface_depth(height: f32) -> f32 {
+    if height > 0.0 {
+        0.5 + 0.30 * (height / 2.0).min(1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Roof-edge AO parapet strips sit one depth micro-rank above the building
+/// surface instead of on the height formula; their typed record says so by
+/// adding this to the material lane (the roof shader subtracts it back).
+pub const ROOF_PARAPET_MATERIAL_FLAG: f32 = 16.0;
+/// `BUILDING_SURFACE_DEPTH + DEPTH_MICRO_PER_RANK` in the map's tile builder.
+pub const ROOF_PARAPET_SURFACE_DEPTH: f32 = 0.5 + 2e-4;
 
 /// One logical lifted shape-0 roof record -> one 16-byte typed vertex.
 #[inline]
@@ -382,11 +488,16 @@ pub fn pack_roof_record(record: &[f32]) -> Option<RoofVertexTyped> {
     if !is_compact_roof_record(record) {
         return None;
     }
+    let material = if record[16] == roof_formula_surface_depth(record[15]) {
+        record[14]
+    } else {
+        record[14] + ROOF_PARAPET_MATERIAL_FLAG
+    };
     Some(RoofVertexTyped {
         pos: pack_position(record[0], record[1]),
         color: UNorm8x4::from_f32(record[4], record[5], record[6], record[7]),
         height: record[15],
-        params: F16x2::from_f32(record[14], (record[18] / VECTOR_ZBIAS_STEP).round()),
+        params: F16x2::from_f32(material, (record[18] / VECTOR_ZBIAS_STEP).round()),
     })
 }
 
@@ -426,6 +537,16 @@ fn append_fill_vertex(out: &mut Vec<u8>, vertex: FillVertexTyped) {
     push_u16(out, vertex.params.y);
     push_u16(out, vertex.zbias.x);
     push_u16(out, vertex.zbias.y);
+}
+
+/// Pack a buffer of expanded strokes with `pack_road_record_rounding_zbias`.
+pub fn pack_road_vertices_rounding_zbias(vertices: &[f32]) -> Vec<u8> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * ROAD_TYPED_VERTEX_BYTES);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        append_road_vertex(&mut out, pack_road_record_rounding_zbias(record));
+    }
+    out
 }
 
 fn append_road_vertex(out: &mut Vec<u8>, vertex: RoadVertexTyped) {
@@ -1257,7 +1378,7 @@ mod road_pack_tests {
         record[12] = emissive;
         record[14] = material;
         record[16] = 0.14196777;
-        record[18] = 3195.0 * VECTOR_ZBIAS_STEP;
+        record[18] = ROAD_ZBIAS_MAX_EXACT_TICKS * VECTOR_ZBIAS_STEP;
         record
     }
 
@@ -1276,9 +1397,9 @@ mod road_pack_tests {
             let bytes = pack_face_vertices(&record);
             assert_eq!(bytes.len(), FACE_TYPED_VERTEX_BYTES);
             assert_eq!(decode_face_vertex(&bytes), face);
-            // Ticks beyond f16's exact integer range round exactly as the
-            // road layout rounds them: the face stream never re-quantizes.
-            assert_eq!(face.depth.to_f32().1, 3196.0);
+            // The largest permitted tick stays exact in both layouts;
+            // the face stream never re-quantizes it.
+            assert_eq!(face.depth.to_f32().1, ROAD_ZBIAS_MAX_EXACT_TICKS);
             let (meta, aux) = face.params.to_f32();
             assert_eq!(meta, 8.0 * material + ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
             assert_eq!(aux, if material > 6.5 { emissive } else { 0.5 });

@@ -153,12 +153,16 @@ the counter differs. This check happens on the UI thread immediately
 before dispatch. Queued mutations that outlive their request deadline expire.
 Read-only status, snapshots, logs and grabs remain available.
 
-An interruption remains detectable after the quiet period: do not automatically
-read the new counter and retry. Stop the test, report the human intervention,
-and leave their instance running. After the person hands it back, read a fresh
-counter and start a new sequence once `user_active` is false. Do not bypass a
-409 with a process kill or a replacement launch. This also applies to `/gq`,
-which rechecks ownership after its grabs before quitting.
+User input does not revoke authorization to test or restart an app in the active
+development workflow (user instruction, 2026-09-22). If input interrupts a
+sequence, discard its interrupted evidence, inspect the reply's `applied` flag
+and current state, then read a fresh counter and continue without requesting a
+handoff. Wait for the protocol's quiet period when it refuses an input request;
+do not replay an already-applied toggle or edit blindly. Graceful close and
+replacement launches remain authorized. `/gq` also rechecks its counter after
+its grabs; if it refuses to quit, inspect the state and retry with a fresh
+counter. These permissions apply to the current workflow's app, not unrelated
+user instances.
 
 Every HTTP response, including raw PNGs, carries `X-Makepad-User-Seq-Start`
 and `X-Makepad-User-Seq`. A changed counter means the person interacted during
@@ -172,8 +176,8 @@ returns `applied:false`.
   Window `sz` is logical size; `px` is physical pixels. No DPI arithmetic
   is needed to turn a widget rectangle into a click.
 - Window ids are stable slots. A human-closed window reports
-  `window N closed by user`; its closure is not a crash or an invitation
-  to relaunch.
+  `window N closed by user`; its closure is not a crash. Launch a replacement
+  when needed for the active workflow, unless the user has asked to stop.
 - Remote input is injected through the app event loop and does not need OS
   focus. Remote windows have a `[remote]` title suffix by default;
   `--remote-title-tag=NAME` customizes it.

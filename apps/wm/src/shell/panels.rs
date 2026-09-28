@@ -117,19 +117,12 @@ pub const MONTH_NAMES: [&str; 12] = [
 ];
 pub const WEEKDAY_NAMES: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
-/// Today, from `date +%Y-%m-%d`.
+/// Today's local date (year, month 1–12, day 1–31), read in-process.
 pub fn today() -> (i64, u32, u32) {
-    let out = std::process::Command::new("date")
-        .arg("+%Y-%m-%d")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    let mut parts = out.trim().split('-');
-    let y = parts.next().and_then(|s| s.parse::<i64>().ok()).unwrap_or(2026);
-    let m = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-    let d = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-    (y, m, d)
+    match super::bar::local_now() {
+        Some(now) => (now.year, now.month, now.day),
+        None => (2026, 1, 1),
+    }
 }
 
 // ======================================================================

@@ -1,0 +1,22 @@
+// The default smoke test, run for every app that has no `ci.splash` of its
+// own. tools/ci sets `ci.target` to the app it found ({package, binary, cwd}).
+// Nothing here touches the app beyond looking at it.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: [ci.target.package] targets: ci.host.targets})
+})
+
+let app = ci.launch(ci.target)
+
+ci.step("comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window taken from a Mac. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The window should show a working application: panels, buttons, text, lists, a canvas, a map, a document or some other user interface. The application came up when ALL of these are true: 1. The picture is not blank: it is not one flat colour from edge to edge, and it is not entirely black or entirely white. 2. Some user interface is visible: at least two different things among text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture. 3. No error panel covers the window: there is no large block of text with words such as panic, error, failed, backtrace or unwrap. Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO")
+})
+
+app.quit()
+nil

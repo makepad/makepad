@@ -80,6 +80,9 @@ impl App {
         );
         let (top, bottom) = match style {
             DesktopStyle::Omarchy => (shell::rgb(16, 19, 21), shell::rgb(24, 30, 34)),
+            // The twelfth sheet: near-black grounds, so the desktop behind it
+            // is the same flat dark the style itself draws.
+            DesktopStyle::BlackOrange => (shell::rgb(20, 23, 28), shell::rgb(16, 19, 23)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),

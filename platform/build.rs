@@ -41,21 +41,35 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
 
+    // The default macOS bundle name and identifier. An app overrides them
+    // with MAKEPAD_BUNDLE_NAME / MAKEPAD_BUNDLE_IDENTIFIER (typically in its
+    // `.cargo/config.toml` `[env]` section with `force = true`), which
+    // `app_main!` reads in the APP crate and embeds in its executable (see
+    // src/app_meta.rs): read here, a bundle build or another app's name
+    // rebuilt this crate and everything above it. The default is the
+    // workspace/package directory name (capitalized), which is almost always
+    // more meaningful than a hardcoded placeholder; it depends only on where
+    // the target directory is.
+    let bundle_name = detect_app_name(Path::new(&out_dir)).unwrap_or_else(|| "Makepad App".to_string());
+    let bundle_id = format!("dev.makepad.{}", bundle_name.to_lowercase().replace(' ', "-"));
+    std::fs::write(
+        Path::new(&out_dir).join("app_meta_gen.rs"),
+        format!(
+            "/// The bundle name when the app's build sets no MAKEPAD_BUNDLE_NAME.\n\
+             pub const DEFAULT_BUNDLE_NAME: &str = {bundle_name:?};\n\
+             /// The identifier that goes with [`DEFAULT_BUNDLE_NAME`].\n\
+             pub const DEFAULT_BUNDLE_IDENTIFIER: &str = {bundle_id:?};\n"
+        ),
+    )
+    .unwrap();
+
     if target_os == "macos" {
-        // The downstream app can override the bundle name shown in the macOS
-        // application menu by setting MAKEPAD_BUNDLE_NAME — typically via its
-        // `.cargo/config.toml` `[env]` section with `force = true`. macOS uses
-        // CFBundleName from this Info.plist as the first menu bar item title
-        // for unbundled `cargo run` launches, and it overrides whatever NSMenu
-        // title we pass to setMainMenu:. When the env var isn't set, we fall
-        // back to the workspace/package directory name (capitalized), which
-        // is almost always more meaningful than a hardcoded placeholder.
-        let bundle_name = env::var("MAKEPAD_BUNDLE_NAME")
-            .ok()
-            .or_else(|| detect_app_name(Path::new(&out_dir)))
-            .unwrap_or_else(|| "Makepad App".to_string());
-        let bundle_id = env::var("MAKEPAD_BUNDLE_IDENTIFIER")
-            .unwrap_or_else(|_| format!("dev.makepad.{}", bundle_name.to_lowercase().replace(' ', "-")));
+        // macOS uses CFBundleName from an Info.plist beside an unbundled
+        // executable as the first menu bar item title for `cargo run`
+        // launches, and it overrides whatever NSMenu title we pass to
+        // setMainMenu:. `app_main!` embeds its own Info.plist in the
+        // executable, which takes precedence; this one, with the defaults,
+        // serves binaries that start without `app_main!`.
         let command_line_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,24 +101,26 @@ fn main() {
         std::fs::write(path.join("Info.plist"), command_line_plist).unwrap();
     }
 
-    // Per slot: env-var override → auto-discovery in `<workspace_root>/resources/`.
+    // Window icons auto-discovered in `<workspace_root>/resources/`.
     // Workspace root is the dir containing `target/` (5 ancestors up from
-    // OUT_DIR), same heuristic as `detect_app_name`.
-    let icons: &[(&str, &str, &str)] = &[
-        ("MAKEPAD_APP_ICON_32",   "icon_32.png",   "CUSTOM_ICON_PNG_32"),
-        ("MAKEPAD_APP_ICON_64",   "icon_64.png",   "CUSTOM_ICON_PNG_64"),
-        ("MAKEPAD_APP_ICON_128",  "icon_128.png",  "CUSTOM_ICON_PNG_128"),
-        ("MAKEPAD_APP_ICON_256",  "icon_256.png",  "CUSTOM_ICON_PNG_256"),
-        ("MAKEPAD_APP_ICON_512",  "icon_512.png",  "CUSTOM_ICON_PNG_512"),
-        ("MAKEPAD_APP_ICON_1024", "icon_1024.png", "CUSTOM_ICON_PNG_1024"),
-        ("MAKEPAD_APP_ICON_ICO",  "icon.ico",      "CUSTOM_ICON_ICO"),
+    // OUT_DIR), same heuristic as `detect_app_name`. An app's own icons
+    // (MAKEPAD_APP_ICON_*, which `cargo makepad desktop` sets per app) are
+    // read by `app_main!` in the app crate instead (src/app_meta.rs), so
+    // switching apps does not rebuild this crate.
+    let icons: &[(&str, &str)] = &[
+        ("icon_32.png", "CUSTOM_ICON_PNG_32"),
+        ("icon_64.png", "CUSTOM_ICON_PNG_64"),
+        ("icon_128.png", "CUSTOM_ICON_PNG_128"),
+        ("icon_256.png", "CUSTOM_ICON_PNG_256"),
+        ("icon_512.png", "CUSTOM_ICON_PNG_512"),
+        ("icon_1024.png", "CUSTOM_ICON_PNG_1024"),
+        ("icon.ico", "CUSTOM_ICON_ICO"),
     ];
     let resources_dir = Path::new(&out_dir).ancestors().nth(5).map(|r| r.join("resources"));
     let mut icon_gen = String::new();
-    for &(var, filename, const_name) in icons {
-        println!("cargo:rerun-if-env-changed={var}");
-        let path = env::var(var).ok().or_else(|| {
-            let p = resources_dir.as_ref()?.join(filename);
+    for &(filename, const_name) in icons {
+        let path = resources_dir.as_ref().and_then(|dir| {
+            let p = dir.join(filename);
             p.is_file().then(|| p.to_string_lossy().into_owned())
         });
         let value = match &path {
@@ -126,10 +142,13 @@ fn main() {
     std::fs::write(Path::new(&out_dir).join("app_icon_gen.rs"), icon_gen).unwrap();
 
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,gpusim,use_unstable_unix_socket_ancillary_data_2021)");
+    // Every variable declared here rebuilds this crate and everything that
+    // depends on it (draw, widgets, every app) when its value changes: keep
+    // per-app inputs out (see src/app_meta.rs). MAKEPAD selects the backend
+    // (gpusim, gl, vulkan, lines, ...), which this crate is compiled for;
+    // words that only concern a crate further up belong in a variable of
+    // that crate's own.
     println!("cargo:rerun-if-env-changed=MAKEPAD");
-    println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
-    println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_NAME");
-    println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_IDENTIFIER");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
 
     // The GPU API on desktop Linux. The `vulkan` feature builds both

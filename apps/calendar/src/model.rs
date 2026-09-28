@@ -494,107 +494,10 @@ impl ClockSnapshot {
     }
 
     pub fn from_epoch_secs(secs: i64) -> Self {
-        let local = local_civil(secs);
-        let today = civil::from_ymd(local.year, local.month, local.day);
+        let local = civil::local_or_utc(secs);
+        let today = local.day_number();
         let minute = (local.hour * 60 + local.minute).min(MINUTES_PER_DAY as u32 - 1) as u16;
         Self { today, minute }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocalCivil {
-    pub year: i32,
-    pub month: u32,
-    pub day: u32,
-    pub hour: u32,
-    pub minute: u32,
-    pub second: u32,
-    /// True when the platform applied a real local zone.
-    pub zoned: bool,
-}
-
-/// Host-local civil breakdown of Unix epoch seconds. Unix targets use
-/// `localtime_r`; UTC is not substituted on those targets.
-pub fn local_civil(secs: i64) -> LocalCivil {
-    sys::local(secs).unwrap_or_else(|| {
-        // Only reached when the platform call fails. Still a civil breakdown
-        // of the same instant, not a zoned conversion.
-        let days = secs.div_euclid(86_400) as Day;
-        let rem = secs.rem_euclid(86_400) as u32;
-        let (year, month, day) = civil::to_ymd(days);
-        LocalCivil {
-            year,
-            month,
-            day,
-            hour: rem / 3600,
-            minute: (rem / 60) % 60,
-            second: rem % 60,
-            zoned: false,
-        }
-    })
-}
-
-#[cfg(unix)]
-mod sys {
-    use super::LocalCivil;
-    use std::os::raw::{c_char, c_int, c_long};
-
-    #[repr(C)]
-    struct Tm {
-        tm_sec: c_int,
-        tm_min: c_int,
-        tm_hour: c_int,
-        tm_mday: c_int,
-        tm_mon: c_int,
-        tm_year: c_int,
-        tm_wday: c_int,
-        tm_yday: c_int,
-        tm_isdst: c_int,
-        tm_gmtoff: c_long,
-        tm_zone: *const c_char,
-    }
-
-    extern "C" {
-        fn tzset();
-        fn localtime_r(time: *const c_long, out: *mut Tm) -> *mut Tm;
-    }
-
-    pub fn local(secs: i64) -> Option<LocalCivil> {
-        unsafe { tzset() };
-        let t: c_long = c_long::try_from(secs).ok()?;
-        let mut tm = Tm {
-            tm_sec: 0,
-            tm_min: 0,
-            tm_hour: 0,
-            tm_mday: 1,
-            tm_mon: 0,
-            tm_year: 70,
-            tm_wday: 4,
-            tm_yday: 0,
-            tm_isdst: 0,
-            tm_gmtoff: 0,
-            tm_zone: std::ptr::null(),
-        };
-        let ok = unsafe { !localtime_r(&t, &mut tm).is_null() };
-        if !ok {
-            return None;
-        }
-        Some(LocalCivil {
-            year: tm.tm_year + 1900,
-            month: (tm.tm_mon + 1).clamp(1, 12) as u32,
-            day: tm.tm_mday.clamp(1, 31) as u32,
-            hour: tm.tm_hour.clamp(0, 23) as u32,
-            minute: tm.tm_min.clamp(0, 59) as u32,
-            second: tm.tm_sec.clamp(0, 60) as u32,
-            zoned: true,
-        })
-    }
-}
-
-#[cfg(not(unix))]
-mod sys {
-    pub fn local(_secs: i64) -> Option<super::LocalCivil> {
-        None
     }
 }
 
@@ -995,11 +898,11 @@ mod tests {
         assert!(!t.intersects_day(11));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
-    fn local_civil_is_zoned_on_unix() {
-        let local = local_civil(1_788_698_096);
-        assert!(local.zoned, "localtime_r must supply a zone");
+    fn clock_snapshot_is_the_local_day() {
+        let local = civil::local_or_utc(1_788_698_096);
+        assert!(local.zoned, "the host must supply a zone");
         assert!(local.hour < 24 && local.minute < 60);
         let snap = ClockSnapshot::from_epoch_secs(1_788_698_096);
         assert_eq!(

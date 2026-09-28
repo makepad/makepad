@@ -396,6 +396,10 @@ pub struct WmState {
     pub launchable: crate::apps::Launchable,
     /// Reduce Transparency / Reduce Motion (desktop.rs `Accessibility`).
     pub accessibility: crate::desktop::Accessibility,
+    /// The super-app's first-run provisioning (dylib_host): its newest
+    /// progress line while the toolchain streams out of the APK, shown on
+    /// the desk; None once provisioned (or when nothing is provisioning).
+    pub provision: Option<String>,
 }
 
 impl WmState {
@@ -803,6 +807,9 @@ pub struct WmDesk {
     #[find] #[live] phone_ui: PhoneSurface,
     #[live] draw_phone: DrawPhoneApp,
     #[rust] phone_frames: HashMap<ClientId, PhoneFrame>,
+    /// The simulated phone's finger: the client a primary mouse press in
+    /// the open app went to as a touch, until the button lifts.
+    #[rust] phone_finger: Option<phone::PhoneFinger>,
     #[rust] desktop_frames: HashMap<ClientId, WindowFrame>,
     #[rust] pub wallpaper: WidgetRef,
     #[rust] compositor: Option<BackdropCompositor>,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use makepad_mbtile_reader::{detail_feature_used, detail_key_allowed, DetailGeom};
 
 use super::geom::MVT_EXTENT;
 use super::FastHashMap;
@@ -100,37 +101,24 @@ impl Layer {
     }
 }
 
-// Keep these byte-for-byte aligned with the renderer's DETAIL_WAY_KEYS and
-// DETAIL_POINT_EXTRA_KEYS in widgets/src/map/tile.rs. They are duplicated
-// here because map_build deliberately has no renderer dependency unless its
-// optional `faces` feature is enabled.
-const DETAIL_WAY_KEYS: &[&str] = &[
-    "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
-    "name", "attraction", "zoo", "tourism", "public_transport", "landuse", "leisure",
-    "natural", "building", "building:part", "height", "building:levels", "min_height",
-    "building:min_level", "location", "place", "parking", "surface", "access", "service",
-    "link", "rail", "waterway", "ref",
-];
-
-const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
-    "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office", "operator",
-    "shop", "osm_layer", "kerb", "bus", "shelter",
-];
-
-fn renderer_reads_detail_key(key: &str) -> bool {
-    DETAIL_WAY_KEYS.contains(&key) || DETAIL_POINT_EXTRA_KEYS.contains(&key)
-}
-
-/// Drop tags that the current renderer cannot observe. Geometry and every
-/// shortbread/base layer remain untouched.
-pub(super) fn retain_renderer_detail_tags(features: &mut [TileFeature]) {
-    for feature in features {
-        if feature.layer.is_osm_detail() {
-            feature
-                .tags
-                .retain(|(key, _)| renderer_reads_detail_key(key));
+/// Apply the renderer's detail contract (`makepad_mbtile_reader::map_tags`):
+/// `osm_*` features keep only the tags the renderer reads, and features its
+/// detail pass can never draw are dropped. Geometry and every shortbread/base
+/// layer remain untouched. The repacker applies the same contract to
+/// existing archives, so a fresh bake and a repacked one agree.
+pub(super) fn retain_renderer_detail_tags(features: &mut Vec<TileFeature>) {
+    features.retain_mut(|feature| {
+        if !feature.layer.is_osm_detail() {
+            return true;
         }
-    }
+        feature.tags.retain(|(key, _)| detail_key_allowed(key));
+        let geom = match feature.geometry_type {
+            GeometryType::Point => DetailGeom::Point,
+            GeometryType::LineString => DetailGeom::Line,
+            GeometryType::Polygon => DetailGeom::Polygon,
+        };
+        detail_feature_used(feature.layer.name(), geom, feature.tags.as_slice())
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -846,6 +834,8 @@ mod tests {
     #[test]
     fn renderer_profile_keeps_only_reader_whitelist_and_drops_provenance() {
         let mut line = sample_feature();
+        // A bridge way: the renderer's detail pass keeps it as a corridor.
+        line.tags.push(("bridge".to_string(), "yes".to_string()));
         line.tags
             .push(("amenity".to_string(), "parking".to_string()));
         line.tags
@@ -877,7 +867,7 @@ mod tests {
         point.layer = Layer::OsmPoints;
         point.geometry_type = GeometryType::Point;
         point.tags = vec![
-            ("amenity".to_string(), "cafe".to_string()),
+            ("amenity".to_string(), "bench".to_string()),
             ("operator".to_string(), "Example".to_string()),
             ("addr:street".to_string(), "Nowhere".to_string()),
         ];

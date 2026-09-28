@@ -4,6 +4,9 @@ use std::path::Path;
 use std::io::prelude::*;
 
 fn main() {
+    // Only this script decides what it writes: without a rerun directive
+    // Cargo would rerun it on any change in the package.
+    println!("cargo:rerun-if-changed=build.rs");
     let out_dir = env::var("OUT_DIR").unwrap();
     let path = Path::new(&out_dir).parent().unwrap().parent().unwrap().parent().unwrap();
     let cwd = std::env::current_dir().unwrap();

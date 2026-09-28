@@ -12,12 +12,12 @@
 //! factory, the server only stores what it is handed), and the same picture
 //! the preview widgets draw live from decoded samples.
 //!
-//! Dependency-free: an iterative radix-2 FFT, a musically weighted
+//! Dependency-free: the crate's radix-2 FFT ([`crate::fft`]), a musically weighted
 //! log-frequency mapping, and a perceptual colour ramp, with the columns
 //! split across cores because a full track at this resolution is tens of
 //! thousands of transforms.
 
-use std::f32::consts::PI;
+use crate::fft::Fft;
 
 /// High-definition picture size, COMPOSED FOR A CARD.
 ///
@@ -79,7 +79,6 @@ pub fn spectrogram_rgba(
     if samples.len() < N_FFT || w == 0 || h == 0 || sample_rate == 0 {
         return None;
     }
-    let window = hann(N_FFT);
     // One column per output pixel, spread over the WHOLE track: an icon
     // shows the shape of a piece, not its first two seconds.
     let span = samples.len().saturating_sub(N_FFT);
@@ -99,13 +98,13 @@ pub fn spectrogram_rgba(
     let mut columns: Vec<Vec<f32>> = vec![Vec::new(); w];
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in columns.chunks_mut(per_thread).enumerate() {
-            let (window, bins, samples) = (&window, &bins, samples);
+            let (bins, samples) = (&bins, samples);
             scope.spawn(move || {
-                let mut fft = Fft::new();
+                let mut fft = Columns::new();
                 for (i, column) in chunk.iter_mut().enumerate() {
                     let x = chunk_index * per_thread + i;
                     let start = (x as f64 * stride) as usize;
-                    *column = fft.column(samples, start, frames, window, bins);
+                    *column = fft.column(samples, start, frames, bins);
                 }
             });
         }
@@ -220,41 +219,23 @@ pub fn ramp(level: f32) -> [u8; 3] {
     out
 }
 
-fn hann(n: usize) -> Vec<f32> {
-    (0..n)
-        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / n as f32).cos())
-        .collect()
-}
-
-/// Iterative in-place radix-2 Cooley-Tukey, scratch reused across columns.
-struct Fft {
-    re: Vec<f32>,
-    im: Vec<f32>,
-    band: Vec<f32>,
+/// One worker's scratch: the shared transform, the bin magnitudes of the
+/// frame it just read and the band levels of the column being built.
+struct Columns {
+    fft: Fft,
     mag: Vec<f32>,
+    band: Vec<f32>,
 }
 
-impl Fft {
+impl Columns {
     fn new() -> Self {
-        Self {
-            re: vec![0.0; N_FFT],
-            im: vec![0.0; N_FFT],
-            band: Vec::new(),
-            mag: vec![0.0; N_FFT / 2],
-        }
+        Self { fft: Fft::new(N_FFT), mag: vec![0.0; N_FFT / 2], band: Vec::new() }
     }
 
     /// One column: `frames` overlapping transforms starting at `start`,
     /// peak-held per band, so a transient anywhere in the column's span
     /// lights it.
-    fn column(
-        &mut self,
-        samples: &[f32],
-        start: usize,
-        frames: usize,
-        window: &[f32],
-        bins: &[Row],
-    ) -> Vec<f32> {
+    fn column(&mut self, samples: &[f32], start: usize, frames: usize, bins: &[Row]) -> Vec<f32> {
         self.band.clear();
         self.band.resize(bins.len(), 0.0);
         for frame in 0..frames.max(1) {
@@ -262,16 +243,8 @@ impl Fft {
             if base >= samples.len() {
                 break;
             }
-            for i in 0..N_FFT {
-                let s = samples.get(base + i).copied().unwrap_or(0.0);
-                self.re[i] = s * window[i];
-                self.im[i] = 0.0;
-            }
-            self.transform();
-            for bin in 0..N_FFT / 2 {
-                let (re, im) = (self.re[bin], self.im[bin]);
-                self.mag[bin] = (re * re + im * im).sqrt();
-            }
+            let end = (base + N_FFT).min(samples.len());
+            self.fft.magnitudes(&samples[base..end], &mut self.mag);
             for (row, spec) in bins.iter().enumerate() {
                 let value = if spec.hi > spec.lo + 1 {
                     // The loudest bin in the band, not the average: one
@@ -296,52 +269,12 @@ impl Fft {
         }
         self.band.clone()
     }
-
-    fn transform(&mut self) {
-        let n = N_FFT;
-        // Bit-reversal permutation.
-        let mut j = 0usize;
-        for i in 1..n {
-            let mut bit = n >> 1;
-            while j & bit != 0 {
-                j ^= bit;
-                bit >>= 1;
-            }
-            j |= bit;
-            if i < j {
-                self.re.swap(i, j);
-                self.im.swap(i, j);
-            }
-        }
-        let mut len = 2;
-        while len <= n {
-            let ang = -2.0 * PI / len as f32;
-            let (wr, wi) = (ang.cos(), ang.sin());
-            let mut i = 0;
-            while i < n {
-                let (mut cr, mut ci) = (1.0f32, 0.0f32);
-                for k in 0..len / 2 {
-                    let (a, b) = (i + k, i + k + len / 2);
-                    let (xr, xi) = (self.re[b] * cr - self.im[b] * ci,
-                                    self.re[b] * ci + self.im[b] * cr);
-                    self.re[b] = self.re[a] - xr;
-                    self.im[b] = self.im[a] - xi;
-                    self.re[a] += xr;
-                    self.im[a] += xi;
-                    let next = (cr * wr - ci * wi, cr * wi + ci * wr);
-                    cr = next.0;
-                    ci = next.1;
-                }
-                i += len;
-            }
-            len <<= 1;
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     fn tone(freq: f32, secs: f32, rate: u32) -> Vec<f32> {
         let n = (secs * rate as f32) as usize;
