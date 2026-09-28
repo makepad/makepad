@@ -224,17 +224,62 @@ fn wgsl_collect_instance_fields(output: &ShaderOutput, vm: &ScriptVm) -> Vec<Wgs
     out
 }
 
+/// Identifiers the fragment stage can read: every identifier in the bodies of
+/// the functions reachable from `io_fragment` (calls followed by name).
+/// Instance fields outside this set stay in the vertex stage. Metal forwards
+/// only a flat instance id and re-reads the instance in the fragment; WGSL
+/// forwards values, and all of a large instance (morph weights, a transform,
+/// ...) overflowed the 124/128 inter-stage components Vulkan devices allow.
+fn wgsl_fragment_identifiers(output: &ShaderOutput) -> std::collections::HashSet<String> {
+    fn identifiers(body: &str) -> impl Iterator<Item = &str> {
+        body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| !word.is_empty())
+    }
+    let bodies: std::collections::HashMap<&str, &str> = output
+        .functions
+        .iter()
+        .filter_map(|f| {
+            let name = f.call_sig.strip_prefix("fn ")?.split('(').next()?.trim();
+            Some((name, f.out.as_str()))
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![output.backend.map_function_name("io_fragment")];
+    let mut words = std::collections::HashSet::new();
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(body) = bodies.get(name.as_str()) else { continue };
+        for word in identifiers(body) {
+            if bodies.contains_key(word) && !seen.contains(word) {
+                stack.push(word.to_string());
+            }
+            words.insert(word.to_string());
+        }
+    }
+    words
+}
+
 fn wgsl_collect_varying_fields(output: &ShaderOutput, vm: &ScriptVm) -> Vec<WgslPackedField> {
     let mut out = Vec::new();
     let mut offset = 0usize;
+    let fragment_reads = wgsl_fragment_identifiers(output);
+    let fragment_reads_io = |prefix: &str, io: &ShaderIo| {
+        fragment_reads.contains(&format!("{prefix}{}", output.backend.map_io_name(io.name)))
+    };
     for io in &output.io {
         if let ShaderIoKind::DynInstance = io.kind {
-            wgsl_push_field(output, vm, io, "dyninst_", false, &mut offset, &mut out);
+            if fragment_reads_io("dyninst_", io) {
+                wgsl_push_field(output, vm, io, "dyninst_", false, &mut offset, &mut out);
+            }
         }
     }
     for io in &output.io {
         if let ShaderIoKind::RustInstance = io.kind {
-            wgsl_push_field(output, vm, io, "rustinst_", false, &mut offset, &mut out);
+            if fragment_reads_io("rustinst_", io) {
+                wgsl_push_field(output, vm, io, "rustinst_", false, &mut offset, &mut out);
+            }
         }
     }
     for io in &output.io {

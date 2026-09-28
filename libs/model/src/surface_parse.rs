@@ -59,6 +59,12 @@ fn pattern(v: &Value) -> Result<SurfacePattern> {
         "perlin" => PatternKind::Perlin,
         "fbm" => PatternKind::Fbm,
         "yarn" => PatternKind::Yarn,
+        "bricks" => PatternKind::Bricks,
+        "tiles" => PatternKind::Tiles,
+        "planks" => PatternKind::Planks,
+        "vents" => PatternKind::Vents,
+        "grille" => PatternKind::Grille,
+        "knurl" => PatternKind::Knurl,
         _ => return Err(Error::Invalid("surface pattern kind")),
     };
     let p = SurfacePattern {
@@ -320,6 +326,12 @@ impl SurfaceOperation {
                     color: array(need(v, "color")?)?,
                     mask: flag(v, "mask", false)?,
                 }
+            }
+            "surface_vertex_colors" => {
+                fields(v, &["op", "object", "vertices", "colors"])?;
+                let vertices: Vec<mesh::VertexId> = selections(need(v, "vertices")?, limits.mesh.max_vertices)?.into_iter().map(mesh::VertexId).collect();
+                let colors = need(v, "colors")?.as_arr().ok_or(Error::Invalid("vertex colors"))?.iter().map(array).collect::<Result<Vec<[f64; 4]>>>()?;
+                VertexColors { object: text(v, "object")?.into(), vertices, colors }
             }
             "surface_vertex_paint" => {
                 fields(v, &["op", "object", "vertices", "color", "opacity"])?;

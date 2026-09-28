@@ -1481,6 +1481,37 @@ impl CxGameInputApi for Cx {
         }
         &mut []
     }
+
+    fn game_input_infos(&mut self) -> Vec<crate::event::game_input::GameInputInfo> {
+        if self.in_makepad_studio {
+            return Vec::new();
+        }
+        if let Some(game_input) = &self.os.windows_game_input {
+            return game_input.gamepads.clone();
+        }
+        Vec::new()
+    }
+
+    fn gamepad_haptic_capabilities(
+        &mut self,
+        id: crate::makepad_live_id::LiveId,
+    ) -> crate::event::game_input::GamepadHapticCapabilities {
+        match &self.os.windows_game_input {
+            Some(game_input) if !self.in_makepad_studio => game_input.haptic_capabilities(id),
+            _ => Default::default(),
+        }
+    }
+
+    fn gamepad_haptic_pulse(
+        &mut self,
+        id: crate::makepad_live_id::LiveId,
+        pulse: crate::event::game_input::GamepadHapticPulse,
+    ) -> bool {
+        match &mut self.os.windows_game_input {
+            Some(game_input) if !self.in_makepad_studio => game_input.haptic_pulse(id, pulse),
+            _ => false,
+        }
+    }
 }
 
 impl CxOsApi for Cx {

@@ -30,10 +30,14 @@ pub struct VehicleWheel {
     pub visual:Option<VisualWheelMotion>,
 }
 pub const VEHICLE_WHEEL_CONNECTIONS:[&str;4]=["wheel_front_left","wheel_front_right","wheel_rear_left","wheel_rear_right"];
+/// How many generic driven parts (non-wheel connections) one model may bind.
+pub const MAX_DRIVEN_PARTS:usize=48;
 #[derive(Clone,Debug,PartialEq)]
 pub struct LodLevel {pub target_faces:usize,pub max_error:f64,pub distance:f64}
 #[derive(Clone,Debug,PartialEq)]
-pub enum CollisionProxy {Box,Sphere,Mesh{object:String}}
+/// Hull and capsule are fitted to the object's own vertices at compile and
+/// delivered as compact triangle proxies.
+pub enum CollisionProxy {Box,Sphere,Mesh{object:String},Hull,Capsule}
 #[derive(Clone,Debug,PartialEq)]
 pub struct NamedModifier {pub name:String,pub enabled:bool,pub operation:MeshEditingOperation}
 #[derive(Clone,Debug,Default,PartialEq)]
@@ -98,12 +102,19 @@ impl SceneState {
             }
         }
         for socket in self.sockets.values() {name(&socket.name,limits)?;socket.transform.validate()?;self.attachment(&socket.attachment,state)?;}
-        if self.wheels.len()>4{return Err(Error::Budget("vehicle wheel bindings"));}
+        // A binding on one of the four wheel connections is a road wheel; any
+        // other connection is a generic DRIVEN PART (a control surface, a
+        // gear leg, a canopy) posed by the host through the same contract.
+        let is_wheel=|c:&str|VEHICLE_WHEEL_CONNECTIONS.contains(&c);
+        if self.wheels.values().filter(|w|is_wheel(&w.connection)).count()>4{return Err(Error::Budget("vehicle wheel bindings"));}
+        if self.wheels.values().filter(|w|!is_wheel(&w.connection)).count()>MAX_DRIVEN_PARTS{return Err(Error::Budget("driven part bindings"));}
         let mut connections=BTreeSet::new();
         for (object,wheel) in &self.wheels {
             ctx.checkpoint(1)?;name(object,limits)?;
             if !state.objects.contains_key(object){return Err(Error::MissingObject(object.clone()));}
-            if !VEHICLE_WHEEL_CONNECTIONS.contains(&wheel.connection.as_str())||!connections.insert(&wheel.connection){return Err(Error::Invalid("unknown or duplicate vehicle wheel connection"));}
+            if wheel.connection.starts_with("wheel_")&&!is_wheel(&wheel.connection){return Err(Error::Invalid("unknown vehicle wheel connection"));}
+            name(&wheel.connection,limits)?;
+            if !connections.insert(&wheel.connection){return Err(Error::Invalid("duplicate vehicle wheel or driven part connection"));}
             if wheel.pivot.iter().any(|v|!v.is_finite()||v.abs()>1e6)||[wheel.radius,wheel.width].iter().any(|v|!v.is_finite()||(*v as f32)<=0.||*v>10000.){return Err(Error::Invalid("wheel requires finite pivot and positive bounded renderable radius/width"));}
             if wheel.visual.is_some_and(|visual|!visual.is_valid()){return Err(Error::Invalid("wheel visual requires steer_gain 0..1, steer_max 0..1.2 radians, compression/droop 0..5 model metres"));}
             let world=self.world_matrix(object)?;let scale=world[0][0];
@@ -356,7 +367,7 @@ impl SceneOperation {
             "delete_vehicle_wheel"=>{fields(v,&["op","object"])?;Self::DeleteVehicleWheel{object:text(v,"object")?.into()}}
             "lods"=>{fields(v,&["op","object","levels"])?;Self::Lods{object:text(v,"object")?.into(),levels:rows(need(v,"levels")?,4)?.iter().map(|v|{
                 fields(v,&["target_faces","max_error","distance"])?;Ok(LodLevel{target_faces:integer(need(v,"target_faces")?)? as usize,max_error:float(need(v,"max_error")?)?,distance:float(need(v,"distance")?)?})}).collect::<Result<_>>()?}}
-            "collider"=>{fields(v,&["op","object","kind","source"])?;let proxy=match text(v,"kind")?{"box"=>CollisionProxy::Box,"sphere"=>CollisionProxy::Sphere,
+            "collider"=>{fields(v,&["op","object","kind","source"])?;let proxy=match text(v,"kind")?{"box"=>CollisionProxy::Box,"sphere"=>CollisionProxy::Sphere,"hull"=>CollisionProxy::Hull,"capsule"=>CollisionProxy::Capsule,
                 "mesh"=>CollisionProxy::Mesh{object:text(v,"source")?.into()},_=>return Err(Error::Invalid("collider kind"))};Self::Collider{object:text(v,"object")?.into(),proxy}}
             _=>return Ok(None),
         };if let Some(object)=value.object_name(){name(object,limits)?;}Ok(Some(value))
@@ -385,7 +396,7 @@ impl SceneOperation {
             Self::DeleteVehicleWheel{object}=>vec![("op",json::s("delete_vehicle_wheel")),("object",json::s(object))],
             Self::Lods{object,levels}=>vec![("op",json::s("lods")),("object",json::s(object)),("levels",Value::Arr(levels.iter().map(|l|json::obj(vec![
                 ("target_faces",Value::Int(l.target_faces as i64)),("max_error",Value::F64(l.max_error)),("distance",Value::F64(l.distance))])).collect()))],
-            Self::Collider{object,proxy}=>vec![("op",json::s("collider")),("object",json::s(object)),("kind",json::s(match proxy{CollisionProxy::Box=>"box",CollisionProxy::Sphere=>"sphere",CollisionProxy::Mesh{..}=>"mesh"}))],
+            Self::Collider{object,proxy}=>vec![("op",json::s("collider")),("object",json::s(object)),("kind",json::s(match proxy{CollisionProxy::Box=>"box",CollisionProxy::Sphere=>"sphere",CollisionProxy::Mesh{..}=>"mesh",CollisionProxy::Hull=>"hull",CollisionProxy::Capsule=>"capsule"}))],
         };
         if let Self::Light(LightEmitter{kind:LightKind::Spot{inner,outer},..})=self{f.push(("inner",Value::F64(*inner)));f.push(("outer",Value::F64(*outer)));}
         if let Self::Collider{proxy:CollisionProxy::Mesh{object},..}=self{f.push(("source",json::s(object)));}

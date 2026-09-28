@@ -3,7 +3,8 @@
 These Splash files define the shared widget styles used by the window manager:
 `omarchy`, `black-orange`, `macos`, `macos-dark`, `windows`, `windows-dark`,
 `windows-2000`, `nextstep`, `ios`, `ios-dark`, `android`, `android-dark`, and
-the four material sheets `neumorphic`, `molded`, `glossy` and `milled`.
+the four material sheets `neumorphic`, `molded`, `glossy` and `milled`, and
+`cyberpunk` (flat, chamfered controls edge-lit in cyan and magenta).
 
 Each style has two phases:
 

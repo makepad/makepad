@@ -67,6 +67,25 @@ script_mod! {
         // x = radius (m), y = bias floor (m), z = bias slope per metre of
         // view distance, w unused
         u_ao: uniform(vec4(0.3, 0.015, 0.002, 0.0))
+        // x = 1: `depth_tex` is a HARDWARE depth buffer of a GL-style
+        // projection (stored z = ndc * 0.5 + 0.5); y, z = the projection's
+        // m[2][2] and m[3][2], which turn it back into view distance.
+        u_depth: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        // View distance at uv (0 = background), from either input kind.
+        dist: fn(uv: vec2f) -> float {
+            let d = self.depth_tex.sample_nearest(uv).x
+            if self.u_depth.x < 0.5 {
+                return d
+            }
+            if d >= 0.99999 {
+                return 0.0
+            }
+            let z = self.u_depth.z / (d * 2.0 - 1.0 + self.u_depth.y)
+            let nx = uv.x * 2.0 - 1.0
+            let ny = 1.0 - uv.y * 2.0
+            return z * length(vec3(nx * self.u_proj.x, ny * self.u_proj.y, 1.0))
+        }
         // Nothing to clip against: the quad IS the pass. Straight to clip
         // space, exactly like a CAD composite quad — the pass keeps no
         // camera of its own.
@@ -115,7 +134,7 @@ script_mod! {
 
         pixel: fn() -> vec4f {
             let uv = self.pos
-            let d = self.depth_tex.sample_nearest(uv).x
+            let d = self.dist(uv)
             if d <= 0.0 {
                 return vec4(1.0, 0.0, 0.0, 1.0)
             }
@@ -127,10 +146,10 @@ script_mod! {
             // false slope across the edge.
             let tx = self.u_texel.x
             let ty = self.u_texel.y
-            let dl = self.depth_tex.sample_nearest(uv + vec2(0.0 - tx, 0.0)).x
-            let dr = self.depth_tex.sample_nearest(uv + vec2(tx, 0.0)).x
-            let du = self.depth_tex.sample_nearest(uv + vec2(0.0, 0.0 - ty)).x
-            let dd = self.depth_tex.sample_nearest(uv + vec2(0.0, ty)).x
+            let dl = self.dist(uv + vec2(0.0 - tx, 0.0))
+            let dr = self.dist(uv + vec2(tx, 0.0))
+            let du = self.dist(uv + vec2(0.0, 0.0 - ty))
+            let dd = self.dist(uv + vec2(0.0, ty))
             var ddx = self.view_pos(uv + vec2(tx, 0.0), dr) - p
             if dr <= 0.0 || (dl > 0.0 && abs(dl - d) < abs(dr - d)) {
                 ddx = p - self.view_pos(uv + vec2(0.0 - tx, 0.0), dl)
@@ -183,7 +202,7 @@ script_mod! {
                 let s = p + (t * (cos(ang) * r) + b * (sin(ang) * r) + n * z) * scale
                 let suv = self.project_uv(s)
                 if suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 {
-                    let sd = self.depth_tex.sample_nearest(suv).x
+                    let sd = self.dist(suv)
                     if sd > 0.0 {
                         // How far the geometry there stands IN FRONT of the
                         // sample point, metres. tap_occlusion in ssao.rs is
@@ -346,6 +365,9 @@ pub struct SsaoPass {
     /// neighbours' timeslices, and the floor is what the pass itself costs.
     pub stage_gpu_min_ms: [f64; 3],
     pub gpu_samples: u64,
+    /// `Some((m[2][2], m[3][2]))` of a perspective projection when the input
+    /// is a hardware depth buffer instead of a view-distance target.
+    pub hardware_depth: Option<(f32, f32)>,
 }
 
 const STAGE_NAMES: [&str; 3] = ["ssao raw", "ssao blur h", "ssao blur v"];
@@ -501,6 +523,8 @@ impl SsaoPass {
                 live_id!(u_ao),
                 &[params.radius, params.bias, params.bias_slope, 0.0],
             );
+            let depth = self.hardware_depth.map_or([0.0; 4], |(a, b)| [1.0, a, b, 0.0]);
+            dv.set_uniform(cx.cx, live_id!(u_depth), &depth);
             run_stage(cx, &mut self.stages, 0, &tex_a, &mut |cx, r| {
                 draw_raw.draw_abs(cx, r)
             });

@@ -69,7 +69,9 @@ fn invalid_or_incomplete_vehicle_bindings_refuse_without_mutating_source(){
     let mut doc=vehicle();let original=doc.to_bytes(None).unwrap();
     for source in [
         r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_rear_right","pivot":[0,0,0],"radius":0.35,"width":0.24}]"#,
-        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"bogus","pivot":[0,0,0],"radius":0.35,"width":0.24}]"#,
+        // Any other connection name is a generic driven part (a flap, a
+        // gear leg); an unknown name in the `wheel_` family is a typo.
+        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_bogus","pivot":[0,0,0],"radius":0.35,"width":0.24}]"#,
         r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_front_left","pivot":[0,0,0],"radius":0,"width":0.24}]"#,
         r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_front_left","pivot":[0,0,0],"radius":1e-200,"width":0.24}]"#,
         r#"[{"op":"object_node","object":"tire_0","node":{"parent":"body","transform":{"scale":[1,2,1]}}}]"#,

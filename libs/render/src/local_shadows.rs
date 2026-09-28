@@ -1,15 +1,47 @@
-//! Bounded realtime local shadow atlas. A spot occupies one tile; a point
-//! occupies six. A shadow-requesting light that cannot fit is omitted, never
-//! silently downgraded to illuminating through walls.
+//! Bounded realtime local shadow atlas (v2).
+//!
+//! * A spot occupies one square tile, a point six (a cube). Tiles come in
+//!   power-of-two sizes from the configured maximum down to an eighth of it,
+//!   chosen per light by importance (brightness and apparent size from the
+//!   eye), and packed by a buddy allocator into a 4:2 atlas (8 max-size
+//!   blocks). A light that does not fit at its size is offered the next
+//!   smaller one; only when even the smallest does not fit does it light
+//!   UNSHADOWED (never dark), and that happens to the lowest-ranked lights
+//!   first because allocation runs in rank order.
+//! * Ranking keeps last frame's owners (hysteresis), so the budget boundary
+//!   does not flicker, and a light dimmed to nothing (a street lamp at noon)
+//!   never takes atlas faces.
+//! * Static faces are CACHED: a face is re-rendered only when its light
+//!   moved, its tile moved, the static caster set changed, or a mover is (or
+//!   was last time) inside its frustum. Re-rendered faces go into a lower
+//!   depth "generation" of the atlas so a tile can be cleared on its own
+//!   (shadow_csm::CSM_DEPTH_GENS explains the scheme); after
+//!   [`LOCAL_DEPTH_GENS`] rendering frames the atlas is cleared and every
+//!   face re-rendered.
+//! * Cube faces are rendered a couple of texels wider than 90 degrees, so a
+//!   filter footprint at a face edge reads real depth instead of a clamped
+//!   border (the seam between cube faces).
 use crate::{
     gpu_lightmap::{GpuBakeMesh, GpuLmMover},
     lightmap::LmLight,
     shaders::*,
 };
 use makepad_draw::*;
+use std::hash::{Hash, Hasher};
 
-const COLUMNS: usize = 4;
-const MAX_FACES: usize = 16;
+/// Hard cap on faces per frame (metadata rows, draw lists).
+const MAX_FACES: usize = 64;
+/// Atlas blocks of the maximum tile size: 4 columns x 2 rows.
+const ROOT_COLS: usize = 4;
+const ROOT_ROWS: usize = 2;
+/// Smallest tile: the maximum tile size >> MIN_TIER_SHIFT.
+const MIN_TIER_SHIFT: u32 = 3;
+/// Depth generations for face caching. Perspective depth crowds near 1, so
+/// each generation keeps a quarter of the range (about 3 float steps per
+/// centimetre at 20 m; the receiver's bias floor is 1.5 cm).
+const LOCAL_DEPTH_GENS: u32 = 4;
+/// Texels a cube face is widened by on every side (cross-face filtering).
+const CUBE_GUARD: f32 = 2.0;
 
 /// Shader layout and atlas format must agree for the lifetime of the app.
 pub(crate) fn hardware_shadow_maps() -> bool {
@@ -21,6 +53,9 @@ pub(crate) fn hardware_shadow_maps() -> bool {
     })
 }
 
+/// `max_faces` caps the faces per frame; `resolution` is the LARGEST tile
+/// edge. The atlas is `4 * resolution` x `2 * resolution` (4096 x 2048 at
+/// the default 1024: 32 MiB of D32 plus the R32F colour target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalShadowConfig {
     pub max_faces: usize,
@@ -29,8 +64,8 @@ pub struct LocalShadowConfig {
 impl Default for LocalShadowConfig {
     fn default() -> Self {
         Self {
-            max_faces: 8,
-            resolution: 512,
+            max_faces: MAX_FACES,
+            resolution: 1024,
         }
     }
 }
@@ -47,9 +82,16 @@ impl LocalShadowConfig {
 pub struct LocalShadowStats {
     pub lights: usize,
     pub faces: usize,
+    /// Faces re-rendered this frame (the rest came from the cache).
+    pub rendered_faces: usize,
     pub omitted_lights: usize,
+    /// Lights that got a smaller tile than their importance asked for.
+    pub downsized_lights: usize,
     pub caster_draws: usize,
     pub encode_us: u64,
+    /// Smoothed GPU time of the atlas pass in ms (Metal command-buffer
+    /// timing; 0 on backends that do not report it).
+    pub gpu_ms: f32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -58,15 +100,49 @@ pub(crate) struct ShadowRecord {
     /// 0=no request, -1=omitted, 1=spot, 6=point.
     pub count: i32,
     pub near: f32,
+    pub far: f32,
+    /// Tile edge in texels of this light's faces.
+    pub tile: usize,
 }
 
+/// One light's tile request while the frame's atlas is being sized.
 #[derive(Clone, Copy)]
+struct TilePlan {
+    light: usize,
+    rank: usize,
+    count: usize,
+    want: usize,
+    tile: usize,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct Face {
     light: usize,
+    /// Which face of the light (0 for a spot, 0..6 for a point).
+    index: usize,
+    key: u64,
     rx: Vec4f,
     ry: Vec4f,
     rz: Vec4f,
     tile: Vec4f,
+    /// Texel rect (x, y, edge) in the atlas.
+    rect: (usize, usize, usize),
+    generation: u32,
+    /// A skinned/morphed (pose-changing) mover was drawn into this face.
+    had_live: bool,
+    /// Identity of the rigid movers inside the face when it was rendered
+    /// (geometry + exact transform, order-independent).
+    movers_hash: u64,
+}
+
+/// Score multiplier for a light that held faces last frame: a challenger must
+/// clearly out-rank it before the budget changes hands.
+const OWNER_BONUS: f32 = 1.5;
+
+/// Frame-stable identity of a light (lists are rebuilt every frame).
+fn light_key(l: &LmLight) -> u64 {
+    let q = |v: f32| ((v * 10.0).round() as i64 as u64) & 0x1f_ffff;
+    q(l.pos.x) | (q(l.pos.y) << 21) | (q(l.pos.z) << 42) ^ (l.radius.to_bits() as u64).rotate_left(7)
 }
 
 fn dot(r: Vec4f, p: Vec3f) -> f32 {
@@ -110,6 +186,88 @@ fn in_face(face: &Face, near: f32, far: f32, min: Vec3f, max: Vec3f) -> bool {
     true
 }
 
+/// A mover as the face cache sees it: bounds for culling, an identity
+/// (geometry + exact transform) and whether its shape changes by itself.
+/// Rigid movers cull by their posed AABB; skinned and morphed ones by the
+/// rest AABB grown by its own size plus a metre (a posed limb can leave the
+/// rest box, never by that much), and are always "live".
+#[derive(Clone, Copy)]
+struct MoverBox {
+    min: Vec3f,
+    max: Vec3f,
+    id: u64,
+    live: bool,
+}
+
+fn mover_box(m: &GpuLmMover) -> MoverBox {
+    let (lo, hi) = crate::lightmap::world_bounds(&m.transform, (m.min, m.max));
+    let live = m.skin.is_some() || m.morph.is_some();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    m.geometry.hash(&mut h);
+    for v in m.transform.v {
+        v.to_bits().hash(&mut h);
+    }
+    let (min, max) = if live {
+        let pad = (hi - lo) * 0.5 + vec3f(1.0, 1.0, 1.0);
+        (lo - pad, hi + pad)
+    } else {
+        (lo, hi)
+    };
+    MoverBox { min, max, id: h.finish(), live }
+}
+
+/// Buddy allocator over the atlas: ROOT_COLS x ROOT_ROWS blocks of `max`
+/// texels, split into quarters on demand. Deterministic for a given request
+/// sequence, so an unchanged light set gets unchanged tiles (the cache key).
+#[derive(Default)]
+struct Buddy {
+    max: usize,
+    /// Free blocks per level (level 0 = max size), each an (x, y) origin.
+    free: Vec<Vec<(usize, usize)>>,
+}
+impl Buddy {
+    fn reset(&mut self, max: usize) {
+        self.max = max;
+        self.free.resize_with(MIN_TIER_SHIFT as usize + 1, Vec::new);
+        for level in &mut self.free {
+            level.clear();
+        }
+        // Reverse push so pop() hands out blocks in reading order.
+        for row in (0..ROOT_ROWS).rev() {
+            for col in (0..ROOT_COLS).rev() {
+                self.free[0].push((col * max, row * max));
+            }
+        }
+    }
+    fn alloc(&mut self, size: usize) -> Option<(usize, usize)> {
+        let level = (self.max / size).trailing_zeros() as usize;
+        if level >= self.free.len() {
+            return None;
+        }
+        let mut from = level;
+        while self.free[from].is_empty() {
+            if from == 0 {
+                return None;
+            }
+            from -= 1;
+        }
+        while from < level {
+            let (x, y) = self.free[from].pop().unwrap();
+            let half = self.max >> (from + 1);
+            from += 1;
+            for (dx, dy) in [(1, 1), (0, 1), (1, 0)] {
+                self.free[from].push((x + dx * half, y + dy * half));
+            }
+            self.free[from].push((x, y));
+        }
+        self.free[level].pop()
+    }
+    fn release(&mut self, size: usize, at: (usize, usize)) {
+        let level = (self.max / size).trailing_zeros() as usize;
+        self.free[level].push(at);
+    }
+}
+
 pub(crate) struct LocalShadows {
     pub soft_filter: bool,
     /// Apparent emitter radius in world units for bounded contact-hardening.
@@ -118,7 +276,26 @@ pub(crate) struct LocalShadows {
     pub records: Vec<ShadowRecord>,
     pub data: Vec<f32>,
     faces: Vec<Face>,
+    /// Last frame's faces: the cache the new allocation is matched against.
+    prev_faces: Vec<Face>,
     ranked: Vec<(f32, usize)>,
+    /// Keys of the lights that held faces last frame (sorted), for hysteresis.
+    owners: Vec<u64>,
+    next_owners: Vec<u64>,
+    buddy: Buddy,
+    plan: Vec<TilePlan>,
+    /// Faces to re-render this frame (indices into `faces`).
+    dirty: Vec<usize>,
+    /// Depth generation the next re-rendered faces use, and whether the
+    /// atlas content is valid at all (cleared on allocation / config).
+    generation: u32,
+    atlas_valid: bool,
+    statics_hash: u64,
+    frames: u64,
+    acc_rendered: usize,
+    acc_full: usize,
+    miss_reasons: [usize; 4],
+    movers: Vec<MoverBox>,
     pub texture: Option<Texture>,
     metadata: Option<Texture>,
     metadata_height: usize,
@@ -128,7 +305,9 @@ pub(crate) struct LocalShadows {
     list: Option<DrawList>,
     rigid: Option<DrawLmLampDepth>,
     skinned: Option<DrawLocalShadowSkinned>,
+    clear_quad: Option<Geometry>,
     pub stats: LocalShadowStats,
+    gpu_ms: f32,
 }
 impl Default for LocalShadows {
     fn default() -> Self {
@@ -139,7 +318,21 @@ impl Default for LocalShadows {
             records: Vec::new(),
             data: Vec::new(),
             faces: Vec::new(),
+            prev_faces: Vec::new(),
             ranked: Vec::new(),
+            owners: Vec::new(),
+            next_owners: Vec::new(),
+            buddy: Buddy::default(),
+            plan: Vec::new(),
+            dirty: Vec::new(),
+            generation: 0,
+            atlas_valid: false,
+            statics_hash: 0,
+            frames: 0,
+            acc_rendered: 0,
+            acc_full: 0,
+            miss_reasons: [0; 4],
+            movers: Vec::new(),
             texture: None,
             metadata: None,
             metadata_height: 0,
@@ -149,10 +342,17 @@ impl Default for LocalShadows {
             list: None,
             rigid: None,
             skinned: None,
+            clear_quad: None,
             stats: LocalShadowStats::default(),
+            gpu_ms: 0.0,
         }
     }
 }
+
+/// Floats per face in the metadata: rx, ry, rz, the atlas uv rect, and the
+/// depth window (stored = projected * x + y).
+const FACE_FLOATS: usize = 20;
+
 impl LocalShadows {
     pub(crate) fn parent_to(&self,cx:&mut Cx,parent:DrawPassId){if let Some(pass)=&self.pass{cx.passes[pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(parent);}}
     pub fn config(&self) -> LocalShadowConfig {
@@ -163,16 +363,41 @@ impl LocalShadows {
         if self.config != config {
             self.texture = None;
             self.depth = None;
+            self.atlas_valid = false;
             self.config = config;
         }
     }
     pub fn size(&self) -> (usize, usize) {
-        (
-            self.columns() * self.config.resolution,
-            self.config.max_faces.max(1).div_ceil(COLUMNS) * self.config.resolution,
-        )
+        (ROOT_COLS * self.config.resolution, ROOT_ROWS * self.config.resolution)
     }
-    fn columns(&self)->usize {self.config.max_faces.clamp(1,COLUMNS)}
+    /// Importance -> tile edge: brightness times apparent size from the
+    /// eye (radius over distance), a full-size tile for a light whose reach
+    /// contains the eye, an eighth for a distant one. Points are capped at half size
+    /// (six faces).
+    ///
+    /// Hysteresis: a light keeps last frame's tile until its ideal size is
+    /// three quarters of an octave away, so walking past a lamp does not
+    /// flip its tile (and re-render and re-pack the atlas) on every
+    /// boundary crossing.
+    fn desired_tile(&self, l: &LmLight, eye: Vec3f, count: usize, prev: Option<usize>) -> usize {
+        let max = self.config.resolution;
+        let d = (l.pos - eye).length();
+        let peak = l.color.x.max(l.color.y).max(l.color.z).min(1.0).max(0.25);
+        let cover = (l.radius / d.max(0.001) * peak).min(1.0);
+        let min = max >> MIN_TIER_SHIFT;
+        // Nearest power of two (in log space), not the next one up.
+        let ideal = (cover * max as f32).max(1.0);
+        let mut t = (ideal.log2().round().exp2() as usize).clamp(min, max);
+        if let Some(prev) = prev.filter(|p| (min..=max).contains(p)) {
+            if (ideal.log2() - (prev as f32).log2()).abs() < 0.75 {
+                t = prev;
+            }
+        }
+        if count == 6 {
+            t = t.min(max / 2).max(min);
+        }
+        t
+    }
     fn upload_metadata(&mut self, cx: &mut Cx) {
         let height = (self.records.len() + self.data.len() / 4)
             .max(1)
@@ -188,17 +413,25 @@ impl LocalShadows {
         for (i, r) in self.records.iter().enumerate() {
             let texel_world_per_depth = if r.count > 0 {
                 let row = self.faces[r.first].rx;
-                2.0 / ((self.config.resolution - 2) as f32
-                    * (row.x * row.x + row.y * row.y + row.z * row.z).sqrt())
+                2.0 / ((r.tile - 2) as f32 * (row.x * row.x + row.y * row.y + row.z * row.z).sqrt())
             } else {
                 0.0
             };
             packed[i * 4..i * 4 + 4].copy_from_slice(&[
                 r.count as f32,
                 r.near,
-                (self.records.len() + r.first * 4) as f32,
+                (self.records.len() + r.first * (FACE_FLOATS / 4)) as f32,
                 texel_world_per_depth,
             ]);
+        }
+        // Face depth windows: generation window folded with the backend's
+        // clip-z -> depth mapping (the hardware compare's reference space).
+        let (clip_scale, clip_bias) = cx.clip_depth_scale_bias();
+        for (f, face) in self.faces.iter().enumerate() {
+            let (gs, go) = local_generation_window(face.generation);
+            let at = f * FACE_FLOATS + 16;
+            self.data[at] = gs * clip_scale;
+            self.data[at + 1] = go * clip_scale + clip_bias;
         }
         let start = self.records.len() * 4;
         packed[start..start + self.data.len()].copy_from_slice(&self.data);
@@ -221,8 +454,6 @@ impl LocalShadows {
         }
     }
     pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, fallback: &Texture) {
-        let (scale, bias) = cx.clip_depth_scale_bias();
-        vars.set_uniform(cx, live_id!(local_shadow_depth_range), &[scale, bias]);
         vars.set_uniform(cx,live_id!(local_shadow_soft),&[if self.soft_filter{1.0}else{0.0}]);
         vars.set_uniform(cx,live_id!(local_shadow_source_radius),&[self.source_radius]);
         let requested = self.records.iter().any(|r| r.count != 0);
@@ -265,10 +496,14 @@ impl LocalShadows {
             }
         }
     }
+    /// Rank, size and place this frame's faces; mark the ones whose cached
+    /// content is stale (`dirty`). `statics_hash` identifies the static
+    /// caster set; `mover_boxes` are this frame's mover bounds.
     fn prepare(&mut self, lights: &[LmLight], active: &[bool], eye: Vec3f) {
         self.stats = LocalShadowStats::default();
         self.records.clear();
         self.records.resize(lights.len(), ShadowRecord::default());
+        std::mem::swap(&mut self.faces, &mut self.prev_faces);
         self.faces.clear();
         self.data.clear();
         self.ranked.clear();
@@ -280,37 +515,108 @@ impl LocalShadows {
             if !active.get(i).copied().unwrap_or(false) {
                 continue;
             }
+            let peak = l.color.x.max(l.color.y).max(l.color.z);
+            if peak <= 1.0e-3 {
+                // Dimmed to nothing (daylight): no light, so no shadow to cast.
+                self.records[i].count = 0;
+                continue;
+            }
             let delta = l.pos - eye;
-            let score = l.color.x.max(l.color.y).max(l.color.z) * l.radius * l.radius
-                / (delta.dot(delta) + l.radius * l.radius);
+            let mut score = peak * l.radius * l.radius / (delta.dot(delta) + l.radius * l.radius);
+            if self.owners.binary_search(&light_key(l)).is_ok() {
+                score *= OWNER_BONUS;
+            }
             self.ranked.push((score, i));
         }
+        self.next_owners.clear();
         self.ranked
             .sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        let (width, height) = self.size();
-        for &(_, i) in &self.ranked {
+        // Size the tiles: each light's importance asks for a tile; if the
+        // asks overflow the atlas, the LOWEST-ranked lights are halved first
+        // (down to the smallest tier), and only when every remaining light
+        // already sits at the smallest tier is the lowest-ranked dropped
+        // (unshadowed). Rank order, so a boundary light never out-sizes a
+        // brighter one.
+        let res = self.config.resolution;
+        let min_tile = res >> MIN_TIER_SHIFT;
+        self.plan.clear();
+        let mut face_budget = self.config.max_faces;
+        for (rank, &(_, i)) in self.ranked.iter().enumerate() {
             let l = &lights[i];
-            let count = if l.cone.is_some_and(|(_, outer)| outer < 89.0) {
-                1
-            } else {
-                6
-            };
-            if self.faces.len() + count > self.config.max_faces {
+            let count = if l.cone.is_some_and(|(_, outer)| outer < 89.0) { 1 } else { 6 };
+            if count > face_budget {
+                self.records[i].count = 0;
                 self.stats.omitted_lights += 1;
                 continue;
             }
+            face_budget -= count;
+            let key = light_key(l);
+            let prev = self.prev_faces.iter().find(|f| f.key == key).map(|f| f.rect.2);
+            let want = self.desired_tile(l, eye, count, prev);
+            self.plan.push(TilePlan { light: i, rank, count, want, tile: want });
+        }
+        let capacity = ROOT_COLS * ROOT_ROWS * res * res;
+        let mut area: usize = self.plan.iter().map(|p| p.count * p.tile * p.tile).sum();
+        while area > capacity {
+            if let Some(p) = self.plan.iter_mut().rev().find(|p| p.tile > min_tile) {
+                area -= p.count * (p.tile * p.tile - p.tile * p.tile / 4);
+                p.tile /= 2;
+            } else {
+                let p = self.plan.pop().unwrap();
+                area -= p.count * p.tile * p.tile;
+                self.records[p.light].count = 0;
+                self.stats.omitted_lights += 1;
+            }
+        }
+        // Largest tiles first: power-of-two squares whose total area fits
+        // always pack into the buddy blocks in that order.
+        self.plan.sort_by(|a, b| b.tile.cmp(&a.tile).then(a.rank.cmp(&b.rank)));
+        self.buddy.reset(res);
+        let (width, height) = self.size();
+        let mut slots = [(0usize, 0usize); 6];
+        for pi in 0..self.plan.len() {
+            let TilePlan { light: i, count, want, tile, .. } = self.plan[pi];
+            let l = &lights[i];
+            let mut got = 0;
+            while got < count {
+                match self.buddy.alloc(tile) {
+                    Some(at) => {
+                        slots[got] = at;
+                        got += 1;
+                    }
+                    None => break,
+                }
+            }
+            if got < count {
+                // Cannot happen for a plan that fits; stay unshadowed if it does.
+                for at in &slots[..got] {
+                    self.buddy.release(tile, *at);
+                }
+                self.records[i].count = 0;
+                self.stats.omitted_lights += 1;
+                continue;
+            }
+            if tile < want {
+                self.stats.downsized_lights += 1;
+            }
+            let key = light_key(l);
+            self.next_owners.push(key);
             let near = (l.radius * 0.001).clamp(0.001, 0.03);
             self.records[i] = ShadowRecord {
                 first: self.faces.len(),
                 count: count as i32,
                 near,
+                far: l.radius,
+                tile,
             };
             let focal = if count == 1 {
                 1.0 / l.cone.unwrap().1.to_radians().tan()
             } else {
-                1.0
+                // A cube face slightly wider than 90 degrees: CUBE_GUARD
+                // texels of real depth beyond every edge.
+                1.0 - 2.0 * CUBE_GUARD / (tile - 2) as f32
             };
-            for f in 0..count {
+            for (f, &(x, y)) in slots[..count].iter().enumerate() {
                 let dir = if count == 1 {
                     l.dir
                 } else {
@@ -324,29 +630,109 @@ impl LocalShadows {
                     }
                 };
                 let (rx, ry, rz) = camera_rows(l.pos, dir, focal);
-                let slot = self.faces.len();
-                let r = self.config.resolution;
                 let uv = vec4(
-                    (slot % self.columns() * r + 1) as f32 / width as f32,
-                    (slot / self.columns() * r + 1) as f32 / height as f32,
-                    (r - 2) as f32 / width as f32,
-                    (r - 2) as f32 / height as f32,
+                    (x + 1) as f32 / width as f32,
+                    (y + 1) as f32 / height as f32,
+                    (tile - 2) as f32 / width as f32,
+                    (tile - 2) as f32 / height as f32,
                 );
-                let tile = vec4(uv.z, uv.w, uv.x * 2.0 + uv.z - 1.0, 1.0 - uv.y * 2.0 - uv.w);
+                let clip = vec4(uv.z, uv.w, uv.x * 2.0 + uv.z - 1.0, 1.0 - uv.y * 2.0 - uv.w);
                 self.faces.push(Face {
                     light: i,
+                    index: f,
+                    key,
                     rx,
                     ry,
                     rz,
-                    tile,
+                    tile: clip,
+                    rect: (x, y, tile),
+                    generation: 0,
+                    had_live: false,
+                    movers_hash: 0,
                 });
                 for row in [rx, ry, rz, uv] {
                     self.data.extend_from_slice(&[row.x, row.y, row.z, row.w]);
                 }
+                // Depth window, filled at upload (needs the backend mapping).
+                self.data.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
             }
             self.stats.lights += 1;
         }
+        self.next_owners.sort_unstable();
+        std::mem::swap(&mut self.owners, &mut self.next_owners);
         self.stats.faces = self.faces.len();
+    }
+
+    /// Match this frame's faces against last frame's: a face keeps its
+    /// cached content (and generation) when the same light face sits in the
+    /// same tile with the same camera rows, the static set is unchanged,
+    /// and no mover is inside it now or was when it was rendered. Everything
+    /// else is `dirty` and re-renders this frame in a fresh generation.
+    /// Returns true when the whole atlas must be cleared first.
+    fn plan_cache(&mut self, statics_changed: bool) -> bool {
+        self.dirty.clear();
+        for f in 0..self.faces.len() {
+            let face = self.faces[f];
+            let record = self.records[face.light];
+            // The movers inside this face: an order-independent identity of
+            // the rigid ones, and whether any changes shape by itself. A
+            // parked car or a terrain tile passed as a mover keeps the face
+            // cached; one that moves (or leaves) re-renders it.
+            let mut movers_hash = 0u64;
+            let mut live = false;
+            for m in &self.movers {
+                if in_face(&face, record.near, record.far, m.min, m.max) {
+                    movers_hash = movers_hash.wrapping_add(m.id.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                    live |= m.live;
+                }
+            }
+            self.faces[f].movers_hash = movers_hash;
+            self.faces[f].had_live = live;
+            let reusable = self.atlas_valid && !statics_changed && !live;
+            let cached = self
+                .prev_faces
+                .iter()
+                .filter(|_| reusable)
+                .find(|p| {
+                    p.key == face.key && p.index == face.index && p.rect == face.rect
+                        && p.rx == face.rx && p.ry == face.ry && p.rz == face.rz
+                })
+                .filter(|p| !p.had_live && p.movers_hash == movers_hash)
+                .map(|p| p.generation);
+            match cached {
+                Some(generation) => self.faces[f].generation = generation,
+                None => {
+                    // Why (for the MAKEPAD_CLUSTER_STATS summary).
+                    let reason = if !self.atlas_valid || statics_changed {
+                        0
+                    } else if live {
+                        1
+                    } else if self.prev_faces.iter().any(|p| p.key == face.key && p.index == face.index && p.rect == face.rect) {
+                        2
+                    } else {
+                        3
+                    };
+                    self.miss_reasons[reason] += 1;
+                    self.dirty.push(f);
+                }
+            }
+        }
+        if self.dirty.is_empty() {
+            return false;
+        }
+        let full = !self.atlas_valid || self.generation + 1 >= LOCAL_DEPTH_GENS;
+        if full {
+            self.generation = 0;
+            self.dirty.clear();
+            self.dirty.extend(0..self.faces.len());
+        } else {
+            self.generation += 1;
+        }
+        for &f in &self.dirty {
+            self.faces[f].generation = self.generation;
+        }
+        self.atlas_valid = true;
+        full
     }
 
     pub fn render(
@@ -359,8 +745,16 @@ impl LocalShadows {
         movers: &[GpuLmMover],
     ) {
         let start = Cx::monotonic_now();
+        if let Some(pass) = &self.pass {
+            for ms in pass.take_gpu_times_ms(cx.cx) {
+                self.gpu_ms = crate::gpu_lightmap::ema_ms(self.gpu_ms, ms);
+            }
+        }
         self.prepare(lights, active, eye);
+        self.stats.gpu_ms = self.gpu_ms;
         if self.faces.is_empty() && (!hardware_shadow_maps() || self.depth.is_some()) {
+            self.gpu_ms = 0.0;
+            self.stats.gpu_ms = 0.0;
             self.upload_metadata(cx.cx);
             return;
         }
@@ -379,6 +773,7 @@ impl LocalShadows {
                         record.count = -1;
                     }
                 }
+                self.faces.clear();
                 self.upload_metadata(cx.cx);
                 return;
             };
@@ -386,10 +781,12 @@ impl LocalShadows {
             self.skinned = Some(skinned);
         }
         // An initialized one-texel depth binding is still required when the
-        // shader has no active shadow lights. Do not allocate a full atlas.
-        let (width, height) = if self.faces.is_empty() { (1, 1) } else { self.size() };
+        // shader has no active shadow lights. Do not allocate a full atlas;
+        // once a full atlas exists it is kept (no 1x1 <-> full hitch).
+        let (width, height) = if self.faces.is_empty() && self.allocation_size.0 <= 1 { (1, 1) } else { self.size() };
         if self.texture.is_none() || self.allocation_size != (width, height) {
             self.allocation_size = (width, height);
+            self.atlas_valid = false;
             self.texture = Some(Texture::new_with_format(
                 cx.cx,
                 TextureFormat::RenderRf32 {
@@ -408,36 +805,116 @@ impl LocalShadows {
                 }},
             ));
         }
-        let pass = self.pass.get_or_insert_with(|| DrawPass::new(cx.cx));
+        // Cache inputs: the static set's identity and every mover's bounds.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        statics.len().hash(&mut hasher);
+        for m in statics {
+            m.geometry.hash(&mut hasher);
+            for v in m.transform.v {
+                v.to_bits().hash(&mut hasher);
+            }
+        }
+        let statics_hash = hasher.finish();
+        let statics_changed = statics_hash != self.statics_hash;
+        self.statics_hash = statics_hash;
+        self.movers.clear();
+        self.movers.extend(movers.iter().map(mover_box));
+        let full = self.plan_cache(statics_changed);
+        self.stats.rendered_faces = self.dirty.len();
+        self.frames += 1;
+        self.acc_rendered += self.dirty.len();
+        self.acc_full += full as usize;
+        if self.frames % 120 == 0 && std::env::var_os("MAKEPAD_CLUSTER_STATS").is_some() {
+            let mut tiles = [0usize; MIN_TIER_SHIFT as usize + 1];
+            for f in &self.faces {
+                tiles[(self.config.resolution / f.rect.2).trailing_zeros() as usize] += 1;
+            }
+            log!(
+                "local shadow atlas: {} faces by tile {:?} (from {}px down), {} downsized; last 120 frames: {:.1} faces re-rendered/frame, {} full clears; misses: {} statics/new atlas, {} live mover, {} moved mover/light, {} new tile",
+                self.faces.len(), tiles, self.config.resolution, self.stats.downsized_lights,
+                self.acc_rendered as f32 / 120.0, self.acc_full,
+                self.miss_reasons[0], self.miss_reasons[1], self.miss_reasons[2], self.miss_reasons[3]
+            );
+            self.miss_reasons = [0; 4];
+            self.acc_rendered = 0;
+            self.acc_full = 0;
+        }
+        if self.dirty.is_empty() {
+            // Every face is cached: the atlas pass is not encoded at all and
+            // the targets keep their content.
+            self.gpu_ms = 0.0;
+            self.stats.gpu_ms = 0.0;
+            self.upload_metadata(cx.cx);
+            self.stats.encode_us = ((Cx::monotonic_now() - start) * 1e6) as u64;
+            return;
+        }
+        let pass = self.pass.get_or_insert_with(|| {
+            let pass = DrawPass::new(cx.cx);
+            pass.set_pass_name(cx.cx, "local_shadows");
+            pass.set_gpu_timing_enabled(cx.cx, true);
+            pass
+        });
         let list = self.list.get_or_insert_with(|| DrawList::new(cx.cx));
         cx.make_child_pass(pass);
         cx.begin_pass(pass, Some(1.0));
         pass.set_size(cx.cx, dvec2(width as f64, height as f64));
         pass.clear_color_textures(cx.cx);
+        let clear = vec4(1.0, 1.0, 1.0, 1.0);
         pass.set_color_texture(
             cx.cx,
             self.texture.as_ref().unwrap(),
-            DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 1.0, 1.0)),
+            if full { DrawPassClearColor::ClearWith(clear) } else { DrawPassClearColor::InitWith(clear) },
         );
         pass.set_depth_texture(
             cx.cx,
             self.depth.as_ref().unwrap(),
-            DrawPassClearDepth::ClearWith(1.0),
+            if full { DrawPassClearDepth::ClearWith(1.0) } else { DrawPassClearDepth::InitWith(1.0) },
         );
         list.begin_always(cx);
+        let quad = self
+            .clear_quad
+            .get_or_insert_with(|| {
+                let g = Geometry::new(cx.cx);
+                let mut v = Vec::with_capacity(4 * crate::skin::SKIN_VERTEX_FLOATS);
+                // Just inside the depth shader's 0.999 frustum discard.
+                for (x, y) in [(-0.9985, -0.9985), (0.9985, -0.9985), (0.9985, 0.9985), (-0.9985, 0.9985)] {
+                    v.extend_from_slice(&[x, y, 0.0]);
+                    v.resize(v.len() + crate::skin::SKIN_VERTEX_FLOATS - 3, 0.0);
+                }
+                g.update(cx.cx, vec![0, 1, 2, 0, 2, 3], v);
+                g
+            })
+            .geometry_id();
         let rigid = self.rigid.as_mut().unwrap();
         let skinned = self.skinned.as_mut().unwrap();
-        for face in &self.faces {
+        for &f in &self.dirty {
+            let face = self.faces[f];
             let record = self.records[face.light];
             let far = lights[face.light].radius;
+            let (gs, go) = local_generation_window(face.generation);
+            // Depth generation in clip space: z * (1 - z_) + w_ * vz.
+            let window = (1.0 - gs, go);
+            rigid.tile_a = face.tile;
+            rigid.set_morph(cx.cx,None);
+            if !full {
+                // Clear this tile to its generation's far end: identity
+                // rows, view z = 1, depth range (0, 1) -> ndc z = 1.
+                rigid.face_rx = vec4(1.0, 0.0, 0.0, 0.0);
+                rigid.face_ry = vec4(0.0, 1.0, 0.0, 0.0);
+                rigid.face_rz = vec4(0.0, 0.0, 0.0, 1.0);
+                rigid.lamp_range = vec4(0.0, 1.0, window.0, window.1);
+                rigid.transform = Mat4f::identity();
+                rigid.draw_vars.geometry_id = Some(quad);
+                if rigid.draw_vars.can_instance() {
+                    cx.add_instance(&rigid.draw_vars);
+                }
+            }
             rigid.face_rx = face.rx;
             rigid.face_ry = face.ry;
             rigid.face_rz = face.rz;
-            rigid.tile_a = face.tile;
-            rigid.lamp_range = vec4(record.near, far, 0.0, 0.0);
-            rigid.set_morph(cx.cx,None);
+            rigid.lamp_range = vec4(record.near, far, window.0, window.1);
             for m in statics {
-                if !in_face(face, record.near, far, m.min, m.max) {
+                if !in_face(&face, record.near, far, m.min, m.max) {
                     continue;
                 }
                 rigid.transform = m.transform;
@@ -447,11 +924,8 @@ impl LocalShadows {
                     self.stats.caster_draws += 1;
                 }
             }
-            for m in movers {
-                let (min, max) = crate::lightmap::world_bounds(&m.transform, (m.min, m.max));
-                // Skin bounds can change under animation; never cull a posed
-                // character by its rest AABB. The GPU performs its clipping.
-                if m.skin.is_none() && m.morph.is_none() && !in_face(face, record.near, far, min, max) {
+            for (m, b) in movers.iter().zip(&self.movers) {
+                if !in_face(&face, record.near, far, b.min, b.max) {
                     continue;
                 }
                 if let Some(skin) = &m.skin {
@@ -485,6 +959,13 @@ impl LocalShadows {
         self.upload_metadata(cx.cx);
         self.stats.encode_us = ((Cx::monotonic_now() - start) * 1e6) as u64;
     }
+}
+
+/// Clip-space z window of a local-atlas depth generation (see
+/// shadow_csm::depth_generation_window; this atlas uses LOCAL_DEPTH_GENS).
+fn local_generation_window(generation: u32) -> (f32, f32) {
+    let g = LOCAL_DEPTH_GENS as f32;
+    (1.0 / g, (g - 1.0 - generation.min(LOCAL_DEPTH_GENS - 1) as f32) / g)
 }
 
 // Independent of clustered photometry: one header per uploaded light,
@@ -547,7 +1028,6 @@ pub(crate) mod sampling {
             local_shadow_visibility: fn(index: float, wp: vec3, normal: vec3, light_pos: vec3, radius: float) -> float {
                 if self.local_shadow_on<0.5 {return 1.0}
                 let record=self.local_shadow_fetch(index)
-                if record.x<0.0 {return 0.0}
                 if record.x<0.5 {return 1.0}
                 let delta=wp-light_pos
                 // Choose a cubemap face AFTER normal bias: the offset can
@@ -567,7 +1047,7 @@ pub(crate) mod sampling {
                         if shadow_delta.z<0.0 {face=5.0}
                     }
                 }
-                let at=record.z+face*4.0
+                let at=record.z+face*5.0
                 let p=vec4(receiver.x,receiver.y,receiver.z,1.0)
                 let z=dot(self.local_shadow_fetch(at+2.0),p)
                 if z<=record.y {return 1.0}
@@ -659,7 +1139,6 @@ pub(crate) mod hardware_sampling {
     script_mod! {
         use mod.prelude.widgets_internal.*
         mod.draw.LocalShadowSampling.local_shadow_map = texture_depth(float)
-        mod.draw.LocalShadowSampling.local_shadow_depth_range = uniform(vec2(1.0, 0.0))
         mod.draw.LocalShadowSampling.local_shadow_pcf = fn(uv: vec2, lo: vec2, hi: vec2, depth: float) -> float {
             // A separable 1:2:1 kernel, regrouped into two bilinear samples
             // per axis. Hardware compares before interpolation.
@@ -685,7 +1164,6 @@ pub(crate) mod hardware_sampling {
         mod.draw.LocalShadowSampling.local_shadow_visibility = fn(index: float, wp: vec3, normal: vec3, light_pos: vec3, radius: float) -> float {
                 if self.local_shadow_on<0.5 {return 1.0}
                 let record=self.local_shadow_fetch(index)
-                if record.x<0.0 {return 0.0}
                 if record.x<0.5 {return 1.0}
                 let delta=wp-light_pos
                 // Choose a cubemap face AFTER normal bias: the offset can
@@ -705,7 +1183,7 @@ pub(crate) mod hardware_sampling {
                         if shadow_delta.z<0.0 {face=5.0}
                     }
                 }
-                let at=record.z+face*4.0
+                let at=record.z+face*5.0
                 let p=vec4(receiver.x,receiver.y,receiver.z,1.0)
                 let z=dot(self.local_shadow_fetch(at+2.0),p)
                 if z<=record.y {return 1.0}
@@ -727,9 +1205,12 @@ pub(crate) mod hardware_sampling {
                 let slope = 1.0 + 2.0 * (1.0 - clamp(dot(normal, delta * (-1.0) / max(length(delta), 0.0001)), 0.0, 1.0))
                 let biased_z = max(z - max(0.015, world_texel * 2.0) * slope, record.y)
                 // Match the rasterized projective depth, not the linear R32F
-                // legacy color output. GL has an additional viewport remap.
+                // legacy color output. The face's depth window (its cache
+                // generation and the backend's clip-z remap) rides in its
+                // fifth metadata row.
                 let projected = radius * (biased_z - record.y) / max(biased_z * (radius - record.y), 0.000001)
-                let depth = projected * self.local_shadow_depth_range.x + self.local_shadow_depth_range.y
+                let window = self.local_shadow_fetch(at+4.0)
+                let depth = projected * window.x + window.y
                 return self.local_shadow_pcf(uv, lo, hi, depth)
         }
     }
@@ -756,8 +1237,9 @@ script_mod! {
             let vy=dot(self.sun_ry,wp)
             let vz=dot(self.sun_rz,wp)
             self.v_local_view=vec3(vx,vy,vz)
+            // lamp_range.zw: the face's depth generation, as DrawLmLampDepth.
             self.vertex_pos=vec4(vx*self.tile_a.x+vz*self.tile_a.z,vy*self.tile_a.y+vz*self.tile_a.w,
-                (vz-self.lamp_range.x)*self.lamp_range.y/max(self.lamp_range.y-self.lamp_range.x,0.0001),vz)
+                (vz-self.lamp_range.x)*self.lamp_range.y/max(self.lamp_range.y-self.lamp_range.x,0.0001)*(1.0-self.lamp_range.z)+self.lamp_range.w*vz,vz)
         }
         pixel: fn() {
             let vz=max(self.v_local_view.z,0.0001)
@@ -771,26 +1253,116 @@ script_mod! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The v2 atlas: a 4:2 target of the configured maximum tile, faces in
+    /// power-of-two tiles that stay inside the atlas and never overlap, and
+    /// the per-face metadata stride the shader reads (FACE_FLOATS).
     #[test]
-    fn compact_atlas_uses_only_configured_columns() {
-        let mut shadows=LocalShadows::default();
-        for faces in 1..=16 {
-            shadows.set_config(LocalShadowConfig{max_faces:faces,resolution:1024});
-            let (w,h)=shadows.size();
-            assert_eq!(w,faces.min(4)*1024);
-            assert_eq!(h,faces.div_ceil(4)*1024);
-            let lights=vec![spot(Vec3f::default());faces];
-            shadows.prepare(&lights,&vec![true;faces],Vec3f::default());
-            assert_eq!(shadows.stats.faces,faces);
-            for row in shadows.data.chunks_exact(16) {
-                assert!(row[12]>=0.0&&row[13]>=0.0);
-                assert!(row[12]+row[14]<=1.0&&row[13]+row[15]<=1.0);
+    fn atlas_tiles_are_disjoint_and_inside_the_target() {
+        let mut shadows = LocalShadows::default();
+        shadows.set_config(LocalShadowConfig { max_faces: 64, resolution: 1024 });
+        assert_eq!(shadows.size(), (4096, 2048));
+        // A mix of near spots and a few points, eye at the origin.
+        let mut lights = Vec::new();
+        for i in 0..24 {
+            lights.push(spot(vec3f(i as f32 * 7.0, 3.0, 0.0)));
+        }
+        for i in 0..4 {
+            lights.push(LmLight { cone: None, ..spot(vec3f(0.0, 3.0, 10.0 + i as f32 * 20.0)) });
+        }
+        let active = vec![true; lights.len()];
+        shadows.prepare(&lights, &active, Vec3f::default());
+        assert!(shadows.stats.faces > 24);
+        assert_eq!(shadows.data.len(), shadows.faces.len() * FACE_FLOATS);
+        for (i, a) in shadows.faces.iter().enumerate() {
+            let (x, y, t) = a.rect;
+            assert!(t.is_power_of_two() && t >= 128 && t <= 1024);
+            assert!(x + t <= 4096 && y + t <= 2048);
+            for b in &shadows.faces[i + 1..] {
+                let (bx, by, bt) = b.rect;
+                assert!(x + t <= bx || bx + bt <= x || y + t <= by || by + bt <= y, "tiles overlap");
             }
         }
-        shadows.set_config(LocalShadowConfig{max_faces:1,resolution:1024});
-        assert_eq!(shadows.size(),(1024,1024));
-        assert!(1024*1024 < 8*512*512);
+        for row in shadows.data.chunks_exact(FACE_FLOATS) {
+            assert!(row[12] >= 0.0 && row[13] >= 0.0);
+            assert!(row[12] + row[14] <= 1.0 && row[13] + row[15] <= 1.0);
+        }
     }
+
+    /// Importance sizes the tile: a near light gets the full tile, a far
+    /// one an eighth; a full atlas downsizes lower-ranked lights before any
+    /// light goes unshadowed.
+    #[test]
+    fn tiles_follow_importance_and_downsize_before_omitting() {
+        let mut shadows = LocalShadows::default();
+        shadows.set_config(LocalShadowConfig { max_faces: 64, resolution: 1024 });
+        let near = spot(vec3f(0.0, 3.0, 5.0));
+        let far = LmLight { radius: 8.0, ..spot(vec3f(0.0, 3.0, 200.0)) };
+        shadows.prepare(&[near.clone(), far], &[true, true], Vec3f::default());
+        assert_eq!(shadows.records[0].tile, 1024);
+        assert_eq!(shadows.records[1].tile, 128);
+        // Twelve near spots want 12 full tiles; the atlas holds 8.
+        let lights = vec![near; 12];
+        shadows.prepare(&lights, &[true; 12], Vec3f::default());
+        assert_eq!(shadows.stats.omitted_lights, 0, "downsize, don't drop");
+        assert!(shadows.stats.downsized_lights >= 4);
+        assert_eq!(shadows.records[0].tile, 1024, "the top-ranked light keeps its size");
+    }
+
+    /// Face caching: an unchanged light set with no movers re-renders
+    /// nothing; a mover re-renders only the faces it is inside (and those
+    /// again the frame after it leaves); a static change re-renders all.
+    #[test]
+    fn static_faces_are_cached_and_movers_dirty_only_their_faces() {
+        let mut s = LocalShadows::default();
+        let lights = vec![
+            spot(vec3f(0.0, 3.0, 0.0)),
+            LmLight { cone: None, ..spot(vec3f(60.0, 3.0, 0.0)) },
+        ];
+        let active = [true, true];
+        let rigid = |(min, max): (Vec3f, Vec3f), id: u64| MoverBox { min, max, id, live: false };
+        let frame = |s: &mut LocalShadows, movers: Vec<MoverBox>, statics_changed: bool| {
+            s.prepare(&lights, &active, Vec3f::default());
+            s.movers = movers;
+            s.plan_cache(statics_changed);
+            s.dirty.len()
+        };
+        assert_eq!(frame(&mut s, vec![], false), 7, "first frame renders every face");
+        assert_eq!(frame(&mut s, vec![], false), 0, "nothing changed: all cached");
+        // A crate 5 m in front of the spot (it looks down -z).
+        let crate_box = (vec3f(-0.5, 2.5, -5.5), vec3f(0.5, 3.5, -4.5));
+        assert_eq!(frame(&mut s, vec![rigid(crate_box, 7)], false), 1, "only the spot face");
+        assert_eq!(frame(&mut s, vec![], false), 1, "and again once it has left");
+        assert_eq!(frame(&mut s, vec![], false), 0);
+        assert_eq!(frame(&mut s, vec![], true), 7, "a static change re-renders all");
+        // A mover that stays put (a parked car, a terrain tile handed over
+        // as a mover) keeps the face cached after its first render...
+        let mut s = LocalShadows::default();
+        assert_eq!(frame(&mut s, vec![], false), 7);
+        assert_eq!(frame(&mut s, vec![rigid(crate_box, 9)], false), 1);
+        assert_eq!(frame(&mut s, vec![rigid(crate_box, 9)], false), 0);
+        // ...one that moved (new transform = new identity) does not, and a
+        // skinned one never does.
+        assert_eq!(frame(&mut s, vec![rigid(crate_box, 10)], false), 1);
+        let live = MoverBox { live: true, ..rigid(crate_box, 10) };
+        assert_eq!(frame(&mut s, vec![live], false), 1);
+        assert!(frame(&mut s, vec![live], false) >= 1, "a live mover's face never caches");
+        // Generations descend; running out clears the atlas.
+        let mut fulls = 0;
+        for _ in 0..8 {
+            s.prepare(&lights, &active, Vec3f::default());
+            s.movers = vec![MoverBox { live: true, ..rigid(crate_box, 1) }];
+            let full = s.plan_cache(false);
+            fulls += full as u32;
+            assert!(s.generation < LOCAL_DEPTH_GENS);
+        }
+        assert!(fulls >= 2, "the atlas clears every LOCAL_DEPTH_GENS rendering frames");
+        for g in 1..LOCAL_DEPTH_GENS {
+            let (_, o0) = local_generation_window(g - 1);
+            let (sc, o1) = local_generation_window(g);
+            assert!(o1 + sc <= o0 + 1e-6);
+        }
+    }
+
     fn soft_weights(f:f32,spread:f32)->[f32;8] {
         let mut weights=std::array::from_fn(|i| {
             let d=(i as f32-3.0-f)/spread;
@@ -826,7 +1398,7 @@ mod tests {
                     let ry = axis(face.ry);
                     let rz = axis(face.rz);
                     let focal = rx.length();
-                    let pixels = (resolution - 2) as f32;
+                    let pixels = (shadows.records[0].tile - 2) as f32;
                     let texel_world_per_depth = 2.0 / (pixels * focal);
                     for x in [-3.0, -1.17, 0.31, 2.53, 4.0] {
                         for (wp, normal) in [
@@ -926,7 +1498,7 @@ mod tests {
         }
     }
     #[test]
-    fn atlas_budget_never_unshadows_an_excluded_request() {
+    fn an_over_budget_light_lights_unshadowed_and_owners_keep_their_faces() {
         let mut s = LocalShadows::default();
         s.set_config(LocalShadowConfig {
             max_faces: 2,
@@ -943,8 +1515,22 @@ mod tests {
         );
         assert_eq!(s.stats.faces, 2);
         assert_eq!(s.stats.omitted_lights, 1);
-        assert_eq!(s.records[1].count, -1);
+        // 0 = no shadow record: the shader lights it unshadowed, never black.
+        assert_eq!(s.records[1].count, 0);
         assert_eq!(s.records[0].count, 1);
+        assert_eq!(s.records[2].count, 1);
+        // Hysteresis: the far light edging slightly closer than an owner
+        // does not steal its faces.
+        s.prepare(
+            &[
+                spot(vec3f(0.0, 0.0, 0.0)),
+                spot(vec3f(1.9, 0.0, 0.0)),
+                spot(vec3f(2.0, 0.0, 0.0)),
+            ],
+            &[true; 3],
+            Vec3f::default(),
+        );
+        assert_eq!(s.records[1].count, 0, "a newcomer barely ahead does not evict an owner");
         assert_eq!(s.records[2].count, 1);
         s.prepare(&[], &[], Vec3f::default());
         assert!(s.records.is_empty());
@@ -962,14 +1548,14 @@ mod tests {
             ..Default::default()
         });
         s.prepare(&[p.clone()], &[true], Vec3f::default());
-        assert_eq!(s.records[0].count, -1);
+        assert_eq!(s.records[0].count, 0, "all six faces or none: unshadowed");
         s.set_config(LocalShadowConfig {
             max_faces: 6,
             ..Default::default()
         });
         s.prepare(&[p], &[true], Vec3f::default());
         assert_eq!(s.records[0].count, 6);
-        assert_eq!(s.data.len(), 6 * 16);
+        assert_eq!(s.data.len(), 6 * FACE_FLOATS);
     }
     #[test]
     fn imported_punctual_lights_enter_the_bounded_shadow_atlas() {
@@ -1006,7 +1592,7 @@ mod tests {
             }
             shadows.set_config(LocalShadowConfig{max_faces:faces-1,resolution:256});
             shadows.prepare(std::slice::from_ref(&light),&[true],light.pos);
-            assert_eq!(shadows.records[0].count,-1,"insufficient atlas space omits the light instead of leaking through walls");
+            assert_eq!(shadows.records[0].count,0,"insufficient atlas space lights it unshadowed instead of going dark");
             assert_eq!(shadows.stats.faces,0);assert_eq!(shadows.stats.omitted_lights,1);
         }
     }

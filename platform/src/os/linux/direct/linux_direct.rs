@@ -90,6 +90,7 @@ impl DirectApp {
             let vulkan = crate::os::linux::vulkan::CxVulkan::new_direct(mode.as_deref(), &cx.thread_spawner())
                 .unwrap_or_else(|error| panic!("Direct Vulkan initialization failed: {error}"));
             let size = vulkan.size();
+            cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
             cx.os.vulkan = Some(vulkan);
             size
         };
@@ -128,8 +129,10 @@ impl Cx {
             cx.os_type = OsType::LinuxWindow(crate::cx::LinuxWindowParams {
                 custom_window_chrome: false,
             });
-            cx.os.vulkan = Some(crate::os::linux::vulkan::CxVulkan::new_offscreen()
-                .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}")));
+            let vulkan = crate::os::linux::vulkan::CxVulkan::new_offscreen()
+                .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}"));
+            cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
+            cx.os.vulkan = Some(vulkan);
             cx.stdin_event_loop();
             drop(cx.os.vulkan.take());
             cx.self_ref = None;

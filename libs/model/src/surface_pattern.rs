@@ -53,9 +53,63 @@ pub(super) fn sample(kind: PatternKind, x: f64, y: f64, scale: [f64; 2], seed: u
             let fibers = 0.5 + 0.5 * (TAU * (x * 12. + y + warp)).cos();
             (0.16 + 0.84 * strand.sqrt()) * (0.84 + 0.16 * fibers)
         }
+        PatternKind::Bricks | PatternKind::Tiles | PatternKind::Planks => return masonry(kind, x, y, periods, seed),
+        PatternKind::Vents => {
+            // A stadium-shaped slot per cell with a soft bevelled lip.
+            let (fx, fy) = (x - x.floor(), y - y.floor());
+            let (hx, hy) = (0.42, 0.22);
+            let dx = ((fx - 0.5).abs() - (hx - hy)).max(0.);
+            let d = (dx * dx + (fy - 0.5) * (fy - 0.5)).sqrt() - hy;
+            (d / 0.06).clamp(0., 1.)
+        }
+        PatternKind::Grille => {
+            // Hexagonal cells: distance to the nearest cell centre on a
+            // staggered lattice, holes inside a hexagonal radius.
+            let row = y.floor();
+            let fx = x + if (row as i64).rem_euclid(2) == 1 { 0.5 } else { 0. };
+            let (cx, cy) = (fx.floor() + 0.5, row + 0.5);
+            let (dx, dy) = ((fx - cx).abs(), (y - cy).abs());
+            let hex = (dx * 0.866 + dy * 0.5).max(dy);
+            ((hex - 0.36) / 0.05).clamp(0., 1.)
+        }
+        PatternKind::Knurl => {
+            let a = (TAU * (x + y)).sin().abs();
+            let b = (TAU * (x - y)).sin().abs();
+            0.35 + 0.65 * (a.min(b) * 1.6).min(1.)
+        }
         _ => unreachable!("legacy patterns retain their original sampler"),
     };
     value.clamp(0., 1.)
+}
+
+fn unit_hash(x: i64, y: i64, seed: u64) -> f64 { (hash(x, y, seed) >> 11) as f64 / ((1u64 << 53) - 1) as f64 }
+/// Joint-and-unit surfaces. 0 is the joint (mortar, grout, gap); units get a
+/// seeded tone in 0.55..1 plus fine surface noise. Unit identities wrap with
+/// the integral scale, so tiles repeat exactly (use an even row count for
+/// running bond and staggered planks).
+fn masonry(kind: PatternKind, x: f64, y: f64, periods: [i64; 2], seed: u64) -> f64 {
+    let wrap = |n: i64, p: i64| if p > 0 { n.rem_euclid(p) } else { n };
+    let row = y.floor() as i64;
+    let (shift, joint_u, joint_v) = match kind {
+        PatternKind::Bricks => (if row.rem_euclid(2) == 1 { 0.5 } else { 0. }, 0.06, 0.12),
+        PatternKind::Tiles => (0., 0.05, 0.05),
+        _ => ((unit_hash(wrap(row, periods[1]), 7, seed) * 4.).floor() * 0.25, 0.01, 0.07),
+    };
+    let xs = x + shift;
+    let (col, fu, fv) = (xs.floor() as i64, xs - xs.floor(), y - y.floor());
+    let edge = |f: f64, width: f64| { let d = f.min(1. - f); ((d - width * 0.5) / (width * 0.5)).clamp(0., 1.) };
+    let joint = edge(fu, joint_u).min(edge(fv, joint_v));
+    if joint <= 0. { return 0.; }
+    let id = (wrap(col, periods[0]), wrap(row, periods[1]));
+    let tone = 0.55 + 0.45 * unit_hash(id.0, id.1, seed);
+    let detail = match kind {
+        PatternKind::Planks => {
+            let grain = fbm(x * 0.5, y * 6., periods.map(|p| p.max(1)), seed ^ 0x51);
+            0.82 + 0.18 * (0.5 + 0.5 * (TAU * (y * 3. + grain * 2.5)).sin())
+        }
+        _ => 0.9 + 0.1 * (0.5 + fbm(x * 4., y * 4., periods.map(|p| p * 4), seed ^ 0x77)),
+    };
+    (joint * tone * detail).clamp(0., 1.)
 }
 
 #[cfg(test)]

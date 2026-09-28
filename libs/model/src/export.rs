@@ -96,6 +96,10 @@ impl Document {
         }
         ctx.checkpoint(1)?;
         let mut parts: BTreeMap<(String, u32), Part> = BTreeMap::new();
+        let mut weld: std::collections::HashMap<(String, u32), std::collections::HashMap<(mesh::VertexId, [u32; 3], [u32; 2]), u32>> = std::collections::HashMap::new();
+        // Shape keys carry per-triangle normal deltas, so a document with
+        // morphs keeps one render vertex per triangle corner.
+        let weld_corners = self.rig().morphs.is_empty();
         let mut triangles = 0usize;
         for (name, mesh) in self.objects() {
             ctx.checkpoint(1)?;
@@ -118,15 +122,20 @@ impl Document {
             for tri in &triangulated.triangles {
                 ctx.checkpoint(1)?;
                 let part = parts.entry((name.to_owned(), tri.material)).or_default();
+                let welded = weld.entry((name.to_owned(), tri.material)).or_default();
                 part.faces.push(tri.source_face);
                 for index in tri.indices {
                     let v = &triangulated.vertices[index as usize];
-                    part.indices.push(
-                        part.positions
-                            .len()
-                            .try_into()
-                            .map_err(|_| Error::Budget("compiled vertices"))?,
-                    );
+                    // Corners sharing source vertex, normal and UV share one
+                    // render vertex (weights and colour follow the source).
+                    let key = (v.source_vertex, v.normal.map(|x| (x as f32).to_bits()), v.uv.map(|x| (x as f32).to_bits()));
+                    if let Some(&existing) = welded.get(&key).filter(|_| weld_corners) {
+                        part.indices.push(existing);
+                        continue;
+                    }
+                    let next: u32 = part.positions.len().try_into().map_err(|_| Error::Budget("compiled vertices"))?;
+                    welded.insert(key, next);
+                    part.indices.push(next);
                     part.source_vertices.push(v.source_vertex);
                     part.positions.push([
                         f32_value(v.position[0])?,
@@ -227,9 +236,10 @@ impl Document {
                 object: object.clone(),
                 material: *id,
                 faces: part.faces.clone(),
-                source_vertices: part.source_vertices.clone(),
-                positions: part.positions.clone(),
-                normals: part.normals.clone(),
+                // The GLB is welded; this record stays one entry per triangle corner.
+                source_vertices: part.indices.iter().map(|&i| part.source_vertices[i as usize]).collect(),
+                positions: part.indices.iter().map(|&i| part.positions[i as usize]).collect(),
+                normals: part.indices.iter().map(|&i| part.normals[i as usize]).collect(),
             });
             views.push(GlbTexturedPart {
                 positions: &part.positions,

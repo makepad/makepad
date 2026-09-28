@@ -145,6 +145,7 @@ impl WaylandCx {
                 match crate::os::linux::vulkan::CxVulkan::new_wayland(display_ptr.cast()) {
                     Ok(vulkan) => {
                         let fifo_presents_queue = vulkan.fifo_presents_queue();
+                        cx.borrow_mut().gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
                         cx.borrow_mut().os.vulkan = Some(vulkan);
                         Some(fifo_presents_queue)
                     }

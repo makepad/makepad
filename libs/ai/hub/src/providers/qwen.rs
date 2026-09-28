@@ -362,6 +362,20 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     images: Vec<crate::providers::provider::ToolImage>,
     vision: Option<vision::VisionTurn>,
     vision_base: Option<String>,
+    /// The row the running vision review will annotate, as the session's
+    /// history holds it.
+    vision_row: Option<(ChatRole, String)>,
+    /// Vision observations by the history row they annotate. The session
+    /// rebuilds every round from its own history, which never holds them:
+    /// without this, the round after a tool call (and every later turn)
+    /// answered as if the image had never been seen.
+    observed: Vec<Observation>,
+}
+
+struct Observation {
+    role: ChatRole,
+    row: String,
+    block: String,
 }
 
 /// One wire turn: the session-history role it mirrors, and the exact text
@@ -426,7 +440,24 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             images: Vec::new(),
             vision: None,
             vision_base: None,
+            vision_row: None,
+            observed: Vec::new(),
         }
+    }
+
+    /// Put each remembered observation block back on the row it annotated.
+    /// Rows compacted out of the history drop their observations for good.
+    fn with_observations(&mut self, input: &TurnInput) -> TurnInput {
+        let mut input = input.clone();
+        self.observed.retain(|seen| {
+            let Some(row) = input.messages.iter_mut().rev().find(|m| m.role == seen.role
+                && m.text.strip_prefix(seen.row.as_str()).is_some_and(|rest| rest.is_empty() || rest == seen.block)) else { return false };
+            // An input already carrying the block (a vision round's own
+            // continuation) keeps it once.
+            if row.text.len() == seen.row.len() { row.text.push_str(&seen.block); }
+            true
+        });
+        input
     }
 
     /// Require this exact advertised fleet model id when supplied.
@@ -945,6 +976,8 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
 
     fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
         if self.vision.is_some() { return Err("vision review is still running".into()); }
+        let patched;
+        let input = if self.observed.is_empty() { input } else { patched = self.with_observations(input); &patched };
         if !self.images.is_empty() {
             if self.active.is_some() || self.pending.is_some() { return Err("a turn is already in flight".into()); }
             // Prefer the node that actually completed the last visual review.
@@ -953,6 +986,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             let mut bases = self.bases.clone();
             if let Some(index) = self.vision_base.as_ref().and_then(|base| bases.iter().position(|b| b == base)) { bases.swap(0, index); }
             let chat_base = self.probe().ok().map(|pick| pick.0);
+            self.vision_row = input.messages.last().map(|m| (m.role, m.text.clone()));
             self.vision = Some(vision::VisionTurn::new(
                 input.clone(),
                 std::mem::take(&mut self.images),
@@ -1084,6 +1118,11 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 vision::Poll::Failed(message) => return vec![ProviderEvent::Error(message)],
                 vision::Poll::Ready(input, base) => {
                     self.vision_base = base;
+                    if let (Some((role, row)), Some(last)) = (self.vision_row.take(), input.messages.last()) {
+                        if let Some(block) = last.text.strip_prefix(row.as_str()).filter(|b| !b.is_empty()) {
+                            self.observed.push(Observation { role, row, block: block.to_string() });
+                        }
+                    }
                     return match self.begin_turn(&input) {
                         Ok(()) => vec![ProviderEvent::Status { note: "local vision complete · continuing with Qwen".into(), permille: 0 }],
                         Err(message) => vec![ProviderEvent::Error(message)],
@@ -1291,6 +1330,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
 
     fn cancel(&mut self) {
         self.images.clear();
+        self.vision_row = None;
         if let Some(mut vision) = self.vision.take() { vision.cancel(&mut self.transport); }
         self.pending = None;
         // The next history can replace the unsubmitted user/tool tail.
@@ -1724,6 +1764,27 @@ mod wire_transcript_tests {
         let body = &capped.generates.borrow()[0];
         assert_eq!(body.get("max_tokens").and_then(Value::as_u64), Some(73));
         assert!(body.get("thinking").is_none());
+    }
+
+    /// The session rebuilds each round from its own history, which never
+    /// holds vision observations. The provider puts them back on the row
+    /// they annotate: the round after a tool call, and later turns, still
+    /// know what the image showed.
+    #[test]
+    fn vision_observations_follow_their_row_into_later_rounds() {
+        let mut p = FleetQwenChatProvider::new(Scripted::default(), vec!["http://n1:1".into()]);
+        let block = "\n\nLOCAL VISION OBSERVATIONS: a red and white coaster".to_string();
+        p.observed.push(Observation { role: ChatRole::User, row: "what colour is the coaster?".into(), block: block.clone() });
+        let tool = ChatMessage { role: ChatRole::Tool, text: "world.list: 3 placements".into() };
+        let later = TurnInput::new("SYS", vec![user("what colour is the coaster?"), tool.clone()]);
+        let patched = p.with_observations(&later);
+        assert_eq!(patched.messages[0].text, format!("what colour is the coaster?{block}"));
+        assert_eq!(patched.messages[1], tool);
+        // Already carrying it (the vision round's own input): not doubled.
+        assert_eq!(p.with_observations(&patched).messages[0].text, patched.messages[0].text);
+        // Compacted out of the history: forgotten.
+        p.with_observations(&TurnInput::new("SYS", vec![user("next")]));
+        assert!(p.observed.is_empty());
     }
 
     #[test]

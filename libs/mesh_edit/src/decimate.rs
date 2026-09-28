@@ -25,16 +25,24 @@ impl Mesh {
                 first_uv.entry(c.vertex).or_insert(c.uv);first_material.entry(c.vertex).or_insert(f.material);
             }}
             for edge in m.edge_data.keys(){protected.extend([edge.0,edge.1]);}
-            let mut radii=m.vertices.iter().map(|v|(v.id,0f64)).collect::<BTreeMap<_,_>>();let mut vertex_mapping=source.vertices.iter().map(|v|(v.id,v.id)).collect::<BTreeMap<_,_>>();let mut collapses=0;
+            let mut radii=m.vertices.iter().map(|v|(v.id,0f64)).collect::<BTreeMap<_,_>>();let mut merged=BTreeMap::<VertexId,VertexId>::new();let mut collapses=0;
+            // Each pass collapses every independent candidate in error order:
+            // a collapse dirties both one-rings, whose adjacency is stale until
+            // the next pass rebuilds it. One collapse per adjacency rebuild made
+            // this quadratic (a 4.6k-face mesh took 10 s).
             while m.faces.len()>target_faces{ctx.checkpoint(1)?;let adj=m.adjacency(ctx)?;let mut candidates=Vec::new();
                 for &edge in adj.edges.keys(){ctx.checkpoint(1)?;if protected.contains(&edge.0)||protected.contains(&edge.1){continue;}let distance=length(sub(m.vertex(edge.0).unwrap().position,m.vertex(edge.1).unwrap().position));let error=radii[&edge.0].max(radii[&edge.1])+distance*0.5;
                     if error<=max_error{candidates.push((error,edge));}}
                 candidates.sort_by(|a,b|a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));let mut progressed=false;
+                let mut dirty=BTreeSet::new();
                 for (error,edge) in candidates{ctx.checkpoint(1)?;
+                    if dirty.contains(&edge.0)||dirty.contains(&edge.1){continue;}
                     // Never remove more incident triangles than the target asks.
                     if m.faces.len().saturating_sub(adj.radial(edge).len())<target_faces{continue;}
                     match collapse_triangle_neighborhood(m,&adj,edge,ctx){
-                        Ok(_)=>{radii.insert(edge.0,error);radii.remove(&edge.1);for value in vertex_mapping.values_mut(){ctx.checkpoint(1)?;if *value==edge.1{*value=edge.0;}}collapses+=1;progressed=true;break;}
+                        Ok(_)=>{radii.insert(edge.0,error);radii.remove(&edge.1);merged.insert(edge.1,edge.0);collapses+=1;progressed=true;
+                            for v in [edge.0,edge.1]{dirty.insert(v);for e in &adj.vertex_edges[&v]{dirty.insert(e.0);dirty.insert(e.1);}}
+                            if m.faces.len()<=target_faces{break;}}
                         Err(error@MeshError::Cancelled)|Err(error@MeshError::Budget{..})=>return Err(error),
                         Err(_)=>continue,
                     }
@@ -44,7 +52,9 @@ impl Mesh {
             // The outer edit owns rollback. Local link/orientation checks guard
             // candidates; a full manifold qualification still gates publication.
             surface(m,ctx)?;
-            mappings.extend(vertex_mapping.into_iter().map(|(a,b)|(ElementId::Vertex(a),vec![ElementId::Vertex(b)])));
+            // Every original vertex maps to the survivor at the end of its merge chain.
+            let resolve=|mut v:VertexId|{while let Some(&next)=merged.get(&v){v=next;}v};
+            mappings.extend(source.vertices.iter().map(|v|(ElementId::Vertex(v.id),vec![ElementId::Vertex(resolve(v.id))])));
             Ok(((m.faces.len(),collapses),mappings.into_iter().collect()))
         })?;Ok(DecimateResult{changes,achieved_faces,collapses})
     }

@@ -147,6 +147,13 @@ pub trait ChatProvider {
     fn reset_conversation(&mut self) {
         self.cancel();
     }
+
+    /// The model calls the session's tools natively, through an MCP server
+    /// the host handed the provider, inside one turn: the session teaches
+    /// no text tool protocol and extracts no calls from the reply.
+    fn tools_over_mcp(&self) -> bool {
+        false
+    }
 }
 
 // ------------------------------------------------------------------ threaded

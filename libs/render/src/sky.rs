@@ -178,6 +178,9 @@ pub struct SkyFrame {
     /// — the FOG colour that matches this sky (fog is one colour, the
     /// horizon is not; the average is the only seam-free choice).
     pub fog_rgb: Vec3f,
+    /// The same compass-averaged horizon as LINEAR, scene-referred radiance
+    /// (no tone map, no display gamma) — the fog colour of the HDR lane.
+    pub fog_linear: Vec3f,
 }
 
 /// One Perez channel's five coefficients from turbidity `t`.
@@ -262,6 +265,20 @@ fn yxy_to_rgb(y_lum: f32, x: f32, yc: f32, exposure: f32) -> Vec3f {
     )
 }
 
+/// Yxy -> LINEAR sRGB-primaries radiance at `exposure` (the HDR lane: the
+/// composite tone maps, so there is no Reinhard, normalise or gamma here).
+fn yxy_to_linear(y_lum: f32, x: f32, yc: f32, exposure: f32) -> Vec3f {
+    let yc = yc.max(1.0e-4);
+    let yt = (y_lum * exposure).max(0.0);
+    let big_x = x * (yt / yc);
+    let big_z = (1.0 - x - yc) * (yt / yc);
+    vec3f(
+        (3.2406 * big_x - 1.5372 * yt - 0.4986 * big_z).max(0.0),
+        (-0.9689 * big_x + 1.8758 * yt + 0.0415 * big_z).max(0.0),
+        (0.0557 * big_x - 0.2040 * yt + 1.0570 * big_z).max(0.0),
+    )
+}
+
 /// Build one frame of sky parameters from the sun direction (y up, unit)
 /// and turbidity. `exposure` scales the model's absolute luminance into the
 /// display range — 0.12 lands the default noon near the hand-painted sky's
@@ -310,6 +327,7 @@ pub fn preetham_frame(sun_dir: Vec3f, turbidity: f32, exposure: f32) -> SkyFrame
     // Fog: the tone-mapped model at 2 degrees above the horizon, averaged
     // over 8 compass directions, faded toward night.
     let mut fog = vec3f(0.0, 0.0, 0.0);
+    let mut fog_linear = vec3f(0.0, 0.0, 0.0);
     let vth = std::f32::consts::FRAC_PI_2 - 0.035;
     let (vc, vs) = (vth.cos(), vth.sin());
     for k in 0..8 {
@@ -325,10 +343,15 @@ pub fn preetham_frame(sun_dir: Vec3f, turbidity: f32, exposure: f32) -> SkyFrame
             exposure,
         );
         fog = fog + rgb;
+        fog_linear = fog_linear
+            + yxy_to_linear(f(&y5, zen_y, f0_y), f(&x5, zen_x, f0_x), f(&yc5, zen_yc, f0_yc), exposure);
     }
     fog = fog * (1.0 / 8.0);
     let night_fog = vec3f(0.05, 0.06, 0.09);
     fog = fog + (night_fog - fog) * night;
+    // The HDR night horizon: the analytic dome's own night floor.
+    fog_linear = fog_linear * (1.0 / 8.0);
+    fog_linear = fog_linear + (vec3f(0.010, 0.012, 0.020) - fog_linear) * night;
 
     SkyFrame {
         pz_y: vec4(y5[0], y5[1], y5[2], y5[3]),
@@ -343,7 +366,42 @@ pub fn preetham_frame(sun_dir: Vec3f, turbidity: f32, exposure: f32) -> SkyFrame
             vec4(d.x, d.y, d.z, 0.0)
         },
         fog_rgb: fog,
+        fog_linear,
     }
+}
+
+/// The dome's cosine-weighted mean LINEAR radiance over the upper
+/// hemisphere — irradiance/pi, the unit the HDR lane's fill (`sun_sky`)
+/// uses — at this frame's exposure. 48 directions (6 rings x 8 azimuths),
+/// weighted by cos(theta) * ring area; the circumsolar lobe is included,
+/// the disc is not (that is the direct term). Cheap: CPU, once per frame.
+pub fn sky_fill_linear(frame: &SkyFrame) -> Vec3f {
+    let sun = vec3f(frame.sun.x, frame.sun.y, frame.sun.z);
+    let mut sum = vec3f(0.0, 0.0, 0.0);
+    let mut weight = 0.0;
+    for ring in 0..6 {
+        let theta = (ring as f32 + 0.5) / 6.0 * std::f32::consts::FRAC_PI_2;
+        let (st, ct) = theta.sin_cos();
+        let w_ring = ct * st;
+        for k in 0..8 {
+            let az = (k as f32 + 0.5) / 8.0 * std::f32::consts::TAU;
+            let v = vec3f(az.cos() * st, ct, az.sin() * st);
+            let cos_gamma = v.dot(sun).clamp(-1.0, 1.0);
+            let gamma = cos_gamma.acos();
+            let cos_theta = ct.max(0.01);
+            let eval = |c: Vec4f, e: f32| {
+                (1.0 + c.x * (c.y / cos_theta).exp()) * (1.0 + c.z * (c.w * gamma).exp() + e * cos_gamma * cos_gamma)
+            };
+            let y = frame.zenith.x * eval(frame.pz_y, frame.pz_e.x) * frame.pz_f0.x;
+            let x = frame.zenith.y * eval(frame.pz_x, frame.pz_e.y) * frame.pz_f0.y;
+            let yc = frame.zenith.z * eval(frame.pz_yc, frame.pz_e.z) * frame.pz_f0.z;
+            sum = sum + yxy_to_linear(y, x, yc, frame.sun.w) * w_ring;
+            weight += w_ring;
+        }
+    }
+    let day = sum * (1.0 / weight.max(1.0e-6));
+    // Night: the model's dome floor (the shader's night sky colour).
+    day + (vec3f(0.006, 0.008, 0.014) - day) * frame.zenith.w
 }
 
 /// Texture-free CPU transcription of [`crate::shaders::DrawSceneSkyAnalytic`].

@@ -110,6 +110,12 @@ pub trait ToolDispatcher: Send + Sync {
     /// Execute one tool. May block the server worker thread waiting for a
     /// receipt; must never be invoked on the UI thread.
     fn call(&self, caller: &LaneCaller, name: &str, args: &Value, request_id: &str) -> Outcome;
+    /// [`call`](Self::call) for a tool whose result includes pictures
+    /// (base64 PNGs, answered as MCP `image` content beside the text) —
+    /// a render the model should see. Default: no pictures.
+    fn call_with_images(&self, caller: &LaneCaller, name: &str, args: &Value, request_id: &str) -> (Outcome, Vec<String>) {
+        (self.call(caller, name, args, request_id), Vec::new())
+    }
 }
 
 /// A minted bearer credential: 32 OS-random bytes as lowercase hex.
@@ -779,7 +785,7 @@ fn dispatch_message(message: &Value, caller: &LaneCaller, shared: &Shared) -> Re
                 Value::Str(s) => format!("mcp-{}-{s}", caller.lane),
                 _ => unreachable!(),
             };
-            let outcome = shared.dispatcher.call(caller, name, &args, &request_id);
+            let (outcome, images) = shared.dispatcher.call_with_images(caller, name, &args, &request_id);
             let text = if outcome.text.len() > MAX_RESULT_BYTES {
                 // The dispatcher's envelope is expected to page; a reply over
                 // the cap is a dispatcher bug, reported rather than truncated
@@ -793,7 +799,17 @@ fn dispatch_message(message: &Value, caller: &LaneCaller, shared: &Shared) -> Re
                 json::obj(vec![
                     (
                         "content",
-                        Value::Arr(vec![json::obj(vec![("type", json::s("text")), ("text", json::s(text))])]),
+                        Value::Arr(
+                            std::iter::once(json::obj(vec![("type", json::s("text")), ("text", json::s(text))]))
+                                .chain(images.into_iter().map(|data| {
+                                    json::obj(vec![
+                                        ("type", json::s("image")),
+                                        ("data", json::s(data)),
+                                        ("mimeType", json::s("image/png")),
+                                    ])
+                                }))
+                                .collect(),
+                        ),
                     ),
                     ("isError", Value::Bool(outcome.is_error)),
                 ]),
@@ -875,6 +891,39 @@ mod tests {
                 is_error: false,
             }
         }
+    }
+
+    /// A dispatcher whose one tool answers with a picture.
+    struct Painter;
+
+    impl ToolDispatcher for Painter {
+        fn list(&self, _caller: &LaneCaller) -> Vec<ToolDef> {
+            vec![ToolDef::new("render", "a picture", r#"{"type":"object"}"#, crate::wire::Risk::Read)]
+        }
+        fn call(&self, _caller: &LaneCaller, _name: &str, _args: &Value, _request_id: &str) -> Outcome {
+            Outcome { text: "{}".into(), is_error: false }
+        }
+        fn call_with_images(&self, caller: &LaneCaller, name: &str, args: &Value, request_id: &str) -> (Outcome, Vec<String>) {
+            (self.call(caller, name, args, request_id), vec!["iVBORw0KGgo=".into()])
+        }
+    }
+
+    #[test]
+    fn a_tool_result_carries_its_pictures_as_image_content() {
+        let dir = temp_dir("img");
+        let tokens = Arc::new(TokenStore::open(&dir).unwrap());
+        let server = McpServer::start(tokens.clone(), Arc::new(Painter)).unwrap();
+        let token = tokens.mint("lane-a", "owner-1").unwrap();
+        let call = rpc(server.port(), token.as_str(), r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"render","arguments":{}}}"#);
+        let v = json::parse(&call.body).unwrap();
+        let content = v.get("result").unwrap().get("content").unwrap().as_arr().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(content[1].get("type").and_then(Value::as_str), Some("image"));
+        assert_eq!(content[1].get("mimeType").and_then(Value::as_str), Some("image/png"));
+        assert_eq!(content[1].get("data").and_then(Value::as_str), Some("iVBORw0KGgo="));
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {

@@ -46,15 +46,33 @@ pub(crate) fn fur_shell_count(length: f32, transform: &makepad_draw::Mat4f, dist
 }
 
 #[derive(Clone,Copy)]
-pub enum PixelSemantic { Color, Data, Normal }
+pub enum PixelSemantic { Color, Data, Normal,
+    /// Base colour of an alpha-TESTED (MASK) material: filtered like
+    /// `Color`, with each mip's alpha coverage kept (see `prepare`).
+    MaskedColor }
 
 #[derive(Clone)]
-pub struct PreparedTexture {pub width:usize,pub height:usize,pub data:Vec<u32>,pub max_level:usize}
+pub struct PreparedTexture {pub width:usize,pub height:usize,pub data:Vec<u32>,pub max_level:usize,
+    /// Content hash (size + level-0 texels), computed on the worker: the
+    /// renderer's texture cache shares one GPU texture per distinct image
+    /// across every model and chunk that uses it.
+    pub hash:u64}
 fn linear(v:f32)->f32{if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)}}
 fn srgb(v:f32)->f32{if v<=0.0031308{v*12.92}else{1.055*v.max(0.0).powf(1.0/2.4)-0.055}}
 impl PreparedTexture {
     pub fn prepare(image:ImageBuffer,semantic:PixelSemantic)->Self {
         let (width,height)=(image.width,image.height);let mut data=image.data;
+        let hash=data.iter().fold(0xcbf2_9ce4_8422_2325u64^((width as u64)<<32|height as u64)^(semantic as u64).rotate_left(17),|h,t|(h^*t as u64).wrapping_mul(0x100_0000_01b3));
+        // Alpha coverage (MaskedColor): box filtering pulls every mip's
+        // alpha toward its mean, so an alpha-TESTED texture (a mask cutout, a terrain
+        // overlay's height × splat weight) loses its coverage with distance
+        // — a splat layer under weight ~0.5 vanished outright past a few
+        // metres. Each level's alpha is remapped to level 0's distribution
+        // (histogram match over the 256 byte values), which keeps the share
+        // of texels above ANY cutoff, whatever the weight multiplies in.
+        let alpha_hist=|texels:&[u32]|{let mut hist=[0u32;256];for t in texels{hist[(t>>24)as usize]+=1;}hist};
+        let hist0=alpha_hist(&data);
+        let varied=hist0.iter().filter(|c|**c>0).count()>1;
         let(mut w,mut h,mut start,mut max_level)=(width,height,0usize,0usize);
         while w>1||h>1 {
             let(nw,nh)=((w/2).max(1),(h/2).max(1));let offset=data.len();
@@ -63,25 +81,51 @@ impl PreparedTexture {
                 for(dy,dx)in[(0,0),(0,1),(1,0),(1,1)] {
                     let pixel=data[start+(y*2+dy).min(h-1)*w+(x*2+dx).min(w-1)];
                     let mut c=[((pixel>>16)&255)as f32/255.0,((pixel>>8)&255)as f32/255.0,(pixel&255)as f32/255.0,(pixel>>24)as f32/255.0];
-                    match semantic {PixelSemantic::Color=>{for i in 0..3{c[i]=linear(c[i])*c[3];}},PixelSemantic::Normal=>{for i in 0..3{c[i]=c[i]*2.0-1.0;}},PixelSemantic::Data=>{}}
+                    match semantic {PixelSemantic::Color|PixelSemantic::MaskedColor=>{for i in 0..3{c[i]=linear(c[i])*c[3];}},PixelSemantic::Normal=>{for i in 0..3{c[i]=c[i]*2.0-1.0;}},PixelSemantic::Data=>{}}
                     for i in 0..4{sum[i]+=c[i]*0.25;}
                 }
                 match semantic {
-                    PixelSemantic::Color=>{for i in 0..3{sum[i]=srgb(if sum[3]>1e-8{sum[i]/sum[3]}else{0.0});}},
+                    PixelSemantic::Color|PixelSemantic::MaskedColor=>{for i in 0..3{sum[i]=srgb(if sum[3]>1e-8{sum[i]/sum[3]}else{0.0});}},
                     PixelSemantic::Normal=>{let length=(sum[0]*sum[0]+sum[1]*sum[1]+sum[2]*sum[2]).sqrt();for i in 0..3{sum[i]=if length>1e-8{sum[i]/length*0.5+0.5}else{if i==2{1.0}else{0.5}};}},
                     PixelSemantic::Data=>{},
                 }
                 let byte=|v:f32|(v.clamp(0.0,1.0)*255.0+0.5)as u32;
                 data.push(byte(sum[3])<<24|byte(sum[0])<<16|byte(sum[1])<<8|byte(sum[2]));
             }}
+            if varied && matches!(semantic,PixelSemantic::MaskedColor) {
+                let level=&mut data[offset..];
+                let lut=coverage_lut(&alpha_hist(level),&hist0);
+                for t in level.iter_mut(){*t=(*t&0x00ff_ffff)|(lut[(*t>>24)as usize]as u32)<<24;}
+            }
             start=offset;w=nw;h=nh;max_level+=1;
         }
-        Self{width,height,data,max_level}
+        Self{width,height,data,max_level,hash}
+    }
+    /// Upload through a content-keyed cache: an identical image already on
+    /// the GPU (another model, another terrain chunk) is shared, not copied.
+    pub fn upload_cached(self,cx:&mut Cx,cache:&mut std::collections::HashMap<u64,Texture>)->Texture {
+        if let Some(texture)=cache.get(&self.hash){return texture.clone();}
+        let hash=self.hash;let texture=self.upload(cx);cache.insert(hash,texture.clone());texture
     }
     pub fn upload(self,cx:&mut Cx)->Texture {
         Texture::new_with_format(cx,TextureFormat::VecMipBGRAu8_32{width:self.width,height:self.height,data:Some(self.data),max_level:Some(self.max_level),wrap:TextureWrap::Repeat,updated:TextureUpdated::Full})
     }
     pub fn bytes(&self)->usize{self.data.len()*4}
+}
+
+/// Byte → byte map sending `level`'s alpha distribution onto `reference`'s:
+/// a value at cumulative share q of the level maps to the reference value at
+/// the same share (the middle of the value's own rank range).
+fn coverage_lut(level:&[u32;256],reference:&[u32;256])->[u8;256]{
+    let total=|h:&[u32;256]|h.iter().map(|c|*c as u64).sum::<u64>().max(1);
+    let (lt,rt)=(total(level),total(reference));
+    let mut lut=[0u8;256];let mut below=0u64;let mut r=0usize;let mut r_below=0u64;
+    for v in 0..256 {
+        let mid=(below*2+level[v]as u64) as f64/(2.0*lt as f64);
+        while r<255 && ((r_below+reference[r]as u64) as f64/rt as f64)<mid {r_below+=reference[r]as u64;r+=1;}
+        lut[v]=r as u8;below+=level[v]as u64;
+    }
+    lut
 }
 
 #[derive(Clone)]
@@ -108,6 +152,20 @@ impl PreparedSurface {
 #[cfg(test)]
 mod tests{
     use super::*;
+    /// A height-in-alpha texture tested at 0.7 × weight keeps its coverage
+    /// down the mip chain instead of averaging to 0.5 and dropping out.
+    #[test]fn alpha_tested_coverage_survives_the_mip_chain(){
+        let n=64;let mut image=ImageBuffer::default();image.width=n;image.height=n;
+        let mut x=0x1234_5678u32;
+        image.data=(0..n*n).map(|_|{x^=x<<13;x^=x>>17;x^=x<<5;((x>>24)<<24)|0x0080_8080}).collect();
+        let cover=|texels:&[u32],cut:f32|texels.iter().filter(|t|((**t>>24)as f32/255.0)*0.7>cut).count()as f32/texels.len()as f32;
+        let level0=cover(&image.data,0.5);
+        let texture=PreparedTexture::prepare(image,PixelSemantic::MaskedColor);
+        // Level 3 is 8x8, starting after 64²+32²+16².
+        let start=n*n+32*32+16*16;let level3=cover(&texture.data[start..start+64],0.5);
+        assert!(level0>0.2&&level0<0.35,"{level0}");
+        assert!((level3-level0).abs()<0.1,"coverage {level0} at level 0 but {level3} at level 3");
+    }
     #[test]fn color_mips_filter_linear_premultiplied_pixels(){
         let mut image=ImageBuffer::default();image.width=2;image.height=1;image.data=vec![0xffff_ffff,0xff00_0000];
         let texture=PreparedTexture::prepare(image,PixelSemantic::Color);let r=(texture.data[2]>>16)&255;assert!((187..=189).contains(&r));

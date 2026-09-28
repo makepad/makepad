@@ -206,6 +206,7 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
             metallic: mat.map(|m| m.metallic).unwrap_or(0.0),
             roughness: mat.map(|m| m.roughness).unwrap_or(1.0),
             orm_png: None,
+            ..Default::default()
         };
         let layer_i = if layered {
             layers
@@ -300,6 +301,7 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
         metallic: 0.0,
         roughness: 1.0,
         orm_png: None,
+        ..Default::default()
     };
     if layered {
         draw_layers = layers

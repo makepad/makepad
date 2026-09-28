@@ -63,6 +63,15 @@ pub enum HudKind {
     Flash,
     /// A mark at the crosshair fired by a hit or a kill.
     Marker,
+    /// A minimap: a world polyline (a track, a route) fitted into the box,
+    /// with live dots for the racers, players or tagged entities the host
+    /// supplies — the subject highlighted.
+    Map,
+    /// A fighter head-up display over the whole pane: pitch ladder,
+    /// flight-path marker, tapes, target boxes and lock, warnings. The host
+    /// projects the subject aircraft's state (see the renderer's
+    /// `FlightHud`).
+    Flight,
 }
 
 impl HudKind {
@@ -76,6 +85,8 @@ impl HudKind {
             HudKind::Log => "log",
             HudKind::Flash => "flash",
             HudKind::Marker => "marker",
+            HudKind::Map => "map",
+            HudKind::Flight => "flight",
         }
     }
 
@@ -83,7 +94,7 @@ impl HudKind {
     /// the pane on their own terms and must not push a panel's children
     /// around.
     pub fn is_laid_out(self) -> bool {
-        !matches!(self, HudKind::Flash | HudKind::Marker)
+        !matches!(self, HudKind::Flash | HudKind::Marker | HudKind::Flight)
     }
 }
 
@@ -187,6 +198,349 @@ impl HudPulse {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Motion: tweens, transforms, punches and count-ups
+// ---------------------------------------------------------------------------
+
+/// The curve a tween runs along, `t` in 0..1 to progress (which may pass 1:
+/// `OutBack` and `OutElastic` overshoot, which is what makes a pop pop).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HudEase {
+    #[default]
+    OutCubic,
+    Linear,
+    OutBack,
+    OutExpo,
+    OutElastic,
+    InOutSine,
+}
+
+impl HudEase {
+    pub fn parse(name: &str) -> Option<HudEase> {
+        Some(match name {
+            "out_cubic" | "out" => HudEase::OutCubic,
+            "linear" => HudEase::Linear,
+            "out_back" | "back" => HudEase::OutBack,
+            "out_expo" | "expo" => HudEase::OutExpo,
+            "out_elastic" | "elastic" => HudEase::OutElastic,
+            "in_out_sine" | "sine" => HudEase::InOutSine,
+            _ => return None,
+        })
+    }
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            HudEase::Linear => t,
+            HudEase::OutCubic => 1.0 - (1.0 - t).powi(3),
+            HudEase::OutBack => {
+                let c1 = 1.70158;
+                let c3 = c1 + 1.0;
+                1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+            }
+            HudEase::OutExpo => {
+                if t >= 1.0 { 1.0 } else { 1.0 - 2f32.powf(-10.0 * t) }
+            }
+            HudEase::OutElastic => {
+                if t <= 0.0 || t >= 1.0 {
+                    t
+                } else {
+                    2f32.powf(-10.0 * t) * ((t * 10.0 - 0.75) * (2.0 * std::f32::consts::PI / 3.0)).sin() + 1.0
+                }
+            }
+            HudEase::InOutSine => -((std::f32::consts::PI * t).cos() - 1.0) * 0.5,
+        }
+    }
+}
+
+/// What a tween does to its element.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HudTweenKind {
+    #[default]
+    None,
+    /// Scale up from small with an overshoot: "GO!", a combo count.
+    Pop,
+    Fade,
+    /// Slide in FROM that side (and out TO it).
+    SlideLeft,
+    SlideRight,
+    SlideUp,
+    SlideDown,
+    /// A scale kick that settles back: a value that just changed.
+    Punch,
+    /// A decaying jitter: a hit, a miss, a fumble.
+    Shake,
+}
+
+impl HudTweenKind {
+    pub fn parse(name: &str) -> Option<HudTweenKind> {
+        Some(match name {
+            "none" | "" => HudTweenKind::None,
+            "pop" => HudTweenKind::Pop,
+            "fade" => HudTweenKind::Fade,
+            "slide_left" | "left" => HudTweenKind::SlideLeft,
+            "slide_right" | "right" => HudTweenKind::SlideRight,
+            "slide_up" | "up" => HudTweenKind::SlideUp,
+            "slide_down" | "down" => HudTweenKind::SlideDown,
+            "punch" => HudTweenKind::Punch,
+            "shake" => HudTweenKind::Shake,
+            _ => return None,
+        })
+    }
+}
+
+/// One tween: what, how long, along which curve, and how far (scale kick
+/// for a punch, HUD units for a slide or a shake; 0 = the kind's default).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudTween {
+    pub kind: HudTweenKind,
+    pub secs: f32,
+    pub ease: HudEase,
+    pub amount: f32,
+}
+
+impl HudTween {
+    /// The kind with the duration, curve and reach it reads best at: out-back
+    /// for pops, out-expo for slides.
+    pub fn of(kind: HudTweenKind) -> HudTween {
+        let (secs, ease, amount) = match kind {
+            HudTweenKind::None => (0.0, HudEase::OutCubic, 0.0),
+            HudTweenKind::Pop => (0.45, HudEase::OutBack, 0.25),
+            HudTweenKind::Fade => (0.25, HudEase::OutCubic, 0.0),
+            HudTweenKind::SlideLeft | HudTweenKind::SlideRight | HudTweenKind::SlideUp | HudTweenKind::SlideDown => {
+                (0.5, HudEase::OutExpo, 90.0)
+            }
+            HudTweenKind::Punch => (0.35, HudEase::OutCubic, 0.35),
+            HudTweenKind::Shake => (0.4, HudEase::Linear, 10.0),
+        };
+        HudTween { kind, secs, ease, amount }
+    }
+    pub fn is_none(&self) -> bool {
+        self.kind == HudTweenKind::None || self.secs <= 0.0
+    }
+}
+
+/// How an element moves. The default is perfectly still, and a still element
+/// costs the renderer nothing beyond one comparison.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudMotion {
+    /// Horizontal shear, as x offset per unit of height (-0.2 leans it
+    /// forward like italic type): the static slant of a trick callout.
+    pub skew: f32,
+    /// Static rotation, radians, clockwise on screen.
+    pub rotate: f32,
+    /// Played when the element appears (declared, `show`/`when` turning on).
+    pub enter: HudTween,
+    /// Played when it goes (`show`/`when` turning off, a `ms` running out):
+    /// the enter curve backwards.
+    pub exit: HudTween,
+    /// Played whenever its number or text changes.
+    pub change: HudTween,
+    /// Seconds a changed number takes to count to its new value (0 = snaps).
+    pub count: f32,
+}
+
+impl HudMotion {
+    pub fn is_still(&self) -> bool {
+        self.skew == 0.0
+            && self.rotate == 0.0
+            && self.enter.is_none()
+            && self.exit.is_none()
+            && self.change.is_none()
+            && self.count <= 0.0
+    }
+}
+
+/// The live half of [`HudMotion`], owned by the document between frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HudMotionState {
+    /// Seconds since the enter / exit / change tween (or the punch) started;
+    /// infinite when none is running.
+    pub enter_age: f32,
+    pub exit_age: f32,
+    pub change_age: f32,
+    /// One-shot `hud_punch` kicks, independent of the declared tweens: a
+    /// scale punch and a shake, which may play together.
+    pub punch: HudTween,
+    pub punch_age: f32,
+    pub shake: HudTween,
+    pub shake_age: f32,
+    /// Seen on screen last frame, and where (pane-local pixels x, y, w, h).
+    pub shown: bool,
+    pub rect: [f32; 4],
+    /// The number/text last seen, for change detection.
+    pub value: f32,
+    pub text_key: u64,
+    /// Count-up: from, to, and seconds into it.
+    pub count_from: f32,
+    pub count_to: f32,
+    pub count_age: f32,
+    /// The element goes away for good once its exit has played.
+    pub remove_after_exit: bool,
+}
+
+impl Default for HudMotionState {
+    fn default() -> Self {
+        Self {
+            enter_age: f32::INFINITY,
+            exit_age: f32::INFINITY,
+            change_age: f32::INFINITY,
+            punch: HudTween::default(),
+            punch_age: f32::INFINITY,
+            shake: HudTween::default(),
+            shake_age: f32::INFINITY,
+            shown: false,
+            rect: [0.0; 4],
+            value: f32::NAN,
+            text_key: 0,
+            count_from: 0.0,
+            count_to: 0.0,
+            count_age: f32::INFINITY,
+            remove_after_exit: false,
+        }
+    }
+}
+
+/// Where the motion puts an element this frame, applied about its centre.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HudPose {
+    /// Offset in pane pixels.
+    pub dx: f32,
+    pub dy: f32,
+    pub scale: f32,
+    pub rotate: f32,
+    pub skew: f32,
+    pub opacity: f32,
+}
+
+impl HudPose {
+    pub const IDENTITY: HudPose = HudPose { dx: 0.0, dy: 0.0, scale: 1.0, rotate: 0.0, skew: 0.0, opacity: 1.0 };
+    /// True when the pose moves nothing (opacity aside).
+    pub fn is_rigid_identity(&self) -> bool {
+        self.dx == 0.0 && self.dy == 0.0 && self.scale == 1.0 && self.rotate == 0.0 && self.skew == 0.0
+    }
+    /// The 2D affine `[a, b, c, d, tx, ty]` (x' = a x + c y + tx,
+    /// y' = b x + d y + ty) that applies this pose about `pivot`.
+    pub fn affine(&self, pivot: Vec2f) -> [f32; 6] {
+        let (s, c) = self.rotate.sin_cos();
+        let k = self.scale;
+        // R * Shear * S: shear leans x by y.
+        let a = c * k;
+        let b = s * k;
+        let cc = (c * self.skew - s) * k;
+        let d = (s * self.skew + c) * k;
+        let tx = pivot.x + self.dx - (a * pivot.x + cc * pivot.y);
+        let ty = pivot.y + self.dy - (b * pivot.x + d * pivot.y);
+        [a, b, cc, d, tx, ty]
+    }
+}
+
+/// Compose two affines: `outer` applied after `inner`.
+pub fn hud_affine_mul(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
+    let [a1, b1, c1, d1, x1, y1] = outer;
+    let [a2, b2, c2, d2, x2, y2] = inner;
+    [
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * x2 + c1 * y2 + x1,
+        b1 * x2 + d1 * y2 + y1,
+    ]
+}
+
+pub const HUD_AFFINE_IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// Fold one tween at progress `p` (0 = start of an enter, 1 = at rest) into
+/// `pose`. `units` converts HUD units to pixels.
+fn tween_pose(pose: &mut HudPose, tw: &HudTween, p: f32, linear: f32, units: f32) {
+    let reach = if tw.amount != 0.0 { tw.amount } else { HudTween::of(tw.kind).amount };
+    let fade_in = (linear * 2.5).clamp(0.0, 1.0);
+    match tw.kind {
+        HudTweenKind::None => {}
+        HudTweenKind::Pop => {
+            pose.scale *= reach + (1.0 - reach) * p;
+            pose.opacity *= fade_in;
+        }
+        HudTweenKind::Fade => pose.opacity *= p.clamp(0.0, 1.0),
+        HudTweenKind::SlideLeft => {
+            pose.dx -= reach * units * (1.0 - p);
+            pose.opacity *= fade_in;
+        }
+        HudTweenKind::SlideRight => {
+            pose.dx += reach * units * (1.0 - p);
+            pose.opacity *= fade_in;
+        }
+        HudTweenKind::SlideUp => {
+            pose.dy += reach * units * (1.0 - p);
+            pose.opacity *= fade_in;
+        }
+        HudTweenKind::SlideDown => {
+            pose.dy -= reach * units * (1.0 - p);
+            pose.opacity *= fade_in;
+        }
+        HudTweenKind::Punch => pose.scale *= 1.0 + reach * (1.0 - p),
+        HudTweenKind::Shake => {
+            let decay = 1.0 - p;
+            let w = linear * tw.secs * 60.0;
+            pose.dx += reach * units * decay * (w * 1.3).sin();
+            pose.dy += reach * units * decay * 0.6 * (w * 1.7 + 1.1).cos();
+        }
+    }
+}
+
+/// A kick-style tween (punch, shake) runs from its peak to rest; everything
+/// else runs from "not there yet" to rest. `age` in seconds.
+fn tween_at(pose: &mut HudPose, tw: &HudTween, age: f32, units: f32) {
+    if tw.is_none() || !age.is_finite() || age >= tw.secs {
+        return;
+    }
+    let linear = (age / tw.secs).clamp(0.0, 1.0);
+    tween_pose(pose, tw, tw.ease.apply(linear), linear, units);
+}
+
+/// The element's pose this frame, from its static transform and whatever
+/// tweens are running. `units` converts HUD units to pixels.
+pub fn hud_pose(e: &HudElement, units: f32) -> HudPose {
+    let m = &e.motion;
+    let st = &e.motion_state;
+    let mut pose = HudPose { skew: m.skew, rotate: m.rotate, ..HudPose::IDENTITY };
+    if st.exit_age.is_finite() && !m.exit.is_none() {
+        // The exit is the enter played backwards: progress runs 1 -> 0.
+        let linear = (st.exit_age / m.exit.secs).clamp(0.0, 1.0);
+        let back = 1.0 - linear;
+        tween_pose(&mut pose, &m.exit, m.exit.ease.apply(back), back, units);
+    } else {
+        tween_at(&mut pose, &m.enter, st.enter_age, units);
+    }
+    tween_at(&mut pose, &m.change, st.change_age, units);
+    tween_at(&mut pose, &st.punch, st.punch_age, units);
+    tween_at(&mut pose, &st.shake, st.shake_age, units);
+    pose
+}
+
+/// The number a counting element shows this frame instead of `target`.
+pub fn hud_counted(e: &HudElement, target: f32) -> f32 {
+    let st = &e.motion_state;
+    if e.motion.count <= 0.0 || !st.count_age.is_finite() || st.count_age >= e.motion.count || st.count_to != target {
+        return target;
+    }
+    let p = HudEase::OutExpo.apply(st.count_age / e.motion.count);
+    st.count_from + (st.count_to - st.count_from) * p
+}
+
+/// What the renderer saw of one moving element this frame, for
+/// [`HudDoc::settle_motion`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct HudSeen {
+    pub name: String,
+    pub visible: bool,
+    pub rect: [f32; 4],
+    /// Its number (a gauge's value, a numeric readout), when it has one.
+    pub number: Option<f32>,
+    /// A hash of the text it drew, 0 for none.
+    pub text_key: u64,
+}
+
 /// One declared element. Every field is optional: an element that sets only
 /// its kind and a bind still draws something sensible, which is the property
 /// that lets a small model get a working HUD on the first try.
@@ -279,6 +633,33 @@ pub struct HudElement {
     pub chip_value: f32,
     /// Set when the element expires on its own (`ms` on a text banner).
     pub expires: f32,
+    /// Map: the world polyline as (x, z), decimated at declaration
+    /// ([`decimate_polyline`]), and whether it closes on itself.
+    pub points: Vec<Vec2f>,
+    pub closed: bool,
+    /// Map: which entities draw as dots — `racers`, `players`, `tag:<tag>`,
+    /// `ids` (then `dot_ids`), or empty for none. The host resolves it.
+    pub dots: String,
+    pub dot_ids: Vec<u64>,
+    /// Map: dot palette and size (HUD units); zero alpha = the style's own.
+    pub dot_color: Vec4f,
+    pub self_color: Vec4f,
+    pub lead_color: Vec4f,
+    pub dot_size: f32,
+    /// Map: turn the whole map so the subject's heading points up.
+    pub rotate: bool,
+    /// Map: write each dot's race position beside it.
+    pub labels: bool,
+    /// Map as RADAR: metres from the pane's own subject to the edge of a
+    /// round map centred on it. 0 = fit the whole polyline in the box.
+    pub range: f32,
+    /// Radar: world (x, z) points of interest (the next gate, a drop-off),
+    /// drawn in place when in range and as an arrow on the rim when not.
+    pub targets: Vec<Vec2f>,
+    pub target_color: Vec4f,
+    /// How it moves (tweens, transform, count-up) and the live state of that.
+    pub motion: HudMotion,
+    pub motion_state: HudMotionState,
 }
 
 impl Default for HudElement {
@@ -333,6 +714,21 @@ impl Default for HudElement {
             pulse: HudPulse::default(),
             chip_value: f32::NAN,
             expires: 0.0,
+            points: Vec::new(),
+            closed: false,
+            dots: String::new(),
+            dot_ids: Vec::new(),
+            dot_color: vec4(0.0, 0.0, 0.0, 0.0),
+            self_color: vec4(0.0, 0.0, 0.0, 0.0),
+            lead_color: vec4(0.0, 0.0, 0.0, 0.0),
+            dot_size: 0.0,
+            rotate: false,
+            labels: false,
+            range: 0.0,
+            targets: Vec::new(),
+            target_color: vec4(0.0, 0.0, 0.0, 0.0),
+            motion: HudMotion::default(),
+            motion_state: HudMotionState::default(),
         }
     }
 }
@@ -398,9 +794,6 @@ pub struct HudDoc {
     next_order: i32,
 }
 
-/// Ceiling on declared elements. A generated HUD that declares one element per
-/// entity is a bug, and this is where it stops being the renderer's problem.
-pub const MAX_ELEMENTS: usize = 96;
 /// Ceiling on live log lines across every log element.
 pub const MAX_LINES: usize = 24;
 /// A log line's life when nothing said otherwise.
@@ -424,9 +817,10 @@ impl HudDoc {
     /// author's keys over whatever [`Self::get`] returned, which is where the
     /// "absent keys keep their value" rule lives.
     ///
-    /// Returns false only when the document is full, which the caller reports
-    /// rather than silently dropping.
-    pub fn set(&mut self, mut element: HudElement) -> bool {
+    /// The document grows with what the author declares; there is no fixed
+    /// ceiling (a competitive HUD with a scoreboard and a kill feed runs to a
+    /// few hundred elements, and layout is linear in them).
+    pub fn set(&mut self, mut element: HudElement) {
         if let Some(slot) = self.elements.iter_mut().find(|e| e.name == element.name) {
             // A re-declaration keeps its place in the layout unless the author
             // asked for a different one: an update must never make a HUD jump.
@@ -435,18 +829,15 @@ impl HudDoc {
             }
             element.pulse = slot.pulse;
             element.chip_value = slot.chip_value;
+            element.motion_state = slot.motion_state;
             *slot = element;
-            return true;
-        }
-        if self.elements.len() >= MAX_ELEMENTS {
-            return false;
+            return;
         }
         if element.order == i32::MIN {
             element.order = self.next_order;
         }
         self.next_order += 1;
         self.elements.push(element);
-        true
     }
 
     /// Remove an element and everything inside it — orphaning a child would
@@ -531,13 +922,106 @@ impl HudDoc {
             if e.expires > 0.0 {
                 e.expires -= dt;
                 if e.expires <= 0.0 {
-                    expired.push(e.name.clone());
+                    if !e.motion.exit.is_none() && e.motion_state.shown {
+                        // Play the exit first; settle_motion removes it.
+                        e.show = false;
+                        e.motion_state.remove_after_exit = true;
+                    } else {
+                        expired.push(e.name.clone());
+                    }
                 }
             }
         }
         for name in expired {
             self.remove(&name);
         }
+    }
+
+    /// Kick one element with a one-shot tween on top of whatever else it
+    /// is doing: a `Shake` goes in the shake slot, anything else in the
+    /// punch slot, so a punch and a shake can play at once.
+    pub fn punch(&mut self, name: &str, tween: HudTween) {
+        if let Some(e) = self.get_mut(name) {
+            if tween.kind == HudTweenKind::Shake {
+                e.motion_state.shake = tween;
+                e.motion_state.shake_age = 0.0;
+            } else {
+                e.motion_state.punch = tween;
+                e.motion_state.punch_age = 0.0;
+            }
+        }
+    }
+
+    /// Advance every moving element by `dt` against what the renderer just
+    /// drew (`seen`): start enter tweens on appearing, exits on
+    /// disappearing, change tweens and count-ups on a new number or text,
+    /// and drop elements whose exit has played out. Still elements are
+    /// never in `seen` and are not touched. Returns true while anything is
+    /// still in motion, so the host knows to keep drawing frames.
+    pub fn settle_motion(&mut self, dt: f32, seen: &[HudSeen]) -> bool {
+        let mut animating = false;
+        let mut done: Vec<String> = Vec::new();
+        for s in seen {
+            let Some(e) = self.get_mut(&s.name) else { continue };
+            let m = e.motion;
+            let st = &mut e.motion_state;
+            for age in [&mut st.enter_age, &mut st.exit_age, &mut st.change_age, &mut st.punch_age, &mut st.shake_age, &mut st.count_age] {
+                if age.is_finite() {
+                    *age += dt;
+                }
+            }
+            if s.visible {
+                if s.rect[2] > 0.0 {
+                    st.rect = s.rect;
+                }
+                if !st.shown {
+                    st.enter_age = if m.enter.is_none() { f32::INFINITY } else { 0.0 };
+                    st.exit_age = f32::INFINITY;
+                } else {
+                    let number_changed = matches!(s.number, Some(v) if st.value.is_finite() && v != st.value);
+                    let text_changed = s.text_key != 0 && st.text_key != 0 && s.text_key != st.text_key;
+                    if (number_changed || text_changed) && !m.change.is_none() {
+                        st.change_age = 0.0;
+                    }
+                    if number_changed && m.count > 0.0 {
+                        let now = if st.count_age.is_finite() && st.count_age < m.count {
+                            let p = HudEase::OutExpo.apply(st.count_age / m.count);
+                            st.count_from + (st.count_to - st.count_from) * p
+                        } else {
+                            st.value
+                        };
+                        st.count_from = now;
+                        st.count_to = s.number.unwrap_or(now);
+                        st.count_age = 0.0;
+                    }
+                }
+                if let Some(v) = s.number {
+                    st.value = v;
+                }
+                if s.text_key != 0 {
+                    st.text_key = s.text_key;
+                }
+                st.shown = true;
+            } else if st.shown {
+                st.shown = false;
+                st.exit_age = if m.exit.is_none() { f32::INFINITY } else { 0.0 };
+            }
+            let exiting = st.exit_age.is_finite() && st.exit_age < m.exit.secs;
+            if st.remove_after_exit && !exiting && !st.shown {
+                done.push(s.name.clone());
+                continue;
+            }
+            animating |= exiting
+                || (st.enter_age.is_finite() && st.enter_age < m.enter.secs)
+                || (st.change_age.is_finite() && st.change_age < m.change.secs)
+                || (st.punch_age.is_finite() && st.punch_age < st.punch.secs)
+                || (st.shake_age.is_finite() && st.shake_age < st.shake.secs)
+                || (st.count_age.is_finite() && st.count_age < m.count);
+        }
+        for name in done {
+            self.remove(&name);
+        }
+        animating
     }
 
     /// Ease every chip gauge toward the value it was just drawn with. The
@@ -587,6 +1071,10 @@ pub const BAR_W: f32 = 190.0;
 pub const BAR_H: f32 = 18.0;
 pub const RING_R: f32 = 34.0;
 pub const ICON_D: f32 = 26.0;
+/// A map's edge when `size` gives none.
+pub const MAP_D: f32 = 220.0;
+/// Most polyline points a map keeps.
+pub const MAX_MAP_POINTS: usize = 256;
 pub const TEXT_SIZE: f32 = 17.0;
 pub const NUMERAL_SIZE: f32 = 34.0;
 pub const CAPTION_SIZE: f32 = 12.0;
@@ -778,7 +1266,13 @@ impl Measure<'_> {
                 let rows = e.lines.max(1) as f32;
                 (220.0 * s, rows * size * 1.35)
             }
-            HudKind::Flash | HudKind::Marker => (0.0, 0.0),
+            HudKind::Flash | HudKind::Marker | HudKind::Flight => (0.0, 0.0),
+            // Square unless both axes were given: `size: 200` means a
+            // 200-unit map, not a 200-wide strip.
+            HudKind::Map => {
+                let d = if e.size.x > 0.0 { e.size.x } else { MAP_D } * s;
+                (d, d)
+            }
             HudKind::Panel => {
                 let kids = self.children(&e.name);
                 let (gap, pad) = (e.gap * s, e.pad * s);
@@ -914,8 +1408,150 @@ fn place(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Map
+// ---------------------------------------------------------------------------
+
+/// One dot a host hands a map for this frame: a world position (x, z), the
+/// entity's forward direction on the ground, its race position (0 = none)
+/// and whether it is the pane's own subject.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudMapDot {
+    pub x: f32,
+    pub z: f32,
+    pub fx: f32,
+    pub fz: f32,
+    pub rank: u32,
+    pub is_self: bool,
+}
+
+/// Thin a world polyline to at most `max` points, keeping the shape: evenly
+/// spaced along its length, so a centreline sampled every metre and one
+/// sampled every hundred reduce to the same outline. Always keeps the ends.
+pub fn decimate_polyline(points: &[Vec2f], max: usize) -> Vec<Vec2f> {
+    let max = max.max(2);
+    if points.len() <= max {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(max);
+    let last = (points.len() - 1) as f32;
+    for k in 0..max {
+        let i = ((k as f32 / (max - 1) as f32) * last).round() as usize;
+        out.push(points[i.min(points.len() - 1)]);
+    }
+    out
+}
+
+/// World → map-box transform: centre of the polyline's bounds and the
+/// pixels-per-metre that fits it inside `w`×`h` minus `pad` on every side.
+/// With `rotating`, the fit uses the bounding CIRCLE so the outline stays
+/// inside the box at every heading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HudMapFit {
+    pub cx: f32,
+    pub cz: f32,
+    pub scale: f32,
+    /// Rotation applied after centring (screen radians).
+    pub cos: f32,
+    pub sin: f32,
+}
+
+impl HudMapFit {
+    pub fn new(points: &[Vec2f], w: f32, h: f32, pad: f32, rotating: bool) -> Option<HudMapFit> {
+        let first = points.first()?;
+        let (mut lo, mut hi) = (*first, *first);
+        for p in points {
+            lo = vec2f(lo.x.min(p.x), lo.y.min(p.y));
+            hi = vec2f(hi.x.max(p.x), hi.y.max(p.y));
+        }
+        let (cx, cz) = ((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5);
+        let (aw, ah) = ((w - 2.0 * pad).max(1.0), (h - 2.0 * pad).max(1.0));
+        let scale = if rotating {
+            let r = points
+                .iter()
+                .map(|p| ((p.x - cx).powi(2) + (p.y - cz).powi(2)).sqrt())
+                .fold(0.0f32, f32::max)
+                .max(1.0e-3);
+            aw.min(ah) * 0.5 / r
+        } else {
+            let (sw, sh) = ((hi.x - lo.x).max(1.0e-3), (hi.y - lo.y).max(1.0e-3));
+            (aw / sw).min(ah / sh)
+        };
+        Some(HudMapFit { cx, cz, scale, cos: 1.0, sin: 0.0 })
+    }
+
+    /// A radar: centred on (x, z), `range` metres from the centre to a
+    /// circle of `radius` pixels.
+    pub fn radar(x: f32, z: f32, range: f32, radius: f32) -> HudMapFit {
+        HudMapFit { cx: x, cz: z, scale: radius.max(1.0) / range.max(1.0e-3), cos: 1.0, sin: 0.0 }
+    }
+
+    /// Turn the map so a ground-forward (fx, fz) points up the screen.
+    /// North-up is +x right, −z up (screen y = world z).
+    pub fn heading_up(mut self, fx: f32, fz: f32) -> Self {
+        let len = (fx * fx + fz * fz).sqrt();
+        if len > 1.0e-4 {
+            let a = -std::f32::consts::FRAC_PI_2 - fz.atan2(fx);
+            self.cos = a.cos();
+            self.sin = a.sin();
+        }
+        self
+    }
+
+    /// A world (x, z) as a pixel offset from the box centre (y down).
+    pub fn apply(&self, x: f32, z: f32) -> (f32, f32) {
+        let (dx, dz) = ((x - self.cx) * self.scale, (z - self.cz) * self.scale);
+        (dx * self.cos - dz * self.sin, dx * self.sin + dz * self.cos)
+    }
+
+    /// A ground direction in screen space (unit length is kept).
+    pub fn apply_dir(&self, fx: f32, fz: f32) -> (f32, f32) {
+        (fx * self.cos - fz * self.sin, fx * self.sin + fz * self.cos)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn map_polyline_is_decimated_evenly_with_both_ends() {
+        let pts: Vec<Vec2f> = (0..1000).map(|i| vec2f(i as f32, 0.0)).collect();
+        let d = decimate_polyline(&pts, MAX_MAP_POINTS);
+        assert_eq!(d.len(), MAX_MAP_POINTS);
+        assert_eq!(d[0], pts[0]);
+        assert_eq!(*d.last().unwrap(), pts[999]);
+        assert_eq!(decimate_polyline(&pts[..10], 256).len(), 10);
+    }
+
+    #[test]
+    fn map_fit_keeps_the_track_inside_the_box_at_any_heading() {
+        let pts = vec![vec2f(-100.0, -40.0), vec2f(100.0, -40.0), vec2f(100.0, 40.0), vec2f(-100.0, 40.0)];
+        let fit = HudMapFit::new(&pts, 200.0, 200.0, 10.0, false).unwrap();
+        // North-up fits the long axis: 200 m into 180 px.
+        assert!((fit.scale - 0.9).abs() < 1e-4);
+        let (x, y) = fit.apply(100.0, 40.0);
+        assert!((x - 90.0).abs() < 1e-3 && (y - 36.0).abs() < 1e-3);
+        for &(fx, fz) in &[(1.0, 0.0), (0.0, 1.0), (0.7, -0.7), (-1.0, 0.2)] {
+            let rot = HudMapFit::new(&pts, 200.0, 200.0, 10.0, true).unwrap().heading_up(fx, fz);
+            for p in &pts {
+                let (x, y) = rot.apply(p.x, p.y);
+                assert!(x.abs() <= 90.01 && y.abs() <= 90.01, "{x} {y}");
+            }
+            // The heading itself points up the screen.
+            let (dx, dy) = rot.apply_dir(fx, fz);
+            assert!(dx.abs() < 1e-3 && dy < 0.0, "{dx} {dy}");
+        }
+    }
+
+    #[test]
+    fn map_measures_square_from_one_size_axis() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { name: "map".into(), kind: HudKind::Map, size: vec2f(150.0, 0.0), ..Default::default() });
+        let placed = layout(&doc, 1920.0, 1080.0, 1.0, &mut |_, s| (s, s), &mut |_| String::new());
+        assert_eq!(placed.len(), 1);
+        assert_eq!((placed[0].w, placed[0].h), (150.0, 150.0));
+    }
+
     use super::*;
 
     /// A stand-in text engine: every glyph is half the font size wide, every
@@ -1144,13 +1780,15 @@ mod tests {
     }
 
     #[test]
-    fn the_document_refuses_to_grow_without_limit() {
+    fn the_document_grows_with_what_the_author_declares() {
         let mut doc = HudDoc::default();
-        for i in 0..(MAX_ELEMENTS + 10) {
-            let ok = doc.set(el(&format!("e{i}"), HudKind::Icon));
-            assert_eq!(ok, i < MAX_ELEMENTS);
+        for i in 0..500 {
+            doc.set(el(&format!("e{i}"), HudKind::Icon));
         }
-        assert_eq!(doc.elements.len(), MAX_ELEMENTS);
+        assert_eq!(doc.elements.len(), 500);
+        // Re-declaring an element updates it in place.
+        doc.set(el("e7", HudKind::Text));
+        assert_eq!(doc.elements.len(), 500);
     }
 }
 

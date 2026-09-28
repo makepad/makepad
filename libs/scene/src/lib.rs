@@ -9,6 +9,7 @@ pub mod light;
 pub mod mesh;
 pub mod particles;
 pub mod terrain;
+pub mod vfx;
 pub mod voxel;
 pub mod water;
 pub mod world;
@@ -19,10 +20,13 @@ pub use entity::*;
 pub use environment::*;
 pub use heading::*;
 pub use hud::{layout as hud_layout, Crosshair, CrosshairStyle, HudAlign, HudAnchor, HudBar,
-    HudDoc, HudElement, HudKind, HudLine, HudPlaced, HudPulse, HudSlot, HudStack, HudValue};
+    HudDoc, HudElement, HudKind, HudLine, HudMapDot, HudMapFit, HudPlaced, HudPulse, HudSlot, HudStack, HudValue,
+    hud_affine_mul, hud_counted, hud_pose, HudEase, HudMotion, HudMotionState, HudPose, HudSeen, HudTween, HudTweenKind,
+    HUD_AFFINE_IDENTITY};
 pub use light::*;
 pub use particles::*;
 pub use terrain::*;
+pub use vfx::*;
 pub use voxel::{ChunkKey, ChunkMesh, VoxelView};
 pub use water::{WaterSurface, WaterView, WaterWave, MAX_WAVES};
 pub use world::*;

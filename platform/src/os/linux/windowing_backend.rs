@@ -81,6 +81,7 @@ impl Cx {
                     cx.os_type = crate::cx::OsType::LinuxWindow(crate::cx::LinuxWindowParams {
                         custom_window_chrome: false,
                     });
+                    cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
                     cx.os.vulkan = Some(vulkan);
                     cx.os.gpu_backend = Some(crate::cx::GpuBackend::Vulkan);
                     cx.stdin_event_loop();

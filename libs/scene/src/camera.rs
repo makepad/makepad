@@ -12,11 +12,13 @@ pub struct CameraState {
     pub boom: f32,
     pub fov: f32,
     pub near: f32,
+    /// Far plane in metres; 0 = the stock 500 m. See `scene_far`.
+    pub far: f32,
 }
 impl Default for CameraState {
     fn default() -> Self {
         Self { target: vec3f(0.0, 2.0, 0.0), distance: 18.0, follow: 0, side: false,
-            third: 0, height: 1.6, boom: 10.0, fov: 40.0, near: 0.15 }
+            third: 0, height: 1.6, boom: 10.0, fov: 40.0, near: 0.15, far: 0.0 }
     }
 }
 #[derive(Clone, Copy, Debug, Default)]

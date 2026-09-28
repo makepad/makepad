@@ -1874,6 +1874,26 @@ impl CxVulkan {
         self.instance.handle()
     }
 
+    /// `GpuInfo::float16_blend_targets`: RGBA16Float colour targets that
+    /// ordinary draw shaders render into with the premultiplied-over blend
+    /// (an HDR scene pass). Pipelines are already built per pass attachment
+    /// format (`VulkanRenderPassKey`), so this is only the device's support
+    /// for that format as a blendable, filterable attachment.
+    pub(crate) fn float16_blend_targets(&self) -> bool {
+        let props = unsafe {
+            self.instance.get_physical_device_format_properties(
+                self.physical_device,
+                vk::Format::R16G16B16A16_SFLOAT,
+            )
+        };
+        props.optimal_tiling_features.contains(
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        )
+    }
+
     #[cfg(target_os = "android")]
     pub(crate) fn physical_device_handle(&self) -> vk::PhysicalDevice {
         self.physical_device
@@ -7344,10 +7364,18 @@ impl CxVulkan {
             } else {
                 null_texture_resource
             };
-            let resource = self
-                .textures
-                .get(&Self::texture_key(*texture_id))
-                .or(fallback);
+            // A `texture_depth` slot that is unbound, or names a depth target
+            // with no image yet (a shadow map before its first pass), gets
+            // the initialized 1x1 depth image rather than the colour null
+            // texture: a comparison sampler on a colour view is undefined
+            // (VUID-vkCmdDrawIndexed-None-06479).
+            let key = Self::texture_key(*texture_id);
+            let unbound_depth = (key == null_texture_key || !self.textures.contains_key(&key))
+                && matches!(packet.texture_types.get(slot), Some(TextureType::TextureDepth));
+            let (resource, layout_override) = match (unbound_depth, self.xr_depth_dummy.as_ref()) {
+                (true, Some(dummy)) => (Some(dummy), Some(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)),
+                _ => (self.textures.get(&Self::texture_key(*texture_id)).or(fallback), None),
+            };
             let Some(resource) = resource else {
                 return Ok(false);
             };
@@ -7363,7 +7391,7 @@ impl CxVulkan {
 
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(resource.view)
-                .image_layout(resource.layout);
+                .image_layout(layout_override.unwrap_or(resource.layout));
             if let Some(video_sampler) = resource.sampler {
                 video_sampler_overrides.insert(sampler_index, video_sampler);
             }

@@ -49,6 +49,12 @@ fn pattern_read(r: &mut Reader<'_>) -> Result<SurfacePattern> {
         4 => PatternKind::Perlin,
         5 => PatternKind::Fbm,
         6 => PatternKind::Yarn,
+        7 => PatternKind::Bricks,
+        8 => PatternKind::Tiles,
+        9 => PatternKind::Planks,
+        10 => PatternKind::Vents,
+        11 => PatternKind::Grille,
+        12 => PatternKind::Knurl,
         _ => return Err(Error::Corrupt("surface pattern kind")),
     };
     Ok(SurfacePattern {
@@ -329,6 +335,15 @@ pub(crate) fn write_surface_operation(w: &mut Writer, op: &SurfaceOperation) -> 
             target_write(w, *material, *channel, layer)?;
             pattern_write(w, pattern)?;
         }
+        VertexColors { object, vertices, colors } => {
+            w.u8(14)?;
+            w.string(object)?;
+            w.count(vertices.len())?;
+            for (v, c) in vertices.iter().zip(colors) {
+                w.u64(v.0)?;
+                write_array(w, c)?;
+            }
+        }
         Derive { material, channel, layer, recipe } => {
             w.u8(13)?;
             target_write(w, *material, *channel, layer)?;
@@ -583,6 +598,15 @@ pub(crate) fn read_surface_operation(r: &mut Reader<'_>, l: &Limits) -> Result<S
             let recipe = derivation_read(r, l)?;
             recipe.validate(channel, l)?;
             Derive { material, channel, layer, recipe }
+        }
+        14 => {
+            let object = r.string(l.max_name_bytes)?;
+            let (mut vertices, mut colors) = (Vec::new(), Vec::new());
+            for _ in 0..r.count(l.mesh.max_vertices)? {
+                vertices.push(mesh::VertexId(r.u64()?));
+                colors.push(read_array(r)?);
+            }
+            VertexColors { object, vertices, colors }
         }
         _ => return Err(Error::Corrupt("surface operation tag")),
     })

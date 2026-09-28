@@ -87,6 +87,7 @@ impl App {
             DesktopStyle::Molded => (shell::rgb(216, 218, 214), shell::rgb(196, 199, 194)),
             DesktopStyle::Glossy => (shell::rgb(43, 47, 52), shell::rgb(30, 33, 37)),
             DesktopStyle::Milled => (shell::rgb(21, 23, 27), shell::rgb(12, 13, 16)),
+            DesktopStyle::Cyberpunk => (shell::rgb(13, 15, 20), shell::rgb(7, 8, 12)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),

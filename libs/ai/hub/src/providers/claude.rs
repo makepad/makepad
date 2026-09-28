@@ -44,6 +44,9 @@ pub struct ParseState {
 pub struct ClaudeCodeChatProvider {
     cli: Option<PathBuf>,
     model: Option<String>,
+    /// An MCP server whose tools the model calls natively: the
+    /// `--mcp-config` JSON and the `--allowedTools` pattern.
+    mcp: Option<(String, String)>,
     resume: Option<String>,
     turn: Option<(CliTurn, ParseState)>,
     /// Images for the next turn: sent as image blocks of a stream-json
@@ -53,7 +56,17 @@ pub struct ClaudeCodeChatProvider {
 
 impl ClaudeCodeChatProvider {
     pub fn new(model: Option<String>) -> ClaudeCodeChatProvider {
-        ClaudeCodeChatProvider { cli: find_cli(), model, resume: None, turn: None, images: Vec::new() }
+        ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new() }
+    }
+
+    /// Give the model the tools of one MCP server (`config` is the
+    /// `{"mcpServers":{...}}` JSON, `allowed` the `--allowedTools` pattern,
+    /// e.g. `mcp__sandbox`). Its calls then run inside the CLI's own agent
+    /// loop — many per turn, results and images native — instead of the
+    /// session's one-call-per-process text protocol.
+    pub fn with_mcp(mut self, config: String, allowed: String) -> Self {
+        self.mcp = Some((config, allowed));
+        self
     }
 
     /// The CLI conversation id, for persisting broker sessions.
@@ -71,6 +84,12 @@ pub fn find_cli() -> Option<PathBuf> {
 /// NOT here — it is written to stdin (see the module doc). `--tools ""`
 /// keeps the CLI chat-only.
 pub fn build_args(model: &Option<String>, resume: &Option<String>, system: &str) -> Vec<String> {
+    build_args_with_mcp(model, resume, system, None)
+}
+
+/// [`build_args`] with an MCP server whose tools are allowed without a
+/// prompt (the built-in tools stay off).
+pub fn build_args_with_mcp(model: &Option<String>, resume: &Option<String>, system: &str, mcp: Option<&(String, String)>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--verbose".into(),
@@ -79,10 +98,14 @@ pub fn build_args(model: &Option<String>, resume: &Option<String>, system: &str)
         "--include-partial-messages".into(),
         "--strict-mcp-config".into(),
         "--mcp-config".into(),
-        r#"{"mcpServers":{}}"#.into(),
-        "--tools".into(),
-        String::new(),
+        mcp.map_or(r#"{"mcpServers":{}}"#.to_string(), |(config, _)| config.clone()),
     ];
+    if let Some((_, allowed)) = mcp {
+        args.push("--allowedTools".into());
+        args.push(allowed.clone());
+    }
+    args.push("--tools".into());
+    args.push(String::new());
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.clone());
@@ -186,7 +209,17 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
     let mut events = Vec::new();
     match v.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
-            let delta = v.get("event").and_then(|e| e.get("delta"));
+            // A new text block after tool calls starts on its own line (an
+            // MCP-tool turn narrates between calls).
+            let event = v.get("event");
+            if event.and_then(|e| e.get("type")).and_then(Value::as_str) == Some("content_block_start")
+                && event.and_then(|e| e.get("content_block")).and_then(|b| b.get("type")).and_then(Value::as_str) == Some("text")
+                && !state.collected.is_empty() && !state.collected.ends_with('\n')
+            {
+                state.collected.push('\n');
+                events.push(ProviderEvent::Delta("\n".to_string()));
+            }
+            let delta = event.and_then(|e| e.get("delta"));
             match delta.and_then(|d| d.get("type")).and_then(Value::as_str) {
                 Some("text_delta") => {
                     if let Some(text) = delta.and_then(|d| d.get("text")).and_then(Value::as_str) {
@@ -196,8 +229,10 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
                     }
                 }
                 Some("thinking_delta") => {
+                    // Redacted/summarised thinking arrives as empty deltas;
+                    // an empty block is not worth a think marker.
                     if let Some(text) =
-                        delta.and_then(|d| d.get("thinking")).and_then(Value::as_str)
+                        delta.and_then(|d| d.get("thinking")).and_then(Value::as_str).filter(|t| !t.is_empty())
                     {
                         if !state.thinking_open {
                             events.push(ProviderEvent::Delta("<think>".to_string()));
@@ -337,7 +372,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
             return Err("Claude Code CLI not found".to_string());
         };
         let mut prompt = render_prompt(input, self.resume.is_some());
-        let mut args = build_args(&self.model, &self.resume, &input.system_with_dynamic());
+        let mut args = build_args_with_mcp(&self.model, &self.resume, &input.system_with_dynamic(), self.mcp.as_ref());
         let images = std::mem::take(&mut self.images);
         if !images.is_empty() {
             // Images need the structured input: one user message whose
@@ -349,6 +384,11 @@ impl ChatProvider for ClaudeCodeChatProvider {
         let dir = turn_dir("claude");
         let mut command = cli_command(&cli, &dir);
         command.args(&args);
+        if self.mcp.is_some() {
+            // A game tool may run a long generation; the CLI's default MCP
+            // call timeout would abandon it.
+            command.env("MCP_TOOL_TIMEOUT", "900000");
+        }
         let turn = CliTurn::spawn(command, Some(prompt), "Claude Code", Some(dir))?;
         self.turn = Some((turn, ParseState::default()));
         Ok(())
@@ -356,6 +396,10 @@ impl ChatProvider for ClaudeCodeChatProvider {
 
     fn poll(&mut self) -> Vec<ProviderEvent> {
         poll_messages_turn(&mut self.turn, &mut self.resume, "Claude Code")
+    }
+
+    fn tools_over_mcp(&self) -> bool {
+        self.mcp.is_some()
     }
 
     fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
@@ -397,6 +441,38 @@ mod tests {
         let bare = build_args(&None, &None, "");
         assert_eq!(bare.last().map(String::as_str), Some(""));
         assert_eq!(bare[bare.len() - 2], "--tools");
+    }
+
+    #[test]
+    fn empty_thinking_opens_no_block_and_later_text_starts_a_new_line() {
+        let mut state = ParseState::default();
+        let mut all = Vec::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Building."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done."}}}"#,
+        ] {
+            let (events, _) = parse_stream_line(&json::parse(line.as_bytes()).unwrap(), &mut state);
+            all.extend(events);
+        }
+        let text: String = all.iter().filter_map(|e| match e { ProviderEvent::Delta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(text, "Building.\nDone.");
+    }
+
+    #[test]
+    fn an_mcp_server_is_passed_and_allowed_with_the_builtin_tools_off() {
+        let mcp = (r#"{"mcpServers":{"sandbox":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}"#.to_string(), "mcp__sandbox".to_string());
+        let args = build_args_with_mcp(&Some("claude-opus-5-5".into()), &None, "sys", Some(&mcp));
+        assert!(args.windows(2).any(|w| w[0] == "--mcp-config" && w[1] == mcp.0));
+        assert!(args.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "mcp__sandbox"));
+        assert!(args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "claude-opus-5-5"));
+        let provider = ClaudeCodeChatProvider::new(None);
+        assert!(!provider.tools_over_mcp());
+        assert!(provider.with_mcp(mcp.0.clone(), mcp.1.clone()).tools_over_mcp());
     }
 
     #[test]

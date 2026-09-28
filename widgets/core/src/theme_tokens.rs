@@ -2148,6 +2148,7 @@ const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
     (DesktopStyle::Molded, false, Scheme::Light),
     (DesktopStyle::Glossy, false, Scheme::Dark),
     (DesktopStyle::Milled, false, Scheme::Dark),
+    (DesktopStyle::Cyberpunk, false, Scheme::Dark),
     (DesktopStyle::Macos, false, Scheme::Light),
     (DesktopStyle::Macos, true, Scheme::Dark),
     (DesktopStyle::Windows, false, Scheme::Light),
@@ -3474,6 +3475,7 @@ mod sheet_contrast_tests {
         (DesktopStyle::Molded, false),
         (DesktopStyle::Glossy, false),
         (DesktopStyle::Milled, false),
+        (DesktopStyle::Cyberpunk, false),
         (DesktopStyle::Macos, false),
         (DesktopStyle::Macos, true),
         (DesktopStyle::Windows, false),
@@ -3880,7 +3882,7 @@ mod equalizer_tests {
         let pale = BlendTheme::group(Appearance::Light);
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
-        assert_eq!(dark.len(), 9, "{dark:?}");
+        assert_eq!(dark.len(), 10, "{dark:?}");
         assert_eq!(pale.len(), 10, "{pale:?}");
     }
 

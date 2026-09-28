@@ -1,404 +1,442 @@
-//! Incremental diffuse transport kernels. Not the progressive path tracer.
+//! Cascaded probe-GI kernels: fragment passes only (no compute, no readback).
+//!
+//! Frame: TRACE (per batch probe: place it off geometry, 64 rotated rays
+//! through the voxel clipmap) -> RELIGHT (shade each hit: sun through the
+//! voxels, clustered lights, sky on miss, last frame's field for further
+//! bounces) -> GATHER (L1 irradiance + 8x8 octahedral distance moments,
+//! blended with the probe's history) -> SCATTER (copy the updated probe
+//! rows into the persistent field; untouched probes are never rewritten).
+//!
+//! Field: an RGBA16F atlas, per cascade and probe slot an 8x8 irradiance
+//! tile (6x6 octahedral interior + guard ring, cosine-weighted radiance),
+//! a 10x10 moment tile (8x8 interior + guard, E[d] and E[d^2]) and one info
+//! texel (relocation offset in cells, state). Receivers read 3 texels per
+//! probe with hardware bilinear filtering. state > 0 is valid (ramping in
+//! over the first updates), < 0 inside geometry, 0 not traced.
 use makepad_draw::*;
 script_mod! {
     use mod.prelude.widgets_internal.*
+    // Cascade windows; shared by producers and receivers.
+    let GiCascades = {
+        // x,y,z probes per cascade, w = probes per cascade
+        gi_grid: uniform(vec4(16.0,8.0,16.0,2048.0))
+        // Per cascade: min cell of the window (xyz), spacing (w; 0 = off)
+        gi_c0: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_c1: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_c2: uniform(vec4(0.0,0.0,0.0,0.0))
+        // Probe home inside its cell (xyz, in cells), w = cascade count
+        gi_home: uniform(vec4(0.43,0.47,0.41,0.0))
+        gi_cascade: fn(k:float)->vec4 {
+            if k<0.5 {return self.gi_c0}
+            if k<1.5 {return self.gi_c1}
+            return self.gi_c2
+        }
+        gi_mod: fn(a:vec3,b:vec3)->vec3 {return a-floor(a/b)*b}
+        gi_slot: fn(cell:vec3)->float {
+            let m=self.gi_mod(cell,self.gi_grid.xyz)
+            return m.x+self.gi_grid.x*(m.y+self.gi_grid.y*m.z)
+        }
+        gi_hash: fn(p:vec3)->vec3 {
+            return fract(sin(vec3(dot(p,vec3(127.1,311.7,74.7)),dot(p,vec3(269.5,183.3,246.1)),dot(p,vec3(113.5,271.9,124.6))))*43758.5453)
+        }
+    }
     let FastGiSampling = {
+        ..GiCascades,
         gi_field: texture_2d(float)
-        gi_transition: uniform(1.0)
-        gi_previous_bank: uniform(1.0)
-        gi_previous_origin: uniform(vec4(0.0,0.0,0.0,2.0))
-        gi_previous_grid: uniform(vec4(10.0,6.0,10.0,600.0))
-        gi_previous_blockers: uniform(0.0)
-        gi_sample_origin: fn(previous:bool)->vec4 {if previous{return self.gi_previous_origin} return self.gi_origin}
-        gi_sample_grid: fn(previous:bool)->vec4 {if previous{return self.gi_previous_grid} return self.gi_grid}
-        gi_sample_blockers: fn(previous:bool)->float {if previous{return self.gi_previous_blockers} return self.gi_blocker_count}
         gi_on: uniform(0.0)
+        // Where no cascade is confident a RECEIVER keeps this share of its
+        // ordinary ambient (1: never darker than GI off). Producers leave 0:
+        // an uncertain probe must not inject sky into the bounce feedback.
+        gi_fallback_floor: uniform(0.0)
         gi_debug: uniform(0.0)
-        gi_blocker_count: uniform(0.0)
-        gi_origin: uniform(vec4(0.0,0.0,0.0,2.0))
-        gi_grid: uniform(vec4(10.0,6.0,10.0,600.0))
-        gi_fetch: fn(previous:bool,index:float,lane:float)->vec4 {
-            let height=max(self.gi_sample_grid(previous).w,64.0)
-            var bank=0.0
-            if previous {bank=self.gi_previous_bank}
-            return self.gi_field.sample_nearest(vec2((lane+0.5)/40.0,(index+0.5+bank*height)/(height*2.0)))
+        // Atlas: width, height, tiles per row, tile rows per cascade.
+        gi_atlas: uniform(vec4(640.0,1824.0,64.0,32.0))
+        // Texel origin of probe `slot`'s tile in region `region` (0 irradiance
+        // 8x8, 1 moments 10x10, 2 info 1x1) of cascade k.
+        gi_tile: fn(k:float,slot:float,region:float)->vec2 {
+            let r=self.gi_atlas.z
+            let t=self.gi_atlas.w
+            let tile=vec2(slot-floor(slot/r)*r,floor(slot/r))
+            let base=k*t*19.0
+            if region<0.5 {return vec2(tile.x*8.0,base+tile.y*8.0)}
+            if region<1.5 {return vec2(tile.x*10.0,base+t*8.0+tile.y*10.0)}
+            return vec2(tile.x,base+t*18.0+tile.y)
         }
-        gi_segment_clear: fn(previous:bool,probe:vec3,receiver:vec3,blockers:vec4)->bool {
-            if self.gi_sample_blockers(previous)<0.5 || blockers.x==(-1.0) {return true}
-            var count=4.0
-            if blockers.x<(-1.5) {count=self.gi_sample_blockers(previous)}
-            var i=0.0
-            while i<count {
-                var id=blockers.x
-                if i>0.5 {id=blockers.y}
-                if i>1.5 {id=blockers.z}
-                if i>2.5 {id=blockers.w}
-                if blockers.x<(-1.5) {id=i}
-                if id>=0.0 {
-                    let a=self.gi_fetch(previous,id,37.0)
-                    // Gather marks approximate actor bounds with zero rows.
-                    // They are transport proxies, not proof of solid space.
-                    if dot(a.xyz,a.xyz)>0.0 {
-                    let b=self.gi_fetch(previous,id,38.0)
-                    let c=self.gi_fetch(previous,id,39.0)
-                    let p=vec3(dot(a,vec4(probe,1.0)),dot(b,vec4(probe,1.0)),dot(c,vec4(probe,1.0)))
-                    let delta=receiver-probe
-                    let d=vec3(dot(a.xyz,delta),dot(b.xyz,delta),dot(c.xyz,delta))
-                    let inv=(step(vec3(0.0,0.0,0.0),d)*2.0-vec3(1.0,1.0,1.0))/max(abs(d),vec3(0.0000001,0.0000001,0.0000001))
-                    let t0=(vec3(-1.0,-1.0,-1.0)-p)*inv
-                    let t1=(vec3(1.0,1.0,1.0)-p)*inv
-                    let lo=min(t0,t1)
-                    let hi=max(t0,t1)
-                    let near=max(max(lo.x,lo.y),max(lo.z,0.00001))
-                    let far=min(min(hi.x,hi.y),min(hi.z,0.99999))
-                    if near<far {return false}
-                    }
-                }
-                i=i+1.0
-            }
-            return true
+        gi_oct: fn(d:vec3)->vec2 {
+            var o=d.xy/max(abs(d.x)+abs(d.y)+abs(d.z),0.00001)
+            if d.z<0.0 {o=(vec2(1.0,1.0)-abs(o.yx))*(step(vec2(0.0,0.0),o)*2.0-vec2(1.0,1.0))}
+            return o*0.5+vec2(0.5,0.5)
         }
-        gi_wrap_oct: fn(cell:vec2)->vec2 {
-            // Octahedral edges fold back onto the same edge with the other
-            // coordinate mirrored. Clamping makes seams on the -Z hemisphere.
-            var b=cell
-            if b.x<0.0 {b=vec2(-1.0-b.x,7.0-b.y)}
-            if b.x>7.0 {b=vec2(15.0-b.x,7.0-b.y)}
-            if b.y<0.0 {b=vec2(7.0-b.x,-1.0-b.y)}
-            if b.y>7.0 {b=vec2(7.0-b.x,15.0-b.y)}
-            return b
+        // Bilinear lookup inside a tile's interior; the guard ring holds the
+        // octahedral neighbours, so filtering never bleeds across tiles.
+        gi_tile_sample: fn(k:float,slot:float,region:float,d:vec3)->vec4 {
+            var n=6.0
+            if region>0.5 {n=8.0}
+            let p=self.gi_tile(k,slot,region)+vec2(1.0,1.0)+self.gi_oct(d)*n
+            return self.gi_field.sample(p/self.gi_atlas.xy)
         }
-        gi_moment: fn(previous:bool,index:float,cell:vec2)->vec2 {
-            let b=self.gi_wrap_oct(cell)
-            let slot=b.x+b.y*8.0
-            let moments=self.gi_fetch(previous,index,4.0+floor(slot*0.5))
-            if slot-floor(slot*0.5)*2.0>0.5{return moments.zw}
-            return moments.xy
+        // (relocation offset in cells, state): state > 0 valid (ramps in
+        // over the first updates), < 0 inside geometry, 0 not traced.
+        gi_info: fn(k:float,cell:vec3)->vec4 {
+            let p=self.gi_tile(k,self.gi_slot(cell),2.0)+vec2(0.5,0.5)
+            return self.gi_field.sample_nearest(p/self.gi_atlas.xy)
         }
-        gi_probe_info_field: fn(previous:bool,cell:vec3)->vec4 {
-            let index=cell.x+self.gi_sample_grid(previous).x*(cell.y+self.gi_sample_grid(previous).y*cell.z)
-            return self.gi_fetch(previous,index,3.0)
-        }
-        gi_probe_info: fn(cell:vec3)->vec4 {return self.gi_probe_info_field(false,cell)}
-        gi_probe_eligible: fn(previous:bool,cell:vec3,receiver:vec3,blockers:vec4,w:float)->vec4 {
-            let probe=self.gi_probe_info_field(previous,cell)
-            if probe.w<0.5 || w<=0.0 {return vec4(probe.xyz,0.0)}
-            if !self.gi_segment_clear(previous,probe.xyz,receiver,blockers) {return vec4(probe.xyz,0.0)}
-            return probe
-        }
-        gi_moment_valid: fn(previous:bool,index:float,cell:vec2)->vec3 {
-            let m=self.gi_moment(previous,index,cell)
-            if m.x<0.0 {return vec3(0.0,0.0,0.0)}
-            return vec3(m,1.0)
-        }
-        gi_probe: fn(previous:bool,cell:vec3,probe:vec4,wp:vec3,n:vec3,w:float)->vec4 {
-            let index=cell.x+self.gi_sample_grid(previous).x*(cell.y+self.gi_sample_grid(previous).y*cell.z)
-            if probe.w<0.5 || w<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
-            // Do not push the receiver past a nearby probe. A fixed normal
-            // bias made an otherwise visible probe look behind the wall,
-            // printing tiny dark dots at its projected grid position.
-            let to_probe=probe.xyz-wp
+        // One probe's contribution: vec4(irradiance*weight, weight).
+        gi_probe: fn(k:float,cell:vec3,info:vec4,wp:vec3,n:vec3,w:float)->vec4 {
+            if w<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
+            let slot=self.gi_slot(cell)
+            let s=self.gi_cascade(k).w
+            let probe=(cell+self.gi_home.xyz+info.xyz)*s
+            // Do not push the receiver past a nearby probe: a fixed normal
+            // bias made a visible probe look behind the wall (dark dots).
+            let to_probe=probe-wp
             let probe_distance=length(to_probe)
-            let bias=min(self.gi_sample_origin(previous).w*0.03,probe_distance*0.25)
-            let delta=wp+n*bias-probe.xyz
+            let bias=min(s*0.03,probe_distance*0.25)
+            let delta=wp+n*bias-probe
             let distance=length(delta)
-            let direction=delta/max(distance,0.00001)
-            var oct=direction.xy/max(abs(direction.x)+abs(direction.y)+abs(direction.z),0.00001)
-            if direction.z<0.0 {oct=(vec2(1.0,1.0)-abs(oct.yx))*(step(vec2(0.0,0.0),oct)*2.0-vec2(1.0,1.0))}
-            let bin=(oct*0.5+vec2(0.5,0.5))*8.0-vec2(0.5,0.5)
-            let b=floor(bin)
-            let f=fract(bin)
-            let filtered=mix(mix(self.gi_moment_valid(previous,index,b),self.gi_moment_valid(previous,index,b+vec2(1.0,0.0)),f.x),mix(self.gi_moment_valid(previous,index,b+vec2(0.0,1.0)),self.gi_moment_valid(previous,index,b+vec2(1.0,1.0)),f.x),f.y)
-            if filtered.z<=0.000001 {return vec4(0.0,0.0,0.0,0.0)}
-            let moments=filtered.xy/filtered.z
+            let moments=self.gi_tile_sample(k,slot,1.0,delta/max(distance,0.00001)).xy
             let mean=moments.x
-            let second=moments.y
-            let difference=max(distance-mean-self.gi_sample_origin(previous).w*0.05,0.0)
-            let variance=max(second-mean*mean,0.0001)
-            let visibility=variance/(variance+difference*difference)
-            // Facing uses the UNBIASED receiver. At a probe almost on a
-            // wall, normalizing a tiny vector creates a point-sized weight
-            // spike. Bound that angular variation to a sub-cell footprint.
-            let facing=pow(clamp(dot(n,to_probe)/max(probe_distance,self.gi_sample_origin(previous).w*0.25)*0.5+0.5,0.0,1.0),2.0)
-            let weight=w*visibility*visibility*max(facing,0.005)
-            let basis=vec4(1.0,n)
-            var light=max(vec3(dot(self.gi_fetch(previous,index,0.0),basis),dot(self.gi_fetch(previous,index,1.0),basis),dot(self.gi_fetch(previous,index,2.0),basis)),vec3(0.0,0.0,0.0))
-            if self.gi_debug>2.5 && self.gi_debug<3.5 {light=fract(sin(vec3(index+1.0,index+17.0,index+43.0))*43758.5453)}
+            let difference=max(distance-mean-s*0.05,0.0)
+            let variance=max(moments.y-mean*mean,0.0001)
+            var visibility=variance/(variance+difference*difference)
+            if mean<=0.0 {visibility=1.0}
+            // Facing uses the UNBIASED receiver, bounded to a sub-cell
+            // footprint so a probe almost on a wall makes no weight spike.
+            let facing=pow(clamp(dot(n,to_probe)/max(probe_distance,s*0.25)*0.5+0.5,0.0,1.0),2.0)
+            let weight=w*visibility*visibility*max(facing,0.02)
+            var light=max(self.gi_tile_sample(k,slot,0.0,n).xyz,vec3(0.0,0.0,0.0))
+            if self.gi_debug>2.5 && self.gi_debug<3.5 {light=self.gi_hash(vec3(slot,k,1.0))}
             return vec4(light*weight,weight)
         }
-        gi_ambient_field: fn(previous:bool,wp:vec3,normal:vec3,fallback:vec3)->vec3 {
-            if self.gi_on<=0.0{return fallback}
-            let n=normalize(normal)
-            // Interpolate on the AIR side of a receiver, not arbitrarily
-            // close to a disabled probe inside the solid. Visibility still
-            // tests the actual receiver below, without this larger offset.
-            let local=(wp+n*(self.gi_sample_origin(previous).w*0.1)-self.gi_sample_origin(previous).xyz)/self.gi_sample_origin(previous).w
-            let border=min(local,self.gi_sample_grid(previous).xyz-vec3(1.0,1.0,1.0)-local)
-            let edge=min(min(border.x,border.y),border.z)
-            if edge<=0.0{return fallback}
+        // One cascade: vec4(irradiance, confidence incl. the window fade).
+        gi_cascade_sample: fn(k:float,wp:vec3,n:vec3)->vec4 {
+            let c=self.gi_cascade(k)
+            if c.w<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
+            // Interpolate on the AIR side of the receiver.
+            let local=(wp+n*(c.w*0.1))/c.w-self.gi_home.xyz-c.xyz
+            let g=self.gi_grid.xyz-vec3(1.0,1.0,1.0)-local
+            let edge=min(min(min(local.x,local.y),local.z),min(min(g.x,g.y),g.z))
+            if edge<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
             let base=floor(local)
-            var blockers=vec4(-1.0,-1.0,-1.0,-1.0)
-            if self.gi_sample_blockers(previous)>0.5 {blockers=self.gi_fetch(previous,base.x+self.gi_sample_grid(previous).x*(base.y+self.gi_sample_grid(previous).y*base.z),36.0)}
-            let f=fract(local)
-            // Trilinear weights remain smooth as visible probes enter/leave
-            // a cell. Four-probe tetrahedra exposed their diagonal boundaries
-            // once directional visibility removed individual corners.
+            let f=local-base
             let t=vec3(1.0,1.0,1.0)-f
-            let w0=t.x*t.y*t.z
-            let w1=f.x*t.y*t.z
-            let w2=t.x*f.y*t.z
-            let w3=f.x*f.y*t.z
-            let w4=t.x*t.y*f.z
-            let w5=f.x*t.y*f.z
-            let w6=t.x*f.y*f.z
-            let w7=f.x*f.y*f.z
-            // Gate each probe once, before both irradiance and confidence.
-            // A valid exterior/below-floor probe is still unavailable to this
-            // receiver; counting its nominal weight darkens room corners.
-            let receiver=wp+n*(self.gi_sample_origin(previous).w*0.001)
-            let p0=self.gi_probe_eligible(previous,base,receiver,blockers,w0)
-            let p1=self.gi_probe_eligible(previous,base+vec3(1.0,0.0,0.0),receiver,blockers,w1)
-            let p2=self.gi_probe_eligible(previous,base+vec3(0.0,1.0,0.0),receiver,blockers,w2)
-            let p3=self.gi_probe_eligible(previous,base+vec3(1.0,1.0,0.0),receiver,blockers,w3)
-            let p4=self.gi_probe_eligible(previous,base+vec3(0.0,0.0,1.0),receiver,blockers,w4)
-            let p5=self.gi_probe_eligible(previous,base+vec3(1.0,0.0,1.0),receiver,blockers,w5)
-            let p6=self.gi_probe_eligible(previous,base+vec3(0.0,1.0,1.0),receiver,blockers,w6)
-            let p7=self.gi_probe_eligible(previous,base+vec3(1.0,1.0,1.0),receiver,blockers,w7)
-            let sum=self.gi_probe(previous,base,p0,wp,n,w0)+self.gi_probe(previous,base+vec3(1.0,0.0,0.0),p1,wp,n,w1)
-                +self.gi_probe(previous,base+vec3(0.0,1.0,0.0),p2,wp,n,w2)+self.gi_probe(previous,base+vec3(1.0,1.0,0.0),p3,wp,n,w3)
-                +self.gi_probe(previous,base+vec3(0.0,0.0,1.0),p4,wp,n,w4)+self.gi_probe(previous,base+vec3(1.0,0.0,1.0),p5,wp,n,w5)
-                +self.gi_probe(previous,base+vec3(0.0,1.0,1.0),p6,wp,n,w6)+self.gi_probe(previous,base+vec3(1.0,1.0,1.0),p7,wp,n,w7)
-            // Confidence retains moment visibility and facing relative to
-            // eligible nominal support, not relative to final weights.
-            // Reuse gated records: no extra fetches or segment tests.
-            let available=step(0.5,p0.w)*w0+step(0.5,p1.w)*w1+step(0.5,p2.w)*w2+step(0.5,p3.w)*w3+step(0.5,p4.w)*w4+step(0.5,p5.w)*w5+step(0.5,p6.w)*w6+step(0.5,p7.w)*w7
-            let confidence=smoothstep(0.0,0.025,sum.w/max(available,0.00000001))
-            if self.gi_debug>1.5 && self.gi_debug<2.5 {return vec3(confidence,confidence,confidence)}
-            // A hidden/missing field is not evidence of unoccluded sky.
-            // Keep hemisphere fallback at the volume edge/Off only; interior
-            // uncertainty must not inject energy (also used by feedback).
-            return mix(fallback,sum.xyz/max(sum.w,0.00000001)*confidence,clamp(edge,0.0,1.0)*min(self.gi_on,1.0))
+            let b0=c.xyz+base
+            let p0=self.gi_info(k,b0)
+            let p1=self.gi_info(k,b0+vec3(1.0,0.0,0.0))
+            let p2=self.gi_info(k,b0+vec3(0.0,1.0,0.0))
+            let p3=self.gi_info(k,b0+vec3(1.0,1.0,0.0))
+            let p4=self.gi_info(k,b0+vec3(0.0,0.0,1.0))
+            let p5=self.gi_info(k,b0+vec3(1.0,0.0,1.0))
+            let p6=self.gi_info(k,b0+vec3(0.0,1.0,1.0))
+            let p7=self.gi_info(k,b0+vec3(1.0,1.0,1.0))
+            // Trilinear weight x maturity (a new probe fades in).
+            let w0=t.x*t.y*t.z*max(p0.w,0.0)
+            let w1=f.x*t.y*t.z*max(p1.w,0.0)
+            let w2=t.x*f.y*t.z*max(p2.w,0.0)
+            let w3=f.x*f.y*t.z*max(p3.w,0.0)
+            let w4=t.x*t.y*f.z*max(p4.w,0.0)
+            let w5=f.x*t.y*f.z*max(p5.w,0.0)
+            let w6=t.x*f.y*f.z*max(p6.w,0.0)
+            let w7=f.x*f.y*f.z*max(p7.w,0.0)
+            let available=w0+w1+w2+w3+w4+w5+w6+w7
+            if available<=0.000001 {return vec4(0.0,0.0,0.0,0.0)}
+            let sum=self.gi_probe(k,b0,p0,wp,n,w0)+self.gi_probe(k,b0+vec3(1.0,0.0,0.0),p1,wp,n,w1)
+                +self.gi_probe(k,b0+vec3(0.0,1.0,0.0),p2,wp,n,w2)+self.gi_probe(k,b0+vec3(1.0,1.0,0.0),p3,wp,n,w3)
+                +self.gi_probe(k,b0+vec3(0.0,0.0,1.0),p4,wp,n,w4)+self.gi_probe(k,b0+vec3(1.0,0.0,1.0),p5,wp,n,w5)
+                +self.gi_probe(k,b0+vec3(0.0,1.0,1.0),p6,wp,n,w6)+self.gi_probe(k,b0+vec3(1.0,1.0,1.0),p7,wp,n,w7)
+            if sum.w<=0.00000001 {return vec4(0.0,0.0,0.0,0.0)}
+            // Coverage (enough traced, valid probes) times visibility (the
+            // receiver is not hidden from all of them); both fade to the
+            // next cascade, never to black.
+            let confidence=smoothstep(0.05,0.4,available)*smoothstep(0.0,0.05,sum.w/available)
+            return vec4(sum.xyz/sum.w,confidence*clamp(edge,0.0,1.0))
         }
-        // Keep the old world-space field visible during placement and
-        // warmup; blend only once the replacement has converged. Producers
-        // bind transition=1, so old display data never enters GI feedback.
+        gi_ambient_weights: fn(wp:vec3,n:vec3)->vec3 {
+            let s0=self.gi_cascade_sample(0.0,wp,n).w
+            let s1=self.gi_cascade_sample(1.0,wp,n).w
+            let s2=self.gi_cascade_sample(2.0,wp,n).w
+            return vec3(s0,s1*(1.0-s0),s2*(1.0-s0)*(1.0-s1))
+        }
+        // Finest confident cascade first, then coarser, then the ordinary
+        // ambient: an untraced, occluded or out-of-volume receiver keeps
+        // the look it has with GI off.
         gi_ambient: fn(wp:vec3,normal:vec3,fallback:vec3)->vec3 {
             if self.gi_on<=0.0 {return fallback}
-            if self.gi_transition>=1.0 {return self.gi_ambient_field(false,wp,normal,fallback)}
-            let old=self.gi_ambient_field(true,wp,normal,fallback)
-            if self.gi_transition<=0.0 {return old}
-            return mix(old,self.gi_ambient_field(false,wp,normal,fallback),self.gi_transition)
+            let n=normalize(normal)
+            let s0=self.gi_cascade_sample(0.0,wp,n)
+            var acc=s0.xyz*s0.w
+            var remain=1.0-s0.w
+            if remain>0.002 && self.gi_home.w>1.5 {
+                let s1=self.gi_cascade_sample(1.0,wp,n)
+                acc=acc+s1.xyz*(s1.w*remain)
+                remain=remain*(1.0-s1.w)
+                if remain>0.002 && self.gi_home.w>2.5 {
+                    let s2=self.gi_cascade_sample(2.0,wp,n)
+                    acc=acc+s2.xyz*(s2.w*remain)
+                    remain=remain*(1.0-s2.w)
+                }
+            }
+            let gi=acc+fallback*(self.gi_fallback_floor*remain)
+            return mix(fallback,gi,min(self.gi_on,1.0))
         }
         // Last operation before writing DISPLAY colour into an 8-bit scene
-        // target. Never applied to probe/hit payloads. One quantization step
-        // of zero-mean noise breaks broad dark gradient contours; world-space
-        // seed is stable between frames/eyes, with no time or history input.
+        // target. One quantization step of zero-mean world-space noise
+        // breaks broad dark gradient contours.
         gi_display: fn(color:vec4,wp:vec3,n:vec3)->vec4 {
             if self.gi_on<=0.0 || color.w<0.999 {return color}
             if self.gi_debug>0.5 {
-                let local=(wp-self.gi_origin.xyz)/self.gi_origin.w
-                if self.gi_debug<1.5 {return vec4(fract(floor(local)*vec3(0.37,0.57,0.73)),1.0)}
-                if self.gi_debug>4.5 {
-                    // Raw irradiance uses the largest nominal trilinear
-                    // weight, matching the sampler's air-side cell selection.
-                    // No visibility, facing, interpolation or confidence:
-                    // disagreements here already exist in the cached SH.
-                    var sample_local=local
-                    if self.gi_debug>5.5 {sample_local=local+normalize(n)*0.1}
-                    let cell=clamp(floor(sample_local+vec3(0.5,0.5,0.5)),vec3(0.0,0.0,0.0),self.gi_grid.xyz-vec3(1.0,1.0,1.0))
-                    let state=self.gi_probe_info(cell).w
-                    if state<(-1.5) {return vec4(1.0,0.0,1.0,1.0)}
-                    if state<0.0 {return vec4(1.0,0.1,0.0,1.0)}
-                    if state<0.5 {return vec4(0.1,0.1,0.1,1.0)}
-                    if self.gi_debug>5.5 {
-                        let index=cell.x+self.gi_grid.x*(cell.y+self.gi_grid.y*cell.z)
-                        let basis=vec4(1.0,normalize(n))
-                        let light=vec3(dot(self.gi_fetch(false,index,0.0),basis),dot(self.gi_fetch(false,index,1.0),basis),dot(self.gi_fetch(false,index,2.0),basis))
-                        return vec4(max(light,vec3(0.0,0.0,0.0)),1.0)
-                    }
-                    return vec4(0.0,0.8,0.1,1.0)
+                let nn=normalize(n)
+                if self.gi_debug<1.5 {
+                    // Cells of the finest cascade that covers the pixel,
+                    // tinted per cascade (red fine, green mid, blue coarse).
+                    let w=self.gi_ambient_weights(wp,nn)
+                    var k=0.0
+                    if w.x<0.001 {k=1.0}
+                    if w.x<0.001 && w.y<0.001 {k=2.0}
+                    let c=self.gi_cascade(k)
+                    let cell=floor(wp/max(c.w,0.001)-self.gi_home.xyz)
+                    let tint=vec3(step(k,0.5),step(abs(k-1.0),0.5),step(1.5,k))
+                    return vec4(mix(fract(cell*vec3(0.37,0.57,0.73)),tint,0.5),1.0)
                 }
-                return vec4(self.gi_ambient(wp,n,vec3(0.0,0.0,0.0)),1.0)
+                if self.gi_debug<2.5 {return vec4(self.gi_ambient_weights(wp,nn),1.0)}
+                if self.gi_debug>4.5 {
+                    // Nearest probe of cascade 0: orange = inside geometry,
+                    // grey = not traced, green = valid (dim while fading in).
+                    let c=self.gi_c0
+                    let cell=floor((wp+nn*(c.w*0.1))/max(c.w,0.001)-self.gi_home.xyz+vec3(0.5,0.5,0.5))
+                    let info=self.gi_info(0.0,cell)
+                    if info.w<0.0 {return vec4(1.0,0.4,0.0,1.0)}
+                    if info.w==0.0 {return vec4(0.1,0.1,0.1,1.0)}
+                    if self.gi_debug>5.5 {return vec4(max(self.gi_tile_sample(0.0,self.gi_slot(cell),0.0,nn).xyz,vec3(0.0,0.0,0.0)),1.0)}
+                    return vec4(0.0,0.8*info.w,0.1,1.0)
+                }
+                return vec4(self.gi_ambient(wp,nn,vec3(0.0,0.0,0.0)),1.0)
             }
             let noise=fract(sin(dot(wp,vec3(127.1,311.7,74.7)))*43758.5453)-0.5
             return vec4(max(color.xyz+vec3(noise,noise,noise)*(1.0/255.0),vec3(0.0,0.0,0.0)),color.w)
         }
     }
-    let ProbeLayout = {
-        gi_positions: texture_2d(float)
-        gi_origin: uniform(vec4(0.0,0.0,0.0,2.0))
-        gi_grid: uniform(vec4(10.0,6.0,10.0,600.0))
-        gi_batch: uniform(vec4(0.0,64.0,32.0,256.0))
-        // selected sources, position-row texels, ray-cache width, reserved.
-        // Producer-only data; the forward field and its sampler stay unchanged.
-        gi_emitters: uniform(vec4(0.0,1.0,64.0,0.0))
-        position_data: fn(index:float,lane:float)->vec4 {
-            return self.gi_positions.sample_nearest(vec2((lane+0.5)/self.gi_emitters.y,(index+0.5)/self.gi_grid.w))
+    // This frame's probe list: row r = (slot, cascade, hysteresis, -),
+    // (cell xyz, -). gi_pass = (rows, row capacity, ray length, frame seed).
+    let GiBatch = {
+        ..GiCascades,
+        gi_batch: texture_2d(float)
+        gi_pass: uniform(vec4(1.0,1.0,32.0,0.0))
+        batch_row: fn()->float {return min(floor(self.pos.y*self.gi_pass.x),self.gi_pass.x-1.0)}
+        batch_a: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.25,(row+0.5)/self.gi_pass.y))}
+        batch_b: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.75,(row+0.5)/self.gi_pass.y))}
+        // Spherical Fibonacci set under a random rotation per probe and
+        // update: fixed directions printed probe-aligned stripes.
+        gi_ray: fn(r:float,a:vec4)->vec3 {
+            let z=1.0-(2.0*r+1.0)/64.0
+            let q=sqrt(max(1.0-z*z,0.0))
+            let phi=r*2.3999632
+            let v=vec3(q*cos(phi),z,q*sin(phi))
+            let u=self.gi_hash(vec3(a.x+0.5,a.y*7.0+1.0,self.gi_pass.w))
+            let s1=sqrt(1.0-u.x)
+            let s2=sqrt(u.x)
+            let qv=vec4(s1*sin(6.2831853*u.y),s1*cos(6.2831853*u.y),s2*sin(6.2831853*u.z),s2*cos(6.2831853*u.z))
+            return normalize(v+cross(qv.xyz,cross(qv.xyz,v)+v*qv.w)*2.0)
         }
-        probe_pos: fn(index: float)->vec3 {
-            return self.position_data(index,0.0).xyz
-        }
-        emitter_ray: fn(index:float,target:float)->vec4 {
-            return self.position_data(index,1.0+self.gi_emitters.x+target*2.0)
-        }
-        emitter_sh: fn(index:float,target:float)->vec4 {
-            return self.position_data(index,2.0+self.gi_emitters.x+target*2.0)
-        }
-        emitter_sampled: fn(index:float,id:float)->bool {
-            if id<=0.0 {return false}
-            var e=0.0
-            while e<self.gi_emitters.x {
-                if abs(self.position_data(index,1.0+e).w-id)<0.5 {return true}
-                e=e+1.0
-            }
-            return false
-        }
-        // One sample per 8x8 octahedral visibility bin. Bilinear moment
-        // reconstruction combines four neighboring directions. This avoids
-        // the enormous angular cones and false occlusion of the 4x4 field.
-        ray_dir: fn(index:float)->vec4 {
-            let x=index-floor(index/8.0)*8.0
-            let y=floor(index/8.0)
-            var f=(vec2(x,y)+vec2(0.5,0.5))*0.25-vec2(1.0,1.0)
-            var d=vec3(f.x,f.y,1.0-abs(f.x)-abs(f.y))
-            if d.z<0.0 {d=vec3((1.0-abs(f.y))*sign(f.x),(1.0-abs(f.x))*sign(f.y),d.z)}
-            let len=length(d)
-            return vec4(d/len,1.0/(len*len*len))
+        gi_unpack: fn(p:float)->vec3 {
+            let x=abs(p)
+            return vec3(x-floor(x/256.0)*256.0,floor(x/256.0)-floor(x/65536.0)*256.0,floor(x/65536.0))/255.0
         }
     }
-    let Geometry = {
-        gi_nodes: texture_2d(float)
-        gi_triangles: texture_2d(float)
-        gi_scene: uniform(vec4(1.0,1.0,0.0,0.0))
-        node: fn(at:float)->vec4 {
-            let y=floor(at/256.0)
-            return self.gi_nodes.sample_nearest(vec2((at-y*256.0+0.5)/256.0,(y+0.5)/self.gi_scene.x))
+    // The voxel clipmap: level l = (min voxel xyz, voxel size; 0 = absent).
+    let GiVoxels = {
+        gi_vox_a: texture_2d(float)
+        gi_vox_b: texture_2d(float)
+        gi_vox_c: texture_2d(float)
+        gi_vox_dims: uniform(vec4(64.0,32.0,64.0,0.0))
+        // texture width, height, rows per level, z slices per row
+        gi_vox_tex: uniform(vec4(512.0,768.0,256.0,8.0))
+        gi_vox0: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_vox1: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_vox2: uniform(vec4(0.0,0.0,0.0,0.0))
+        vox_level: fn(l:float)->vec4 {
+            if l<0.5 {return self.gi_vox0}
+            if l<1.5 {return self.gi_vox1}
+            return self.gi_vox2
         }
-        tri: fn(at:float)->vec4 {
-            let y=floor(at/256.0)
-            return self.gi_triangles.sample_nearest(vec2((at-y*256.0+0.5)/256.0,(y+0.5)/self.gi_scene.y))
+        vox_uv: fn(l:float,c:vec3)->vec2 {
+            let d=self.gi_vox_dims.xyz
+            let m=c-floor(c/d)*d
+            let tile=floor(m.z/self.gi_vox_tex.w)
+            let x=m.x+d.x*(m.z-tile*self.gi_vox_tex.w)
+            let y=m.y+d.y*tile+l*self.gi_vox_tex.z
+            return vec2((x+0.5)/self.gi_vox_tex.x,(y+0.5)/self.gi_vox_tex.y)
         }
-        reciprocal: fn(d:vec3)->vec3 {
-            return (step(vec3(0.0,0.0,0.0),d)*2.0-vec3(1.0,1.0,1.0))/max(abs(d),vec3(0.0000001,0.0000001,0.0000001))
+        vox_inside: fn(l:float,c:vec3)->bool {
+            let o=self.vox_level(l).xyz
+            let d=self.gi_vox_dims.xyz
+            return c.x>=o.x && c.y>=o.y && c.z>=o.z && c.x<o.x+d.x && c.y<o.y+d.y && c.z<o.z+d.z
         }
-        // x distance, y triangle+1 (0 miss, -1 exhausted), z backface.
-        trace_static: fn(ro:vec3,rd:vec3,limit:float)->vec3 {
-            let inv=self.reciprocal(rd)
-            var result=vec3(limit,0.0,0.0)
-            var node=0.0
-            var steps=0.0
-            while node<self.gi_scene.z && steps<self.gi_batch.w {
-                steps=steps+1.0
-                let a=self.node(node*2.0)
-                let b=self.node(node*2.0+1.0)
-                let v0=(a.xyz-ro)*inv
-                let v1=(b.xyz-ro)*inv
-                let low=min(v0,v1)
-                let high=max(v0,v1)
-                let near=max(max(low.x,low.y),max(low.z,0.0001))
-                let far=min(min(high.x,high.y),min(high.z,result.x))*1.000001
-                if near<=far {
-                    if a.w<0.0 {
-                        var k=0.0
-                        while k<min(0.0-a.w,8.0) {
-                            let index=b.w+k
-                            let p=self.tri(index*5.0).xyz
-                            let e1=self.tri(index*5.0+1.0).xyz-p
-                            let e2=self.tri(index*5.0+2.0).xyz-p
-                            let h=cross(rd,e2)
-                            let det=dot(e1,h)
-                            if abs(det)>0.00000001 {
-                                let q=ro-p
-                                let u=dot(q,h)/det
-                                let r=cross(q,e1)
-                                let v=dot(rd,r)/det
-                                let t=dot(e2,r)/det
-                                if u>=-0.000001 && v>=-0.000001 && u+v<=1.000001 && t>0.001 && t<result.x {
-                                    result=vec3(t,index+1.0,step(det,0.0))
-                                }
-                            }
-                            k=k+1.0
-                        }
-                    }
-                    node=node+1.0
-                } else {
-                    if a.w<0.0 {node=node+1.0}else{node=b.w}
+        vox_solid: fn(l:float,c:vec3)->bool {return self.gi_vox_a.sample_nearest(self.vox_uv(l,c)).w>0.5}
+        // Finest level holding p: vec4(level, cell), level = -1 if none.
+        vox_find: fn(p:vec3,first:float)->vec4 {
+            var l=first
+            loop {
+                if l>=self.gi_vox_dims.w {break}
+                let v=self.vox_level(l)
+                if v.w>0.0 {
+                    let c=floor(p/v.w)
+                    if self.vox_inside(l,c) {return vec4(l,c)}
                 }
+                l=l+1.0
             }
-            if node<self.gi_scene.z {return vec3(0.0,-1.0,0.0)}
-            return result
+            return vec4(-1.0,0.0,0.0,0.0)
+        }
+        vox_free: fn(p:vec3,first:float)->bool {
+            let f=self.vox_find(p,first)
+            if f.x<0.0 {return true}
+            return !self.vox_solid(f.x,f.yzw)
+        }
+        // DDA through the finest level first, then coarser levels from
+        // where the ray left the finer window. vec4(t, level, entry axis
+        // (+-1..3, 0 = start voxel), 1 hit / 0 miss / -1 step budget spent).
+        vox_trace: fn(ro:vec3,rd:vec3,tmax:float,first:float)->vec4 {
+            let stp=step(vec3(0.0,0.0,0.0),rd)*2.0-vec3(1.0,1.0,1.0)
+            let inv=stp/max(abs(rd),vec3(0.000001,0.000001,0.000001))
+            var level=first
+            var t=0.0
+            var steps=0.0
+            var skip=false
+            loop {
+                if level>=self.gi_vox_dims.w || t>=tmax {break}
+                let v=self.vox_level(level)
+                var cell=floor((ro+rd*t)/max(v.w,0.000001))
+                if v.w>0.0 && self.vox_inside(level,cell) {
+                    var next=((cell+max(stp,vec3(0.0,0.0,0.0)))*v.w-ro)*inv
+                    let delta=abs(inv)*v.w
+                    var axis=0.0
+                    loop {
+                        steps=steps+1.0
+                        if steps>320.0 {return vec4(t,level,axis,-1.0)}
+                        // Entering a coarser level mid-ray, the voxel we are
+                        // already in holds the finer geometry we just passed.
+                        if !skip && self.vox_solid(level,cell) {return vec4(t,level,axis,1.0)}
+                        skip=false
+                        if next.x<next.y && next.x<next.z {
+                            t=next.x
+                            cell.x=cell.x+stp.x
+                            next.x=next.x+delta.x
+                            axis=stp.x
+                        } else if next.y<next.z {
+                            t=next.y
+                            cell.y=cell.y+stp.y
+                            next.y=next.y+delta.y
+                            axis=stp.y*2.0
+                        } else {
+                            t=next.z
+                            cell.z=cell.z+stp.z
+                            next.z=next.z+delta.z
+                            axis=stp.z*3.0
+                        }
+                        if t>=tmax || !self.vox_inside(level,cell) {break}
+                    }
+                }
+                level=level+1.0
+                skip=true
+            }
+            return vec4(tmax,level,0.0,0.0)
         }
     }
     mod.draw.DrawGiTrace = set_type_default() do #(DrawGiTrace::script_shader(vm)) {
         ..mod.draw.DrawQuad,
-        ..ProbeLayout,
-        ..Geometry,
+        ..GiBatch,
+        ..GiVoxels,
         alpha_blend: false
         color_format: @Rgba32F
-        pixel: fn(){
-            let index=floor(self.pos.y*self.gi_batch.y)+self.gi_batch.x
-            let ray=min(floor(self.pos.x*self.gi_emitters.z),self.gi_emitters.z-1.0)
-            if ray>=64.0 {
-                let target=self.emitter_ray(index,ray-64.0)
-                if target.w<=0.002 {return vec4(0.0,0.0,0.0,0.0)}
-                // Endpoint is on the emitter. Exclude only that endpoint;
-                // blockers and traversal exhaustion never become visible sky.
-                let hit=self.trace_static(self.probe_pos(index),target.xyz,target.w-0.002)
-                return vec4(hit,1.0)
+        pack: fn(v:vec3)->float {
+            let b=floor(clamp(v,vec3(0.0,0.0,0.0),vec3(1.0,1.0,1.0))*255.0+vec3(0.5,0.5,0.5))
+            return b.x+b.y*256.0+b.z*65536.0
+        }
+        // Move a probe home out of solid voxels: the nearest free candidate
+        // within 0.45 cells, else the probe is inside geometry (state -1).
+        place: fn(k:float,home:vec3)->vec4 {
+            let s=self.gi_cascade(k).w
+            var i=0.0
+            loop {
+                if i>12.5 {break}
+                var o=vec3(0.0,0.0,0.0)
+                if i>0.5 {
+                    let j=floor((i-1.0)*0.5)
+                    let axis=j-floor(j/3.0)*3.0
+                    var mag=0.3
+                    if i>6.5 {mag=0.45}
+                    let sgn=1.0-2.0*((i-1.0)-floor((i-1.0)*0.5)*2.0)
+                    // +y first: probes are most often buried in floors.
+                    if axis<0.5 {o=vec3(0.0,sgn*mag,0.0)} else if axis<1.5 {o=vec3(sgn*mag,0.0,0.0)} else {o=vec3(0.0,0.0,sgn*mag)}
+                }
+                let p=home+o*s
+                if self.vox_free(p,k) {return vec4(p,1.0)}
+                i=i+1.0
             }
-            let state=self.position_data(index,0.0).w
-            if state<(-1.5) {return vec4(0.0,-1.0,0.0,1.0)}
-            if state<0.0 {return vec4(0.0,0.0,1.0,1.0)}
-            let hit=self.trace_static(self.probe_pos(index),self.ray_dir(ray).xyz,self.gi_batch.z)
-            return vec4(hit,1.0)
+            return vec4(home,-1.0)
+        }
+        pixel: fn(){
+            let row=self.batch_row()
+            let col=floor(self.pos.x*65.0)
+            let a=self.batch_a(row)
+            let b=self.batch_b(row)
+            let s=self.gi_cascade(a.y).w
+            let probe=self.place(a.y,(b.xyz+self.gi_home.xyz)*s)
+            if col>63.5 {return probe}
+            // hits: (t, albedo, normal (negative = backface), emission);
+            // y = -1 miss, -2 invalid (probe or ray unusable).
+            if probe.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
+            let rd=self.gi_ray(col,a)
+            let hit=self.vox_trace(probe.xyz,rd,self.gi_pass.z,a.y)
+            if hit.w<0.0 {return vec4(0.0,-2.0,0.0,0.0)}
+            if hit.w<0.5 {return vec4(self.gi_pass.z,-1.0,0.0,0.0)}
+            let v=self.vox_level(hit.y)
+            let cell=floor((probe.xyz+rd*(hit.x+v.w*0.01))/v.w)
+            let uv=self.vox_uv(hit.y,cell)
+            let albedo=self.gi_vox_a.sample_nearest(uv).xyz
+            let stored=self.gi_vox_b.sample_nearest(uv).xyz*2.0-vec3(1.0,1.0,1.0)
+            let emission=self.gi_vox_c.sample_nearest(uv)
+            var face=rd*(-1.0)
+            let ax=abs(hit.z)
+            if ax>0.5 {
+                if ax<1.5 {face=vec3(0.0-sign(hit.z),0.0,0.0)} else if ax<2.5 {face=vec3(0.0,0.0-sign(hit.z),0.0)} else {face=vec3(0.0,0.0,0.0-sign(hit.z))}
+            }
+            // Averaged voxel normals: a coherent one decides the side; two
+            // faces of a thin wall cancel out and the entered face is used.
+            var n=face
+            var back=false
+            if length(stored)>0.5 {
+                let facing=dot(normalize(stored),rd)
+                if facing<(-0.1) {n=normalize(stored)}
+                if facing>0.3 {back=true}
+            }
+            var packed=self.pack(n*0.5+vec3(0.5,0.5,0.5))
+            if back {packed=0.0-1.0-packed}
+            let e=floor(clamp(emission,vec4(0.0,0.0,0.0,0.0),vec4(1.0,1.0,1.0,1.0))*vec4(31.0,31.0,31.0,255.0)+vec4(0.5,0.5,0.5,0.5))
+            return vec4(hit.x,self.pack(albedo),packed,e.x+e.y*32.0+e.z*1024.0+e.w*32768.0)
         }
         fragment: fn(){self.fb0=self.pixel()}
-    }
-    let MoverData = {
-        gi_movers: texture_2d(float)
-        gi_mover_height: uniform(1.0)
-        mover: fn(at:float)->vec4 {
-            let y=floor(at/256.0)
-            return self.gi_movers.sample_nearest(vec2((at-y*256.0+0.5)/256.0,(y+0.5)/self.gi_mover_height))
-        }
     }
     mod.draw.DrawGiRelight = set_type_default() do #(DrawGiRelight::script_shader(vm)) {
         ..mod.draw.DrawQuad,
         ..FastGiSampling,
-        ..ProbeLayout,
-        ..Geometry,
+        ..GiBatch,
+        ..GiVoxels,
         ..mod.draw.ClusteredLighting,
-        ..MoverData,
         alpha_blend: false
         color_format: @Rgba32F
         gi_hits: texture_2d(float)
-        gi_sun_map: texture_2d(float)
-        gi_sun_rows: texture_2d(float)
         gi_sun_dir: uniform(vec3(0.0,1.0,0.0))
         gi_sun_color: uniform(vec3(0.0,0.0,0.0))
         gi_sky: uniform(vec3(0.1,0.1,0.1))
         gi_ground: uniform(vec3(0.1,0.1,0.1))
-        gi_counts: uniform(vec4(0.0,0.0,0.0,0.0))
+        // feedback, linear albedo, emission gain, sun ray length
+        gi_relight: uniform(vec4(0.85,0.0,0.0,48.0))
         gi_light_ids0: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
         gi_light_ids1: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
-        sun_row: fn(at:float)->vec4 {return self.gi_sun_rows.sample_nearest(vec2((at+0.5)/16.0,0.5))}
-        sun_visibility: fn(p:vec3,n:vec3)->float {
-            var i=0.0
-            while i<self.gi_counts.z {
-                let a=self.sun_row(i*4.0)
-                let b=self.sun_row(i*4.0+1.0)
-                let c=self.sun_row(i*4.0+2.0)
-                let bias=self.sun_row(i*4.0+3.0)
-                let wp=vec4(p+n*max(bias.y,0.01),1.0)
-                let q=vec3(dot(a,wp),dot(b,wp),dot(c,wp))
-                if abs(q.x)<0.98 && abs(q.y)<0.98 && q.z>0.0 && q.z<1.0 {
-                    let uv=vec2((q.x*0.5+0.5+i)/3.0,0.5-q.y*0.5)
-                    return step(q.z-bias.x*2.0,self.gi_sun_map.sample_nearest(uv).x)
-                }
-                i=i+1.0
-            }
-            // Outside known shadow coverage: no invented sunlight indoors.
-            return 0.0
+        hit_at: fn(ray:float,row:float)->vec4 {return self.gi_hits.sample_nearest(vec2((ray+0.5)/65.0,(row+0.5)/self.gi_pass.y))}
+        decode_srgb: fn(c:vec3)->vec3 {
+            return mix(c/12.92,pow((c+vec3(0.055,0.055,0.055))/1.055,vec3(2.4,2.4,2.4)),step(vec3(0.04045,0.04045,0.04045),c))
         }
         local_bounce: fn(p:vec3,n:vec3,index:float)->vec3 {
             if index<0.0 {return vec3(0.0,0.0,0.0)}
@@ -425,236 +463,188 @@ script_mod! {
             }
             return color.xyz*(attenuation*cone*max(dot(n,l),0.0)*self.local_shadow_visibility(index,p,n,pos.xyz,pos.w))
         }
-        emitter_radiance: fn(index:float,target_index:float,hit:vec4)->vec4 {
-            let target=self.emitter_ray(index,target_index)
-            if target.w<=0.002 || hit.y!=0.0 || hit.w<0.5 {return vec4(0.0,0.0,0.0,0.0)}
-            let ro=self.probe_pos(index)
-            var i=0.0
-            while i<self.gi_counts.x {
-                let a=self.mover(i*6.0)
-                let b=self.mover(i*6.0+1.0)
-                let c=self.mover(i*6.0+2.0)
-                let p=vec3(dot(a,vec4(ro,1.0)),dot(b,vec4(ro,1.0)),dot(c,vec4(ro,1.0)))
-                // An approximate actor bound can contain a perfectly valid
-                // air probe. Do not suppress all emitter samples from it.
-                if max(max(abs(p.x),abs(p.y)),abs(p.z))>=0.999 || self.mover(i*6.0+3.0).w>0.5 {
-                let d=vec3(dot(a.xyz,target.xyz),dot(b.xyz,target.xyz),dot(c.xyz,target.xyz))
-                let inv=self.reciprocal(d)
-                let t0=(vec3(-1.0,-1.0,-1.0)-p)*inv
-                let t1=(vec3(1.0,1.0,1.0)-p)*inv
-                let lo=min(t0,t1)
-                let hi=max(t0,t1)
-                let near=max(max(lo.x,lo.y),max(lo.z,0.001))
-                let far=min(min(hi.x,hi.y),min(hi.z,target.w-0.002))
-                if near<=far {return vec4(0.0,0.0,0.0,0.0)}
-                }
-                i=i+1.0
-            }
-            return vec4(self.position_data(index,1.0+floor(target_index/12.0)).xyz,1.0)
-        }
         pixel: fn(){
-            let index=floor(self.pos.y*self.gi_batch.y)+self.gi_batch.x
-            let ray=min(floor(self.pos.x*self.gi_emitters.z),self.gi_emitters.z-1.0)
-            let hit=self.gi_hits.sample_nearest(vec2((ray+0.5)/self.gi_emitters.z,(index+0.5)/self.gi_grid.w))
-            if ray>=64.0 {return self.emitter_radiance(index,ray-64.0,hit)}
-            let rd=self.ray_dir(ray).xyz
-            let ro=self.probe_pos(index)
-            if hit.y<0.0 {return vec4(0.0,0.0,0.0,-2.0)}
-            if hit.z>0.5 {return vec4(0.0,0.0,0.0,-1.0)}
-            var distance=hit.x
-            var n=vec3(0.0,1.0,0.0)
-            var albedo=vec3(0.0,0.0,0.0)
-            var emission=vec3(0.0,0.0,0.0)
-            var found=hit.y>0.5
-            if found {
-                let at=(hit.y-1.0)*5.0
-                let p=self.tri(at).xyz
-                n=normalize(cross(self.tri(at+1.0).xyz-p,self.tri(at+2.0).xyz-p))
-                albedo=self.tri(at+3.0).xyz
-                let source=self.tri(at+4.0)
-                emission=source.xyz
-                // Split ONLY emission, not reflected light. A zero per-probe
-                // header means range/geometry fallback to the original rays.
-                if self.emitter_sampled(index,source.w) {emission=vec3(0.0,0.0,0.0)}
+            let row=self.batch_row()
+            let ray=min(floor(self.pos.x*64.0),63.0)
+            let probe=self.hit_at(64.0,row)
+            let hit=self.hit_at(ray,row)
+            // radiance: (rgb, distance); w = -1 backface, -2 invalid.
+            if probe.w<0.0 || hit.y<(-1.5) {return vec4(0.0,0.0,0.0,-2.0)}
+            let a=self.batch_a(row)
+            let rd=self.gi_ray(ray,a)
+            if hit.y<(-0.5) {return vec4(mix(self.gi_ground,self.gi_sky,clamp(rd.y*0.5+0.5,0.0,1.0)),hit.x)}
+            if hit.z<0.0 {return vec4(0.0,0.0,0.0,-1.0)}
+            var albedo=min(self.gi_unpack(hit.y),vec3(0.9,0.9,0.9))
+            if self.gi_relight.y>0.5 {albedo=self.decode_srgb(albedo)}
+            let n=normalize(self.gi_unpack(hit.z)*2.0-vec3(1.0,1.0,1.0))
+            // Emission: 5-bit hue per channel + 8-bit intensity m/(1+m).
+            // The linear lane decodes the hue like an albedo and applies the
+            // lanes' glow gain (gi_relight.z).
+            let level=floor(hit.w/32768.0)
+            let rest=hit.w-level*32768.0
+            var hue=vec3(rest-floor(rest/32.0)*32.0,floor(rest/32.0)-floor(rest/1024.0)*32.0,floor(rest/1024.0))/31.0
+            if self.gi_relight.y>0.5 {hue=self.decode_srgb(hue)}
+            let glow=min(level/255.0,0.996)
+            let emission=hue*(glow/(1.0-glow))*self.gi_relight.z
+            let p=probe.xyz+rd*hit.x
+            var light=vec3(0.0,0.0,0.0)
+            let ndl=dot(n,self.gi_sun_dir)
+            if ndl>0.0 && max(max(self.gi_sun_color.x,self.gi_sun_color.y),self.gi_sun_color.z)>0.0 {
+                // Sun visibility through the same voxels: works without a
+                // shadow map, in every shadow tier and beyond the CSM.
+                let v=self.vox_level(a.y)
+                let origin=p+n*(v.w*0.75)-rd*(v.w*0.25)
+                let shadow=self.vox_trace(origin,self.gi_sun_dir,self.gi_relight.w,a.y)
+                if shadow.w<0.5 && shadow.w>(-0.5) {light=self.gi_sun_color*ndl}
             }
-            // Small oriented proxies for movers; never rebuild static BVH
-            // merely because a door/car moved. Only an exact solid box can
-            // prove a probe is inside geometry; mesh bounds include air.
-            var i=0.0
-            while i<self.gi_counts.x {
-                let a=self.mover(i*6.0)
-                let b=self.mover(i*6.0+1.0)
-                let c=self.mover(i*6.0+2.0)
-                let p=vec3(dot(a,vec4(ro,1.0)),dot(b,vec4(ro,1.0)),dot(c,vec4(ro,1.0)))
-                if max(max(abs(p.x),abs(p.y)),abs(p.z))<0.999 && self.mover(i*6.0+3.0).w>0.5 {return vec4(0.0,0.0,0.0,-1.0)}
-                let d=vec3(dot(a.xyz,rd),dot(b.xyz,rd),dot(c.xyz,rd))
-                let inv=self.reciprocal(d)
-                let t0=(vec3(-1.0,-1.0,-1.0)-p)*inv
-                let t1=(vec3(1.0,1.0,1.0)-p)*inv
-                let lo=min(t0,t1)
-                let hi=max(t0,t1)
-                let near=max(max(lo.x,lo.y),lo.z)
-                let far=min(min(hi.x,hi.y),hi.z)
-                if near>0.001 && near<=far && near<distance {
-                    distance=near
-                    n=normalize(a.xyz)*(0.0-sign(d.x))
-                    if lo.y>=lo.x && lo.y>=lo.z {n=normalize(b.xyz)*(0.0-sign(d.y))}
-                    if lo.z>=lo.x && lo.z>=lo.y {n=normalize(c.xyz)*(0.0-sign(d.z))}
-                    albedo=self.mover(i*6.0+3.0).xyz
-                    emission=self.mover(i*6.0+4.0).xyz
-                    found=true
-                }
-                i=i+1.0
-            }
-            if !found {return vec4(mix(self.gi_ground,self.gi_sky,clamp(rd.y*0.5+0.5,0.0,1.0)),self.gi_batch.z)}
-            let p=ro+rd*distance
-            var light=self.gi_sun_color*(max(dot(n,self.gi_sun_dir),0.0)*self.sun_visibility(p,n))
             light=light+self.local_bounce(p,n,self.gi_light_ids0.x)+self.local_bounce(p,n,self.gi_light_ids0.y)
             light=light+self.local_bounce(p,n,self.gi_light_ids0.z)+self.local_bounce(p,n,self.gi_light_ids0.w)
             light=light+self.local_bounce(p,n,self.gi_light_ids1.x)+self.local_bounce(p,n,self.gi_light_ids1.y)
             light=light+self.local_bounce(p,n,self.gi_light_ids1.z)+self.local_bounce(p,n,self.gi_light_ids1.w)
-            // Reuse previous-frame irradiance at the HIT, not at the probe.
-            // Subsequent updates propagate further diffuse bounces without
-            // tracing recursive rays. Missing/invalid history adds no light.
-            if self.gi_counts.w>0.0 {
-                light=light+min(self.gi_ambient(p,n,vec3(0.0,0.0,0.0)),vec3(8.0,8.0,8.0))*self.gi_counts.w
+            // Further bounces: last frame's field AT THE HIT, no recursion.
+            if self.gi_relight.x>0.0 {
+                light=light+min(self.gi_ambient(p,n,vec3(0.0,0.0,0.0)),vec3(64.0,64.0,64.0))*self.gi_relight.x
             }
-            // Legacy game light units already fold the Lambert normalization.
-            return vec4(min(clamp(albedo,vec3(0.0,0.0,0.0),vec3(0.9,0.9,0.9))*light+emission,vec3(8.0,8.0,8.0)),distance)
+            return vec4(min(albedo*light+emission,vec3(64.0,64.0,64.0)),hit.x)
         }
         fragment: fn(){self.fb0=self.pixel()}
     }
     mod.draw.DrawGiGather = set_type_default() do #(DrawGiGather::script_shader(vm)) {
         ..mod.draw.DrawQuad,
         ..FastGiSampling,
-        ..ProbeLayout,
-        ..MoverData,
+        ..GiBatch,
         alpha_blend: false
-        color_format: @Rgba32F
+        color_format: @Rgba16F
+        gi_hits: texture_2d(float)
         gi_radiance: texture_2d(float)
-        ray: fn(index:float,r:float)->vec4{return self.gi_radiance.sample_nearest(vec2((r+0.5)/self.gi_emitters.z,(index+0.5)/self.gi_grid.w))}
-        distance_moments: fn(index:float,r:float)->vec2 {
-            // Prefilter the existing rays, once per updated probe, rather
-            // than treating each angular bin as a zero-variance point hit.
-            // The latter projected octahedral wedges onto nearby walls.
-            let center=self.ray_dir(r).xyz
-            let cell=vec2(r-floor(r/8.0)*8.0,floor(r/8.0))
-            var moments=vec2(0.0,0.0)
-            var total=0.0
-            var y=-1.0
-            while y<=1.0 {
-                var x=-1.0
-                while x<=1.0 {
-                    let b=self.gi_wrap_oct(cell+vec2(x,y))
-                    let sample=b.x+b.y*8.0
-                    let direction=self.ray_dir(sample)
-                    let cosine=max(dot(center,direction.xyz),0.0)
-                    let c2=cosine*cosine
-                    let c4=c2*c2
-                    let c8=c4*c4
-                    let weight=c8*c8*direction.w
-                    // Only local-cell visibility is queried. Distant sky
-                    // hits must not inflate variance and leak through walls.
-                    let raw_distance=self.ray(index,sample).w
-                    // Invalid is NOT a zero-distance hit. Exclude its
-                    // statistical weight as well as its radiance.
-                    if raw_distance>=0.0 {
-                        let distance=min(raw_distance,self.gi_origin.w*2.0)
-                        moments=moments+vec2(distance,distance*distance)*weight
-                        total=total+weight
-                    }
-                    x=x+1.0
-                }
-                y=y+1.0
-            }
-            // Explicit no-data marker, excluded during bilinear lookup too.
-            if total<=0.000001 {return vec2(-1.0,0.0)}
-            return moments/max(total,0.000001)
+        radiance: fn(r:float,row:float)->vec4 {return self.gi_radiance.sample_nearest(vec2((r+0.5)/64.0,(row+0.5)/self.gi_pass.y))}
+        // Direction of texel (x, y) of an n x n interior with a guard ring:
+        // guard texels fold onto their octahedral neighbours.
+        tile_dir: fn(x:float,y:float,n:float)->vec3 {
+            var b=vec2(x-1.0,y-1.0)
+            if b.x<0.0 {b=vec2(-1.0-b.x,n-1.0-b.y)}
+            if b.x>n-1.0 {b=vec2(2.0*n-1.0-b.x,n-1.0-b.y)}
+            if b.y<0.0 {b=vec2(n-1.0-b.x,-1.0-b.y)}
+            if b.y>n-1.0 {b=vec2(n-1.0-b.x,2.0*n-1.0-b.y)}
+            let f=(b+vec2(0.5,0.5))/n*2.0-vec2(1.0,1.0)
+            var d=vec3(f.x,f.y,1.0-abs(f.x)-abs(f.y))
+            if d.z<0.0 {d=vec3((1.0-abs(f.y))*sign(f.x),(1.0-abs(f.x))*sign(f.y),d.z)}
+            return normalize(d)
         }
-        gi_keep_previous: uniform(0.0)
-        gi_copy_previous: uniform(0.0)
-        pixel: fn(){
-            let height=max(self.gi_grid.w,64.0)
-            let index=min(floor(self.pos.y*height*2.0),height*2.0-1.0)
-            let lane=min(floor(self.pos.x*40.0),39.0)
-            // The second bank holds the last complete world-space field.
-            // First scroll frame copies bank zero; later frames retain bank
-            // one. Scene shaders still bind only this single field texture.
-            if index>=height {
-                if self.gi_keep_previous<0.5 {return vec4(0.0,0.0,0.0,0.0)}
-                var source=index
-                if self.gi_copy_previous>0.5 {source=index-height}
-                return self.gi_field.sample_nearest(vec2((lane+0.5)/40.0,(source+0.5)/(height*2.0)))
-            }
-            // Update blocker topology every frame, including untouched probe
-            // rows. Geometry may move before a lighting sweep reaches a cell.
-            if lane>=37.0 {
-                // Zero rows are a non-blocking marker for approximate mesh
-                // bounds. Preserve their actual rows in the relight bank.
-                if index<self.gi_blocker_count && self.mover(index*6.0+3.0).w>0.5 {return self.mover(index*6.0+lane-37.0)}
-                return vec4(0.0,0.0,0.0,0.0)
-            }
-            if lane>=36.0 {
-                if index<self.gi_grid.w {return self.mover(384.0+index)}
-                return vec4(-1.0,-1.0,-1.0,-1.0)
-            }
-            if index>=self.gi_grid.w {return vec4(0.0,0.0,0.0,0.0)}
-            if index<self.gi_batch.x || index>=self.gi_batch.x+self.gi_batch.y {
-                if self.gi_on<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
-                return self.gi_fetch(false,index,lane)
-            }
-            if lane>=4.0 {
-                // Two filtered bins per texel: (E[d], E[d²]), NOT E[d]².
-                let r=(lane-4.0)*2.0
-                return vec4(self.distance_moments(index,r),self.distance_moments(index,r+1.0))
-            }
-            var coefficients=vec4(0.0,0.0,0.0,0.0)
-            var weight=0.0
-            var invalid=0.0
-            var exhausted=0.0
+        // Cosine-weighted radiance around d (E/pi): irradiance texel.
+        irradiance: fn(d:vec3,row:float,a:vec4)->vec4 {
+            var sum=vec3(0.0,0.0,0.0)
+            var total=0.0
             var r=0.0
-            while r<64.0 {
-                let sample=self.ray(index,r)
-                let direction=self.ray_dir(r)
-                var value=sample.x
-                if lane>0.5 {value=sample.y}
-                if lane>1.5 {value=sample.z}
-                if sample.w<(-1.5) {exhausted=exhausted+1.0}
-                if sample.w<0.0 {invalid=invalid+1.0} else {
-                    coefficients=coefficients+vec4(1.0,direction.xyz*2.0)*(value*direction.w)
-                    weight=weight+direction.w
+            loop {
+                if r>63.5 {break}
+                let sample=self.radiance(r,row)
+                if sample.w>=0.0 {
+                    let w=max(dot(d,self.gi_ray(r,a)),0.0)
+                    sum=sum+sample.xyz*w
+                    total=total+w
                 }
                 r=r+1.0
             }
-            if lane>2.5 {
-                if exhausted>0.0 {return vec4(self.probe_pos(index),-2.0)}
-                if invalid>6.0 {return vec4(self.probe_pos(index),-1.0)}
-                return vec4(self.probe_pos(index),1.0)
-            }
-            var result=coefficients/max(weight,0.0001)
-            // Analytic full-sphere DC/L1 weights are already normalized.
-            // These targeted visibility rays must NOT enter distance moments,
-            // general-ray normalization, or solid/backface classification.
-            var target=0.0
-            while target<self.gi_emitters.x*12.0 {
-                let sample=self.ray(index,64.0+target)
-                var value=sample.x
-                if lane>0.5 {value=sample.y}
-                if lane>1.5 {value=sample.z}
-                result=result+self.emitter_sh(index,target)*value
-                target=target+1.0
-            }
-            // Smooth small changes only. Geometry/large lighting changes
-            // replace history immediately, rather than leaving glowing trails.
-            if self.gi_on>0.0 && invalid<=6.0 && exhausted<0.5 {
-                if self.gi_fetch(false,index,3.0).w>0.5 {
-                    let old=self.gi_fetch(false,index,lane)
-                    let d=abs(old-result)
-                    let change=max(max(d.x,d.y),max(d.z,d.w))/max(max(abs(old.x),abs(result.x)),0.02)
-                    return mix(result,old,0.35*(1.0-smoothstep(0.1,0.3,change)))
+            if total<=0.0001 {return vec4(0.0,0.0,0.0,-1.0)}
+            return vec4(sum/total,1.0)
+        }
+        // Filtered (E[d], E[d^2]) around d from this update's rays.
+        moments: fn(d:vec3,row:float,a:vec4,s:float)->vec4 {
+            var m=vec2(0.0,0.0)
+            var total=0.0
+            var r=0.0
+            loop {
+                if r>63.5 {break}
+                let sample=self.radiance(r,row)
+                if sample.w>=0.0 {
+                    let c=max(dot(d,self.gi_ray(r,a)),0.0)
+                    let c2=c*c
+                    let c4=c2*c2
+                    let w=c4*c4*c4
+                    let dist=min(sample.w,s*2.0)
+                    m=m+vec2(dist,dist*dist)*w
+                    total=total+w
                 }
+                r=r+1.0
             }
-            return result
+            if total<=0.0001 {return vec4(0.0,0.0,0.0,-1.0)}
+            return vec4(m/total,0.0,1.0)
+        }
+        // Columns: 0..63 irradiance tile (8x8), 64..163 moment tile (10x10),
+        // 164 info. Each texel blends with the same texel of the field.
+        pixel: fn(){
+            let row=self.batch_row()
+            let col=min(floor(self.pos.x*165.0),164.0)
+            let a=self.batch_a(row)
+            let b=self.batch_b(row)
+            let k=a.y
+            let s=self.gi_cascade(k).w
+            let probe=self.gi_hits.sample_nearest(vec2(64.5/65.0,(row+0.5)/self.gi_pass.y))
+            let home=(b.xyz+self.gi_home.xyz)*s
+            let offset=(probe.xyz-home)/s
+            let old_info=self.gi_field.sample_nearest((self.gi_tile(k,a.x,2.0)+vec2(0.5,0.5))/self.gi_atlas.xy)
+            let od=abs(old_info.xyz-offset)
+            // History only from this very probe (same cell, same place);
+            // hysteresis 0 marks a slot that just changed cells.
+            let history=a.z>0.0 && old_info.w>0.0 && probe.w>0.0 && max(max(od.x,od.y),od.z)<0.05
+            var h=a.z
+            if !history {h=0.0}
+            if col>163.5 {
+                var back=0.0
+                var r=0.0
+                loop {
+                    if r>63.5 {break}
+                    let w=self.radiance(r,row).w
+                    if w<(-0.5) && w>(-1.5) {back=back+1.0}
+                    r=r+1.0
+                }
+                // Mostly backfaces: the probe sits inside closed geometry
+                // (below terrain, inside a wall box).
+                if probe.w<0.0 || back>16.0 {return vec4(0.0,0.0,0.0,-1.0)}
+                var state=0.34
+                if history {state=min(old_info.w+0.34,1.0)}
+                return vec4(offset,state)
+            }
+            if col<63.5 {
+                let x=col-floor(col/8.0)*8.0
+                let y=floor(col/8.0)
+                let old=self.gi_field.sample_nearest((self.gi_tile(k,a.x,0.0)+vec2(x+0.5,y+0.5))/self.gi_atlas.xy)
+                let v=self.irradiance(self.tile_dir(x,y,6.0),row,a)
+                if v.w<0.0 {
+                    if h>0.0 {return old}
+                    return vec4(0.0,0.0,0.0,0.0)
+                }
+                return vec4(mix(v.xyz,old.xyz,h),1.0)
+            }
+            let c=col-64.0
+            let x=c-floor(c/10.0)*10.0
+            let y=floor(c/10.0)
+            let old=self.gi_field.sample_nearest((self.gi_tile(k,a.x,1.0)+vec2(x+0.5,y+0.5))/self.gi_atlas.xy)
+            let m=self.moments(self.tile_dir(x,y,8.0),row,a,s)
+            if m.w<0.0 {
+                if h>0.0 {return old}
+                return vec4(0.0,0.0,0.0,0.0)
+            }
+            if h>0.0 && old.w>0.5 {return vec4(mix(m.xy,old.xy,h),0.0,1.0)}
+            return m
+        }
+        fragment: fn(){self.fb0=self.pixel()}
+    }
+    // Copies one gathered tile (x = batch row, y = first column, z = tile
+    // width) into the persistent field; a negative row writes zeros (the
+    // info texel of a slot that just changed cells).
+    mod.draw.DrawGiScatter = set_type_default() do #(DrawGiScatter::script_shader(vm)) {
+        ..mod.draw.DrawQuad,
+        alpha_blend: false
+        color_format: @Rgba16F
+        gi_update: texture_2d(float)
+        gi_update_size: uniform(vec2(165.0,1.0))
+        pixel: fn(){
+            if self.gi_tile.x<0.0 {return vec4(0.0,0.0,0.0,0.0)}
+            let w=self.gi_tile.z
+            let col=self.gi_tile.y+min(floor(self.pos.x*w),w-1.0)+min(floor(self.pos.y*w),w-1.0)*w
+            return self.gi_update.sample_nearest(vec2((col+0.5)/self.gi_update_size.x,(self.gi_tile.x+0.5)/self.gi_update_size.y))
         }
         fragment: fn(){self.fb0=self.pixel()}
     }
@@ -664,3 +654,4 @@ script_mod! {
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiTrace {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiRelight {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiGather {#[deref] pub quad:DrawQuad}
+#[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiScatter {#[deref] pub quad:DrawQuad, #[live(vec4(0.0,0.0,1.0,0.0))] pub gi_tile:Vec4f}

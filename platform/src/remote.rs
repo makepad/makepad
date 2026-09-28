@@ -325,25 +325,62 @@ mod imp {
         })
     }
 
+    /// 2x2 box-filter a raw readback in place of the job's pixels (same
+    /// channel order and origin, tightly packed); the sink's scale doubles
+    /// so the requested output size is kept where it still can be.
+    fn halve_grab(job: &mut EncodeJob) -> bool {
+        let (w, h, stride) = (job.width as usize, job.height as usize, job.stride);
+        if stride < w * 4 || job.pixels.len() < stride * h {
+            return false;
+        }
+        let (w2, h2) = (w / 2, h / 2);
+        let mut out = vec![0u8; w2 * h2 * 4];
+        for y in 0..h2 {
+            let (r0, r1) = (&job.pixels[2 * y * stride..], &job.pixels[(2 * y + 1) * stride..]);
+            for x in 0..w2 {
+                for c in 0..4 {
+                    let i = 8 * x + c;
+                    let sum = r0[i] as u32 + r0[i + 4] as u32 + r1[i] as u32 + r1[i + 4] as u32;
+                    out[(y * w2 + x) * 4 + c] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        job.pixels = Arc::from(out.into_boxed_slice());
+        job.width = w2 as u32;
+        job.height = h2 as u32;
+        job.stride = w2 * 4;
+        job.sink.scale = (job.sink.scale * 2.0).min(1.0);
+        true
+    }
+
     fn submit_encode(mut job: EncodeJob, raw: bool) {
         if job.sink.cancelled.load(Ordering::Relaxed) {
             return;
         }
-        let len = job.pixels.len();
-        // Keep fetch_update for older stable toolchains without try_update.
-        #[allow(deprecated)]
-        if GRAB_BYTES
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(len)
-                    .filter(|total| *total <= MAX_GRAB_BYTES)
-            })
-            .is_err()
-        {
-            let _ = job.sink.tx.try_send(Err(
-                "grab pixel budget full; retry at a slower cadence".into()
-            ));
-            return;
-        }
+        // Over the pixel budget (a fast /gseq of a large window outruns the
+        // encoder): halve the frame until it fits instead of failing, so the
+        // sequence degrades to smaller frames. A requested scale <= 0.5
+        // loses nothing, since the encoder would have scaled down anyway.
+        let len = loop {
+            let len = job.pixels.len();
+            // Keep fetch_update for older stable toolchains without try_update.
+            #[allow(deprecated)]
+            let fits = GRAB_BYTES
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    used.checked_add(len)
+                        .filter(|total| *total <= MAX_GRAB_BYTES)
+                })
+                .is_ok();
+            if fits {
+                break len;
+            }
+            if !raw || job.width < 2 || job.height < 2 || !halve_grab(&mut job) {
+                let _ = job.sink.tx.try_send(Err(
+                    "grab pixel budget full; retry at a slower cadence".into()
+                ));
+                return;
+            }
+        };
         job.bytes = Some(GrabBytes(len));
         job.backend_png = !raw;
         match encode_queue() {

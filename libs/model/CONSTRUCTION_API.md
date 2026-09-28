@@ -62,3 +62,50 @@ refuses with an explicit packing-budget error if the requested count cannot
 fit; it never silently returns fewer fibers. This keeps distinct fibers apart
 in the authored rest mesh. The root still overlaps the source surface by
 design, and subsequent deformation does not simulate strand self-collision.
+
+## Parametric shapes and architecture
+
+Factories that create a new object from parameters (`material` optional, 0).
+Output shells are closed and outward-wound, UVs are in metres of surface and
+curved parts carry analytic corner normals.
+
+- `box {size,radius?,segments?}` rounded box; `capsule {radius,height,segments?,rings?}`
+  (height = 2*radius is a sphere); `cone {radius,top_radius?,height,segments?,smooth?}`
+  (top_radius = radius is a cylinder); `torus {radius,tube,segments?,sides?}`;
+  `wedge {size}` (ramp from -Z top edge to +Z).
+- `extrusion {profile,depth,axis?,center?,corner_radius?,corner_segments?,bevel?,bevel_segments?}`
+  prism of a 2D profile (any winding), with 2D corner fillets and rounded cap edges.
+- `tube {path,radius,segments?,caps?}` circular sweep with rotation-minimising frames.
+- `wall {path,closed?,height,thickness,base?,openings?,inner_material?,trim_material?}`
+  mitred polyline wall; openings `{at,width,height,sill?,frame?,frame_depth?,frame_material?,glass?,mullions?}`
+  are built as reveals (door when sill is 0), optionally framed and glazed.
+- `stair {from,to,width,steps?,thickness?}` one closed stair solid.
+- `roof {kind:gable|hip|flat,center,size,pitch?,overhang?,thickness?,ridge?,trim_material?,gable_material?,gable_thickness?}`.
+
+`collider` also accepts `kind:"hull"` (convex hull of the object, support
+points in 256 directions for dense objects) and `kind:"capsule"`; both are
+delivered as compact triangle proxies.
+
+## Programs
+
+`build_program(ops, limits, fetch, cancelled)` applies an ordered list of
+operation values to a fresh document and compiles it. Besides every ordinary
+operation it expands `humanoid_rig {height,clips?,sockets?}`, `bind
+{object,joint}`, `bind_all {}` and `import_glb {alias,prefix,material_base?,transform?}`
+(bytes resolved through `fetch`). Failures name the operation index.
+
+## Detail and weathering
+
+- `decal {object,target,center,normal,up?,size,depth?,offset?,material}` projects
+  a box onto the target's front-facing triangles (world space) and keeps the
+  clipped surface as a thin new object `offset` above it, UVs 0..1 across the
+  decal (V down). Use alpha-masked materials for vents, badges and text.
+- `bevel {object,width,segments?,angle?}` rounds every edge whose dihedral angle
+  exceeds `angle` on any closed polygon mesh: faces shrink in plane, edges become
+  quadratic strips, vertices get corner patches; faces keep flat normals and
+  strips interpolated ones. The object is rebuilt (new element IDs).
+- `crease {object,angle?,weight?}` marks sharp edges with a subdivision crease.
+- Program macro `weathering {ao?,distance?,edges?,samples?,objects?}` casts
+  hemisphere rays against the whole model and writes AO × edge-wear grey levels
+  as vertex colours (multiplying every material).
+- `stencil::stencil_text` rasterizes a 5x7 stencil font for text layers.

@@ -61,6 +61,17 @@ const NIGHT_AMBIENT: Vec3f = Vec3f {
     z: 0.15,
 };
 
+/// HDR output (see [`SunLight::to_hdr`]): direct-term gain over the legacy
+/// multiplier, fill gain, and the share of the fill left at full night.
+const HDR_SUN: f32 = 3.0;
+const HDR_AMBIENT: f32 = 0.8;
+const HDR_NIGHT_FLOOR: f32 = 0.22;
+/// Exposure metering (see [`SunLight::hdr_exposure`]): the key a noon rig
+/// maps to ~0.8, and the adaptation range (night gains at most ~2 stops).
+const HDR_EXPOSURE_KEY: f32 = 0.75;
+const HDR_EXPOSURE_MIN: f32 = 0.25;
+const HDR_EXPOSURE_MAX: f32 = 3.2;
+
 /// `SceneSun`'s ambient is tuned for the map's bright top-down bake; a game
 /// viewed from inside the scene needs it lower or everything reads flat.
 const MAP_AMBIENT_TO_GAME: f32 = 0.45;
@@ -80,6 +91,40 @@ impl SunLight {
             ground: sun.ground * MAP_AMBIENT_TO_GAME,
             shadow_alpha: sun.shadow_alpha,
         }
+    }
+
+    /// This rig in the LINEAR, scene-referred units of the HDR output
+    /// ([`crate::Renderer::set_hdr_output`]): the direct term becomes an
+    /// irradiance about 3x the legacy 0.72 multiplier (a noon white wall sits
+    /// near 2.0 before exposure), the dome fill keeps roughly a fifth of it
+    /// (the sun-to-shade ratio of a clear day), and after dusk the fill drops
+    /// to a dim moonlit floor so lamps and emissive windows carry the scene.
+    /// The tone mapper, not a clamp, decides how that reaches the screen.
+    pub fn to_hdr(&self) -> Self {
+        let elev = self.dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let day = {
+            let x = ((elev + 8.0) / 14.0).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let fill = HDR_AMBIENT * (HDR_NIGHT_FLOOR + (1.0 - HDR_NIGHT_FLOOR) * day);
+        Self {
+            dir: self.dir,
+            color: self.color * HDR_SUN,
+            sky: self.sky * fill,
+            ground: self.ground * fill,
+            shadow_alpha: self.shadow_alpha,
+        }
+    }
+
+    /// Metered exposure for an HDR rig (the output of [`Self::to_hdr`]):
+    /// the scene key is the fill plus half the sun on an up-facing surface,
+    /// and exposure maps that key to mid-tone. Night is allowed two stops of
+    /// adaptation over noon and no more, so it still reads as night while
+    /// lamps and windows gain their pools.
+    pub fn hdr_exposure(&self) -> f32 {
+        let lum = |c: Vec3f| c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
+        let key = (lum(self.sky) + lum(self.ground)) * 0.5 + lum(self.color) * self.dir.y.max(0.0) * 0.5;
+        (HDR_EXPOSURE_KEY / key.max(1.0e-4)).clamp(HDR_EXPOSURE_MIN, HDR_EXPOSURE_MAX)
     }
 
     /// Map-space view of this sun, for anything that wants the shared type.

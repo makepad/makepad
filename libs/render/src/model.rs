@@ -122,11 +122,15 @@ pub struct PbrMaterial {
     /// chunk. glTF packs occlusion/roughness/metallic as R/G/B — the "ORM"
     /// convention — and the factors multiply the sampled channels.
     pub orm_png: Option<Vec<u8>>,
+    /// The base-colour texture's glTF sampler says `magFilter: NEAREST`
+    /// (9728): magnified texels draw as hard squares — the pixel-art look of
+    /// the classic games' textures. Minification stays filtered.
+    pub mag_nearest: bool,
 }
 
 impl Default for PbrMaterial {
     fn default() -> Self {
-        Self { metallic: 1.0, roughness: 1.0, orm_png: None, surface: None }
+        Self { metallic: 1.0, roughness: 1.0, orm_png: None, surface: None, mag_nearest: false }
     }
 }
 
@@ -1494,22 +1498,14 @@ impl StaticModel {
             .map(str::to_string);
         // Embedded base color (image stored in the BIN chunk via bufferView):
         // the self-contained convention of generated/baked GLBs. Resolved
-        // through the first material's baseColorTexture; falls back to
-        // images[0] when materials carry no texture reference.
-        let image_index = json
-            .get("materials")
-            .and_then(|m| m.idx(0))
-            .and_then(|m| m.get("pbrMetallicRoughness"))
-            .and_then(|p| p.get("baseColorTexture"))
-            .and_then(|t| t.get("index"))
-            .and_then(Val::usize)
-            .and_then(|ti| {
-                json.get("textures")
-                    .and_then(|t| t.idx(ti))
-                    .and_then(|t| t.get("source"))
-                    .and_then(Val::usize)
-            })
-            .unwrap_or(0);
+        // through the material the geometry USES — materials[0] may be a
+        // palette nothing references (script models: the single-material
+        // model sampled that white placeholder and rendered white) — and
+        // falls back to images[0] when no material carries a texture.
+        let image_index = prim_spans
+            .first()
+            .map(|s| s.image)
+            .unwrap_or_else(|| gltf_used_material_image(&json));
         let texture_png = gltf_embedded_png(&json, bin_chunk, image_index);
 
         // Split by embedded image so a world GLB (one PNG per tile) draws
@@ -1573,6 +1569,23 @@ pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
         ||material.get("extras").is_some_and(|e|e.get("makepadMips").is_some()||matches!(e.get("makepadSurface"),Some(Val::Bool(true))))
 }
 
+/// Does material `index`'s base-colour texture sample with `magFilter:
+/// NEAREST` (9728)? glTF's default (no sampler, or no magFilter) is the
+/// implementation's choice, which here is linear.
+pub(crate) fn gltf_mag_nearest(json: &Val, index: usize) -> bool {
+    (|| {
+        let texture = json
+            .get("materials")?
+            .idx(index)?
+            .get("pbrMetallicRoughness")?
+            .get("baseColorTexture")?
+            .get("index")?
+            .usize()?;
+        let sampler = json.get("textures")?.idx(texture)?.get("sampler")?.usize()?;
+        json.get("samplers")?.idx(sampler)?.get("magFilter")?.usize()
+    })() == Some(9728)
+}
+
 pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<crate::material_surface::MaterialSurface> {
     if !gltf_material_is_surface(json,index){return None}
     let material=json.get("materials")?.idx(index)?;
@@ -1611,6 +1624,7 @@ impl PrimSpan {
             metallic: self.metallic,
             roughness: self.roughness,
             orm_png: self.orm_image.and_then(|i| gltf_embedded_png(json, bin, i)),
+            mag_nearest: self.material.is_some_and(|i| gltf_mag_nearest(json, i)),
         }
     }
 
@@ -1674,6 +1688,7 @@ fn model_level_pbr(spans: &[PrimSpan], json: &Val, bin: &[u8]) -> PbrMaterial {
         return PbrMaterial::default();
     };
     PbrMaterial {
+        mag_nearest: gltf_mag_nearest(json, 0),
         surface: gltf_material_surface(json,bin,0).map(std::sync::Arc::new),
         metallic: (pbr.get("metallicFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
             .clamp(0.0, 1.0),
@@ -2610,21 +2625,31 @@ pub fn embedded_base_color_png(glb: &[u8]) -> Option<Vec<u8>> {
         at += 8 + len + (4 - len % 4) % 4;
     }
     let json = JsonParser::parse(json_chunk?).ok()?;
-    let image = json
-        .get("materials")
-        .and_then(|m| m.idx(0))
-        .and_then(|m| m.get("pbrMetallicRoughness"))
-        .and_then(|p| p.get("baseColorTexture"))
-        .and_then(|t| t.get("index"))
-        .and_then(Val::usize)
-        .and_then(|ti| {
-            json.get("textures")
-                .and_then(|t| t.idx(ti))
-                .and_then(|t| t.get("source"))
-                .and_then(Val::usize)
-        })
-        .unwrap_or(0);
+    let image = gltf_used_material_image(&json);
     gltf_embedded_png(&json, bin_chunk, image)
+}
+
+/// The base-colour image of the first material a mesh primitive actually
+/// references (a GLB may carry unreferenced materials ahead of it), else of
+/// materials[0], else image 0.
+fn gltf_used_material_image(json: &Val) -> usize {
+    let meshes = json.get("meshes").map(Val::arr).unwrap_or_default();
+    let first_prim = meshes
+        .iter()
+        .flat_map(|mesh| mesh.get("primitives").map(Val::arr).unwrap_or_default())
+        .find(|p| p.get("material").and_then(Val::usize).is_some());
+    match first_prim {
+        Some(prim) => gltf_prim_image_index(json, prim),
+        None => json
+            .get("materials")
+            .and_then(|m| m.idx(0))
+            .and_then(|m| m.get("pbrMetallicRoughness"))
+            .and_then(|p| p.get("baseColorTexture"))
+            .and_then(|t| t.get("index"))
+            .and_then(Val::usize)
+            .and_then(|ti| json.get("textures").and_then(|t| t.idx(ti)).and_then(|t| t.get("source")).and_then(Val::usize))
+            .unwrap_or(0),
+    }
 }
 
 pub(crate) fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
@@ -3771,6 +3796,133 @@ pub(crate) mod tests {
             (c2[0] - 0.5).abs() < 0.01 && (c2[1] - 0.5).abs() < 0.01 && (c2[2] - 1.0).abs() < 0.01,
             "{c2:?}"
         );
+    }
+
+    /// A GLB whose materials[0] is an unreferenced palette (the script-model
+    /// writer's shape) draws with the texture of the material its primitive
+    /// USES: sampling materials[0]'s placeholder drew single-material script
+    /// models white.
+    #[test]
+    fn single_material_models_take_the_used_materials_texture() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let palette: &[u8] = b"PALETTE-PNG-BYTES";
+        let leaf: &[u8] = b"LEAF-PNG-BYTES!!";
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let (p0, p1) = (bin.len(), bin.len() + palette.len());
+        bin.extend_from_slice(palette);
+        bin.extend_from_slice(leaf);
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"material":1}}]}}],
+            "materials":[
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":1}}}}}}],
+            "textures":[{{"source":0}},{{"source":1}}],
+            "images":[{{"bufferView":1,"mimeType":"image/png"}},{{"bufferView":2,"mimeType":"image/png"}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":{p0},"byteLength":{}}},
+              {{"buffer":0,"byteOffset":{p1},"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            palette.len(),
+            leaf.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        assert!(m.draw_layers.is_empty(), "one material is one layer: the main texture draws it");
+        assert_eq!(m.texture_png.as_deref(), Some(leaf));
+        assert_eq!(embedded_base_color_png(&glb).as_deref(), Some(leaf));
+    }
+
+    /// A splat terrain (level terrain_mesh → level glb): an opaque base part
+    /// and an alpha-masked overlay part over the SAME triangles with the
+    /// splat weight in COLOR_0 alpha. The overlay must become its own layer
+    /// AFTER the base, keep its MASK surface and carry the weight per vertex.
+    #[test]
+    fn splat_overlays_parse_as_masked_layers_after_their_base() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        // COLOR_0 as normalized ubyte VEC4: white, alpha 0.7 (weight 0.45).
+        for _ in 0..3 {
+            bin.extend_from_slice(&[255, 255, 255, 179]);
+        }
+        let png_at = bin.len();
+        let png: &[u8] = b"TERRAIN-PNG!";
+        bin.extend_from_slice(png);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[
+              {{"attributes":{{"POSITION":0}},"material":0}},
+              {{"attributes":{{"POSITION":0,"COLOR_0":1}},"material":1}}]}}],
+            "materials":[
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"extras":{{"makepadMips":true}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}},"roughnessFactor":1,"metallicFactor":0}},"alphaMode":"MASK","alphaCutoff":0.5,"extras":{{"makepadMips":true}}}}],
+            "textures":[{{"source":0}}],
+            "images":[{{"bufferView":2,"mimeType":"image/png"}}],
+            "accessors":[
+              {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":1,"componentType":5121,"normalized":true,"count":3,"type":"VEC4"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":36,"byteLength":12}},
+              {{"buffer":0,"byteOffset":{png_at},"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            png.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        assert_eq!(m.draw_layers.len(), 2);
+        let modes: Vec<_> = m.draw_layers.iter().map(|l| l.pbr.surface.as_ref().map(|s| s.alpha_mode)).collect();
+        assert_eq!(modes, vec![Some(0), Some(1)], "base first, the MASK overlay after it");
+        let alpha = |l: &StaticDrawLayer| l.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| (v[5].to_bits() >> 24) as u8).collect::<Vec<_>>();
+        assert_eq!(alpha(&m.draw_layers[1]), vec![179; 3], "the splat weight rides the colour lane");
     }
 
     /// The node transform must be folded into the vertices, not dropped —

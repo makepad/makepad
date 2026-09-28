@@ -5,58 +5,145 @@
 use makepad_draw::*;
 use makepad_scene::{HudAnchor, HudBar, HudSlot};
 
-/// HUD: named text slots pinned to anchors (slots sharing an anchor stack
-/// downward in insertion order), plus gauges. "center" is the big banner,
-/// "hint" the small top-left control help — their historical looks are the
-/// slot-name defaults. Color/size of 0 = defaults.
+#[path = "hud_flight.rs"]
+mod flight;
+pub use flight::*;
+
+/// The draws the slot HUD is lent: the sans face for banners and hints, the
+/// code face for readouts and gauge labels, and one flat-colour rect for
+/// plates, ticks and gauges.
+pub struct HudOverlayDraws<'a> {
+    pub text: &'a mut DrawText,
+    pub code: &'a mut DrawText,
+    pub rect: &'a mut DrawColor,
+}
+
+/// One laid-out piece of the slot HUD: a block of text rows, or a gauge.
+struct OverlayItem {
+    anchor: HudAnchor,
+    lines: Vec<String>,
+    size: f32,
+    color: Vec4f,
+    mono: bool,
+    banner: bool,
+    /// A gauge: (fraction, label).
+    bar: Option<(f32, String)>,
+    w: f64,
+    h: f64,
+    line_h: f64,
+}
+
+const PAD_X: f64 = 7.0;
+const PAD_Y: f64 = 3.0;
+const GAP: f64 = 5.0;
+const MARGIN: f64 = 12.0;
+const BAR_W: f64 = 120.0;
+const BAR_H: f64 = 8.0;
+const BAR_LABEL: f32 = 8.0;
+/// A slot wraps onto at most this many rows (or as many as its author wrote
+/// with newlines, if more); the last one ends in an
+/// ellipsis. Beyond it a HUD line is a paragraph, and a paragraph over the
+/// game is the collision this layout exists to prevent.
+const MAX_ROWS: usize = 4;
+
+fn measure(cx: &mut Cx2d, draw: &mut DrawText, size: f32, text: &str) -> (f64, f64) {
+    draw.text_style.font_size = size;
+    let l = draw.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+    (l.size_in_lpxs.width as f64, l.size_in_lpxs.height as f64)
+}
+
+/// Break `text` into rows no wider than `max_w`: its own newlines first,
+/// then greedily by words; a word wider than the row is cut. Past
+/// `MAX_ROWS` the last row ends in an ellipsis.
+fn wrap_rows(cx: &mut Cx2d, draw: &mut DrawText, size: f32, text: &str, max_w: f64) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        let mut row = String::new();
+        for word in para.split(' ') {
+            let candidate = if row.is_empty() { word.to_string() } else { format!("{row} {word}") };
+            if measure(cx, draw, size, &candidate).0 <= max_w || row.is_empty() {
+                row = candidate;
+            } else {
+                rows.push(std::mem::take(&mut row));
+                row = word.to_string();
+            }
+        }
+        rows.push(row);
+    }
+    // Trailing blanks from a double space, and the empty last row of a text
+    // that ends in a newline, would stack empty plates.
+    for row in rows.iter_mut() {
+        *row = row.trim_end().to_string();
+    }
+    while rows.len() > 1 && rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    // The cap is on WRAPPING: rows the author wrote are all kept.
+    let cap = MAX_ROWS.max(text.trim_end().split('\n').count());
+    let mut ellipsize = |row: &mut String, force: bool| {
+        if !force && measure(cx, draw, size, row).0 <= max_w {
+            return;
+        }
+        loop {
+            let with = format!("{row}…");
+            if measure(cx, draw, size, &with).0 <= max_w || row.chars().count() <= 1 {
+                *row = with;
+                return;
+            }
+            row.pop();
+        }
+    };
+    if rows.len() > cap {
+        rows.truncate(cap);
+        let last = rows.last_mut().unwrap();
+        ellipsize(last, true);
+    }
+    for row in rows.iter_mut() {
+        ellipsize(row, false);
+    }
+    rows
+}
+
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.pos.x < b.pos.x + b.size.x
+        && b.pos.x < a.pos.x + a.size.x
+        && a.pos.y < b.pos.y + b.size.y
+        && b.pos.y < a.pos.y + a.size.y
+}
+
+/// HUD: named text slots and gauges pinned to seven anchors. Each anchor is
+/// a stack (top anchors grow downward, bottom ones upward, in insertion
+/// order); every slot is wrapped to its anchor's width and ellipsised past
+/// four rows; and the stacks are placed so they never cover each other or
+/// `avoid` (the composed HUD's panels): corners first, then the top strip,
+/// the banner and the bottom strip, each pushed clear of what is already
+/// down. Every block stands on a dark plate so it reads over a white sky and
+/// a black floor alike. "center" is the banner, "hint" the small control
+/// help. Color/size of 0 = defaults; explicit slot colours stay exact.
 pub fn draw_hud_overlay(
     cx: &mut Cx2d,
     rect: Rect,
-    draw_hud: &mut DrawText,
-    draw_dot: &mut DrawColor,
+    draws: &mut HudOverlayDraws,
     slots: &[(String, HudSlot)],
     bars: &[HudBar],
     crosshair: bool,
+    avoid: &[Rect],
 ) {
-    // Legacy/level-authored hint slots should sit behind the world instead
-    // of reading as near-white chrome. Explicit slot colors remain exact.
-    let default_color = vec4(1.0, 1.0, 1.0, 0.65);
-    // Per-anchor stacking cursors (y offset from the anchor's origin).
-    let mut cursors: [f64; 7] = [0.0; 7];
-    let anchor_index = |a: HudAnchor| match a {
-        HudAnchor::TopLeft => 0usize,
-        HudAnchor::Top => 1,
-        HudAnchor::TopRight => 2,
-        HudAnchor::Center => 3,
-        HudAnchor::BottomLeft => 4,
-        HudAnchor::Bottom => 5,
-        HudAnchor::BottomRight => 6,
-    };
-    let margin = 12.0f64;
-    // (x anchor: -1 left, 0 center, 1 right; base y; stack direction)
-    let anchor_home = |a: HudAnchor, rect: Rect| -> (f64, f64, f64) {
-        match a {
-            HudAnchor::TopLeft => (rect.pos.x + margin, rect.pos.y + 10.0, 1.0),
-            HudAnchor::Top => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 84.0, 1.0),
-            HudAnchor::TopRight => (rect.pos.x + rect.size.x - margin, rect.pos.y + 10.0, 1.0),
-            HudAnchor::Center => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 42.0, 1.0),
-            HudAnchor::BottomLeft => (rect.pos.x + margin, rect.pos.y + rect.size.y - 26.0, -1.0),
-            HudAnchor::Bottom => (
-                rect.pos.x + rect.size.x * 0.5,
-                rect.pos.y + rect.size.y - 26.0,
-                -1.0,
-            ),
-            HudAnchor::BottomRight => (
-                rect.pos.x + rect.size.x - margin,
-                rect.pos.y + rect.size.y - 26.0,
-                -1.0,
-            ),
-        }
-    };
+    let style = HudStyle::default();
+    let default_color = style.ink;
+    let hint_color = style.caption;
+    let corner_w = (rect.size.x * 0.38).max(120.0);
+    let strip_w = (rect.size.x - 2.0 * MARGIN).max(80.0);
+
+    let mut items: Vec<OverlayItem> = Vec::new();
     for (name, slot) in slots {
         if slot.text.is_empty() {
             continue;
         }
+        // A slot NAMED "center" is the banner wherever the author left it at
+        // the default anchor: that is what the name has always promised.
+        let anchor = if name == "center" && slot.anchor == HudAnchor::TopLeft { HudAnchor::Center } else { slot.anchor };
+        let banner = anchor == HudAnchor::Center;
         let default_size = match name.as_str() {
             "center" => 22.0,
             "top" => 15.0,
@@ -64,72 +151,198 @@ pub fn draw_hud_overlay(
             _ => 12.0,
         };
         let size = if slot.size > 0.0 { slot.size } else { default_size };
-        draw_hud.text_style.font_size = size;
-        draw_hud.color = if slot.color.w > 0.0 {
+        let color = if slot.color.w > 0.0 {
             slot.color
+        } else if name == "hint" {
+            hint_color
         } else {
             default_color
         };
-        let (home_x, home_y, stack_dir) = anchor_home(slot.anchor, rect);
-        let layout = draw_hud.layout(cx, 0.0, 0.0, None, false, Align::default(), &slot.text);
-        let width = layout.size_in_lpxs.width as f64;
-        let x = match slot.anchor {
-            HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - width * 0.5,
-            HudAnchor::TopRight | HudAnchor::BottomRight => home_x - width,
-            _ => home_x,
-        };
-        let ai = anchor_index(slot.anchor);
-        let y = home_y + cursors[ai] * stack_dir;
-        cursors[ai] += size as f64 * 1.55;
-        draw_hud.draw_abs(cx, dvec2(x, y), &slot.text);
+        // Readouts in the corners are numbers people watch change: the code
+        // face keeps their digits from jittering. A corner slot with no digit
+        // in it is prose (a level's one-line brief), and prose, banners and
+        // hints stay in the sans face.
+        let mono = matches!(anchor, HudAnchor::TopLeft | HudAnchor::TopRight | HudAnchor::BottomRight)
+            && name != "hint"
+            && slot.text.chars().any(|c| c.is_ascii_digit());
+        // Corner readouts keep to a narrow column; prose in a corner (the
+        // control help) may take most of the width, and the stacks placed
+        // after it step clear of whatever it covers.
+        let max_w = match anchor {
+            HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => strip_w,
+            _ if mono => corner_w,
+            _ => (rect.size.x * 0.62).max(corner_w),
+        } - 2.0 * PAD_X;
+        let draw = if mono { &mut *draws.code } else { &mut *draws.text };
+        let lines = wrap_rows(cx, draw, size, &slot.text, max_w.max(40.0));
+        let mut w: f64 = 0.0;
+        let mut line_h: f64 = 0.0;
+        for line in &lines {
+            let (lw, lh) = measure(cx, draw, size, if line.is_empty() { " " } else { line });
+            w = w.max(lw);
+            line_h = line_h.max(lh);
+        }
+        let h = line_h * lines.len() as f64;
+        items.push(OverlayItem {
+            anchor,
+            lines,
+            size,
+            color,
+            mono,
+            banner,
+            bar: None,
+            w: w + 2.0 * PAD_X,
+            h: h + 2.0 * PAD_Y,
+            line_h,
+        });
     }
-    // Gauges stack after the texts of their anchor.
     for bar in bars {
-        let (home_x, home_y, stack_dir) = anchor_home(bar.anchor, rect);
-        let ai = anchor_index(bar.anchor);
-        let y = home_y + cursors[ai] * stack_dir + 3.0;
-        cursors[ai] += 16.0;
-        let bar_w = 140.0f64;
-        let x = match bar.anchor {
-            HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - bar_w * 0.5,
-            HudAnchor::TopRight | HudAnchor::BottomRight => home_x - bar_w,
-            _ => home_x,
+        let label = if bar.name.starts_with('_') { String::new() } else { bar.name.to_uppercase() };
+        let label_w = if label.is_empty() { 0.0 } else { measure(cx, draws.code, BAR_LABEL, &label).0 + 6.0 };
+        items.push(OverlayItem {
+            anchor: bar.anchor,
+            lines: Vec::new(),
+            size: BAR_LABEL,
+            color: bar.color,
+            mono: true,
+            banner: false,
+            bar: Some((bar.fraction.clamp(0.0, 1.0), label)),
+            w: label_w + BAR_W + 2.0 * PAD_X,
+            h: 14.0,
+            line_h: 0.0,
+        });
+    }
+
+    // Place the stacks. Each is one block: its width the widest item, its
+    // height the items and gaps; the block moves as a whole.
+    let order = [
+        HudAnchor::TopLeft,
+        HudAnchor::TopRight,
+        HudAnchor::BottomLeft,
+        HudAnchor::BottomRight,
+        HudAnchor::Top,
+        HudAnchor::Center,
+        HudAnchor::Bottom,
+    ];
+    let mut taken: Vec<Rect> = avoid.to_vec();
+    let mut placed: Vec<(usize, f64, f64)> = Vec::new();
+    for anchor in order {
+        let members: Vec<usize> = (0..items.len()).filter(|i| items[*i].anchor == anchor).collect();
+        if members.is_empty() {
+            continue;
+        }
+        let block_w = members.iter().map(|i| items[*i].w).fold(0.0, f64::max);
+        let block_h = members.iter().map(|i| items[*i].h).sum::<f64>() + GAP * (members.len() - 1) as f64;
+        let down = matches!(anchor, HudAnchor::TopLeft | HudAnchor::Top | HudAnchor::TopRight | HudAnchor::Center);
+        let x = match anchor {
+            HudAnchor::TopLeft | HudAnchor::BottomLeft => rect.pos.x + MARGIN,
+            HudAnchor::TopRight | HudAnchor::BottomRight => rect.pos.x + rect.size.x - MARGIN - block_w,
+            _ => rect.pos.x + (rect.size.x - block_w) * 0.5,
         };
-        // Track, then fill.
-        draw_dot.color = vec4(0.05, 0.06, 0.1, 0.65);
-        draw_dot.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(x, y),
-                size: dvec2(bar_w, 10.0),
-            },
-        );
-        draw_dot.color = bar.color;
-        draw_dot.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(x + 1.0, y + 1.0),
-                size: dvec2((bar_w - 2.0) * bar.fraction.clamp(0.0, 1.0) as f64, 8.0),
-            },
-        );
+        let mut y = match anchor {
+            HudAnchor::Center => rect.pos.y + rect.size.y * 0.22,
+            _ if down => rect.pos.y + MARGIN,
+            _ => rect.pos.y + rect.size.y - MARGIN - block_h,
+        };
+        // Step clear of every block already down: below it for a top stack,
+        // above it for a bottom one. Bounded by the pane: a stack that cannot
+        // fit keeps its last spot rather than leaving the screen.
+        for _ in 0..taken.len() + 1 {
+            let block = Rect { pos: dvec2(x, y), size: dvec2(block_w, block_h) };
+            let Some(hit) = taken.iter().find(|t| overlaps(block, **t)) else { break };
+            let next = if down { hit.pos.y + hit.size.y + GAP } else { hit.pos.y - GAP - block_h };
+            if next < rect.pos.y || next + block_h > rect.pos.y + rect.size.y {
+                break;
+            }
+            y = next;
+        }
+        taken.push(Rect { pos: dvec2(x, y), size: dvec2(block_w, block_h) });
+        // Within the block, top stacks read downward, bottom stacks upward
+        // (the first item nearest its edge), each item aligned to its side.
+        let mut cursor = 0.0;
+        let seq: Vec<usize> = if down { members.clone() } else { members.iter().rev().cloned().collect() };
+        for i in seq {
+            let it = &items[i];
+            let ix = match anchor {
+                HudAnchor::TopLeft | HudAnchor::BottomLeft => x,
+                HudAnchor::TopRight | HudAnchor::BottomRight => x + block_w - it.w,
+                _ => x + (block_w - it.w) * 0.5,
+            };
+            placed.push((i, ix, y + cursor));
+            cursor += it.h + GAP;
+        }
+    }
+
+    for (i, x, y) in placed {
+        let it = &items[i];
+        let r = Rect { pos: dvec2(x, y), size: dvec2(it.w, it.h) };
+        // The plate: near-black glass, lighter than nothing, darker than any
+        // sky. Readouts carry a short accent tick on their leading edge, the
+        // banner a hairline above and below.
+        draws.rect.color = vec4(style.plate.x, style.plate.y, style.plate.z, if it.banner { 0.72 } else { 0.58 });
+        draws.rect.draw_abs(cx, r);
+        let tick = if it.bar.is_some() { it.color } else { style.accent };
+        if it.banner {
+            draws.rect.color = vec4(style.accent.x, style.accent.y, style.accent.z, 0.55);
+            draws.rect.draw_abs(cx, Rect { pos: r.pos, size: dvec2(r.size.x, 1.0) });
+            draws.rect.draw_abs(cx, Rect { pos: dvec2(r.pos.x, r.pos.y + r.size.y - 1.0), size: dvec2(r.size.x, 1.0) });
+        } else if it.mono {
+            let right = matches!(it.anchor, HudAnchor::TopRight | HudAnchor::BottomRight);
+            let tx = if right { r.pos.x + r.size.x - 2.0 } else { r.pos.x };
+            draws.rect.color = vec4(tick.x, tick.y, tick.z, 0.85);
+            draws.rect.draw_abs(cx, Rect { pos: dvec2(tx, r.pos.y), size: dvec2(2.0, r.size.y) });
+        }
+        if let Some((fraction, label)) = &it.bar {
+            let mut bx = x + PAD_X;
+            if !label.is_empty() {
+                draws.code.text_style.font_size = BAR_LABEL;
+                draws.code.color = style.caption;
+                draws.code.draw_abs(cx, dvec2(bx, y + 2.5), label);
+                bx += measure(cx, draws.code, BAR_LABEL, label).0 + 6.0;
+            }
+            let by = y + (it.h - BAR_H) * 0.5;
+            draws.rect.color = vec4(it.color.x, it.color.y, it.color.z, 0.18);
+            draws.rect.draw_abs(cx, Rect { pos: dvec2(bx, by), size: dvec2(BAR_W, BAR_H) });
+            draws.rect.color = it.color;
+            draws.rect.draw_abs(cx, Rect { pos: dvec2(bx, by), size: dvec2(BAR_W * *fraction as f64, BAR_H) });
+            continue;
+        }
+        let draw = if it.mono { &mut *draws.code } else { &mut *draws.text };
+        draw.text_style.font_size = it.size;
+        for (row, line) in it.lines.iter().enumerate() {
+            let (lw, _) = measure(cx, draw, it.size, line);
+            let lx = match it.anchor {
+                HudAnchor::TopRight | HudAnchor::BottomRight => x + it.w - PAD_X - lw,
+                HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => x + (it.w - lw) * 0.5,
+                _ => x + PAD_X,
+            };
+            let ly = y + PAD_Y + it.line_h * row as f64;
+            // A one-point dark shadow on top of the plate: the plate carries
+            // legibility, the shadow crispness over its translucent edge.
+            draw.color = vec4(0.0, 0.0, 0.0, it.color.w * 0.6);
+            draw.draw_abs(cx, dvec2(lx + 1.0, ly + 1.0), line);
+            draw.color = it.color;
+            draw.draw_abs(cx, dvec2(lx, ly), line);
+        }
     }
     // Restore defaults for anyone else using these draws.
-    draw_hud.text_style.font_size = 22.0;
-    draw_hud.color = default_color;
-    draw_dot.color = vec4(1.0, 1.0, 1.0, 0.9);
+    draws.text.text_style.font_size = 22.0;
+    draws.text.color = default_color;
+    draws.rect.color = vec4(1.0, 1.0, 1.0, 0.9);
 
     if crosshair {
-        let dot = 5.0;
-        draw_dot.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(
-                    rect.pos.x + (rect.size.x - dot) * 0.5,
-                    rect.pos.y + (rect.size.y - dot) * 0.5,
-                ),
-                size: dvec2(dot, dot),
-            },
-        );
+        let c = dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5);
+        // A dot and four short ticks: the dot for aim, the ticks so it
+        // survives a white background.
+        draws.rect.color = vec4(0.0, 0.0, 0.0, 0.5);
+        draws.rect.draw_abs(cx, Rect { pos: c - dvec2(3.5, 3.5), size: dvec2(7.0, 7.0) });
+        draws.rect.color = vec4(1.0, 1.0, 1.0, 0.95);
+        draws.rect.draw_abs(cx, Rect { pos: c - dvec2(2.0, 2.0), size: dvec2(4.0, 4.0) });
+        draws.rect.color = vec4(style.accent.x, style.accent.y, style.accent.z, 0.9);
+        for (dx, dy, w, h) in [(-11.0, -0.75, 5.0, 1.5), (6.0, -0.75, 5.0, 1.5), (-0.75, -11.0, 1.5, 5.0), (-0.75, 6.0, 1.5, 5.0)] {
+            draws.rect.draw_abs(cx, Rect { pos: c + dvec2(dx, dy), size: dvec2(w, h) });
+        }
+        draws.rect.color = vec4(1.0, 1.0, 1.0, 0.9);
     }
 }
 
@@ -195,13 +408,17 @@ use makepad_scene::hud::{
     text_size_for, CAPTION_SIZE, HUD_REFERENCE_HEIGHT, TEXT_SIZE,
 };
 use makepad_scene::{
-    CrosshairStyle, HudDoc, HudElement, HudKind, HudValue,
+    hud_affine_mul, hud_counted, hud_pose, CrosshairStyle, HudDoc, HudElement, HudKind, HudMapDot,
+    HudMapFit, HudSeen, HudValue, HUD_AFFINE_IDENTITY,
 };
 
 /// The look every element falls back to. One dark plate palette, so a HUD
 /// built out of defaults already reads as a game's rather than as a debug
 /// overlay — which is the whole difference a author should not have to spend
-/// their one attempt on.
+/// their one attempt on. The palette is the sandbox window's cyberpunk one:
+/// near-black glass plates with a cyan hairline, ice-white readouts, cyan
+/// gauges, a hot red for low. The plate stays dark and mostly opaque, so the
+/// readout holds over a white sky and a black floor alike (UI_DESIGN.md §4).
 #[derive(Clone, Copy, Debug)]
 pub struct HudStyle {
     pub plate: Vec4f,
@@ -218,15 +435,15 @@ pub struct HudStyle {
 impl Default for HudStyle {
     fn default() -> Self {
         Self {
-            plate: vec4(0.055, 0.063, 0.086, 0.82),
-            plate_border: vec4(1.0, 1.0, 1.0, 0.11),
+            plate: vec4(0.027, 0.031, 0.047, 0.80),
+            plate_border: vec4(0.078, 0.941, 1.0, 0.38),
             plate_radius: 6.0,
             plate_border_width: 1.0,
-            ink: vec4(0.88, 0.92, 0.97, 1.0),
-            caption: vec4(0.56, 0.63, 0.73, 1.0),
-            accent: vec4(0.27, 0.82, 0.48, 1.0),
-            low: vec4(1.0, 0.27, 0.22, 1.0),
-            track: vec4(1.0, 1.0, 1.0, 0.10),
+            ink: vec4(0.90, 0.98, 1.0, 1.0),
+            caption: vec4(0.55, 0.66, 0.75, 1.0),
+            accent: vec4(0.078, 0.941, 1.0, 1.0),
+            low: vec4(1.0, 0.23, 0.36, 1.0),
+            track: vec4(0.078, 0.941, 1.0, 0.10),
         }
     }
 }
@@ -247,6 +464,12 @@ pub struct HudBinder<'a> {
     /// the shared vector/glyph atlas hard enough to evict the application's
     /// own text, which is exactly what it looked like.
     pub glyph: &'a mut dyn FnMut(&mut Cx2d, Rect, &str, Vec4f) -> bool,
+    /// The dots a map element shows this frame (its `dots` resolved against
+    /// the world, the pane's subject flagged). Appends to the given list.
+    pub map_dots: &'a mut dyn FnMut(&HudElement, &mut Vec<HudMapDot>),
+    /// The flight HUD's frame for a `flight` element (the subject aircraft,
+    /// projected through this pane's camera); None draws nothing.
+    pub flight: &'a mut dyn FnMut(&HudElement, Rect) -> Option<FlightHud>,
 }
 
 /// The draw structs the host lends (they carry its theme styling).
@@ -254,10 +477,17 @@ pub struct HudDraws<'a> {
     pub shape: &'a mut DrawHudShape,
     pub image: &'a mut DrawHudImage,
     pub text: &'a mut DrawText,
+    /// Draw lists the host keeps between frames: an element drawn under a
+    /// transform (a pop's scale, a callout's skew) is drawn into one of
+    /// these with the transform as its view matrix. Grown on demand; only
+    /// elements that are transformed THIS frame take one.
+    pub lists: &'a mut Vec<DrawList2d>,
 }
 
 /// Draw the whole HUD document over `rect`, and report the fraction each
 /// gauge was asked to show so the host can settle its trailing chip bars.
+/// Every drawn element's rect is appended to `occupied`, so the slot HUD
+/// drawn after it (`draw_hud_overlay`) can keep its stacks clear of them.
 pub fn draw_hud_doc(
     cx: &mut Cx2d,
     rect: Rect,
@@ -266,9 +496,33 @@ pub fn draw_hud_doc(
     style: &HudStyle,
     binder: &mut HudBinder,
     spread: f32,
+    occupied: &mut Vec<Rect>,
+    seen: &mut Vec<HudSeen>,
 ) -> Vec<(String, f32)> {
-    let scale = (rect.size.y as f32 / HUD_REFERENCE_HEIGHT).max(0.35);
+    // The HUD is authored against a 1080-high pane. A pane narrower than
+    // 1.2 : 1 (a split-screen slice) scales by its WIDTH instead, so a bar
+    // laid out for a landscape screen still fits across a portrait one.
+    // Every landscape pane scales exactly as before.
+    let scale = (rect.size.y as f32 / HUD_REFERENCE_HEIGHT)
+        .min(rect.size.x as f32 / (HUD_REFERENCE_HEIGHT * 1.2))
+        .max(0.35);
+    // Motion is paid for only by a document that has some: a still HUD takes
+    // the plain path below with no pose work, no lists and no reports.
+    let moving = doc.elements.iter().any(moves);
     let mut fractions: Vec<(String, f32)> = Vec::new();
+    // A `when:` bind that is off this frame takes its element OUT of the
+    // layout (not just the draw), so a panel shrinks to what it shows
+    // instead of keeping empty rows for the hidden ones.
+    let gated = doc.elements.iter().any(|e| e.show && !e.when.is_empty()).then(|| {
+        let mut d = doc.clone();
+        for e in d.elements.iter_mut() {
+            if e.show && !e.when.is_empty() && !visible(e, binder) {
+                e.show = false;
+            }
+        }
+        d
+    });
+    let doc = gated.as_ref().unwrap_or(doc);
 
     // Flashes go UNDER the elements: a damage vignette must not wash out the
     // number that tells you how much damage it was.
@@ -297,31 +551,126 @@ pub fn draw_hud_doc(
         )
     };
 
+    // One scratch list for every map this frame (normally one map).
+    let mut map_dots: Vec<HudMapDot> = Vec::new();
+    // Each moving element's pose as an affine about its centre, composed with
+    // its containers' (a panel that pops carries its children with it), and
+    // its opacity likewise. Indexed like `doc.elements`; empty when still.
+    let mut poses: Vec<Option<([f32; 6], f32)>> = Vec::new();
+    let mut lists_used = 0usize;
+    if moving {
+        let mut rects: Vec<Option<Rect>> = vec![None; doc.elements.len()];
+        for p in &placed {
+            rects[p.index] = Some(Rect {
+                pos: dvec2(rect.pos.x + p.x as f64, rect.pos.y + p.y as f64),
+                size: dvec2(p.w as f64, p.h as f64),
+            });
+        }
+        poses = vec![None; doc.elements.len()];
+        for i in 0..doc.elements.len() {
+            pose_of(doc, i, &rects, scale, &mut poses);
+        }
+    }
     for p in &placed {
         let e = &doc.elements[p.index];
-        if !visible(e, binder) {
+        if !visible_in(doc, e, binder) {
+            if moving && moves(e) {
+                seen.push(HudSeen { name: e.name.clone(), visible: false, rect: [0.0; 4], number: None, text_key: 0 });
+            }
             continue;
         }
         let at = Rect {
             pos: dvec2(rect.pos.x + p.x as f64, rect.pos.y + p.y as f64),
             size: dvec2(p.w as f64, p.h as f64),
         };
-        match e.kind {
-            HudKind::Panel => draw_panel(cx, at, e, draws, style, scale),
-            HudKind::Bar => {
-                let f = gauge_fraction(e, binder);
-                fractions.push((e.name.clone(), f));
-                draw_bar(cx, at, e, draws, style, scale, f, binder);
+        if !matches!(e.kind, HudKind::Flash | HudKind::Marker) {
+            occupied.push(at);
+        }
+        let pose = if moving { poses[p.index] } else { None };
+        let Some((affine, opacity)) = pose else {
+            draw_element(cx, at, e, doc, draws, style, scale, binder, &mut map_dots, &mut fractions);
+            continue;
+        };
+        let (number, text_key) = motion_report(e, binder);
+        // Moving elements report for their tweens; the still children of a
+        // moving container report too, so the container's exit can take
+        // them along from where they last stood.
+        seen.push(HudSeen {
+            name: e.name.clone(),
+            visible: true,
+            rect: [p.x, p.y, p.w, p.h],
+            number,
+            text_key,
+        });
+        // A counting number draws the value it has counted to so far.
+        let counted = number.filter(|_| e.motion.count > 0.0).map(|n| hud_counted(e, n)).filter(|c| Some(*c) != number);
+        let moved = (opacity < 1.0 || counted.is_some()).then(|| {
+            let mut m = faded(e, opacity);
+            if let Some(c) = counted {
+                m.value = HudValue::Fixed(c);
             }
-            HudKind::Ring => {
-                let f = gauge_fraction(e, binder);
-                fractions.push((e.name.clone(), f));
-                draw_ring(cx, at, e, draws, style, scale, f, binder);
+            m
+        });
+        let faded_style = (opacity < 1.0).then(|| faded_style(style, opacity));
+        let e = moved.as_ref().unwrap_or(e);
+        let style = faded_style.as_ref().unwrap_or(style);
+        with_transform(cx, draws, &mut lists_used, affine, |cx, draws| {
+            draw_element(cx, at, e, doc, draws, style, scale, binder, &mut map_dots, &mut fractions);
+        });
+    }
+    // Elements that are no longer laid out but still playing their exit,
+    // drawn where they last stood; and the report that they are gone.
+    if moving {
+        let placed_set: Vec<bool> = {
+            let mut v = vec![false; doc.elements.len()];
+            for p in &placed {
+                v[p.index] = true;
             }
-            HudKind::Text => draw_readout(cx, at, e, draws, style, scale, binder),
-            HudKind::Icon => draw_icon(cx, at, e, draws, style, scale, binder),
-            HudKind::Log => draw_log(cx, at, e, doc, draws, style, scale),
-            HudKind::Flash | HudKind::Marker => {}
+            v
+        };
+        for (i, e) in doc.elements.iter().enumerate() {
+            if placed_set[i] || !moves(e) {
+                continue;
+            }
+            seen.push(HudSeen { name: e.name.clone(), visible: false, rect: [0.0; 4], number: None, text_key: 0 });
+            let st = &e.motion_state;
+            if !(st.exit_age.is_finite() && st.exit_age < e.motion.exit.secs) || st.rect[2] <= 0.0 {
+                continue;
+            }
+            let at = Rect {
+                pos: dvec2(rect.pos.x + st.rect[0] as f64, rect.pos.y + st.rect[1] as f64),
+                size: dvec2(st.rect[2] as f64, st.rect[3] as f64),
+            };
+            let pose = hud_pose(e, scale);
+            let centre = vec2f((at.pos.x + at.size.x * 0.5) as f32, (at.pos.y + at.size.y * 0.5) as f32);
+            let affine = pose.affine(centre);
+            let fs = faded_style(style, pose.opacity);
+            // The element and everything inside it, as they last stood.
+            let mut going: Vec<(Rect, HudElement)> = vec![(at, faded(e, pose.opacity))];
+            for c in doc.elements.iter().filter(|c| inside(doc, c, &e.name)) {
+                let r = c.motion_state.rect;
+                if r[2] > 0.0 {
+                    let cat = Rect {
+                        pos: dvec2(rect.pos.x + r[0] as f64, rect.pos.y + r[1] as f64),
+                        size: dvec2(r[2] as f64, r[3] as f64),
+                    };
+                    going.push((cat, faded(c, pose.opacity)));
+                }
+            }
+            with_transform(cx, draws, &mut lists_used, affine, |cx, draws| {
+                for (cat, m) in &going {
+                    draw_element(cx, *cat, m, doc, draws, &fs, scale, binder, &mut map_dots, &mut fractions);
+                }
+            });
+        }
+    }
+
+    // The flight HUD owns the whole pane, under the markers and crosshair.
+    for e in &doc.elements {
+        if e.kind == HudKind::Flight && visible(e, binder) {
+            if let Some(hud) = (binder.flight)(e, rect) {
+                draw_flight(cx, rect, e, draws, &hud);
+            }
         }
     }
 
@@ -335,6 +684,199 @@ pub fn draw_hud_doc(
     }
     restore(draws, style);
     fractions
+}
+
+/// Whether an element takes part in motion this frame: declared motion, or
+/// a one-shot punch still running.
+fn moves(e: &HudElement) -> bool {
+    let st = &e.motion_state;
+    !e.motion.is_still()
+        || (st.punch_age.is_finite() && st.punch_age < st.punch.secs)
+        || (st.shake_age.is_finite() && st.shake_age < st.shake.secs)
+}
+
+/// The composed pose of element `i` (its own over its containers'), memoised
+/// in `poses`. None when neither it nor any container moves.
+fn pose_of(
+    doc: &HudDoc,
+    i: usize,
+    rects: &[Option<Rect>],
+    units: f32,
+    poses: &mut Vec<Option<([f32; 6], f32)>>,
+) -> Option<([f32; 6], f32)> {
+    if let Some(p) = poses[i] {
+        return Some(p);
+    }
+    let e = &doc.elements[i];
+    let parent = if e.parent.is_empty() {
+        None
+    } else {
+        doc.elements
+            .iter()
+            .position(|p| p.name == e.parent)
+            .filter(|p| *p != i)
+            .and_then(|p| pose_of(doc, p, rects, units, poses))
+    };
+    let own = if moves(e) {
+        rects[i].map(|r| {
+            let pose = hud_pose(e, units);
+            let centre = vec2f((r.pos.x + r.size.x * 0.5) as f32, (r.pos.y + r.size.y * 0.5) as f32);
+            (pose.affine(centre), pose.opacity)
+        })
+    } else {
+        None
+    };
+    let out = match (parent, own) {
+        (None, None) => return None,
+        (Some(p), None) => p,
+        (None, Some(o)) => o,
+        (Some((pa, po)), Some((oa, oo))) => (hud_affine_mul(pa, oa), po * oo),
+    };
+    poses[i] = Some(out);
+    Some(out)
+}
+
+/// Whether `e` sits (at any depth) inside the element named `ancestor`.
+fn inside(doc: &HudDoc, e: &HudElement, ancestor: &str) -> bool {
+    let mut at = e;
+    for _ in 0..16 {
+        if at.parent.is_empty() {
+            return false;
+        }
+        if at.parent == ancestor {
+            return true;
+        }
+        match doc.elements.iter().find(|p| p.name == at.parent) {
+            Some(p) => at = p,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// What change detection watches on an element: its number and its text.
+fn motion_report(e: &HudElement, binder: &mut HudBinder) -> (Option<f32>, u64) {
+    let number = match e.kind {
+        HudKind::Bar | HudKind::Ring | HudKind::Text if !e.value.is_none() => (binder.number)(&e.value, e.of),
+        _ => None,
+    };
+    let text_key = if e.kind == HudKind::Text {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        element_text(e, binder).hash(&mut h);
+        h.finish() | 1
+    } else {
+        0
+    };
+    (number, text_key)
+}
+
+/// A copy of the element with every colour it names taken to `a` of its
+/// alpha (a zero alpha still means "the style's own", which the faded style
+/// supplies).
+fn faded(e: &HudElement, a: f32) -> HudElement {
+    let mut m = e.clone();
+    if a < 1.0 {
+        for c in [&mut m.color, &mut m.track, &mut m.border_color, &mut m.low_color, &mut m.dot_color, &mut m.self_color, &mut m.lead_color] {
+            c.w *= a;
+        }
+    }
+    m
+}
+
+fn faded_style(style: &HudStyle, a: f32) -> HudStyle {
+    let mut s = *style;
+    for c in [&mut s.plate, &mut s.plate_border, &mut s.ink, &mut s.caption, &mut s.accent, &mut s.low, &mut s.track] {
+        c.w *= a;
+    }
+    s
+}
+
+/// Draw through `affine` (pane pixels to pane pixels): into the next pooled
+/// draw list with it as the view matrix, or straight through when it is the
+/// identity.
+fn with_transform(
+    cx: &mut Cx2d,
+    draws: &mut HudDraws,
+    used: &mut usize,
+    affine: [f32; 6],
+    draw: impl FnOnce(&mut Cx2d, &mut HudDraws),
+) {
+    if affine == HUD_AFFINE_IDENTITY {
+        draw(cx, draws);
+        return;
+    }
+    if draws.lists.len() <= *used {
+        draws.lists.push(DrawList2d::new(cx));
+    }
+    let id = draws.lists[*used].id();
+    *used += 1;
+    // Always re-recorded: the list is drawn from inside the host's own
+    // redraw, and what it holds (a pose, a counted number) changes every
+    // frame it is used. A `redraw_list` here would only take effect on the
+    // NEXT redraw and leave this one showing last frame's pose.
+    if draws.lists[*used - 1].begin_maybe(cx, true).is_redrawing() {
+        let [a, b, c, d, tx, ty] = affine;
+        let m = Mat4f { v: [a, b, 0.0, 0.0, c, d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0] };
+        let gen = cx.next_uniform_gen();
+        cx.draw_lists[id].set_uniform_view_transform(&m, gen);
+        draw(cx, draws);
+        draws.lists[*used - 1].end(cx);
+    }
+}
+
+/// One laid-out element, by kind.
+#[allow(clippy::too_many_arguments)]
+fn draw_element(
+    cx: &mut Cx2d,
+    at: Rect,
+    e: &HudElement,
+    doc: &HudDoc,
+    draws: &mut HudDraws,
+    style: &HudStyle,
+    scale: f32,
+    binder: &mut HudBinder,
+    map_dots: &mut Vec<HudMapDot>,
+    fractions: &mut Vec<(String, f32)>,
+) {
+    match e.kind {
+        HudKind::Panel => draw_panel(cx, at, e, draws, style, scale),
+        HudKind::Bar => {
+            let f = gauge_fraction(e, binder);
+            fractions.push((e.name.clone(), f));
+            draw_bar(cx, at, e, draws, style, scale, f, binder);
+        }
+        HudKind::Ring => {
+            let f = gauge_fraction(e, binder);
+            fractions.push((e.name.clone(), f));
+            draw_ring(cx, at, e, draws, style, scale, f, binder);
+        }
+        HudKind::Text => draw_readout(cx, at, e, draws, style, scale, binder),
+        HudKind::Icon => draw_icon(cx, at, e, draws, style, scale, binder),
+        HudKind::Log => draw_log(cx, at, e, doc, draws, style, scale),
+        HudKind::Map => draw_map(cx, at, e, draws, style, scale, binder, map_dots),
+        HudKind::Flash | HudKind::Marker | HudKind::Flight => {}
+    }
+}
+
+/// Visible itself AND inside visible containers: a panel hidden by `when:`
+/// or `hud_show` takes everything inside it along (a `free` stack's children
+/// would otherwise draw at the hidden panel's origin).
+fn visible_in(doc: &HudDoc, e: &HudElement, binder: &mut HudBinder) -> bool {
+    let mut at = e;
+    for _ in 0..16 {
+        if !visible(at, binder) {
+            return false;
+        }
+        if at.parent.is_empty() {
+            return true;
+        }
+        match doc.elements.iter().find(|p| p.name == at.parent) {
+            Some(parent) => at = parent,
+            None => return true,
+        }
+    }
+    true
 }
 
 /// A `when:` bind gates visibility, with a leading `!` inverting it. This is
@@ -583,6 +1125,212 @@ fn draw_ring(
     }
 }
 
+/// A minimap: the plate, the polyline (a dark under-stroke, then the line),
+/// then every dot — others as discs (the leader in its own colour), the
+/// subject last as a heading dart so it is never covered.
+#[allow(clippy::too_many_arguments)]
+fn draw_map(
+    cx: &mut Cx2d,
+    at: Rect,
+    e: &HudElement,
+    draws: &mut HudDraws,
+    style: &HudStyle,
+    scale: f32,
+    binder: &mut HudBinder,
+    dots: &mut Vec<HudMapDot>,
+) {
+    // A radar is round, centred on the pane's own subject at a fixed
+    // scale, and clips what it draws to its circle.
+    let radar = e.range > 0.0;
+    let (ground, border_color, border, radius) = plate(e, style);
+    if ground.w > 0.0 || border > 0.0 {
+        draws.shape.shape = if radar { 5.0 } else { 0.0 };
+        draws.shape.fill = ground;
+        draws.shape.stroke = border_color;
+        draws.shape.border = border * scale;
+        draws.shape.radius = radius * scale;
+        draws.shape.draw_abs(cx, at);
+    }
+    dots.clear();
+    (binder.map_dots)(e, dots);
+    let pad = 12.0 * scale;
+    let (ox, oy) = (
+        at.pos.x + at.size.x * 0.5,
+        at.pos.y + at.size.y * 0.5,
+    );
+    // The radar's usable circle, in pixels from the centre.
+    let rim = (at.size.x.min(at.size.y) * 0.5 - pad as f64 * 0.5).max(4.0);
+    let fit = if radar {
+        let (x, z) = dots
+            .iter()
+            .find(|d| d.is_self)
+            .map(|d| (d.x, d.z))
+            .or_else(|| e.points.first().map(|p| (p.x, p.y)))
+            .unwrap_or((0.0, 0.0));
+        Some(HudMapFit::radar(x, z, e.range, rim as f32))
+    } else {
+        HudMapFit::new(&e.points, at.size.x as f32, at.size.y as f32, pad, e.rotate)
+    };
+    let Some(mut fit) = fit else {
+        return;
+    };
+    if e.rotate {
+        if let Some(me) = dots.iter().find(|d| d.is_self) {
+            fit = fit.heading_up(me.fx, me.fz);
+        }
+    }
+    let to_px = |x: f32, z: f32| {
+        let (px, py) = fit.apply(x, z);
+        (ox + px as f64, oy + py as f64)
+    };
+    let width = if e.thickness > 0.0 { e.thickness } else { 3.0 } * scale;
+    let line = if e.color.w > 0.0 { e.color } else { style.ink };
+    let under = if e.track.w > 0.0 { e.track } else { vec4(0.0, 0.0, 0.0, 0.55) };
+    let n = e.points.len();
+    let segments = if e.closed { n } else { n.saturating_sub(1) };
+    draws.shape.border = 0.0;
+    draws.shape.radius = 0.0;
+    if radar {
+        // A faint ring at half range: distance at a glance.
+        draws.shape.shape = 1.0;
+        draws.shape.fill = vec4(line.x, line.y, line.z, 0.18);
+        draws.shape.thickness = 1.0 * scale;
+        draws.shape.from = 0.0;
+        draws.shape.sweep = std::f32::consts::TAU;
+        draws.shape.frac = 1.0;
+        let r = rim * 0.5 + 1.0 + 0.5 * scale as f64;
+        draws.shape.draw_abs(cx, Rect { pos: dvec2(ox - r, oy - r), size: dvec2(r * 2.0, r * 2.0) });
+    }
+    let clip_r = rim - 1.0;
+    for (color, w) in [(under, width + 3.0 * scale), (line, width)] {
+        draws.shape.fill = color;
+        draws.shape.thickness = w;
+        for k in 0..segments {
+            let a = e.points[k];
+            let b = e.points[(k + 1) % n];
+            let (x0, y0) = to_px(a.x, a.y);
+            let (x1, y1) = to_px(b.x, b.y);
+            let ((x0, y0), (x1, y1)) = if radar {
+                match clip_to_circle((x0 - ox, y0 - oy), (x1 - ox, y1 - oy), clip_r - w as f64 * 0.5) {
+                    Some(((ax, ay), (bx, by))) => ((ax + ox, ay + oy), (bx + ox, by + oy)),
+                    None => continue,
+                }
+            } else {
+                ((x0, y0), (x1, y1))
+            };
+            let half = w as f64 * 0.5 + 1.0;
+            // Which diagonal of its box the segment runs along.
+            draws.shape.shape = if (x1 - x0) * (y1 - y0) >= 0.0 { 2.0 } else { 3.0 };
+            draws.shape.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x0.min(x1) - half, y0.min(y1) - half),
+                    size: dvec2((x1 - x0).abs() + half * 2.0, (y1 - y0).abs() + half * 2.0),
+                },
+            );
+        }
+    }
+    let d = if e.dot_size > 0.0 { e.dot_size } else { 9.0 } * scale;
+    let other = if e.dot_color.w > 0.0 { e.dot_color } else { vec4(0.92, 0.94, 0.96, 1.0) };
+    let lead = if e.lead_color.w > 0.0 { e.lead_color } else { other };
+    let mine = if e.self_color.w > 0.0 { e.self_color } else { style.accent };
+    let outline = vec4(0.02, 0.03, 0.05, 0.9);
+    let label_size = (11.0 * scale).max(8.0);
+    for pass in 0..2 {
+        for dot in dots.iter() {
+            // Others first, the subject over them.
+            if dot.is_self != (pass == 1) {
+                continue;
+            }
+            let (x, y) = to_px(dot.x, dot.z);
+            if radar && !dot.is_self && ((x - ox).powi(2) + (y - oy).powi(2)).sqrt() > clip_r {
+                continue;
+            }
+            if dot.is_self {
+                let r = (d * 1.9) as f64;
+                let (dx, dy) = fit.apply_dir(dot.fx, dot.fz);
+                draws.shape.shape = 4.0;
+                draws.shape.from = dx.atan2(-dy);
+                draws.shape.fill = mine;
+                draws.shape.stroke = outline;
+                draws.shape.border = 1.5 * scale;
+                draws.shape.draw_abs(cx, Rect { pos: dvec2(x - r * 0.5, y - r * 0.5), size: dvec2(r, r) });
+                draws.shape.from = 0.0;
+            } else {
+                let r = d as f64;
+                draws.shape.shape = 0.0;
+                draws.shape.fill = if dot.rank == 1 { lead } else { other };
+                draws.shape.stroke = outline;
+                draws.shape.border = 1.5 * scale;
+                draws.shape.radius = d * 0.5;
+                draws.shape.draw_abs(cx, Rect { pos: dvec2(x - r * 0.5, y - r * 0.5), size: dvec2(r, r) });
+                draws.shape.radius = 0.0;
+            }
+            if e.labels && dot.rank > 0 {
+                let text = dot.rank.to_string();
+                draws.text.text_style.font_size = label_size;
+                draws.text.color = if dot.is_self { mine } else { style.ink };
+                draws.text.draw_abs(cx, dvec2(x + d as f64 * 0.8, y - label_size as f64 * 1.1), &text);
+            }
+        }
+    }
+    // Targets: in place when in range, an arrow on the rim pointing at
+    // them when not.
+    if radar && !e.targets.is_empty() {
+        let ink = if e.target_color.w > 0.0 { e.target_color } else { style.low };
+        for t in &e.targets {
+            let (x, y) = to_px(t.x, t.y);
+            let (dx, dy) = (x - ox, y - oy);
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist <= clip_r - d as f64 {
+                let r = d as f64 * 1.3;
+                draws.shape.shape = 0.0;
+                draws.shape.fill = ink;
+                draws.shape.stroke = outline;
+                draws.shape.border = 1.5 * scale;
+                draws.shape.radius = 0.0;
+                draws.shape.draw_abs(cx, Rect { pos: dvec2(x - r * 0.5, y - r * 0.5), size: dvec2(r, r) });
+            } else {
+                let r = d as f64 * 1.8;
+                let (ux, uy) = if dist > 1.0e-6 { (dx / dist, dy / dist) } else { (0.0, -1.0) };
+                let (px, py) = (ox + ux * (clip_r - r * 0.5), oy + uy * (clip_r - r * 0.5));
+                draws.shape.shape = 4.0;
+                draws.shape.from = (ux as f32).atan2(-uy as f32);
+                draws.shape.fill = ink;
+                draws.shape.stroke = outline;
+                draws.shape.border = 1.5 * scale;
+                draws.shape.draw_abs(cx, Rect { pos: dvec2(px - r * 0.5, py - r * 0.5), size: dvec2(r, r) });
+                draws.shape.from = 0.0;
+            }
+        }
+    }
+    draws.shape.shape = 0.0;
+    draws.shape.border = 0.0;
+}
+
+/// The part of the segment a..b (relative to a circle's centre) inside a
+/// circle of radius `r`, or None when it misses it.
+fn clip_to_circle(a: (f64, f64), b: (f64, f64), r: f64) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let qa = dx * dx + dy * dy;
+    let qb = 2.0 * (a.0 * dx + a.1 * dy);
+    let qc = a.0 * a.0 + a.1 * a.1 - r * r;
+    if qa < 1.0e-12 {
+        return (qc <= 0.0).then_some((a, b));
+    }
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc <= 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t0 = ((-qb - s) / (2.0 * qa)).max(0.0);
+    let t1 = ((-qb + s) / (2.0 * qa)).min(1.0);
+    if t0 >= t1 {
+        return None;
+    }
+    Some(((a.0 + dx * t0, a.1 + dy * t0), (a.0 + dx * t1, a.1 + dy * t1)))
+}
+
 /// The string a Text element shows: prefix, the number or literal, suffix.
 fn element_text(e: &HudElement, binder: &mut HudBinder) -> String {
     if e.kind != HudKind::Text {
@@ -628,6 +1376,9 @@ fn draw_readout(
     scale: f32,
     binder: &mut HudBinder,
 ) {
+    if e.style == "sheet" && draw_sheet_readout(cx, at, e, draws, binder) {
+        return;
+    }
     let size = if e.glyph > 0.0 { e.glyph } else { text_size_for(&e.style) } * scale;
     let text = element_text(e, binder);
     let frac = if e.max.is_none() && e.low > 0.0 {
@@ -676,6 +1427,49 @@ fn draw_readout(
         return;
     }
     draws.text.draw_abs(cx, dvec2(x, y), &text);
+}
+
+/// The cells of a `style: "sheet"` glyph strip, left to right.
+pub const SHEET_GLYPHS: &str = "0123456789%-";
+
+/// `style: "sheet"`: the readout drawn from a bitmap glyph strip (`image`) —
+/// one row of equal cells holding [`SHEET_GLYPHS`], the way the classic
+/// status bars drew their numbers (Doom's STTNUM). Glyphs are as tall as the
+/// element's box and keep the cell's proportions; the number is
+/// right-aligned in the box, as those bars aligned theirs. Characters the
+/// strip does not hold advance one cell blank. False until the strip has
+/// loaded, so the text lane stands in for it meanwhile.
+fn draw_sheet_readout(
+    cx: &mut Cx2d,
+    at: Rect,
+    e: &HudElement,
+    draws: &mut HudDraws,
+    binder: &mut HudBinder,
+) -> bool {
+    let Some((texture, w, h)) = (binder.image)(&e.image) else {
+        return false;
+    };
+    let cells = SHEET_GLYPHS.chars().count() as f32;
+    if w <= 0.0 || h <= 0.0 {
+        return false;
+    }
+    let text = element_text(e, binder);
+    let gh = at.size.y;
+    let gw = gh * ((w / cells) / h) as f64;
+    draws.image.tint = if e.color.w > 0.0 { e.color } else { vec4(1.0, 1.0, 1.0, 1.0) };
+    draws.image.tex_size = vec2f(w, h);
+    draws.image.pixelated = 1.0;
+    draws.image.draw_vars.set_texture(0, &texture);
+    let mut x = at.pos.x + at.size.x;
+    for ch in text.chars().rev() {
+        x -= gw;
+        let Some(i) = SHEET_GLYPHS.chars().position(|g| g == ch) else { continue };
+        let u0 = i as f32 / cells;
+        draws.image.uv_rect = vec4(u0, 0.0, u0 + 1.0 / cells, 1.0);
+        draws.image.draw_abs(cx, Rect { pos: dvec2(x, at.pos.y), size: dvec2(gw, gh) });
+    }
+    draws.image.uv_rect = vec4(0.0, 0.0, 1.0, 1.0);
+    true
 }
 
 fn draw_icon(

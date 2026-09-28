@@ -40,8 +40,8 @@ impl Document {
     pub fn default_review_poses(&self)->Vec<ReviewPose>{
         if self.soft_body().is_some(){return ["acceleration","landing","wall"].into_iter().map(|scenario|ReviewPose::SoftBody{scenario:scenario.into()}).collect();}
 
-        if !self.scene().wheels.is_empty(){
-            let steering=self.scene().wheels.values().map(|w|w.visual.map_or(0.55,|v|if v.steer_gain>0.{(v.steer_max/v.steer_gain).min(1.2)}else{0.})).fold(0.,f64::max);
+        if self.scene().wheels.values().any(|w|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())){
+            let steering=self.scene().wheels.values().filter(|w|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())).map(|w|w.visual.map_or(0.55,|v|if v.steer_gain>0.{(v.steer_max/v.steer_gain).min(1.2)}else{0.})).fold(0.,f64::max);
             let compression=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,5.),|v|v.compression)).fold(0.,f64::max);
             let droop=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,5.),|v|v.droop)).fold(0.,f64::max);
             return [(-steering,compression),(steering,compression),(-steering,-droop),(steering,-droop)].into_iter().map(|(steer,suspension)|ReviewPose::Vehicle{steer,suspension}).collect();

@@ -14,13 +14,15 @@ use crate::{
 
 #[cfg(target_os = "macos")]
 use crate::os::apple::apple_util::cfstring_ref_to_string;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 #[cfg(target_os = "macos")]
 use std::{
     ptr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::Mutex,
     thread::{self, JoinHandle},
 };
 
@@ -30,7 +32,7 @@ pub struct AppleGameInput {
     pub states: Vec<GameInputState>,
     gc_gamepads: Vec<GameInputInfo>,
     gc_states: Vec<GameInputState>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     haptics: Vec<Option<AppleControllerHaptics>>,
     #[cfg(target_os = "macos")]
     raw_hid: AppleRawHidInput,
@@ -44,7 +46,7 @@ impl AppleGameInput {
             states: Vec::new(),
             gc_gamepads: Vec::new(),
             gc_states: Vec::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
             haptics: Vec::new(),
             #[cfg(target_os = "macos")]
             raw_hid: AppleRawHidInput::new(),
@@ -160,7 +162,7 @@ impl AppleGameInput {
         self.controllers.push(ptr);
         self.gc_states
             .push(GameInputState::Gamepad(GamepadState::default()));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
         self.haptics.push(unsafe { AppleControllerHaptics::new(ptr) });
     }
 
@@ -170,7 +172,7 @@ impl AppleGameInput {
             self.gc_gamepads.remove(index);
             self.controllers.remove(index);
             self.gc_states.remove(index);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
             self.haptics.remove(index);
             unsafe {
                 let _: () = msg_send![ptr, release];
@@ -283,7 +285,7 @@ impl AppleGameInput {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[link(name = "GameController", kind = "framework")]
 unsafe extern "C" {
     static GCHapticsLocalityDefault: ObjcId;
@@ -291,7 +293,7 @@ unsafe extern "C" {
     static GCHapticsLocalityRightHandle: ObjcId;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[link(name = "CoreHaptics", kind = "framework")]
 unsafe extern "C" {
     static CHHapticEventTypeHapticContinuous: ObjcId;
@@ -302,14 +304,14 @@ unsafe extern "C" {
 /// One platform-owned Core Haptics engine. Engines start asynchronously;
 /// the UI can keep polling/publishing without waiting for Bluetooth or the
 /// haptic server. Short retained players are reaped on the next sample.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 struct AppleHapticChannel {
     engine: ObjcId,
     ready: Arc<AtomicBool>,
     players: Vec<(ObjcId, std::time::Instant)>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 impl AppleHapticChannel {
     unsafe fn new(device_haptics: ObjcId, locality: ObjcId) -> Option<Self> {
         let engine: ObjcId = msg_send![device_haptics, createEngineWithLocality: locality];
@@ -404,7 +406,7 @@ impl AppleHapticChannel {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 impl Drop for AppleHapticChannel {
     fn drop(&mut self) {
         unsafe {
@@ -421,13 +423,13 @@ impl Drop for AppleHapticChannel {
 
 /// Per-controller left/right handle channels. A controller with only the
 /// default locality uses one channel and receives the stronger side.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 struct AppleControllerHaptics {
     left: AppleHapticChannel,
     right: Option<AppleHapticChannel>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 impl AppleControllerHaptics {
     unsafe fn new(controller: ObjcId) -> Option<Self> {
         let selector = Sel::register("haptics");
@@ -1307,7 +1309,7 @@ impl CxGameInputApi for Cx {
     }
 
     fn gamepad_haptic_capabilities(&mut self, id: LiveId) -> GamepadHapticCapabilities {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
         if let Some(game_input) = &self.os.apple_game_input {
             if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
                 return game_input.haptics[index]
@@ -1316,13 +1318,13 @@ impl CxGameInputApi for Cx {
                     .unwrap_or_default();
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
         let _ = id;
         Default::default()
     }
 
     fn gamepad_haptic_pulse(&mut self, id: LiveId, pulse: GamepadHapticPulse) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
         if let Some(game_input) = &mut self.os.apple_game_input {
             if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
                 if let Some(haptics) = &mut game_input.haptics[index] {
@@ -1330,7 +1332,7 @@ impl CxGameInputApi for Cx {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
         let _ = (id, pulse);
         false
     }

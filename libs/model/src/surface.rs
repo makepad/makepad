@@ -63,11 +63,26 @@ pub enum PatternKind {
     Perlin,
     Fbm,
     Yarn,
+    /// Running-bond masonry: scale is [bricks per row, rows] per UV tile;
+    /// color_a is the mortar, color_b the brick face.
+    Bricks,
+    /// Square tiles or pavers with grout lines (color_a) and per-tile tone.
+    Tiles,
+    /// Staggered boards along U with fine grain; color_a is the gap.
+    Planks,
+    /// Rounded horizontal slots (color_a) on a plate; scale = [columns, rows].
+    Vents,
+    /// Hexagonal mesh holes (color_a) in a grille; scale = cells per tile.
+    Grille,
+    /// Diamond knurling/stippling for grips; color_a is the groove.
+    Knurl,
 }
 impl PatternKind {
     pub fn name(self) -> &'static str { match self {
         Self::Checker => "checker", Self::Stripes => "stripes", Self::Gradient => "gradient",
         Self::Noise => "noise", Self::Perlin => "perlin", Self::Fbm => "fbm", Self::Yarn => "yarn",
+        Self::Bricks => "bricks", Self::Tiles => "tiles", Self::Planks => "planks",
+        Self::Vents => "vents", Self::Grille => "grille", Self::Knurl => "knurl",
     } }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -286,6 +301,12 @@ pub enum SurfaceOperation {
         vertices: Vec<mesh::VertexId>,
         color: [f64; 4],
         opacity: f64,
+    },
+    /// Replaces the colours of many vertices at once (baked weathering).
+    VertexColors {
+        object: String,
+        vertices: Vec<mesh::VertexId>,
+        colors: Vec<[f64; 4]>,
     },
     Bake {
         source: String,
@@ -758,6 +779,17 @@ impl SurfaceState {
                     }
                 }
             }
+            VertexColors { object, vertices, colors } => {
+                if vertices.len() != colors.len() || vertices.is_empty() || vertices.len() > limits.mesh.max_vertices || !colors.iter().all(|c| color_valid(c)) {
+                    return Err(Error::Invalid("vertex colors"));
+                }
+                let mesh = objects.get(object).ok_or(Error::Invalid("unknown paint object"))?;
+                for (id, color) in vertices.iter().zip(colors) {
+                    ctx.checkpoint(1)?;
+                    mesh.vertex(*id).ok_or(Error::Invalid("unknown painted vertex"))?;
+                    self.vertex_colors.insert((object.clone(), *id), *color);
+                }
+            }
             Bake { .. } => geometry::bake(self, op, objects, legacy, limits, ctx)?,
             Dilate {
                 material,
@@ -819,12 +851,13 @@ impl SurfaceOperation {
             Mask { mask, .. } => mask.as_ref().map_or(0, Vec::len) + 256,
             Stroke { points, .. } => points.len() * 16 + 512,
             VertexPaint { vertices, .. } => vertices.len() * 8 + 256,
+            VertexColors { vertices, .. } => vertices.len() * 40 + 256,
             _ => 512,
         }
     }
     pub fn object_name(&self) -> Option<&str> {
         match self {
-            Self::ProjectedStroke { object, .. } | Self::VertexPaint { object, .. } => Some(object),
+            Self::ProjectedStroke { object, .. } | Self::VertexPaint { object, .. } | Self::VertexColors { object, .. } => Some(object),
             Self::Bake { target, .. } => Some(target),
             _ => None,
         }
@@ -960,7 +993,7 @@ fn render_pattern(
                     n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
                     ((n ^ (n >> 31)) >> 11) as f64 / ((1u64 << 53) - 1) as f64
                 },
-                PatternKind::Perlin | PatternKind::Fbm | PatternKind::Yarn =>
+                PatternKind::Perlin | PatternKind::Fbm | PatternKind::Yarn | PatternKind::Bricks | PatternKind::Tiles | PatternKind::Planks | PatternKind::Vents | PatternKind::Grille | PatternKind::Knurl =>
                     pattern_sampler::sample(pattern.kind, u, v, pattern.scale, pattern.seed),
             };
             let mut color = [0.; 4];

@@ -548,6 +548,10 @@ impl CxSplashVmExt for Cx {
         };
         let outer_std = std::mem::replace(&mut self.script_data.std, std);
         let outer_vm = self.script_vm.take();
+        // An isolate wears the stylesheet of the VM that allocates it, as an
+        // embedded `Splash` does on reapply: panels a guest builds from the
+        // stock widgets match the window they sit in.
+        let inherited = outer_vm.as_ref().and_then(|outer| crate::desktop_style::sheet_of_heap(self, outer.heap.heap_key()));
         self.script_vm = Some(Box::new(ScriptVmBase::new()));
         let bx = {
             let bx = self.script_vm.take().unwrap();
@@ -556,6 +560,9 @@ impl CxSplashVmExt for Cx {
                 bx,
             };
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
+            if let Some(sheet) = inherited {
+                crate::desktop_style::install(&mut vm, sheet);
+            }
             crate::theme_mod(&mut vm);
             match splash_theme() {
                 SplashTheme::Light => {

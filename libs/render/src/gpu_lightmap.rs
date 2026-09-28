@@ -71,13 +71,20 @@
 //! per-frame cost is the cascade depth pass.
 
 use crate::lightmap::{plan_atlas, LmLight, LmRect, LmScene};
-use crate::shadow_csm::{fit_cascades, CsmFrame, CsmView, CSM_CASCADES};
+use crate::shadow_csm::{
+    cascade_overlaps, csm_tile_clip, depth_generation_window, CsmFrame, CsmSchedule,
+    CsmView, CSM_CASCADES, CSM_GRID,
+};
 use crate::shaders::*;
 use makepad_draw::*;
 
 /// Mirrors lightmap.rs's private constants — the GPU passes must agree with
 /// the CPU conventions the material shaders were tuned against.
 const RAY_OFFSET: f32 = 0.02;
+/// Lowest sun (dir.y) the cascades still render for: the sun disc keeps
+/// throwing gold light until it is fully below the horizon (sun.rs fades
+/// it over -2..0.5 degrees), so its shadows must last as long as it does.
+const CSM_MIN_SUN_Y: f32 = 0.005;
 
 /// How the baker schedules work. Pure runtime policy — no platform
 /// conditionals; switchable live via [`Renderer::set_gpu_lightmap_mode`].
@@ -99,10 +106,11 @@ pub enum GpuLightmapMode {
 
 /// Device-local budget for the Realtime cascaded-shadow tier.
 ///
-/// `tile_resolution` is the edge of ONE cascade. The three fixed-layout
-/// cascade tiles are stored side by side, with one R32F color target and one
-/// D32 depth target, so target memory is `24 * tile_resolution^2` bytes.
-/// `far_range` is the world-space reach of the final cascade.
+/// `tile_resolution` is the edge of ONE cascade. The four cascade tiles sit
+/// in a 2x2 grid (shadow_csm::CSM_GRID), with one R32F color target and one
+/// D32 depth target, so target memory is `32 * tile_resolution^2` bytes.
+/// `far_range` is the detail range (the third cascade ends near it); the
+/// far cascade reaches `far_range * shadow_csm::FAR_REACH`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CsmConfig {
     pub tile_resolution: usize,
@@ -260,6 +268,7 @@ fn schedule_regions(
 }
 
 /// One caster the depth passes rasterize.
+#[derive(Clone, Copy)]
 pub struct GpuBakeMesh {
     pub geometry: GeometryId,
     pub transform: Mat4f,
@@ -595,6 +604,8 @@ pub struct GpuLightmapBaker {
     /// Realtime CSM resolution/range are presentation policy, not realm
     /// state. They survive realm switches and may change live.
     csm_policy: CsmPolicy,
+    /// See [`GpuLightmapBaker::set_csm_far_reach`].
+    csm_far_reach: f32,
     /// A job scheduled by the renderer, realized on the next draw.
     pending: Option<GpuBakeJob>,
     /// Keep the previous completed atlas visible until every new region is
@@ -603,7 +614,7 @@ pub struct GpuLightmapBaker {
     state: Option<BakeState>,
     draws: Option<Box<LmDraws>>,
     pool: Vec<BakePass>,
-    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles side by side in
+    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles in a 2x2 grid in
     /// one Rf32 strip (one texture slot in every material family), plus its
     /// hardware depth. Written every Realtime frame, sampled by the PCF
     /// compare in the material shaders.
@@ -617,7 +628,7 @@ pub struct GpuLightmapBaker {
     /// cascades, no binding, `csm_vis` returning full sun.
     ///
     /// Allocated only while Realtime is serving. At the default 2048 tile
-    /// edge these two targets are about 96 MiB per view, so retaining them
+    /// edge these two targets are about 128 MiB per view, so retaining them
     /// in OnChange (where they are never sampled) is a serious split/mobile
     /// memory leak rather than harmless scratch.
     csm_tex: Option<Texture>,
@@ -659,13 +670,38 @@ pub struct GpuLightmapBaker {
     /// per-frame cascade-encode averages every 120 frames).
     rt_frames: u64,
     rt_us: u64,
+    /// Last Realtime frame: (static casters, movers, CPU encode us); zero
+    /// when the cascades did not render.
+    csm_frame_stats: (usize, usize, u64),
+    /// GPU time of the cascade pass, ms: an exponential average of the
+    /// command-buffer samples the backend reports (Metal; 0 elsewhere).
+    csm_gpu_ms: f32,
+    /// Caster instances the last cascade pass encoded, summed over the
+    /// cascades after per-cascade culling.
+    csm_draws: usize,
+    csm_mover_bounds: Vec<(Vec3f, Vec3f)>,
+    /// Staggered tile updates (shadow_csm::CsmSchedule): which tiles this
+    /// frame re-renders, in which depth generation, and the cascade each
+    /// kept tile was rendered with (receivers compare against THAT fit).
+    csm_schedule: CsmSchedule,
+    csm_tiles: CsmFrame,
+    csm_frame_no: u64,
+    /// `MAKEPAD_CSM_STAGGER=0` re-renders every cascade every frame.
+    csm_stagger: bool,
+    /// A 1x1 sampled depth texture parked in the `csm_map` slot while the
+    /// tier is off: the slot is a depth texture in every material family.
+    csm_fallback: Option<Texture>,
+    /// Tile-clearing quad (ndc [-1,1]^2 in the depth shaders' vertex layout).
+    csm_clear_quad: Option<Geometry>,
 }
+
 
 impl Default for GpuLightmapBaker {
     fn default() -> Self {
         Self {
             mode: GpuLightmapMode::default(),
             csm_policy: CsmPolicy::default(),
+            csm_far_reach: 0.0,
             pending: None,
             pending_delivery: None,
             state: None,
@@ -686,6 +722,16 @@ impl Default for GpuLightmapBaker {
             csm_logged: None,
             rt_frames: 0,
             rt_us: 0,
+            csm_frame_stats: (0, 0, 0),
+            csm_gpu_ms: 0.0,
+            csm_draws: 0,
+            csm_mover_bounds: Vec::new(),
+            csm_schedule: CsmSchedule::default(),
+            csm_tiles: CsmFrame::default(),
+            csm_frame_no: 0,
+            csm_stagger: std::env::var("MAKEPAD_CSM_STAGGER").as_deref() != Ok("0"),
+            csm_fallback: None,
+            csm_clear_quad: None,
         }
     }
 }
@@ -706,6 +752,13 @@ fn bake_budget_from_env() -> usize {
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
     Vec3f { x, y, z }
+}
+
+/// One smoothing step for a GPU pass timer (about a 16-sample window);
+/// the first sample seeds it.
+pub(crate) fn ema_ms(avg: f32, sample: f64) -> f32 {
+    let sample = sample as f32;
+    if avg <= 0.0 { sample } else { avg + (sample - avg) * 0.0625 }
 }
 
 fn csm_caster_counts(
@@ -1078,6 +1131,19 @@ fn render_tex(cx: &mut Cx, w: usize, h: usize) -> Texture {
     )
 }
 
+fn depth_tex_sampled(cx: &mut Cx, w: usize, h: usize) -> Texture {
+    Texture::new_with_format(
+        cx,
+        TextureFormat::DepthD32Sampled {
+            size: TextureSize::Fixed {
+                width: w,
+                height: h,
+            },
+            initial: true,
+        },
+    )
+}
+
 fn render_tex_rf32(cx: &mut Cx, w: usize, h: usize) -> Texture {
     Texture::new_with_format(
         cx,
@@ -1140,6 +1206,13 @@ impl GpuLightmapBaker {
     /// combine a new inverse resolution with an old target.
     ///
     /// Returns the effective configuration after environment overrides.
+    /// Stretch the far cascade to `metres` (0 = the default reach of
+    /// `far_range * FAR_REACH`). The detail cascades are unchanged.
+    pub fn set_csm_far_reach(&mut self, metres: f32) {
+        let metres = if metres.is_finite() { metres.clamp(0.0, 16384.0) } else { 0.0 };
+        if metres != self.csm_far_reach { self.csm_far_reach = metres; self.csm_last = None; }
+    }
+
     pub fn set_csm_config(&mut self, tile_resolution: usize, far_range: f32) -> CsmConfig {
         let old = self.csm_policy.effective();
         let new = self.csm_policy.set_device(tile_resolution, far_range);
@@ -1245,16 +1318,26 @@ impl GpuLightmapBaker {
             let res = self.csm_policy.effective().tile_resolution;
             if self.csm_tex.is_none() || self.csm_depth.is_none() || self.csm_res != res {
                 self.csm_res = res;
-                let width = res * CSM_CASCADES;
-                self.csm_tex = Some(render_tex_rf32(cx, width, res));
-                self.csm_depth = Some(depth_tex(cx, width, res));
+                let edge = res * CSM_GRID;
+                self.csm_tex = Some(render_tex_rf32(cx, edge, edge));
+                self.csm_depth = Some(depth_tex_sampled(cx, edge, edge));
+                self.csm_schedule.invalidate();
             }
         } else {
-            // Dropping the last handles lets the backend reclaim ~96 MiB per
+            // Dropping the last handles lets the backend reclaim ~128 MiB per
             // 2048px view instead of carrying realtime-only memory forever.
             self.csm_tex = None;
             self.csm_depth = None;
             self.csm_last = None;
+            self.csm_gpu_ms = 0.0;
+            self.csm_schedule.invalidate();
+        }
+    }
+
+    /// The off-tier `csm_map` binding (1x1 sampled depth), created once.
+    pub fn ensure_csm_fallback(&mut self, cx: &mut Cx) {
+        if self.csm_fallback.is_none() {
+            self.csm_fallback = Some(depth_tex_sampled(cx, 1, 1));
         }
     }
 
@@ -1297,17 +1380,38 @@ impl GpuLightmapBaker {
     /// the horizon) — the renderer then writes csm off into the uniforms.
     /// A realized atlas is NOT a precondition: a world with no static
     /// lightmap still gets full cascade shadows for its dynamics.
-    pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
-        let frame = self.csm_last?;
-        Some((
-            frame,
-            self.csm_tex.as_ref()?.clone(),
-            1.0 / self.csm_res.max(1) as f32,
-        ))
+    /// Last Realtime frame's cascade work: (static casters, movers, CPU
+    /// encode us).
+    pub fn csm_frame_stats(&self) -> (usize, usize, u64) {
+        self.csm_frame_stats
     }
 
-    pub(crate) fn parent_csm_to(&self,cx:&mut Cx,parent:DrawPassId){
-        if self.csm_binding().is_some(){for p in &self.csm_pool{cx.passes[p.pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(parent);}}
+    /// Smoothed GPU time of the cascade pass in ms (0 until a backend that
+    /// times command buffers reports one, or while the cascades are off).
+    pub fn csm_gpu_ms(&self) -> f32 {
+        self.csm_gpu_ms
+    }
+
+    /// Caster instances the last cascade pass drew, summed over cascades
+    /// (after per-cascade culling; each caster counts once per cascade).
+    pub fn csm_draws(&self) -> usize {
+        self.csm_draws
+    }
+
+    /// This frame's cascade binding for the material shaders: the fitted
+    /// cascades (each tile's own fit and depth generation, `on` set), the
+    /// sampled depth target and one tile's inverse resolution. Whenever the
+    /// tier is not serving (OnChange/Off, sun below the horizon, no target)
+    /// the frame is off (`on` false) and the texture is the 1x1 depth
+    /// fallback; None only before that fallback exists.
+    pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
+        if let (Some(frame), Some(depth)) = (self.csm_last, self.csm_depth.as_ref()) {
+            let mut frame = frame;
+            frame.on = true;
+            frame.generation = self.csm_schedule.generation;
+            return Some((frame, depth.clone(), 1.0 / self.csm_res.max(1) as f32));
+        }
+        Some((CsmFrame::default(), self.csm_fallback.clone()?, 0.001))
     }
 
     /// DEBUG: the stage textures worth dumping alongside the atlas. The mask
@@ -1599,6 +1703,11 @@ impl GpuLightmapBaker {
         scene_bounds: Option<(Vec3f, Vec3f)>,
     ) -> Option<GpuLmDelivery> {
         self.csm_last = None;
+        for bp in &self.csm_pool {
+            for ms in bp.pass.take_gpu_times_ms(cx.cx) {
+                self.csm_gpu_ms = ema_ms(self.csm_gpu_ms, ms);
+            }
+        }
         if !self.ensure_draws(cx.cx) {
             return None;
         }
@@ -1653,7 +1762,7 @@ impl GpuLightmapBaker {
         };
         // Realtime: fit this frame's cascades (sun below the horizon fits
         // nothing — the materials' sun term is dead anyway).
-        let csm = (realtime && sun_dir.y > 0.02 && self.csm_tex.is_some()).then(|| {
+        let csm = (realtime && sun_dir.y > CSM_MIN_SUN_Y && self.csm_tex.is_some()).then(|| {
             let range = self.csm_policy.effective().far_range;
             // The z window reaches from the cascade slice BACK to the scene
             // bound toward the sun. With a realized atlas that bound is
@@ -1668,13 +1777,14 @@ impl GpuLightmapBaker {
                     v3(eye.x + range, eye.y + range, eye.z + range),
                 ),
             };
-            fit_cascades(
+            crate::shadow_csm::fit_cascades_reach(
                 csm_view,
                 eye,
                 sun_dir,
                 scene_min,
                 scene_max,
                 range,
+                self.csm_far_reach,
                 self.csm_res as f32,
             )
         });
@@ -1691,8 +1801,14 @@ impl GpuLightmapBaker {
         if !batch.is_empty() {
             passes += self.encode_batch(cx, sun_dir, &batch);
         }
-        if let Some(frame) = csm {
-            passes += self.encode_cascades(cx, static_casters, movers, &frame);
+        if let Some(frame) = &csm {
+            let (full, due) = self.csm_schedule.plan(self.csm_frame_no, self.csm_stagger);
+            self.csm_frame_no += 1;
+            passes += self.encode_cascades(cx, static_casters, movers, frame, full, due);
+        } else {
+            // Nothing is kept across an off stretch: the next serving frame
+            // clears and renders every tile.
+            self.csm_schedule.invalidate();
         }
         let us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
         if let Some(frame) = &csm {
@@ -1709,7 +1825,14 @@ impl GpuLightmapBaker {
                 self.state.is_some()
             );
         }
-        self.csm_last = csm;
+        self.csm_frame_stats = if csm.is_some() {
+            (static_casters.len(), movers.len(), us)
+        } else {
+            (0, 0, 0)
+        };
+        // Receivers compare against each tile's own fit (a kept tile keeps
+        // the cascade it was rendered with).
+        self.csm_last = csm.map(|_| self.csm_tiles);
         if !batch.is_empty() {
             self.bake_frames += 1;
             self.bake_passes += passes;
@@ -2500,13 +2623,15 @@ impl GpuLightmapBaker {
         encoded
     }
 
-    /// Realtime cascades: ONE pass, CSM_CASCADES tiles side by side in the
-    /// strip, EVERY caster — static meshes, occluder boxes, rigid movers
+    /// Realtime cascades: ONE pass, CSM_CASCADES tiles in the 2x2 grid of the
+    /// target, EVERY caster — static meshes, occluder boxes, rigid movers
     /// and skinned characters (posed from the same joint palette the
     /// visible draw binds, so a character shadows in exactly the pose it
-    /// renders in). No CPU per-cascade culling yet: instance encodes are
-    /// cheap at village scale and the GPU clips; cull here first if a big
-    /// world ever makes this loop hot.
+    /// renders in). Each cascade draws only the casters whose world box
+    /// overlaps its light-space box (shadow_csm::cascade_overlaps), so the
+    /// far cascade's town does not cost the near cascades anything. Tiles
+    /// are still clipped by `discard` in the depth shader: the platform has
+    /// no per-draw viewport/scissor to confine a draw to its tile.
     ///
     /// The static half comes from the realized atlas layout when there IS
     /// one; a world without a layout still encodes its dynamic casters,
@@ -2517,6 +2642,8 @@ impl GpuLightmapBaker {
         static_casters: &[GpuBakeMesh],
         movers: &[GpuLmMover],
         frame: &CsmFrame,
+        full_clear: bool,
+        due: [bool; CSM_CASCADES],
     ) -> usize {
         let res = self.csm_res;
         let (Some(csm_tex), Some(csm_z)) = (self.csm_tex.clone(), self.csm_depth.clone()) else {
@@ -2524,7 +2651,12 @@ impl GpuLightmapBaker {
         };
         let state = self.state.take();
         let mut draws = self.draws.take().unwrap();
-        ensure_pool(&mut self.csm_pool, cx.cx, 1);
+        if self.csm_pool.is_empty() {
+            ensure_pool(&mut self.csm_pool, cx.cx, 1);
+            let pass = &self.csm_pool[0].pass;
+            pass.set_pass_name(cx.cx, "csm");
+            pass.set_gpu_timing_enabled(cx.cx, true);
+        }
         let order = pass_order(&self.csm_pool, 1);
         let mut seq = PassSeq {
             pool: &mut self.csm_pool,
@@ -2533,8 +2665,8 @@ impl GpuLightmapBaker {
         };
         let idx = seq.open(
             cx,
-            res * CSM_CASCADES,
-            res,
+            res * CSM_GRID,
+            res * CSM_GRID,
             &csm_tex,
             DrawPassClearColor::ClearWith(Vec4f {
                 x: 1.0,
@@ -2544,26 +2676,72 @@ impl GpuLightmapBaker {
             }),
             Some(&csm_z),
         );
+        if !full_clear {
+            // Keep the tiles this frame does not re-render: load both
+            // attachments; due tiles are cleared by their own quad below.
+            let pass = &seq.pool[idx].pass;
+            pass.clear_color_textures(cx.cx);
+            pass.set_color_texture(cx.cx, &csm_tex, DrawPassClearColor::InitWith(vec4(1.0, 1.0, 1.0, 1.0)));
+            pass.set_depth_texture(cx.cx, &csm_z, DrawPassClearDepth::InitWith(1.0));
+        }
+        let quad = self
+            .csm_clear_quad
+            .get_or_insert_with(|| {
+                let g = Geometry::new(cx.cx);
+                let mut v = Vec::with_capacity(4 * crate::skin::SKIN_VERTEX_FLOATS);
+                for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    v.extend_from_slice(&[x, y, 0.0]);
+                    v.resize(v.len() + crate::skin::SKIN_VERTEX_FLOATS - 3, 0.0);
+                }
+                g.update(cx.cx, vec![0, 1, 2, 0, 2, 3], v);
+                g
+            })
+            .geometry_id();
+        // Posed world bounds, once per frame for all cascades (scratch
+        // retained across frames: no per-frame allocation once warm).
+        self.csm_mover_bounds.clear();
+        self.csm_mover_bounds.extend(
+            movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))),
+        );
+        let mut draws_n = 0usize;
         for (ci, casc) in frame.cascades.iter().enumerate() {
-            let tile = Vec4f {
-                x: 1.0 / CSM_CASCADES as f32,
-                y: 1.0,
-                z: (2.0 * ci as f32 + 1.0) / CSM_CASCADES as f32 - 1.0,
-                w: 0.0,
-            };
+            if !due[ci] {
+                continue;
+            }
+            self.csm_tiles.cascades[ci] = *casc;
+            let tile = csm_tile_clip(ci);
+            // This tile's depth generation: z_clip = z01 * (1 - y) + z.
+            let (gs, go) = depth_generation_window(self.csm_schedule.generation[ci]);
+            let gen = vec4(0.0, 1.0 - gs, go, 0.0);
             let d = &mut draws.sun_depth;
-                d.set_morph(cx.cx,None);
+            d.set_morph(cx.cx, None);
+            d.flip_a = gen;
+            d.tile_a = tile;
+            if !full_clear {
+                // Clear the tile to its generation's far end: ndc rows are
+                // the identity and z01 = 1 everywhere on the quad.
+                d.sun_rx = vec4(1.0, 0.0, 0.0, 0.0);
+                d.sun_ry = vec4(0.0, 1.0, 0.0, 0.0);
+                d.sun_rz = vec4(0.0, 0.0, 0.0, 1.0);
+                d.transform = Mat4f::identity();
+                d.draw_vars.geometry_id = Some(quad);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+            }
             d.sun_rx = casc.rx;
             d.sun_ry = casc.ry;
             d.sun_rz = casc.rz;
-            d.flip_a = Vec4f::default();
-            d.tile_a = tile;
             if let Some(state) = state.as_ref() {
                 // Regioned meshes already live in the realized atlas state.
                 // Its caster-only suffix is deliberately skipped here: the
                 // upload-time registry below owns that lane in Realtime and
                 // carries every material layer rather than only layer zero.
                 for m in state.meshes.iter().take(state.region_mesh_count) {
+                    if !cascade_overlaps(casc, m.min, m.max) {
+                        continue;
+                    }
+                    draws_n += 1;
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
                     if d.draw_vars.can_instance() {
@@ -2579,13 +2757,24 @@ impl GpuLightmapBaker {
                 }
             }
             for m in static_casters {
+                if !cascade_overlaps(casc, m.min, m.max) {
+                    continue;
+                }
+                draws_n += 1;
                 d.transform = m.transform;
                 d.draw_vars.geometry_id = Some(m.geometry);
                 if d.draw_vars.can_instance() {
                     cx.add_instance(&d.draw_vars);
                 }
             }
-            for mv in movers.iter().filter(|m| m.skin.is_none()) {
+            for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
+                // Rigid movers cull by their posed AABB. Skinned and morphed
+                // casters are never culled by a rest AABB (a posed limb can
+                // leave it); the GPU clips them.
+                if mv.skin.is_some() || (mv.morph.is_none() && !cascade_overlaps(casc, *lo, *hi)) {
+                    continue;
+                }
+                draws_n += 1;
                 d.set_morph(cx.cx,mv.morph.as_ref());
                 d.transform = mv.transform;
                 d.draw_vars.geometry_id = Some(mv.geometry);
@@ -2595,12 +2784,13 @@ impl GpuLightmapBaker {
             }
             for mv in movers {
                 let Some(skin) = &mv.skin else { continue };
+                draws_n += 1;
                 let ds = &mut draws.sun_depth_skinned;
                 ds.set_morph(cx.cx,mv.morph.as_ref());
                 ds.sun_rx = casc.rx;
                 ds.sun_ry = casc.ry;
                 ds.sun_rz = casc.rz;
-                ds.flip_a = Vec4f::default();
+                ds.flip_a = gen;
                 ds.tile_a = tile;
                 ds.transform = mv.transform;
                 ds.skin_a.x = skin.joint_base;
@@ -2612,6 +2802,7 @@ impl GpuLightmapBaker {
             }
         }
         seq.close(cx, idx);
+        self.csm_draws = draws_n;
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(
             state.as_ref(),

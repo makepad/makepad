@@ -149,6 +149,7 @@ workspace.members = [
     "libs/piano_model",
     "libs/drumkit",
     "libs/drumkit_phys",
+    "libs/audio_synth",
     "libs/musicxml",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",

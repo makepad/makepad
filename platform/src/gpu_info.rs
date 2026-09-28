@@ -10,6 +10,11 @@ pub struct GpuInfo {
     pub min_uniform_vectors: u32,
     /// Native backends support these formats; WebGL reports its extension.
     pub float_color_targets: bool,
+    /// RGBA16Float colour targets that ordinary (BGRA8-declared) draw shaders
+    /// can render into WITH blending — an HDR scene pass. Set by backends
+    /// that build the matching pipeline variant (Metal; Vulkan where the
+    /// device blends RGBA16Float, see `CxVulkan::float16_blend_targets`).
+    pub float16_blend_targets: bool,
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
@@ -21,6 +26,7 @@ impl Default for GpuInfo {
             // default to a nice gpu
             min_uniform_vectors: 1024,
             float_color_targets: true,
+            float16_blend_targets: false,
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),

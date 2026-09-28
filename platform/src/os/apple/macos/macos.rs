@@ -658,6 +658,7 @@ impl Cx {
 
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
+        cx.borrow_mut().gpu_info.float16_blend_targets = true;
         cx.borrow_mut().publish_metal_device_for_media();
 
         //let cx = Rc::new(RefCell::new(self));

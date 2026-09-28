@@ -33,10 +33,13 @@ pub enum DesktopStyle {
     /// Milled near-black metal lit from inside in orange: flat machined
     /// faces, a hard hairline on every edge, everything that is on glows.
     Milled,
+    /// Night-city street tech: near-black glass and gunmetal, chamfered
+    /// controls edge-lit in cyan, magenta for what is held.
+    Cyberpunk,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 12] = [Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    pub const ALL: [Self; 13] = [Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled, Self::Cyberpunk, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
@@ -45,6 +48,7 @@ impl DesktopStyle {
             Self::Molded => "molded",
             Self::Glossy => "glossy",
             Self::Milled => "milled",
+            Self::Cyberpunk => "cyberpunk",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -61,6 +65,7 @@ impl DesktopStyle {
             Self::Molded => "Molded",
             Self::Glossy => "Glossy",
             Self::Milled => "Milled",
+            Self::Cyberpunk => "Cyberpunk",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -82,7 +87,7 @@ impl DesktopStyle {
     /// it.
     pub fn icon_set(self) -> usize {
         match self {
-            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Glossy | Self::Milled => 0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Glossy | Self::Milled | Self::Cyberpunk => 0,
             Self::Macos => 1,
             Self::Windows | Self::Molded => 2,
             Self::Windows2000 => 3,
@@ -97,11 +102,11 @@ impl DesktopStyle {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        !matches!(self, Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled) && !self.mobile()
+        !matches!(self, Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled | Self::Cyberpunk) && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled | Self::Cyberpunk => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -110,7 +115,7 @@ impl DesktopStyle {
     }
     pub fn title_height(self) -> f64 {
         match self {
-            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
+            Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled | Self::Cyberpunk => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -174,6 +179,10 @@ impl StyleSheet {
             DesktopStyle::Milled => (
                 include_str!("../../themes/milled/theme.splash"),
                 include_str!("../../themes/milled/widgets.splash"),
+            ),
+            DesktopStyle::Cyberpunk => (
+                include_str!("../../themes/cyberpunk/theme.splash"),
+                include_str!("../../themes/cyberpunk/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../../themes/macos-dark/theme.splash"),
@@ -273,6 +282,11 @@ pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
 pub fn uninstall(vm: &mut ScriptVm) {
     let key = vm.bx.heap.heap_key();
     vm.cx_mut().global::<Styles>().heaps.remove(&key);
+}
+/// The sheet installed on the heap `key`, if any: what a VM allocated from
+/// that one inherits.
+pub(crate) fn sheet_of_heap(cx: &mut Cx, key: usize) -> Option<StyleSheet> {
+    cx.global::<Styles>().heaps.get(&key).cloned()
 }
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     let key = vm.bx.heap.heap_key();
@@ -560,6 +574,7 @@ mod tests {
                         DesktopStyle::Molded => 5.0,
                         DesktopStyle::Glossy => 6.0,
                         DesktopStyle::Milled => 3.0,
+                        DesktopStyle::Cyberpunk => 2.5,
                         _ => 0.0,
                     }
                 );

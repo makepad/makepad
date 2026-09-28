@@ -55,4 +55,11 @@ pub use selection::*;
 
 mod review;
 mod review_pose;
+pub mod templates;
+mod character_mesh;
+pub mod character;
+pub mod stencil;
+pub mod import;
+mod program;
+pub use program::*;
 pub use review_pose::*;

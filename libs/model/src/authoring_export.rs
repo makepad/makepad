@@ -147,7 +147,8 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],ctx
 }
 
 fn validate_vehicle_export(doc:&Document)->Result<()> {
-    let wheels=&doc.scene().wheels;if wheels.is_empty(){return Ok(());}
+    let wheels:Vec<_>=doc.scene().wheels.iter().filter(|(_,w)|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())).collect();
+    if wheels.is_empty(){return Ok(());}
     if wheels.len()!=4{return Err(Error::Invalid("vehicle export requires all four wheel connections"));}
     if doc.skeleton().is_some(){return Err(Error::Invalid("vehicle wheels require rigid objects, not a skinned asset"));}
     let mut anchors=[[0.;3];4];

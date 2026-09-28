@@ -5,7 +5,6 @@
 // transform, and export to STL/OBJ for 3D printing.
 
 pub mod solid;
-pub mod document;
 
 // Re-export the main types
 pub use solid::{
@@ -13,10 +12,6 @@ pub use solid::{
     union_all_with, Solid,
 };
 pub use makepad_csg_boolean::boolean::FinishParams;
-pub use document::{
-    evaluate_program, mesh_document, render_thumbnail, CsgBudgets, CsgDocument, CsgError,
-    CsgAnimKind, CsgAnimation, CsgAxis, MeshedModel, MeshedPart, PartPreview, Thumbnail,
-};
 
 // Re-export sub-crate types that users commonly need
 pub use makepad_csg_math::{dvec3, BBox3d, Mat4d, Vec3d};

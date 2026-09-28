@@ -385,6 +385,9 @@ impl PreparedSkinPart { pub fn upload_bytes(&self)->usize{(self.vertices.len()+s
 
 #[path = "skin_soft.rs"]
 pub(crate) mod soft_deform;
+#[path = "skin_anim.rs"]
+mod anim;
+pub use anim::*;
 
 pub struct SkinnedModel {
     primitives: Vec<SkinPrimitive>,

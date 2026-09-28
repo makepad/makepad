@@ -1115,7 +1115,7 @@ mod tests {
     /// different depth on terrain than on a wall is the bug this catches.
     #[test]
     fn every_composite_fills_the_sun_shadow_from_the_same_constant() {
-        let src = include_str!("shaders.rs");
+        let src = crate::shaders::SHADER_SOURCE;
         let at = format!("/ {LM_LAMP_SHADOW_FILL_AT:.3}, 0.0, 1.0)");
         assert_eq!(
             src.matches(&at).count(),
@@ -1199,7 +1199,7 @@ mod tests {
     /// pins the pieces together so a refactor cannot silently drop one.
     #[test]
     fn the_lamp_dilate_distrusts_chart_edge_texels() {
-        let src = include_str!("shaders.rs");
+        let src = crate::shaders::SHADER_SOURCE;
         let dilate = {
             let start = src.find("mod.draw.DrawLmLampDilate").expect("dilate shader");
             let end = src[start..].find("mod.draw.DrawLmEncode").expect("encode follows");

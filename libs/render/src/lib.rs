@@ -39,6 +39,7 @@ pub mod lightmap;
 pub mod model;
 pub mod material_surface;
 pub mod player_nav;
+pub mod post;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
@@ -52,7 +53,10 @@ pub mod shadow_mesh;
 pub mod shadow_csm;
 pub mod shadow_sdf;
 pub mod sky;
+pub mod smoke;
+pub mod vfx;
 pub mod ssao;
+pub mod stream;
 pub mod sun;
 pub mod thermometer;
 
@@ -78,6 +82,8 @@ pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
 pub use ssao::*;
+pub use post::BloomPass;
+pub use smoke::SmokeVolume;
 pub use sun::*;
 // `sun::solar_dir` (axis-mapped game-space wrapper) and
 // `makepad_draw::solar_dir` (the underlying shared solar model, pulled in
@@ -99,6 +105,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     clustered::script_mod(vm);
     fast_gi::script_mod(vm);
     ssao::script_mod(vm);
+    post::script_mod(vm);
+    smoke::script_mod(vm);
+    vfx::shader::script_mod(vm);
     shaders::script_mod(vm);
     local_shadows::script_mod(vm)
 }

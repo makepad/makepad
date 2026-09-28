@@ -205,7 +205,7 @@ mod shape_tests {
     /// changing one has to change the stated intent as well.
     #[test]
     fn culling_choices_match_the_geometry_they_draw() {
-        let src = include_str!("shaders.rs");
+        let src = crate::shaders::SHADER_SOURCE;
         let setting = |shader: &str| -> Option<bool> {
             let at = src.find(&format!("mod.draw.{shader} = "))?;
             let tail = &src[at..];
@@ -257,15 +257,18 @@ mod shape_tests {
     fn skinned_albedo_uses_repeat_not_fract() {
         // Tiling world textures (Q3) share DrawSceneSkinned with Kenney atlases.
         // `fract(uv)` wraps in software but wrecks mip LOD at every tile seam.
-        let src = include_str!("shaders.rs");
+        let src = crate::shaders::SHADER_SOURCE;
         let at = src
             .find("mod.draw.DrawSceneSkinned = ")
             .expect("DrawSceneSkinned");
         let tail = &src[at..];
         let end = tail.find("\n    mod.draw.").unwrap_or(tail.len());
         let decl = &tail[..end];
+        // The albedo read goes through `base_texel`, which may snap a
+        // magnified texel to its centre (glTF NEAREST) but still hands the
+        // raw, unwrapped uv to the repeat sampler.
         assert!(
-            decl.contains("sample_as_bgra_repeat(self.v_uv)"),
+            decl.contains("var suv = self.v_uv") && decl.contains("self.tex.sample_as_bgra_repeat(suv)"),
             "world albedo must REPEAT-sample raw UVs"
         );
         assert!(
@@ -280,7 +283,7 @@ mod shape_tests {
     /// Rust-side sun configuration continued to look perfectly healthy.
     #[test]
     fn imported_models_receive_direct_sun_ambient_ao_and_csm() {
-        let src = include_str!("shaders.rs");
+        let src = crate::shaders::SHADER_SOURCE;
         let at = src
             .find("mod.draw.DrawSceneSkinned = ")
             .expect("DrawSceneSkinned");

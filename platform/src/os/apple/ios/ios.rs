@@ -497,6 +497,7 @@ impl Cx {
         });
 
         let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        cx.borrow_mut().gpu_info.float16_blend_targets = true;
         //let cx = Rc::new(RefCell::new(self));
         //crate::log!("Makepad iOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));

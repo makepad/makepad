@@ -1,6 +1,8 @@
 //! Typed bridge from strict JSON/source logs to worker-owned mesh operations.
 use crate::{json::{self,Value},mesh::*,service::{array,fields,float,integer,need,selections,stable_id,text},Error,Limits,OperationResult,Result};
 use std::collections::BTreeMap;
+#[path="mesh_editing_bevel.rs"]
+mod rounded;
 
 #[derive(Clone,Debug,PartialEq)]
 pub struct MeshEditingOperation { object:String, action:Action }
@@ -14,6 +16,7 @@ enum Action {
     Sculpt{vertices:Vec<VertexId>,brush:SculptBrush}, BoxUv{faces:Vec<FaceId>,scale:[f64;2],offset:[f64;2]}, CylinderUv{faces:Vec<FaceId>,axis:usize,scale:[f64;2],offset:[f64;2]},
     Subdivide{levels:u32},Mirror{axis:usize,offset:f64},FlipFaces{faces:Vec<FaceId>},
     Unwrap{faces:Vec<FaceId>},Pack{faces:Vec<FaceId>,padding:f64},Relax{faces:Vec<FaceId>,iterations:u32,factor:f64},Pin{corners:Vec<CornerId>,pinned:bool},Normals{smooth:bool,angle:f64},
+    RoundBevel{angle:f64,width:f64,segments:u32},Crease{angle:f64,weight:f64},
 }
 impl MeshEditingOperation {
     pub fn parse(value:&Value,limits:&Limits)->Result<Option<Self>>{
@@ -62,6 +65,8 @@ impl MeshEditingOperation {
             "uv_relax"=>{fields(value,&["op","object","faces","iterations","factor"])?;Action::Relax{faces:ff()?,iterations:integer(need(value,"iterations")?)?,factor:float(need(value,"factor")?)?}},
             "uv_pin"=>{fields(value,&["op","object","corners","pinned"])?;Action::Pin{corners:selections(need(value,"corners")?,limits.mesh.max_corners)?.into_iter().map(CornerId).collect(),pinned:boolean(need(value,"pinned")?)?}},
             "normals"=>{fields(value,&["op","object","smooth","angle"])?;Action::Normals{smooth:boolean(need(value,"smooth")?)?,angle:float(need(value,"angle")?)?}},
+            "bevel"=>{fields(value,&["op","object","width","segments","angle"])?;Action::RoundBevel{width:float(need(value,"width")?)?,segments:value.get("segments").map(integer).transpose()?.unwrap_or(3),angle:value.get("angle").map(float).transpose()?.unwrap_or(0.52)}},
+            "crease"=>{fields(value,&["op","object","angle","weight"])?;Action::Crease{angle:value.get("angle").map(float).transpose()?.unwrap_or(0.52),weight:value.get("weight").map(float).transpose()?.unwrap_or(1.)}},
             _=>return Ok(None),
         };
         Ok(Some(Self{object:checked_name(text(value,"object")?,limits)?,action}))
@@ -109,6 +114,8 @@ impl MeshEditingOperation {
             Action::Relax{faces,iterations,factor}=>("uv_relax",vec![("faces",face_ids(faces)),("iterations",Value::Int(*iterations as i64)),("factor",Value::F64(*factor))]),
             Action::Pin{corners,pinned}=>("uv_pin",vec![("corners",Value::Arr(corners.iter().map(|c|json::s(c.0.to_string())).collect())),("pinned",Value::Bool(*pinned))]),
             Action::Normals{smooth,angle}=>("normals",vec![("smooth",Value::Bool(*smooth)),("angle",Value::F64(*angle))]),
+            Action::RoundBevel{angle,width,segments}=>("bevel",vec![("width",Value::F64(*width)),("segments",Value::Int(*segments as i64)),("angle",Value::F64(*angle))]),
+            Action::Crease{angle,weight}=>("crease",vec![("angle",Value::F64(*angle)),("weight",Value::F64(*weight))]),
         };let mut values=vec![("op",json::s(op)),("object",json::s(&self.object))];values.append(&mut args);json::obj(values)
     }
 
@@ -137,6 +144,8 @@ impl MeshEditingOperation {
             Action::BoxUv{faces,scale,offset}=>{result.faces=faces.clone();mesh.project_uv_box(faces,*scale,*offset,ctx)?},Action::CylinderUv{faces,axis,scale,offset}=>{result.faces=faces.clone();mesh.project_uv_cylindrical(faces,*axis,*scale,*offset,ctx)?},
             Action::Unwrap{faces}=>{result.faces=faces.clone();mesh.unwrap_uv(faces,ctx)?},Action::Pack{faces,padding}=>{result.faces=faces.clone();mesh.pack_uv(faces,*padding,ctx)?},Action::Relax{faces,iterations,factor}=>{result.faces=faces.clone();mesh.relax_uv(faces,*iterations,*factor,ctx)?},
             Action::Pin{corners,pinned}=>mesh.pin_uv(corners,*pinned,ctx)?,Action::Normals{smooth,angle}=>mesh.recalculate_normals(*smooth,*angle,ctx)?,
+            Action::RoundBevel{angle,width,segments}=>{*mesh=rounded::bevel(mesh,*angle,*width,*segments,ctx)?;result.faces=mesh.faces().iter().map(|f|f.id).collect();ChangeSet::default()},
+            Action::Crease{angle,weight}=>rounded::crease(mesh,*angle,*weight,ctx)?,
         };
         if result.faces.is_empty(){result.faces=changes.created.iter().filter_map(|id|if let ElementId::Face(f)=id{Some(*f)}else{None}).collect();}
         if result.vertices.is_empty(){result.vertices=changes.created.iter().filter_map(|id|if let ElementId::Vertex(v)=id{Some(*v)}else{None}).collect();}

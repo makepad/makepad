@@ -248,7 +248,8 @@ fn analytic_normals_survive_rotated_nonuniform_and_mirrored_mesh_transforms() {
             let loaded = makepad_gltf::load_gltf_from_bytes(&compiled.glb, None).unwrap();
             let decoded = makepad_gltf::decode_mesh_primitive(&loaded, 0, 0).unwrap();
             let normals = decoded.normals.unwrap();
-            assert_eq!(normals, compiled.primitives[0].normals);
+            let corners: Vec<[f32; 3]> = decoded.indices.iter().map(|&i| normals[i as usize]).collect();
+            assert_eq!(corners, compiled.primitives[0].normals);
             for triangle in decoded.indices.chunks_exact(3) {
                 let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| {
                     decoded.positions[triangle[i] as usize].map(f64::from)
@@ -283,7 +284,8 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
         assert_eq!(pbr.base_color_factor, Some([0.5, 0.15, 0.25, 1.]));
         let decoded = makepad_gltf::decode_mesh_primitive(&loaded, 0, 0).unwrap();
         let normals = decoded.normals.unwrap();
-        assert_eq!(normals, compiled.primitives[0].normals);
+        let corners: Vec<[f32; 3]> = decoded.indices.iter().map(|&i| normals[i as usize]).collect();
+        assert_eq!(corners, compiled.primitives[0].normals);
         assert!(normals
             .iter()
             .all(|n| (length(n.map(f64::from)) - 1.).abs() < 1e-6));
@@ -303,7 +305,7 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
                     .map(|i| tri.vertices[i as usize].normal.map(|v| v as f32))
             })
             .collect::<Vec<_>>();
-        assert_eq!(normals, expected);
+        assert_eq!(corners, expected);
         assert_eq!(doc.head(), head);
         assert_eq!(doc.to_bytes(None).unwrap(), source);
         let reopened = Document::from_bytes(&source, Limits::default(), None).unwrap();

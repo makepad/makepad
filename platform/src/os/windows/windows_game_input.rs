@@ -10,7 +10,7 @@ use {
             DI8DEVCLASS_GAMECTRL, DI8DEVTYPE_DRIVING, DICONSTANTFORCE, DIDATAFORMAT,
             DIDEVICEINSTANCEW, DIDFT_ANYINSTANCE, DIDFT_AXIS, DIDFT_BUTTON, DIDFT_POV,
             DIDF_ABSAXIS, DIEB_NOTRIGGER, DIEDFL_ATTACHEDONLY, DIEFFECT, DIEFF_CARTESIAN,
-            DIEFF_OBJECTOFFSETS, DIENUM_CONTINUE, DIEP_START, DIEP_TYPESPECIFICPARAMS, DIJOYSTATE2,
+            DIEFF_OBJECTOFFSETS, DIENUM_CONTINUE, DIEP_TYPESPECIFICPARAMS, DIJOYSTATE2,
             DIOBJECTDATAFORMAT, DISCL_BACKGROUND, DISCL_EXCLUSIVE, GUID_POV,
         },
         windows::Win32::System::LibraryLoader::GetModuleHandleW,
@@ -104,11 +104,14 @@ pub struct WindowsGameInput {
     pub gamepads: Vec<GameInputInfo>,
     pub states: Vec<GameInputState>,
     pub direct_input: Option<IDirectInput8W>,
+    /// Open DirectInput wheels: id, device, instance GUID, the constant-force
+    /// effect when exclusive access allowed one, the magnitude last sent.
     pub di_devices: Vec<(
         LiveId,
         IDirectInputDevice8W,
         GUID,
         Option<IDirectInputEffect>,
+        i32,
     )>,
     pub next_wheel_id: u64,
     pub enum_timer: u64,
@@ -123,6 +126,8 @@ pub struct WindowsGameInput {
     discovery: Arc<GameInputDiscovery>,
     /// Last `discovery.di_generation` this side has enumerated for.
     di_generation_seen: u32,
+    /// XInput rumble per slot: when the running vibration should stop.
+    rumble_until: [Option<std::time::Instant>; 4],
 }
 
 /// Shared with the discovery thread.
@@ -176,7 +181,58 @@ unsafe fn attached_driving_guids(di: &IDirectInput8W) -> Vec<u128> {
     found
 }
 
+const DISCL_NONEXCLUSIVE: u32 = 0x2;
+
+/// `XINPUT_VIBRATION`: left = the low-frequency motor, right = the high.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XinputVibration {
+    left: u16,
+    right: u16,
+}
+
+unsafe fn xinput_set_state(slot: u32, vibration: &XinputVibration) -> u32 {
+    windows_core::link!("xinput1_4.dll" "system" fn XInputSetState(dwuserindex: u32, pvibration: *const XinputVibration) -> u32);
+    unsafe { XInputSetState(slot, vibration) }
+}
+
+/// The foreground window when it belongs to this process, else null.
+fn own_foreground_window() -> windows::Win32::Foundation::HWND {
+    windows_core::link!("user32.dll" "system" fn GetWindowThreadProcessId(hwnd: windows::Win32::Foundation::HWND, process: *mut u32) -> u32);
+    unsafe {
+        let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        let mut process = 0u32;
+        if !hwnd.0.is_null() && GetWindowThreadProcessId(hwnd, &mut process) != 0 && process == std::process::id() {
+            hwnd
+        } else {
+            windows::Win32::Foundation::HWND(std::ptr::null_mut())
+        }
+    }
+}
+
 impl WindowsGameInput {
+    /// XInput pads are ids 0..3 (their slot); both motors are addressable.
+    pub fn haptic_capabilities(&self, id: LiveId) -> GamepadHapticCapabilities {
+        let is_pad = id.0 < 4 && self.xinput_connected[id.0 as usize];
+        GamepadHapticCapabilities { handles: is_pad, separate_handles: is_pad }
+    }
+
+    /// One haptic sample as XInput vibration, stopped by `poll` when its
+    /// duration is up.
+    pub fn haptic_pulse(&mut self, id: LiveId, pulse: GamepadHapticPulse) -> bool {
+        if id.0 >= 4 || !self.xinput_connected[id.0 as usize] {
+            return false;
+        }
+        let motor = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
+        let vibration = XinputVibration { left: motor(pulse.left), right: motor(pulse.right) };
+        let ok = unsafe { xinput_set_state(id.0 as u32, &vibration) } == 0;
+        if ok {
+            let secs = pulse.duration_s.clamp(0.01, 0.25);
+            self.rumble_until[id.0 as usize] = Some(std::time::Instant::now() + std::time::Duration::from_secs_f32(secs));
+        }
+        ok
+    }
+
     pub fn new() -> Self {
         let direct_input = unsafe { create_direct_input() };
 
@@ -190,6 +246,7 @@ impl WindowsGameInput {
             xinput_connected: [false; 4],
             discovery: Self::spawn_discovery(),
             di_generation_seen: 0,
+            rumble_until: [None; 4],
         }
     }
 
@@ -247,6 +304,15 @@ impl WindowsGameInput {
         for i in 0..4 {
             if discovered & (1 << i) != 0 {
                 self.xinput_connected[i] = true;
+            }
+        }
+        // A haptic sample is short; XInput vibration runs until told
+        // otherwise, so stop what has run its time.
+        let now = std::time::Instant::now();
+        for slot in 0..4 {
+            if self.rumble_until[slot].is_some_and(|until| now >= until) {
+                self.rumble_until[slot] = None;
+                unsafe { xinput_set_state(slot as u32, &XinputVibration::default()) };
             }
         }
         // 1. Poll XInput (Xbox Controllers)
@@ -455,32 +521,9 @@ impl WindowsGameInput {
                     let mut active_di_indices = Vec::new();
 
                     for (guid, name) in ctx.found_devices {
-                        // Check if we already have this device open
-                        // Note: We need a way to persistently identify devices. GUID is good for session.
-                        // For now, we linear search our open devices.
-
-                        // Currently we store (LiveId, IDirectInputDevice8W) in self.di_devices
-                        // We need to know which device corresponds to which GUID.
-                        // Since IDirectInputDevice8W doesn't easily expose GUID back,
-                        // we might want to change `di_devices` to store GUID too.
-                        // But accessing device info is slow.
-                        // Simplest approach: We don't have easy stable ID across runs without more logic,
-                        // but within session GUID is stable.
-                        // For the sake of this prompt, let's just assume we can't easily match existing open devices by GUID
-                        // completely efficiently without changing the struct, so I'll trust the order or add GUID to struct.
-
-                        // Let's match by comparing device objects? No.
-                        // Let's upgrade `di_devices` to store GUID.
-                        // Wait, I can't change the struct definition inside this method.
-                        // I need to change the struct in the file first.
-                        // I will assume `di_devices` stores `(LiveId, IDirectInputDevice8W, GUID)`.
-                        // Ah, I defined the struct above without GUID. I should add it.
-                        // But since I am overwriting the whole file, I CAN change the struct! :)
-
-                        // See below for corrected struct definition in the same file.
-
+                        // Already open? Instance GUIDs are stable for the session.
                         let mut existing_index = None;
-                        for (idx, (_, _, existing_guid, _)) in self.di_devices.iter().enumerate() {
+                        for (idx, (_, _, existing_guid, _, _)) in self.di_devices.iter().enumerate() {
                             if *existing_guid == guid {
                                 existing_index = Some(idx);
                                 break;
@@ -504,17 +547,19 @@ impl WindowsGameInput {
                                     #[allow(static_mut_refs)]
                                     let data_format = &mut DF_JOYSTICK2_FORMAT.as_mut().unwrap().0;
                                     if device.SetDataFormat(data_format).is_ok() {
-                                        // Set cooperative level (Background | Exclusive)
-                                        // FORCE FEEDBACK REQUIRES EXCLUSIVE ACCESS
-                                        let hwnd =  windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
-
-                                        if device
-                                            .SetCooperativeLevel(
-                                                hwnd,
-                                                DISCL_BACKGROUND | DISCL_EXCLUSIVE,
-                                            )
-                                            .is_ok()
-                                        {
+                                        // Force feedback needs exclusive access, which
+                                        // DirectInput ties to a top-level window. Only
+                                        // this process's own window may hold it: the
+                                        // foreground window at hot-plug can be another
+                                        // app's. Otherwise input only (non-exclusive,
+                                        // no window needed) and no effect.
+                                        let hwnd = own_foreground_window();
+                                        let level = if hwnd.0.is_null() {
+                                            DISCL_BACKGROUND | DISCL_NONEXCLUSIVE
+                                        } else {
+                                            DISCL_BACKGROUND | DISCL_EXCLUSIVE
+                                        };
+                                        if device.SetCooperativeLevel(hwnd, level).is_ok() {
                                             // Acquire
                                             let _ = device.Acquire();
 
@@ -581,6 +626,7 @@ impl WindowsGameInput {
                                                 device.clone(),
                                                 guid,
                                                 effect,
+                                                0,
                                             ));
                                             active_di_indices.push(self.di_devices.len() - 1);
 
@@ -605,7 +651,7 @@ impl WindowsGameInput {
                     let mut i = 0;
                     while i < self.di_devices.len() {
                         if !active_di_indices.contains(&i) {
-                            let (id, _, _, _) = self.di_devices[i];
+                            let (id, _, _, _, _) = self.di_devices[i];
                             self.di_devices.remove(i);
                             if let Some(index) = self.gamepads.iter().position(|g| g.id == id) {
                                 let info = self.gamepads[index].clone();
@@ -621,7 +667,7 @@ impl WindowsGameInput {
                 }
 
                 // Poll active DI devices
-                for (id, device, _, effect) in &self.di_devices {
+                for (id, device, _, effect, sent_magnitude) in &mut self.di_devices {
                     // Poll() usually needed before GetDeviceState
                     let _ = device.Poll();
 
@@ -660,41 +706,34 @@ impl WindowsGameInput {
                                 wh_state.brake = norm_trig(65535 - state.lRz);
                                 wh_state.clutch = norm_trig(65535 - state.rglSlider[0]);
 
-                                // Force Feedback Update
+                                // Force feedback: the app's `steer_force` (−1..1) as
+                                // the constant force's magnitude. The effect was
+                                // started once at creation; only the magnitude is
+                                // updated, and only when it changed.
                                 if let Some(eff) = effect {
-                                    // Map steer_force (-1.0 to 1.0) to -10000 to 10000
-                                    let steer_force = wh_state.steer_force.clamp(-1.0, 1.0);
-                                    let mag = (steer_force * 10000.0) as i32;
-
-                                    // To update parameters, we need to pass a DIEFFECT structure again?
-                                    // Or just TypeSpecificParams?
-                                    // IDirectInputEffect::SetParameters takes flags.
-                                    // If we only update magnitude, we can update TypeSpecificParams.
-
-                                    let mut cf_params = DICONSTANTFORCE { lMagnitude: mag };
-
-                                    // We need to construct a DIEFFECT that points to this
-                                    let mut eff_struct = DIEFFECT {
-                                        dwSize: size_of::<DIEFFECT>() as u32,
-                                        dwFlags: 0, // Not used when we only update typespecific?
-                                        dwDuration: 0,
-                                        dwSamplePeriod: 0,
-                                        dwGain: 0,
-                                        dwTriggerButton: 0,
-                                        dwTriggerRepeatInterval: 0,
-                                        cAxes: 0,
-                                        rgdwAxes: std::ptr::null_mut(),
-                                        rglDirection: std::ptr::null_mut(),
-                                        lpEnvelope: std::ptr::null_mut(),
-                                        cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
-                                        lpvTypeSpecificParams: &mut cf_params as *mut _ as *mut _,
-                                        dwStartDelay: 0,
-                                    };
-
-                                    let _ = eff.SetParameters(
-                                        &mut eff_struct,
-                                        DIEP_TYPESPECIFICPARAMS | DIEP_START,
-                                    );
+                                    let mag = (wh_state.steer_force.clamp(-1.0, 1.0) * 10000.0) as i32;
+                                    if mag != *sent_magnitude {
+                                        let mut cf_params = DICONSTANTFORCE { lMagnitude: mag };
+                                        let mut eff_struct = DIEFFECT {
+                                            dwSize: size_of::<DIEFFECT>() as u32,
+                                            dwFlags: 0,
+                                            dwDuration: 0,
+                                            dwSamplePeriod: 0,
+                                            dwGain: 0,
+                                            dwTriggerButton: 0,
+                                            dwTriggerRepeatInterval: 0,
+                                            cAxes: 0,
+                                            rgdwAxes: std::ptr::null_mut(),
+                                            rglDirection: std::ptr::null_mut(),
+                                            lpEnvelope: std::ptr::null_mut(),
+                                            cbTypeSpecificParams: size_of::<DICONSTANTFORCE>() as u32,
+                                            lpvTypeSpecificParams: &mut cf_params as *mut _ as *mut _,
+                                            dwStartDelay: 0,
+                                        };
+                                        if eff.SetParameters(&mut eff_struct, DIEP_TYPESPECIFICPARAMS).is_ok() {
+                                            *sent_magnitude = mag;
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -120,6 +120,12 @@ pub struct ClusteredLights {
     stats: ClusterStats,
     last_overflow: (usize, usize),
     last_overflow_log: f64,
+    /// The lighting convention every lit lane reads (`lin_ctl`; see
+    /// `Renderer::lin_ctl`), bound together with the cluster uniforms.
+    pub(crate) lin_ctl: [f32; 4],
+    /// HDR height fog (`fog_ctl`, `fog_eye`), bound with the cluster uniforms.
+    pub(crate) fog_ctl: [f32; 4],
+    pub(crate) fog_eye: [f32; 4],
 }
 
 impl Default for ClusteredLights {
@@ -145,6 +151,9 @@ impl Default for ClusteredLights {
             stats: ClusterStats::default(),
             last_overflow: (0, 0),
             last_overflow_log: -1.0,
+            lin_ctl: [0.0, 1.0, 1.0, 1.0],
+            fog_ctl: [0.0; 4],
+            fog_eye: [0.0; 4],
         }
     }
 }
@@ -555,6 +564,9 @@ impl ClusteredLights {
 
     pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool) {
         let on = enabled && self.texture.is_some();
+        vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
+        vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
+        vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
         vars.set_uniform(cx, live_id!(cluster_on), &[if on { 1.0 } else { 0.0 }]);
         if !on {
             return;
@@ -615,6 +627,39 @@ script_mod! {
         cluster_data: texture_2d(float),
         ..mod.draw.LocalShadowSampling
         cluster_on: uniform(0.0)
+        // The lighting convention (Renderer::set_hdr_output): x = 1 for the
+        // linear HDR lane (sRGB texels/colours decoded, no in-lane tone map),
+        // y = exposure, z = 1/exposure, w = emission gain.
+        lin_ctl: uniform(vec4(0.0, 1.0, 1.0, 1.0))
+        // sRGB -> linear for the HDR lane (a close cubic fit of the exact
+        // piecewise curve); the identity for the legacy display-space lane.
+        to_lin: fn(c: vec3) -> vec3 {
+            if self.lin_ctl.x < 0.5 { return c }
+            return c * (c * (c * 0.305306011 + vec3(0.682171111, 0.682171111, 0.682171111)) + vec3(0.012522878, 0.012522878, 0.012522878))
+        }
+        // HDR lane fog (Renderer::set_hdr_output): exponential HEIGHT fog
+        // evaluated per pixel. fog_ctl = (base height, 1/scale height, 0,
+        // on); fog_eye = the true world camera. The game's fog density is
+        // the density AT the base height, so a view from above looks
+        // through far less haze than one along the ground.
+        fog_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        fog_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        scene_fog: fn(legacy: float, wp: vec3, density: float) -> float {
+            if self.lin_ctl.x < 0.5 || self.fog_ctl.w < 0.5 { return legacy }
+            let d = wp - self.fog_eye.xyz
+            let k = self.fog_ctl.y
+            // Optical depth of exp(-(h - h0) k) along the segment, written
+            // with both exponents bounded (no overflow from high cameras).
+            // (e^a - e^b)/dy with b = a - dy, written as e^a (1 - e^-dy)/dy:
+            // the difference of two exponentials cancels catastrophically
+            // on near-level rays under fast math (rings round the camera).
+            let a = min((self.fog_ctl.x - self.fog_eye.y) * k, 30.0)
+            let dy = d.y * k
+            var slope = 1.0 - dy * 0.5 + dy * dy * 0.1666667
+            if abs(dy) > 0.05 { slope = (1.0 - exp(0.0 - dy)) / dy }
+            let layer = exp(a) * slope
+            return 1.0 - exp(0.0 - length(d) * density * layer)
+        }
         cluster_x: uniform(vec4(1.0,0.0,0.0,0.0))
         cluster_y: uniform(vec4(0.0,1.0,0.0,0.0))
         cluster_w: uniform(vec4(0.0,0.0,0.0,1.0))
@@ -703,7 +748,9 @@ script_mod! {
                         let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
                         let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
                         let diffuse=(vec3(1.0,1.0,1.0)-f)*albedo*((1.0-metal)/3.14159265)
-                        response=(diffuse+spec)*ndl
+                        // Light colours are irradiance/pi units; the HDR
+                        // lane restores the pi the 1/pi BRDF divides out.
+                        response=(diffuse+spec)*(ndl*mix(1.0,3.14159265,self.lin_ctl.x))
                     }
                     total=total+color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w))*response
                 }

@@ -4,6 +4,10 @@ use crate::{json::{self,Value},mesh::{Context,Mesh,Polygon,JointWeight},service:
 use std::collections::BTreeMap;
 #[path="construction_fibers.rs"]
 mod fibers;
+#[path="construction_shapes.rs"]
+mod shapes;
+#[path="construction_decal.rs"]
+mod decal;
 
 #[derive(Clone,Debug,PartialEq)]
 pub struct ConstructionOperation {object:String,kind:Construction}
@@ -16,6 +20,8 @@ enum Construction {
     QuadStrip{a:Vec<[f64;3]>,b:Vec<[f64;3]>,closed:bool,material:u32},
     Boolean{a:String,b:String,mode:BooleanMode},
     Voxel{source:String,resolution:u32},
+    Shape{shape:shapes::Shape,material:u32},
+    Decal{decal:decal::Decal,material:u32},
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum BooleanMode {Union,Difference,Intersection}
@@ -34,6 +40,9 @@ impl ConstructionOperation {
             "quad_strip"=>{fields(v,&["op","object","a","b","closed","material"])?;Construction::QuadStrip{a:vectors(need(v,"a")?,2,4096)?,b:vectors(need(v,"b")?,2,4096)?,closed:flag(v,"closed")?,material:integer(need(v,"material")?)?}},
             "boolean"=>{fields(v,&["op","object","a","b","mode"])?;Construction::Boolean{a:name(text(v,"a")?,limits)?,b:name(text(v,"b")?,limits)?,mode:match text(v,"mode")?{"union"=>BooleanMode::Union,"difference"=>BooleanMode::Difference,"intersection"=>BooleanMode::Intersection,_=>return Err(Error::Invalid("boolean mode"))}}},
             "voxel_remesh"=>{fields(v,&["op","object","source","resolution"])?;let resolution=integer(need(v,"resolution")?)?;if !(8..=32).contains(&resolution)||!resolution.is_power_of_two(){return Err(Error::Invalid("voxel resolution must be 8,16,32"));}Construction::Voxel{source:name(text(v,"source")?,limits)?,resolution}},
+            "decal"=>Construction::Decal{decal:decal::Decal::parse(v)?,material:v.get("material").map(integer).transpose()?.unwrap_or(0)},
+            op if shapes::SHAPE_OPS.contains(&op)=>{let shape=shapes::Shape::parse(op,v)?.ok_or(Error::Invalid("shape"))?;
+                Construction::Shape{shape,material:v.get("material").map(integer).transpose()?.unwrap_or(0)}},
             _=>return Ok(None),
         };Ok(Some(Self{object:name(text(v,"object")?,limits)?,kind}))
     }
@@ -48,6 +57,8 @@ impl ConstructionOperation {
             Construction::QuadStrip{a,b,closed,material}=>("quad_strip",vec![("a",vector_values(a)),("b",vector_values(b)),("closed",Value::Bool(*closed)),("material",Value::Int(*material as i64))]),
             Construction::Boolean{a,b,mode}=>("boolean",vec![("a",json::s(a)),("b",json::s(b)),("mode",json::s(match mode{BooleanMode::Union=>"union",BooleanMode::Difference=>"difference",BooleanMode::Intersection=>"intersection"}))]),
             Construction::Voxel{source,resolution}=>("voxel_remesh",vec![("source",json::s(source)),("resolution",Value::Int(*resolution as i64))]),
+            Construction::Shape{shape,material}=>{let(op,mut args)=shape.value();args.push(("material",Value::Int(*material as i64)));(op,args)},
+            Construction::Decal{decal,material}=>{let mut args=decal.value();args.push(("material",Value::Int(*material as i64)));("decal",args)},
         };let mut values=vec![("op",json::s(op)),("object",json::s(&self.object))];values.append(&mut args);json::obj(values)
     }
     pub fn apply(&self,objects:&mut BTreeMap<String,Mesh>,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
@@ -68,6 +79,8 @@ impl ConstructionOperation {
                 boolean_mesh(&a,&b,*mode,ctx)?
             },
             Construction::Voxel{source,resolution}=>voxel_mesh(&world_source(objects,scene,source,ctx)?,*resolution,ctx)?,
+            Construction::Shape{shape,material}=>shape.generate(*material,ctx)?,
+            Construction::Decal{decal,material}=>decal.generate(&world_source(objects,scene,&decal.target,ctx)?,*material,ctx)?,
         };
         ctx.checkpoint(0)?;let mut result=OperationResult{object:self.object.clone(),faces:mesh.faces().iter().map(|f|f.id).collect(),vertices:mesh.vertices().iter().map(|v|v.id).collect(),..Default::default()};
         result.metrics.insert("faces".into(),mesh.faces().len());result.metrics.insert("vertices".into(),mesh.vertices().len());objects.insert(self.object.clone(),mesh);Ok(result)
@@ -104,7 +117,10 @@ fn loft(profiles:&[Vec<[f64;3]>],closed:bool,caps:bool,material:u32,ctx:&mut Con
     let positions=profiles.iter().flatten().copied().collect::<Vec<_>>();let mut polygons=Vec::new();
     for ring in 0..profiles.len()-1{for j in 0..strips{ctx.checkpoint(1)?;let k=(j+1)%n;let u=j as f64/strips as f64;let u1=(j+1)as f64/strips as f64;let v=ring as f64/(profiles.len()-1)as f64;let v1=(ring+1)as f64/(profiles.len()-1)as f64;
         polygons.push(Polygon{vertices:vec![(ring*n+j)as u32,(ring*n+k)as u32,((ring+1)*n+k)as u32,((ring+1)*n+j)as u32],uvs:vec![[u,v],[u1,v],[u1,v1],[u,v1]],material});}}
-    if caps{polygons.push(cap_polygon(&positions,(0..n).rev().map(|i|i as u32).collect(),material)?);polygons.push(cap_polygon(&positions,((profiles.len()-1)*n..profiles.len()*n).map(|i|i as u32).collect(),material)?);}
+    if caps{polygons.push(cap_polygon(&positions,(0..n).rev().map(|i|i as u32).collect(),material)?);polygons.push(cap_polygon(&positions,((profiles.len()-1)*n..profiles.len()*n).map(|i|i as u32).collect(),material)?);
+        // A capped loft is a solid: whichever way its profiles wind, face out.
+        let volume:f64=polygons.iter().map(|p|(1..p.vertices.len()-1).map(|i|{let [a,b,c]=[p.vertices[0],p.vertices[i],p.vertices[i+1]].map(|v|positions[v as usize]);dot(a,cross(b,c))}).sum::<f64>()).sum();
+        if volume<0.{for p in &mut polygons{p.vertices.reverse();p.uvs.reverse();}}}
     Ok(Mesh::from_polygons(&positions,&polygons,ctx)?)
 }
 fn cap_polygon(positions:&[[f64;3]],indices:Vec<u32>,material:u32)->Result<Polygon>{let mut normal=[0.;3];for i in 0..indices.len(){normal=add(normal,cross(positions[indices[i]as usize],positions[indices[(i+1)%indices.len()]as usize]));}let normal=unit(normal)?;let axis=(0..3).max_by(|&a,&b|normal[a].abs().total_cmp(&normal[b].abs())).unwrap();
@@ -185,7 +201,17 @@ fn transfer_surface(positions:&[[f64;3]],faces:&[[u32;3]],sources:&[SourceTriang
         let points=[p[0],p[1],p[2]];let centroid=mul(add(add(p[0],p[1]),p[2]),1./3.);let mut mapped=None;
         if exact {for source in sources{ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
             if mapping.iter().all(|(b,d)|*d<=epsilon&&b.iter().all(|v|*v>=-1e-7&&*v<=1.+1e-7)){mapped=Some((source,mapping.map(|(b,_)|b)));break;}
-        }}else{let(i,_,_)=nearest_source(centroid,sources,ctx)?;mapped=Some((&sources[i],points.map(|p|closest_barycentric(p,sources[i].points).0)));}
+        }
+            // The kernel may retriangulate a planar region across the
+            // diagonals of its source polygon. Extrapolate from the coplanar
+            // source triangle the output triangle overhangs least; affine
+            // UVs/normals of a planar face are exact under extrapolation.
+            if mapped.is_none(){let mut best:Option<(f64,&SourceTriangle,[[f64;3];3])>=None;
+                for source in sources{ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
+                    if mapping.iter().all(|(_,d)|*d<=epsilon*16.){let outside=mapping.iter().flat_map(|(b,_)|b.iter()).map(|v|(-v).max(v-1.).max(0.)).fold(0f64,f64::max);
+                        if best.as_ref().is_none_or(|(o,_,_)|outside<*o){best=Some((outside,source,mapping.map(|(b,_)|b)));}}}
+                mapped=best.map(|(_,source,bary)|(source,bary));}
+        }else{let(i,_,_)=nearest_source(centroid,sources,ctx)?;mapped=Some((&sources[i],points.map(|p|closest_barycentric(p,sources[i].points).0)));}
         let (source,bary)=mapped.ok_or(Error::Invalid("boolean retessellation crosses an ambiguous authored UV/material triangle"))?;
         let uvs=bary.map(|b|std::array::from_fn(|d|(0..3).map(|i|source.uv[i][d]*b[i]).sum())).to_vec();
         let geometric=unit(cross(sub(p[1],p[0]),sub(p[2],p[0])))?;

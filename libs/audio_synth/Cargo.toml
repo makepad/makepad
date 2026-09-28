@@ -1,0 +1,21 @@
+[package]
+name = "makepad-audio-synth"
+version = "0.1.0"
+edition = "2021"
+description = "Shared realtime synthesis: band-limited oscillators, filters, reverb, spatializer, dynamics, a data-driven sfx recipe format, physically-inspired vehicle engines and tyres, the Ironfish synth, and one Instrument trait over Makepad's piano, drum kits and SoundFont player"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[features]
+default = []
+# The heavy instruments (modelled piano, drum kits, SoundFont player) behind
+# one flag, so a DSP-only user (Stage's audio_dsp re-export) builds none of
+# them.
+instruments = ["dep:makepad-piano-model", "dep:makepad-drumkit", "dep:makepad-drumkit-phys", "dep:makepad-soundfont"]
+
+[dependencies]
+makepad-piano-model = { path = "../piano_model", optional = true }
+makepad-drumkit = { path = "../drumkit", optional = true }
+makepad-drumkit-phys = { path = "../drumkit_phys", optional = true }
+makepad-soundfont = { path = "../soundfont", optional = true }
