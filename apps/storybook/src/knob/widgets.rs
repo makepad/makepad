@@ -13,7 +13,7 @@ script_mod! {
 
     mod.storybook.TurnedKnobBase = #(TurnedKnob::register_widget(vm))
     /** One knob of the bench's knob engine: `style` (0..17) in `material`
-     * (0..11), turned to `value`. A drag turns it; a tap raises `Tapped`. */
+     * (0..12), turned to `value`. A drag turns it; a tap raises `Tapped`. */
     mod.storybook.TurnedKnob = set_type_default() do mod.storybook.TurnedKnobBase{
         width: 160.
         height: 160.
@@ -214,6 +214,58 @@ pub fn set_style_uniforms(cx: &Cx, vars: &mut DrawVars, s: &KnobShape, a: &KnobA
     }
 }
 
+/// How far from its centre a knob paints anything, in the bench's units (the
+/// knob's radius is 56): its solid, the cast shadow and the ground lip with
+/// their blur, the contact ring, a well's, the latched glow and the marks.
+/// The same bounds the shader stops each of them at, so the quad the knob is
+/// drawn in never cuts one short.
+pub fn knob_reach(m: &KnobMaterial, s: &KnobShape, a: &KnobAssets, lit: bool) -> f64 {
+    const R: f64 = 56.0;
+    let wr = s.wr0.abs().max(s.wr1.abs());
+    let mut solid_r = R * wr.max(1.0);
+    if s.wr1 - s.wr0 > 0.01 {
+        solid_r += s.wwmax * R * 0.5;
+    }
+    if s.flutes >= 1.0 {
+        solid_r += s.fd.abs();
+    }
+    let mut reach = solid_r;
+    let blur = m.sblur.max(0.001);
+    if m.level > 0.5 {
+        // The shader's own bound for the knob's ground: the outline, the
+        // cast shadow's length, four blurs and the lip's offset.
+        let tanel = m.lz.max(0.05) / m.lx.hypot(m.ly).max(0.05);
+        let hk = R * m.pdepth.max(0.001);
+        let off = (m.raise * 1.2).max(0.0) / tanel;
+        let cast_l = a.geom.consts.wing_top.max(1.0) * hk / tanel;
+        reach = reach.max(solid_r + cast_l + 4.0 * blur + off);
+        // The wells' contact rings.
+        if s.well > 1.01 {
+            reach = reach.max(s.well * R + 4.0 * blur);
+        }
+        if s.awell > 0.01 && s.arcw >= 0.01 {
+            reach = reach.max(s.arcr * R + s.arcw * s.awell * 0.5 + 4.0 * blur);
+        }
+    }
+    if lit && m.glow > 0.001 {
+        reach = reach.max(solid_r + 4.0 * m.glow * 14.0);
+    }
+    // The marks, with the room the shader gives an LED's halo.
+    let mut mr: f64 = 0.0;
+    if s.ticks >= 1.0 {
+        mr = s.tickr + s.tickl;
+    }
+    if s.ptype > 0.5 {
+        mr = mr.max(s.pr1);
+    }
+    if s.arcw >= 0.01 {
+        mr = mr.max(s.arcr);
+    }
+    reach = reach.max(R * mr + s.arcw + (s.pw.max(s.tickw) * R / 56.0).max(1.2) + 42.0);
+    // And a few units for the antialiasing.
+    reach + 4.0
+}
+
 /// What a knob raised.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum TurnedKnobAction {
@@ -250,7 +302,7 @@ pub struct TurnedKnob {
     /// handed a shape over with `set_shape`.
     #[live]
     pub style: f64,
-    /// The material, 0..11, in the order of `MATERIALS`, unless the host
+    /// The material, 0..12, in the order of `MATERIALS`, unless the host
     /// has handed one over with `set_material`.
     #[live]
     pub material: f64,
@@ -283,6 +335,12 @@ pub struct TurnedKnob {
     assets: Option<KnobAssets>,
     #[rust]
     drag: Option<Drag>,
+    /// The layout rect: what a hit is tested against and what the widget
+    /// reports as its area. The quad it draws reaches further (see
+    /// [`knob_reach`]).
+    #[area]
+    #[rust]
+    hit: Area,
 }
 
 impl TurnedKnob {
@@ -335,6 +393,12 @@ impl TurnedKnob {
             self.draw_knob.redraw(cx);
         }
     }
+
+    /// The draw shader this knob was built with: whether it is ready to
+    /// draw is the backend's to say (`Cx::is_draw_shader_window_ready`).
+    pub fn draw_shader_id(&self) -> Option<DrawShaderId> {
+        self.draw_knob.draw_vars.draw_shader_id
+    }
 }
 
 impl Widget for TurnedKnob {
@@ -351,19 +415,26 @@ impl Widget for TurnedKnob {
                 a
             }
         };
+        cx.add_rect_area(&mut self.hit, rect);
         let radius = self.fill * rect.size.x.min(rect.size.y) * 0.5;
+        // The quad reaches as far as anything the knob paints on the ground,
+        // past the layout rect where that is further: it composes over what
+        // is under it (`knob_out` in the shader), so it needs no edge.
+        let reach = knob_reach(&m, shape, &assets, self.lit) * radius.max(1.0) / self.unit_radius.max(1.0);
+        let half = dvec2((rect.size.x * 0.5).max(reach), (rect.size.y * 0.5).max(reach));
+        let quad = Rect { pos: rect.pos + rect.size * 0.5 - half, size: half * 2.0 };
         let vars = &mut self.draw_knob.draw_vars;
         set_material_uniforms(cx, vars, &m);
         set_style_uniforms(cx, vars, shape, &assets);
         u4(cx, vars, live_id!(k_state), [self.value, if self.lit { 1.0 } else { 0.0 }, self.edge_fade, 0.0]);
-        u4(cx, vars, live_id!(k_geom), [rect.size.x * 0.5, rect.size.y * 0.5, radius.max(1.0), self.unit_radius]);
-        self.draw_knob.draw_abs(cx, rect);
+        u4(cx, vars, live_id!(k_geom), [half.x, half.y, radius.max(1.0), self.unit_radius]);
+        self.draw_knob.draw_abs(cx, quad);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
-        match event.hits(cx, self.draw_knob.area()) {
+        match event.hits(cx, self.hit) {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if fe.tap_count == 2 && self.turnable {
@@ -435,6 +506,10 @@ impl TurnedKnobRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_lit(cx, lit);
         }
+    }
+
+    pub fn draw_shader_id(&self) -> Option<DrawShaderId> {
+        self.borrow().and_then(|inner| inner.draw_shader_id())
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<f64> {

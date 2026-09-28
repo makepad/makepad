@@ -51,10 +51,15 @@ impl Default for GpuTimeQuery {
         }
     }
 }
-// Only backends that report command-buffer timing (Metal today) call the
+// Only backends that report pass timing (Metal and D3D11 today) call the
 // recording half; the other backends still compile it.
 #[allow(dead_code)]
 impl GpuTimeRecorder {
+    /// A sample the backend could not take (no free query, an unreliable
+    /// clock) counts like one the full queue refused.
+    pub(crate) fn record_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
     pub(crate) fn record_breakdown(&self, tag: u64, line: String) {
         if self.breakdown.try_send((tag, line)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -417,8 +422,9 @@ impl DrawPass {
     }
 
     /// Enable asynchronous backend GPU timing for this pass. Metal records
-    /// the command buffer's GPUStartTime/GPUEndTime; unsupported backends
-    /// simply leave the sample queue empty.
+    /// the command buffer's GPUStartTime/GPUEndTime; D3D11 brackets the
+    /// pass with timestamp queries, polled without waiting. Unsupported
+    /// backends simply leave the sample queue empty.
     pub fn set_gpu_timing_enabled(&self, cx: &mut Cx, enabled: bool) {
         cx.passes[self.draw_pass_id()].set_gpu_timing_enabled(enabled);
     }

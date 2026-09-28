@@ -398,7 +398,7 @@ mod tests {
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
-                ("Material", &["Overview", "Knob presets"]),
+                ("Material", &["Overview", "Knob presets", "Knob cost"]),
                 ("Splash", &["Overview"]),
             ],
         ),

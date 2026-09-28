@@ -8,16 +8,11 @@
 //! the material to every knob and the shape to the large knob and the 3D
 //! view, and picks the style a knob in the gallery is tapped on.
 use crate::controls::{ControlValue, StoryControlAction};
-use crate::knob::presets::{style_shapes, Anchor, KnobMaterial, KnobShape, KnobStyle, MATERIALS, STYLES};
+use crate::knob::look::{color_of, ink_of, KnobLook, DEFAULT_STYLE, STYLE_INDEX, STYLE_PRESET, VALUE};
+use crate::knob::presets::{style_shapes, Anchor, KnobMaterial, KnobShape, KnobStyle, STYLES};
 use crate::knob::widgets::{set_material_uniforms, KnobView3dWidgetExt, TurnedKnobAction, TurnedKnobWidgetExt};
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
-
-/// The material the page opens on: the charcoal, matte on a warm dark
-/// ground, its marks LEDs.
-const DEFAULT_MATERIAL: usize = 7;
-/// And the style: the winged knob.
-const DEFAULT_STYLE: usize = 8;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::knob::script_mod(vm);
@@ -40,10 +35,14 @@ mod page {
         }
 
         // One gallery cell: a knob and its style's name under it.
+        // A knob's light and shadow reach past its cell; no view between it
+        // and the page clips them.
         let KnobCell = View{
             width: 136.
             height: Fit
             flow: Down
+            clip_x: false
+            clip_y: false
             align: Align{x: 0.5 y: 0.0}
             knob := TurnedKnob{width: 136. height: 128. fill: 0.5}
             name := Label{
@@ -71,11 +70,13 @@ mod page {
             show_bg: true
             draw_bg +: {..mod.storybook.KnobGroundFill}
 
-            intro := PageNote{text: "The Material Bench's knob engine, ported: eighteen knob styles in twelve materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style in the shape the geometry controls give it; drag the 3D view to orbit it, ctrl-scroll to zoom, double-tap to put the camera back."}
+            intro := PageNote{text: "The Material Bench's knob engine, ported: eighteen knob styles in thirteen materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style in the shape the geometry controls give it; drag the 3D view to orbit it, ctrl-scroll to zoom, double-tap to put the camera back."}
             stage := View{
                 width: Fill
                 height: Fit
                 flow: Flow.Right{wrap: true}
+                clip_x: false
+                clip_y: false
                 spacing: 16.
                 align: Align{x: 0.0 y: 0.5}
                 view3d := KnobView3d{width: 403. height: 290.}
@@ -83,6 +84,8 @@ mod page {
                     width: 270.
                     height: Fit
                     flow: Down
+                    clip_x: false
+                    clip_y: false
                     spacing: 4.
                     align: Align{x: 0.5 y: 0.0}
                     big := TurnedKnob{width: 270. height: 270. fill: 0.62}
@@ -96,6 +99,8 @@ mod page {
                 width: Fill
                 height: Fit
                 flow: Flow.Right{wrap: true}
+                clip_x: false
+                clip_y: false
                 c0 := KnobCell{}
                 c1 := KnobCell{}
                 c2 := KnobCell{}
@@ -119,109 +124,17 @@ mod page {
     }
 }
 
-/// The material, shape and knob state the page's controls write, one live
-/// property per control. A material preset writes all the material's, a
-/// style preset all the shape's.
+/// The page: the look its controls write (`crate::knob::look`), handed to
+/// every knob and to the 3D view, and the shape they write, one live
+/// property per control, handed to the large knob and the 3D view. A
+/// material preset writes all the material's, a style preset all the
+/// shape's.
 #[derive(Script, Widget)]
 pub struct KnobPresets {
     #[deref]
     view: View,
     #[live]
-    style: f64,
-    #[live]
-    value: f64,
-    #[live]
-    lit: bool,
-    #[live]
-    level: f64,
-    #[live]
-    lx: f64,
-    #[live]
-    ly: f64,
-    #[live]
-    lz: f64,
-    #[live]
-    li: f64,
-    #[live]
-    bw: f64,
-    #[live]
-    bc: f64,
-    #[live]
-    raise: f64,
-    #[live]
-    sink: f64,
-    #[live]
-    spec: f64,
-    #[live]
-    rough: f64,
-    #[live]
-    ao: f64,
-    #[live]
-    rim: f64,
-    #[live]
-    gloss: f64,
-    #[live]
-    glow: f64,
-    #[live]
-    shadow: f64,
-    #[live]
-    sblur: f64,
-    #[live]
-    fall: f64,
-    #[live]
-    oao: f64,
-    #[live]
-    inner: f64,
-    #[live]
-    inner_r: f64,
-    #[live]
-    lip: f64,
-    #[live]
-    facegrad: f64,
-    #[live]
-    hair: f64,
-    #[live]
-    aoreach: f64,
-    #[live]
-    pdepth: f64,
-    #[live]
-    psmooth: f64,
-    #[live]
-    pfin: f64,
-    #[live]
-    mbev: f64,
-    #[live]
-    env: f64,
-    #[live]
-    metal: f64,
-    #[live]
-    ev: f64,
-    #[live]
-    roll: f64,
-    #[live]
-    coat: f64,
-    #[live]
-    coatr: f64,
-    #[live]
-    envk: f64,
-    #[live]
-    persp: f64,
-    #[live]
-    lights: f64,
-    #[live]
-    panes: f64,
-    #[live]
-    ground: Vec4f,
-    #[live]
-    body_ink: Vec4f,
-    #[live]
-    light_ink: Vec4f,
-    #[live]
-    shadow_ink: Vec4f,
-    #[live]
-    glow_ink: Vec4f,
-    #[live]
-    ptr_ink: Vec4f,
+    look: KnobLook,
     // The shape: every number of a style, under the style's own names.
     #[live]
     capr: f64,
@@ -338,123 +251,13 @@ pub struct KnobPresets {
 /// crest height along it, and its section across it.
 pub const CURVES: [&str; 5] = ["prof", "flute", "wwid", "whgt", "wprof"];
 
-fn color_of(c: u32) -> Vec4f {
-    let v = crate::knob::bake::ink(c);
-    vec4(v[0] as f32, v[1] as f32, v[2] as f32, 1.0)
-}
-
-fn ink_of(c: Vec4f) -> u32 {
-    let b = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 255;
-    (b(c.x) << 24) | (b(c.y) << 16) | (b(c.z) << 8) | 0xFF
-}
-
 impl KnobPresets {
-    fn load(&mut self, m: &KnobMaterial) {
-        self.level = m.level;
-        self.lx = m.lx;
-        self.ly = m.ly;
-        self.lz = m.lz;
-        self.li = m.li;
-        self.bw = m.bw;
-        self.bc = m.bc;
-        self.raise = m.raise;
-        self.sink = m.sink;
-        self.spec = m.spec;
-        self.rough = m.rough;
-        self.ao = m.ao;
-        self.rim = m.rim;
-        self.gloss = m.gloss;
-        self.glow = m.glow;
-        self.shadow = m.shadow;
-        self.sblur = m.sblur;
-        self.fall = m.fall;
-        self.oao = m.oao;
-        self.inner = m.inner;
-        self.inner_r = m.inner_r;
-        self.lip = m.lip;
-        self.facegrad = m.facegrad;
-        self.hair = m.hair;
-        self.aoreach = m.aoreach;
-        self.pdepth = m.pdepth;
-        self.psmooth = m.psmooth;
-        self.pfin = m.pfin;
-        self.mbev = m.mbev;
-        self.env = m.env;
-        self.metal = m.metal;
-        self.ev = m.ev;
-        self.roll = m.roll;
-        self.coat = m.coat;
-        self.coatr = m.coatr;
-        self.envk = m.envk;
-        self.persp = m.persp;
-        self.lights = m.lights;
-        self.panes = m.panes;
-        self.ground = color_of(m.ground);
-        self.body_ink = color_of(m.body_ink);
-        self.light_ink = color_of(m.light_ink);
-        self.shadow_ink = color_of(m.shadow_ink);
-        self.glow_ink = color_of(m.glow_ink);
-        self.ptr_ink = color_of(m.ptr_ink);
-    }
-
-    /// The material the controls describe now.
-    fn material(&self) -> KnobMaterial {
-        KnobMaterial {
-            name: "custom",
-            level: self.level,
-            lx: self.lx,
-            ly: self.ly,
-            lz: self.lz,
-            li: self.li,
-            bw: self.bw,
-            bc: self.bc,
-            raise: self.raise,
-            sink: self.sink,
-            spec: self.spec,
-            rough: self.rough,
-            ao: self.ao,
-            rim: self.rim,
-            gloss: self.gloss,
-            glow: self.glow,
-            shadow: self.shadow,
-            sblur: self.sblur,
-            fall: self.fall,
-            oao: self.oao,
-            inner: self.inner,
-            inner_r: self.inner_r,
-            lip: self.lip,
-            facegrad: self.facegrad,
-            hair: self.hair,
-            aoreach: self.aoreach,
-            pdepth: self.pdepth,
-            psmooth: self.psmooth,
-            pfin: self.pfin,
-            mbev: self.mbev,
-            env: self.env,
-            metal: self.metal,
-            ev: self.ev,
-            roll: self.roll,
-            coat: self.coat,
-            coatr: self.coatr,
-            envk: self.envk,
-            persp: self.persp,
-            lights: self.lights,
-            panes: self.panes,
-            ground: ink_of(self.ground),
-            body_ink: ink_of(self.body_ink),
-            light_ink: ink_of(self.light_ink),
-            shadow_ink: ink_of(self.shadow_ink),
-            glow_ink: ink_of(self.glow_ink),
-            ptr_ink: ink_of(self.ptr_ink),
-        }
-    }
-
     /// Load a style whole, its numbers and its curves, and make it the
     /// picked one.
     fn load_style(&mut self, index: usize) {
         let index = index.min(STYLES.len() - 1);
         let s = &STYLES[index];
-        self.style = index as f64;
+        self.look.style = index as f64;
         self.loaded_style = index;
         self.capr = s.capr;
         self.cap_ink = color_of(s.cap_ink);
@@ -503,7 +306,7 @@ impl KnobPresets {
         let anchor_index = |v: f64| v.round().max(0.0) as usize;
         let [prof, flute, wwid, whgt, wprof] = self.curves.clone();
         KnobShape {
-            name: STYLES[self.style_index()].name.to_string(),
+            name: STYLES[self.look.style_index()].name.to_string(),
             capr: self.capr,
             cap_ink: ink_of(self.cap_ink),
             spun: self.spun,
@@ -575,10 +378,6 @@ impl KnobPresets {
         }
     }
 
-    fn style_index(&self) -> usize {
-        (self.style.round().max(0.0) as usize).min(STYLES.len() - 1)
-    }
-
     fn cell(i: usize) -> LiveId {
         LiveId::from_str(&format!("c{i}"))
     }
@@ -592,7 +391,7 @@ impl KnobPresets {
     /// pulled back a step.
     fn tell_controls(&self, cx: &mut Cx) {
         let uid = self.widget_uid();
-        let preset = ControlValue::Choice(self.style_index());
+        let preset = ControlValue::Choice(self.look.style_index());
         cx.widget_action(uid, StoryControlAction::Set { label: STYLE_PRESET, value: preset });
         for (label, value) in shape_values(&self.shape()) {
             cx.widget_action(uid, StoryControlAction::Set { label, value });
@@ -608,10 +407,10 @@ impl KnobPresets {
     /// shape to the large knob and the 3D view, and colour the text to read
     /// on the ground.
     fn push(&mut self, cx: &mut Cx) {
-        let m = self.material();
+        let m = self.look.material();
         let shape = self.shape();
-        let style = self.style_index();
-        let state = (m, shape.clone(), style, self.value, self.lit);
+        let style = self.look.style_index();
+        let state = (m, shape.clone(), style, self.look.value, self.look.lit);
         if self.pushed.as_ref() == Some(&state) {
             return;
         }
@@ -637,8 +436,8 @@ impl KnobPresets {
             let knob = self.view.turned_knob(cx, &[Self::cell(i), live_id!(knob)]);
             knob.set_style(cx, i);
             knob.set_material(cx, &m);
-            knob.set_value(cx, self.value);
-            knob.set_lit(cx, self.lit);
+            knob.set_value(cx, self.look.value);
+            knob.set_lit(cx, self.look.lit);
             if recolour || restyle {
                 let mut name = self.view.widget(cx, &[Self::cell(i), live_id!(name)]);
                 let label = STYLES[i].label();
@@ -651,24 +450,17 @@ impl KnobPresets {
         big.set_style(cx, style);
         big.set_shape(cx, &shape);
         big.set_material(cx, &m);
-        big.set_value(cx, self.value);
-        big.set_lit(cx, self.lit);
+        big.set_value(cx, self.look.value);
+        big.set_lit(cx, self.look.lit);
         let view3d = self.view.knob_view3d(cx, &[live_id!(view3d)]);
         view3d.set_style(cx, style);
         view3d.set_shape(cx, &shape);
         view3d.set_material(cx, &m);
-        view3d.set_value(cx, self.value);
+        view3d.set_value(cx, self.look.value);
         if recolour || restyle || relit {
-            // The material by its inks; of two with the same inks (the
-            // chrome and the showroom), the one hung with these lights.
-            let inks = |p: &&KnobMaterial| p.ground == m.ground && p.body_ink == m.body_ink;
-            let material = MATERIALS
-                .iter()
-                .filter(inks)
-                .find(|p| p.lights == m.lights)
-                .or_else(|| MATERIALS.iter().find(inks))
-                .map(|p| p.name)
-                .unwrap_or("this material");
+            // The material by its inks and, of the chrome and the showroom
+            // chrome, its lights.
+            let material = self.look.material_name();
             let mut caption = self.view.widget(cx, &[live_id!(caption)]);
             let style_name = STYLES[style].label();
             let words = if edited {
@@ -687,9 +479,8 @@ impl KnobPresets {
 
 impl ScriptHook for KnobPresets {
     fn on_after_new(&mut self, _vm: &mut ScriptVm) {
-        self.load(&MATERIALS[DEFAULT_MATERIAL]);
+        self.look.reset();
         self.load_style(DEFAULT_STYLE);
-        self.value = 0.34;
     }
 
     fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
@@ -697,7 +488,7 @@ impl ScriptHook for KnobPresets {
         // the edits back in the order they were made): the style comes whole,
         // curves and all, as it always did. A style preset writes the index
         // first, so the numbers it writes after it land on top of this.
-        let style = self.style_index();
+        let style = self.look.style_index();
         if style != self.loaded_style {
             self.load_style(style);
             // The controls still show the style that was. They are told on
@@ -753,7 +544,7 @@ fn read_curve(vm: &ScriptVm, value: ScriptValue) -> Option<Vec<Anchor>> {
 impl Widget for KnobPresets {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.push(cx);
-        let m = self.material();
+        let m = self.look.material();
         set_material_uniforms(cx, &mut self.view.draw_bg.draw_vars, &m);
         self.view.draw_walk(cx, scope, walk)
     }
@@ -793,7 +584,7 @@ impl Widget for KnobPresets {
         // shows the choice, so its values are set one by one.
         let uid = self.widget_uid();
         if let Some(v) = turned {
-            self.value = v;
+            self.look.value = v;
             self.push(cx);
             cx.widget_action(uid, StoryControlAction::Set { label: VALUE, value: ControlValue::Number(v) });
         }
@@ -823,56 +614,6 @@ pub enum KnobPresetsAction {
 
 // ---- the controls ----
 
-const STYLE_PRESET: &str = "Style";
-const STYLE_INDEX: &str = "Style index";
-const VALUE: &str = "Value";
-const LATCHED: &str = "Latched (LEDs lit)";
-const MATERIAL: &str = "Material";
-const LIGHT_X: &str = "Light x (right +)";
-const LIGHT_Y: &str = "Light y (down +)";
-const LIGHT_Z: &str = "Light z (toward you)";
-const INTENSITY: &str = "Intensity";
-const TIER: &str = "Tier (0 / 1 / 2)";
-const SPECULAR: &str = "Specular";
-const ROUGHNESS: &str = "Roughness";
-const METALLIC: &str = "Metallic";
-const COAT: &str = "Clear coat";
-const COAT_ROUGH: &str = "Coat roughness";
-const STUDIO: &str = "Studio (0 / 1 chrome / 2 outdoor)";
-const STUDIO_LIGHTS: &str = "Studio lights";
-const STUDIO_PANES: &str = "Ceiling panes";
-const REFLECTION: &str = "Reflection";
-const EXPOSURE: &str = "Exposure (EV)";
-const ROLL: &str = "Highlight roll-off";
-const PERSPECTIVE: &str = "Reflection perspective";
-const RAISE: &str = "Raise (pt)";
-const SINK: &str = "Sink (pt)";
-const RIM: &str = "Rim";
-const GLOSS: &str = "Gloss sweep";
-const HAIRLINE: &str = "Hairline edge";
-const GLOW: &str = "Glow (latched)";
-const DEPTH: &str = "Profile depth";
-const CREASE: &str = "Min crease blur";
-const MARK_FINISH: &str = "Mark finish (paint / engrave / emboss / LED)";
-const MARK_BEVEL: &str = "Mark bevel / LED housing";
-const BEVEL_WIDTH: &str = "Well bevel width";
-const BEVEL_CURVE: &str = "Well bevel curve";
-const OCCLUSION: &str = "Well occlusion";
-const OCCLUSION_REACH: &str = "Occlusion reach";
-const FACE_GRADIENT: &str = "Well face gradient";
-const CAST_SHADOW: &str = "Cast shadow";
-const SHADOW_BLUR: &str = "Shadow blur (pt)";
-const FALLOFF: &str = "Falloff (linear to expo)";
-const CONTACT: &str = "Contact occlusion";
-const GROUND_LIP: &str = "Ground lip";
-const INNER_SHADOW: &str = "Inner shadow (wells)";
-const INNER_BLUR: &str = "Inner blur (pt)";
-const GROUND: &str = "Ground";
-const BODY: &str = "Knob body";
-const LIGHT_INK: &str = "Light ink";
-const SHADOW_INK: &str = "Shadow ink (multiplies)";
-const GLOW_INK: &str = "Glow ink";
-const POINTER_INK: &str = "Pointer ink";
 // The shape, in the bench's words.
 const CAP_RADIUS: &str = "Cap radius (0 = none)";
 const SPUN: &str = "Spun metal";
@@ -918,97 +659,6 @@ const CUT_LENGTH: &str = "Cut half length (x R)";
 const CUT_FLOOR: &str = "Cut floor (x cap height, 0 = through)";
 const CUT_WALL: &str = "Cut wall (x R per cap height)";
 const CUT_BLEND: &str = "Cut blend (fillet, x R)";
-
-const MATERIAL_NAMES: &[&str] = &[
-    "Neumorphic",
-    "Moulded",
-    "Glossy",
-    "Milled",
-    "Porcelain",
-    "Onyx",
-    "Gunmetal",
-    "Charcoal",
-    "Obsidian",
-    "Aluminium",
-    "Chrome",
-    "Showroom chrome",
-];
-
-const STYLE_NAMES: &[&str] = &[
-    "Classic",
-    "Fluted",
-    "Knurled",
-    "Pointer",
-    "Skirted",
-    "Dome",
-    "Chromecap",
-    "Lobed",
-    "Winged",
-    "Dial",
-    "Chamfered",
-    "Chicken",
-    "Dimpled",
-    "Fingerdimple",
-    "Slotted",
-    "Scalloped",
-    "Grooved",
-    "Cutwing",
-];
-
-/// Every material control's value in one preset: the whole material.
-fn material_preset(option: usize) -> Vec<(&'static str, ControlValue)> {
-    use ControlValue::{Color, Number};
-    let Some(m) = MATERIALS.get(option) else {
-        return Vec::new();
-    };
-    vec![
-        (LIGHT_X, Number(m.lx)),
-        (LIGHT_Y, Number(m.ly)),
-        (LIGHT_Z, Number(m.lz)),
-        (INTENSITY, Number(m.li)),
-        (TIER, Number(m.level)),
-        (SPECULAR, Number(m.spec)),
-        (ROUGHNESS, Number(m.rough)),
-        (METALLIC, Number(m.metal)),
-        (COAT, Number(m.coat)),
-        (COAT_ROUGH, Number(m.coatr)),
-        (STUDIO, Number(m.envk)),
-        (STUDIO_LIGHTS, Number(m.lights)),
-        (STUDIO_PANES, Number(m.panes)),
-        (REFLECTION, Number(m.env)),
-        (EXPOSURE, Number(m.ev)),
-        (ROLL, Number(m.roll)),
-        (PERSPECTIVE, Number(m.persp)),
-        (RAISE, Number(m.raise)),
-        (SINK, Number(m.sink)),
-        (RIM, Number(m.rim)),
-        (GLOSS, Number(m.gloss)),
-        (HAIRLINE, Number(m.hair)),
-        (GLOW, Number(m.glow)),
-        (DEPTH, Number(m.pdepth)),
-        (CREASE, Number(m.psmooth)),
-        (MARK_FINISH, Number(m.pfin)),
-        (MARK_BEVEL, Number(m.mbev)),
-        (BEVEL_WIDTH, Number(m.bw)),
-        (BEVEL_CURVE, Number(m.bc)),
-        (OCCLUSION, Number(m.ao)),
-        (OCCLUSION_REACH, Number(m.aoreach)),
-        (FACE_GRADIENT, Number(m.facegrad)),
-        (CAST_SHADOW, Number(m.shadow)),
-        (SHADOW_BLUR, Number(m.sblur)),
-        (FALLOFF, Number(m.fall)),
-        (CONTACT, Number(m.oao)),
-        (GROUND_LIP, Number(m.lip)),
-        (INNER_SHADOW, Number(m.inner)),
-        (INNER_BLUR, Number(m.inner_r)),
-        (GROUND, Color(m.ground)),
-        (BODY, Color(m.body_ink)),
-        (LIGHT_INK, Color(m.light_ink)),
-        (SHADOW_INK, Color(m.shadow_ink)),
-        (GLOW_INK, Color(m.glow_ink)),
-        (POINTER_INK, Color(m.ptr_ink)),
-    ]
-}
 
 /// Every shape control's value in one style, the style index first: the
 /// whole geometry, its curves too, so the curve editors show the style's.
@@ -1074,19 +724,6 @@ fn shape_values(s: &KnobShape) -> Vec<(&'static str, ControlValue)> {
     ]
 }
 
-/// A slider on the page's own property.
-const fn number(label: &'static str, prop: &'static str, min: f64, max: f64, step: f64, default: f64) -> Control {
-    Control { label, target: "", kind: ControlKind::Number { prop, min, max, step, default } }
-}
-
-const fn color(label: &'static str, prop: &'static str, default: u32) -> Control {
-    Control { label, target: "", kind: ControlKind::Color { prop, default } }
-}
-
-const fn section(label: &'static str, open: bool) -> Control {
-    Control { label, target: "", kind: ControlKind::Section { open } }
-}
-
 /// A curve editor on one of the page's curves, captioned at its two ends.
 const fn curve(
     label: &'static str,
@@ -1102,7 +739,7 @@ const fn curve(
     }
 }
 
-const M: KnobMaterial = MATERIALS[DEFAULT_MATERIAL];
+/// The style the shape's controls open on.
 const S: KnobStyle = STYLES[DEFAULT_STYLE];
 
 pub const STORIES: &[Story] = &[Story {
@@ -1116,11 +753,11 @@ pub const STORIES: &[Story] = &[Story {
     tags: &["material", "knob", "presets", "3d", "skeuomorph", "bench"],
     doc: "# Knob presets
 
-The Material Bench's knob engine, ported into the storybook: eighteen of its knob styles, live, in any of twelve materials, on that material's ground. The picked style is shown large and in 3D beside the gallery, in the shape the geometry controls give it.
+The Material Bench's knob engine, ported into the storybook: eighteen of its knob styles, live, in any of its eleven materials and two of ours (a dark neumorphic one and a showroom chrome), on that material's ground. The picked style is shown large and in 3D beside the gallery, in the shape the geometry controls give it.
 
 ## The engine
 
-`TurnedKnob` draws one knob in its own quad: the ground under it with the knob's cast shadow and contact ring, the wells some styles stand in, the knob's face and its marks -- the pointer, the dial ticks and the value arc. `KnobView3d` ray marches the same solid under an orbiting camera. Both live in the storybook (`apps/storybook/src/knob/`); nothing in the widget library depends on them.
+`TurnedKnob` draws one knob in one quad, grown past its layout rect as far as its light and shadow reach and composed over the page (transparent where it paints nothing), so no quad edge ever shows: the ground under it with the knob's cast shadow, ground lip and contact ring, the wells some styles stand in, the knob's face and its marks -- the pointer, the dial ticks and the value arc. `KnobView3d` ray marches the same solid under an orbiting camera. Both live in the storybook (`apps/storybook/src/knob/`); nothing in the widget library depends on them.
 
 A **style** is geometry: a revolve profile drawn as a Bezier curve, a grip (flutes, knurls, lobes), a wing -- a ridge added along the pointer or two cutters taken away -- a cut (a dimple, a slot, scallops, a ring), a flat, a cap, and the marks. A **material** is light and finish: the key light, the tier, the specular and roughness (GGX), metal, a clear coat, the studio it reflects (a softbox studio, a chrome studio hung with strip lights, outdoors), exposure and highlight roll-off, the shadow, and seven inks. The two multiply: any style in any material. The showroom chrome is the chrome in a studio hung with seven strip lights where the bench has three, so its face shows more of the room.
 
@@ -1139,149 +776,93 @@ Drag any knob, the large one included, to turn them all; tap a knob in the galle
 The Controls tab has the style and value; the shape's own numbers and curves in folding groups -- Cap, Profile, Grip, Wing, Pointer, Dial and Cut -- which the style preset, the style index or a tap on a knob in the gallery sets all at once, the curves drawn in curve editors (the revolve profile, half a grip tooth, and the wing's width, height and section); a material preset that sets every material control at once; and the bench's material controls in folding groups: Light, Surface, Environment, Relief, Wells, Shadow and Colours. The gallery always shows the styles as they come; the large knob and the 3D view show the shape as edited.",
     subject: "",
     feature: None,
-    controls: &[
-        section("Knob", true),
-        Control { label: STYLE_PRESET, target: "", kind: ControlKind::Preset { options: STYLE_NAMES, default: DEFAULT_STYLE, values: style_preset } },
-        number(STYLE_INDEX, "style", 0., 17., 1., DEFAULT_STYLE as f64),
-        number(VALUE, "value", 0., 1., 0.01, 0.34),
-        Control { label: LATCHED, target: "", kind: ControlKind::Bool { prop: "lit", default: false } },
-        section("Cap", false),
-        number(CAP_RADIUS, "capr", 0., 1., 0.01, S.capr),
-        number(SPUN, "spun", 0., 1., 0.01, S.spun),
-        number(FLAT, "flat", 0., 1., 0.01, S.flat),
-        color(CAP_INK, "cap_ink", S.cap_ink),
-        section("Profile", false),
-        curve(REVOLVE_PROFILE, "prof", S.prof, "CENTRE", "SKIRT RIM"),
-        // Profile anchors: the bench's slider runs to the profile's last,
-        // and the chrome cap's grip runs to its seventh.
-        number(FLUTES_FROM, "ffrom", 0., 6., 1., S.ffrom as f64),
-        number(FLUTES_TO, "fto", 0., 6., 1., S.fto as f64),
-        section("Grip", false),
-        // Half a tooth, crest to trough: the mirror shows the whole one it
-        // makes round the knob.
-        Control {
-            label: TOOTH_PROFILE,
-            target: "",
-            kind: ControlKind::Curve {
-                prop: "flute",
-                default: S.flute,
-                left: "CREST",
-                right: "TROUGH",
-                guide: None,
-                guide_label: "",
-                mirror: true,
+    controls: crate::knob_controls!(
+        style: self::style_preset,
+        shape: [
+            section("Cap", false),
+            number(CAP_RADIUS, "capr", 0., 1., 0.01, S.capr),
+            number(SPUN, "spun", 0., 1., 0.01, S.spun),
+            number(FLAT, "flat", 0., 1., 0.01, S.flat),
+            color(CAP_INK, "cap_ink", S.cap_ink),
+            section("Profile", false),
+            curve(REVOLVE_PROFILE, "prof", S.prof, "CENTRE", "SKIRT RIM"),
+            // Profile anchors: the bench's slider runs to the profile's last,
+            // and the chrome cap's grip runs to its seventh.
+            number(FLUTES_FROM, "ffrom", 0., 6., 1., S.ffrom as f64),
+            number(FLUTES_TO, "fto", 0., 6., 1., S.fto as f64),
+            section("Grip", false),
+            // Half a tooth, crest to trough: the mirror shows the whole one it
+            // makes round the knob.
+            Control {
+                label: TOOTH_PROFILE,
+                target: "",
+                kind: ControlKind::Curve {
+                    prop: "flute",
+                    default: S.flute,
+                    left: "CREST",
+                    right: "TROUGH",
+                    guide: None,
+                    guide_label: "",
+                    mirror: true,
+                },
             },
-        },
-        number(COLUMNS, "flutes", 0., 96., 1., S.flutes),
-        number(TOOTH_DEPTH, "fd", 0., 12., 0.25, S.fd),
-        number(TOOTH_SHARPNESS, "fs", 0., 1., 0.01, S.fs),
-        number(GRIP_TAPER, "gtaper", 0., 1., 0.01, S.gtaper),
-        section("Wing", false),
-        curve(WING_WIDTH_CURVE, "wwid", S.wwid, "ROOT", "TIP"),
-        // The crest's height: the box is twice the cap's, so the cap's top
-        // is the guide at half.
-        Control {
-            label: WING_HEIGHT,
-            target: "",
-            kind: ControlKind::Curve {
-                prop: "whgt",
-                default: S.whgt,
-                left: "ROOT",
-                right: "TIP",
-                guide: Some(0.5),
-                guide_label: "CAP TOP",
-                mirror: false,
+            number(COLUMNS, "flutes", 0., 96., 1., S.flutes),
+            number(TOOTH_DEPTH, "fd", 0., 12., 0.25, S.fd),
+            number(TOOTH_SHARPNESS, "fs", 0., 1., 0.01, S.fs),
+            number(GRIP_TAPER, "gtaper", 0., 1., 0.01, S.gtaper),
+            section("Wing", false),
+            curve(WING_WIDTH_CURVE, "wwid", S.wwid, "ROOT", "TIP"),
+            // The crest's height: the box is twice the cap's, so the cap's top
+            // is the guide at half.
+            Control {
+                label: WING_HEIGHT,
+                target: "",
+                kind: ControlKind::Curve {
+                    prop: "whgt",
+                    default: S.whgt,
+                    left: "ROOT",
+                    right: "TIP",
+                    guide: Some(0.5),
+                    guide_label: "CAP TOP",
+                    mirror: false,
+                },
             },
-        },
-        curve(WING_SECTION, "wprof", S.wprof, "CENTRE", "EDGE"),
-        // The bench's slider stops at -1; the winged knob's root is at -1.3.
-        number(WING_ROOT, "wr0", -1.5, 1., 0.05, S.wr0),
-        number(WING_TIP, "wr1", 0., 2.5, 0.05, S.wr1),
-        number(WING_WIDTH, "wwmax", 0.05, 2.4, 0.01, S.wwmax),
-        number(WING_BLEND, "barfil", 0., 0.5, 0.01, S.barfil),
-        number(WING_END, "wendr", 0., 1., 0.01, S.wendr),
-        number(WING_MODE, "wmode", 0., 1., 1., S.wmode),
-        number(WING_BASE, "wbase", 0., 1., 0.01, S.wbase),
-        section("Pointer", false),
-        number(POINTER, "ptype", 0., 3., 1., S.ptype),
-        number(POINTER_INNER, "pr0", 0., 1., 0.01, S.pr0),
-        number(POINTER_OUTER, "pr1", 0., 1.2, 0.01, S.pr1),
-        number(POINTER_WIDTH, "pw", 0.5, 14., 0.25, S.pw),
-        section("Dial", false),
-        number(DIAL_TICKS, "ticks", 0., 24., 1., S.ticks),
-        number(TICK_RADIUS, "tickr", 0.3, 1.6, 0.01, S.tickr),
-        number(TICK_LENGTH, "tickl", 0., 0.4, 0.01, S.tickl),
-        number(TICK_STROKE, "tickw", 0.5, 8., 0.1, S.tickw),
-        number(ARC_WIDTH, "arcw", 0., 10., 0.25, S.arcw),
-        number(ARC_RADIUS, "arcr", 0.5, 1.6, 0.01, S.arcr),
-        number(ARC_WELL, "awell", 0., 6., 0.1, S.awell),
-        number(WELL, "well", 0., 1.6, 0.01, S.well),
-        section("Cut", false),
-        number(CUT, "cut", 0., 4., 1., S.cut),
-        number(CUT_COUNT, "cn", 2., 24., 1., S.cn),
-        number(CUT_POSITION, "cr", 0., 1.3, 0.01, S.cr),
-        number(CUT_SIZE, "cs", 0.02, 1., 0.005, S.cs),
-        number(DIMPLE_SHAPE, "csph", 0., 1., 1., S.csph),
-        number(SPHERE_CENTRE, "cz", -0.6, 1., 0.005, S.cz),
-        number(CUT_LENGTH, "cl", 0.05, 1.3, 0.01, S.cl),
-        number(CUT_FLOOR, "cf", 0., 1., 0.01, S.cf),
-        number(CUT_WALL, "cw", 0.01, 0.8, 0.01, S.cw),
-        number(CUT_BLEND, "cfil", 0., 0.4, 0.005, S.cfil),
-        section("Material", true),
-        Control { label: MATERIAL, target: "", kind: ControlKind::Preset { options: MATERIAL_NAMES, default: DEFAULT_MATERIAL, values: material_preset } },
-        section("Light", false),
-        number(LIGHT_X, "lx", -1., 1., 0.01, M.lx),
-        number(LIGHT_Y, "ly", -1., 1., 0.01, M.ly),
-        number(LIGHT_Z, "lz", 0., 1., 0.01, M.lz),
-        number(INTENSITY, "li", 0., 2., 0.05, M.li),
-        section("Surface", false),
-        number(TIER, "level", 0., 2., 1., M.level),
-        number(SPECULAR, "spec", 0., 1., 0.01, M.spec),
-        number(ROUGHNESS, "rough", 0., 1., 0.01, M.rough),
-        number(METALLIC, "metal", 0., 1., 0.01, M.metal),
-        number(COAT, "coat", 0., 1., 0.01, M.coat),
-        number(COAT_ROUGH, "coatr", 0., 1., 0.01, M.coatr),
-        section("Environment", false),
-        number(STUDIO, "envk", 0., 2., 1., M.envk),
-        number(STUDIO_LIGHTS, "lights", 0., 12., 1., M.lights),
-        number(STUDIO_PANES, "panes", 1., 6., 1., M.panes),
-        number(REFLECTION, "env", 0., 1., 0.01, M.env),
-        number(EXPOSURE, "ev", -2., 2., 0.05, M.ev),
-        number(ROLL, "roll", 0., 1., 0.01, M.roll),
-        number(PERSPECTIVE, "persp", 0., 1., 0.01, M.persp),
-        section("Relief", false),
-        number(RAISE, "raise", 0., 24., 0.5, M.raise),
-        number(SINK, "sink", 0., 24., 0.5, M.sink),
-        number(RIM, "rim", 0., 1., 0.01, M.rim),
-        number(GLOSS, "gloss", 0., 1., 0.01, M.gloss),
-        number(HAIRLINE, "hair", 0., 1., 0.01, M.hair),
-        number(GLOW, "glow", 0., 1., 0.01, M.glow),
-        number(DEPTH, "pdepth", 0., 3., 0.01, M.pdepth),
-        number(CREASE, "psmooth", 0., 24., 1., M.psmooth),
-        number(MARK_FINISH, "pfin", 0., 3., 1., M.pfin),
-        number(MARK_BEVEL, "mbev", 0., 6., 0.1, M.mbev),
-        section("Wells", false),
-        number(BEVEL_WIDTH, "bw", 0., 24., 0.5, M.bw),
-        number(BEVEL_CURVE, "bc", 0., 1., 0.05, M.bc),
-        number(OCCLUSION, "ao", 0., 1., 0.01, M.ao),
-        number(OCCLUSION_REACH, "aoreach", 0.25, 3., 0.05, M.aoreach),
-        number(FACE_GRADIENT, "facegrad", 0., 1., 0.01, M.facegrad),
-        section("Shadow", false),
-        number(CAST_SHADOW, "shadow", 0., 1., 0.01, M.shadow),
-        number(SHADOW_BLUR, "sblur", 0.5, 40., 0.5, M.sblur),
-        number(FALLOFF, "fall", 0., 1., 0.05, M.fall),
-        number(CONTACT, "oao", 0., 1., 0.01, M.oao),
-        number(GROUND_LIP, "lip", 0., 1., 0.01, M.lip),
-        number(INNER_SHADOW, "inner", 0., 1., 0.01, M.inner),
-        number(INNER_BLUR, "inner_r", 0.5, 32., 0.5, M.inner_r),
-        section("Colours", false),
-        color(GROUND, "ground", M.ground),
-        color(BODY, "body_ink", M.body_ink),
-        color(LIGHT_INK, "light_ink", M.light_ink),
-        color(SHADOW_INK, "shadow_ink", M.shadow_ink),
-        color(GLOW_INK, "glow_ink", M.glow_ink),
-        color(POINTER_INK, "ptr_ink", M.ptr_ink),
-    ],
+            curve(WING_SECTION, "wprof", S.wprof, "CENTRE", "EDGE"),
+            // The bench's slider stops at -1; the winged knob's root is at -1.3.
+            number(WING_ROOT, "wr0", -1.5, 1., 0.05, S.wr0),
+            number(WING_TIP, "wr1", 0., 2.5, 0.05, S.wr1),
+            number(WING_WIDTH, "wwmax", 0.05, 2.4, 0.01, S.wwmax),
+            number(WING_BLEND, "barfil", 0., 0.5, 0.01, S.barfil),
+            number(WING_END, "wendr", 0., 1., 0.01, S.wendr),
+            number(WING_MODE, "wmode", 0., 1., 1., S.wmode),
+            number(WING_BASE, "wbase", 0., 1., 0.01, S.wbase),
+            section("Pointer", false),
+            number(POINTER, "ptype", 0., 3., 1., S.ptype),
+            number(POINTER_INNER, "pr0", 0., 1., 0.01, S.pr0),
+            number(POINTER_OUTER, "pr1", 0., 1.2, 0.01, S.pr1),
+            number(POINTER_WIDTH, "pw", 0.5, 14., 0.25, S.pw),
+            section("Dial", false),
+            number(DIAL_TICKS, "ticks", 0., 24., 1., S.ticks),
+            number(TICK_RADIUS, "tickr", 0.3, 1.6, 0.01, S.tickr),
+            number(TICK_LENGTH, "tickl", 0., 0.4, 0.01, S.tickl),
+            number(TICK_STROKE, "tickw", 0.5, 8., 0.1, S.tickw),
+            number(ARC_WIDTH, "arcw", 0., 10., 0.25, S.arcw),
+            number(ARC_RADIUS, "arcr", 0.5, 1.6, 0.01, S.arcr),
+            number(ARC_WELL, "awell", 0., 6., 0.1, S.awell),
+            number(WELL, "well", 0., 1.6, 0.01, S.well),
+            section("Cut", false),
+            number(CUT, "cut", 0., 4., 1., S.cut),
+            number(CUT_COUNT, "cn", 2., 24., 1., S.cn),
+            number(CUT_POSITION, "cr", 0., 1.3, 0.01, S.cr),
+            number(CUT_SIZE, "cs", 0.02, 1., 0.005, S.cs),
+            number(DIMPLE_SHAPE, "csph", 0., 1., 1., S.csph),
+            number(SPHERE_CENTRE, "cz", -0.6, 1., 0.005, S.cz),
+            number(CUT_LENGTH, "cl", 0.05, 1.3, 0.01, S.cl),
+            number(CUT_FLOOR, "cf", 0., 1., 0.01, S.cf),
+            number(CUT_WALL, "cw", 0.01, 0.8, 0.01, S.cw),
+            number(CUT_BLEND, "cfil", 0., 0.4, 0.005, S.cfil),
+        ],
+    ),
     on_actions: None,
 }];
 
@@ -1290,7 +871,8 @@ mod tests {
     use super::*;
     use crate::canvas::apply_chunk;
     use crate::controls::{chunk_for, default_of};
-    use crate::knob::presets::{material_index, style_index};
+    use crate::knob::look::{material_preset, DEFAULT_MATERIAL, MATERIAL_NAMES, STUDIO_LIGHTS, STYLE_NAMES};
+    use crate::knob::presets::{material_index, style_index, MATERIALS};
     use crate::makepad_widgets::makepad_script::trap::NoTrap;
 
     /// The control a preset's value goes to: the one of that label that
@@ -1376,7 +958,7 @@ mod tests {
         }
         let p = page.borrow::<KnobPresets>().expect("the page is a KnobPresets");
         assert_eq!(p.shape(), KnobShape::from(&STYLES[DEFAULT_STYLE]));
-        assert_eq!(p.material(), KnobMaterial { name: "custom", ..MATERIALS[DEFAULT_MATERIAL] });
+        assert_eq!(p.look.material(), KnobMaterial { name: "custom", ..MATERIALS[DEFAULT_MATERIAL] });
     }
 
     #[test]

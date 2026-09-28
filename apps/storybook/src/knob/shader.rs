@@ -66,8 +66,26 @@ script_mod! {
         }
     }
 
+    // THE QUAD'S OUTPUT, over the page: where the knob paints nothing the
+    // quad is transparent, a darkening of the ground multiplies what is
+    // under it, a lightening adds to it, and what the knob covers (its
+    // face, a well, a mark) is opaque. Over a page of the material's own
+    // ground it is the opaque colour exactly; over a neighbour's halo or
+    // shadow the two combine, as on the bench's one stage. So the quad can
+    // reach as far as the knob's light and shadow do (`TurnedKnob` grows it
+    // to), past its own layout rect, and no edge of it ever shows.
+    let KnobOut = {
+        knob_out: fn(c: vec3, cover: float) -> vec4 {
+            let g = self.hdr_out(self.m_ground.xyz)
+            let r = c / max(g, vec3(0.001, 0.001, 0.001))
+            let a = clamp(max(max(cover, 1.0 - r.x), max(1.0 - r.y, 1.0 - r.z)), 0.0, 1.0)
+            return vec4(max(c - g * (1.0 - a), vec3(0.0, 0.0, 0.0)), a)
+        }
+    }
+
     let KnobCore = {
         ..KnobExposure,
+        ..KnobOut,
         // Always 0: added to a loop's bound, so no compiler can count it.
         knob_zero: uniform(0.0)
 
@@ -1154,6 +1172,7 @@ script_mod! {
 
             var col = self.m_ground.xyz
             var touched = 0.0
+            var cover = 0.0
             var turned_d = 1e9
             var spec_k = 1.0
 
@@ -1506,7 +1525,9 @@ script_mod! {
                         }
                         if lit > 0.5 { face = self.inner_glow(face, fd, vec2(fd, -1000.0)) }
                     }
-                    col = mix(col, face, 1.0 - smoothstep(-px, px, fd))
+                    let fcov = 1.0 - smoothstep(-px, px, fd)
+                    col = mix(col, face, fcov)
+                    cover = max(cover, fcov)
                 }
                 layer = layer + 1.0
             }
@@ -1526,7 +1547,9 @@ script_mod! {
                 let td = self.tick_d(p, R)
                 var under = 1.0
                 if ad < 2.0 * px || td.x < 40.0 { under = smoothstep(-px, px, turned_d) }
-                col = mix(col, self.m_glow_ink.xyz, (1.0 - smoothstep(-px, px, ad)) * under)
+                let acov = (1.0 - smoothstep(-px, px, ad)) * under
+                col = mix(col, self.m_glow_ink.xyz, acov)
+                cover = max(cover, acov)
                 let pd = self.ptr_d(p, spin, R)
                 var m = 0.0
                 loop {
@@ -1551,15 +1574,16 @@ script_mod! {
                             mg = vec2(0.0, 1.0)
                         }
                         col = mix(col, self.mark_ink(col, md, mg, mw, ml, self.m_ptr_ink.xyz, px, spec_k), mk)
+                        cover = max(cover, (1.0 - smoothstep(-px, px, md)) * mk)
                     }
                     m = m + 1.0
                 }
             }
-            // Opaque: the quad is the ground, what the knob does to it fading
-            // out over the last points of the quad before the exposure, so
-            // its edge is the page's own colour by the same arithmetic.
-            if touched < 0.5 { return vec4(self.hdr_out(self.m_ground.xyz), 1.0) }
-            return vec4(self.hdr_out(mix(self.m_ground.xyz, col, qa)), 1.0)
+            // What the knob does to the ground fades out over the last points
+            // of the quad (a safety: the quad is grown to reach past it all),
+            // and the quad composes over the page (`knob_out`).
+            if touched < 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            return self.knob_out(self.hdr_out(mix(self.m_ground.xyz, col, qa)), cover * qa)
         }
     }
 

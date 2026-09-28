@@ -4,6 +4,7 @@
 use crate::controls::ControlValue;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -63,14 +64,26 @@ script_mod! {
     // padding, since a control keeps its quad and insets its face rather
     // than growing past its clip: the offset the shadow starts at (the
     // raise over the light's slope, 4) and two blur lengths for its tail.
+    // The face is the ground and nothing else: most stock sheets give a
+    // button a second fill stop (macos-dark's is #353537), and a cap left
+    // with it is a blend of the ground and that grey, as the slider's
+    // handle would be.
+    // One width for every cap, so the five of a row are one object in five
+    // states and not five sizes of label: a face 104 by 52. The bench's
+    // numbers are tuned on a face of 156 by 72, and a shadow 12 long round a
+    // face 28 high is more shadow than face; this is the largest five to a
+    // row leaves room for.
     let Cap = Button{
-        padding: Inset{left: 40. right: 40. top: 34. bottom: 34.}
+        width: 160.
+        padding: Inset{left: 28. right: 28. top: 47. bottom: 47.}
         draw_bg +: {
             color: neu_ground
             color_hover: neu_ground
             color_down: neu_ground
             color_focus: neu_ground
             color_disabled: neu_ground
+            color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+            border_radius: 12.0
             material: neu_tier
             material_margin: 28.0
             material_light: neu_light
@@ -82,7 +95,16 @@ script_mod! {
             material_light_ink: neu_light_ink
             material_shadow_ink: neu_shadow_ink
             material_glow_ink: neu_glow_ink
-            border_size: 0.0
+            // Focus is a ring in the glow ink and nothing else: the stroke
+            // is there in every state and clear in all but that one. With no
+            // stroke at all a focused cap is a cap at rest.
+            border_size: 1.5
+            border_color: #0000
+            border_color_hover: #0000
+            border_color_down: #0000
+            border_color_disabled: #0000
+            border_color_focus: neu_glow_ink
+            border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
         }
         draw_text +: {
             color: neu_ink
@@ -91,15 +113,49 @@ script_mod! {
             color_focus: neu_ink
             color_disabled: neu_ink
             material_ink_glow: 0.0
+            // The label lights toward the ink the face lights toward, not
+            // the theme's.
+            material_glow_ink: neu_glow_ink
+            text_style: theme.font_bold{font_size: theme.font_size_p}
         }
+    }
+    // A cap built in the state it names, kept out of reach of every event:
+    // one that reached it would play its hover off, and the row would be
+    // five caps at rest. One to a cap, so a row that runs out of width can
+    // still break between them.
+    let Pose = StillView{
+        width: Fit
+        height: Fit
+    }
+    // The margins of two neighbours lie over one another, which is shadow
+    // on shadow and no face; a row too narrow for five breaks.
+    let Caps = StoryRow{
+        flow: Flow.Right{wrap: true}
+        spacing: -28.
     }
     // The three press idioms, one signed number each. The illuminating cap
     // keeps a glow of its own, which the panel leaves alone.
     let Invert = Cap{draw_bg +: {material_press: -9.0 material_press_invert: 1.0}}
     let Deepen = Cap{draw_bg +: {material_press: -2.0 material_press_invert: 0.0}}
+    // The lit label stands on a face lit the same ink, so it is pushed far
+    // enough past full brightness to clip near white on any glow ink: at
+    // the theme's 1.6 a saturated violet only reaches a lighter violet.
     let Illuminate = Cap{
         draw_bg +: {material_press: -1.0 material_press_invert: 0.0 material_inner: vec4(0.55, 10.0, 0.70, 0.6)}
-        draw_text +: {material_ink_glow: 0.85}
+        draw_text +: {material_ink_glow: 0.85 material_ink_lift: 3.0}
+    }
+    // A toggle: the inverting cap with round ends, as the bench draws its
+    // own, whose label takes the glow ink while it is held or latched, so
+    // on is told from a press that has not been let go.
+    let Latch = Invert{
+        draw_bg +: {border_radius: 26.0}
+        draw_text +: {material_ink_glow: 1.0 material_ink_lift: 1.0}
+    }
+    // A cap lit where it stands, the bench's latched light: latched, with
+    // no press to go down by.
+    let Lit = Cap{
+        draw_bg +: {active: 1.0 material_press: 0.0 material_press_invert: 0.0}
+        draw_text +: {active: 1.0}
     }
 
     let Well = CheckBox{
@@ -283,30 +339,42 @@ script_mod! {
         }}
 
         StoryHeading{text: "A button that really goes down"}
-        StoryNote{text: "Rest, hover, pressed, focused, disabled. The pointer lifts a cap a quarter more; a press adds material_press, and its sign and size pick the idiom. Disabled moulds the cap flat into the page, which also takes its shadow away. The focus ring stays what it was: focus is a ring, never a change of relief."}
+        StoryNote{text: "Rest, hover, pressed, focused, disabled. The pointer lifts a cap a quarter more; a press adds material_press, and its sign and size pick the idiom. Disabled moulds the cap flat into the page, which also takes its shadow away. Focus is a ring in the glow ink, never a change of relief. The first cap of each row is live, to point at, press and tab to; the other four are held in the state they name."}
         StoryNote{text: "INVERT: past minus the raise the face crosses zero, the lit and shaded shoulders swap and the cap reads as pushed into the page. material_press_invert dishes the face as well. The neumorphic sheet, and the row the panel's press controls move."}
-        stage_invert := Stage{StoryRow{
+        stage_invert := Stage{Caps{
             subject := Invert{text: "Rest"}
-            invert_hover := Invert{text: "Hover" animator +: {hover: {default: @on}}}
-            invert_pressed := Invert{text: "Pressed" animator +: {hover: {default: @down}}}
-            invert_focused := Invert{text: "Focused" animator +: {focus: {default: @on}}}
-            invert_disabled := Invert{text: "Disabled" animator +: {disabled: {default: @on}}}
+            Pose{invert_hover := Invert{text: "Hover" animator +: {hover: {default: @on}}}}
+            Pose{invert_pressed := Invert{text: "Pressed" animator +: {hover: {default: @down}}}}
+            Pose{invert_focused := Invert{text: "Focused" animator +: {focus: {default: @on}}}}
+            Pose{invert_disabled := Invert{text: "Disabled" animator +: {disabled: {default: @on}}}}
         }}
         StoryNote{text: "DEEPEN: the cap drops but stays above the page, its face still convex, so the shadow closes up and the specular dims. Moulded plastic flexes; it does not turn inside out. The molded sheet."}
-        stage_deepen := Stage{StoryRow{
+        stage_deepen := Stage{Caps{
             deepen_rest := Deepen{text: "Rest"}
-            deepen_hover := Deepen{text: "Hover" animator +: {hover: {default: @on}}}
-            deepen_pressed := Deepen{text: "Pressed" animator +: {hover: {default: @down}}}
-            deepen_focused := Deepen{text: "Focused" animator +: {focus: {default: @on}}}
-            deepen_disabled := Deepen{text: "Disabled" animator +: {disabled: {default: @on}}}
+            Pose{deepen_hover := Deepen{text: "Hover" animator +: {hover: {default: @on}}}}
+            Pose{deepen_pressed := Deepen{text: "Pressed" animator +: {hover: {default: @down}}}}
+            Pose{deepen_focused := Deepen{text: "Focused" animator +: {focus: {default: @on}}}}
+            Pose{deepen_disabled := Deepen{text: "Disabled" animator +: {disabled: {default: @on}}}}
         }}
         StoryNote{text: "ILLUMINATE: the cap barely moves and the glow carries the state -- the face lifts toward the glow ink, a halo spills onto the page, and the label lights with it, pushed past full brightness so it clips bright rather than tints. The glossy and milled sheets."}
-        stage_illuminate := Stage{StoryRow{
+        stage_illuminate := Stage{Caps{
             illuminate_rest := Illuminate{text: "Rest"}
-            illuminate_hover := Illuminate{text: "Hover" animator +: {hover: {default: @on}}}
-            illuminate_pressed := Illuminate{text: "Pressed" animator +: {hover: {default: @down}}}
-            illuminate_focused := Illuminate{text: "Focused" animator +: {focus: {default: @on}}}
-            illuminate_disabled := Illuminate{text: "Disabled" animator +: {disabled: {default: @on}}}
+            Pose{illuminate_hover := Illuminate{text: "Hover" animator +: {hover: {default: @on}}}}
+            Pose{illuminate_pressed := Illuminate{text: "Pressed" animator +: {hover: {default: @down}}}}
+            Pose{illuminate_focused := Illuminate{text: "Focused" animator +: {focus: {default: @on}}}}
+            Pose{illuminate_disabled := Illuminate{text: "Disabled" animator +: {disabled: {default: @on}}}}
+        }}
+        StoryNote{text: "LATCHED: a button shown on. It stays where the press left it and keeps the light the press gave it, through draw_bg.active and draw_text.active. The toggle is live: press it to latch it and again to let it go, beside the same cap held latched. The three after it are the bench's lit caps, latched with no press to go down by, so they are lit where they stand: the face alone, the label alone, and both."}
+        stage_latched := Stage{Caps{
+            toggle := Latch{text: "Toggle"}
+            Pose{toggle_on := Latch{text: "Latched" draw_bg +: {active: 1.0} draw_text +: {active: 1.0}}}
+            Pose{glow_face := Lit{text: "Glow face" draw_bg +: {material_inner: vec4(0.55, 10.0, 0.70, 0.6)}}}
+            Pose{glow_ink := Lit{text: "Glow ink" draw_text +: {material_ink_glow: 0.85 material_ink_lift: 1.0}}}
+            Pose{glow_both := Lit{
+                text: "Glow both"
+                draw_bg +: {material_inner: vec4(0.55, 10.0, 0.70, 0.6)}
+                draw_text +: {material_ink_glow: 0.85 material_ink_lift: 3.0}
+            }}
         }}
 
         StoryHeading{text: "Wells and caps"}
@@ -339,7 +407,19 @@ script_mod! {
 // rounded view, a panel and the slider's groove have no glow ink; only a
 // button has a press and a lit label; the illuminating row keeps its own
 // glow, and the deepening and illuminating rows their own press, so the
-// three idioms stay apart however the rest is tuned.
+// three idioms stay apart however the rest is tuned. The toggle is an
+// inverting cap and moves with that row; the lit caps keep their own glow
+// and have no press.
+macro_rules! latch_row {
+    () => {
+        "toggle toggle_on"
+    };
+}
+macro_rules! glow_row {
+    () => {
+        "glow_face glow_ink glow_both"
+    };
+}
 macro_rules! views {
     () => {
         "raised panel inset"
@@ -372,24 +452,29 @@ macro_rules! knobs {
 }
 macro_rules! stages {
     () => {
-        "stage_views stage_invert stage_deepen stage_illuminate stage_wells stage_knobs"
+        "stage_views stage_invert stage_deepen stage_illuminate stage_latched stage_wells stage_knobs"
     };
 }
 
 /// Every material control on the page.
 const EVERY: &str = concat!(
-    views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!(), " groove"
+    views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!(), " ",
+    wells!(), " ", knobs!(), " groove"
 );
-/// Every one but the illuminating row, which keeps its glow.
-const INNER: &str = concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", wells!(), " ", knobs!(), " groove");
+/// Every one but the illuminating row and the lit caps, which keep their glow.
+const INNER: &str =
+    concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", latch_row!(), " ", wells!(), " ", knobs!(), " groove");
 /// Every one with a glow ink.
-const GLOW_INK: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!());
-/// The inverting row, the neumorphic idiom the press controls move.
-const PRESSED: &str = invert_row!();
+const GLOW_INK: &str = concat!(
+    invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!(), " ", wells!(), " ", knobs!()
+);
+/// The inverting row and the toggle, the neumorphic idiom the press controls move.
+const PRESSED: &str = concat!(invert_row!(), " ", latch_row!());
 /// The buttons whose label does not already glow.
 const LIT_LABEL: &str = concat!(invert_row!(), " ", deepen_row!());
 /// Every button on the page.
-const BUTTONS: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!());
+const BUTTONS: &str =
+    concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", latch_row!(), " ", glow_row!());
 /// What takes the ground as one colour: the stages, the views moulded
 /// straight out of them, and the knobs, which have no state colours.
 const PLAIN_GROUND: &str = concat!(stages!(), " ", views!(), " ", knobs!());
@@ -918,6 +1003,31 @@ const fn color(label: &'static str, target: &'static str, prop: &'static str, de
     Control { label, target, kind: ControlKind::Color { prop, default } }
 }
 
+/// Whether the page's toggle is latched. A button keeps nothing itself, so
+/// the page keeps this, as a host would.
+static LATCHED: AtomicBool = AtomicBool::new(false);
+
+/// A press of the toggle latches it, and the next lets it go. A pass with
+/// no actions is the page settling after it was built or rebuilt, which
+/// builds the toggle let go: it is given the state it was left in.
+fn material_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let pressed = root.button(cx, ids!(toggle)).clicked(actions);
+    let settling = actions.is_empty();
+    if !pressed && !settling {
+        return;
+    }
+    let latched = if pressed { !LATCHED.fetch_xor(true, Ordering::Relaxed) } else { LATCHED.load(Ordering::Relaxed) };
+    if settling && !latched {
+        return;
+    }
+    let active = if latched { 1.0 } else { 0.0 };
+    let toggle = root.widget(cx, ids!(toggle));
+    if let Err(err) = crate::canvas::apply_chunk(cx, &toggle, &format!("{{draw_bg.active: {active:?} draw_text.active: {active:?}}}")) {
+        log!("material: the toggle took no latch: {}", err);
+    }
+    toggle.redraw(cx);
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "containers/material/overview",
     category: "Containers",
@@ -954,6 +1064,8 @@ Makepad clips by default, and a button is not a view, so it cannot grow past its
 One elevation per control: raised at rest, lifted a quarter more under the pointer, moved by `material_press_depth` while held, moulded flat when disabled. The sign and size of the press pick the idiom -- past `-material_raise` the face inverts, short of it the cap deepens, near zero the glow carries the state -- and `material_press_invert` says whether a held face dishes as well as descends. The button's state layer (`layer_color`) is skipped under a material: a face that both darkens and re-lights reads as muddy.
 
 Lit ink is one `mix` in the label's existing `get_color`, toward `color_material_glow` and past full brightness by `material_ink_lift`; the halo comes from the face. Nothing samples a glyph twice.
+
+A button shown on is latched: `draw_bg.active` and `draw_text.active` hold it where a press leaves it and keep the light a press gives it. A button keeps nothing itself, so its host sets both, as the toggle on this page does. With no material they draw nothing.
 
 ## What this page shows
 
@@ -1015,11 +1127,12 @@ The bench's metallic, clearcoat, environment, reflection, exposure and highlight
         color(LIGHT_INK, EVERY, "draw_bg.material_light_ink", 0xFFFFFFFF),
         color(SHADOW_INK, EVERY, "draw_bg.material_shadow_ink", 0x9299B3FF),
         color(GLOW_INK_LABEL, GLOW_INK, "draw_bg.material_glow_ink", 0x7C4DFFFF),
+        color(GLOW_INK_LABEL, BUTTONS, "draw_bg.border_color_focus draw_text.material_glow_ink", 0x7C4DFFFF),
         color(LABEL_INK, BUTTONS, BUTTON_INK, 0x3A4052FF),
         color(LABEL_INK, wells!(), WELL_INK, 0x3A4052FF),
         color(LABEL_INK, "groove", GROOVE_INK, 0x3A4052FF),
     ],
-    on_actions: None,
+    on_actions: Some(material_actions),
 }];
 
 #[cfg(test)]
