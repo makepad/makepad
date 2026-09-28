@@ -9839,6 +9839,8 @@ mod local_archive_regression_tests {
             NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
+        // The crate's own target/ exists only once some other test made it.
+        std::fs::create_dir_all("target").unwrap();
         let mut writer = MbtilesWriter::create(&path).unwrap();
         writer.set_metadata("minzoom", "0");
         writer.set_metadata("maxzoom", "0");
