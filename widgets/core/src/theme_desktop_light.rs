@@ -500,6 +500,18 @@ script_mod! {
         color_material_light: #xFFFFFFFF
         color_material_shadow: #x1E2430FF
         color_material_glow: #x7C4DFFFF
+        // INSTRUMENTS
+        // A pale reflective glass with dark ink, the way a lit screen reads
+        // on a light panel, and a dark lens for a lamp that is out. A white
+        // lamp vanishes on a pale ground, so the plain lamp lights a clear
+        // daylight blue; and a halo, light added to a pale ground, only
+        // bleaches it, so there is none.
+        color_screen: #xD8DCDFFF
+        color_screen_ink: #x23272CFF
+        screen_ghost: 0.1
+        color_lamp_off: #x3A3E45FF
+        color_lamp_plain: #x4F94D4FF
+        lamp_halo: 0.0
         // Surface and outline roles on the opaque ladder.
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app

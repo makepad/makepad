@@ -1,0 +1,176 @@
+mod.theme = mod.themes.light
+
+// Turned and brushed aluminium on a pale anodised housing.
+// Faces stay colourless; colour lives only in recesses, arcs and lamps.
+// Every state of a family is spelled out, because the base derived its
+// states once, from its own colours.
+use mod.res.*
+use mod.text.*
+
+// The housing: the middle of the ground's top-to-bottom fall.
+mod.theme.color_bg_app = #cacacc
+mod.theme.color_fg_app = #d4d4d6
+mod.theme.color_bg_container = #d2d2d4
+mod.theme.color_surface_container_lowest = #bdbec1
+
+// Raised faces: brushed plate, lit from above.
+mod.theme.color_outset = #dfe0e3
+mod.theme.color_outset_1 = #eceef0
+mod.theme.color_outset_2 = #c9cbce
+mod.theme.color_outset_hover = #e6e7ea
+mod.theme.color_outset_1_hover = #f1f2f4
+mod.theme.color_outset_2_hover = #d0d2d5
+mod.theme.color_outset_down = #d2d3d6
+mod.theme.color_outset_1_down = #cfd1d4
+mod.theme.color_outset_2_down = #dadcdf
+mod.theme.color_outset_focus = #dfe0e3
+mod.theme.color_outset_1_focus = #eceef0
+mod.theme.color_outset_2_focus = #c9cbce
+mod.theme.color_outset_active = #dfe0e3
+mod.theme.color_outset_1_active = #eceef0
+mod.theme.color_outset_2_active = #c9cbce
+mod.theme.color_outset_disabled = #d3d4d6
+mod.theme.color_outset_1_disabled = #d3d4d6
+mod.theme.color_outset_2_disabled = #d3d4d6
+
+// Wells: slots cut into the housing.
+mod.theme.color_inset = #a8a9ad
+mod.theme.color_inset_1 = #a8a9ad
+mod.theme.color_inset_2 = #a8a9ad
+mod.theme.color_inset_hover = #adaeb2
+mod.theme.color_inset_1_hover = #adaeb2
+mod.theme.color_inset_2_hover = #adaeb2
+mod.theme.color_inset_focus = #adaeb2
+mod.theme.color_inset_1_focus = #adaeb2
+mod.theme.color_inset_2_focus = #adaeb2
+mod.theme.color_inset_active = #a8a9ad
+mod.theme.color_inset_1_active = #a8a9ad
+mod.theme.color_inset_2_active = #a8a9ad
+mod.theme.color_inset_down = #a3a4a8
+mod.theme.color_inset_1_down = #a3a4a8
+mod.theme.color_inset_2_down = #a3a4a8
+mod.theme.color_inset_drag = #a3a4a8
+mod.theme.color_inset_1_drag = #a3a4a8
+mod.theme.color_inset_2_drag = #a3a4a8
+mod.theme.color_inset_empty = #a8a9ad
+mod.theme.color_inset_1_empty = #a8a9ad
+mod.theme.color_inset_2_empty = #a8a9ad
+mod.theme.color_inset_disabled = #c3c4c7
+mod.theme.color_inset_1_disabled = #c3c4c7
+mod.theme.color_inset_2_disabled = #c3c4c7
+
+// One dark hairline on every face and well.
+mod.theme.color_bevel = #5d5e62
+mod.theme.color_bevel_hover = #5d5e62
+mod.theme.color_bevel_focus = #0d7fc8
+mod.theme.color_bevel_down = #5d5e62
+mod.theme.color_bevel_active = #5d5e62
+mod.theme.color_bevel_empty = #5d5e62
+mod.theme.color_bevel_disabled = #9c9da1
+mod.theme.color_bevel_inset_1 = #5d5e62
+mod.theme.color_bevel_inset_2 = #5d5e62
+mod.theme.color_bevel_outset_1 = #5d5e62
+mod.theme.color_bevel_outset_2 = #5d5e62
+mod.theme.beveling = 0.5
+
+// Engraved ink: dark grey on metal and ground.
+mod.theme.color_text = #3c3d40
+mod.theme.color_text_hover = #3c3d40
+mod.theme.color_text_focus = #3c3d40
+mod.theme.color_text_active = #3c3d40
+mod.theme.color_text_down = #3c3d40
+mod.theme.color_text_disabled = #8e8f93
+mod.theme.color_text_placeholder = #66676b
+mod.theme.color_text_placeholder_hover = #5e5f63
+mod.theme.color_text_val = #3c3d40
+// The ink the surface roles carry: a step darker than the engraving, so it
+// still reads 4.7 to 1 on the deepest well the ground grows
+// (color_surface_container_highest, #9f9fa0), where #3c3d40 reads 4.1.
+mod.theme.color_on_surface = #333436
+mod.theme.color_text_cursor = #0da1fb
+mod.theme.color_cursor = #0da1fb
+mod.theme.color_label = #3c3d40
+mod.theme.color_label_hover = #3c3d40
+mod.theme.color_label_focus = #3c3d40
+mod.theme.color_label_active = #3c3d40
+mod.theme.color_label_down = #3c3d40
+mod.theme.color_label_disabled = #8e8f93
+mod.theme.color_label_inner = #3c3d40
+mod.theme.color_label_inner_hover = #2e2f32
+mod.theme.color_label_inner_focus = #3c3d40
+mod.theme.color_label_inner_active = #3c3d40
+mod.theme.color_label_inner_down = #2e2f32
+mod.theme.color_label_inner_disabled = #8e8f93
+mod.theme.color_label_outer = #3c3d40
+mod.theme.color_label_outer_hover = #2e2f32
+mod.theme.color_label_outer_focus = #3c3d40
+mod.theme.color_label_outer_active = #3c3d40
+mod.theme.color_label_outer_down = #2e2f32
+mod.theme.color_label_outer_disabled = #8e8f93
+mod.theme.color_icon = #3c3d40
+mod.theme.color_icon_hover = #2e2f32
+mod.theme.color_icon_focus = #3c3d40
+mod.theme.color_icon_active = #3c3d40
+mod.theme.color_icon_down = #2e2f32
+mod.theme.color_icon_disabled = #8e8f93
+
+// The accent seed: the primary, secondary and tertiary families are grown
+// from `color_ctrl_selected`. A deep anodised blue; the bright blue of the
+// lit tracks is drawn by the faces themselves.
+mod.theme.color_ctrl_selected = #1f5f8f
+mod.theme.color_focus = #0d7fc8
+mod.theme.color_ctrl_active = #1f5f8f
+mod.theme.color_val = #5ba7d9
+mod.theme.color_selection_focus = #5ba7d94d
+mod.theme.color_bg_highlight_inline = #5ba7d94d
+
+mod.theme.color_terminal_bg = #1b1c20
+mod.theme.color_terminal_text = #e9eaec
+
+// Slim metrics: rows of 24 points, gaps of 6, hairline edges.
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 3.0
+mod.theme.space_2 = 6.0
+mod.theme.space_3 = 9.0
+mod.theme.space_4 = 12.0
+mod.theme.space_5 = 18.0
+mod.theme.space_6 = 24.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 3.0 bottom: 0.0 left: 3.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 3.0 right: 0.0 bottom: 3.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 6.0 right: 6.0 bottom: 6.0 left: 6.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 6.0 bottom: 0.0 left: 6.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 6.0 right: 0.0 bottom: 6.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 9.0 right: 9.0 bottom: 9.0 left: 9.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 9.0 bottom: 0.0 left: 9.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 9.0 right: 0.0 bottom: 9.0 left: 0.0}
+// The rungs the base froze at its own space factor, restated at ours.
+mod.theme.size_control_s = 20.0
+mod.theme.size_control_m = 24.0
+mod.theme.size_control_l = 28.0
+mod.theme.tab_height = 24.0
+mod.theme.corner_radius = 2.0
+mod.theme.container_corner_radius = 6.0
+mod.theme.textselection_corner_radius = 1.0
+mod.theme.radius_xs = 1.5
+mod.theme.radius_s = 3.0
+mod.theme.radius_m = 4.0
+mod.theme.radius_l = 6.0
+
+// A grotesque at 500 for control text, 600 for captions and emphasis.
+// A font size draws 1.333 layout points per unit, so 8.25 is the brief's
+// 11 point control text (cap 8 points, a third of a 24 point row).
+mod.theme.font_size_p = 8.25
+mod.theme.type_title_l_size = 12.0
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_s_size = 9.0
+mod.theme.type_body_l_size = 9.0
+mod.theme.type_body_m_size = 8.25
+mod.theme.type_body_s_size = 7.5
+mod.theme.type_label_l_size = 8.25
+mod.theme.type_label_m_size = 7.5
+mod.theme.type_label_s_size = 6.75
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.25 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+true

@@ -1518,6 +1518,23 @@
    ]
   },
   {
+   "component": "Kitchen sink",
+   "aka": [
+    "all widgets",
+    "widget gallery",
+    "showcase",
+    "theme preview",
+    "style sheet preview",
+    "state matrix"
+   ],
+   "does": [
+    "every common control on one screen",
+    "controls held still in each state",
+    "hover pressed focus and disabled side by side",
+    "judge a style sheet in one grab"
+   ]
+  },
+  {
    "component": "Label",
    "aka": [
     "caption",
@@ -1541,6 +1558,32 @@
     "emoji and cjk",
     "hover in and hover out",
     "fit or fill width"
+   ]
+  },
+  {
+   "component": "Lamp",
+   "aka": [
+    "indicator light",
+    "led",
+    "pilot light",
+    "status light",
+    "power light",
+    "signal lamp",
+    "warning light",
+    "tally light",
+    "indicator dot",
+    "lit indicator"
+   ],
+   "does": [
+    "show that something is on",
+    "light in the theme's intent colours",
+    "dark lens when off",
+    "pale core when lit",
+    "ease on and off",
+    "half lit",
+    "halo held to a ceiling",
+    "round or bar light",
+    "batch many indicators"
    ]
   },
   {
@@ -1968,6 +2011,29 @@
     "radio style rows",
     "custom row template",
     "labels from a list"
+   ]
+  },
+  {
+   "component": "NeedleMeter",
+   "aka": [
+    "analogue meter",
+    "analog meter",
+    "dial gauge",
+    "moving coil meter",
+    "needle gauge",
+    "vu dial",
+    "panel meter",
+    "pointer meter"
+   ],
+   "does": [
+    "read a value by angle",
+    "printed scale with ticks",
+    "major and minor ticks",
+    "red zone at the loud end",
+    "needle that eases",
+    "pivot cover",
+    "value from 0 to 1",
+    "stop repainting once landed"
    ]
   },
   {
@@ -2443,6 +2509,33 @@
    ]
   },
   {
+   "component": "Readout",
+   "aka": [
+    "seven segment",
+    "7 segment",
+    "segment display",
+    "digital display",
+    "led digits",
+    "lcd digits",
+    "numeric display",
+    "counter display",
+    "digital clock digits",
+    "frequency display"
+   ],
+   "does": [
+    "show a number as lit segments",
+    "ghost of the unlit segments",
+    "decimal point on the digit",
+    "colon cell for a time",
+    "fixed number of cells",
+    "right or left aligned digits",
+    "slanted digits",
+    "short codes in segments",
+    "number with decimals from rust",
+    "dashes when a number does not fit"
+   ]
+  },
+  {
    "component": "RichTextEditor",
    "aka": [
     "wysiwyg",
@@ -2497,6 +2590,27 @@
     "mouse wheel",
     "unit suffix",
     "decimal precision"
+   ]
+  },
+  {
+   "component": "ScreenView",
+   "aka": [
+    "display window",
+    "lcd window",
+    "screen bezel",
+    "instrument display",
+    "glass panel for digits",
+    "recessed screen",
+    "device screen"
+   ],
+   "does": [
+    "frame a readout",
+    "slim bezel",
+    "inner shadow at the top",
+    "glass sheen over content",
+    "optional scan lines",
+    "hold a readout and a meter",
+    "screen face colour"
    ]
   },
   {

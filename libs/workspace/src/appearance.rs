@@ -9,20 +9,17 @@ use makepad_widgets_core::desktop_style::{self, DesktopStyle, StyleSheet};
 use makepad_widgets_core::*;
 
 /// Picker rows: index 0 follows the host OS, then `DesktopStyle::ALL` in
-/// order except BlackOrange. The Settings panel's labels are spelled out
-/// in Splash (so a stylesheet reapply keeps them); `labels_match_the_picker`
-/// pins the two lists together.
+/// order except BlackOrange. The labels are made from that same list rather
+/// than typed out a second time: a typed copy fell behind the styles, and a
+/// row that said macOS picked another family.
 pub const FOLLOW_HOST: &str = "Follow host OS";
-pub const PICKER_LABELS: [&str; 8] = [
-    FOLLOW_HOST,
-    "Omarchy",
-    "macOS",
-    "Windows",
-    "Windows 2000",
-    "NeXTSTEP",
-    "iOS",
-    "Android",
-];
+
+/// What the picker shows, row for row with `family_at`.
+pub fn picker_labels() -> Vec<String> {
+    std::iter::once(FOLLOW_HOST.to_string())
+        .chain(picker_families().map(|style| style.label().to_string()))
+        .collect()
+}
 
 /// A resolved appearance: one family and whether its dark variant is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,10 +187,11 @@ mod tests {
 
     #[test]
     fn labels_match_the_picker() {
-        assert_eq!(PICKER_LABELS[0], FOLLOW_HOST);
-        assert_eq!(PICKER_LABELS.len(), picker_families().count() + 1);
+        let labels = picker_labels();
+        assert_eq!(labels[0], FOLLOW_HOST);
+        assert_eq!(labels.len(), picker_families().count() + 1);
         for (i, style) in picker_families().enumerate() {
-            assert_eq!(PICKER_LABELS[i + 1], style.label());
+            assert_eq!(labels[i + 1], style.label());
             assert_eq!(family_at(i + 1), Some(style));
         }
         assert_eq!(family_at(0), None);
@@ -221,7 +219,8 @@ mod tests {
         );
 
         let s = Settings { style: Some("nextstep".into()), dark: true, ..Default::default() };
-        assert_eq!(picker_index(&s), 5);
+        let row = picker_families().position(|f| f == DesktopStyle::NextStep).map(|i| i + 1);
+        assert_eq!(Some(picker_index(&s)), row);
         let c = StyleChoice::from_settings(&s, DesktopStyle::Macos, Some(true));
         assert_eq!(c.family, DesktopStyle::NextStep);
         assert!(!c.dark, "a family without a dark variant stays light");

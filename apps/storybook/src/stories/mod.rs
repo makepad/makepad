@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 pub mod welcome;
 pub mod slug;
+pub mod kitchen_sink;
 pub mod foundations;
 pub mod tween;
 pub mod ease_editor;
@@ -116,6 +117,12 @@ pub mod alert;
 pub mod toast;
 pub mod progress;
 pub mod level_meter;
+pub mod lamp;
+pub mod needle_meter;
+pub mod readout;
+pub mod screen_view;
+pub mod grounds;
+pub mod toggle_switches;
 pub mod spinner;
 pub mod placeholder;
 pub mod empty_state;
@@ -176,6 +183,7 @@ static FILES: &[StoryModule] = &[
     file(welcome::script_mod, welcome::STORIES),
     file(crate::coverage::script_mod, crate::coverage::STORIES),
     file(slug::script_mod, slug::STORIES),
+    file(kitchen_sink::script_mod, kitchen_sink::STORIES),
     // 1 Foundations
     file(foundations::script_mod, foundations::STORIES),
     file(tween::script_mod, tween::STORIES),
@@ -195,6 +203,7 @@ static FILES: &[StoryModule] = &[
     // 3 Containers
     file(view::script_mod, view::STORIES),
     file(corner_cap_view::script_mod, corner_cap_view::STORIES),
+    file(grounds::script_mod, grounds::STORIES),
     file(card::script_mod, card::STORIES),
     file(accordion::script_mod, accordion::STORIES),
     file(carousel::script_mod, carousel::STORIES),
@@ -203,6 +212,7 @@ static FILES: &[StoryModule] = &[
     file(glasspanel::script_mod, glasspanel::STORIES),
     file(glass_surfaces::script_mod, glass_surfaces::STORIES),
     file(glass_controls::script_mod, glass_controls::STORIES),
+    file(screen_view::script_mod, screen_view::STORIES),
     file(surface_material::script_mod, surface_material::STORIES),
     file(knob_presets::script_mod, knob_presets::STORIES),
     file(splash::script_mod, splash::STORIES),
@@ -252,6 +262,7 @@ static FILES: &[StoryModule] = &[
     file(gizmo::script_mod, gizmo::STORIES),
     // 8 Selection
     file(checkbox::script_mod, checkbox::STORIES),
+    file(toggle_switches::script_mod, toggle_switches::STORIES),
     file(radio_group::script_mod, radio_group::STORIES),
     file(select::script_mod, select::STORIES),
     file(combobox::script_mod, combobox::STORIES),
@@ -289,6 +300,8 @@ static FILES: &[StoryModule] = &[
     file(toast::script_mod, toast::STORIES),
     file(progress::script_mod, progress::STORIES),
     file(level_meter::script_mod, level_meter::STORIES),
+    file(lamp::script_mod, lamp::STORIES),
+    file(needle_meter::script_mod, needle_meter::STORIES),
     file(spinner::script_mod, spinner::STORIES),
     file(spinner_states::script_mod, spinner_states::STORIES),
     file(placeholder::script_mod, placeholder::STORIES),
@@ -308,6 +321,7 @@ static FILES: &[StoryModule] = &[
     file(badge::script_mod, badge::STORIES),
     file(avatar::script_mod, avatar::STORIES),
     file(kbd::script_mod, kbd::STORIES),
+    file(readout::script_mod, readout::STORIES),
     file(chart::script_mod, chart::STORIES),
     file(chart_shapes::script_mod, chart_shapes::STORIES),
     file(timeline::script_mod, timeline::STORIES),
