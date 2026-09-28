@@ -74,6 +74,14 @@ impl Config {
         let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
         Self::parse(&text, base, installed)
     }
+    /// The checkout's own `local/ci/ci.toml` when it has one, else the
+    /// defaults, without writing one (a developer's checkout, for preflight).
+    pub fn load_existing(base: &Path, control: &Control) -> Result<Self> {
+        if base.join("local/ci/ci.toml").is_file() {
+            return Self::load(base, control);
+        }
+        Self::parse("", base, crate::cargo::matrix_targets(&host_target(base, control)?))
+    }
     fn parse(text: &str, base: &Path, installed: Vec<String>) -> Result<Self> {
         crate::window_geometry::configured(text)?;
         let doc = parse_toml(text).map_err(|e| e.to_string())?;
@@ -186,6 +194,9 @@ fn valid_branch(s: &str) -> bool {
 }
 
 pub(crate) fn probe(program: &str, args: &[String], base: &Path, control: &Control) -> Result<String> {
+    probe_with_timeout(program, args, base, control, 30)
+}
+pub(crate) fn probe_with_timeout(program: &str, args: &[String], base: &Path, control: &Control, timeout: u64) -> Result<String> {
     let dir = base.join("local/ci");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
@@ -198,7 +209,7 @@ pub(crate) fn probe(program: &str, args: &[String], base: &Path, control: &Contr
         args,
         base,
         &[],
-        30,
+        timeout,
         path.clone(),
         control,
         &mut |_| {},

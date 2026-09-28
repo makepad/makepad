@@ -95,7 +95,9 @@ fn cargo_call(
     opts: Options,
     machine: Option<&crate::machine::Machine>,
 ) -> Result<CargoResult> {
-    if rt(vm).validate {
+    // Preflight runs checks only: builds go through `ci.build`, tests stay out.
+    let preflight_skips = rt(vm).preflight.is_some() && args.first().map(String::as_str) != Some("check");
+    if rt(vm).dry() || preflight_skips {
         let host = rt(vm).host.target.clone();
         cargo::command_args(&args, &opts, &host)?;
         return Ok(CargoResult::parse(crate::process::Output {
@@ -104,6 +106,7 @@ fn cargo_call(
         }));
     }
     let r = rt(vm);
+    r.worked = true;
     let host = r.host.clone();
     let command_args = if machine.is_some() {
         args.clone()
@@ -180,7 +183,8 @@ fn build(vm: &mut ScriptVm, v: ScriptValue) -> Result<PathBuf> {
         // The native build API always returns target/release/<bin>.
         opts.target = None;
     }
-    if rt(vm).validate { return Ok(path); }
+    if rt(vm).dry() { return Ok(path); }
+    rt(vm).worked = true;
     let own = rt(vm).step.is_none();
     let i = rt(vm).step.unwrap_or_else(|| {
         let r = rt(vm);
@@ -317,7 +321,13 @@ fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate
     !failures.is_empty()
 }
 fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
-    let packages = fields(vm, v, id!(packages))?;
+    let mut packages = fields(vm, v, id!(packages))?;
+    if let Some(affected) = &rt(vm).preflight {
+        // Preflight checks only what the change reaches; warming is a cache fill.
+        if warm { return Ok(()); }
+        packages.retain(|p| affected.contains(p));
+        if packages.is_empty() && object_field(vm, v, id!(workspace)).as_bool() != Some(true) { return Ok(()); }
+    }
     let workspace = object_field(vm, v, id!(workspace)).as_bool() == Some(true);
     if packages.is_empty() && !workspace {
         // An empty discovered app list has nothing to warm.
@@ -359,7 +369,8 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         check_opts.env.retain(|(key, _)| key != "MAKEPAD");
         check_opts.env.extend(check.env.clone());
         let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
-        if rt(vm).validate { continue; }
+        if rt(vm).dry() { continue; }
+        rt(vm).worked = true;
         let r = rt(vm);
         let i = r.run.plan(&format!("{} / {}check {}", r.group, if warm { "warm " } else { "" }, check.label));
         r.run.begin(i, &crate::report::display_command("cargo", &args));

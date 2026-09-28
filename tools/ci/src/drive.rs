@@ -41,8 +41,19 @@ struct Runtime {
     permit: Option<crate::runner::Permit>,
     warning: String,
     manifest: Option<(String, PathBuf)>,
+    /// Preflight (`ci --preflight`): a developer's checkout before a push.
+    /// Only the cheap parts run for real, the other-platform checks of these
+    /// packages and the host builds of what a script launches; the rest
+    /// behaves as in validation.
+    preflight: Option<std::collections::BTreeSet<String>>,
+    /// A real cargo command ran inside the current step (preflight only).
+    worked: bool,
 }
 impl Runtime {
+    /// Nothing runs: validation, not preflight.
+    fn dry(&self) -> bool {
+        self.validate && self.preflight.is_none()
+    }
     fn fail(&mut self, text: &str) {
         self.suppressed = true;
         if let Some(i) = self.step {
@@ -634,6 +645,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
             runtime.skipped = false;
             runtime.warning.clear();
             runtime.step = Some(i);
+            runtime.worked = false;
             runtime.run.begin(i, "");
             runtime.validated_steps.push(name);
             let answer = vm.call(body, &[]);
@@ -646,7 +658,10 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                 rt(vm).fail("step callback returned an error");
             }
             let runtime = rt(vm);
-            if !runtime.suppressed {
+            if !runtime.suppressed && runtime.preflight.is_some() && !runtime.worked {
+                // A preflight step that ran nothing real says so, never "passed".
+                runtime.run.end(i, "skipped", "not run by preflight");
+            } else if !runtime.suppressed {
                 runtime.run.end(
                     i,
                     if runtime.skipped || !runtime.warning.is_empty() {
@@ -902,7 +917,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                     env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
                     env.push((
                         "CARGO_TARGET_DIR".into(),
-                        rt(vm).run.root.join("target").display().to_string(),
+                        crate::cargo::target_dir(&rt(vm).run.root).display().to_string(),
                     ));
                 }
                 if let Some(i) = rt(vm).step {
@@ -1142,6 +1157,17 @@ pub fn run_script(
 ) -> Run {
     execute(run, config, hub, script, false, permit).0
 }
+/// One script in preflight mode: `affected` are the packages whose checks
+/// and builds run for real.
+pub fn run_preflight(
+    run: Run,
+    config: Config,
+    hub: Judge,
+    script: &Script,
+    affected: std::collections::BTreeSet<String>,
+) -> Run {
+    execute_with(run, config, hub, script, true, None, Some(affected)).0
+}
 fn execute(
     run: Run,
     config: Config,
@@ -1150,7 +1176,18 @@ fn execute(
     validate: bool,
     permit: Option<crate::runner::Permit>,
 ) -> (Run, Vec<String>) {
-    let host = if validate {
+    execute_with(run, config, hub, script, validate, permit, None)
+}
+fn execute_with(
+    run: Run,
+    config: Config,
+    hub: Judge,
+    script: &Script,
+    validate: bool,
+    permit: Option<crate::runner::Permit>,
+    preflight: Option<std::collections::BTreeSet<String>>,
+) -> (Run, Vec<String>) {
+    let host = if validate && preflight.is_none() {
         crate::cargo::Host {
             target: "host".into(),
             targets: vec!["wasm32-unknown-unknown".into()],
@@ -1210,6 +1247,8 @@ fn execute(
             permit,
             warning: String::new(),
             manifest,
+            preflight,
+            worked: false,
         },
         (),
     );

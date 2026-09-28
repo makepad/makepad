@@ -251,7 +251,7 @@ pub fn execute(
     env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
     env.push((
         "CARGO_TARGET_DIR".into(),
-        run.root.join("target").display().to_string(),
+        target_dir(&run.root).display().to_string(),
     ));
     env.push(("CARGO_TERM_COLOR".into(), "never".into()));
     let root = run.root.clone();
@@ -272,8 +272,15 @@ pub fn execute(
 pub fn target_env(root: &Path, env: &[(String, String)]) -> Vec<(String, String)> {
     let mut env = env.to_vec();
     env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
-    env.push(("CARGO_TARGET_DIR".into(), root.join("target").display().to_string()));
+    env.push(("CARGO_TARGET_DIR".into(), target_dir(root).display().to_string()));
     env
+}
+/// A preflight builds where its developer builds: the target directory that
+/// checkout already shares (set once, before any command). The CI's own
+/// checkout always builds in its `target/`.
+pub static SHARED_TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub fn target_dir(root: &Path) -> PathBuf {
+    SHARED_TARGET.get().cloned().unwrap_or_else(|| root.join("target"))
 }
 
 #[derive(Default)]
@@ -428,8 +435,8 @@ pub fn binary_path(root: &std::path::Path, binary: &str) -> Result<PathBuf> {
     if binary.is_empty() || binary.contains(['/', '\\']) || binary == ".." {
         return Err("binary must be a basename".into());
     }
-    Ok(root
-        .join("target/release")
+    Ok(target_dir(root)
+        .join("release")
         .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX)))
 }
 #[cfg(test)]

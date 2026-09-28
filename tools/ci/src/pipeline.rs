@@ -322,6 +322,9 @@ pub fn run_once(
     if run.finish() == 1 {
         branch.verdict = "red".into();
     }
+    if matches!(branch.verdict.as_str(), "green" | "orange") {
+        crate::status::record_pass(base, &branch.name, &branch.tip)?;
+    }
     state.insert(branch.name.clone(), branch.clone());
     watch::save_state(base, &state)?;
     Ok(branch)
@@ -370,6 +373,11 @@ pub fn watch_loop(
 ) -> Result<()> {
     let mut state = watch::load_state(&base, &config)?;
     watch::publish(&state, &notify);
+    match crate::status::start(&base) {
+        Ok(Some(url)) => notify(Update::Log(format!("status: {url}"))),
+        Ok(None) => {}
+        Err(e) => notify(Update::Log(e)),
+    }
     let poller = watch::Poller::start(base.clone(), config.clone())?;
     let mut queue = Queue::default();
     let mut force = false;

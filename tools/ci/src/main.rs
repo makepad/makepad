@@ -6,11 +6,13 @@ mod window_geometry;
 mod drive;
 mod machine;
 mod pipeline;
+mod preflight;
 mod process;
 mod remote;
 mod report;
 mod runner;
 mod smoke;
+mod status;
 mod test_run;
 mod uihub;
 mod wall;
@@ -27,6 +29,8 @@ pub struct Options {
     model: Option<String>,
     no_vision: bool,
     deep: bool,
+    preflight: Option<preflight::Options>,
+    serve_status: bool,
 }
 impl Options {
     fn parse() -> process::Result<Self> {
@@ -51,6 +55,22 @@ impl Options {
                         result.once = Some(value);
                     }
                 }
+                "--preflight" => {
+                    result.preflight = Some(preflight::Options { base_ref: "origin/work".into(), dependents: false, report: None, packages: Vec::new() })
+                }
+                "--base" | "--report" | "--package" => {
+                    let flag = args[i].clone();
+                    i += 1;
+                    let value = args.get(i).ok_or(format!("{flag} needs a value"))?.clone();
+                    let p = result.preflight.as_mut().ok_or(format!("{flag} goes after --preflight"))?;
+                    match flag.as_str() {
+                        "--base" => p.base_ref = value,
+                        "--report" => p.report = Some(value.into()),
+                        _ => p.packages.push(value),
+                    }
+                }
+                "--dependents" => result.preflight.as_mut().ok_or("--dependents goes after --preflight")?.dependents = true,
+                "--serve-status" => result.serve_status = true,
                 "--install" => result.install = true,
                 "--accept-license" => result.accept_license = true,
                 "--no-vision" => result.no_vision = true,
@@ -60,7 +80,7 @@ impl Options {
                     result.model = Some(args.get(i).ok_or("--model needs an ID")?.clone());
                 }
                 "--help" | "-h" => {
-                    println!("ci [--run [ci.splash] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--deep] [--remote]");
+                    println!("ci [--run [ci.splash] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--deep] [--remote]\nci --preflight [--base origin/work] [--package NAME]... [--dependents] [--report file.json]\nci --serve-status   (only GET /ci/v1/status from local/ci, as status_listen in local/ci/ci.toml says)");
                     std::process::exit(0);
                 }
                 s if s == "--remote"
@@ -73,6 +93,8 @@ impl Options {
         if usize::from(result.script.is_some())
             + usize::from(result.once.is_some())
             + usize::from(result.install)
+            + usize::from(result.preflight.is_some())
+            + usize::from(result.serve_status)
             > 1
         {
             return Err("choose one of --run, --once, --install".into());
@@ -98,6 +120,16 @@ impl Options {
 fn cli(options: &Options) -> process::Result<i32> {
     let base = std::env::current_dir().map_err(|e| e.to_string())?;
     let control = process::Control::default();
+    if options.serve_status {
+        let url = status::start(&base)?.ok_or("status_listen is off in local/ci/ci.toml")?;
+        println!("serving {url}");
+        loop {
+            std::thread::park();
+        }
+    }
+    if let Some(preflight) = &options.preflight {
+        return preflight::run(&base, preflight, control, Arc::new(|_| {}));
+    }
     let config = options.config(&base, &control)?;
     let notify: report::Notify = Arc::new(|update| match update {
         report::Update::Failed(s) => eprintln!("RED: {s}"),
@@ -123,7 +155,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if options.script.is_some() || options.once.is_some() || options.install {
+    if options.script.is_some() || options.once.is_some() || options.install || options.preflight.is_some() || options.serve_status {
         let code = match cli(&options) {
             Ok(p) => p,
             Err(e) => {

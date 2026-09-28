@@ -32,7 +32,9 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if ty.is_dir() {
-            if !matches!(name.as_ref(), "target" | "local" | ".git") && !name.starts_with("target-")
+            // Hidden directories hold tool state (`.git`, agents' `.claude/worktrees`
+            // with whole checkouts), never the checkout's own crates.
+            if !matches!(name.as_ref(), "target" | "local") && !name.starts_with("target-") && !name.starts_with('.')
             {
                 walk(root, &entry.path(), files)?;
             }
