@@ -1430,6 +1430,23 @@ impl GStreamerVideoPlayer {
                 );
             }
 
+            // Keep the pitch when the playback rate is not 1: playbin plays a
+            // rate change by resampling, which shifts the pitch with the speed.
+            let scaletempo_type = CString::new("scaletempo").unwrap();
+            let scaletempo =
+                (gst.gst_element_factory_make)(scaletempo_type.as_ptr(), std::ptr::null());
+            if scaletempo.is_null() {
+                crate::log!("VIDEO: scaletempo unavailable; a playback rate change shifts the pitch");
+            } else {
+                let audio_filter_prop = CString::new("audio-filter").unwrap();
+                (gst.g_object_set_ptr)(
+                    pipeline,
+                    audio_filter_prop.as_ptr(),
+                    scaletempo as *mut c_void,
+                    std::ptr::null(),
+                );
+            }
+
             let video_sink = if audio_only {
                 let fakesink_type = CString::new("fakesink").unwrap();
                 let fakesink =
