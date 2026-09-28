@@ -111,7 +111,11 @@ pub(crate) struct Hot {
     pub iter: u32,
 }
 
+// The cache-line layout is exact where f64 is 8-byte aligned. On i686 the
+// C layout aligns f64 to 4, so the structs pack tighter: still correct,
+// only the line split differs there.
 const _: () = assert!(std::mem::size_of::<Hot>() == 64);
+#[cfg(not(target_arch = "x86"))]
 const _: () = assert!(std::mem::offset_of!(Cold, events) == 64);
 const _: () = assert!(std::mem::size_of::<Cold>() == 256);
 
