@@ -2315,12 +2315,13 @@ impl TextFlow {
                 0.0
             };
 
-            // RowAlign::Center centers each walk by its own height, which
-            // would undo baseline_shift for shorter runs; hand every run the
-            // line's height instead so they all get the same centering shift.
+            // RowAlign::Center centers each walk by its own height, which would undo
+            // baseline_shift for shorter runs; hand every run the line's height (and its
+            // baseline, for RowAlign::Baseline) so they all get the same shift.
             let (line_asc, line_desc) = self.style_metrics_em(cx, 0);
             self.draw_text.align_row_height =
                 Some((line_asc + line_desc) * line_size * LPXS_PER_PT);
+            self.draw_text.align_row_baseline = Some(line_asc * line_size * LPXS_PER_PT);
             // Our runs' rows wrap at the flow's pitch, not the font's line gap. Read once here
             // so the selection capture, the wrap probes and the draw share one layout.
             self.draw_text.flow_wrap_spacing_in_lpxs = Some(

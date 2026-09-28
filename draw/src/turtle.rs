@@ -11,6 +11,7 @@ script_mod! {
         Size: mod.std.set_type_default() do #(Size::script_api(vm)),
         ..me.Size,
         Metrics: mod.std.set_type_default() do #(Metrics::script_api(vm))
+        Baseline: mod.std.set_type_default() do #(Baseline::script_api(vm))
         RowAlign: mod.std.set_type_default() do #(RowAlign::script_api(vm))
         Distribute: mod.std.set_type_default() do #(Distribute::script_api(vm))
         Flow: mod.std.set_type_default() do #(Flow::script_api(vm)),
@@ -127,6 +128,10 @@ pub struct Walk {
 
     #[live]
     pub metrics: Metrics,
+
+    /// Where this walk's text baseline sits, for `RowAlign::Baseline` rows.
+    #[live]
+    pub baseline: Baseline,
 
     /// True only for an internally-materialized deferred walk. This keeps
     /// absolute placement internal to the flex pass distinguishable from a
@@ -283,6 +288,21 @@ impl Default for Metrics {
         }
     }
 }
+
+/// Where a walk's text baseline sits, in lpxs down from the top of its rectangle
+/// (inside the margin). `Auto` is what the walk draws or what its children report;
+/// `At` is an f32 so `Walk` stays inside its size gate.
+#[derive(Copy, Clone, Default, Debug, PartialEq, Script, ScriptHook)]
+pub enum Baseline {
+    #[pick]
+    #[default]
+    Auto,
+    /// Has none and never reports one: a baseline row seats this walk's bottom edge.
+    None,
+    #[live(0.0)]
+    At(f32),
+}
+
 /// Specifies the desired width/height of a walk's rectangle.
 ///
 /// See `Turtle::next_walk_width` and `Turtle::next_walk_height` for details on how the actual
@@ -1800,10 +1820,10 @@ mod tests {
             ..Default::default()
         };
         with_turtle(dvec2(200.0, 100.0), layout, |cx| {
-            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+            assert_eq!(cx.row_anchor_drop(18.0, None), 0.0);
             let pill = tracked_walk(cx, Walk::fixed(20.0, 24.0));
             // Centering an 18-tall anchor on the 24-tall walk seats it 3 below the row top.
-            let drop = cx.row_center_anchor_drop(18.0);
+            let drop = cx.row_anchor_drop(18.0, None);
             assert_eq!(drop, 3.0);
 
             // Emit the anchor the way a wrapped text run does: from the row top, padded by the drop.
@@ -1814,9 +1834,9 @@ mod tests {
             cx.turtle_mut().allocate_height(drop + 18.0);
             let rect = Rect { pos: row_top, size: dvec2(30.0, drop + 18.0) };
             let align_height = Some(18.0 + 2.0 * drop);
-            cx.emit_turtle_walk_with_role(rect, start, Metrics::default(), align_height, RowAlignRole::Anchor);
+            cx.emit_turtle_walk_with_role(rect, start, Metrics::default(), align_height, None, RowAlignRole::Anchor);
             // A second anchor on this row stays on the first one's line.
-            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+            assert_eq!(cx.row_anchor_drop(18.0, None), 0.0);
             cx.turtle_new_line();
 
             // The walk stayed where it was drawn, below the padding, and both centers meet.
@@ -1824,8 +1844,489 @@ mod tests {
             assert_eq!(marker_pos(cx, start).y, 4.0);
             assert_eq!(marker_pos(cx, pill).y + 12.0, marker_pos(cx, start).y + 9.0);
             // A fresh row holds nothing to center on.
-            assert_eq!(cx.row_center_anchor_drop(18.0), 0.0);
+            assert_eq!(cx.row_anchor_drop(18.0, None), 0.0);
         });
+    }
+
+    fn baseline_rows() -> Layout {
+        Layout {
+            flow: Flow::Right { wrap: true, row_align: RowAlign::Baseline },
+            ..Default::default()
+        }
+    }
+
+    fn walk_with_baseline(width: f64, height: f64, baseline: f32) -> Walk {
+        Walk { baseline: Baseline::At(baseline), ..Walk::fixed(width, height) }
+    }
+
+    /// Emits an immovable text row the way a wrapped run's first row does: from the row top,
+    /// `drop` of padding above its `height`, its baseline `baseline` below the row top.
+    fn emit_text_anchor(cx: &mut Cx2d, width: f64, height: f64, drop: f64, baseline: f64) -> usize {
+        let row_top = cx.turtle().pos();
+        let start = cx.align_list.len();
+        cx.align_list.push(AlignEntry::BeginClip(row_top + dvec2(0.0, drop), row_top));
+        cx.turtle_mut().allocate_width(width);
+        cx.turtle_mut().allocate_height(drop + height);
+        cx.turtle_mut().move_right(width);
+        let rect = Rect { pos: row_top, size: dvec2(width, drop + height) };
+        cx.emit_turtle_walk_with_role(
+            rect,
+            start,
+            Metrics::default(),
+            Some(height + 2.0 * drop),
+            Some(baseline),
+            RowAlignRole::Anchor,
+        );
+        start
+    }
+
+    fn last_reported_baseline(cx: &Cx2d) -> Option<f64> {
+        cx.finished_walks.last().unwrap().baseline
+    }
+
+    #[test]
+    fn baseline_row_puts_every_baseline_on_the_deepest_one() {
+        with_turtle(dvec2(200.0, 100.0), baseline_rows(), |cx| {
+            let a = tracked_walk(cx, walk_with_baseline(20.0, 20.0, 15.0));
+            let b = tracked_walk(cx, walk_with_baseline(20.0, 10.0, 8.0));
+            cx.turtle_new_line();
+            assert_eq!(marker_pos(cx, a).y, 0.0);
+            assert_eq!(marker_pos(cx, b).y, 7.0);
+            assert_eq!(cx.turtle().used_height(), 20.0);
+            assert_eq!(cx.turtle().pos().y, 20.0);
+        });
+    }
+
+    #[test]
+    fn baseline_row_grows_for_a_box_seated_below_it() {
+        with_turtle(dvec2(200.0, 100.0), baseline_rows(), |cx| {
+            tracked_walk(cx, walk_with_baseline(20.0, 17.6, 13.5));
+            let b = tracked_walk(cx, walk_with_baseline(20.0, 10.0, 2.0));
+            cx.turtle_new_line();
+            // B ends at 21.5, below the 17.6 the row had, so the row grew to keep it.
+            assert_close(marker_pos(cx, b).y, 11.5);
+            assert_close(cx.turtle().used_height(), 21.5);
+            assert_close(cx.turtle().pos().y, 21.5);
+        });
+    }
+
+    #[test]
+    fn baseline_row_seats_a_baseline_less_box_on_the_line() {
+        with_turtle(dvec2(200.0, 100.0), baseline_rows(), |cx| {
+            let text = tracked_walk(cx, walk_with_baseline(20.0, 17.6, 13.5));
+            let image = tracked_walk(cx, Walk::fixed(12.0, 12.0));
+            tracked_walk(cx, Walk::fixed(5.0, 0.0));
+            cx.turtle_new_line();
+            assert_eq!(marker_pos(cx, text).y, 0.0);
+            assert_close(marker_pos(cx, image).y, 1.5);
+            // The zero-height spacer adds nothing above or below the line.
+            assert_close(cx.turtle().used_height(), 17.6);
+        });
+    }
+
+    #[test]
+    fn baseline_anchor_owns_the_line_and_the_up_shift_is_clamped() {
+        let layout = Layout {
+            padding: Inset { top: 1.0, ..Default::default() },
+            ..baseline_rows()
+        };
+        with_turtle(dvec2(200.0, 100.0), layout, |cx| {
+            let anchor = emit_text_anchor(cx, 30.0, 18.0, 0.0, 13.0);
+            let pill = tracked_walk(cx, walk_with_baseline(20.0, 24.0, 17.0));
+            cx.turtle_new_line();
+            // The pill wants to rise 4 onto the anchor's line, but only the 1 of padding fits.
+            assert_eq!(marker_pos(cx, anchor).y, 1.0);
+            assert_eq!(marker_pos(cx, pill).y, 0.0);
+            // That 1 is forgiven below the row, so the next row starts at the pill's bottom.
+            assert_eq!(cx.turtle().pos().y, 24.0);
+        });
+    }
+
+    #[test]
+    fn dropped_anchor_meets_a_deeper_baseline_in_place() {
+        with_turtle(dvec2(200.0, 100.0), baseline_rows(), |cx| {
+            assert_eq!(cx.row_anchor_drop(18.0, Some(13.0)), 0.0);
+            let pill = tracked_walk(cx, walk_with_baseline(20.0, 24.0, 17.0));
+            let drop = cx.row_anchor_drop(18.0, Some(13.0));
+            assert_eq!(drop, 4.0);
+            let anchor = emit_text_anchor(cx, 30.0, 18.0, drop, drop + 13.0);
+            // A second anchor on this row stays on the first one's line.
+            assert_eq!(cx.row_anchor_drop(18.0, Some(13.0)), 0.0);
+            cx.turtle_new_line();
+            assert_eq!(marker_pos(cx, pill).y, 0.0);
+            assert_eq!(marker_pos(cx, anchor).y, 4.0);
+            assert_eq!(cx.turtle().pos().y, 24.0);
+            assert_eq!(cx.row_anchor_drop(18.0, Some(13.0)), 0.0);
+        });
+    }
+
+    #[test]
+    fn row_baseline_descent_is_the_deepest_hang_below_the_line() {
+        with_turtle(dvec2(200.0, 100.0), baseline_rows(), |cx| {
+            assert_eq!(cx.row_baseline_descent(), 0.0);
+            tracked_walk(cx, walk_with_baseline(20.0, 24.0, 17.0));
+            tracked_walk(cx, Walk::fixed(5.0, 0.0));
+            assert_eq!(cx.row_baseline_descent(), 7.0);
+            // A box without a baseline sits on the line, so it hangs nothing below it.
+            tracked_walk(cx, Walk::fixed(10.0, 12.0));
+            assert_eq!(cx.row_baseline_descent(), 7.0);
+        });
+    }
+
+    #[test]
+    fn turtle_reports_its_first_declared_in_flow_baseline() {
+        with_turtle(dvec2(200.0, 100.0), Layout::flow_right(), |cx| {
+            let inner = Layout {
+                padding: Inset { top: 2.0, ..Default::default() },
+                ..Layout::flow_right()
+            };
+            cx.begin_turtle(Walk::fit(), inner);
+            cx.walk_turtle(Walk {
+                abs_pos: Some(dvec2(0.0, 0.0)),
+                ..walk_with_baseline(10.0, 20.0, 1.0)
+            });
+            let start = cx.align_list.len();
+            let rect = Rect { pos: cx.turtle().pos(), size: dvec2(10.0, 20.0) };
+            cx.emit_turtle_walk_with_role(rect, start, Metrics::default(), None, Some(3.0), RowAlignRole::Fixed);
+            cx.walk_turtle(Walk {
+                margin: Inset { top: 3.0, ..Default::default() },
+                ..walk_with_baseline(10.0, 20.0, 10.0)
+            });
+            cx.walk_turtle(walk_with_baseline(10.0, 20.0, 4.0));
+            cx.end_turtle();
+            // Padding 2 + margin 3 + baseline 10; the out-of-flow and immovable walks before
+            // it were skipped and the shallower walk after it changed nothing.
+            assert_eq!(last_reported_baseline(cx), Some(15.0));
+        });
+    }
+
+    #[test]
+    fn declared_turtle_baseline_wins_over_its_children() {
+        with_turtle(dvec2(200.0, 100.0), Layout::flow_right(), |cx| {
+            cx.begin_turtle(Walk { baseline: Baseline::None, ..Walk::fit() }, Layout::flow_right());
+            cx.walk_turtle(walk_with_baseline(10.0, 20.0, 10.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), None);
+
+            cx.begin_turtle(Walk { baseline: Baseline::At(4.0), ..Walk::fit() }, Layout::flow_right());
+            cx.walk_turtle(walk_with_baseline(10.0, 20.0, 10.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(4.0));
+
+            cx.begin_turtle(Walk::fit(), Layout::flow_right());
+            cx.walk_turtle(Walk::fixed(10.0, 20.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), None);
+        });
+    }
+
+    #[test]
+    fn turtle_baseline_follows_close_time_shifts() {
+        with_turtle(dvec2(200.0, 400.0), Layout::flow_down(), |cx| {
+            // A centered non-wrapping row: the 10-tall walk drops 10 to center in the box's row.
+            cx.begin_turtle(Walk::fit(), Layout { align: Align { x: 0.0, y: 0.5 }, ..Layout::flow_right() });
+            cx.walk_turtle(Walk::fixed(30.0, 30.0));
+            cx.walk_turtle(walk_with_baseline(10.0, 10.0, 8.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(18.0));
+
+            // A column centering its content in a fixed height.
+            cx.begin_turtle(Walk::fixed(50.0, 100.0), Layout { align: Align { x: 0.0, y: 0.5 }, ..Layout::flow_down() });
+            cx.walk_turtle(walk_with_baseline(10.0, 10.0, 8.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(53.0));
+
+            // An overlay aligned to its bottom.
+            cx.begin_turtle(Walk::fixed(50.0, 100.0), Layout { align: Align { x: 0.0, y: 1.0 }, ..Layout::flow_overlay() });
+            cx.walk_turtle(walk_with_baseline(10.0, 10.0, 8.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(98.0));
+        });
+    }
+
+    #[test]
+    fn turtle_reports_a_baseline_after_a_leading_new_line() {
+        with_turtle(dvec2(200.0, 100.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fit(), Layout::flow_right_wrap());
+            cx.turtle_new_line();
+            cx.walk_turtle(walk_with_baseline(10.0, 20.0, 10.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(10.0));
+        });
+    }
+
+    #[test]
+    fn deferred_fill_declared_first_is_the_turtle_baseline_source() {
+        with_turtle(dvec2(200.0, 200.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fixed(100.0, 40.0), Layout { align: Align { x: 0.0, y: 0.5 }, ..Layout::flow_right() });
+            let mut deferred = cx
+                .defer_walk_turtle(Walk {
+                    baseline: Baseline::At(6.0),
+                    ..Walk::new(
+                        Size::Fill {
+                            weight: 1.0,
+                            basis: FitBound::Abs(20.0),
+                            shrink: 0.0,
+                            min: None,
+                            max: Some(40.0),
+                        },
+                        Size::Fixed(10.0),
+                    )
+                })
+                .unwrap();
+            tracked_walk(cx, walk_with_baseline(10.0, 20.0, 9.0));
+            let materialized = deferred.resolve(cx);
+            let fill = tracked_walk(cx, materialized);
+            cx.end_turtle();
+            // Declared first, the Fill is the source; its centering (15 down in the 40-tall
+            // row) is counted once.
+            assert_eq!(marker_pos(cx, fill).y, 15.0);
+            assert_eq!(last_reported_baseline(cx), Some(21.0));
+        });
+    }
+
+    /// Draws one wrapping row of a box and a text-like walk under `row_align`, with or
+    /// without baseline data, and returns the marker positions, the used height and the
+    /// baseline the row's turtle reported.
+    fn aligned_row(row_align: RowAlign, with_baselines: bool) -> (Vec2d, Vec2d, f64, Option<f64>) {
+        let mut result = (Vec2d::default(), Vec2d::default(), 0.0, None);
+        with_turtle(dvec2(200.0, 100.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fit(), Layout { flow: Flow::Right { wrap: true, row_align }, ..Default::default() });
+            let box_walk = tracked_walk(cx, Walk::fixed(20.0, 24.0));
+            let text = tracked_walk(cx, Walk {
+                metrics: Metrics { descender: 4.0, ..Metrics::default() },
+                baseline: if with_baselines { Baseline::At(13.5) } else { Baseline::Auto },
+                ..Walk::fixed(20.0, 17.0)
+            });
+            cx.turtle_new_line();
+            let used = cx.turtle().used_height();
+            cx.end_turtle();
+            result = (marker_pos(cx, box_walk), marker_pos(cx, text), used, last_reported_baseline(cx));
+        });
+        result
+    }
+
+    #[test]
+    fn center_and_bottom_rows_ignore_baselines_and_report_the_shifted_one() {
+        let (box_a, text_a, used_a, reported_a) = aligned_row(RowAlign::Center, true);
+        let (box_b, text_b, used_b, reported_b) = aligned_row(RowAlign::Center, false);
+        assert_eq!((box_a, text_a, used_a), (box_b, text_b, used_b));
+        assert_close(text_a.y, 3.5);
+        assert_close(reported_a.unwrap(), 13.5 + 3.5);
+        assert_eq!(reported_b, None);
+
+        let (box_a, text_a, used_a, reported_a) = aligned_row(RowAlign::Bottom, true);
+        let (box_b, text_b, used_b, reported_b) = aligned_row(RowAlign::Bottom, false);
+        assert_eq!((box_a, text_a, used_a), (box_b, text_b, used_b));
+        assert_close(reported_a.unwrap(), 13.5 + text_a.y);
+        assert_eq!(reported_b, None);
+    }
+
+
+    fn assert_near(actual: f64, expected: f64, tol: f64) {
+        assert!((actual - expected).abs() < tol, "expected {expected}, got {actual}");
+    }
+
+    /// Robrix's pill_bg: a Fit turtle with negative vertical padding and align y 0.5, holding a
+    /// baseline-less avatar and a title. The reported baseline must be where the title's really is.
+    #[test]
+    fn negative_padding_turtle_reports_where_its_title_sits() {
+        with_turtle(dvec2(400.0, 100.0), baseline_rows(), |cx| {
+            cx.begin_turtle(
+                Walk::fit(),
+                Layout {
+                    align: Align { x: 0.0, y: 0.5 },
+                    padding: Inset { left: 6.0, right: 4.0, top: -3.0, bottom: -3.0 },
+                    ..Layout::flow_right()
+                },
+            );
+            tracked_walk(cx, Walk { baseline: Baseline::None, ..Walk::fixed(16.0, 16.0) });
+            let title = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            let rect = cx.end_turtle();
+            let reported = last_reported_baseline(cx).unwrap();
+            assert_near(rect.pos.y + reported, marker_pos(cx, title).y + 13.5667, 1e-4);
+        });
+    }
+
+    #[test]
+    fn nowrap_baseline_row_grows_its_fit_turtle() {
+        with_turtle(dvec2(400.0, 100.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fit(), Layout { flow: Flow::Right { wrap: false, row_align: RowAlign::Baseline }, ..Default::default() });
+            let image = tracked_walk(cx, Walk::fixed(30.0, 30.0));
+            let text = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            let rect = cx.end_turtle();
+            assert_near(marker_pos(cx, image).y, 0.0, 1e-4);
+            assert_near(marker_pos(cx, text).y, 30.0 - 13.5667, 1e-4);
+            assert_near(rect.size.y, 30.0 + 17.6 - 13.5667, 1e-4);
+            assert_near(last_reported_baseline(cx).unwrap(), 30.0, 1e-4);
+        });
+    }
+
+    #[test]
+    fn grown_row_extends_the_turtle_clip() {
+        with_turtle(dvec2(400.0, 200.0), Layout::flow_down(), |cx| {
+            let clip_index = cx.align_list.len();
+            cx.begin_turtle(Walk::fit(), Layout { clip_y: true, ..baseline_rows() });
+            tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            tracked_walk(cx, Walk::fixed(30.0, 30.0));
+            let rect = cx.end_turtle();
+            assert_near(rect.size.y, 30.0 + 17.6 - 13.5667, 1e-4);
+            let AlignEntry::BeginClip(min, max) = cx.align_list[clip_index] else { panic!() };
+            assert_near(max.y - min.y, rect.size.y, 1e-4);
+        });
+    }
+
+    /// A lone walk never needs to move, even with its baseline above its outer top (negative margin).
+    #[test]
+    fn lone_walk_with_a_baseline_above_its_top_stays_put() {
+        with_turtle(dvec2(400.0, 100.0), baseline_rows(), |cx| {
+            let walk = tracked_walk(cx, Walk { margin: Inset { top: -5.0, ..Default::default() }, ..walk_with_baseline(10.0, 10.0, 2.0) });
+            cx.turtle_new_line();
+            assert_near(marker_pos(cx, walk).y, -5.0, 1e-4);
+        });
+    }
+
+    #[test]
+    fn deferred_fill_joins_the_baseline_row() {
+        with_turtle(dvec2(200.0, 200.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fixed(100.0, 60.0), Layout { flow: Flow::Right { wrap: false, row_align: RowAlign::Baseline }, ..Default::default() });
+            let mut deferred = cx
+                .defer_walk_turtle(Walk {
+                    baseline: Baseline::At(6.0),
+                    ..Walk::new(
+                        Size::Fill { weight: 1.0, basis: FitBound::Abs(20.0), shrink: 0.0, min: None, max: Some(40.0) },
+                        Size::Fixed(10.0),
+                    )
+                })
+                .unwrap();
+            let text = tracked_walk(cx, walk_with_baseline(10.0, 20.0, 15.0));
+            let materialized = deferred.resolve(cx);
+            let fill = tracked_walk(cx, materialized);
+            cx.end_turtle();
+            assert_near(marker_pos(cx, text).y, 0.0, 1e-4);
+            assert_near(marker_pos(cx, fill).y, 9.0, 1e-4);
+        });
+    }
+
+    #[test]
+    fn turtle_reports_first_row_baseline_after_that_row_grew() {
+        with_turtle(dvec2(400.0, 200.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fit(), baseline_rows());
+            let text = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            let tall = tracked_walk(cx, walk_with_baseline(13.0, 30.0, 4.0));
+            cx.turtle_new_line();
+            let row2 = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            let rect = cx.end_turtle();
+            assert_near(marker_pos(cx, text).y, 0.0, 1e-4);
+            assert_near(marker_pos(cx, tall).y, 13.5667 - 4.0, 1e-4);
+            assert_near(marker_pos(cx, row2).y, 39.5667, 1e-4);
+            assert_near(rect.size.y, 39.5667 + 17.6, 1e-4);
+            assert_near(last_reported_baseline(cx).unwrap(), 13.5667, 1e-4);
+        });
+    }
+
+    #[test]
+    fn child_declared_none_is_skipped_as_source() {
+        with_turtle(dvec2(200.0, 100.0), Layout::flow_right(), |cx| {
+            cx.begin_turtle(Walk::fit(), Layout::flow_right());
+            cx.walk_turtle(Walk { baseline: Baseline::None, ..walk_with_baseline(10.0, 20.0, 3.0) });
+            cx.walk_turtle(walk_with_baseline(10.0, 20.0, 10.0));
+            cx.end_turtle();
+            assert_eq!(last_reported_baseline(cx), Some(10.0));
+        });
+    }
+
+    #[test]
+    fn nested_block_aligns_by_its_first_line() {
+        with_turtle(dvec2(400.0, 200.0), baseline_rows(), |cx| {
+            let text = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            cx.begin_turtle(Walk::fit(), Layout { padding: Inset { top: 4.0, ..Default::default() }, ..Layout::flow_down() });
+            let line1 = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            let line2 = tracked_walk(cx, walk_with_baseline(50.0, 17.6, 13.5667));
+            cx.end_turtle();
+            cx.turtle_new_line();
+            assert_near(marker_pos(cx, text).y, 4.0, 1e-4);
+            assert_near(marker_pos(cx, line1).y, 4.0, 1e-4);
+            assert_near(marker_pos(cx, line2).y, 21.6, 1e-4);
+            assert_near(cx.turtle().used_height(), 4.0 + 35.2, 1e-4);
+        });
+    }
+
+    #[test]
+    fn baseline_bookkeeping_sizes() {
+        // `Walk` is passed by value everywhere, so its gate is the one that matters.
+        assert!(std::mem::size_of::<Baseline>() <= 8);
+        assert!(std::mem::size_of::<Walk>() <= 384);
+    }
+
+    struct CountingAllocator;
+
+    static ALLOCATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::alloc::System.alloc(layout)
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            std::alloc::System.dealloc(ptr, layout)
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::alloc::System.realloc(ptr, layout, new_size)
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    /// Draws `rows` wrapping rows of eight nested boxes with baselines under `row_align`,
+    /// returning how many heap allocations that took.
+    fn allocations_for_rows(row_align: RowAlign, rows: usize) -> usize {
+        let before = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        with_turtle(dvec2(1000.0, 10000.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fit(), Layout { flow: Flow::Right { wrap: true, row_align }, ..Default::default() });
+            for row in 0..rows {
+                for index in 0..8 {
+                    let height = 10.0 + ((row + index) % 5) as f64 * 3.0;
+                    cx.begin_turtle(Walk::fit(), Layout { align: Align { x: 0.0, y: 0.5 }, ..Layout::flow_right() });
+                    cx.walk_turtle(walk_with_baseline(20.0, height, (height * 0.75) as f32));
+                    cx.end_turtle();
+                }
+                cx.turtle_new_line();
+            }
+            cx.end_turtle();
+        });
+        ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed) - before
+    }
+
+    /// Run alone (`-- --ignored --test-threads=1`) so no other test's allocations are counted.
+    /// The counts still wobble by a few from test setup, so only per-row growth would fail it.
+    #[test]
+    #[ignore = "counts this thread's allocations, so it needs --test-threads=1"]
+    fn baseline_rows_allocate_like_center_and_top_rows() {
+        let count = |row_align| (0..3).map(|_| allocations_for_rows(row_align, 50)).min().unwrap();
+        let (top, center, baseline) = (count(RowAlign::Top), count(RowAlign::Center), count(RowAlign::Baseline));
+        println!("allocations for 50 rows x 8 walks: top {top} center {center} baseline {baseline}");
+        assert!(baseline <= center + 8 && baseline <= top + 8);
+    }
+
+    /// Run with `--release -- --ignored --nocapture` for the per-row cost of each alignment.
+    #[test]
+    #[ignore = "timing only"]
+    fn row_alignment_timing() {
+        for row_align in [RowAlign::Top, RowAlign::Center, RowAlign::Baseline] {
+            let rows = 200;
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let start = std::time::Instant::now();
+                allocations_for_rows(row_align, rows);
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            println!("{row_align:?}: {:.1} ns per row of 8 nested walks", best * 1e9 / rows as f64);
+        }
     }
 
     #[test]
@@ -2435,8 +2936,8 @@ impl Default for Flow {
     }
 }
 
-/// How each walk in a `Flow::Right { wrap: true }` row is vertically aligned
-/// relative to the row's other walks.
+/// How each walk in a `Flow::Right` row is vertically aligned relative to the
+/// row's other walks (a non-wrapping flow is one row).
 ///
 /// All alignment is performed at row-finish time (i.e., when the row wraps
 /// or when the turtle ends) by shifting the already-rendered items in the
@@ -2457,6 +2958,14 @@ pub enum RowAlign {
     /// the row), and the text slides down to the row's center so that the
     /// block's internal content visually aligns with the surrounding text.
     Center,
+    /// Each walk is shifted so its baseline sits on the row's: the deepest
+    /// baseline on the row, or an immovable text row's own. A walk with no
+    /// baseline seats its bottom edge there, the way an inline image does in HTML.
+    /// Text runs report their line's baseline, so a widget inside a sub/superscript
+    /// sits on the line, not the raised text. An `abs_pos` walk, or a cached View
+    /// that draws nothing, reports no baseline. Leave `align.y` at 0 on such rows:
+    /// it is applied per walk afterwards and would undo the alignment.
+    Baseline,
 }
 
 /// How positive slack is distributed between in-flow walks on the main axis.
@@ -2513,6 +3022,10 @@ pub struct Turtle {
     deferred_fills: Vec<DeferredFill>,
     flex_resolved: bool,
     next_flow_index: u32,
+    /// The finished walk whose baseline this turtle reports, and that baseline below
+    /// the turtle's rectangle top, kept current through row-finish and close-time shifts.
+    baseline_walk: Option<usize>,
+    baseline_y: f64,
     pos: Vec2d,
     origin: Vec2d,
     guard: Area,
@@ -3249,6 +3762,16 @@ pub struct FinishedWalk {
     /// Text runs pass their line's height here so mixed-font runs on a row all
     /// get the same shift and keep their relative baselines.
     align_height: Option<f64>,
+
+    /// The walk's text baseline below its outer top (margin included), when it has one.
+    baseline: Option<f64>,
+}
+
+impl FinishedWalk {
+    /// The baseline a `RowAlign::Baseline` row aligns: a walk without one sits on its bottom edge.
+    fn effective_baseline(&self) -> f64 {
+        self.baseline.unwrap_or(self.outer_size.y)
+    }
 }
 
 /// How row alignment may treat a finished walk.
@@ -3993,6 +4516,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             deferred_fills: Vec::new(),
             flex_resolved: false,
             next_flow_index: 0,
+            baseline_walk: None,
+            baseline_y: 0.0,
             pos: Vec2d {
                 x: layout.padding.left,
                 y: layout.padding.top,
@@ -4096,6 +4621,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             deferred_fills: Vec::new(),
             flex_resolved: false,
             next_flow_index: 0,
+            baseline_walk: None,
+            baseline_y: 0.0,
             wrap_spacing: layout.wrap_spacing,
             pos: Vec2d {
                 x: origin.x + layout.padding.left,
@@ -4173,6 +4700,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             )
         };
 
+        // The walk this turtle's baseline comes from moves too, so its shift is kept.
+        let baseline_walk = self.turtle().baseline_walk;
+        let mut baseline_dy = 0.0;
+
         // Close-time placement is one normalized pass. Every align-list range
         // moves at most once, combining a preceding flex delta with either the
         // historical Start alignment or its distribution offset.
@@ -4240,6 +4771,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             0.0
                         };
                     let cross = align.y * (inner_effective_height - outer_height).max(0.0);
+                    if Some(index) == baseline_walk {
+                        baseline_dy = cross;
+                    }
                     let range_end = self.finished_walk_align_list_end(index);
                     self.move_align_list(range_start, range_end, main, cross, false);
                 }
@@ -4364,6 +4898,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             0.0
                         };
                     let cross = align.x * (inner_effective_width - outer_width).max(0.0);
+                    if Some(index) == baseline_walk {
+                        baseline_dy = main;
+                    }
                     let range_end = self.finished_walk_align_list_end(index);
                     self.move_align_list(range_start, range_end, cross, main, false);
                 }
@@ -4373,6 +4910,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let walk = &self.finished_walks[index];
                     let dx = align.x * (inner_effective_width - walk.outer_size.x).max(0.0);
                     let dy = align.y * (inner_effective_height - walk.outer_size.y).max(0.0);
+                    if Some(index) == baseline_walk {
+                        baseline_dy = dy;
+                    }
                     let range_start = walk.align_list_start;
                     let range_end = self.finished_walk_align_list_end(index);
                     self.move_align_list(range_start, range_end, dx, dy, false);
@@ -4397,11 +4937,20 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 size: turtle.size(),
             }
         } else {
+            // A turtle reports the first in-flow child baseline it saw (its first line, like a
+            // table cell in CSS), unless its walk declares one.
+            let baseline = match turtle.walk().baseline {
+                Baseline::Auto if turtle.baseline_walk.is_some() => {
+                    Baseline::At((turtle.baseline_y + baseline_dy) as f32)
+                }
+                declared => declared,
+            };
             self.walk_turtle_internal(
                 Walk {
                     abs_pos: turtle.walk().abs_pos,
                     width: Size::Fixed(turtle.width()),
                     height: Size::Fixed(turtle.height()),
+                    baseline,
                     ..turtle.walk()
                 },
                 turtle_align_start,
@@ -4601,6 +5150,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
         let size = turtle.next_walk_size(walk.width, walk.height, walk.margin);
         let outer_size = size + walk.margin.size();
+        let baseline = match walk.baseline {
+            Baseline::At(baseline) => Some(walk.margin.top + baseline as f64),
+            _ => None,
+        };
 
         if let Some(outer_origin) = walk.abs_pos {
             let old_pos = turtle.pos();
@@ -4624,7 +5177,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 metrics: walk.metrics,
                 align_role: RowAlignRole::Shiftable,
                 align_height: None,
+                baseline,
             });
+            self.note_turtle_baseline(in_flow, RowAlignRole::Shiftable, outer_origin.y, baseline, flow_index);
 
             let origin = outer_origin + walk.margin.left_top();
             Rect { pos: origin, size }
@@ -4680,7 +5235,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 metrics: walk.metrics,
                 align_role: RowAlignRole::Shiftable,
                 align_height: None,
+                baseline,
             });
+            self.note_turtle_baseline(true, RowAlignRole::Shiftable, outer_origin.y, baseline, flow_index);
 
             let origin = outer_origin + walk.margin.left_top();
             Rect { pos: origin, size }
@@ -4936,10 +5493,11 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         metrics: Metrics,
         align_height: Option<f64>,
     ) {
-        self.emit_turtle_walk_with_role(rect, align_list_start, metrics, align_height, RowAlignRole::Shiftable)
+        self.emit_turtle_walk_with_role(rect, align_list_start, metrics, align_height, None, RowAlignRole::Shiftable)
     }
 
-    /// Like [`emit_turtle_walk_with_align_height`] but with an explicit
+    /// Like [`emit_turtle_walk_with_align_height`] but with the walk's text
+    /// baseline below `rect`'s top (for `RowAlign::Baseline`) and an explicit
     /// [`RowAlignRole`].
     pub fn emit_turtle_walk_with_role(
         &mut self,
@@ -4947,6 +5505,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         align_list_start: usize,
         metrics: Metrics,
         align_height: Option<f64>,
+        baseline: Option<f64>,
         align_role: RowAlignRole,
     ) {
         let turtle = self.turtles.last_mut().unwrap();
@@ -4961,7 +5520,37 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             metrics,
             align_role,
             align_height,
+            baseline,
         });
+        self.note_turtle_baseline(true, align_role, rect.pos.y, baseline, flow_index);
+    }
+
+    /// Remembers the first declared in-flow walk with a baseline as the one this
+    /// turtle reports. A deferred Fill is pushed after its siblings but keeps its
+    /// declaration index, so it can still take over.
+    fn note_turtle_baseline(
+        &mut self,
+        in_flow: bool,
+        align_role: RowAlignRole,
+        outer_top: f64,
+        baseline: Option<f64>,
+        flow_index: u32,
+    ) {
+        let Some(baseline) = baseline else { return };
+        if !in_flow || align_role == RowAlignRole::Fixed {
+            return;
+        }
+        let index = self.finished_walks.len() - 1;
+        let replace = match self.turtle().baseline_walk {
+            None => true,
+            Some(current) => flow_index < self.finished_walks[current].flow_index,
+        };
+        if replace {
+            let baseline_y = outer_top - self.turtle().origin().y + baseline;
+            let turtle = self.turtle_mut();
+            turtle.baseline_walk = Some(index);
+            turtle.baseline_y = baseline_y;
+        }
     }
 
     fn walk_turtle_peek(&self, walk: Walk) -> Rect {
@@ -5038,8 +5627,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// Finishes the current row: applies its row alignment and rolls the row
     /// bookkeeping forward.
     ///
-    /// Returns the row's bottom forgiveness (see [`Cx2d::finish_row_center`]);
-    /// rows under `RowAlign::Top` and `RowAlign::Bottom` always return zero.
+    /// Returns the row's bottom forgiveness (see [`Cx2d::finish_row_center`] and
+    /// [`Cx2d::finish_row_baseline`]); rows under `RowAlign::Top` and
+    /// `RowAlign::Bottom` always return zero.
     fn finish_row(&mut self, align_list_start: usize) -> f64 {
         let row_align = if let Flow::Right { row_align, .. } = self.turtle().flow() {
             row_align
@@ -5057,6 +5647,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 0.0
             }
             RowAlign::Center => self.finish_row_center(align_list_start),
+            RowAlign::Baseline => self.finish_row_baseline(align_list_start),
         };
 
         self.turtle_mut().prev_row_metrics = self.turtle().current_row_metrics;
@@ -5137,6 +5728,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             } else {
                 align_list_start
             };
+            if Some(finished_walk_index) == self.turtle().baseline_walk {
+                self.turtle_mut().baseline_y += shift;
+            }
             self.move_align_list(start, end, 0.0, shift, false);
         }
     }
@@ -5260,6 +5854,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             } else {
                 align_list_start
             };
+            if Some(finished_walk_index) == self.turtle().baseline_walk {
+                self.turtle_mut().baseline_y += shift;
+            }
             self.move_align_list(start, end, 0.0, shift, false);
         }
 
@@ -5271,24 +5868,142 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         row_bottom_forgiveness
     }
 
-    /// How far below the current row's top an anchor of `anchor_height` must sit for the row's
-    /// taller walks to center on it without moving up, as the per-row path centers a row. A row
-    /// that already holds an anchor keeps the new anchor on that anchor's line instead.
-    pub fn row_center_anchor_drop(&self, anchor_height: f64) -> f64 {
-        if !matches!(self.turtle().flow(), Flow::Right { row_align: RowAlign::Center, .. }) {
-            return 0.0;
-        }
-        let mut tallest: f64 = 0.0;
-        for walk in &self.finished_walks[self.current_row_walks_start()..] {
-            match walk.align_role {
-                RowAlignRole::Anchor => return 0.0,
+    /// Puts the current row's walks on one baseline (the deepest, or an immovable text row's
+    /// own; a walk without one sits on its bottom edge). The row grows when a seated box
+    /// reaches below it; up-shifts toward an anchor are clamped and forgiven like Center's.
+    fn finish_row_baseline(&mut self, align_list_start: usize) -> f64 {
+        let current_row_height = self.turtle().row_height();
+
+        let finished_walks_start = self.current_row_walks_start();
+        let finished_walks_end = self.finished_walks.len();
+
+        let mut anchor_baseline: Option<f64> = None;
+        let mut deepest_baseline: Option<f64> = None;
+        for finished_walk in &self.finished_walks[finished_walks_start..finished_walks_end] {
+            if !finished_walk.in_flow {
+                continue;
+            }
+            let baseline = finished_walk.effective_baseline();
+            match finished_walk.align_role {
+                RowAlignRole::Anchor => {
+                    anchor_baseline =
+                        Some(anchor_baseline.map_or(baseline, |b: f64| b.max(baseline)));
+                }
                 RowAlignRole::Shiftable => {
-                    tallest = tallest.max(walk.align_height.unwrap_or(walk.outer_size.y))
+                    deepest_baseline =
+                        Some(deepest_baseline.map_or(baseline, |b: f64| b.max(baseline)));
                 }
                 RowAlignRole::Fixed => {}
             }
         }
-        ((tallest - anchor_height) * 0.5).max(0.0)
+        // A negative margin can put a baseline above the row top, so no zero floor here.
+        let row_baseline = anchor_baseline.or(deepest_baseline).unwrap_or(0.0);
+        let min_shift = (self.turtle().origin().y - self.turtle().pos().y).min(0.0);
+        let baseline_walk = self.turtle().baseline_walk;
+
+        let mut max_effective_bottom: f64 = 0.0;
+        let mut max_up_overhang: f64 = 0.0;
+
+        for finished_walk_index in finished_walks_start..finished_walks_end {
+            let finished_walk = &self.finished_walks[finished_walk_index];
+            if !finished_walk.in_flow {
+                continue;
+            }
+            if finished_walk.align_role != RowAlignRole::Shiftable {
+                max_effective_bottom = max_effective_bottom.max(finished_walk.outer_size.y);
+                continue;
+            }
+            let mut shift = row_baseline - finished_walk.effective_baseline();
+            if anchor_baseline.is_some() {
+                shift = shift.max(min_shift);
+            }
+
+            let applied = shift != 0.0;
+            let applied_shift = if applied { shift } else { 0.0 };
+            max_up_overhang = max_up_overhang.max((-applied_shift).max(0.0));
+            max_effective_bottom =
+                max_effective_bottom.max(finished_walk.outer_size.y + applied_shift);
+
+            if !applied {
+                continue;
+            }
+
+            let start = self.finished_walks[finished_walk_index].align_list_start;
+            let end = if finished_walk_index + 1 < self.finished_walks.len() {
+                self.finished_walks[finished_walk_index + 1].align_list_start
+            } else {
+                align_list_start
+            };
+            if Some(finished_walk_index) == baseline_walk {
+                self.turtle_mut().baseline_y += shift;
+            }
+            self.move_align_list(start, end, 0.0, shift, false);
+        }
+
+        // A box seated on the line can reach below the row; the row grows to keep it.
+        let grow = max_effective_bottom - current_row_height;
+        if grow > 0.0 {
+            self.turtle_mut().used_height += grow;
+        }
+
+        if anchor_baseline.is_none() {
+            return 0.0;
+        }
+        (current_row_height - max_effective_bottom.max(0.0)).clamp(0.0, max_up_overhang)
+    }
+
+    /// How far below the current row's top an anchor must sit so the row's other walks meet
+    /// it without moving up: an `anchor_height`-tall one under Center, one whose baseline is
+    /// `anchor_baseline` below its top under Baseline. A row that already holds an anchor: 0.
+    pub fn row_anchor_drop(&self, anchor_height: f64, anchor_baseline: Option<f64>) -> f64 {
+        let Flow::Right { row_align, .. } = self.turtle().flow() else {
+            return 0.0;
+        };
+        let walks = &self.finished_walks[self.current_row_walks_start()..];
+        match row_align {
+            RowAlign::Center => {
+                let mut tallest: f64 = 0.0;
+                for walk in walks {
+                    match walk.align_role {
+                        RowAlignRole::Anchor => return 0.0,
+                        RowAlignRole::Shiftable => {
+                            tallest = tallest.max(walk.align_height.unwrap_or(walk.outer_size.y))
+                        }
+                        RowAlignRole::Fixed => {}
+                    }
+                }
+                ((tallest - anchor_height) * 0.5).max(0.0)
+            }
+            RowAlign::Baseline => {
+                let Some(anchor_baseline) = anchor_baseline else {
+                    return 0.0;
+                };
+                let mut deepest: f64 = 0.0;
+                for walk in walks {
+                    match walk.align_role {
+                        RowAlignRole::Anchor => return 0.0,
+                        RowAlignRole::Shiftable if walk.in_flow => {
+                            deepest = deepest.max(walk.effective_baseline())
+                        }
+                        _ => {}
+                    }
+                }
+                (deepest - anchor_baseline).max(0.0)
+            }
+            RowAlign::Top | RowAlign::Bottom => 0.0,
+        }
+    }
+
+    /// How far the current row's walks reach below their baselines, once a
+    /// `RowAlign::Baseline` row has put them on one line.
+    pub fn row_baseline_descent(&self) -> f64 {
+        let mut descent: f64 = 0.0;
+        for walk in &self.finished_walks[self.current_row_walks_start()..] {
+            if walk.in_flow {
+                descent = descent.max(walk.outer_size.y - walk.effective_baseline());
+            }
+        }
+        descent
     }
 
     /// Shifts the rendered content in the align list range `[start, end)` by
