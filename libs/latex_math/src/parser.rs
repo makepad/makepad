@@ -458,10 +458,17 @@ impl<'a> Parser<'a> {
             if stop(self) || self.peek().is_none() {
                 break;
             }
+            let pos_before = self.pos;
             if let Some(node) = self.parse_one() {
                 // Check for sub/superscript attachment
                 let node = self.maybe_attach_scripts(node);
                 nodes.push(node);
+            }
+            // parse_one leaves a stray `}` or `]` for its caller; when this
+            // loop's stop condition does not take it, consume it so
+            // malformed input cannot spin here forever.
+            if self.pos == pos_before {
+                self.advance();
             }
         }
         nodes
