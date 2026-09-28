@@ -6,7 +6,7 @@ script_mod! {
 
     // Mirrors a chat client's room-list message preview: bold sender, text,
     // and a mention pill whose rounded background overdraws its layout rect
-    // through negative padding, all inside a RowAlign.Center wrapping flow.
+    // through negative padding, all inside a RowAlign.Baseline wrapping flow.
     let ReproPreview = View{
         height: Fit, show_bg: true, draw_bg +: {color: #333}
         Html{
@@ -14,7 +14,7 @@ script_mod! {
             max_lines: 2
             text_overflow: Ellipsis
             font_size: 9.3
-            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+            flow: Flow.Right{wrap: true, row_align: RowAlign.Baseline}
             align: Align{ y: 0.5 }
             text_style_normal +: { font_size: 9.3, line_spacing: 1.32 }
             text_style_bold +: { font_size: 9.3, line_spacing: 1.32 }
