@@ -297,7 +297,7 @@ impl Markdown {
 
         let parser = Parser::new_ext(
             self.body.as_ref(),
-            Options::ENABLE_TABLES | Options::ENABLE_MATH,
+            Options::ENABLE_TABLES | Options::ENABLE_MATH | Options::ENABLE_STRIKETHROUGH,
         );
 
         for event in parser.into_iter() {
@@ -388,10 +388,10 @@ impl Markdown {
                     tf.bold.pop();
                 }
                 MdEvent::Start(Tag::Strikethrough) => {
-                    tf.underline.push();
+                    tf.strikethrough.push();
                 }
                 MdEvent::End(TagEnd::Strikethrough) => {
-                    tf.underline.pop();
+                    tf.strikethrough.pop();
                 }
                 MdEvent::Start(Tag::Link { dest_url, .. }) => {
                     self.auto_id += 1;
