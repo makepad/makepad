@@ -1118,6 +1118,16 @@ impl Cx {
         &self.os_type
     }
 
+    /// Linux X11: hide the window manager's decorations (the system title
+    /// bar) so the app draws its own chrome. Wayland picks client-side
+    /// decorations on its own. Call from `Startup`, before the window is
+    /// created; windows created afterwards follow the setting.
+    pub fn set_linux_custom_window_chrome(&mut self, enable: bool) {
+        if let OsType::LinuxWindow(params) = &mut self.os_type {
+            params.custom_window_chrome = enable;
+        }
+    }
+
     /// The GPU API this binary renders with (see [`GpuBackend`]). Desktop Linux
     /// picks between Vulkan and OpenGL ES at startup (a Vulkan-capable build
     /// falls back to OpenGL when no usable hardware device answers); once the

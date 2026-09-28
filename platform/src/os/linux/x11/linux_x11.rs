@@ -540,6 +540,10 @@ impl X11Cx {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
                     let window = &cx.windows[window_id];
                     let (create_position, create_inner_size) = window.create_geom();
+                    let custom_window_chrome = matches!(
+                        &cx.os_type,
+                        OsType::LinuxWindow(params) if params.custom_window_chrome
+                    );
                     let opengl_window = OpenglWindow::new(
                         window_id,
                         gl_cx,
@@ -548,9 +552,13 @@ impl X11Cx {
                         &window.create_title,
                         &window.create_app_id,
                         window.is_fullscreen,
+                        custom_window_chrome,
                     );
                     let window = &mut cx.windows[window_id];
                     window.window_geom = opengl_window.window_geom.clone();
+                    // Without WM decorations the app's caption bar is the
+                    // window's chrome, as with Wayland client-side decorations.
+                    window.uses_client_side_decorations = custom_window_chrome;
                     if window.backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
                     }

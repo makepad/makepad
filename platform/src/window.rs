@@ -725,7 +725,9 @@ impl WindowHandle {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
 
-    /// Whether this Wayland window is using Makepad-drawn decorations.
+    /// Whether this window is using Makepad-drawn decorations: Wayland
+    /// client-side decorations, or an X11 window created after
+    /// `Cx::set_linux_custom_window_chrome(true)`.
     pub fn uses_wayland_client_side_decorations(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].uses_client_side_decorations
     }
@@ -857,7 +859,8 @@ pub struct CxWindow {
     pub backdrop_intensity: f32,
     pub macos: MacosWindowConfig,
     pub wayland_decorations: WaylandDecorationPreference,
-    /// Effective Wayland decoration mode selected by the compositor.
+    /// Effective decoration mode: selected by the Wayland compositor, or set
+    /// on X11 when the app hides the WM decorations.
     pub(crate) uses_client_side_decorations: bool,
     /// True compositor fullscreen, kept separate so CSD remains visible when maximized.
     pub(crate) wayland_is_fullscreen: bool,
