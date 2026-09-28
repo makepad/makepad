@@ -323,6 +323,9 @@ pub fn define_makepad_view_controller() -> *const Class {
     // UIRectEdge bit set: the edges whose system gestures the app asked to
     // defer (`Cx::defer_system_gestures`); 0 = UIRectEdgeNone.
     decl.add_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures");
+    // UIInterfaceOrientationMask the app locked to (`Cx::set_screen_orientation`);
+    // 0 = no lock, answer UIKit's own default.
+    decl.add_ivar::<u64>("_supportedInterfaceOrientations");
 
     extern "C" fn prefers_status_bar_hidden(this: &Object, _: Sel) -> BOOL {
         unsafe { *this.get_ivar("_prefersStatusBarHidden") }
@@ -338,6 +341,24 @@ pub fn define_makepad_view_controller() -> *const Class {
 
     extern "C" fn preferred_screen_edges_deferring_system_gestures(this: &Object, _: Sel) -> u64 {
         unsafe { *this.get_ivar("_preferredScreenEdgesDeferringSystemGestures") }
+    }
+
+    extern "C" fn supported_interface_orientations(this: &Object, _: Sel) -> u64 {
+        let mask: u64 = unsafe { *this.get_ivar("_supportedInterfaceOrientations") };
+        if mask != 0 {
+            return mask;
+        }
+        // UIKit's default: every orientation on iPad (idiom 1), all but
+        // upside-down elsewhere.
+        let idiom: i64 = unsafe {
+            let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+            msg_send![device, userInterfaceIdiom]
+        };
+        if idiom == 1 {
+            30
+        } else {
+            26
+        }
     }
 
     // Called by iOS when the safe area insets change (e.g., device rotation).
@@ -385,6 +406,10 @@ pub fn define_makepad_view_controller() -> *const Class {
         decl.add_method(
             sel!(preferredScreenEdgesDeferringSystemGestures),
             preferred_screen_edges_deferring_system_gestures as extern "C" fn(&Object, Sel) -> u64,
+        );
+        decl.add_method(
+            sel!(supportedInterfaceOrientations),
+            supported_interface_orientations as extern "C" fn(&Object, Sel) -> u64,
         );
         decl.add_method(
             sel!(viewSafeAreaInsetsDidChange),

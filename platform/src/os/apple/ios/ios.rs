@@ -1645,6 +1645,12 @@ impl Cx {
                 CxOsOp::DeferSystemGestures(edges) => {
                     IosApp::set_deferred_system_gesture_edges(ui_rect_edges(edges));
                 }
+                CxOsOp::SetScreenOrientation(orientation) => {
+                    IosApp::set_screen_orientation(orientation);
+                }
+                CxOsOp::SetKeepScreenOn(on) => {
+                    IosApp::set_idle_timer_disabled(on);
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

@@ -191,7 +191,7 @@ pub use {
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
-        display_context::{DisplayContext, SystemBarAppearance},
+        display_context::{DisplayContext, ScreenOrientation, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
             FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,

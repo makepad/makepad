@@ -19,6 +19,19 @@ pub enum SystemBarAppearance {
     LightIcons,
 }
 
+/// A screen-orientation lock, on platforms that rotate (Android and iOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScreenOrientation {
+    /// No lock: the screen follows the device and the user's rotation
+    /// setting, within what the app's manifest / Info.plist allows.
+    #[default]
+    Auto,
+    /// Portrait, either way up where the platform allows it.
+    Portrait,
+    /// Landscape, either way round.
+    Landscape,
+}
+
 /// The current context data relevant to adaptive views.
 /// Later to be expanded with more context data like platfrom information, accessibility settings, etc.
 #[derive(Clone, Debug, Default)]

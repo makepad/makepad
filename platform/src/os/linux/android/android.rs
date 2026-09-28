@@ -1355,6 +1355,24 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, true);
                     }
                 }
+                // A recreated Activity starts from its manifest again: restore
+                // what the app asked for, and only that, so a manifest's own
+                // orientation stands until the app overrides it.
+                if let Some(orientation) = self.os.screen_orientation {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_screen_orientation(
+                            env,
+                            android_screen_orientation(orientation),
+                        );
+                    }
+                }
+                if self.os.keep_screen_on {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_keep_screen_on(env, true);
+                    }
+                }
                 // Java may keep a cached snapshot overlay visible across any
                 // pause/resume transition, even when Android never tears down
                 // the underlying SurfaceView. Always hide that overlay on the
@@ -3195,6 +3213,23 @@ impl Cx {
                     let env = attach_jni_env();
                     android_jni::to_java_set_system_bar_appearance(env, dark_icons);
                 },
+                CxOsOp::SetScreenOrientation(orientation) => {
+                    self.os.screen_orientation = Some(orientation);
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_screen_orientation(
+                            env,
+                            android_screen_orientation(orientation),
+                        );
+                    }
+                }
+                CxOsOp::SetKeepScreenOn(on) => {
+                    self.os.keep_screen_on = on;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_keep_screen_on(env, on);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -3500,6 +3535,8 @@ impl Default for CxOs {
             gl_fallback: false,
             quit: false,
             fullscreen: false,
+            screen_orientation: None,
+            keep_screen_on: false,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
             video_configs: HashMap::new(),
@@ -3597,6 +3634,17 @@ impl Cx {
     }
 }
 
+/// `ActivityInfo.SCREEN_ORIENTATION_*` for an orientation lock: `Auto` is
+/// UNSPECIFIED (-1), the locks are the sensor variants so either way up works.
+fn android_screen_orientation(orientation: crate::display_context::ScreenOrientation) -> i32 {
+    use crate::display_context::ScreenOrientation;
+    match orientation {
+        ScreenOrientation::Auto => -1,
+        ScreenOrientation::Portrait => 7,
+        ScreenOrientation::Landscape => 6,
+    }
+}
+
 pub struct CxOs {
     /// The app called `start_location_updates`; used to start streaming after
     /// the runtime permission dialog resolves (and to re-arm on resume).
@@ -3639,6 +3687,11 @@ pub struct CxOs {
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
+    /// The orientation lock the app asked for, re-applied on resume; `None`
+    /// until it asks, leaving the manifest's orientation alone.
+    pub screen_orientation: Option<crate::display_context::ScreenOrientation>,
+    /// The app asked to keep the screen on; re-applied on resume.
+    pub keep_screen_on: bool,
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
     pub display: Option<CxAndroidDisplay>,

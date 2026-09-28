@@ -352,6 +352,8 @@ impl IosApp {
             (*view_ctrl_obj).set_ivar::<i64>("_preferredStatusBarStyle", 0);
             // UIRectEdgeNone: the OS keeps every edge gesture until an app asks.
             (*view_ctrl_obj).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", 0);
+            // No orientation lock until an app asks.
+            (*view_ctrl_obj).set_ivar::<u64>("_supportedInterfaceOrientations", 0);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -1418,6 +1420,72 @@ impl IosApp {
                 (*vc).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", edges);
                 let () = msg_send![vc, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
             }
+        }
+    }
+
+    /// Locks the interface orientation, or with `Auto` releases the lock:
+    /// the view controller answers `supportedInterfaceOrientations` with the
+    /// mask, and UIKit is told to ask again. iOS 16+ also asks the window
+    /// scene to rotate now; before that the lock takes hold at the next
+    /// device rotation. Same borrow pattern as `set_fullscreen`.
+    pub fn set_screen_orientation(orientation: crate::display_context::ScreenOrientation) {
+        use crate::display_context::ScreenOrientation;
+        // UIInterfaceOrientationMask: portrait 2, landscape (left|right) 24;
+        // 0 = no lock.
+        let mask: u64 = match orientation {
+            ScreenOrientation::Auto => 0,
+            ScreenOrientation::Portrait => 2,
+            ScreenOrientation::Landscape => 24,
+        };
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+        let Some(vc) = vc else {
+            return;
+        };
+        unsafe {
+            (*vc).set_ivar::<u64>("_supportedInterfaceOrientations", mask);
+            let can_update: BOOL = msg_send![
+                vc,
+                respondsToSelector: sel!(setNeedsUpdateOfSupportedInterfaceOrientations)
+            ];
+            if can_update == NO {
+                let () = msg_send![class!(UIViewController), attemptRotationToDeviceOrientation];
+                return;
+            }
+            let () = msg_send![vc, setNeedsUpdateOfSupportedInterfaceOrientations];
+            if mask == 0 {
+                return;
+            }
+            let view: ObjcId = msg_send![vc, view];
+            let window: ObjcId = if view == nil { nil } else { msg_send![view, window] };
+            let scene: ObjcId = if window == nil { nil } else { msg_send![window, windowScene] };
+            let prefs_class = makepad_objc_sys::runtime::objc_getClass(
+                b"UIWindowSceneGeometryPreferencesIOS\0".as_ptr() as *const _,
+            );
+            if scene == nil || prefs_class.is_null() {
+                return;
+            }
+            let prefs: ObjcId = msg_send![prefs_class as ObjcId, alloc];
+            let prefs: ObjcId = msg_send![prefs, initWithInterfaceOrientations: mask];
+            if prefs != nil {
+                let () = msg_send![scene, requestGeometryUpdateWithPreferences: prefs errorHandler: nil];
+                let () = msg_send![prefs, release];
+            }
+        }
+    }
+
+    /// Keeps the screen awake while `disabled` (the idle timer is what dims
+    /// and locks it).
+    pub fn set_idle_timer_disabled(disabled: bool) {
+        unsafe {
+            let app: ObjcId = msg_send![class!(UIApplication), sharedApplication];
+            let () = msg_send![app, setIdleTimerDisabled: if disabled { YES } else { NO }];
         }
     }
 

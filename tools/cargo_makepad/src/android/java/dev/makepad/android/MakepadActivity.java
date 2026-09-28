@@ -1668,6 +1668,32 @@ public class MakepadActivity
             });
     }
 
+    // Locks the screen orientation (an ActivityInfo.SCREEN_ORIENTATION_*
+    // value; UNSPECIFIED releases the lock).
+    public void setScreenOrientation(final int orientation) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    setRequestedOrientation(orientation);
+                }
+            });
+    }
+
+    // Keeps the display awake while `on`. Window flags only take effect from
+    // the UI thread.
+    public void setKeepScreenOn(final boolean on) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (on) {
+                        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    } else {
+                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    }
+                }
+            });
+    }
+
     // Tints the system bar (status/navigation bar) icons and text. A "light"
     // system bar has a light background, so it needs dark icons for contrast;
     // we therefore request dark icons when the app's background is light.

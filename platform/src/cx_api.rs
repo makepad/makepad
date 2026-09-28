@@ -5,7 +5,7 @@ use {
         area::Area,
         cursor::MouseCursor,
         cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
-        display_context::SystemBarAppearance,
+        display_context::{ScreenOrientation, SystemBarAppearance},
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
@@ -326,6 +326,12 @@ pub enum CxOsOp {
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
+    /// Locks the screen orientation, or releases the lock. Honored on
+    /// Android and iOS.
+    SetScreenOrientation(ScreenOrientation),
+    /// Keeps the display from dimming and sleeping while `true`. Honored on
+    /// Android and iOS.
+    SetKeepScreenOn(bool),
     /// Asks the OS to defer its own edge gestures (the home-indicator swipe,
     /// the status-bar and control-centre pulls) on these screen edges, so
     /// the first swipe from such an edge reaches the app. Honored on iOS.
@@ -520,6 +526,8 @@ impl CxOsOp {
             Self::RepinMousePointer => "RepinMousePointer",
             Self::SetSystemBarDarkIcons(..) => "SetSystemBarDarkIcons",
             Self::DeferSystemGestures(..) => "DeferSystemGestures",
+            Self::SetScreenOrientation(..) => "SetScreenOrientation",
+            Self::SetKeepScreenOn(..) => "SetKeepScreenOn",
 
             Self::ShowTextIME(..) => "ShowTextIME",
             Self::HideTextIME => "HideTextIME",
@@ -1383,6 +1391,34 @@ impl Cx {
             .retain(|op| !matches!(op, CxOsOp::DeferSystemGestures(_)));
         self.platform_ops.push_back(CxOsOp::DeferSystemGestures(edges));
     }
+    /// Locks the screen to portrait or landscape, or with
+    /// [`ScreenOrientation::Auto`] releases the lock. Honored on Android and
+    /// iOS (on iOS 16+ the screen turns at once, before that at the next
+    /// device rotation); nothing elsewhere. A lock the app's manifest or
+    /// Info.plist does not allow is the app's own error. The latest request
+    /// of a frame wins.
+    pub fn set_screen_orientation(&mut self, orientation: ScreenOrientation) {
+        if !matches!(self.os_type(), OsType::Android(_) | OsType::Ios(_)) {
+            return;
+        }
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::SetScreenOrientation(_)));
+        self.platform_ops
+            .push_back(CxOsOp::SetScreenOrientation(orientation));
+    }
+
+    /// Keeps the display awake (no dimming, no sleep) while `on`, e.g. while
+    /// a video plays. Honored on Android and iOS; nothing elsewhere. The
+    /// latest request of a frame wins.
+    pub fn set_keep_screen_on(&mut self, on: bool) {
+        if !matches!(self.os_type(), OsType::Android(_) | OsType::Ios(_)) {
+            return;
+        }
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::SetKeepScreenOn(_)));
+        self.platform_ops.push_back(CxOsOp::SetKeepScreenOn(on));
+    }
+
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push_back(op);

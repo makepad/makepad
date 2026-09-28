@@ -1544,6 +1544,20 @@ pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_
     );
 }
 
+pub unsafe fn to_java_set_screen_orientation(env: *mut jni_sys::JNIEnv, orientation: i32) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setScreenOrientation",
+        "(I)V",
+        orientation
+    );
+}
+
+pub unsafe fn to_java_set_keep_screen_on(env: *mut jni_sys::JNIEnv, on: bool) {
+    ndk_utils::call_void_method!(env, get_activity(), "setKeepScreenOn", "(Z)V", on as i32);
+}
+
 pub unsafe fn to_java_set_surface_cover_visible(visible: bool) {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(
