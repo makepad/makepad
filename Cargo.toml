@@ -290,7 +290,6 @@ workspace.exclude = [
     "libs/vulkan/ash",
     "libs/vulkan/bit-set",
     "libs/vulkan/bit-vec",
-    "libs/vulkan/bitflags",
     "libs/vulkan/cfg-if",
     "libs/vulkan/cfg_aliases",
     "libs/vulkan/crunchy",
