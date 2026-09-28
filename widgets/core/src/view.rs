@@ -304,6 +304,21 @@ impl ScriptHook for View {
             self.optimize = ViewOptimize::DrawList;
         }
 
+        // A view cannot both draw its own background and be cached into a
+        // texture; draw_walk panics on that pair. Both are known here, so
+        // report the design error and keep the background instead.
+        if self.show_bg && self.optimize.is_texture() {
+            error!(
+                "View: `show_bg` and `texture_caching` are mutually exclusive; ignoring \
+                 `texture_caching` and keeping `show_bg`. Remove one of the two."
+            );
+            self.optimize = if self.new_batch {
+                ViewOptimize::DrawList
+            } else {
+                ViewOptimize::None
+            };
+        }
+
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
