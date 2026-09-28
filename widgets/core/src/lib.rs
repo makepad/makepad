@@ -427,9 +427,11 @@ pub fn widgets_dir() -> &'static str {
     static DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let core = env!("CARGO_MANIFEST_DIR").trim_start_matches(r"\\?\");
-        std::path::Path::new(core)
-            .parent()
-            .map(|dir| dir.to_string_lossy().into_owned())
+        // Either separator: a wasm app built on Windows has a `\` path here,
+        // which wasm32's `Path::parent` does not split.
+        core.trim_end_matches(['/', '\\'])
+            .rsplit_once(['/', '\\'])
+            .map(|(dir, _)| dir.to_string())
             .unwrap_or_else(|| core.to_string())
     })
 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -569,6 +569,42 @@ mod tests {
     use super::{font_policy_declares_path, web_resource_base_path};
 
     #[test]
+    fn windows_built_manifest_paths_resolve_to_web_dependency_paths() {
+        use super::{normalize_manifest_join, resolve_dependency_path_from_manifests};
+        use std::collections::HashMap;
+        // A wasm app built on Windows: every manifest is a `\` path.
+        let widgets = r"C:\dev\makepad\widgets";
+        let mut manifests = HashMap::new();
+        manifests.insert("makepad_widgets".to_string(), widgets.to_string());
+        manifests.insert("makepad_draw".to_string(), r"C:\dev\makepad\draw".to_string());
+        manifests.insert("my_app".to_string(), r"C:\dev\app".to_string());
+
+        let abs = normalize_manifest_join(widgets, "resources/IBMPlexSans-Text.ttf").unwrap();
+        assert_eq!(abs, "C:/dev/makepad/widgets/resources/IBMPlexSans-Text.ttf");
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, Some("makepad_widgets"), Some(widgets), &manifests)
+                .as_deref(),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+
+        // `..` out of one crate lands in another; mixed separators still match.
+        let abs = normalize_manifest_join(r"C:\dev\makepad\widgets\core", "../../draw/resources/icons/back.svg").unwrap();
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, None, None, &manifests).as_deref(),
+            Some("makepad_draw/resources/icons/back.svg")
+        );
+
+        // Unix-built manifests behave as before.
+        let mut manifests = HashMap::new();
+        manifests.insert("my_app".to_string(), "/home/me/app".to_string());
+        let abs = normalize_manifest_join("/home/me/app", "resources/logo.svg").unwrap();
+        assert_eq!(
+            resolve_dependency_path_from_manifests(&abs, None, None, &manifests).as_deref(),
+            Some("my_app/resources/logo.svg")
+        );
+    }
+
+    #[test]
     fn heap_local_resource_handles_do_not_alias_font_bytes_or_http_responses() {
         use super::*;
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -746,10 +782,15 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
     Some(stack.join("/"))
 }
 
-#[cfg(target_arch = "wasm32")]
-fn normalize_path(path: &Path) -> Option<PathBuf> {
+/// Manifest directories are the build host's `CARGO_MANIFEST_DIR`, so a wasm
+/// app built on Windows carries `C:\...` paths, and wasm32's `Path` splits
+/// only on `/`: a whole Windows directory would be one component and never a
+/// prefix of a resource path. Separators are unified before any component work.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn normalize_path(path: &str) -> Option<PathBuf> {
+    let path = path.replace('\\', "/");
     let mut out = PathBuf::new();
-    for comp in path.components() {
+    for comp in Path::new(&path).components() {
         match comp {
             std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
             std::path::Component::RootDir => out.push(comp.as_os_str()),
@@ -765,19 +806,27 @@ fn normalize_path(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
-    normalize_dependency_file_path(&path.to_string_lossy().replace('\\', "/"))
+    normalize_dependency_file_path(&path.to_string_lossy())
 }
 
-#[cfg(target_arch = "wasm32")]
+/// Joins a manifest directory and a crate-relative file into a normalized
+/// `/`-separated path.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn normalize_manifest_join(manifest_path: &str, file_path: &str) -> Option<String> {
+    let joined = Path::new(manifest_path).join(file_path);
+    normalize_path(&joined.to_string_lossy()).map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
 fn resolve_dependency_path_from_manifests(
     abs_path: &str,
     default_crate_name: Option<&str>,
     default_manifest_path: Option<&str>,
     manifests: &HashMap<String, String>,
 ) -> Option<String> {
-    let abs_norm = normalize_path(Path::new(abs_path))?;
+    let abs_norm = normalize_path(abs_path)?;
     let mut best: Option<(usize, String)> = None;
 
     let mut candidates = Vec::<(String, String)>::new();
@@ -789,7 +838,7 @@ fn resolve_dependency_path_from_manifests(
     }
 
     for (crate_name, manifest_path) in candidates {
-        let Some(manifest_norm) = normalize_path(Path::new(&manifest_path)) else {
+        let Some(manifest_norm) = normalize_path(&manifest_path) else {
             continue;
         };
         let Ok(rel) = abs_norm.strip_prefix(&manifest_norm) else {
@@ -831,8 +880,7 @@ fn resolve_crate_resource_paths(
             ScriptSource::Mod(script_mod) => script_mod,
             _ => return None,
         };
-        let abs_path = normalize_path(&Path::new(&script_mod.cargo_manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+        let abs_path = normalize_manifest_join(&script_mod.cargo_manifest_path, file_path)
             .unwrap_or_else(|| {
                 let mut fallback = script_mod.cargo_manifest_path.clone();
                 fallback.push('/');
@@ -853,8 +901,7 @@ fn resolve_crate_resource_paths(
     } else {
         let crate_name = crate_part.replace('-', "_");
         let manifest_path = manifests.get(&crate_name)?.clone();
-        let abs_path = normalize_path(&Path::new(&manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+        let abs_path = normalize_manifest_join(&manifest_path, file_path)
             .unwrap_or_else(|| {
                 let mut fallback = manifest_path.clone();
                 fallback.push('/');
