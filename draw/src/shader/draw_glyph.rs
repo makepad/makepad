@@ -389,43 +389,26 @@ script_mod! {
             let sample = self.pos
             let px_x = max(abs(dFdx(sample.x)) + abs(dFdy(sample.x)), 0.00001)
             let px_y = max(abs(dFdx(sample.y)) + abs(dFdy(sample.y)), 0.00001)
-            let alpha_base = if self.aa_4x4 > 0.5 {
-                let x0 = px_x * 0.125
-                let x1 = px_x * 0.375
-                let y0 = px_y * 0.125
-                let y1 = px_y * 0.375
-                let a0 = self.alpha_at(sample + vec2(-x1, -y1), px_x, px_y)
-                let a1 = self.alpha_at(sample + vec2(-x0, -y1), px_x, px_y)
-                let a2 = self.alpha_at(sample + vec2( x0, -y1), px_x, px_y)
-                let a3 = self.alpha_at(sample + vec2( x1, -y1), px_x, px_y)
-                let a4 = self.alpha_at(sample + vec2(-x1, -y0), px_x, px_y)
-                let a5 = self.alpha_at(sample + vec2(-x0, -y0), px_x, px_y)
-                let a6 = self.alpha_at(sample + vec2( x0, -y0), px_x, px_y)
-                let a7 = self.alpha_at(sample + vec2( x1, -y0), px_x, px_y)
-                let a8 = self.alpha_at(sample + vec2(-x1,  y0), px_x, px_y)
-                let a9 = self.alpha_at(sample + vec2(-x0,  y0), px_x, px_y)
-                let a10 = self.alpha_at(sample + vec2( x0,  y0), px_x, px_y)
-                let a11 = self.alpha_at(sample + vec2( x1,  y0), px_x, px_y)
-                let a12 = self.alpha_at(sample + vec2(-x1,  y1), px_x, px_y)
-                let a13 = self.alpha_at(sample + vec2(-x0,  y1), px_x, px_y)
-                let a14 = self.alpha_at(sample + vec2( x0,  y1), px_x, px_y)
-                let a15 = self.alpha_at(sample + vec2( x1,  y1), px_x, px_y)
-                clamp(
-                    (a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15)
-                        * 0.0625,
-                    0.0,
-                    1.0
-                )
-            } else if self.aa_2x2 > 0.5 {
-                let offset = vec2(px_x * 0.25, px_y * 0.25)
-                let a0 = self.alpha_at(sample + vec2(-offset.x, -offset.y), px_x, px_y)
-                let a1 = self.alpha_at(sample + vec2(offset.x, -offset.y), px_x, px_y)
-                let a2 = self.alpha_at(sample + vec2(-offset.x, offset.y), px_x, px_y)
-                let a3 = self.alpha_at(sample + vec2(offset.x, offset.y), px_x, px_y)
-                clamp((a0 + a1 + a2 + a3) * 0.25, 0.0, 1.0)
-            } else {
-                self.alpha_at(sample, px_x, px_y)
+            // One loop over the supersample grid (4x4, 2x2, or the pixel centre),
+            // so alpha_at and its four curve-scan loops are inlined once. Unrolled
+            // into 21 calls they made Adreno 630's compiler spend ~3.5 s on each
+            // text program. Offsets match the unrolled ones: (i + 0.5) / grid - 0.5 px.
+            let grid = if self.aa_4x4 > 0.5 {4.0} else if self.aa_2x2 > 0.5 {2.0} else {1.0}
+            // 1/grid is exact (1, 1/2, 1/4): offsets and the average round
+            // exactly as the unrolled sums did, and the row index is exact
+            // (no division, which some GPUs approximate).
+            let inv_grid = if self.aa_4x4 > 0.5 {0.25} else if self.aa_2x2 > 0.5 {0.5} else {1.0}
+            var alpha_sum = 0.0
+            var sample_index = 0.0
+            loop {
+                if sample_index >= grid * grid { break }
+                let row = floor(sample_index * inv_grid)
+                let col = sample_index - row * grid
+                let offset = (vec2(col, row) + 0.5 - grid * 0.5) * inv_grid * vec2(px_x, px_y)
+                alpha_sum = alpha_sum + self.alpha_at(sample + offset, px_x, px_y)
+                sample_index = sample_index + 1.0
             }
+            let alpha_base = clamp(alpha_sum * inv_grid * inv_grid, 0.0, 1.0)
             let darken = clamp(max(px_x, px_y) * self.stem_darken, 0.0, self.stem_darken_max)
             let edge_weight = clamp(1.0 - abs(alpha_base * 2.0 - 1.0), 0.0, 1.0)
             let alpha = clamp(alpha_base + darken * edge_weight, 0.0, 1.0)
