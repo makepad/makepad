@@ -375,16 +375,16 @@ impl LayoutContext {
     fn layout_multiline(mut self) -> LaidoutText {
         let has_ellipsis_config = self.options.max_rows.is_some() || self.options.ellipsis;
 
-        for (line_index, len) in self
-            .text
-            .clone()
-            .split('\n')
-            .map(|line| line.len())
-            .enumerate()
-        {
+        let text = self.text.clone();
+        let mut line_break_len = 0;
+        for (line_index, (len, next_line_break_len)) in lines_and_breaks(&text).enumerate() {
             if line_index != 0 {
                 self.finish_current_row(true);
+                // finish_current_row steps over one byte; a `\r\n` has two.
+                self.current_row_start += line_break_len - 1;
+                self.current_row_end += line_break_len - 1;
             }
+            line_break_len = next_line_break_len;
             if self.is_past_max_rows() {
                 break;
             }
@@ -601,8 +601,7 @@ impl LayoutContext {
         // Detect whether all text was consumed during layout.
         // If not, text was truncated by the max_rows early-exit.
         let all_text_consumed = self.current_row_end >= self.text.len()
-            || (self.current_row_end + 1 == self.text.len()
-                && self.text.as_bytes()[self.current_row_end] == b'\n');
+            || matches!(&self.text[self.current_row_end..], "\n" | "\r\n" | "\r");
 
         let max_rows = match self.options.max_rows {
             Some(max) if max > 0 => max,
@@ -708,6 +707,33 @@ impl LayoutContext {
             self.finish_current_row(false);
         }
     }
+}
+
+/// Splits text into its lines as `(line length, line break length)` in bytes.
+/// A line ends at `\n`, `\r\n` or a lone `\r`; the break is not part of the
+/// line, so a `\r` never reaches the shaper (where it would draw as .notdef).
+/// The last line has a break length of 0.
+fn lines_and_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        let Some(offset) = bytes[start..].iter().position(|&b| b == b'\n' || b == b'\r') else {
+            done = true;
+            return Some((bytes.len() - start, 0));
+        };
+        let end = start + offset;
+        let break_len = if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        start = end + break_len;
+        Some((offset, break_len))
+    })
 }
 
 #[derive(Debug)]
@@ -1979,5 +2005,38 @@ mod tests {
         assert_eq!(capped.rows.len(), 2);
         assert!(capped.is_truncated, "a discarded third line is a truncation");
         assert!(ends_with_ellipsis(&capped));
+    }
+
+    #[test]
+    fn crlf_and_lone_cr_break_lines_like_lf() {
+        assert_eq!(
+            super::lines_and_breaks("a\r\nbc\rd\n\r\n").collect::<Vec<_>>(),
+            [(1, 2), (2, 1), (1, 1), (0, 2), (0, 0)]
+        );
+
+        let mut layouter = real_font_layouter();
+        let rows = |text: &LaidoutText| -> Vec<(String, usize, bool, f32)> {
+            text.rows
+                .iter()
+                .map(|row| {
+                    let text = row.text.to_string();
+                    (text, row.glyphs.len(), row.newline, row.width_in_lpxs)
+                })
+                .collect()
+        };
+        let lf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\ntwo\nthree\n", 400.0, None, false);
+        let crlf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\r\ntwo\rthree\r\n", 400.0, None, false);
+        assert_eq!(rows(&crlf), rows(&lf), "a \\r is a line break, never a glyph");
+        assert!(crlf.rows.iter().flat_map(|row| &row.glyphs).all(|glyph| glyph.id != 0), "no .notdef");
+        let starts: Vec<_> = crlf.rows.iter().map(|row| row.text.start_in_parent()).collect();
+        assert_eq!(starts, [0, 5, 9, 16]);
+
+        // max_rows sees the same lines, so truncation agrees too.
+        for max_rows in 1..=4 {
+            let lf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\ntwo\nthree\n", 400.0, Some(max_rows), true);
+            let crlf = wrapped_layout(&mut layouter, LATIN_FAMILY, "one\r\ntwo\r\nthree\r\n", 400.0, Some(max_rows), true);
+            assert_eq!(crlf.rows.len(), lf.rows.len(), "max_rows {max_rows}");
+            assert_eq!(crlf.is_truncated, lf.is_truncated, "max_rows {max_rows}");
+        }
     }
 }
