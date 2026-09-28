@@ -5,7 +5,7 @@ use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     fold_button::{FoldButton, FoldButtonAction},
     makepad_derive_widget::*,
-    makepad_draw::turtle::RowAlign,
+    makepad_draw::turtle::{Baseline, RowAlign},
     makepad_draw::*,
     makepad_html::*,
     text_flow::TextFlow,
@@ -953,15 +953,24 @@ impl Widget for Html {
                             // summary text.
                             //
                             // A font_size-tall box sits high in a top-aligned row, so it's pushed
-                            // down; a centered row seats it on the line box, and the bottom
-                            // margin lifts it onto the cap band instead.
-                            let centered =
-                                matches!(cx.turtle().flow(), Flow::Right { row_align: RowAlign::Center, .. });
-                            let (top, bottom) = if centered {
-                                let ink_offset = self.text_flow.line_probe(cx).ink_center_offset_in_lpxs();
-                                (0.0, 2.0 * ink_offset as f64)
-                            } else {
-                                (font_size * 0.25, 0.0)
+                            // down; a centered row seats it on the line box and the bottom margin
+                            // lifts it to the cap band; a baseline row puts the box's center on it.
+                            let row_align = match cx.turtle().flow() {
+                                Flow::Right { row_align, .. } => row_align,
+                                _ => RowAlign::Top,
+                            };
+                            let (top, bottom, baseline) = match row_align {
+                                RowAlign::Center => {
+                                    let ink_offset = self.text_flow.line_probe(cx).ink_center_offset_in_lpxs();
+                                    (0.0, 2.0 * ink_offset as f64, Baseline::Auto)
+                                }
+                                RowAlign::Baseline => {
+                                    let cap = self.text_flow.line_probe(cx).rows.first().map_or(0.0, |row| {
+                                        (row.cap_height_in_lpxs * self.text_flow.draw_text.font_scale) as f64
+                                    });
+                                    (0.0, 0.0, Baseline::At((0.5 * font_size + 0.5 * cap) as f32))
+                                }
+                                RowAlign::Top | RowAlign::Bottom => (font_size * 0.25, 0.0, Baseline::Auto),
                             };
                             let triangle_walk = Walk {
                                 abs_pos: None,
@@ -973,6 +982,7 @@ impl Widget for Html {
                                     top,
                                     bottom,
                                 },
+                                baseline,
                                 ..Default::default()
                             };
                             // One borrow for all FoldButton mutations: seed

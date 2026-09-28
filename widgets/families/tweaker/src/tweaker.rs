@@ -7454,7 +7454,7 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
     match first {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
-        | "metrics" | "distribute" | "container_id" | "min_width" | "max_width"
+        | "metrics" | "baseline" | "distribute" | "container_id" | "min_width" | "max_width"
         | "min_height" | "max_height" | "aspect" | "cell" | "columns" | "rows" | "areas"
         | "column_gap" | "row_gap" | "auto_flow" | "justify_items" | "align_items"
         | "implicit_column_size" | "implicit_row_size" => return SectionKind::Layout,
