@@ -19,7 +19,9 @@
 //! deeper. The layout itself is pure arithmetic and runs inline, throttled
 //! while a scan is still feeding it.
 
-use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI};
+use makepad_widgets::makepad_platform::thread::{
+    Lane, PoolOptions, SignalToUI, TaskPool, ThreadOptions,
+};
 use makepad_widgets::*;
 
 use std::{
@@ -28,7 +30,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -493,6 +495,10 @@ pub struct DiskMap {
     generation: u64,
     #[rust]
     cancel: Option<Arc<AtomicBool>>,
+    /// The running scan's pool (see [`scan_pool`]); released when the scan
+    /// ends or stops, so its workers exit once the walk's last job does.
+    #[rust]
+    scan_pool: Option<TaskPool>,
     #[rust]
     scanning: bool,
     /// Folders the walk has not opened yet. A scan cannot know its own
@@ -958,7 +964,16 @@ impl DiskMap {
         // it again. The browser re-lists its folder after every operation, and
         // the map it just corrected by arithmetic must survive that — throwing
         // it away would undo the whole point of keeping one.
-        if path == self.root && !self.tree.children.is_empty() && self.error.is_none() {
+        //
+        // Nor is asking again while that folder is still being read. The map
+        // is empty until the first listing (or the saved map) lands, and the
+        // host re-asks on every inspector update: restarting then threw the
+        // scan away each time, so under load the map never got past
+        // "Reading the folder…" while cancelled walks kept the workers busy.
+        if path == self.root
+            && (self.scanning || !self.tree.children.is_empty())
+            && self.error.is_none()
+        {
             return;
         }
         self.begin(cx, path, false);
@@ -1006,11 +1021,11 @@ impl DiskMap {
         };
         self.root = path.to_path_buf();
         self.zoom.clear();
-        self.tree = Node::dir(
-            backend::backend().display_name(path),
-            FileKind::Folder as u8,
+        let old_tree = std::mem::replace(
+            &mut self.tree,
+            Node::dir(backend::backend().display_name(path), FileKind::Folder as u8),
         );
-        self.cells.clear();
+        retire(cx, (old_tree, std::mem::take(&mut self.cells)));
         self.laid_out = Rect::default();
         self.stale = true;
         self.last_layout = None;
@@ -1053,7 +1068,14 @@ impl DiskMap {
         };
         let root = self.root.clone();
         let instant = backend::backend().is_instant();
-        let pool = cx.task_pool();
+        let pool = match self.scan_pool.as_ref().filter(|pool| pool.is_open()) {
+            Some(pool) => pool.clone(),
+            None => {
+                let pool = scan_pool(cx);
+                self.scan_pool = Some(pool.clone());
+                pool
+            }
+        };
         let scan_pool = pool.clone();
         let scan = move || {
             // Steps queue as fast as the disk produces them. Waking the UI is
@@ -1152,6 +1174,7 @@ impl DiskMap {
         if let Some(cancel) = self.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        self.scan_pool = None;
         if self.scanning {
             self.scanning = false;
             self.redraw(cx);
@@ -1201,8 +1224,14 @@ impl DiskMap {
             return false;
         }
         let mut finished = false;
+        // Whatever the steps replace, and every step of a scan that has been
+        // abandoned, is freed on a worker: a saved map or a finished subtree
+        // is millions of nodes, a real fraction of a second to drop.
+        let mut retired: Vec<Node> = Vec::new();
+        let mut abandoned: Vec<ScanMessage> = Vec::new();
         for message in messages {
             if message.generation != self.generation {
+                abandoned.push(message);
                 continue;
             }
             if let Some(step) = message.step {
@@ -1212,7 +1241,7 @@ impl DiskMap {
                     self.folders_left = *folders_left;
                     continue;
                 }
-                self.tree.apply(step);
+                self.tree.apply_retiring(step, &mut retired);
                 self.stale = true;
                 self.totals_dirty = true;
                 self.tree_rev = self.tree_rev.wrapping_add(1);
@@ -1220,6 +1249,7 @@ impl DiskMap {
             if let Some(outcome) = message.finished {
                 self.scanning = false;
                 self.cancel = None;
+                self.scan_pool = None;
                 self.stale = true;
                 self.folders_left = 0;
                 finished = true;
@@ -1242,6 +1272,9 @@ impl DiskMap {
                     }
                 }
             }
+        }
+        if !retired.is_empty() || !abandoned.is_empty() {
+            retire(cx, (retired, abandoned));
         }
         // While the walk is running the tree changes far faster than the
         // picture needs to; a finished scan always redraws at once.
@@ -4372,5 +4405,57 @@ mod tests {
         let palette = MapPalette::tokyo_night();
         let class = kind_class(FileKind::Generic) as usize;
         assert!(class < palette.kinds.len());
+    }
+}
+
+/// The pool map scans run on: the user is watching the map grow, so its heavy
+/// workers run at UserInitiated. The shared runtime pool's heavy lane is
+/// Utility, which on Apple silicon parks the walk on the efficiency cores:
+/// `/Applications` (590k entries, M3 Max) took 7.7 s there and 1.8 s here.
+/// Its own pool also leaves the shared heavy lane free for thumbnails and
+/// previews while a scan holds every worker it has. A scan owns its pool:
+/// the map and the walk hold the only handles, so the workers exit when the
+/// scan ends instead of idling for the rest of the process.
+fn scan_pool(cx: &Cx) -> TaskPool {
+    let spawner = cx.thread_spawner();
+    let mut options = PoolOptions::runtime(spawner.available_parallelism());
+    options.name = "diskmap-scan".into();
+    TaskPool::new_with_priority(spawner, options, CxThreadPriority::UserInitiated)
+        .unwrap_or_else(|_| cx.task_pool())
+}
+
+/// Drop `value` on a background thread. Old maps and abandoned scan steps are
+/// whole trees, and freeing millions of nodes is a real fraction of a second
+/// the UI thread has no business spending. One long-lived thread takes them
+/// in order; where no thread can be started, the value is dropped here.
+fn retire<T: Send + 'static>(cx: &Cx, value: T) {
+    type Retired = Box<dyn Send>;
+    static DROPPER: Mutex<Option<Sender<Retired>>> = Mutex::new(None);
+    let mut dropper = DROPPER.lock().unwrap_or_else(|e| e.into_inner());
+    let mut value: Retired = Box::new(value);
+    if let Some(sender) = dropper.as_ref() {
+        match sender.send(value) {
+            Ok(()) => return,
+            Err(returned) => value = returned.0,
+        }
+    }
+    let (sender, receiver) = channel::<Retired>();
+    let options = ThreadOptions {
+        name: Some("diskmap-retire".into()),
+        priority: CxThreadPriority::Background,
+        ..ThreadOptions::default()
+    };
+    let spawned = cx.spawn_worker_with(options, move || {
+        while let Ok(retired) = receiver.recv() {
+            drop(retired);
+        }
+    });
+    match spawned {
+        Ok(task) => {
+            task.detach();
+            let _ = sender.send(value);
+            *dropper = Some(sender);
+        }
+        Err(_) => drop(value),
     }
 }

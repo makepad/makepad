@@ -199,6 +199,13 @@ impl Node {
     /// names a node that is no longer there, which only happens if a caller
     /// mixes steps from two different scans.
     pub fn apply(&mut self, step: ScanStep) -> bool {
+        self.apply_retiring(step, &mut Vec::new())
+    }
+
+    /// [`Node::apply`], handing whatever the step replaced to `retired`
+    /// instead of dropping it here — a subtree can be millions of nodes, and
+    /// a caller on the UI thread frees those somewhere else.
+    pub fn apply_retiring(&mut self, step: ScanStep, retired: &mut Vec<Node>) -> bool {
         match step {
             ScanStep::Opened {
                 at,
@@ -212,7 +219,7 @@ impl Node {
                 node.files = children.iter().map(|c| c.files).sum();
                 node.modified = children.iter().map(|c| c.modified).max().unwrap_or(0);
                 node.kind = heaviest_kind(&children).unwrap_or(node.kind);
-                node.children = children;
+                retired.append(&mut std::mem::replace(&mut node.children, children));
                 node.denied = denied;
                 self.roll_up(&at);
                 true
@@ -221,7 +228,7 @@ impl Node {
                 let Some(node) = self.at_mut(&at) else {
                     return false;
                 };
-                *node = fresh;
+                retired.push(std::mem::replace(node, fresh));
                 self.roll_up(&at);
                 true
             }
