@@ -23,7 +23,7 @@
 //! Registered with the control kit (before every lane) so lanes can place it.
 
 use crate::ui::popover::{open_after, ui_actions, FabUiAction};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

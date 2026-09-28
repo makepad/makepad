@@ -29,7 +29,7 @@ use {
         },
     },
     std::ptr,
-    std::sync::mpsc,
+    crate::makepad_network::mpsc,
     std::time::Instant,
 };
 

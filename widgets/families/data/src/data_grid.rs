@@ -1,7 +1,6 @@
 use {
     crate::{
-        diagonal_text::{diagonal_row_height, draw_diagonal_name, DiagonalLean},
-        table::heading_fits_flat,
+        diagonal_text::{diagonal_row_height, draw_diagonal_name, heading_fits_flat, DiagonalLean},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::text::selection::Cursor,

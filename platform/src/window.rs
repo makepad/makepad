@@ -285,25 +285,6 @@ impl CxWindowPool {
         );
     }
 
-    pub fn relative_to_window_id(&self, pos: Vec2d) -> (WindowId, Vec2d) {
-        for (index, item) in self.0.pool.iter().enumerate() {
-            let window = &item.item;
-            if pos.x >= window.window_geom.position.x
-                && pos.y >= window.window_geom.position.y
-                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
-                && pos.y <= window.window_geom.position.x + window.window_geom.inner_size.y
-            {
-                return (
-                    WindowId(index, item.generation),
-                    window.window_geom.position,
-                );
-            }
-        }
-        return (
-            WindowId(0, self.0.pool[0].generation),
-            self.0.pool[0].item.window_geom.position,
-        );
-    }
 
     /// Every allocated window slot, as a generation-correct `WindowId`.
     /// Callers usually want to skip the ones whose `is_created` is false.

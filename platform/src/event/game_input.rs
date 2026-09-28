@@ -1,7 +1,7 @@
 use crate::makepad_live_id::*;
 use crate::makepad_math::Vec2;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use crate::makepad_network::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

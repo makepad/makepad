@@ -1,6 +1,6 @@
 use {
     std::sync::{Arc, Mutex},
-    std::sync::mpsc,
+    crate::makepad_network::mpsc,
     crate::{
         makepad_live_id::{live_id, LiveId},
         midi::*,

@@ -8,7 +8,7 @@
 //! - vector-heavy: two-sphere min with normalize/dot/packed sin,
 //!   in both vec3-parameter (packed) and hand-scalarized forms.
 
-use makepad_script::math_aot::{MathAot, MathAotParam, MathAotValue, MathBackend, VirInterpBackend};
+use makepad_script_math_aot::{MathAot, MathAotParam, MathAotValue, MathBackend, VirInterpBackend};
 use makepad_script::makepad_math::Vec3f;
 use makepad_script::*;
 use std::time::Instant;

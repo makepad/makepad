@@ -16,7 +16,7 @@
 
 use crate::api::*;
 use crate::nav::orbit::WORLD_UP;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const K_FWD: u16 = 1 << 0;

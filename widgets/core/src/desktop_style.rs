@@ -413,14 +413,13 @@ mod tests {
     /// the one thing that must impose no height at all; `Select` wears a
     /// `Button` for a face and follows the button rule; `TreeSelect` names its
     /// corner `radius` and packs chips into whatever box its own Rust is
-    /// handed.
+    /// handed. `ComboBox`, `DropDown2`, `TagField` and `NumberField` are the
+    /// pickers family's, and are held to the row where that family is
+    /// registered (widgets/families/pickers).
     const FIELD_FIT: &[&str] = &[
         "TextInput",
-        "ComboBox",
         "DropDown",
-        "DropDown2",
         "FieldWell",
-        "TagField",
     ];
     /// The fields that state a FRAME and lay their own parts out inside it: a
     /// number with a stepper, a number you drag, a date, a time, and the two
@@ -432,7 +431,6 @@ mod tests {
     /// therefore carry NO vertical padding, and that is asserted below rather
     /// than skipped, because it is the thing the next sheet would get wrong.
     const FIELD_FRAME: &[&str] = &[
-        "NumberField",
         "ValueInput",
         "DateField",
         "TimeField",
@@ -493,8 +491,9 @@ mod tests {
                         "{sheet}: {name} does not stand in the row its TextInput sets"
                     );
                 }
-                // The date and time fields are the extras family's, and are
-                // held to the row where that family is registered.
+                // The date and time fields are the extras family's, and the
+                // number field the pickers family's; each is held to the row
+                // where its family is registered.
                 let widgets = vm.module(id!(widgets));
                 for name in FIELD_FRAME {
                     let known = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap).as_object();

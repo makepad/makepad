@@ -1,0 +1,12 @@
+[package]
+name = "makepad-widgets-fab"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: The fab design-tool controls (sliders, knobs, colour picks, value inputs and their palette), the property inspector, the menu bar and the tween inspector"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }

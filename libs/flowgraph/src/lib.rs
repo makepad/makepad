@@ -14,7 +14,7 @@ pub use model::{
     NodeView, PortIconOverrides, PortStyle, PortView, WirePainter, FIRST_AT, NODE_WIDTH,
 };
 
-use makepad_widgets::ScriptVm;
+use makepad_widgets_core::ScriptVm;
 
 /// Register the flow graph widget and its DSL-facing style records.
 pub fn script_mod(vm: &mut ScriptVm) {

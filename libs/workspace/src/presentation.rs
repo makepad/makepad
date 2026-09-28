@@ -3,7 +3,7 @@
 //! presenter changes geometry and input coordinates; it never owns
 //! documents, processes or Dock items.
 use crate::workspace;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// World-space origin offset that keeps world coordinates positive inside a
 /// zoomable draw list while the camera pans across a very large space.

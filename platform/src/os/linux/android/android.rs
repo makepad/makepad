@@ -87,7 +87,7 @@ use {
     std::collections::HashMap,
     std::ffi::CString,
     std::rc::Rc,
-    std::sync::mpsc,
+    crate::makepad_network::mpsc,
     //std::os::raw::{c_void},
     std::time::Instant,
 };

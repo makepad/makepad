@@ -32,7 +32,7 @@
 //! over (the icon column is already wired: [`MenuIcon`] carries the slot).
 
 use crate::ui::popover::{FabUiAction, MenuIcon, MenuItem, MenuPlace, OpenPopup, PopupChange};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// SVG glyphs in menu rows. `false` until the shared-atlas fix lands in the
 /// draw layer (see the module doc); the shader marks stand in meanwhile.

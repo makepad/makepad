@@ -212,7 +212,7 @@ fn callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, 
                 t.time_scale, t.paused as u8, t.reduced_motion as u8, t.epoch
             ))
         }
-        _ => crate::makepad_widgets::tweaker::tweak_callback(cx, op, args),
+        _ => makepad_widgets_tweaker::tweaker::tweak_callback(cx, op, args),
     }
 }
 

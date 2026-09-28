@@ -20,7 +20,7 @@
 
 use makepad_video::{encode_intra_frame_mp4, nv12, VideoFileCodec, VideoFileEncoderOptions};
 use makepad_video::VideoFileDecoder;
-use makepad_widgets::ImageBuffer;
+use makepad_widgets_core::ImageBuffer;
 use std::path::Path;
 
 /// Atlas slot side in pixels at level 0.

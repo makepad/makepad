@@ -52,7 +52,7 @@ pub enum SlideSide {
     Bottom,
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, ScriptHook, Widget, WidgetSet, Animator)]
 pub struct SlidePanel {
     #[source]
     source: ScriptObjectRef,

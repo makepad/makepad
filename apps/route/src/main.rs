@@ -133,6 +133,8 @@ impl AppMain for App {
         // Whisper stays on the F16 default (ggml-large-v3-turbo.bin): the
         // voice Metal library has no quantized matmul kernels, so q5_0/q8_0
         // models fail every GPU op. Port the kernels before re-quantizing.
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         side_panel::script_mod(vm);

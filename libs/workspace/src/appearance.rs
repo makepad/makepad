@@ -5,8 +5,8 @@
 //! family.
 
 use crate::state::Settings;
-use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
-use makepad_widgets::*;
+use makepad_widgets_core::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets_core::*;
 
 /// Picker rows: index 0 follows the host OS, then `DesktopStyle::ALL` in
 /// order except BlackOrange. The Settings panel's labels are spelled out
@@ -112,7 +112,7 @@ pub fn host_family(cx: &Cx) -> DesktopStyle {
 pub fn host_dark() -> Option<bool> {
     #[cfg(all(target_os = "macos", not(gpusim)))]
     unsafe {
-        use makepad_widgets::makepad_platform::os::apple::apple_sys::*;
+        use makepad_widgets_core::makepad_platform::os::apple::apple_sys::*;
         extern "C" {
             static NSAppearanceNameAqua: ObjcId;
             static NSAppearanceNameDarkAqua: ObjcId;

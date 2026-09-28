@@ -5,7 +5,7 @@
 //! library — the VJ re-exports these names, so its own call sites (and
 //! its behaviour) never moved.
 
-use makepad_widgets::makepad_platform::video_file::nv12;
+use makepad_widgets_core::makepad_platform::video_file::nv12;
 
 pub struct Frame {
     /// Pacing timestamp — monotonic for the clock (synthetic in bounce).

@@ -5,7 +5,7 @@
 //! design overlay makes, so the two never disagree. Properties the story's
 //! own DSL set come first; the rest are inherited from the widget's template
 //! and hidden until asked for.
-use crate::makepad_widgets::reflect::{collect_row_docs, reflect_flat};
+use makepad_widgets_tweaker::reflect::{collect_row_docs, reflect_flat};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 

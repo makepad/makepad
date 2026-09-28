@@ -23,7 +23,7 @@
 use crate::api::*;
 use crate::ui::icons::{element_icon, Icon};
 use crate::ui::popover::{dropdown_clicked, menu_picked, open_menu, MenuItem, MenuPlace};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 
 const OUTLINER_MENU: LiveId = live_id!(fab_outliner_menu);

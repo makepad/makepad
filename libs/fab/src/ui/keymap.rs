@@ -7,7 +7,7 @@
 //! A `PortalList` of two labels and a key cap has no such appetite.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// The keymap, single source of truth for tooltips and the help panel.
 /// `(keys, action, context)`.

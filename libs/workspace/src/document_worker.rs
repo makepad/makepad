@@ -7,10 +7,10 @@
 //! the single authority for `FileSnapshot::revision`.
 
 use makepad_code_editor::{document::PreparedDocument, session::PreparedView, CodeDocument, CodeSession};
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets_core::makepad_platform::thread::ThreadSpawner;
 use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
-use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions};
+use makepad_widgets_core::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -664,7 +664,7 @@ fn run(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use makepad_widgets::Cx;
+    use makepad_widgets_core::Cx;
 
     /// A headless test has no event loop to wake; the platform waker is a
     /// no-op until the main-thread event loop has started, so tests need no

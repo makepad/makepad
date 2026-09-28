@@ -7,7 +7,9 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
     out.extend(derive_widget_node_impl(input.clone()));
     out.extend(derive_widget_register_impl(input.clone()));
     out.extend(derive_widget_ref_impl(input.clone()));
-    out.extend(derive_widget_set_impl(input.clone()));
+    // The `XxxSet` wrapper (a typed WidgetSet with `xxx_set(cx, paths)`) is
+    // opt-in: add `#[derive(WidgetSet)]` next to `Widget` on the few widgets
+    // that need it. Emitting it for every widget cost ~40% of this derive.
     out
 }
 

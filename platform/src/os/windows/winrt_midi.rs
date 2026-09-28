@@ -11,7 +11,7 @@ use {
         },
     },
     makepad_futures_legacy::executor,
-    std::sync::mpsc,
+    crate::makepad_network::mpsc,
     std::sync::{Arc, Mutex},
 };
 

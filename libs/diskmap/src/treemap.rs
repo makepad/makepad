@@ -32,8 +32,8 @@ use std::{
     time::Duration,
 };
 
-use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
-use makepad_widgets::Cx;
+use makepad_widgets_core::makepad_platform::thread::{Lane, TaskPool};
+use makepad_widgets_core::Cx;
 
 /// A rectangle in treemap space. Plain `f64` so this module stays free of
 /// any UI vector type — the view converts to its own types at the boundary.

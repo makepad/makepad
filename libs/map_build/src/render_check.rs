@@ -15,9 +15,9 @@
 //! It needs the renderer, so it lives under the `faces` feature. The
 //! renderer filter is a process-wide switch: run checks on one thread.
 
-use makepad_widgets::map::geometry::TileKey;
-use makepad_widgets::map::style::probe_compiled_theme;
-use makepad_widgets::map::tile::{
+use makepad_widgets_maps::map::geometry::TileKey;
+use makepad_widgets_maps::map::style::probe_compiled_theme;
+use makepad_widgets_maps::map::tile::{
     baked_faces_hits, build_local_tile_from_archive_bytes, set_detail_contract_filter,
     TileBuffers,
 };

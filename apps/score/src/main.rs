@@ -249,6 +249,8 @@ impl AppMain for App {
         // one during construction — registering the built-in font in the first
         // event would be a frame too late, and the font resolves exactly once.
         ensure_default_font();
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
         score_ui::script_mod(vm);
         self::script_mod(vm)

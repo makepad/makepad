@@ -31,7 +31,7 @@ path = "src/main.rs"
 default = ["tweaker", "engine", "gen"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The chat backends: the person's own Claude Code / Codex CLIs, Claude
 # Desktop over MCP, the Claude API. No model runtime. Off for a build
 # without any backend — the web page answers with NoModel and the tool
@@ -49,6 +49,7 @@ gen = ["dep:makepad-ai-hub"]
 # The `ai` family is the F10 slot this chat fills: an app gets the slot by
 # linking the chat, and no other app has it.
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["rich_text", "ai"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-ai-services = { path = "../../libs/ai/services", default-features = false }

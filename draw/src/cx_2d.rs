@@ -2,7 +2,7 @@ use {
     crate::{
         cx_draw::CxDraw,
         draw_list_2d::DrawList2d,
-        makepad_math::{Rect, Vec2Index, Vec2d},
+        makepad_math::{Rect, Vec2d},
         makepad_platform::{DrawListId, DrawPassId, LiveId},
         makepad_script::ScriptNew,
         turtle::{AlignEntry, FinishedWalk, Turtle, Walk},
@@ -344,19 +344,4 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
     }
 
-    pub fn will_redraw_check_axis(
-        &self,
-        draw_list_2d: &mut DrawList2d,
-        size: f64,
-        axis: Vec2Index,
-    ) -> bool {
-        // ok so we need to check if our turtle position has changed since last time.
-        // if it did, we redraw
-        if draw_list_2d.dirty_check_rect.size.index(axis) != size {
-            draw_list_2d.dirty_check_rect.size.set_index(axis, size);
-            return true;
-        }
-        self.draw_event
-            .draw_list_will_redraw(self, draw_list_2d.draw_list.id())
-    }
 }

@@ -14,7 +14,7 @@
 use crate::api::*;
 use crate::sheets::slice::{self, Chain, Part, P2};
 use crate::model::{Sheet, SheetItem, SheetLink, Stroke};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// A3 landscape, the size Fab publishes its own layouts at.
 pub const PAGE: [f32; 2] = [420.0, 297.0];

@@ -17,11 +17,12 @@ use makepad_studio_protocol::{
     StudioToAppVec,
 };
 #[allow(unused_imports)]
+use crate::makepad_network::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+#[allow(unused_imports)]
 use std::{
     sync::Arc,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError},
         Mutex,
     },
     time::Duration,

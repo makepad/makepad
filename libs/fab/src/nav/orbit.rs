@@ -11,7 +11,7 @@
 //! to exactly the same pixel. See `dolly_keeps_cursor_fixed` in the tests.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Just short of the pole: a camera exactly on the axis has no defined yaw.
 pub const PITCH_LIMIT: f32 = 1.5533; // 89°

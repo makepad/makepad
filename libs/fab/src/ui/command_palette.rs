@@ -9,7 +9,7 @@
 //! before "Material".
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// `(command string handed to run_command, label, shortcut)`.
 pub const COMMANDS: &[(&str, &str, &str)] = &[

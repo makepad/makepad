@@ -66,7 +66,7 @@ use makepad_render::{
     DrawSceneSkyAnalytic, DrawSceneTerrain, GpuLightmapMode, ModelInstance, Renderer, SceneDraws,
     SsaoParams, SsaoPass, SsaoProjection, DEFAULT_CSM_CONFIG, DEFAULT_SHADOW_BUDGET,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 use bake::{AoBake, AoBaked};
 use elements::ElementLut;

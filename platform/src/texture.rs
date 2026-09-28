@@ -163,7 +163,7 @@ pub(crate) struct ReadbackSlot {
     pub cancelled: bool,
     pub reserved_bytes: usize,
     pub result: TextureReadback,
-    pub receive: Option<std::sync::mpsc::Receiver<Result<Arc<[u8]>, ReadbackError>>>,
+    pub receive: Option<crate::makepad_network::mpsc::Receiver<Result<Arc<[u8]>, ReadbackError>>>,
 }
 
 #[derive(Default)]
@@ -178,7 +178,7 @@ pub(crate) struct TextureReadbacks {
 /// when the owning renderer polls the receiver.
 #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
 pub(crate) struct ReadbackCompletion(
-    pub std::sync::mpsc::SyncSender<Result<Arc<[u8]>, ReadbackError>>,
+    pub crate::makepad_network::mpsc::SyncSender<Result<Arc<[u8]>, ReadbackError>>,
 );
 
 #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
@@ -260,7 +260,7 @@ impl Cx {
             slot.result.producer_serial = serial;
             slot.result.channel_order = order;
             slot.result.origin = origin;
-            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            let (send, receive) = crate::makepad_network::mpsc::sync_channel(1);
             slot.receive = Some(receive);
             work.push(ReadbackWork { ticket: slot.result.ticket, texture_id: id, width: slot.result.width, height: slot.result.height,
                 reserved_bytes: slot.reserved_bytes, completion: ReadbackCompletion(send) });
@@ -291,14 +291,15 @@ pub(crate) type ReadbackCopyJob = Box<dyn FnOnce() + Send>;
 /// wakes the renderer to poll GPU fences, but never calls a graphics API.
 #[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
 pub(crate) struct ReadbackWorker {
-    send: std::sync::mpsc::SyncSender<Option<ReadbackCopyJob>>,
+    send: crate::makepad_network::mpsc::SyncSender<Option<ReadbackCopyJob>>,
     active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
 impl ReadbackWorker {
     pub fn new(cx: &Cx) -> Result<Self, ReadbackError> {
-        use std::sync::{atomic::AtomicBool, mpsc};
+        use std::sync::atomic::AtomicBool;
+        use crate::makepad_network::mpsc;
         let (send, receive) = mpsc::sync_channel::<Option<ReadbackCopyJob>>(TEXTURE_READBACK_MAX_REQUESTS + 1);
         let active = Arc::new(AtomicBool::new(false));
         let running = active.clone();
@@ -336,8 +337,8 @@ impl ReadbackWorker {
     pub fn try_copy(&self, job: ReadbackCopyJob) -> Result<(), (ReadbackCopyJob, bool)> {
         match self.send.try_send(Some(job)) {
             Ok(()) => Ok(()),
-            Err(std::sync::mpsc::TrySendError::Full(Some(job))) => Err((job, false)),
-            Err(std::sync::mpsc::TrySendError::Disconnected(Some(job))) => Err((job, true)),
+            Err(crate::makepad_network::mpsc::TrySendError::Full(Some(job))) => Err((job, false)),
+            Err(crate::makepad_network::mpsc::TrySendError::Disconnected(Some(job))) => Err((job, true)),
             _ => unreachable!(),
         }
     }

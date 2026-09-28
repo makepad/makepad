@@ -18,7 +18,7 @@
 //! orbit track from the scene bounds so playback plumbing can be exercised.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

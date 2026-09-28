@@ -4922,6 +4922,8 @@ impl AppMain for App {
         // come up in, and whether the assistant's families are linked.
         let build = WmBuild::from_cx(vm.cx_mut());
         desktop_style::install(vm,desktop_style::StyleSheet::load(build.style));
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
 
         // The theme: evaluated before any module that reads

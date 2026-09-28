@@ -24,7 +24,7 @@
 
 use crate::api::*;
 use crate::tools::{explode, info, measure, section, session, snap, sun_study};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

@@ -100,7 +100,7 @@ impl TileDb {
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
                 ) && path.is_file() =>
             {
-                makepad_widgets::log!("image-tiles: {} is read-only ({error}); writes are refused", path.display());
+                makepad_widgets_core::log!("image-tiles: {} is read-only ({error}); writes are refused", path.display());
                 Self::open_read_only(path)
             }
             Err(e) => Err(format!("open {}: {e:?}", path.display())),

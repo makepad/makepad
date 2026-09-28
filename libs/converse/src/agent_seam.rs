@@ -7,7 +7,7 @@
 //! implementation adapts a hub provider (or the in-process local engine) on
 //! a worker thread and pumps `AgentEvent`s back through `handle_event`.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Unique identifier for an agent session
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

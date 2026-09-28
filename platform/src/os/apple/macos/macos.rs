@@ -102,8 +102,8 @@ fn set_metal_layer_background_color(layer: ObjcId, alpha: f64) {
 // One long-lived worker owns acquisition; the UI consumes a ready retained
 // drawable or leaves the pass dirty. At most one acquisition is outstanding.
 struct DrawableWorker {
-    request: std::sync::mpsc::SyncSender<()>,
-    ready: std::sync::mpsc::Receiver<Option<RcObjcId>>,
+    request: crate::makepad_network::mpsc::SyncSender<()>,
+    ready: crate::makepad_network::mpsc::Receiver<Option<RcObjcId>>,
     pending: bool,
     wait_ns: Arc<std::sync::atomic::AtomicU64>,
     started: Option<Instant>,
@@ -112,8 +112,8 @@ struct DrawableWorker {
 impl DrawableWorker {
     fn new(layer: ObjcId) -> Self {
         let layer = RcObjcId::from_unowned(NonNull::new(layer).unwrap());
-        let (request, requests) = std::sync::mpsc::sync_channel(1);
-        let (ready, replies) = std::sync::mpsc::sync_channel(1);
+        let (request, requests) = crate::makepad_network::mpsc::sync_channel(1);
+        let (ready, replies) = crate::makepad_network::mpsc::sync_channel(1);
         let wait_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let measured = wait_ns.clone();
         std::thread::Builder::new().name("makepad-drawable".into()).spawn(move || {

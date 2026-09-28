@@ -11,7 +11,7 @@
 //! lives in `overlay.rs`, the list in `panel.rs`.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// How many points a measurement of this kind needs before it commits.
 /// `Area` is open-ended: it commits when the user closes the loop.

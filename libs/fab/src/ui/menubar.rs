@@ -22,7 +22,7 @@
 use crate::api::*;
 use crate::ui::menu::menu_cycle;
 use crate::ui::popover::{open_menu, ui_actions, FabUiAction, MenuItem, MenuPlace};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// One owner id per top-level menu, so a pick can be traced back to the menu
 /// it came from without a second lookup.

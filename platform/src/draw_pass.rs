@@ -11,11 +11,11 @@ use crate::{
     texture::Texture,
     window::WindowId,
 };
+use crate::makepad_network::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::{
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
         Arc,
     },
 };

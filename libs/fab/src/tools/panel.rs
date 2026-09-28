@@ -18,7 +18,7 @@ use crate::api::*;
 use crate::tools::{explode, isolate, measure, section, session, sun_study};
 use crate::model::units::LengthUnit;
 use crate::ui::dragnum::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// How many measurements the list shows before it says "+N more".
 const LIST_ROWS: usize = 6;

@@ -11,10 +11,11 @@ metadata.makepad-auto-version = "EVyKRfOGV339Re5CS45PMHHxw_M="
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
 
 [dev-dependencies]

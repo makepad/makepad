@@ -17,7 +17,6 @@ pub use makepad_tween;
 pub mod animator;
 pub mod tween;
 pub mod tween_inspect;
-pub mod tween_inspector;
 pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
@@ -26,7 +25,6 @@ pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
-pub mod conceding_row;
 pub mod width_override;
 pub mod widget;
 pub mod widget_async;
@@ -53,10 +51,7 @@ pub mod button_group;
 pub mod chip;
 pub mod menu;
 pub mod select;
-pub mod accordion;
 pub mod dialog;
-pub mod toast;
-pub mod breadcrumb;
 pub mod button;
 pub mod check_box;
 pub mod icon;
@@ -69,7 +64,6 @@ pub mod link_label;
 pub mod radio_button;
 
 pub mod adaptive_view;
-pub mod alert;
 pub mod divider;
 pub mod desktop_button;
 pub mod gauss_view;
@@ -83,29 +77,18 @@ pub mod relief;
 pub mod window;
 pub mod cursor;
 pub mod window_menu;
-
-pub mod combo_box;
 pub mod field_well;
 pub mod drop_down;
-pub mod drop_down2;
 pub mod popup_menu;
-pub mod number_field;
-pub mod range_slider;
 pub mod slider;
 pub mod text_input;
 pub mod drop_slider;
-pub mod drop_toggles;
 pub mod overlay_place;
 pub mod tip;
 pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
-pub mod ease_editor;
-pub mod sequencer;
 pub mod diagonal_text;
-pub mod fab_controls;
-pub mod menu_bar;
-
 pub mod splitter;
 
 pub mod fold_button;
@@ -113,50 +96,14 @@ pub mod fold_header;
 
 pub mod loading_spinner;
 pub mod progress;
-pub mod playback_bar;
-pub mod level_meter;
-pub mod marquee;
-pub mod spinner;
-
 pub mod bare_step;
 pub mod turtle_step;
-
-pub mod rating;
-pub mod tag_field;
-pub mod radio_group;
 pub mod kbd;
-pub mod hotkeys;
-pub mod hotkey_editor;
-pub mod keyboard_map;
 pub mod typography;
-pub mod list_item;
-pub mod item_selection;
-pub mod avatar;
 pub mod card;
-pub mod media;
-pub mod table;
-pub mod empty_state;
 pub mod timeline;
-pub mod code_block;
-pub mod carousel;
-pub mod form;
-pub mod column_picker;
-pub mod picker_parts;
-pub mod tree_select;
-pub mod transfer;
-pub mod property_inspector;
 pub mod toolbar;
-mod column_fit;
-pub mod masonry;
-pub mod tile_list;
-pub mod item_grid;
-pub mod kanban;
-pub mod svg_select;
-pub mod scroll_marks;
 pub mod scroll_fade;
-pub mod tour;
-pub mod gizmo;
-pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
 
@@ -181,25 +128,18 @@ pub mod scroll_shadow;
 pub mod stack_navigation;
 
 pub mod callout_tooltip;
-pub mod floating_panel;
 pub mod modal;
 pub mod page_flip;
-pub mod pagination;
-pub mod placeholder;
 pub mod hosted_view;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
-pub mod video;
-
-pub mod command_text_input;
 pub mod defer_with_redraw;
 pub mod slide_panel;
 
 pub mod flat_list;
 
 pub mod perf_graph;
-pub mod corner_cap_view;
 pub mod screen_cap;
 
 // Commented out modules (not yet converted)
@@ -215,19 +155,14 @@ pub mod screen_cap;
 
 pub use crate::{
     adaptive_view::*,
-    alert::*,
     divider::*,
     animated_image_gif::*,
     badge::*,
-    breadcrumb::*,
     button_group::*,
     chip::*,
     menu::*,
     select::*,
-    accordion::*,
     dialog::*,
-    toast::*,
-    placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
@@ -235,13 +170,10 @@ pub use crate::{
     cached_widget::*,
     callout_tooltip::*,
     check_box::*,
-    combo_box::*,
     field_well::*,
     desktop_button::*,
 
     drop_down::*,
-    drop_down2::*,
-    drop_toggles::*,
     overlay_place::*,
     popover::*,
     overlay_layers::*,
@@ -264,55 +196,21 @@ pub use crate::{
     // view_ui - no public exports
     label::*,
     link_label::*,
-    menu_bar::*,
-    floating_panel::*,
     modal::*,
     nav_control::*,
     nav_list::*,
     page_flip::*,
-    pagination::*,
     hosted_view::*,
     popup_menu::*,
     popup_notification::*,
-    rating::*,
-    tag_field::*,
-    radio_group::*,
     kbd::*,
-    hotkeys::*,
-    hotkey_editor::*,
-    keyboard_map::*,
     diagonal_text::*,
-    ease_editor::*,
-    sequencer::*,
-    list_item::*,
-    avatar::*,
     card::*,
-    media::*,
-    table::*,
-    empty_state::*,
     timeline::*,
-    code_block::*,
-    carousel::*,
-    form::*,
-    column_picker::*,
-    picker_parts::*,
-    tree_select::*,
-    transfer::*,
-    property_inspector::*,
     toolbar::*,
-    masonry::*,
-    tile_list::*,
-    item_grid::*,
-    kanban::*,
-    svg_select::*,
-    scroll_marks::*,
     scroll_fade::*,
-    tour::*,
-    wheel_picker::*,
     portal_list::*,
     progress::*,
-    playback_bar::*,
-    level_meter::*,
     reorder_list::*,
     radio_button::*,
     root::*,
@@ -323,13 +221,8 @@ pub use crate::{
     scroll_bars::{ScrollBars, ScrollExtent},
     scroll_shadow::*,
     slide_panel::*,
-    number_field::*,
-    range_slider::*,
     slider::*,
     slides_view::*,
-    marquee::*,
-    spinner::*,
-
     splitter::*,
 
     stack_navigation::*,
@@ -388,12 +281,7 @@ pub use crate::splash::*;
 pub use crate::svg::*;
 
 pub use crate::perf_graph::*;
-pub use crate::item_selection::*;
-pub use crate::corner_cap_view::*;
 pub use crate::screen_cap::*;
-
-pub use crate::video::*;
-
 /// Which of the three themes the library is written in `theme_mod` leaves in
 /// `mod.theme`. A `desktop_style` sheet is laid OVER one of these rather than
 /// replacing it, so the two are separate choices.
@@ -694,8 +582,27 @@ pub fn widgets_mod_with(
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
 ) {
+    *vm.cx_mut().global::<Registration>() = Registration { window, families: families.to_vec() };
     let host_io_only = vm.cx().script_data.std.host_io_only();
     widgets_mod_with_io(vm, window, families, host_io_only);
+}
+
+/// The families the last `widgets_mod_with` registered. A module rebuild the
+/// library makes on its own -- the theme lab resolving every theme, see
+/// `theme_tokens::resolve_theme` -- registers them again, so the heap it
+/// leaves behind still has the widgets the app's families put there (the
+/// tweaker's panel is built of the fab family's controls after such a
+/// rebuild).
+#[derive(Clone, Default)]
+struct Registration {
+    window: WindowFamilies,
+    families: Vec<fn(&mut ScriptVm)>,
+}
+
+/// `script_mod` with the families the app registered last.
+pub(crate) fn script_mod_as_registered(vm: &mut ScriptVm) {
+    let Registration { window, families } = vm.cx_mut().global::<Registration>().clone();
+    script_mod_with(vm, window, &families);
 }
 
 /// The core's widgets for a Splash isolate being built: `host_io_only` is
@@ -767,7 +674,6 @@ true
     crate::label::script_mod(vm);
     crate::link_label::script_mod(vm);
     crate::button::script_mod(vm);
-    crate::alert::script_mod(vm);
     crate::divider::script_mod(vm);
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
@@ -826,96 +732,45 @@ true
 
     crate::popup_menu::script_mod(vm);
     crate::drop_down::script_mod(vm);
-    crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
-    crate::range_slider::script_mod(vm);
     crate::drop_slider::script_mod(vm);
-    crate::drop_toggles::script_mod(vm);
     // The badge first: it owns the role palette and the intent names, and
     // the tooltip, the chip and the segmented control all read them.
     crate::badge::script_mod(vm);
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
-    crate::ease_editor::script_mod(vm);
-    crate::tween_inspector::script_mod(vm);
-    crate::sequencer::script_mod(vm);
     // Before the panel kit and the tables: all three turn a heading with the
     // lean this one declares.
     crate::diagonal_text::script_mod(vm);
-    crate::fab_controls::script_mod(vm);
-    crate::menu_bar::script_mod(vm);
-    crate::combo_box::script_mod(vm);
     crate::field_well::script_mod(vm);
-    crate::number_field::script_mod(vm);
-
     crate::splitter::script_mod(vm);
 
     crate::fold_button::script_mod(vm);
     crate::fold_header::script_mod(vm);
-    crate::accordion::script_mod(vm);
-
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
-    crate::playback_bar::script_mod(vm);
-    crate::level_meter::script_mod(vm);
-    crate::breadcrumb::script_mod(vm);
-    crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
-    crate::floating_panel::script_mod(vm);
-    crate::marquee::script_mod(vm);
-    crate::spinner::script_mod(vm);
     crate::chip::script_mod(vm);
     // The menu first: the group's split and menu buttons carry a
     // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
     crate::button_group::script_mod(vm);
     crate::select::script_mod(vm);
-    crate::toast::script_mod(vm);
-    crate::placeholder::script_mod(vm);
     // Only needs a View to derive from; the ladder it uses is Rust.
-    crate::conceding_row::script_mod(vm);
-
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
 
     crate::portal_list::script_mod(vm);
-    crate::rating::script_mod(vm);
-    crate::tag_field::script_mod(vm);
-    crate::radio_group::script_mod(vm);
     crate::kbd::script_mod(vm);
-    crate::wheel_picker::script_mod(vm);
     crate::typography::script_mod(vm);
-    crate::list_item::script_mod(vm);
-    crate::avatar::script_mod(vm);
     crate::card::script_mod(vm);
-    crate::media::script_mod(vm);
-    crate::table::script_mod(vm);
-    crate::empty_state::script_mod(vm);
     crate::timeline::script_mod(vm);
-    crate::code_block::script_mod(vm);
-    crate::carousel::script_mod(vm);
-    crate::form::script_mod(vm);
     // Before the three that draw with its panel and row surfaces.
-    crate::picker_parts::script_mod(vm);
-    crate::column_picker::script_mod(vm);
-    crate::tree_select::script_mod(vm);
-    crate::transfer::script_mod(vm);
     // After TextInput, Button, KbdGroup and the tip they build on.
-    crate::hotkey_editor::script_mod(vm);
-    crate::keyboard_map::script_mod(vm);
-    crate::property_inspector::script_mod(vm);
-    crate::tour::script_mod(vm);
-    crate::gizmo::script_mod(vm);
     crate::toolbar::script_mod(vm);
-    crate::masonry::script_mod(vm);
-    crate::tile_list::script_mod(vm);
-    crate::item_grid::script_mod(vm);
-    crate::kanban::script_mod(vm);
-    crate::scroll_marks::script_mod(vm);
     crate::scroll_fade::script_mod(vm);
-    crate::svg_select::script_mod(vm);
     crate::reorder_list::script_mod(vm);
 
     if !host_io_only { crate::cached_widget::script_mod(vm); }
@@ -935,7 +790,6 @@ true
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
-    crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::hosted_view::script_mod(vm);
     crate::flat_list::script_mod(vm);
@@ -946,8 +800,6 @@ true
     crate::splash::script_mod(vm);
     crate::svg::script_mod(vm);
     crate::perf_graph::script_mod(vm);
-    crate::corner_cap_view::script_mod(vm);
-
     // The overlay layer host registers after every core layer it owns (tip
     // today; menu layer, toaster and dialog host as they land): a widget
     // deriving from another must register after it, and Window, which
@@ -1244,100 +1096,9 @@ mod nav_list_registration_tests {
     }
 }
 
-#[cfg(test)]
-mod pagination_registration_tests {
-    /// The strip registers after the view and label it draws with, carries
-    /// exactly one preset, and keeps its arithmetic a free function: the
-    /// window is what the tests are about, the drawing is not.
-    #[test]
-    fn test_pagination_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let pagination = include_str!("pagination.rs");
-        assert!(lib.contains("pub mod pagination;"));
-        assert!(lib.contains("pagination::*"));
-        let at = lib.find("crate::pagination::script_mod(vm);").expect("pagination registered");
-        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before pagination");
-        }
-        assert!(pagination.contains("mod.widgets.PaginationBase = #(Pagination::register_widget(vm))"));
-        assert_eq!(
-            pagination.matches("set_type_default() do mod.widgets.PaginationBase").count(),
-            1
-        );
-        assert!(pagination.contains("pub fn page_window("), "the arithmetic stays a free function");
-    }
-}
 
-#[cfg(test)]
-mod breadcrumb_registration_tests {
-    /// The trail registers after the view and label it draws with, and
-    /// carries exactly one preset.
-    #[test]
-    fn test_breadcrumb_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let breadcrumb = include_str!("breadcrumb.rs");
-        assert!(lib.contains("pub mod breadcrumb;"));
-        assert!(lib.contains("breadcrumb::*"));
-        let at = lib.find("crate::breadcrumb::script_mod(vm);").expect("breadcrumb registered");
-        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before breadcrumb");
-        }
-        assert!(breadcrumb.contains("mod.widgets.BreadcrumbBase = #(Breadcrumb::register_widget(vm))"));
-        assert_eq!(
-            breadcrumb.matches("set_type_default() do mod.widgets.BreadcrumbBase").count(),
-            1
-        );
-    }
-}
 
-#[cfg(test)]
-mod marquee_registration_tests {
-    /// The marquee registers after the view it draws inside and carries
-    /// exactly one preset. It draws text and no children on purpose, so it
-    /// must not grow a `#[deref] view` and start redrawing child widgets
-    /// several times a frame — see the module's own reasoning.
-    #[test]
-    fn test_marquee_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let marquee = include_str!("marquee.rs");
-        assert!(lib.contains("pub mod marquee;"));
-        assert!(lib.contains("marquee::*"));
-        let at = lib.find("crate::marquee::script_mod(vm);").expect("marquee registered");
-        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before marquee");
-        }
-        assert!(marquee.contains("mod.widgets.MarqueeBase = #(Marquee::register_widget(vm))"));
-        assert_eq!(marquee.matches("set_type_default() do mod.widgets.MarqueeBase").count(), 1);
-    }
-}
 
-#[cfg(test)]
-mod spinner_registration_tests {
-    /// The spinner family registers after the button, label, view and
-    /// glass modules it composes, and leaves `loading_spinner` untouched:
-    /// that DSL-only view has shader parameters seven apps override by name.
-    #[test]
-    fn test_spinner_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let spinner = include_str!("spinner.rs");
-        assert!(lib.contains("pub mod spinner;"));
-        assert!(lib.contains("spinner::*"));
-        let at = lib.find("crate::spinner::script_mod(vm);").expect("spinner registered");
-        for base in [
-            "crate::view::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::gauss_view::script_mod(vm);",
-            "crate::loading_spinner::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before spinner");
-        }
-        assert!(spinner.contains("mod.widgets.SpinnerBase = #(Spinner::register_widget(vm))"));
-        assert!(spinner.contains("mod.widgets.SpinnerFlat = set_type_default()"));
-        assert_eq!(spinner.matches("set_type_default() do mod.widgets.SpinnerBase").count(), 1);
-        assert!(!spinner.contains("mod.widgets.LoadingSpinner"));
-    }
-}
 
 #[cfg(test)]
 mod popover_registration_tests {

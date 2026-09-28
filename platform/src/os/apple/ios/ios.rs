@@ -1,3 +1,4 @@
+use crate::makepad_network::mpsc::{channel, Receiver, Sender};
 use {
     crate::{
         cx::{Cx, IosParams, OsType},
@@ -56,7 +57,6 @@ use {
         panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
         rc::Rc,
         sync::{
-            mpsc::{channel, Receiver, Sender},
             Arc, Mutex,
         },
         time::Instant,

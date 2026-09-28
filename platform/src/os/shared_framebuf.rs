@@ -225,11 +225,6 @@ impl HostSwapchain {
         self.presentable_images.iter().find(|pi| pi.id == id)
     }
 
-    pub fn regenerate_ids(&mut self) {
-        for pi in &mut self.presentable_images {
-            pi.id = PresentableImageId::alloc();
-        }
-    }
 }
 
 // ============================================================================
@@ -271,12 +266,6 @@ pub fn shared_swapchain_from_host_swapchain(
     }
 }
 
-pub fn shared_swapchain_get_image(
-    swapchain: &SharedSwapchain,
-    id: PresentableImageId,
-) -> Option<&SharedPresentableImage> {
-    swapchain.presentable_images.iter().find(|pi| pi.id == id)
-}
 
 // ============================================================================
 // Linux: DMA-BUF-based swapchain

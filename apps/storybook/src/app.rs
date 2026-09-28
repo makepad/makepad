@@ -541,7 +541,7 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(inspect)).clicked(actions) {
-            crate::makepad_widgets::tweaker::set_tweak_on(cx, true);
+            makepad_widgets_tweaker::tweaker::set_tweak_on(cx, true);
         }
         if self.reset_pressed(cx, actions) {
             self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
@@ -576,6 +576,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        makepad_widgets_tweaker::link(vm);
         // Restore the saved theme ONCE, at startup. Done on every run, as it
         // was, this made the catalogue's own list the last writer on every
         // reload: the developer panel's theme picker was undone a tick after
@@ -669,7 +670,7 @@ fn new_count_line(new: usize, days: u32) -> String {
 mod tests {
     use super::*;
     use crate::makepad_widgets::makepad_draw::cx_draw::CxDraw;
-    use crate::makepad_widgets::theme_lab::{Applied, ThemeLab};
+    use makepad_widgets_tweaker::theme_lab::{Applied, ThemeLab};
 
     #[test]
     fn the_new_count_says_how_far_back_it_looked() {

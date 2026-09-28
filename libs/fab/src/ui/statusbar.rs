@@ -9,7 +9,7 @@
 //! the loader and the bake genuinely have something to say.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

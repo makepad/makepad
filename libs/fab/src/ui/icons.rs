@@ -14,7 +14,7 @@
 //! aligns to the far edge (`align: Align{x: 1.0}` / `{y: 1.0}`) — the deferred
 //! turtle shift displaces vector geometry. Use `Filler{}` to push instead.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// The icon set. `path()` is the `crate_resource("self://…")` argument; the
 /// DSL references the same files literally. `ALL` exists so a test can assert

@@ -2,7 +2,7 @@
 //! theme.splash (see Cargo.toml). Theming LIVES in splash — this crate only
 //! ferries the WM's palette into `mod.theme` so stock widgets follow it.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::collections::HashMap;
 
 /// The palette scanned from a theme.splash (`key: #hex` lines).
@@ -116,7 +116,7 @@ pub fn invalidate(cx: &mut Cx) {
 /// theme file (including `term.*` keys); otherwise it is derived from the
 /// installed stylesheet's `mod.theme` roles.
 pub fn current_for_vm(vm: &mut ScriptVm) -> Option<Palette> {
-    let style = makepad_widgets::desktop_style::current_name(vm);
+    let style = makepad_widgets_core::desktop_style::current_name(vm);
     let path = exported_theme_path();
     let key = vm.bx.heap.heap_key();
     if let Some(entry) = vm.cx_mut().global::<PaletteCache>().heaps.get(&key) {
@@ -180,8 +180,8 @@ fn resolve_palette(vm: &mut ScriptVm, style: Option<&str>, path: Option<&str>) -
 pub fn apply(vm: &mut ScriptVm) {
     let key = vm.bx.heap.heap_key();
     vm.cx_mut().global::<PaletteCache>().heaps.remove(&key);
-    if makepad_widgets::desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
-        makepad_widgets::desktop_style::apply_widgets(vm);
+    if makepad_widgets_core::desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
+        makepad_widgets_core::desktop_style::apply_widgets(vm);
         return;
     }
     let path = exported_theme_path();
@@ -304,7 +304,7 @@ pub fn apply(vm: &mut ScriptVm) {
         log!("makepad_wm_theme: {}", e);
     }
     // The palette just read is the one draw paths will ask for.
-    let style = makepad_widgets::desktop_style::current_name(vm);
+    let style = makepad_widgets_core::desktop_style::current_name(vm);
     vm.cx_mut().global::<PaletteCache>().heaps.insert(
         key,
         CachedPalette {
@@ -323,9 +323,9 @@ mod tests {
     fn custom_application_palette_follows_the_active_splash_style() {
         let mut cx=Cx::new(Box::new(|_,_|{}));
         cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);
+            makepad_widgets_core::script_mod(vm);
             desktop_style::install(vm,desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
-            vm.with_reload(makepad_widgets::widgets_mod);
+            vm.with_reload(makepad_widgets_core::widgets_mod);
             let p=current_for_vm(vm).unwrap();
             assert_eq!(p.get("background"),Some("#ececec"),"{:?}",p);
             assert_eq!(p.get("foreground"),Some("#242426"));
@@ -336,22 +336,22 @@ mod tests {
     fn cached_palette_follows_style_switches_and_apply() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);
+            makepad_widgets_core::script_mod(vm);
             desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
-            vm.with_reload(makepad_widgets::widgets_mod);
+            vm.with_reload(makepad_widgets_core::widgets_mod);
             assert_eq!(current_for_vm(vm).unwrap().get("background"), Some("#ececec"));
             // Same inputs: served from the cache, same answer.
             assert_eq!(current_for_vm(vm).unwrap().get("background"), Some("#ececec"));
             assert_eq!(vm.cx_mut().global::<PaletteCache>().heaps.len(), 1);
             // A dark toggle changes the style name, so the entry misses.
             desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Macos, true));
-            vm.with_reload(makepad_widgets::widgets_mod);
+            vm.with_reload(makepad_widgets_core::widgets_mod);
             let p = current_for_vm(vm).unwrap();
             assert_eq!(p.get("background"), Some("#28282a"), "{:?}", p);
             assert!(!p.light_mode);
             // `apply` (re-run by every style reload) drops the entry and re-resolves.
             desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Windows));
-            vm.with_reload(makepad_widgets::widgets_mod);
+            vm.with_reload(makepad_widgets_core::widgets_mod);
             apply(vm);
             assert!(vm.cx_mut().global::<PaletteCache>().heaps.is_empty());
             let p = current_for_vm(vm).unwrap();
@@ -364,7 +364,7 @@ mod tests {
     fn terminal_colors_follow_the_style_without_changing_application_surfaces() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);
+            makepad_widgets_core::script_mod(vm);
             for (style, dark, background, terminal) in [
                 (desktop_style::DesktopStyle::Windows2000, false, "#d4d0c8", Some("#000000")),
                 (desktop_style::DesktopStyle::NextStep, false, "#aaaaaa", Some("#ffffff")),
@@ -373,7 +373,7 @@ mod tests {
                 (desktop_style::DesktopStyle::Macos, false, "#ececec", Some("#ececec")),
             ] {
                 desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(style, dark));
-                vm.with_reload(makepad_widgets::widgets_mod);
+                vm.with_reload(makepad_widgets_core::widgets_mod);
                 apply(vm);
                 let p = current_for_vm(vm).unwrap();
                 assert_eq!(p.get("background"), Some(background), "{style:?}");
@@ -400,7 +400,7 @@ mod tests {
         std::env::set_var("MAKEPAD_WM_THEME_SPLASH", &path);
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);
+            makepad_widgets_core::script_mod(vm);
             // The WM installs Omarchy in every hosted app: the palette is the exported file.
             desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Omarchy));
             let p = current_for_vm(vm).unwrap();

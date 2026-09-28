@@ -19,7 +19,7 @@ use crate::sheets::plan::PlanSettings;
 use crate::tools::overlay::DrawToolCard;
 use crate::ui::widgets::{FabOverflowTab, FabOverflowTabAction, FabOverflowTabStrip};
 use crate::model::{Sheet, SheetItem};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 const TAB_H: f64 = 22.0;
 const FOOT_H: f64 = 16.0;

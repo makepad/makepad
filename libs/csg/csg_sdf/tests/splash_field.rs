@@ -11,7 +11,7 @@
 
 use makepad_csg_math::Vec3d;
 use makepad_csg_sdf::{sdf_to_mesh, Sdf3, SdfSphere, SdfSplashExpr};
-use makepad_script::math_aot::{MathAot, MathAotParam, MathAotValue};
+use makepad_script_math_aot::{MathAot, MathAotParam, MathAotValue};
 use makepad_script::*;
 
 fn make_vm() -> ScriptVm<'static> {

@@ -8,7 +8,7 @@
 
 use crate::api::*;
 use crate::model::PropertyValue;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub struct InfoCard {
     pub title: String,

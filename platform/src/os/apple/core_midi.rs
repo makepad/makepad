@@ -3,7 +3,7 @@ use {
         makepad_live_id::LiveId, makepad_objc_sys::objc_block, midi::*, os::apple::apple_sys::*,
         os::apple::apple_util::*, thread::SignalToUI,
     },
-    std::sync::mpsc,
+    crate::makepad_network::mpsc,
     std::sync::{Arc, Mutex},
 };
 
@@ -209,12 +209,6 @@ impl CoreMidiAccess {
 
     pub fn use_midi_outputs(&self, _ports: &[MidiPortId]) {}
 
-    pub fn midi_port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
-        if let Some(port) = self.ports.iter().find(|p| p.desc.port_id == port) {
-            return Some(port.desc.clone());
-        }
-        None
-    }
 
     pub fn create_midi_input(&self) -> MidiInput {
         let senders = self.input_senders.clone();

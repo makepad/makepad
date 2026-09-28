@@ -32,7 +32,7 @@
 
 use crate::ui::dragnum::*;
 use crate::ui::popover::{FabUiAction, OpenPopup, PopupChange};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::sync::{Mutex, OnceLock};
 
 // ===========================================================================

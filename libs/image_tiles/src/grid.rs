@@ -25,7 +25,7 @@ use crate::library::{ItemId, Library};
 use crate::pack::{pack, Packing};
 use crate::store::{self, StoreEvent, StoreHandle};
 use crate::tape::{fit_dims, page_size, Planes, FullFrame, GRID, LEVELS, PYRAMID_LEVELS, SLOT};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

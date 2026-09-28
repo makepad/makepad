@@ -1,5 +1,5 @@
 use makepad_score_view::{
-    build_drum_score, makepad_widgets::*, BuildOptions, DrumHit, DrumVoice,
+    build_drum_score, makepad_widgets_core::*, BuildOptions, DrumHit, DrumVoice,
 };
 
 app_main!(App);
@@ -165,7 +165,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        makepad_score_view::makepad_widgets::script_mod(vm);
+        makepad_score_view::makepad_widgets_core::script_mod(vm);
         makepad_score_view::script_mod(vm);
         self::script_mod(vm)
     }

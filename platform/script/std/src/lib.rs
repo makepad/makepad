@@ -4,6 +4,7 @@ pub use makepad_script;
 pub mod data;
 pub mod fs;
 pub mod net;
+pub mod net_types;
 pub mod run;
 pub mod task;
 pub mod vm;

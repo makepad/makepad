@@ -10,8 +10,8 @@
 //! behaviour are the drag-numeric field (`dragnum.rs`), overlay popover / pie
 //! menu (`popover.rs`, `pie.rs`), and this module's overflowing tab strip.
 
-use makepad_widgets::tip::TipAction;
-use makepad_widgets::*;
+use makepad_widgets_core::tip::TipAction;
+use makepad_widgets_core::*;
 
 /// A control's horizontal extent in header-content coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]

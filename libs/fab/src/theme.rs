@@ -12,7 +12,7 @@
 //! Surfaces and control geometry follow the shared desktop style; viewport
 //! content and semantic axis/status colors remain local to Fab.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.widgets.*

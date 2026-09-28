@@ -1,12 +1,12 @@
+use crate::mpsc::{
+    channel, sync_channel, Receiver, RecvError, SendError, Sender, SyncSender, TryRecvError,
+    TrySendError,
+};
 use std::{
     fmt,
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{
-            channel, sync_channel, Receiver, RecvError, SendError, Sender, SyncSender,
-            TryRecvError, TrySendError,
-        },
         Arc, Mutex,
     },
 };

@@ -7,7 +7,7 @@
 
 use crate::api::*;
 use crate::ui::widgets::fold_panel_clicked;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

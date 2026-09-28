@@ -4,7 +4,7 @@
 //! per frame. The Properties panel's Material tab builds its texture rows out
 //! of these; clicking one raises the panel's enlarge popover.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

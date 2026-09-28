@@ -410,9 +410,6 @@ impl Cx {
         }
     }
 
-    pub fn instance_upload_collection_examined(&self, root: DrawListId) -> usize {
-        self.draw_lists[root].upload_collection.borrow().examined
-    }
 
     pub fn recycle_instance_uploads(
         &self,
@@ -818,12 +815,12 @@ struct RetirementBatches<P: Send + 'static> {
     available: Vec<Box<RetirementBatch<P>>>,
     preparing: Option<crate::thread::TaskHandle<Vec<Box<RetirementBatch<P>>>>>,
     initialized: bool,
-    returned_tx: std::sync::mpsc::SyncSender<Box<RetirementBatch<P>>>,
-    returned_rx: std::sync::mpsc::Receiver<Box<RetirementBatch<P>>>,
+    returned_tx: crate::makepad_network::mpsc::SyncSender<Box<RetirementBatch<P>>>,
+    returned_rx: crate::makepad_network::mpsc::Receiver<Box<RetirementBatch<P>>>,
 }
 impl<P: Send + 'static> RetirementBatches<P> {
     fn new() -> Self {
-        let (returned_tx, returned_rx) = std::sync::mpsc::sync_channel(16);
+        let (returned_tx, returned_rx) = crate::makepad_network::mpsc::sync_channel(16);
         Self {
             available: Vec::new(),
             preparing: None,
@@ -1175,31 +1172,6 @@ impl CxDrawListPool {
         }
     }
 
-    pub fn retirement_diagnostics<P: Send + 'static>(&self) -> String {
-        let batches = self
-            .4
-            .get(&std::any::TypeId::of::<P>())
-            .and_then(|b| b.downcast_ref::<RetirementBatches<P>>());
-        let cursor = self.2.map(|(id, index)| {
-            (
-                id,
-                index,
-                self.0.is_live_generation(id.0, id.1),
-                self.0.pool[id.0].generation,
-                self.0.pool[id.0].draw_items.buffer.len(),
-            )
-        });
-        format!(
-            "frame={:?} cursor={cursor:?} pending_slots={} staged={} batches={:?} workers={} allocation_pending={} published={}",
-            self.1.retirement_frame,
-            self.0.has_pending_retirements(),
-            self.3.values.borrow().len(),
-            batches.map(|b| (b.initialized, b.preparing.is_some(), b.available.len())),
-            self.1.retirements.load(Ordering::Acquire),
-            self.1.allocations.has_pending_retirements(),
-            self.1.retirement_queued.load(Ordering::Acquire)
-        )
-    }
 
     /// Publish a current receipt, including after the last bounded backend
     /// service or on a frame with no dirty passes. The previous publication
@@ -1997,37 +1969,6 @@ impl CxDrawItems {
             call.mark_uniforms_dirty(generation);
         }
     }
-    /// Patch only the given dyn-uniform ranges of a retained item's draw call
-    /// from `vars` (the shared, camera-dependent uniforms), leaving the item's
-    /// own per-owner values untouched. A camera-only frame therefore never
-    /// rebinds per-owner uniforms nor copies the whole block. The call is
-    /// marked dirty only when a value actually changed.
-    pub fn patch_retained_uniforms(
-        &mut self,
-        index: usize,
-        ranges: &[(usize, usize)],
-        vars: &DrawVars,
-        generation: u64,
-    ) {
-        let item = &mut self.buffer[index];
-        let call = item
-            .kind
-            .draw_call_mut()
-            .expect("retained presentation requires a draw call");
-        assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
-        let mut changed = false;
-        for &(offset, slots) in ranges {
-            for i in offset..(offset + slots).min(call.dyn_uniforms.len()) {
-                if call.dyn_uniforms[i] != vars.dyn_uniforms[i] {
-                    call.dyn_uniforms[i] = vars.dyn_uniforms[i];
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            call.mark_uniforms_dirty(generation);
-        }
-    }
     /// Reinterpret the same resident publication without inventing copy or
     /// consumption receipts. This changes no instance-count/upload predicate.
     pub fn stamp_retained_schema(&mut self, index: usize, schema: u64, prefetched: bool) {
@@ -2170,22 +2111,6 @@ impl CxDrawItems {
                 RecordingBuffer::capacity,
             )
     }
-    pub fn item_capacity(&self) -> usize {
-        self.buffer.len()
-    }
-    pub fn swap_first_instance_buffer(&mut self, spare: &mut RecordingBuffer) -> bool {
-        if !spare.bind_budget(&self.recording_budget) {
-            return false;
-        }
-        if let Some(item) = self.buffer.first_mut() {
-            std::mem::swap(item.instances.as_mut().unwrap(), spare);
-        } else {
-            std::mem::swap(&mut self.first_instance_spare, spare);
-        }
-        self.clean_leaf.set(false);
-        self.instance_counters.set(None);
-        true
-    }
     pub fn len(&self) -> usize {
         self.used
     }
@@ -2245,18 +2170,6 @@ impl CxDrawItems {
         call.dyn_uniforms[offset..offset + value.len()].copy_from_slice(value);
         call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
         true
-    }
-    /// The instances an item submits: its ranges clamped to `resident`, or
-    /// `0..resident` when it has none.
-    pub fn submitted_instances(&self, index: usize, resident: usize) -> usize {
-        let item = &self.buffer[index];
-        if item.instance_ranges.is_empty() {
-            return resident;
-        }
-        item.instance_ranges
-            .iter()
-            .map(|r| (r.end.min(resident as u32)).saturating_sub(r.start.min(resident as u32)) as usize)
-            .sum()
     }
     /// Record backend consumption without changing the recording's topology
     /// or instance upload state.
@@ -2486,38 +2399,7 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
-    /// Parent inventories retain one stable pointer per known child.
-    pub fn reserve_sub_list_inventory(&mut self, count: usize) {
-        self.draw_items
-            .buffer
-            .reserve(count.saturating_sub(self.draw_items.buffer.len()));
-        self.draw_items
-            .child_inventory
-            .reserve(count.saturating_sub(self.draw_items.child_inventory.len()));
-        self.find_appendable_draw_shader_check
-            .reserve(count.saturating_sub(self.find_appendable_draw_shader_check.len()));
-    }
 
-    /// A retained scene knows its inventory before the first quad. Reserve
-    /// once at publication so aligned-instance pushes never repeatedly move a
-    /// growing multi-megabyte stream during a camera/fit frame.
-    pub fn reserve_instance_inventory(&mut self, count: usize) {
-        if count <= self.draw_items.instance_capacity_hint {
-            return;
-        }
-        self.draw_items.instance_capacity_hint = count;
-        self.draw_items.instance_counters.set(None);
-        for item in &mut self.draw_items.buffer {
-            let Some(call) = item.kind.draw_call() else {
-                continue;
-            };
-            let capacity = count.saturating_mul(call.total_instance_slots);
-            if let Some(instances) = &mut item.instances {
-                instances.reserve(capacity.saturating_sub(instances.len()));
-            }
-        }
-        self.find_appendable_draw_shader_check.reserve(16);
-    }
 
     #[inline]
     pub fn set_uniform_view_transform(&mut self, transform: &Mat4f, uniforms_gen: u64) {
@@ -2846,12 +2728,6 @@ impl CxDrawList {
             .unwrap_or_else(|| self.draw_items.len())
     }
 
-    /// Keep painter-order capacity across both presentation and re-recording.
-    pub fn take_draw_item_reorder(&mut self) -> Vec<usize> {
-        self.draw_item_reorder
-            .take()
-            .unwrap_or_else(|| std::mem::take(&mut self.draw_item_reorder_spare))
-    }
 
     pub fn draw_item_id_at_order_index(&self, order_index: usize) -> Option<usize> {
         let draw_item_id = if let Some(reorder) = self.draw_item_reorder.as_ref() {

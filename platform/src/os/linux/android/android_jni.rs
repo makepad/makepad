@@ -20,7 +20,7 @@ use {
     std::{
         cell::Cell,
         ffi::CString,
-        sync::mpsc::{self, Sender},
+        sync::mpsc::Sender,
     },
 };
 
@@ -249,7 +249,7 @@ pub enum FromJavaMessage {
 }
 unsafe impl Send for FromJavaMessage {}
 
-static MESSAGES_TX: Mutex<Option<mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
+static MESSAGES_TX: Mutex<Option<crate::makepad_network::mpsc::Sender<FromJavaMessage>>> = Mutex::new(None);
 
 pub fn send_from_java_message(message: FromJavaMessage) {
     if let Ok(mut tx) = MESSAGES_TX.lock() {
@@ -294,7 +294,7 @@ pub fn jni_set_activity(activity_handle: jni_sys::jobject) {
     }
 }
 
-pub fn jni_set_from_java_tx(from_java_tx: mpsc::Sender<FromJavaMessage>) {
+pub fn jni_set_from_java_tx(from_java_tx: crate::makepad_network::mpsc::Sender<FromJavaMessage>) {
     *MESSAGES_TX.lock().unwrap() = Some(from_java_tx);
 }
 

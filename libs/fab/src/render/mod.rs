@@ -33,7 +33,7 @@ use crate::api::*;
 use crate::model::{ElementId, SceneSnapshot};
 use makepad_raytrace::{Camera as PtCamera, Image, Material, RayTracer, RenderSettings as PtSettings, SceneInput, Sun};
 use makepad_micro_serde::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 
 script_mod! {

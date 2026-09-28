@@ -1,6 +1,6 @@
 //! An [`Sdf3`] field backed by a math-AOT-compiled splash expression.
 //!
-//! The splash math AOT (platform/script/src/math_aot) compiles a
+//! The splash math AOT (platform/script/math_aot) compiles a
 //! pure-math splash function — `|p| length(p) - 1.0`, or `|x, y, z| ...`
 //! — into a batch-evaluable [`CompiledMath`]. This adapter wraps that as
 //! an [`Sdf3`] so the dual-contouring mesher (`sdf_to_mesh`, `SdfGrid3`)
@@ -31,7 +31,7 @@
 
 use crate::sdf::Sdf3;
 use makepad_csg_math::Vec3d;
-use makepad_script::math_aot::{CompiledMath, MathAotValue};
+use makepad_script_math_aot::{CompiledMath, MathAotValue};
 
 /// A compiled splash math expression as a signed distance field.
 ///

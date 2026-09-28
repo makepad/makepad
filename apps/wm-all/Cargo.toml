@@ -25,7 +25,7 @@ path = "src/main.rs"
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["makepad-app-wm/tweaker"]
 # The pane's chat with the machine's own model (Qwen on the local runtime)
 # and the chat backends. Off by default: the in-process pane has no model
 # (NoModel and the tool console). `--features localai` adds both.

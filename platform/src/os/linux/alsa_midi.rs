@@ -1,10 +1,11 @@
 #![allow(non_upper_case_globals)]
+use crate::makepad_network::mpsc;
 use {
     super::{alsa_audio::AlsaError, alsa_sys::*},
     crate::{makepad_live_id::*, midi::*, thread::SignalToUI},
     std::ffi::CStr,
     std::os::raw::c_uint,
-    std::sync::{mpsc, Arc, Mutex},
+    std::sync::{Arc, Mutex},
 };
 
 #[derive(Clone)]

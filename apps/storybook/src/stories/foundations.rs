@@ -11,7 +11,7 @@
 use crate::makepad_widgets::animator::Ease;
 use crate::makepad_widgets::file_tree::*;
 use crate::makepad_widgets::makepad_script::trap::NoTrap;
-use crate::makepad_widgets::reflect::{theme_values, ThemeVal};
+use makepad_widgets_tweaker::reflect::{theme_values, ThemeVal};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 

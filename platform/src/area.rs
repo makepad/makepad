@@ -437,42 +437,6 @@ impl Area {
         };
     }
 
-    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
-        return match self {
-            Area::Instance(inst) => {
-                if inst.instance_count == 0 {
-                    error!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
-                    return abs;
-                }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return abs;
-                }
-                let draw_item = &draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.draw_call().unwrap();
-                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
-                // ok now we have to patch x/y/w/h into it
-                if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let buf = draw_item.instances.as_ref().unwrap();
-                    let x = buf[inst.instance_offset + rect_pos + 0] as f64;
-                    let y = buf[inst.instance_offset + rect_pos + 1] as f64;
-                    return Vec2d {
-                        x: abs.x - x,
-                        y: abs.y - y,
-                    };
-                }
-                abs
-            }
-            Area::Rect(ra) => match live_rect_area(ra, cx) {
-                Some((_, rect_area)) => Vec2d {
-                    x: abs.x - rect_area.rect.pos.x,
-                    y: abs.y - rect_area.rect.pos.y,
-                },
-                None => abs,
-            },
-            _ => abs,
-        };
-    }
 
     pub fn set_rect(&self, cx: &mut Cx, rect: &Rect) {
         match self {

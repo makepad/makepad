@@ -26,7 +26,7 @@
 
 use crate::api::*;
 use makepad_render::{pack_ao_uv, PbrMaterial, StaticDrawLayer, StaticModel};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use makepad_zune_png::makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_png::makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_png::makepad_zune_core::options::EncoderOptions;
@@ -259,9 +259,9 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
                     p.x,
                     p.y,
                     p.z,
-                    makepad_widgets::makepad_draw::pack_pair_f16(ox, oy),
-                    makepad_widgets::makepad_draw::pack_pair_f16(uv[0], uv[1]),
-                    makepad_widgets::makepad_draw::pack_unorm8x4(mr, mg, mb, occ),
+                    makepad_widgets_core::makepad_draw::pack_pair_f16(ox, oy),
+                    makepad_widgets_core::makepad_draw::pack_pair_f16(uv[0], uv[1]),
+                    makepad_widgets_core::makepad_draw::pack_unorm8x4(mr, mg, mb, occ),
                     pack_element_priority(elem, priority),
                 ]);
                 min.x = min.x.min(p.x);

@@ -23,13 +23,13 @@
 
 use makepad_ai_hub::http_client::{http_fetch, HttpClientRequest};
 use makepad_video::{StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
-use makepad_widgets::makepad_micro_serde::*;
-use makepad_widgets::makepad_platform::makepad_network::plain_web_socket::PlainWebSocket;
-use makepad_widgets::makepad_platform::video::{
+use makepad_widgets_core::makepad_micro_serde::*;
+use makepad_widgets_core::makepad_platform::makepad_network::plain_web_socket::PlainWebSocket;
+use makepad_widgets_core::makepad_platform::video::{
     CameraFrameLayout, CameraFrameRef, VideoFormat, VideoFormatId, VideoInputId, VideoInputsEvent,
     VideoPixelFormat,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};

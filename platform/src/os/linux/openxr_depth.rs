@@ -16,8 +16,9 @@ use crate::{
         DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS, DEPTH_VOXEL_EYE_INDEX,
     },
 };
+use crate::makepad_network::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::{
-    sync::{mpsc::{self, Receiver, Sender, TryRecvError}, OnceLock},
+    sync::{OnceLock},
     time::{Duration, Instant},
 };
 

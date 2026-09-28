@@ -89,14 +89,17 @@ const TAKEN_MSG: &str = "re-entrant script VM access: the VM is already `take()`
 /// `ScriptVm` then holds a placeholder — if that closure is where the
 /// unwind began and the placeholder came back here, the slot already has
 /// the VM and the placeholder is dropped.
-fn run_parked<R>(host: &mut dyn ScriptHost, bx: Box<ScriptVmBase>, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+///
+/// Not generic: the `with_vm` family's shells below move their closure and
+/// its result through `Option` slots and share these bodies.
+#[inline(never)]
+fn run_parked(host: &mut dyn ScriptHost, bx: Box<ScriptVmBase>, f: &mut dyn FnMut(&mut ScriptVm)) {
     let mut vm = ScriptVm { host, bx };
     let out = catch_unwind(AssertUnwindSafe(|| f(&mut vm)));
     let ScriptVm { host, bx } = vm;
     match out {
-        Ok(out) => {
+        Ok(()) => {
             *host.script_vm_slot() = Some(bx);
-            out
         }
         Err(payload) => {
             let slot = host.script_vm_slot();
@@ -108,25 +111,57 @@ fn run_parked<R>(host: &mut dyn ScriptHost, bx: Box<ScriptVmBase>, f: impl FnOnc
     }
 }
 
+#[inline(never)]
+pub fn with_vm_and_async_dyn(host: &mut dyn ScriptHost, f: &mut dyn FnMut(&mut ScriptVm)) {
+    let mut bx = host.script_vm_slot().take().expect(TAKEN_MSG);
+    bx.threads.set_current_to_first_unpaused_thread();
+    run_parked(host, bx, f);
+    task::handle_script_tasks(host);
+}
+
+/// `false` when the VM is already held (only when `try_` is set; otherwise
+/// that panics with `TAKEN_MSG`).
+#[inline(never)]
+pub fn with_vm_dyn(host: &mut dyn ScriptHost, try_: bool, f: &mut dyn FnMut(&mut ScriptVm)) -> bool {
+    let mut bx = match host.script_vm_slot().take() {
+        Some(bx) => bx,
+        None if try_ => return false,
+        None => panic!("{}", TAKEN_MSG),
+    };
+    bx.threads.set_current_to_first_unpaused_thread();
+    run_parked(host, bx, &mut |vm| {
+        f(vm);
+        vm.drain_errors();
+    });
+    true
+}
+
+#[inline(never)]
+pub fn with_vm_thread_dyn(
+    host: &mut dyn ScriptHost,
+    thread_id: ScriptThreadId,
+    f: &mut dyn FnMut(&mut ScriptVm),
+) {
+    let mut bx = host.script_vm_slot().take().expect(TAKEN_MSG);
+    bx.threads.set_current_thread_id(thread_id);
+    run_parked(host, bx, f)
+}
+
 pub fn with_vm_and_async<F: FnOnce(&mut ScriptVm) -> R, R>(
     host: &mut dyn ScriptHost,
     f: F,
 ) -> R {
-    let mut bx = host.script_vm_slot().take().expect(TAKEN_MSG);
-    bx.threads.set_current_to_first_unpaused_thread();
-    let out = run_parked(host, bx, f);
-    task::handle_script_tasks(host);
-    out
+    let mut f = Some(f);
+    let mut out = None;
+    with_vm_and_async_dyn(host, &mut |vm| out = Some((f.take().unwrap())(vm)));
+    out.unwrap()
 }
 
 pub fn with_vm<F: FnOnce(&mut ScriptVm) -> R, R>(host: &mut dyn ScriptHost, f: F) -> R {
-    let mut bx = host.script_vm_slot().take().expect(TAKEN_MSG);
-    bx.threads.set_current_to_first_unpaused_thread();
-    run_parked(host, bx, |vm| {
-        let out = f(vm);
-        vm.drain_errors();
-        out
-    })
+    let mut f = Some(f);
+    let mut out = None;
+    with_vm_dyn(host, false, &mut |vm| out = Some((f.take().unwrap())(vm)));
+    out.unwrap()
 }
 
 /// Like [`with_vm`], but returns `None` instead of panicking when the VM is
@@ -137,13 +172,12 @@ pub fn try_with_vm<F: FnOnce(&mut ScriptVm) -> R, R>(
     host: &mut dyn ScriptHost,
     f: F,
 ) -> Option<R> {
-    let mut bx = host.script_vm_slot().take()?;
-    bx.threads.set_current_to_first_unpaused_thread();
-    Some(run_parked(host, bx, |vm| {
-        let out = f(vm);
-        vm.drain_errors();
-        out
-    }))
+    let mut f = Some(f);
+    let mut out = None;
+    if !with_vm_dyn(host, true, &mut |vm| out = Some((f.take().unwrap())(vm))) {
+        return None;
+    }
+    out
 }
 
 pub fn with_vm_thread<F: FnOnce(&mut ScriptVm) -> R, R>(
@@ -151,9 +185,10 @@ pub fn with_vm_thread<F: FnOnce(&mut ScriptVm) -> R, R>(
     thread_id: ScriptThreadId,
     f: F,
 ) -> R {
-    let mut bx = host.script_vm_slot().take().expect(TAKEN_MSG);
-    bx.threads.set_current_thread_id(thread_id);
-    run_parked(host, bx, f)
+    let mut f = Some(f);
+    let mut out = None;
+    with_vm_thread_dyn(host, thread_id, &mut |vm| out = Some((f.take().unwrap())(vm)));
+    out.unwrap()
 }
 
 pub fn eval(host: &mut dyn ScriptHost, script_mod: ScriptMod) -> ScriptValue {

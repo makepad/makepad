@@ -14,7 +14,8 @@
 use crate::api::*;
 use crate::ui::area::{area_actions, AreaAction};
 use crate::ui::viewport_area::open_shading_pie;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
+use makepad_widgets_data::dock::*;
 use std::collections::HashMap;
 use std::time::Instant;
 

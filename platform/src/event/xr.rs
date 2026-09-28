@@ -1188,6 +1188,19 @@ impl XrLocalEvent {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        self.hits_with_options_and_test_dyn(cx, area, options, &hit_test)
+    }
+
+    /// The body of [`Self::hits_with_options_and_test`], compiled once rather
+    /// than once per hit-test closure.
+    #[inline(never)]
+    pub fn hits_with_options_and_test_dyn(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        options: HitOptions,
+        hit_test: &dyn Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
+    ) -> Hit {
         if cx.fingers.test_sweep_lock(options.sweep_area) {
             return Hit::Nothing;
         }

@@ -2,11 +2,6 @@ use std::io::prelude::*;
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "script")]
-use makepad_script::*;
-#[cfg(feature = "script")]
-use std::net::{IpAddr, Ipv4Addr};
-
 pub const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_ERROR_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -161,31 +156,17 @@ impl HttpHeadError {
     }
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Debug)]
 pub struct HttpServerHeaders {
-    #[cfg_attr(
-        feature = "script",
-        rust(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080))
-    )]
     pub addr: SocketAddr,
-    #[cfg_attr(feature = "script", live)]
     pub addr_text: String,
-    #[cfg_attr(feature = "script", live)]
     pub lines: Vec<String>,
-    #[cfg_attr(feature = "script", live)]
     pub verb: String,
-    #[cfg_attr(feature = "script", live)]
     pub path: String,
-    #[cfg_attr(feature = "script", live)]
     pub path_no_slash: String,
-    #[cfg_attr(feature = "script", live)]
     pub search: Option<String>,
-    #[cfg_attr(feature = "script", live)]
     pub content_length: Option<u64>,
-    #[cfg_attr(feature = "script", live)]
     pub accept_encoding: Option<String>,
-    #[cfg_attr(feature = "script", live)]
     pub sec_websocket_key: Option<String>,
 }
 

@@ -28,7 +28,7 @@
 
 use crate::api::*;
 use crate::viewport::pack::to_render;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub const LUT_WIDTH: usize = 256;
 

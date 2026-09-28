@@ -13,6 +13,7 @@
 //! expose the decoder surface itself — this is DXGI NV12 present, not
 //! decoder-pool zero-copy. Force BGRA with `MAKEPAD_MF_BGRA=1`.
 
+use crate::makepad_network::mpsc::{self, Receiver, Sender};
 use {
     crate::{
         event::video_playback::VideoSource,
@@ -58,7 +59,6 @@ use {
         path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
-            mpsc::{self, Receiver, Sender},
             Mutex, OnceLock,
         },
     },

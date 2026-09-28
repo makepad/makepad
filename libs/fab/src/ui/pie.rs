@@ -10,7 +10,7 @@
 //! and is raised by an action, so any control can throw one without owning it.
 
 use crate::ui::popover::{FabUiAction, PieItem};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Fab's slot order, degrees, 0° = +x (right), counter-clockwise.
 const SLOT_DEG: [f32; 8] = [180.0, 0.0, 270.0, 90.0, 225.0, 315.0, 135.0, 45.0];

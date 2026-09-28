@@ -13,7 +13,7 @@
 
 use crate::api::*;
 use crate::tools::session::{SectionAnim, SectionHandle};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// How long a section takes to slide in.
 pub const ANIM_SECONDS: f32 = 0.25;

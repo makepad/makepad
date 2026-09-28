@@ -147,10 +147,10 @@ pub struct Cx {
 
     pub(crate) triggers: HashMap<Area, Vec<Trigger>>,
     /*
-    pub (crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
-    pub (crate) live_file_change_sender: std::sync::mpsc::Sender<Vec<LiveFileChange >>,
+    pub (crate) live_file_change_receiver: crate::makepad_network::mpsc::Receiver<Vec<LiveFileChange>>,
+    pub (crate) live_file_change_sender: crate::makepad_network::mpsc::Sender<Vec<LiveFileChange >>,
     */
-    pub(crate) action_receiver: std::sync::mpsc::Receiver<ActionSend>,
+    pub(crate) action_receiver: crate::makepad_network::mpsc::Receiver<ActionSend>,
 
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
@@ -929,8 +929,8 @@ impl Cx {
         });
 
         let (executor, spawner) = executor::new_executor_and_spawner();
-        //let (live_file_change_sender, live_file_change_receiver) = std::sync::mpsc::channel();
-        let (action_sender, action_receiver) = std::sync::mpsc::channel();
+        //let (live_file_change_sender, live_file_change_receiver) = crate::makepad_network::mpsc::channel();
+        let (action_sender, action_receiver) = crate::makepad_network::mpsc::channel();
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
             *sender = Some(action_sender);
         }

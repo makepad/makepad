@@ -190,18 +190,6 @@ impl Cx {
     }
 }
 
-impl Cx {
-    pub fn flush_draw_shaders(&mut self) {
-        /*
-        self.shader_registry.flush_registry();
-        self.draw_shaders.shaders.clear();
-        self.draw_shaders.ptr_to_item.clear();
-        self.draw_shaders.fingerprints.clear();
-        self.draw_shaders.error_set.clear();
-        self.draw_shaders.error_fingerprints.clear();*/
-    }
-}
-
 impl Index<usize> for CxDrawShaders {
     type Output = CxDrawShader;
     fn index(&self, index: usize) -> &Self::Output {

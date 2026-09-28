@@ -4082,7 +4082,7 @@ struct GlReadback {
     fence: GlSync,
     mapped: bool,
     copy: Option<crate::texture::ReadbackCopyJob>,
-    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+    receive: Option<crate::makepad_network::mpsc::Receiver<std::sync::Arc<[u8]>>>,
 }
 
 #[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
@@ -4358,7 +4358,7 @@ impl Cx {
                             } else {
                                 let width = job.work.width;
                                 let height = job.work.height;
-                                let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                let (send, receive) = crate::makepad_network::mpsc::sync_channel(1);
                                 job.receive = Some(receive);
                                 // The renderer retains the mapped PBO and does
                                 // not unmap/delete it until this lease returns.
@@ -4390,10 +4390,10 @@ impl Cx {
                 if let Some(receive) = &job.receive {
                     match receive.try_recv() {
                         Ok(bytes) => result = Some(Ok(bytes)),
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Err(crate::makepad_network::mpsc::TryRecvError::Disconnected) => {
                             result = Some(Err(ReadbackError::Failed))
                         }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(crate::makepad_network::mpsc::TryRecvError::Empty) => {}
                     }
                 }
                 if let Some(mut result) = result {
@@ -4438,7 +4438,7 @@ impl Cx {
             if job.receive.as_ref().is_some_and(|receive| {
                 matches!(
                     receive.try_recv(),
-                    Err(std::sync::mpsc::TryRecvError::Empty)
+                    Err(crate::makepad_network::mpsc::TryRecvError::Empty)
                 )
             }) {
                 pending.push(job);

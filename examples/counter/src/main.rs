@@ -57,6 +57,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         // Application data survives Splash/style reloads; the UI definitions
         // below are re-evaluated against this same state object.

@@ -2379,10 +2379,10 @@ pub struct MetalCx {
     /// Encoded work the saturated submitter could not take yet, in order.
     submit_retry: RefCell<VecDeque<MetalSubmission>>,
     /// The submit thread's channel and handle; `None` only while dropping.
-    submitter: Option<std::sync::mpsc::SyncSender<MetalSubmission>>,
+    submitter: Option<crate::makepad_network::mpsc::SyncSender<MetalSubmission>>,
     submitter_thread: Option<std::thread::JoinHandle<()>>,
     /// The allocator thread's channel and handle; `None` only while dropping.
-    allocator: Option<std::sync::mpsc::SyncSender<MetalAllocationRequest>>,
+    allocator: Option<crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>>,
     allocator_thread: Option<std::thread::JoinHandle<()>>,
     /// The hang watchdog (a diagnostic thread) and its stop flag.
     watchdog_stop: Arc<std::sync::atomic::AtomicBool>,
@@ -2463,7 +2463,7 @@ pub struct MetalCx {
     /// (`VecUploadEncoder`), shared with the completion handlers that hand
     /// buffers back once their blit has executed.
     staging_pool: RefCell<Vec<StagingBuffer>>,
-    staging_returned: std::sync::mpsc::Receiver<StagingBuffer>,
+    staging_returned: crate::makepad_network::mpsc::Receiver<StagingBuffer>,
     staging_returner: Arc<StagingReturner>,
     /// Shaders drawn by the pass being encoded (`render_view` collects
     /// them, `draw_pass` hands them to the in-flight registry) — what the
@@ -2558,8 +2558,8 @@ struct MetalSubmission {
 /// sender goes).
 fn spawn_submitter(
     in_flight: InFlightQueue,
-) -> (std::sync::mpsc::SyncSender<MetalSubmission>, std::thread::JoinHandle<()>) {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<MetalSubmission>(16);
+) -> (crate::makepad_network::mpsc::SyncSender<MetalSubmission>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = crate::makepad_network::mpsc::sync_channel::<MetalSubmission>(16);
     let thread = std::thread::Builder::new()
         .name("makepad-metal-submit".into())
         .spawn(move || {
@@ -2598,10 +2598,10 @@ fn spawn_submitter(
 }
 
 impl MetalCx {
-    fn submitter(&self) -> &std::sync::mpsc::SyncSender<MetalSubmission> {
+    fn submitter(&self) -> &crate::makepad_network::mpsc::SyncSender<MetalSubmission> {
         self.submitter.as_ref().expect("the submit thread lives as long as the context")
     }
-    fn allocator(&self) -> &std::sync::mpsc::SyncSender<MetalAllocationRequest> {
+    fn allocator(&self) -> &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest> {
         self.allocator.as_ref().expect("the allocator thread lives as long as the context")
     }
     /// Retry encoded work in queue order. A saturated submitter drops NEW
@@ -2612,8 +2612,8 @@ impl MetalCx {
         while let Some(submission) = retry.pop_front() {
             if let Err(error) = self.submitter().try_send(submission) {
                 retry.push_front(match error {
-                    std::sync::mpsc::TrySendError::Full(value)
-                    | std::sync::mpsc::TrySendError::Disconnected(value) => value,
+                    crate::makepad_network::mpsc::TrySendError::Full(value)
+                    | crate::makepad_network::mpsc::TrySendError::Disconnected(value) => value,
                 });
                 return false;
             }
@@ -2866,7 +2866,7 @@ const STAGING_POOL_MAX_COUNT: usize = 32;
 const STAGING_POOL_MAX_BYTES: usize = 192 << 20;
 
 struct StagingReturner {
-    tx: std::sync::mpsc::SyncSender<StagingBuffer>,
+    tx: crate::makepad_network::mpsc::SyncSender<StagingBuffer>,
     bytes: AtomicUsize,
     count: AtomicUsize,
 }
@@ -2901,8 +2901,8 @@ fn staging_pool_return(pool: &StagingReturner, used: Vec<StagingBuffer>) {
         }
         if let Err(error) = pool.tx.try_send(staging) {
             let staging = match error {
-                std::sync::mpsc::TrySendError::Full(value)
-                | std::sync::mpsc::TrySendError::Disconnected(value) => value,
+                crate::makepad_network::mpsc::TrySendError::Full(value)
+                | crate::makepad_network::mpsc::TrySendError::Disconnected(value) => value,
             };
             pool.bytes.fetch_sub(staging.len, Ordering::AcqRel);
             pool.count.fetch_sub(1, Ordering::AcqRel);
@@ -3234,10 +3234,6 @@ pub struct CxOsPass {
     mtl_depth_state_no_write: Option<RcObjcId>,
 }
 
-pub enum PackType {
-    Packed,
-    Unpacked,
-}
 /*
 pub struct SlErr {
     _msg: String
@@ -3314,7 +3310,7 @@ impl MetalCx {
             ];
             tex
         };
-        let (staging_tx, staging_returned) = std::sync::mpsc::sync_channel(STAGING_POOL_MAX_COUNT);
+        let (staging_tx, staging_returned) = crate::makepad_network::mpsc::sync_channel(STAGING_POOL_MAX_COUNT);
         let mut uniform_chunks = Vec::new();
         // Reserve two chunks per in-flight frame before any camera draw.
         for _ in 0..6 {
@@ -3670,7 +3666,7 @@ struct MetalPipelines {
 
 impl MetalPipelines {
     fn enqueue(
-        allocator: &std::sync::mpsc::SyncSender<MetalAllocationRequest>,
+        allocator: &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>,
         device: ObjcId,
         source: String,
         color_format: crate::draw_shader::DrawShaderColorFormat,
@@ -3711,7 +3707,7 @@ impl MetalPipelines {
     /// functions exist. False when the allocator queue is full or the base
     /// library is not compiled yet: the caller retries on a later frame.
     fn enqueue_float16(
-        allocator: &std::sync::mpsc::SyncSender<MetalAllocationRequest>,
+        allocator: &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>,
         device: ObjcId,
         ready: &Arc<Self>,
     ) -> bool {
@@ -4184,12 +4180,12 @@ impl MetalCx {
             {
                 Ok(()) => { self.retired_instance_bytes.set(self.retired_instance_bytes.get().saturating_add(retired_bytes)); }
                 Err(
-                    std::sync::mpsc::TrySendError::Full(MetalAllocationRequest::RetireInstances(
+                    crate::makepad_network::mpsc::TrySendError::Full(MetalAllocationRequest::RetireInstances(
                         buffer,
                         counter,
                         _,
                     ))
-                    | std::sync::mpsc::TrySendError::Disconnected(
+                    | crate::makepad_network::mpsc::TrySendError::Disconnected(
                         MetalAllocationRequest::RetireInstances(buffer, counter, _),
                     ),
                 ) => {
@@ -4439,9 +4435,9 @@ enum MetalAllocationRequest {
 /// The allocator thread: pipeline compiles, render setup and the release of
 /// retired buffers off the UI thread. Owned by the context (joined on drop
 /// when its sender goes).
-fn spawn_allocator() -> (std::sync::mpsc::SyncSender<MetalAllocationRequest>, std::thread::JoinHandle<()>) {
+fn spawn_allocator() -> (crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>, std::thread::JoinHandle<()>) {
     {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<MetalAllocationRequest>(64);
+        let (tx, rx) = crate::makepad_network::mpsc::sync_channel::<MetalAllocationRequest>(64);
         let thread = std::thread::Builder::new().name("makepad-metal-buffer".into()).spawn(move || {
             while let Ok(request) = rx.recv() {
                 let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
@@ -5521,7 +5517,7 @@ impl Cx {
 type RenderCaptureResult = (crate::texture::TextureId, usize, usize, Vec<u8>);
 thread_local! {
     static RENDER_TEXTURE_CAPTURE_REQUESTS: std::cell::RefCell<Vec<crate::texture::TextureId>> = const { std::cell::RefCell::new(Vec::new()) };
-    static RENDER_TEXTURE_CAPTURE_BUS: (std::sync::mpsc::SyncSender<RenderCaptureResult>, std::sync::mpsc::Receiver<RenderCaptureResult>) = std::sync::mpsc::sync_channel(8);
+    static RENDER_TEXTURE_CAPTURE_BUS: (crate::makepad_network::mpsc::SyncSender<RenderCaptureResult>, crate::makepad_network::mpsc::Receiver<RenderCaptureResult>) = crate::makepad_network::mpsc::sync_channel(8);
 }
 
 impl Cx {
@@ -6365,26 +6361,6 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
     }
 }
 
-pub fn get_all_metal_devices() -> Vec<ObjcId> {
-    #[cfg(any(target_os = "ios", target_os = "tvos"))]
-    unsafe {
-        vec![MTLCreateSystemDefaultDevice()]
-    }
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let array = MTLCopyAllDevices();
-        let count: u64 = msg_send![array, count];
-        let ret = (0..count)
-            .map(|i| msg_send![array, objectAtIndex: i])
-            // The elements of this array are references---we convert them to owned references
-            // (which just means that we increment the reference count here, and it is
-            // decremented in the `Drop` impl for `Device`)
-            .map(|device: *mut Object| msg_send![device, retain])
-            .collect();
-        let () = msg_send![array, release];
-        ret
-    }
-}
 
 /// CGL render bridge for macOS. Creates a standalone CGL context (GL 3.2 Core)
 /// that shares textures with Metal via IOSurface.

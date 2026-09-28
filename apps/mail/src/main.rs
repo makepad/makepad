@@ -207,6 +207,8 @@ impl AppMain for App {
             ));
             log!("mail: using macOS {} appearance", if dark { "dark" } else { "light" });
         }
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         makepad_app_mail::script_mod(vm);

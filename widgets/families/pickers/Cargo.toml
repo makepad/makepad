@@ -1,0 +1,12 @@
+[package]
+name = "makepad-widgets-pickers"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: Number fields, range sliders, drop toggles, the combo box and DropDown2, ratings, tag fields, radio groups, wheel pickers, avatars, forms, and the column, tree and transfer pickers"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }

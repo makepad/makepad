@@ -10,7 +10,7 @@
 //! `--open PATH` reach the same `ShellAction::OpenFile`.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::{Path, PathBuf};
 
 /// One listed entry.

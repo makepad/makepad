@@ -27,7 +27,7 @@ use crate::ui::popover::{
     MenuPlace, PieItem,
 };
 use crate::ui::widgets::{clamp_header_pan, fold_panel_clicked, set_panel_chevron};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 const HEADER_OVERFLOW_OWNER: LiveId = live_id!(fab_vp_header_overflow);
 const HEADER_CONTEXT_OWNER: LiveId = LiveId(0x6269_6d78_0012_0001);

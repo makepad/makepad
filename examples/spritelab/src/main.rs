@@ -50,6 +50,8 @@ script_mod! {
 
 impl App {
     fn run(vm: &mut ScriptVm) -> Self {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         makepad_render::script_mod(vm);
         App::from_script_mod(vm, self::script_mod)

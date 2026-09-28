@@ -30,12 +30,12 @@
 //! only when whoever launched the app says so in `MAKEPAD_FEEDBACK_EMAIL`
 //! (the Makepad Builder does); without it the feedback is anonymous.
 
-use makepad_widgets::makepad_platform::screen_capture::{
+use makepad_widgets_core::makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
 };
-use makepad_widgets::makepad_platform::system_info;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_platform::system_info;
+use makepad_widgets_core::makepad_platform::thread::{Lane, TaskHandle};
+use makepad_widgets_core::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -380,7 +380,7 @@ impl FeedbackPanel {
     /// Read the clipboard now (the box was checked): text as it is, an
     /// image turned into the PNG that would be sent, on a worker.
     fn read_clip(&mut self, cx: &mut Cx) {
-        use makepad_widgets::makepad_platform::clipboard_read::{read_clipboard, ClipboardContent, ClipboardImage};
+        use makepad_widgets_core::makepad_platform::clipboard_read::{read_clipboard, ClipboardContent, ClipboardImage};
         let next = match read_clipboard() {
             ClipboardContent::Text(text) if text.len() > MAX_CLIP_TEXT_BYTES => {
                 Err("The text on the clipboard is over 64 KB, too long to send.")
@@ -904,8 +904,8 @@ fn prepare_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<Screenshot, S
 
 /// RGBA pixels from a PNG (8-bit gray, gray+alpha, RGB or RGBA).
 fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    use makepad_widgets::makepad_zune_png::makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions};
-    use makepad_widgets::makepad_zune_png::PngDecoder;
+    use makepad_widgets_core::makepad_zune_png::makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions};
+    use makepad_widgets_core::makepad_zune_png::PngDecoder;
     let options = DecoderOptions::default().set_max_width(16384).set_max_height(16384);
     let mut decoder = PngDecoder::new_with_options(ZCursor::new(png), options);
     decoder.decode_headers().map_err(|e| format!("{e:?}"))?;

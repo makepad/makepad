@@ -312,7 +312,7 @@ pub enum RadioButtonAction {
     None,
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, ScriptHook, Widget, WidgetSet, Animator)]
 pub struct RadioButton {
     #[uid]
     uid: WidgetUid,

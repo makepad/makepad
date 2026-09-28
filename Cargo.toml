@@ -192,6 +192,8 @@ workspace.members = [
     "widgets/feedback",
     # === tests ===
     "platform/script/test",
+    "platform/script/math_aot",
+    "platform/remote_core",
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===
     "widgets/core",
@@ -205,6 +207,13 @@ workspace.members = [
     "widgets/families/voice",
     "widgets/families/cef",
     "widgets/families/ai",
+    "widgets/families/catalog",
+    "widgets/families/pickers",
+    "widgets/families/collections",
+    "widgets/families/media",
+    "widgets/families/hotkeys",
+    "widgets/families/editors",
+    "widgets/families/fab",
     # === private app repositories ===
     # Every app directory with a `src/`: the public apps above, and a private
     # app repository cloned into apps/<name> whose root Cargo.toml is a

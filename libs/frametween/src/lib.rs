@@ -40,7 +40,7 @@
 //! 3. Sibling child passes do NOT run in creation order — each stage is
 //!    parented to the next so the chain resolves back to front.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub mod flow_tween;
 pub mod frame;

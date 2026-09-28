@@ -23,8 +23,11 @@ default-run = "makepad-app-mixer"
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
+# No widget family: the desk is core widgets and its own, and a surface
+# layout runs in a Splash isolate, which registers the core only.
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-theme = { path = "../../libs/wm_theme" }

@@ -7,7 +7,10 @@ description = "The widget catalogue: every component organised, documented and p
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["tweaker", "charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette", "fab", "editors", "hotkeys", "media", "collections", "pickers", "catalog"] }
+# The design overlay: the catalogue always carries it (its theme panel and
+# docs read the overlay's reflection and theme lab).
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0" }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
 
 [features]

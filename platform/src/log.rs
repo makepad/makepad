@@ -62,6 +62,8 @@ pub fn trace_log_dir(topic: &str) -> std::path::PathBuf {
 
 // The only native stdout/remote/Studio writer is this long-lived consumer.
 // Producers never wait for a pipe, a remote ring lock, or logger capacity.
+// The channel stays std mpsc: its bounded try_send takes no lock (the
+// makepad_network::mpsc one does), and a real-time callback may log.
 #[cfg(not(target_arch = "wasm32"))]
 mod async_sink {
     use super::*;

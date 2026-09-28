@@ -560,46 +560,6 @@ impl DrawVars {
         }
     }
 
-    /// Writes one uniform onto the retained draw call behind `area` — any
-    /// draw call of this shader, not only the one this `DrawVars` last
-    /// emitted — and marks its pass for repaint. A clock or camera value
-    /// shared by every call a widget keeps resident moves this way, with no
-    /// redraw and no instance upload. `false` (nothing written) when the
-    /// area is stale, another shader's, or the shader has no such uniform.
-    pub fn set_uniform_on_draw_call(
-        &self,
-        cx: &mut Cx,
-        area: Area,
-        id: LiveId,
-        value: &[f32],
-    ) -> bool {
-        let Some(draw_shader_id) = self.draw_shader_id else {
-            return false;
-        };
-        let Some(inst) = area.valid_instance(cx).copied() else {
-            return false;
-        };
-        let sh = &cx.draw_shaders[draw_shader_id.index];
-        let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) else {
-            return false;
-        };
-        let (offset, slots) = (input.offset, input.slots.min(value.len()));
-        let uniforms_gen = cx.next_uniform_gen();
-        let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-        let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
-        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
-            return false;
-        };
-        if draw_call.draw_shader_id != draw_shader_id {
-            return false;
-        }
-        draw_call.dyn_uniforms[offset..offset + slots].copy_from_slice(&value[..slots]);
-        draw_call.mark_uniforms_dirty(uniforms_gen);
-        if let Some(pass_id) = draw_list.draw_pass_id {
-            cx.passes[pass_id].paint_dirty = true;
-        }
-        true
-    }
 
     /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
     /// the retained draw call behind `area`, and marks its pass for repaint.

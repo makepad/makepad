@@ -10,7 +10,7 @@ use crate::{
 use makepad_score::model::AnnotationKind;
 use makepad_score_render as render;
 use makepad_score_render::{MakepadScoreRenderer, Point as ScorePoint, SemanticId};
-use makepad_widgets::{
+use makepad_widgets_core::{
     event::ScrollPhase,
     scroll_bar::{ScrollAxis, ScrollBarAction},
     scroll_motion::{estimate_release_velocity, push_sample, ScrollSample, FLING_MIN_TOTAL_DELTA},

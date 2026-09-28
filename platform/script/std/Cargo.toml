@@ -9,5 +9,5 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
-makepad-network = { path = "../../network", version = "1.0.0", features = ["script"] }
+makepad-network = { path = "../../network", version = "1.0.0" }
 makepad-script = { path = "..", version = "1.0.0" }

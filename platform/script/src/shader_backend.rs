@@ -1002,23 +1002,6 @@ impl ShaderBackend {
         }
     }
 
-    /// Generate a variable declaration statement for the backend.
-    /// For C-style backends (Metal, HLSL, GLSL): `type_name var_name;\n`
-    /// For WGSL: `var var_name:type_name;\n`
-    pub fn write_var_decl(&self, out: &mut String, ty_name: LiveId, var_name: &str) {
-        match self {
-            Self::Metal | Self::Hlsl | Self::Glsl => {
-                write!(out, "{} {};\n", ty_name, var_name).ok();
-            }
-            Self::Wgsl => {
-                write!(out, "var {}:{};\n", var_name, ty_name).ok();
-            }
-            Self::Rust => {
-                let zero = self.zero_literal(ty_name);
-                write!(out, "let mut {}: {} = {};\n", var_name, ty_name, zero).ok();
-            }
-        }
-    }
 
     /// Generate a variable declaration with zero initialization for the backend.
     /// For C-style backends (Metal, HLSL, GLSL): `type_name var_name = type_name(0);\n`
@@ -1655,15 +1638,6 @@ impl ShaderBackend {
         order.push(ty);
     }
 
-    pub fn pod_type_def(
-        &self,
-        heap: &ScriptHeap,
-        pod_ty: ScriptPodType,
-        referenced: &mut BTreeSet<ScriptPodType>,
-        out: &mut String,
-    ) {
-        self.pod_type_def_impl(heap, pod_ty, referenced, out, false, false)
-    }
 
     fn pod_type_def_impl(
         &self,

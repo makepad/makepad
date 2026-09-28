@@ -16,8 +16,8 @@ use crate::tape::{
     FULL_BPP, FULL_MAX_PX, LEVELS, PAGE_BPP, PYRAMID_LEVELS, SHARD_CAP,
 };
 use makepad_network::blocking_http::{self, Limits, Request};
-use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
-use makepad_widgets::Cx;
+use makepad_widgets_core::makepad_platform::thread::{Lane, TaskPool};
+use makepad_widgets_core::Cx;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;

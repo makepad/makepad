@@ -11,8 +11,8 @@
 //! made to be called from (and customised by) your own tools.
 
 use makepad_image_tiles::bake::{bake, parse_manifest, BakeOptions};
-use makepad_widgets::makepad_platform::thread::Lane;
-use makepad_widgets::Cx;
+use makepad_widgets_core::makepad_platform::thread::Lane;
+use makepad_widgets_core::Cx;
 use std::path::PathBuf;
 
 fn usage() -> ! {

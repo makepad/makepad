@@ -1,8 +1,10 @@
 use crate::makepad_network::{
-    http_server::{HttpServer, HttpServerRequest, HttpServerResponse},
-    utils::HttpServerHeaders,
-    FromUIReceiver, FromUISender, HttpMethod, HttpRequest, NetworkResponse, SocketStream,
-    ToUIReceiver, ToUISender, WsMessage,
+    http_server::{HttpServer, HttpServerRequest, HttpServerResponse as NetHttpServerResponse},
+    FromUIReceiver, FromUISender, NetworkResponse, SocketStream, ToUIReceiver, ToUISender,
+    WsMessage,
+};
+use crate::net_types::{
+    HttpError, HttpMethod, HttpRequest, HttpResponse, HttpServerHeaders, HttpServerResponse,
 };
 use crate::{task, vm, ScriptStd, ScriptVmStdExt};
 use makepad_script::id;
@@ -377,7 +379,7 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         let maybe_ws = vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = headers.script_to_value(vm);
+                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
                             let ret = vm.call(handler.into(), &[headers_val]);
                             if script_has_proto!(vm, ret, net.WebSocketEvents) {
                                 let events = WebSocketEvents::script_from_value(vm, ret);
@@ -472,13 +474,13 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = headers.script_to_value(vm);
+                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
                             let ret = vm.call(handler.into(), &[headers_val]);
                             if script_has_proto!(vm, ret, net.HttpServerResponse) {
-                                let response = HttpServerResponse::script_from_value(vm, ret);
+                                let response = NetHttpServerResponse::from(HttpServerResponse::script_from_value(vm, ret));
                                 let _ = response_sender.send(response);
                             } else {
-                                let _ = response_sender.send(HttpServerResponse::new(
+                                let _ = response_sender.send(NetHttpServerResponse::new(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                                         .to_string(),
                                     "No body".to_string().into_bytes(),
@@ -496,15 +498,15 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = headers.script_to_value(vm);
+                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
                             let body_array = vm.bx.heap.new_array_from_vec_u8(body);
                             let ret = vm.call(handler.into(), &[headers_val, body_array.into()]);
 
                             if script_has_proto!(vm, ret, net.HttpServerResponse) {
-                                let response_obj = HttpServerResponse::script_from_value(vm, ret);
+                                let response_obj = NetHttpServerResponse::from(HttpServerResponse::script_from_value(vm, ret));
                                 let _ = response.send(response_obj);
                             } else {
-                                let _ = response.send(HttpServerResponse::new(
+                                let _ = response.send(NetHttpServerResponse::new(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                                         .to_string(),
                                     "No body".to_string().into_bytes(),
@@ -514,7 +516,7 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     }
                 }
                 HttpServerRequest::PostPending { body, .. } => {
-                    body.reject(HttpServerResponse::new(
+                    body.reject(NetHttpServerResponse::new(
                         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
                         Vec::new(),
                     ));
@@ -665,7 +667,7 @@ pub fn handle_script_network_events(
                     .and_then(|request| request.events.on_stream.as_object());
                 if let Some(handler) = handler {
                     vm::with_vm_and_async(host, |vm| {
-                        let res = res.script_to_value(vm);
+                        let res = HttpResponse::from(res).script_to_value(vm);
                         vm.call(handler.into(), &[res]);
                     });
                 }
@@ -687,7 +689,7 @@ pub fn handle_script_network_events(
                 if let Some((index, handler)) = found {
                     if let Some(handler) = handler {
                         vm::with_vm_and_async(host, |vm| {
-                            let res = res.script_to_value(vm);
+                            let res = HttpResponse::from(res).script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
@@ -711,7 +713,7 @@ pub fn handle_script_network_events(
                 if let Some((index, handler)) = found {
                     if let Some(handler) = handler {
                         vm::with_vm_and_async(host, |vm| {
-                            let res = res.script_to_value(vm);
+                            let res = HttpResponse::from(res).script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
@@ -735,7 +737,7 @@ pub fn handle_script_network_events(
                 if let Some((index, handler)) = found {
                     if let Some(handler) = handler {
                         vm::with_vm_and_async(host, |vm| {
-                            let res = err.script_to_value(vm);
+                            let res = HttpError::from(err).script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
@@ -852,7 +854,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 return script_err_io!(vm.trap(), "script net runtime is not configured");
             };
             let id = LiveId::unique();
-            if let Err(err) = runtime.http_start(id, request) {
+            if let Err(err) = runtime.http_start(id, request.into()) {
                 return script_err_io!(vm.trap(), "http request failed: {err}");
             }
             std.data.http_requests.push(ScriptHttp { id, events });
@@ -1124,7 +1126,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 return script_err_io!(vm.trap(), "script net runtime is not configured");
             };
             let id = LiveId::unique();
-            if runtime.ws_open(id, request).is_err() {
+            if runtime.ws_open(id, request.into()).is_err() {
                 return NIL;
             }
             std.data.web_sockets.push(ScriptWebSocket {

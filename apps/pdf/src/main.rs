@@ -488,6 +488,8 @@ fn status_line(status: &PdfStatus) -> String {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);

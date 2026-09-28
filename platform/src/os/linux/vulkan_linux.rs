@@ -2134,8 +2134,8 @@ fn hotplug_worker(
         if let Some(snapshot) = pending.take() {
             match sender.try_send(snapshot) {
                 Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Full(snapshot)) => pending = Some(snapshot),
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                Err(crate::makepad_network::mpsc::TrySendError::Full(snapshot)) => pending = Some(snapshot),
+                Err(crate::makepad_network::mpsc::TrySendError::Disconnected(_)) => return,
             }
         }
         match &socket {

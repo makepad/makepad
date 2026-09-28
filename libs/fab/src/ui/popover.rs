@@ -12,7 +12,7 @@
 //! overlay-layer law), and reads `FabUiAction::MenuPicked { .. }` back out of
 //! the next actions pass. No shared state, no `api.rs` surface.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Which pre-declared glyph a menu row shows in its icon column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

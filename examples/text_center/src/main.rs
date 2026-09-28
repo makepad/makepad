@@ -186,6 +186,8 @@ impl MatchEvent for App {}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         // The light and dark desktop themes share every number that decides
         // vertical placement (space factor, font sizes, tab height, line
         // spacing); they differ only in color. The suite still renders both,

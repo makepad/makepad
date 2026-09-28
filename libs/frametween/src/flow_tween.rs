@@ -32,7 +32,7 @@
 //!   -> sub-pixel parabola at L0 -> final field texture
 //!   -> warp pass: NV12 A + B + both fields + t -> RGBA out.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 use crate::frame::{
     bgra32_proxy_rgb8, nv12_proxy_rgb8, rgb8_proxy, rgb8_to_bgra32, tl_on, Frame, Pixels,

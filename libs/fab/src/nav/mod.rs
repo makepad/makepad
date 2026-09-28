@@ -31,7 +31,7 @@ pub mod track;
 pub mod walk;
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use orbit::{CameraAnim, WORLD_UP};
 use walk::WalkState;
 

@@ -9,5 +9,6 @@ metadata.makepad-auto-version = "BkQvnL-yt07_4n3oopSxq7yCP_w="
 
 [dependencies]
 makepad-script = { path = "../", version = "1.0.0"}
+makepad-script-math-aot = { path = "../math_aot", version = "1.0.0" }
 
 #[workspace]

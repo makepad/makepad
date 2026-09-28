@@ -14,7 +14,7 @@ pub mod slice;
 pub mod view;
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);

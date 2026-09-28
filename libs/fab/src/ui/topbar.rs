@@ -12,7 +12,7 @@ use crate::ui::popover::{dropdown_clicked, menu_picked, open_menu, MenuItem, Men
 use crate::ui::widgets::{
     clamp_header_pan, clipped_header_controls, HeaderControlSpan,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 const OVERFLOW_OWNER: LiveId = live_id!(fab_top_overflow);
 const OVERFLOW_PARENT_BASE: u64 = 0x6269_6d78_0011_0100;

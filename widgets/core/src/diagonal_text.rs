@@ -389,6 +389,17 @@ impl DiagonalLabelRef {
     }
 }
 
+/// Whether a heading of `name_width` fits flat in a column of `width` with
+/// `pad` either side: the one question that decides whether it turns.
+///
+/// Measured the way a table's sharing column's own width is (`measure`, padding both
+/// sides), so a column sized to its heading always answers yes — which is
+/// what keeps a table of wide columns flat with an angle set. The hundredth
+/// of a point is for the sum that lands exactly on the width.
+pub fn heading_fits_flat(name_width: f64, width: f64, pad: f64) -> bool {
+    name_width + pad * 2.0 <= width + 0.01
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

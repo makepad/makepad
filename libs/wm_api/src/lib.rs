@@ -15,9 +15,9 @@
 //! makepad_wm_api::preview(cx, &path);
 //! ```
 
-use makepad_widgets::makepad_micro_serde::*;
-use makepad_widgets::makepad_platform::studio::AppToStudio;
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_micro_serde::*;
+use makepad_widgets_core::makepad_platform::studio::AppToStudio;
+use makepad_widgets_core::*;
 use std::path::{Path, PathBuf};
 
 /// What an app can ask the window manager.

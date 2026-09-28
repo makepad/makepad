@@ -12,12 +12,12 @@
 
 #[cfg(feature = "tts")]
 use makepad_ai_hub::speech::{TtsConfig, TtsEngine, TtsEvent, TtsHandle, TtsSession};
-use makepad_widgets::makepad_draw::audio::AudioBuffer;
+use makepad_widgets_core::makepad_draw::audio::AudioBuffer;
 #[cfg(feature = "tts")]
-use makepad_widgets::makepad_draw::thread::ThreadOptions;
-use makepad_widgets::makepad_draw::thread::ThreadSpawner;
+use makepad_widgets_core::makepad_draw::thread::ThreadOptions;
+use makepad_widgets_core::makepad_draw::thread::ThreadSpawner;
 #[cfg(feature = "tts")]
-use makepad_widgets::log;
+use makepad_widgets_core::log;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "tts")]
 use std::sync::OnceLock;
@@ -152,8 +152,8 @@ impl SpeechOutput {
 
     /// Convenience for apps with no other audio: install an audio-output
     /// callback that plays speech and nothing else.
-    pub fn install_audio_output(&self, cx: &mut makepad_widgets::Cx, index: usize) {
-        use makepad_widgets::CxMediaApi;
+    pub fn install_audio_output(&self, cx: &mut makepad_widgets_core::Cx, index: usize) {
+        use makepad_widgets_core::CxMediaApi;
         let playback = self.playback.clone();
         let muted = self.muted.clone();
         cx.audio_output(index, move |info, output| {
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn constructing_speech_output_does_not_start_a_session() {
         let start = std::time::Instant::now();
-        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let cx = makepad_widgets_core::Cx::new(Box::new(|_, _| {}));
         let speech = SpeechOutput::new("bm_fable.mkvoice", cx.thread_spawner());
         #[cfg(feature = "tts")]
         assert!(speech.session.get().is_none());
@@ -375,7 +375,7 @@ mod tests {
     #[cfg(feature = "tts")]
     #[test]
     fn kokoro_only_output_cannot_fall_back_to_a_system_voice() {
-        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let cx = makepad_widgets_core::Cx::new(Box::new(|_, _| {}));
         let speech = SpeechOutput::new_kokoro("af_heart", cx.thread_spawner());
         assert_eq!(speech.engine, TtsEngine::Kokoro);
         assert!(speech.session.get().is_none());
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     #[ignore = "starts a real hub TTS session; needs weights or an OS voice"]
     fn lazily_started_session_still_produces_audio() {
-        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let cx = makepad_widgets_core::Cx::new(Box::new(|_, _| {}));
         let speech = SpeechOutput::new("bm_fable.mkvoice", cx.thread_spawner());
         speech.enqueue("Testing the lazy speech path.");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);

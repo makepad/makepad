@@ -1256,7 +1256,6 @@ impl DropDownRef {
 mod outside_press_tests {
     use super::*;
     use crate::button::ButtonAction;
-    use crate::combo_box::ComboBoxWidgetRefExt;
     use crate::makepad_draw::cx_draw::CxDraw;
     use std::cell::Cell;
 
@@ -1335,12 +1334,12 @@ mod outside_press_tests {
         rect.pos + rect.size * 0.5
     }
 
-    /// An open list, a drop-down's or a combo box's, closes on a press
+    /// An open list closes on a press
     /// outside it, and the press goes no further: a button walked after the
     /// list does not hear it, though the list's lock is gone by the time
     /// the button is walked. The next press reaches the button.
     ///
-    /// Each list has a button of its own, and each opens from Rust: with no
+    /// The list has a button of its own, and opens from Rust: with no
     /// event loop here to end a capture on release, a widget that once took
     /// a press would take every later one.
     #[test]
@@ -1361,17 +1360,13 @@ mod outside_press_tests {
                     // before the side panel beside it.
                     event_order: EventOrder.Down
                     pick := DropDown{width: 150.}
-                    combo := ComboBox{width: 150.}
                     after_pick := Button{width: 150. height: 40. margin: Inset{top: 200.} text: "after"}
-                    after_combo := Button{width: 150. height: 40. text: "after"}
                 }
             });
             WidgetRef::script_from_value(vm, value)
         });
         let labels = || vec!["One".to_string(), "Two".to_string(), "Three".to_string()];
         root.drop_down(&cx, ids!(pick)).set_labels(&mut cx, labels());
-        let combo = root.widget(&cx, ids!(combo)).as_combo_box();
-        combo.set_labels(&mut cx, labels());
         let mut target = Target::new(&mut cx);
         target.draw(&mut cx, &root);
         let pick = root.widget(&cx, ids!(pick));
@@ -1384,17 +1379,6 @@ mod outside_press_tests {
         assert!(is_active(&pick));
         assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the drop-down's list");
         assert!(!is_active(&pick), "the press outside closed the drop-down's list");
-        assert_eq!(cx.sweep_lock_area(), None);
-        target.draw(&mut cx, &root);
-        assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
-
-        let after = root.widget(&cx, ids!(after_combo));
-        let on_after = middle(&cx, &after);
-        combo.open_list(&mut cx);
-        target.draw(&mut cx, &root);
-        assert!(combo.is_open());
-        assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the combo box's list");
-        assert!(!combo.is_open(), "the press outside closed the combo box's list");
         assert_eq!(cx.sweep_lock_area(), None);
         target.draw(&mut cx, &root);
         assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");

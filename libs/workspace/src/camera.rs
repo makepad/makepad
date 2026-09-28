@@ -1,7 +1,7 @@
 //! The camera every zoomable presentation projects through, and the
 //! world-space rectangle it projects.
 
-use makepad_widgets::makepad_micro_serde::*;
+use makepad_widgets_core::makepad_micro_serde::*;
 
 pub const MIN_ZOOM: f64 = 0.00001;
 pub const MAX_ZOOM: f64 = 8.0;

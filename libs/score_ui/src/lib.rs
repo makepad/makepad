@@ -4,7 +4,7 @@
 //! editing chrome, dialogs, keymap, playback bridge, and file seams. The
 //! `apps/score` crate is intentionally only a window and event adapter.
 
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 pub use makepad_score_view::{
     build, build_bass_tab_score, build_drum_score, build_pitched_score, view, BuildOptions,
     DrumHit, DrumVoice, PitchedNote, ScoreView, ScoreViewRef, ScoreViewWidgetExt,
@@ -35,7 +35,7 @@ pub use document::*;
 pub use keymap::*;
 pub use state::*;
 
-use makepad_widgets::ScriptVm;
+use makepad_widgets_core::ScriptVm;
 
 /// Register the score theme and widgets in dependency order.
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -49,15 +49,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::{Cx, Event};
+    use makepad_widgets_core::{Cx, Event};
 
     #[test]
     fn score_widget_dsl_registers_without_errors() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
         let errors = cx.with_vm(|vm| {
             vm.bx.captured_errors = Some(Vec::new());
-            makepad_widgets::makepad_platform::script::script_mod(vm);
-            makepad_widgets::script_mod(vm);
+            makepad_widgets_core::makepad_platform::script::script_mod(vm);
+            makepad_widgets_core::script_mod(vm);
             super::script_mod(vm);
             vm.take_errors()
         });

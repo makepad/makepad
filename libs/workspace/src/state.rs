@@ -7,10 +7,10 @@
 //! - `settings.ron` — appearance and renderer choice (`Settings`)
 //! - `dock.ron`     — the dock layout (`HashMap<LiveId, DockItem>`)
 
-use makepad_widgets::dock::DockItem;
-use makepad_widgets::makepad_micro_serde::*;
-use makepad_widgets::makepad_platform::home::makepad_home;
-use makepad_widgets::*;
+use makepad_widgets_data::dock::DockItem;
+use makepad_widgets_core::makepad_micro_serde::*;
+use makepad_widgets_core::makepad_platform::home::makepad_home;
+use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -384,7 +384,7 @@ pub fn dock_state_is_usable(items: &HashMap<LiveId, DockItem>, kinds: &[LiveId])
         }
         match item {
             DockItem::Splitter { a, b, align, .. } => {
-                use makepad_widgets::splitter::SplitterAlign;
+                use makepad_widgets_core::splitter::SplitterAlign;
                 let valid = match align {
                     SplitterAlign::Weighted(v) => v.is_finite() && (0.0..=1.0).contains(v),
                     SplitterAlign::FromA(v) | SplitterAlign::FromB(v) => v.is_finite() && *v >= 0.0,
@@ -447,7 +447,7 @@ pub fn recover_rooted_dock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::splitter::{SplitterAlign, SplitterAxis};
+    use makepad_widgets_core::splitter::{SplitterAlign, SplitterAxis};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

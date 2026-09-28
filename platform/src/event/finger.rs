@@ -1442,6 +1442,19 @@ impl Event {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        self.hits_with_options_and_test_dyn(cx, area, options, &hit_test)
+    }
+
+    /// The body of [`Self::hits_with_options_and_test`], compiled once rather
+    /// than once per hit-test closure.
+    #[inline(never)]
+    pub fn hits_with_options_and_test_dyn(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        options: HitOptions,
+        hit_test: &dyn Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
+    ) -> Hit {
         // A cancelled press ends before anything else — even for an area
         // that is no longer drawn: its terminal FingerUp is owed to it
         // whatever became of its drawable.
@@ -2044,7 +2057,7 @@ impl Event {
                     });
                 }
             }
-            Event::XrLocal(e) => return e.hits_with_options_and_test(cx, area, options, hit_test),
+            Event::XrLocal(e) => return e.hits_with_options_and_test_dyn(cx, area, options, hit_test),
             _ => (),
         };
         Hit::Nothing

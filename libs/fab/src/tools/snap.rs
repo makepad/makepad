@@ -44,7 +44,7 @@
 //! clipped away by an active section plane / box.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Triangles are only scanned for an element up to this many indices; past it
 /// (a merged terrain mesh, a whole curtain wall) only the picked triangle

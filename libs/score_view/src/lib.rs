@@ -1,6 +1,6 @@
 //! Playback-free score engraving, retained pages, score builders, and a lean widget.
 
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 pub mod build;
 pub mod document;
@@ -19,7 +19,7 @@ pub use font::{
 pub use font::bravura;
 pub use view::*;
 
-use makepad_widgets::ScriptVm;
+use makepad_widgets_core::ScriptVm;
 
 /// Register the draw-only score widget.
 pub fn script_mod(vm: &mut ScriptVm) {

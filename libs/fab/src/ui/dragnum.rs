@@ -29,7 +29,7 @@
 //!   the hover arrows at the ends steps by one increment; Ctrl+Wheel does
 //!   the same. The whole row is the hit target.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

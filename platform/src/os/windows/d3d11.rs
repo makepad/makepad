@@ -1504,7 +1504,7 @@ struct D3dReadback {
     context: ID3D11DeviceContext,
     mapped: bool,
     copy: Option<crate::texture::ReadbackCopyJob>,
-    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+    receive: Option<crate::makepad_network::mpsc::Receiver<std::sync::Arc<[u8]>>>,
 }
 
 impl Cx {
@@ -1667,7 +1667,7 @@ impl Cx {
                                 } else {
                                     let address = mapped.pData as usize;
                                     let owner = job.staging.clone();
-                                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                    let (send, receive) = crate::makepad_network::mpsc::sync_channel(1);
                                     job.receive = Some(receive);
                                     job.copy = Some(Box::new(move || {
                                         // The lease owns a COM reference even
@@ -1698,10 +1698,10 @@ impl Cx {
                 if let Some(receive) = &job.receive {
                     match receive.try_recv() {
                         Ok(bytes) => result = Some(Ok(bytes)),
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Err(crate::makepad_network::mpsc::TryRecvError::Disconnected) => {
                             result = Some(Err(ReadbackError::Failed))
                         }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(crate::makepad_network::mpsc::TryRecvError::Empty) => {}
                     }
                 }
                 if let Some(result) = result {

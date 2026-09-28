@@ -501,29 +501,6 @@ impl Cx {
         );
     }
 
-    /// Start every resource declared by the selected application font set.
-    /// This changes timing only: it never adds resources beyond FontPolicy.
-    pub fn preload_font_set(&mut self) {
-        let policy = self.font_set().policy();
-        let paths = {
-            let resources = self.script_data.resources.resources.borrow();
-            policy
-                .assets
-                .iter()
-                .filter_map(|asset| {
-                    resources
-                        .iter()
-                        .find(|resource| {
-                            resource.dependency_path.as_deref() == Some(asset.resource_path)
-                        })
-                        .map(|resource| resource.abs_path.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-        for path in paths {
-            self.load_script_resource_by_path(&path);
-        }
-    }
 
     /// Load all script resources that are still pending.
     ///

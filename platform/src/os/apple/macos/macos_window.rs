@@ -817,23 +817,6 @@ impl MacosWindow {
         }
     }
 
-    pub fn get_ime_origin(&self) -> Vec2d {
-        let shift_x = 5.0; // unknown why
-        let shift_y = -10.0;
-        let rect = NSRect {
-            origin: NSPoint { x: 0.0, y: 0.0 },
-            //view_frame.size.height),
-            size: NSSize {
-                width: 0.0,
-                height: 0.0,
-            },
-        };
-        let out: NSRect = unsafe { msg_send![self.window, convertRectToScreen: rect] };
-        Vec2d {
-            x: out.origin.x + shift_x,
-            y: out.origin.y + shift_y,
-        }
-    }
 
     pub fn get_inner_size(&self) -> Vec2d {
         let view_frame: NSRect = unsafe { msg_send![self.view, frame] };

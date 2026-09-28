@@ -359,10 +359,6 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
-        self.take_studio_screenshot_request_ids_for_window(kind_id, None)
-    }
 
     /// Drain the pending screenshot requests this pass can answer.
     ///

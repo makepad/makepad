@@ -131,8 +131,6 @@ impl Drop for BodyBudgetGuard {
     }
 }
 
-#[cfg(feature = "script")]
-use makepad_script::*;
 
 #[derive(Clone)]
 pub struct HttpServer {
@@ -162,14 +160,10 @@ pub struct HttpServer {
     pub allowed_methods: Option<fn(&str) -> Option<&'static str>>,
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone)]
 pub struct HttpServerResponse {
-    #[cfg_attr(feature = "script", live)]
     pub header: String,
-    #[cfg_attr(feature = "script", live)]
     pub body: Vec<u8>,
-    #[cfg_attr(feature = "script", rust)]
     payload: HttpServerResponsePayload,
 }
 

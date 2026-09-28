@@ -3,7 +3,6 @@ use {
         cx_2d::*,
         draw_list_2d::ManyInstances,
         makepad_platform::*,
-        text::glyph_outline::{Command as OutlineCommand, GlyphOutline},
         turtle::*,
         vector::{PathCmd, VectorPath},
     },
@@ -682,49 +681,7 @@ impl DrawGlyph {
         });
     }
 
-    pub fn add_curves_layer(&mut self, color: Vec4f, curves: &[(Vec2f, Vec2f, Vec2f)]) {
-        self.ensure_initialized();
-        if curves.is_empty() {
-            return;
-        }
-        let mut out = Vec::with_capacity(curves.len());
-        let mut bounds = BBox::default();
-        for (p0, p1, p2) in curves {
-            let q = QuadCurve {
-                p0: p2f(*p0),
-                p1: p2f(*p1),
-                p2: p2f(*p2),
-            };
-            bounds.include(q.p0);
-            bounds.include(q.p1);
-            bounds.include(q.p2);
-            out.push(q);
-        }
-        self.pending_layers.push(PendingLayer {
-            color,
-            curves: out,
-            bounds,
-            flags: self.pending_flags,
-        });
-    }
 
-    pub fn add_outline_layer(&mut self, outline: &GlyphOutline, color: Vec4f) {
-        self.ensure_initialized();
-        self.path.clear();
-        self.pending_color = color;
-        for command in outline.commands().iter().copied() {
-            match command {
-                OutlineCommand::MoveTo(p) => self.path.move_to(p.x, p.y),
-                OutlineCommand::LineTo(p) => self.path.line_to(p.x, p.y),
-                OutlineCommand::QuadTo(c, p) => self.path.quad_to(c.x, c.y, p.x, p.y),
-                OutlineCommand::CurveTo(c1, c2, p) => {
-                    self.path.bezier_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y)
-                }
-                OutlineCommand::Close => self.path.close(),
-            }
-        }
-        self.fill_layer();
-    }
 
     pub fn commit_shape(&mut self, num_bands: Option<usize>) -> Option<GlyphShapeId> {
         self.ensure_initialized();
@@ -1117,9 +1074,6 @@ impl DrawGlyph {
     }
 }
 
-fn p2f(v: Vec2f) -> P2 {
-    P2 { x: v.x, y: v.y }
-}
 
 fn normalize_point(p: P2, bounds: BBox, inv_w: f32, inv_h: f32) -> P2 {
     P2 {

@@ -3113,8 +3113,8 @@ mod tests {
 
     #[cfg(feature = "faces")]
     fn assert_tile_buffers_byte_equal(
-        left: &makepad_widgets::map::tile::TileBuffers,
-        right: &makepad_widgets::map::tile::TileBuffers,
+        left: &makepad_widgets_maps::map::tile::TileBuffers,
+        right: &makepad_widgets_maps::map::tile::TileBuffers,
         context: &str,
     ) {
         macro_rules! same_indices {
@@ -3223,9 +3223,9 @@ mod tests {
     #[test]
     #[ignore = "acceptance test: 25 tiles x render zooms 14-18 x 2D/3D"]
     fn amsterdam_bake_parity() {
-        use makepad_widgets::map::geometry::TileKey;
-        use makepad_widgets::map::style::probe_compiled_theme;
-        use makepad_widgets::map::tile::build_tile_buffers_from_mvt;
+        use makepad_widgets_maps::map::geometry::TileKey;
+        use makepad_widgets_maps::map::style::probe_compiled_theme;
+        use makepad_widgets_maps::map::tile::build_tile_buffers_from_mvt;
 
         let fixture_dir = fixture_dir();
         let mut paths: Vec<_> = fs::read_dir(fixture_dir)

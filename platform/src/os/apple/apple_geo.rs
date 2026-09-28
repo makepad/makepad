@@ -6,6 +6,7 @@
 //! the channel on the main loop and emits `Event::LocationUpdate` /
 //! `Event::LocationError` / `Event::PermissionResult`.
 
+use crate::makepad_network::mpsc::{channel, Receiver, Sender};
 use {
     crate::{
         apple_classes::get_apple_class_global,
@@ -17,7 +18,6 @@ use {
     },
     std::{
         os::raw::c_void,
-        sync::mpsc::{channel, Receiver, Sender},
     },
 };
 

@@ -34,12 +34,14 @@ use crate::model::{
 use crate::wire_route::{
     self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireMode, WireRoute,
 };
-use makepad_widgets::fab_controls::FabValueInput;
-use makepad_widgets::makepad_draw::DrawSvg;
-use makepad_widgets::makepad_draw::vector::{LineCap, LineJoin};
-use makepad_widgets::makepad_platform::event::TouchState;
-use makepad_widgets::widget_tree::CxWidgetExt;
-use makepad_widgets::*;
+use makepad_widgets_fab::fab_controls::FabValueInput;
+use makepad_widgets_media::video::Video;
+use makepad_widgets_pickers::drop_down2::DropDown2;
+use makepad_widgets_core::makepad_draw::DrawSvg;
+use makepad_widgets_core::makepad_draw::vector::{LineCap, LineJoin};
+use makepad_widgets_core::makepad_platform::event::TouchState;
+use makepad_widgets_core::widget_tree::CxWidgetExt;
+use makepad_widgets_core::*;
 use std::any::TypeId;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -4307,7 +4309,7 @@ mod tests {
             TypeId::of::<View>(),
             TypeId::of::<Image>(),
             TypeId::of::<Label>(),
-            TypeId::of::<Markdown>(),
+            TypeId::of::<makepad_widgets_rich_text::markdown::Markdown>(),
         ] {
             assert!(!is_interactive_face_type(display));
         }

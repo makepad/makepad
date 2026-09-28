@@ -8,12 +8,12 @@ use crate::{
     thread::{to_ui_bounded, TaskHandle, ThreadOptions, ThreadSpawner, ToUIReceiver},
 };
 use makepad_studio_protocol::SharedSwapchain;
+use crate::makepad_network::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{sync_channel, SyncSender, TrySendError},
         Arc,
     },
     time::Duration,
@@ -94,8 +94,8 @@ impl GpuInbox {
                         while !worker_stop.load(Ordering::Acquire) {
                             let request = match receive.recv_timeout(Duration::from_millis(100)) {
                                 Ok(request) => request,
-                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                Err(crate::makepad_network::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(crate::makepad_network::mpsc::RecvTimeoutError::Disconnected) => {
                                     return Ok(())
                                 }
                             };

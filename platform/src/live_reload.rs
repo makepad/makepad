@@ -19,7 +19,7 @@ use {
         LiveReloadWatcherHandle, WatchRoot,
     },
     makepad_studio_protocol::StudioToApp,
-    std::sync::mpsc::channel,
+    crate::makepad_network::mpsc::channel,
 };
 
 #[derive(Clone, Debug)]

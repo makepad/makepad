@@ -331,39 +331,6 @@ impl ScriptTokenizer {
         None
     }
 
-    pub fn dump_tokens(&self, heap: &ScriptHeap) {
-        for i in 0..self.tokens.len() {
-            match self.tokens[i].token {
-                ScriptToken::End => print!("End"),
-                ScriptToken::StreamEnd => print!("StreamEnd"),
-                ScriptToken::Identifier(id) => print!("{id}"),
-                ScriptToken::Operator(id) => print!("{id}"),
-                ScriptToken::Separator(id) => print!("{id}"),
-                ScriptToken::OpenCurly => print!("{{"),
-                ScriptToken::CloseCurly => print!("}}"),
-                ScriptToken::OpenRound => print!("("),
-                ScriptToken::CloseRound => print!(")"),
-                ScriptToken::OpenSquare => print!("["),
-                ScriptToken::CloseSquare => print!("]"),
-                ScriptToken::StringUnfinished => print!("\"\".."),
-                ScriptToken::String(v) => {
-                    let mut s = String::new();
-                    heap.cast_to_string(v, &mut s);
-                    print!("\"{}\"", s)
-                }
-                ScriptToken::U40(v) => print!("{v}"),
-                ScriptToken::F64(v) => print!("{v}"),
-                ScriptToken::F32(v) => print!("{v}"),
-                ScriptToken::I32(v) => print!("{v}"),
-                ScriptToken::U32(v) => print!("{v}"),
-                ScriptToken::F16(v) => print!("{v}"),
-                ScriptToken::Color(v) => print!("{:08x}", v),
-                ScriptToken::RustValue(v) => print!("#({v})"),
-            }
-            print!(" ");
-        }
-        print!("\n");
-    }
 
     /// Emits a token, stamping whether a newline preceded it (and clearing the
     /// pending flag). All token emission funnels through here.

@@ -37,7 +37,7 @@ pub mod viewport_area;
 pub mod widgets;
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// The control kit (icons + styled base widgets + the two controls that are
 /// ours). Registered right after the theme so every lane's `script_mod!` can

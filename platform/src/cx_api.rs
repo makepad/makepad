@@ -494,105 +494,112 @@ pub enum CxOsOp {
     XrStopPresenting,
 }
 
+impl CxOsOp {
+    /// The variant's name (what `Debug` prints; the payload is not shown).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::CreateWindow(..) => "CreateWindow",
+            Self::CreatePopupWindow { .. } => "CreatePopupWindow",
+            Self::CloseWindow(..) => "CloseWindow",
+            Self::MinimizeWindow(..) => "MinimizeWindow",
+            Self::Deminiaturize(..) => "Deminiaturize",
+            Self::MaximizeWindow(..) => "MaximizeWindow",
+            Self::FullscreenWindow(..) => "FullscreenWindow",
+            Self::NormalizeWindow(..) => "NormalizeWindow",
+            Self::RestoreWindow(..) => "RestoreWindow",
+            Self::HideWindow(..) => "HideWindow",
+            Self::HideWindowButtons(..) => "HideWindowButtons",
+            Self::ShowWindowButtons(..) => "ShowWindowButtons",
+            Self::SetTopmost(..) => "SetTopmost",
+            Self::SetChromelessWhenMaximized(..) => "SetChromelessWhenMaximized",
+            Self::SetWindowTitle(..) => "SetWindowTitle",
+            Self::SetWindowVisuals(..) => "SetWindowVisuals",
+            Self::ShowInDock(..) => "ShowInDock",
+            Self::LockMousePointer(..) => "LockMousePointer",
+            Self::PinMousePointer(..) => "PinMousePointer",
+            Self::RepinMousePointer => "RepinMousePointer",
+            Self::SetSystemBarDarkIcons(..) => "SetSystemBarDarkIcons",
+            Self::DeferSystemGestures(..) => "DeferSystemGestures",
+
+            Self::ShowTextIME(..) => "ShowTextIME",
+            Self::HideTextIME => "HideTextIME",
+            Self::SyncImeState { .. } => "SyncImeState",
+            Self::SetCursor(..) => "SetCursor",
+            Self::StartTimer { .. } => "StartTimer",
+            Self::StopTimer(..) => "StopTimer",
+            Self::Quit => "Quit",
+
+            Self::StartDragging(..) => "StartDragging",
+            Self::StartExternalDragging { .. } => "StartExternalDragging",
+            Self::UpdateMacosMenu(..) => "UpdateMacosMenu",
+            Self::ShowClipboardActions { .. } => "ShowClipboardActions",
+            Self::HideClipboardActions => "HideClipboardActions",
+            Self::CopyToClipboard(..) => "CopyToClipboard",
+            Self::SetPrimarySelection(..) => "SetPrimarySelection",
+            Self::ShowSelectionHandles { .. } => "ShowSelectionHandles",
+            Self::UpdateSelectionHandles { .. } => "UpdateSelectionHandles",
+            Self::HideSelectionHandles => "HideSelectionHandles",
+            Self::AccessibilityUpdate(..) => "AccessibilityUpdate",
+
+            Self::CheckPermission { .. } => "CheckPermission",
+            Self::RequestPermission { .. } => "RequestPermission",
+            Self::StartLocationUpdates => "StartLocationUpdates",
+            Self::StopLocationUpdates => "StopLocationUpdates",
+
+            Self::HttpRequest { .. } => "HttpRequest",
+            Self::CancelHttpRequest { .. } => "CancelHttpRequest",
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequest(..) => "StorageRequest",
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequestError { .. } => "StorageRequestError",
+
+            Self::PrepareVideoPlayback(..) => "PrepareVideoPlayback",
+            Self::AttachCameraNativePreview { .. } => "AttachCameraNativePreview",
+            Self::UpdateCameraNativePreview { .. } => "UpdateCameraNativePreview",
+            Self::DetachCameraNativePreview { .. } => "DetachCameraNativePreview",
+            Self::SpawnSystemBrowser { .. } => "SpawnSystemBrowser",
+            Self::UpdateSystemBrowser { .. } => "UpdateSystemBrowser",
+            Self::DetachSystemBrowser { .. } => "DetachSystemBrowser",
+            Self::SetSystemBrowserUrl { .. } => "SetSystemBrowserUrl",
+            Self::SystemBrowserHistoryGo { .. } => "SystemBrowserHistoryGo",
+            Self::CloseSystemBrowser { .. } => "CloseSystemBrowser",
+            Self::PrepareAudioPlayback(..) => "PrepareAudioPlayback",
+            Self::BeginVideoPlayback(..) => "BeginVideoPlayback",
+            Self::PauseVideoPlayback(..) => "PauseVideoPlayback",
+            Self::ResumeVideoPlayback(..) => "ResumeVideoPlayback",
+            Self::MuteVideoPlayback(..) => "MuteVideoPlayback",
+            Self::UnmuteVideoPlayback(..) => "UnmuteVideoPlayback",
+            Self::CleanupVideoPlaybackResources(..) => "CleanupVideoPlaybackResources",
+            Self::SeekVideoPlayback(..) => "SeekVideoPlayback",
+            Self::SetVideoVolume(..) => "SetVideoVolume",
+            Self::SetVideoPlaybackRate(..) => "SetVideoPlaybackRate",
+            Self::SelectVideoTrack(..) => "SelectVideoTrack",
+            Self::SelectAudioTrack(..) => "SelectAudioTrack",
+            Self::UpdateVideoSurfaceTexture(..) => "UpdateVideoSurfaceTexture",
+            Self::CreateWebView { .. } => "CreateWebView",
+            Self::UpdateWebView { .. } => "UpdateWebView",
+            Self::CloseWebView { .. } => "CloseWebView",
+            Self::SaveFileDialog(..) => "SaveFileDialog",
+            Self::SelectFileDialog(..) => "SelectFileDialog",
+            Self::SaveFolderDialog(..) => "SaveFolderDialog",
+            Self::SelectFolderDialog(..) => "SelectFolderDialog",
+            Self::ResizeWindow(..) => "ResizeWindow",
+            Self::RepositionWindow(..) => "RepositionWindow",
+
+            Self::XrStartPresenting => "XrStartPresenting",
+            Self::XrSetRenderScale(_) => "XrSetRenderScale",
+            Self::XrStopPresenting => "XrStopPresenting",
+            Self::XrAdvertiseAnchor(_) => "XrAdvertiseAnchor",
+            Self::XrSetLocalAnchor(_) => "XrSetLocalAnchor",
+            Self::XrSetLocalFloor(_) => "XrSetLocalFloor",
+            Self::XrDiscoverAnchor(_) => "XrDiscoverAnchor",
+        }
+    }
+}
+
 impl std::fmt::Debug for CxOsOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CreateWindow(..) => write!(f, "CreateWindow"),
-            Self::CreatePopupWindow { .. } => write!(f, "CreatePopupWindow"),
-            Self::CloseWindow(..) => write!(f, "CloseWindow"),
-            Self::MinimizeWindow(..) => write!(f, "MinimizeWindow"),
-            Self::Deminiaturize(..) => write!(f, "Deminiaturize"),
-            Self::MaximizeWindow(..) => write!(f, "MaximizeWindow"),
-            Self::FullscreenWindow(..) => write!(f, "FullscreenWindow"),
-            Self::NormalizeWindow(..) => write!(f, "NormalizeWindow"),
-            Self::RestoreWindow(..) => write!(f, "RestoreWindow"),
-            Self::HideWindow(..) => write!(f, "HideWindow"),
-            Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
-            Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
-            Self::SetTopmost(..) => write!(f, "SetTopmost"),
-            Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
-            Self::SetWindowTitle(..) => write!(f, "SetWindowTitle"),
-            Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
-            Self::ShowInDock(..) => write!(f, "ShowInDock"),
-            Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
-            Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
-            Self::RepinMousePointer => write!(f, "RepinMousePointer"),
-            Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
-            Self::DeferSystemGestures(..) => write!(f, "DeferSystemGestures"),
-
-            Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
-            Self::HideTextIME => write!(f, "HideTextIME"),
-            Self::SyncImeState { .. } => write!(f, "SyncImeState"),
-            Self::SetCursor(..) => write!(f, "SetCursor"),
-            Self::StartTimer { .. } => write!(f, "StartTimer"),
-            Self::StopTimer(..) => write!(f, "StopTimer"),
-            Self::Quit => write!(f, "Quit"),
-
-            Self::StartDragging(..) => write!(f, "StartDragging"),
-            Self::StartExternalDragging { .. } => write!(f, "StartExternalDragging"),
-            Self::UpdateMacosMenu(..) => write!(f, "UpdateMacosMenu"),
-            Self::ShowClipboardActions { .. } => write!(f, "ShowClipboardActions"),
-            Self::HideClipboardActions => write!(f, "HideClipboardActions"),
-            Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
-            Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
-            Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
-            Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
-            Self::HideSelectionHandles => write!(f, "HideSelectionHandles"),
-            Self::AccessibilityUpdate(..) => write!(f, "AccessibilityUpdate"),
-
-            Self::CheckPermission { .. } => write!(f, "CheckPermission"),
-            Self::RequestPermission { .. } => write!(f, "RequestPermission"),
-            Self::StartLocationUpdates => write!(f, "StartLocationUpdates"),
-            Self::StopLocationUpdates => write!(f, "StopLocationUpdates"),
-
-            Self::HttpRequest { .. } => write!(f, "HttpRequest"),
-            Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
-            #[cfg(target_arch = "wasm32")]
-            Self::StorageRequest(..) => write!(f, "StorageRequest"),
-            #[cfg(target_arch = "wasm32")]
-            Self::StorageRequestError { .. } => write!(f, "StorageRequestError"),
-
-            Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
-            Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
-            Self::UpdateCameraNativePreview { .. } => write!(f, "UpdateCameraNativePreview"),
-            Self::DetachCameraNativePreview { .. } => write!(f, "DetachCameraNativePreview"),
-            Self::SpawnSystemBrowser { .. } => write!(f, "SpawnSystemBrowser"),
-            Self::UpdateSystemBrowser { .. } => write!(f, "UpdateSystemBrowser"),
-            Self::DetachSystemBrowser { .. } => write!(f, "DetachSystemBrowser"),
-            Self::SetSystemBrowserUrl { .. } => write!(f, "SetSystemBrowserUrl"),
-            Self::SystemBrowserHistoryGo { .. } => write!(f, "SystemBrowserHistoryGo"),
-            Self::CloseSystemBrowser { .. } => write!(f, "CloseSystemBrowser"),
-            Self::PrepareAudioPlayback(..) => write!(f, "PrepareAudioPlayback"),
-            Self::BeginVideoPlayback(..) => write!(f, "BeginVideoPlayback"),
-            Self::PauseVideoPlayback(..) => write!(f, "PauseVideoPlayback"),
-            Self::ResumeVideoPlayback(..) => write!(f, "ResumeVideoPlayback"),
-            Self::MuteVideoPlayback(..) => write!(f, "MuteVideoPlayback"),
-            Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
-            Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
-            Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
-            Self::SetVideoVolume(..) => write!(f, "SetVideoVolume"),
-            Self::SetVideoPlaybackRate(..) => write!(f, "SetVideoPlaybackRate"),
-            Self::SelectVideoTrack(..) => write!(f, "SelectVideoTrack"),
-            Self::SelectAudioTrack(..) => write!(f, "SelectAudioTrack"),
-            Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
-            Self::CreateWebView { .. } => write!(f, "CreateWebView"),
-            Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
-            Self::CloseWebView { .. } => write!(f, "CloseWebView"),
-            Self::SaveFileDialog(..) => write!(f, "SaveFileDialog"),
-            Self::SelectFileDialog(..) => write!(f, "SelectFileDialog"),
-            Self::SaveFolderDialog(..) => write!(f, "SaveFolderDialog"),
-            Self::SelectFolderDialog(..) => write!(f, "SelectFolderDialog"),
-            Self::ResizeWindow(..) => write!(f, "ResizeWindow"),
-            Self::RepositionWindow(..) => write!(f, "RepositionWindow"),
-
-            Self::XrStartPresenting => write!(f, "XrStartPresenting"),
-            Self::XrSetRenderScale(_) => write!(f, "XrSetRenderScale"),
-            Self::XrStopPresenting => write!(f, "XrStopPresenting"),
-            Self::XrAdvertiseAnchor(_) => write!(f, "XrAdvertiseAnchor"),
-            Self::XrSetLocalAnchor(_) => write!(f, "XrSetLocalAnchor"),
-            Self::XrSetLocalFloor(_) => write!(f, "XrSetLocalFloor"),
-            Self::XrDiscoverAnchor(_) => write!(f, "XrDiscoverAnchor"),
-        }
+        f.write_str(self.name())
     }
 }
 
@@ -1879,22 +1886,6 @@ impl Cx {
         1.0
     }
 
-    pub fn redraw_pass_and_parent_passes(&mut self, draw_pass_id: DrawPassId) {
-        let mut walk_pass_id = draw_pass_id;
-        loop {
-            if let Some(main_list_id) = self.passes[walk_pass_id].main_draw_list_id {
-                self.redraw_list_and_children(main_list_id);
-            }
-            match self.passes[walk_pass_id].parent.clone() {
-                CxDrawPassParent::DrawPass(next_pass_id) => {
-                    walk_pass_id = next_pass_id;
-                }
-                _ => {
-                    break;
-                }
-            }
-        }
-    }
 
     pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
         match self.passes[draw_pass_id].pass_rect {
@@ -2862,11 +2853,11 @@ impl Cx {
                         slot.result.data = result;
                         slot.receive = None;
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(crate::makepad_network::mpsc::TryRecvError::Disconnected) => {
                         slot.result.data = Err(ReadbackError::DeviceLost);
                         slot.receive = None;
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(crate::makepad_network::mpsc::TryRecvError::Empty) => {}
                 }
             }
             if !slot.pending && slot.receive.is_none() {

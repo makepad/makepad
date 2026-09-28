@@ -25,28 +25,61 @@ impl Cx {
         self.script_vm.is_none()
     }
 
+    // The `with_vm` family is generic over its closure and result, so each
+    // shell below only moves them through `Option` slots; the entry (holder
+    // guard, taking and parking the VM) runs in the shared `*_dyn` bodies.
+
     #[track_caller]
     pub fn with_vm_and_async<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
-            self.script_vm.is_some(),
-            std::panic::Location::caller(),
-        );
-        makepad_script_std::with_vm_and_async(self, f)
+        let caller = std::panic::Location::caller();
+        let mut f = Some(f);
+        let mut out = None;
+        self.with_vm_and_async_dyn(caller, &mut |vm| out = Some((f.take().unwrap())(vm)));
+        out.unwrap()
+    }
+
+    #[inline(never)]
+    fn with_vm_and_async_dyn(
+        &mut self,
+        caller: &'static std::panic::Location<'static>,
+        f: &mut dyn FnMut(&mut ScriptVm),
+    ) {
+        let _vm_guard =
+            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
+        makepad_script_std::vm::with_vm_and_async_dyn(self, f)
     }
 
     #[track_caller]
     pub fn with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
-            self.script_vm.is_some(),
-            std::panic::Location::caller(),
-        );
-        makepad_script_std::with_vm(self, f)
+        let caller = std::panic::Location::caller();
+        let mut f = Some(f);
+        let mut out = None;
+        self.with_vm_dyn(caller, &mut |vm| out = Some((f.take().unwrap())(vm)));
+        out.unwrap()
+    }
+
+    #[inline(never)]
+    fn with_vm_dyn(
+        &mut self,
+        caller: &'static std::panic::Location<'static>,
+        f: &mut dyn FnMut(&mut ScriptVm),
+    ) {
+        let _vm_guard =
+            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
+        makepad_script_std::vm::with_vm_dyn(self, false, f);
     }
 
     /// Like [`Cx::with_vm`], but returns `None` instead of panicking when the
     /// VM is already held (swapped off) by an enclosing `with_vm`/`eval`.
     pub fn try_with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> Option<R> {
-        makepad_script_std::try_with_vm(self, f)
+        let mut f = Some(f);
+        let mut out = None;
+        if !makepad_script_std::vm::with_vm_dyn(self, true, &mut |vm| {
+            out = Some((f.take().unwrap())(vm))
+        }) {
+            return None;
+        }
+        out
     }
 
     #[track_caller]
@@ -55,11 +88,25 @@ impl Cx {
         thread_id: ScriptThreadId,
         f: F,
     ) -> R {
-        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
-            self.script_vm.is_some(),
-            std::panic::Location::caller(),
-        );
-        makepad_script_std::with_vm_thread(self, thread_id, f)
+        let caller = std::panic::Location::caller();
+        let mut f = Some(f);
+        let mut out = None;
+        self.with_vm_thread_dyn(caller, thread_id, &mut |vm| {
+            out = Some((f.take().unwrap())(vm))
+        });
+        out.unwrap()
+    }
+
+    #[inline(never)]
+    fn with_vm_thread_dyn(
+        &mut self,
+        caller: &'static std::panic::Location<'static>,
+        thread_id: ScriptThreadId,
+        f: &mut dyn FnMut(&mut ScriptVm),
+    ) {
+        let _vm_guard =
+            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
+        makepad_script_std::vm::with_vm_thread_dyn(self, thread_id, f)
     }
 
     #[track_caller]

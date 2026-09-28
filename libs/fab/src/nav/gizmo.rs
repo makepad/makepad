@@ -20,8 +20,8 @@
 use crate::api::*;
 use crate::nav::orbit;
 use crate::nav::walk;
-use makepad_widgets::tip::TipAction;
-use makepad_widgets::*;
+use makepad_widgets_core::tip::TipAction;
+use makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.fab.*

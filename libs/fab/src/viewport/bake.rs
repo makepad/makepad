@@ -16,7 +16,7 @@
 
 use crate::api::*;
 use makepad_render::ao::AoSampler;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

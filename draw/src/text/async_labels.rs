@@ -12,15 +12,8 @@ use super::{
 };
 use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use crate::{makepad_platform::*, Cx2d, DrawText};
-use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    rc::Rc,
-    sync::{
-        mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc,
-    },
-};
+use crate::makepad_platform::makepad_network::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
 
 use crate::makepad_platform::thread::ui_hang::hashing::{HashMap, HashSet};
 
@@ -102,7 +95,6 @@ struct Worker {
 struct InstanceStorage {
     free: Vec<LabelDrawStorage>,
     job: Option<crate::makepad_platform::thread::TaskHandle<Vec<LabelDrawStorage>>>,
-    queue_full_reported: bool,
     /// When to try the storage again, on `makepad_platform::monotonic_seconds`.
     retry_at: Option<f64>,
 }
@@ -179,15 +171,6 @@ impl LabelCache {
         }
     }
 
-    /// Reserve known scene inventory once, outside incremental label emission.
-    pub fn reserve_inventory(&mut self, count: usize) {
-        self.texts.reserve(count.saturating_sub(self.texts.len()));
-        self.waiting
-            .reserve(count.saturating_sub(self.waiting.len()));
-        self.ready.reserve(count.saturating_sub(self.ready.len()));
-        self.unsent
-            .reserve(256usize.saturating_sub(self.unsent.len()));
-    }
 
     fn intern_text(&mut self, text: &str) -> LabelText {
         if let Some(last) = &self.last_text {
@@ -227,10 +210,6 @@ impl LabelCache {
             .filter_map(|pool| pool.retry_at)
             .reduce(f64::min)
     }
-    pub fn storage_blocked(&self) -> bool {
-        self.storage_retry_at()
-            .is_some_and(|at| at > makepad_platform::monotonic_seconds())
-    }
     fn poll_instance_storage(&mut self) {
         for pool in &mut self.instance_storage {
             if let Some(result) = pool.job.as_mut().and_then(|job| job.try_take()) {
@@ -249,60 +228,6 @@ impl LabelCache {
         }
     }
 
-    /// Unique CPU recording storage, prefaulted on Heavy workers. Each batch
-    /// is at most32 buffers and normally256KiB; long runs get one buffer.
-    /// The caller owns retirement of any replaced recording storage.
-    pub fn take_draw_storage(
-        &mut self,
-        cx: &mut Cx2d,
-        draw: &DrawText,
-        text: &str,
-    ) -> Option<LabelDrawStorage> {
-        self.poll_instance_storage();
-        let key = self.key(draw, cx.current_dpi_factor(), text);
-        let glyphs = self.ready.get(&key)?.glyphs.len();
-        let floats = glyphs.checked_mul(draw.draw_vars.as_slice().len())?.max(1).checked_next_power_of_two()?;
-        let pool = self.instance_storage.get_mut(floats.trailing_zeros() as usize)?;
-        let storage = pool.free.pop();
-        if pool.free.is_empty()
-            && pool.job.is_none()
-            && pool
-                .retry_at
-                .is_none_or(|at| at <= makepad_platform::monotonic_seconds())
-        {
-            use crate::makepad_platform::thread::Lane;
-            match cx.task_pool().reserve(Lane::Heavy) {
-                Ok(slot) => {
-                    pool.queue_full_reported = false;
-                    pool.retry_at=None;
-                    let mut free = std::mem::take(&mut pool.free);
-                    let recording_budget=cx.draw_lists.1.recordings.clone();
-                    pool.job = Some(slot.submit_internal_named("text.label-instance-storage", move || {
-                        let count = (65536 / floats).clamp(1, 32);
-                        free.reserve(count);
-                        for _ in 0..count {
-                            let mut buffer = RecordingBuffer::new(recording_budget.clone());
-                            buffer.resize(floats,1.0);
-                            if buffer.refused() { break; }
-                            std::hint::black_box(buffer.as_slice());
-                            buffer.clear();
-                            let recording=DrawListRecordingStorage::with_instance_capacity_in(2,256,&recording_budget);
-                            if recording.refused() {break;}
-                            free.push(LabelDrawStorage {instances:buffer,recording});
-                        }
-                        free
-                    }));
-                }
-                Err(error) if !pool.queue_full_reported => {
-                    pool.queue_full_reported = true;
-                    pool.retry_at=Some(makepad_platform::monotonic_seconds()+1.0);
-                    crate::log!("label instance storage queue unavailable; retrying: {error:?}");
-                }
-                Err(_) => {pool.retry_at=Some(makepad_platform::monotonic_seconds()+1.0);}
-            }
-        }
-        storage
-    }
 
     /// Drain replies and bind glyph images within 0.5ms. A partially admitted
     /// run remains pending; drawing never pays its first-use raster cost.

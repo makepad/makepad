@@ -1014,13 +1014,6 @@ impl RetainedInstances {
     pub fn readers(&self) -> usize {
         Arc::strong_count(&self.0)
     }
-    /// Bounded upload ranges, in float slots; never split an instance record.
-    pub fn upload_ranges(&self, max_bytes: usize) -> impl Iterator<Item = Range<usize>> + '_ {
-        let batch = (max_bytes / (self.slots() * 4)).max(1) * self.slots();
-        (0..self.float_len())
-            .step_by(batch)
-            .map(move |start| start..start.saturating_add(batch).min(self.float_len()))
-    }
 }
 
 /// Byte LRU for immutable publications. Pins and retained draw readers prevent

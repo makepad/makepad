@@ -1322,7 +1322,7 @@ pub enum ButtonAction {
 }
 
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
-#[derive(Script, Widget, Animator)]
+#[derive(Script, Widget, WidgetSet, Animator)]
 pub struct Button {
     #[uid]
     uid: WidgetUid,

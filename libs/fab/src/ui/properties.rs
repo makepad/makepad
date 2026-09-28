@@ -24,7 +24,8 @@ use crate::ui::dragnum::*;
 use crate::ui::texview::*;
 use crate::ui::widgets::{fold_panel_clicked, set_panel_chevron};
 use crate::model::PropertyValue;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
+use makepad_widgets_data::data_grid::*;
 
 script_mod! {
     use mod.prelude.fab.*

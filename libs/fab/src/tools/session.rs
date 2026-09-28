@@ -15,7 +15,7 @@
 
 use crate::api::*;
 use crate::model::units::LengthUnit;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::cell::RefCell;
 
 /// A measurement being placed: the committed points and the live preview.

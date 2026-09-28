@@ -2703,7 +2703,7 @@ impl BlendCache {
                 Some(sheet) => crate::desktop_style::install(vm, sheet),
                 None => crate::desktop_style::uninstall(vm),
             }
-            vm.with_reload(crate::script_mod);
+            vm.with_reload(crate::script_mod_as_registered);
             // Fifteen resolves are fifteen module rebuilds, each leaving the
             // last behind; collect once here rather than carry them all.
             vm.gc();
@@ -2934,7 +2934,9 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
             Some(sheet)
         }
     };
-    vm.with_reload(crate::script_mod);
+    // With the app's families: the heap this leaves behind is the one the
+    // app goes on running on.
+    vm.with_reload(crate::script_mod_as_registered);
     // `theme_mod` ends a reload by pointing `mod.theme` at whichever base the
     // Cx is set to, which is the app's choice and has nothing to do with the
     // theme being asked for here. So every base says which one it is outright

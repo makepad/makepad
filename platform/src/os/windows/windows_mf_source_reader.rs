@@ -10,6 +10,7 @@
 //! Playback controls (seek / mute / volume / rate / loop) and PCM audio via
 //! WASAPI are handled on this worker thread.
 
+use crate::makepad_network::mpsc::{self, Receiver, Sender};
 use {
     crate::{
         event::video_playback::VideoSource,
@@ -74,7 +75,6 @@ use {
         path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
-            mpsc::{self, Receiver, Sender},
             Arc, Mutex, OnceLock,
         },
         time::Instant,

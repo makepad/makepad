@@ -37,7 +37,7 @@ fn edit(document: &CodeDocument, change: Change) {
 fn editor() -> (Cx, CodeEditor) {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     let editor = cx.with_vm(|vm| {
-        makepad_widgets::script_mod(vm);
+        makepad_widgets_core::script_mod(vm);
         crate::script_mod(vm);
         vm.bx.captured_errors = Some(Vec::new());
         let value = script_eval!(vm, { use mod.widgets.* CodeEditor{} });

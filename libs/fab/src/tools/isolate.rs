@@ -10,7 +10,7 @@
 //!   local view, and how you read a storey in a Fab model)
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub fn hide_selected(cx: &mut Cx) {
     cx.action(ShellAction::HideSelected);

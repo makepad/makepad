@@ -54,10 +54,16 @@ impl<'a> ScriptVmCx for ScriptVm<'a> {
         self.host.as_any().downcast_ref().unwrap()
     }
     fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
-        with_vm_parked(self, |host| f(host.as_any().downcast_ref().unwrap()))
+        let mut f = Some(f);
+        let mut out = None;
+        with_vm_parked(self, &mut |cx| out = Some((f.take().unwrap())(&*cx)));
+        out.unwrap()
     }
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
-        with_vm_parked(self, |host| f(host.as_any_mut().downcast_mut().unwrap()))
+        let mut f = Some(f);
+        let mut out = None;
+        with_vm_parked(self, &mut |cx| out = Some((f.take().unwrap())(cx)));
+        out.unwrap()
     }
 }
 
@@ -67,19 +73,25 @@ impl<'a> ScriptVmCx for ScriptVm<'a> {
 /// above (a platform's event catcher, a host isolating a guest) must find
 /// this `ScriptVm` holding its base again, or the enclosing `with_vm`
 /// parks the placeholder instead of the VM.
-fn with_vm_parked<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut dyn ScriptHost) -> R) -> R {
+///
+/// Not generic: every `with_cx`/`with_cx_mut` call site shares this one body
+/// (the generic shells above only move the closure and its result through
+/// `Option` slots).
+#[inline(never)]
+fn with_vm_parked(vm: &mut ScriptVm, f: &mut dyn FnMut(&mut Cx)) {
     let saved_thread_id = vm.bx.threads.current();
     assert_vm_slot_free(vm.host.as_any().downcast_ref().unwrap());
     let bx = std::mem::replace(&mut vm.bx, Box::new(ScriptVmBase::empty()));
     *vm.host.script_vm_slot() = Some(bx);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *vm.host)));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f(vm.host.as_any_mut().downcast_mut().unwrap())
+    }));
     match (vm.host.script_vm_slot().take(), out) {
-        (Some(bx), Ok(out)) => {
+        (Some(bx), Ok(())) => {
             vm.bx = bx;
             vm.bx.threads.set_current(saved_thread_id);
-            out
         }
-        (None, Ok(_)) => {
+        (None, Ok(())) => {
             panic!("the closure took the script VM off Cx and never parked it back")
         }
         (bx, Err(payload)) => {

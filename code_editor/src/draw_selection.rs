@@ -1,4 +1,4 @@
-use crate::makepad_widgets::*;
+use crate::makepad_widgets_core::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

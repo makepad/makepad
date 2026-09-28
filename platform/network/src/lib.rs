@@ -6,6 +6,9 @@ pub mod digest;
 // The embedded TCP server is native-only; browsers cannot listen on sockets.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;
+// `recv_timeout` reads the std clock, as std's does (callers are linted).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod mpsc;
 // The blocking TCP websocket is native-only; wasm uses backend::web.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod plain_web_socket;

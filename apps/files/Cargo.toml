@@ -21,7 +21,7 @@ dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 demo = []
 # The standalone window and the local model. A host that links the MODULE
 # (makepad-app-wm) leaves this off and gets the lib only.
@@ -33,6 +33,7 @@ chat = ["dep:makepad-ai-hub"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-diskmap = { path = "../../libs/diskmap" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

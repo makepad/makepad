@@ -25,7 +25,7 @@ use crate::video_file::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use crate::makepad_network::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -186,8 +186,8 @@ pub(super) fn open_session() -> Result<NewSession, String> {
         return Err("a capture is already running; /cap/stop it first".into());
     }
     let session = (NEXT_SESSION.fetch_add(1, Ordering::Relaxed) & SESSION_MASK).max(1);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (tx, rx) = crate::makepad_network::mpsc::channel();
+    let (done_tx, done_rx) = crate::makepad_network::mpsc::channel();
     let counters = Arc::new(CaptureCounters::default());
     *link = Some(Link {
         session,

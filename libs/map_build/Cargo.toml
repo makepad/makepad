@@ -16,13 +16,14 @@ license = "MIT OR Apache-2.0"
 default = []
 # The face bake replays the renderer's own painter cascade, so it needs the
 # widget library. Everything else here is GUI-free; keep it that way.
-faces = ["dep:makepad-widgets"]
+faces = ["dep:makepad-widgets-core", "dep:makepad-widgets-maps"]
 
 [dependencies]
 brotli = "8.0"
 makepad-fast-inflate = { path = "../fast_inflate" }
 makepad-map-nav = { path = "../map_nav" }
 makepad-mbtile-reader = { path = "../mbtile_reader" }
-makepad-widgets = { path = "../../widgets", optional = true, default-features = false, features = ["maps"] }
+makepad-widgets-core = { path = "../../widgets/core", optional = true }
+makepad-widgets-maps = { path = "../../widgets/families/maps", optional = true }
 makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
 smallvec = { path = "../smallvec" }

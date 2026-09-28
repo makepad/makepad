@@ -13,7 +13,7 @@
 //! * `ByElement` — every element moves away from the model centre.
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Storeys in elevation order (lowest first).
 pub fn story_order(scene: &Scene) -> Vec<usize> {

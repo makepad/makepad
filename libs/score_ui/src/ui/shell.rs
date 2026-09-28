@@ -13,7 +13,7 @@ use crate::{
     state::{transport_label, ScoreAppState},
     ProductMode,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 
 script_mod! {

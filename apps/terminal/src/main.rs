@@ -258,6 +258,8 @@ impl App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         makepad_app_terminal::widget::script_mod(vm);

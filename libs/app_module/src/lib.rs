@@ -31,13 +31,13 @@
 //! what makes one module run in every host, the web included.
 
 pub use makepad_ai_services;
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 use makepad_ai_services::wire::{Message, ServiceCall, ServiceManifest, ToolResult};
 use makepad_strict_json as json;
-use makepad_widgets::makepad_platform::storage::StorageHandle;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_platform::storage::StorageHandle;
+use makepad_widgets_core::makepad_platform::thread::SignalToUI;
+use makepad_widgets_core::*;
 use std::fmt;
 use std::sync::mpsc::{channel, Receiver, Sender};
 

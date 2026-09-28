@@ -283,6 +283,28 @@ pub struct SnapshotPart {
     pub enabled: bool,
 }
 
+/// The width part of the default [`Widget::measure_width`], compiled once
+/// instead of once per widget type.
+#[inline(never)]
+fn measure_width_from_walk(
+    over: Option<&crate::width_override::WidthOverride>,
+    walk: &Walk,
+) -> Option<f64> {
+    let width = over.and_then(|o| o.width).unwrap_or(walk.width);
+    let margin = over.and_then(|o| o.margin).unwrap_or(walk.margin);
+    if let Size::Fixed(w) = width {
+        return Some(w + margin.width());
+    }
+    // A Fill takes what the others leave, so what it adds to the row's own
+    // width is its minimum -- nothing, for a plain spacer. Answering None
+    // here would make a row with a spacer in it unpriceable, which is most
+    // rows.
+    if let Size::Fill { min, .. } = width {
+        return Some(min.unwrap_or(0.0) + margin.width());
+    }
+    None
+}
+
 pub trait Widget: WidgetNode {
     /// The OUTER width this widget would take if it were drawn now with `over`
     /// in force, its margin included -- or `None` when it cannot say without
@@ -312,19 +334,7 @@ pub trait Widget: WidgetNode {
             return Some(0.0);
         }
         let walk = self.walk(cx.cx);
-        let width = over.and_then(|o| o.width).unwrap_or(walk.width);
-        let margin = over.and_then(|o| o.margin).unwrap_or(walk.margin);
-        if let Size::Fixed(w) = width {
-            return Some(w + margin.width());
-        }
-        // A Fill takes what the others leave, so what it adds to the row's own
-        // width is its minimum -- nothing, for a plain spacer. Answering None
-        // here would make a row with a spacer in it unpriceable, which is most
-        // rows.
-        if let Size::Fill { min, .. } = width {
-            return Some(min.unwrap_or(0.0) + margin.width());
-        }
-        None
+        measure_width_from_walk(over, &walk)
     }
     /// Visit the current active children and report whether this widget can own
     /// cancel input. Return false without visiting when inactive. Override this
@@ -1559,60 +1569,74 @@ impl WidgetRef {
         }
     }
 
+    // `borrow`/`borrow_mut`/`cast_inner*` are called with ~160 widget types;
+    // the RefCell borrow and the type check run in the non-generic
+    // `*_dyn` bodies, the generic shells only cast the pointer.
+
+    #[inline(never)]
+    fn borrow_mut_dyn(&self, type_id: TypeId) -> Option<std::cell::RefMut<'_, dyn Widget + 'static>> {
+        std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| match inner.as_mut() {
+            Some(inner) if inner.widget.ref_cast_type_id() == type_id => Some(&mut *inner.widget),
+            _ => None,
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn borrow_dyn(&self, type_id: TypeId) -> Option<std::cell::Ref<'_, dyn Widget + 'static>> {
+        std::cell::Ref::filter_map(self.0.borrow(), |inner| match inner.as_ref() {
+            Some(inner) if inner.widget.ref_cast_type_id() == type_id => Some(&*inner.widget),
+            _ => None,
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn cast_inner_mut_dyn(&self, type_id: TypeId) -> Option<std::cell::RefMut<'_, dyn Any + 'static>> {
+        std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
+            inner.as_mut().and_then(|inner| inner.widget.cast_inner_any_mut(type_id))
+        })
+        .ok()
+    }
+
+    #[inline(never)]
+    fn cast_inner_dyn(&self, type_id: TypeId) -> Option<std::cell::Ref<'_, dyn Any + 'static>> {
+        std::cell::Ref::filter_map(self.0.borrow(), |inner| {
+            inner.as_ref().and_then(|inner| inner.widget.cast_inner_any(type_id))
+        })
+        .ok()
+    }
+
     pub fn borrow_mut<T: 'static + Widget>(&self) -> Option<std::cell::RefMut<'_, T>> {
-        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
-            if let Some(inner) = inner.as_mut() {
-                inner.widget.downcast_mut::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        let widget = self.borrow_mut_dyn(TypeId::of::<T>())?;
+        // SAFETY: `borrow_mut_dyn` checked the concrete type is `T`, as
+        // `<dyn Widget>::downcast_mut` does.
+        Some(std::cell::RefMut::map(widget, |w| unsafe {
+            &mut *(w as *mut dyn Widget as *mut T)
+        }))
     }
 
     pub fn cast_inner_mut<T: 'static>(&self) -> Option<std::cell::RefMut<'_, T>> {
-        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
-            if let Some(inner) = inner.as_mut() {
-                inner.widget.cast_inner_mut::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        std::cell::RefMut::filter_map(self.cast_inner_mut_dyn(TypeId::of::<T>())?, |inner| {
+            inner.downcast_mut::<T>()
+        })
+        .ok()
     }
 
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T>> {
-        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
-            if let Some(inner) = inner.as_ref() {
-                inner.widget.downcast_ref::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        let widget = self.borrow_dyn(TypeId::of::<T>())?;
+        // SAFETY: `borrow_dyn` checked the concrete type is `T`, as
+        // `<dyn Widget>::downcast_ref` does.
+        Some(std::cell::Ref::map(widget, |w| unsafe {
+            &*(w as *const dyn Widget as *const T)
+        }))
     }
 
     pub fn cast_inner<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
-        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
-            if let Some(inner) = inner.as_ref() {
-                inner.widget.cast_inner::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
+        std::cell::Ref::filter_map(self.cast_inner_dyn(TypeId::of::<T>())?, |inner| {
+            inner.downcast_ref::<T>()
+        })
+        .ok()
     }
 
     fn script_apply(
@@ -2211,6 +2235,23 @@ pub trait WidgetRegister {
     fn register_widget(vm: &mut ScriptVm) -> ScriptValue;
 }
 
+/// The body of [`register_widget!`], compiled once instead of per widget.
+#[doc(hidden)]
+#[inline(never)]
+pub fn register_widget_factory(
+    cx: &mut Cx,
+    type_id: TypeId,
+    type_name: &str,
+    factory: Box<dyn WidgetFactory>,
+) {
+    crate::widget_async::ensure_widget_async_hooks_registered(cx);
+    let name = LiveId::from_str_with_lut(type_name).unwrap();
+    cx.components
+        .get_or_create::<WidgetRegistry>()
+        .map
+        .insert(type_id, (ComponentInfo { name }, factory));
+}
+
 #[macro_export]
 macro_rules! register_widget {
     ( $ cx: expr, $ ty: ty) => {{
@@ -2221,18 +2262,12 @@ macro_rules! register_widget {
             }
         }
 
-        let cx = $cx;
-        $crate::widget_async::ensure_widget_async_hooks_registered(cx);
-        let type_id = std::any::TypeId::of::<$ty>();
-        let name = $crate::LiveId::from_str_with_lut(stringify!($ty)).unwrap();
-
-        cx.components
-            .get_or_create::<$crate::WidgetRegistry>()
-            .map
-            .insert(
-                type_id,
-                ($crate::ComponentInfo { name }, Box::new(Factory())),
-            );
+        $crate::widget::register_widget_factory(
+            $cx,
+            std::any::TypeId::of::<$ty>(),
+            stringify!($ty),
+            Box::new(Factory()),
+        );
     }};
 }
 

@@ -2,7 +2,6 @@ use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::native::*;
-use crate::object::*;
 use crate::value::*;
 use crate::*;
 
@@ -331,35 +330,6 @@ impl ScriptArrayStorage {
             Self::U32(v) => v.push(value.as_f64().unwrap_or(0.0) as u32),
             Self::U16(v) => v.push(value.as_f64().unwrap_or(0.0) as u16),
             Self::U8(v) => v.push(value.as_f64().unwrap_or(0.0) as u8),
-        }
-    }
-    pub fn push_vec(&mut self, vec: &[ScriptVecValue]) {
-        match self {
-            Self::ScriptValue(v) => {
-                for a in vec {
-                    v.push_back(a.value)
-                }
-            }
-            Self::F32(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as f32)
-                }
-            }
-            Self::U32(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u32)
-                }
-            }
-            Self::U16(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u16)
-                }
-            }
-            Self::U8(v) => {
-                for a in vec {
-                    v.push(a.value.as_f64().unwrap_or(0.0) as u8)
-                }
-            }
         }
     }
     pub fn pop(&mut self) -> Option<ScriptValue> {

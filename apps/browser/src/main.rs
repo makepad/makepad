@@ -632,6 +632,8 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         // The family theme bridge retints the stock widgets from the WM
         // theme; the chrome roles go into mod.browser_theme.

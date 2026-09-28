@@ -9260,7 +9260,7 @@ mod theme_builder_tests {
     /// row in the band, with the bar that state's words answer to. Read off
     /// the widget's own text, so the test follows the widget when it moves.
     fn wheel_band_states() -> Vec<(&'static str, String, String, String, f64)> {
-        let source = include_str!("../../../core/src/wheel_picker.rs");
+        let source = include_str!("../../pickers/src/wheel_picker.rs");
         let well = |property: &str| template_token(source, Some("draw_bg +: {"), property);
         let band = |property: &str| template_token(source, None, property);
         let ink = template_token(source, None, "color_selected");

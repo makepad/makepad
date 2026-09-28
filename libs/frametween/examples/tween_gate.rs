@@ -21,7 +21,7 @@
 //! Exit status is the verdict: 0 = every tier behaved, 1 = one did not.
 //! `FRAMETWEEN_GATE_PNG=<dir>` also dumps what each tier drew.
 
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 use makepad_frametween::selftest::{
     gate_pair, read_block_bgra, BlockReading, BLOCK_B_X, BLOCK_MID_X, GATE_H, GATE_W,
@@ -30,7 +30,7 @@ use makepad_frametween::{
     ai2_frame_plan, default_model_path, rife_proxy_dims, Ai2Pair, FlowTweenView, Mode, RifeJob,
     RifeProduct, RifeProductKind, RifeService, RifeSource,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::sync::Arc;
 
 app_main!(App);
@@ -331,7 +331,7 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_widgets_core::script_mod(vm);
         makepad_frametween::script_mod(vm);
         self::script_mod(vm)
     }

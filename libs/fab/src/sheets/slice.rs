@@ -32,7 +32,7 @@
 //! ```
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Grid steps per metre: 0.1 mm. A 60 m villa is 600 000 steps across, so
 /// every coordinate and every cross product fits an `i64` with room to spare.

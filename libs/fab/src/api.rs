@@ -21,7 +21,7 @@
 //!   Screen/window coordinates are layout points, y down (`Rect`, `DVec2`).
 //!   NDC is x right, y up, both −1..1.
 
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 

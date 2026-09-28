@@ -1,5 +1,5 @@
 use crate::{ProductMode, ScoreAction, ScoreTool};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Stable, discoverable product keymap. Bare note-entry keys are active only
 /// in editor mode; global transport/navigation remains useful in pianist mode.

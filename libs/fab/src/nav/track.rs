@@ -7,7 +7,7 @@
 
 use crate::api::*;
 use crate::nav::orbit::WORLD_UP;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Sample `track` at time `t` with C2 interpolation between keys.
 pub fn sample_c2(track: &CameraTrack, t: f32) -> Option<CameraKey> {

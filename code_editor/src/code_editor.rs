@@ -5,7 +5,7 @@ use {
         draw_selection::DrawSelection,
         history::NewGroup,
         layout::{BlockElement, WrappedElement},
-        makepad_widgets::*,
+        makepad_widgets_core::*,
         selection::Affinity,
         session::{CodeSession, SelectionMode},
         settings::Settings,

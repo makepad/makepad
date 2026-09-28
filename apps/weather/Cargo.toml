@@ -24,7 +24,7 @@ dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-app-wm) leaves this off and gets the lib only.
 standalone = ["dep:makepad-app-aichat", "dep:makepad-wm-api"]
@@ -35,6 +35,7 @@ localai = ["makepad-app-aichat?/localai"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the forecast's one tool.
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }

@@ -316,6 +316,11 @@ impl ScriptNative {
         self.calls[ty_redux.to_index()] = Some(Box::new(f));
     }
 
+    /// The methods registered on a value type (`set_type_method`), by name.
+    pub fn type_methods(&self, ty_redux: ScriptTypeRedux) -> Option<&LiveIdMap<LiveId, ScriptObject>> {
+        self.type_table.get(ty_redux.to_index())
+    }
+
     /// Ensures capacity for type tables - non-generic to reduce monomorphization
     #[inline(never)]
     fn ensure_type_table_capacity(&mut self, ty_redux: ScriptTypeRedux) {

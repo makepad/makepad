@@ -6,23 +6,17 @@ use std::str;
 use makepad_live_id::LiveId;
 use makepad_micro_serde::{DeJson, DeJsonErr, SerJson};
 
-#[cfg(feature = "script")]
-use makepad_script::*;
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WebSocketTransport {
-    #[cfg_attr(feature = "script", pick)]
     #[default]
     Auto,
     PlainTcp,
     Platform,
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum HttpMethod {
-    #[cfg_attr(feature = "script", pick)]
     #[default]
     GET,
     HEAD,
@@ -55,28 +49,18 @@ impl HttpMethod {
     }
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
-    #[cfg_attr(feature = "script", live)]
     pub metadata_id: LiveId,
-    #[cfg_attr(feature = "script", live)]
     pub url: String,
-    #[cfg_attr(feature = "script", live)]
     pub method: HttpMethod,
-    #[cfg_attr(feature = "script", live)]
     pub headers: BTreeMap<String, Vec<String>>,
-    #[cfg_attr(feature = "script", live)]
     pub ignore_ssl_cert: bool,
-    #[cfg_attr(feature = "script", live)]
     pub is_streaming: bool,
     /// Hard allocation cap enforced by the backend while bytes arrive.
     /// Existing callers default to `u64::MAX`; bounded clients set it lower.
-    #[cfg_attr(feature = "script", live)]
     pub max_response_body_bytes: u64,
-    #[cfg_attr(feature = "script", live)]
     pub body: Option<Vec<u8>>,
-    #[cfg_attr(feature = "script", live)]
     pub websocket_transport: WebSocketTransport,
 }
 
@@ -188,16 +172,11 @@ pub struct SplitUrl<'a> {
     pub hash: &'a str,
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
-    #[cfg_attr(feature = "script", live)]
     pub metadata_id: LiveId,
-    #[cfg_attr(feature = "script", live)]
     pub status_code: u16,
-    #[cfg_attr(feature = "script", live)]
     pub headers: BTreeMap<String, Vec<String>>,
-    #[cfg_attr(feature = "script", live)]
     pub body: Option<Arc<[u8]>>,
 }
 
@@ -288,21 +267,15 @@ fn parse_headers(header_string: String) -> BTreeMap<String, Vec<String>> {
     headers
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpError {
-    #[cfg_attr(feature = "script", live)]
     pub message: String,
-    #[cfg_attr(feature = "script", live)]
     pub metadata_id: LiveId,
 }
 
-#[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpProgress {
-    #[cfg_attr(feature = "script", live)]
     pub loaded: u64,
-    #[cfg_attr(feature = "script", live)]
     pub total: u64,
 }
 

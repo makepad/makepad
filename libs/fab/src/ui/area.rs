@@ -15,7 +15,7 @@
 
 use crate::ui::dropdown::*;
 use crate::ui::popover::{open_menu, ui_actions, FabUiAction, MenuIcon, MenuItem, MenuPlace};
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 pub fn area_owner(slot: usize) -> LiveId {
     LiveId(0x6269_6d78_0001_0000 | slot as u64)

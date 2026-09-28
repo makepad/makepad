@@ -4,9 +4,10 @@ use crate::file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialo
 use crate::thread::SignalToUI;
 use std::any::TypeId;
 use std::fmt;
+use crate::makepad_network::mpsc::Sender;
 use std::fmt::Debug;
 
-use std::sync::{mpsc::Sender, Mutex};
+use std::sync::{Mutex};
 
 pub(crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<ActionSend>>> = Mutex::new(None);
 

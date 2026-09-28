@@ -1,7 +1,7 @@
 //! Canvas input follows the established flow-ui face-host coordinate contract.
 use crate::presentation::Camera;
-use makepad_widgets::makepad_platform::event::TweakRayEvent;
-use makepad_widgets::*;
+use makepad_widgets_core::makepad_platform::event::TweakRayEvent;
+use makepad_widgets_core::*;
 use std::cell::RefCell;
 
 /// A pointer event with its positions mapped through the inverse camera, for
@@ -126,7 +126,7 @@ pub fn sync_handled(original: &Event, remapped: &Event, camera: &Camera) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::makepad_platform::event::{
+    use makepad_widgets_core::makepad_platform::event::{
         ScrollEvent, ScrollPhase, TouchPoint, TouchState, TouchUpdateEvent,
     };
     use std::cell::Cell;
@@ -144,10 +144,10 @@ mod tests {
 
     fn claimed_areas() -> (Area, Area) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let list = makepad_widgets::makepad_platform::DrawList::new(&mut cx);
+        let list = makepad_widgets_core::makepad_platform::DrawList::new(&mut cx);
         // Only equality/propagation is tested; no GPU or hit-testing is needed.
         let area = |rect_id| {
-            Area::Rect(makepad_widgets::makepad_platform::RectArea {
+            Area::Rect(makepad_widgets_core::makepad_platform::RectArea {
                 draw_list_id: list.id(),
                 rect_id,
                 redraw_id: 1,

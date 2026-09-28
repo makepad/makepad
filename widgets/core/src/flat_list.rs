@@ -33,7 +33,7 @@ pub struct WidgetItem {
     pub template: LiveId,
 }
 
-#[derive(Script, Widget)]
+#[derive(Script, Widget, WidgetSet)]
 pub struct FlatList {
     #[uid]
     uid: WidgetUid,

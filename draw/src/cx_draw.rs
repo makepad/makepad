@@ -1,6 +1,5 @@
 use {
     crate::{
-        draw_list_2d::DrawList2d,
         makepad_math::{dvec2, Vec2d},
         makepad_platform::{
             Area, Cx, CxDrawPassParent, CxDrawPassRect, DrawEvent, DrawListId, DrawPass,
@@ -282,10 +281,6 @@ impl<'a> CxDraw<'a> {
         self.cx.passes[self.pass_stack.last().unwrap().pass_id].zbias_step
     }
 
-    pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {
-        let dl = &mut self.cx.draw_lists[*self.draw_list_stack.last().unwrap()];
-        dl.append_sub_list(self.cx.redraw_id, draw_list_2d.id());
-    }
 
     /*pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;

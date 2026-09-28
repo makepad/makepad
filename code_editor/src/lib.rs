@@ -1,5 +1,5 @@
-pub use makepad_widgets;
-use makepad_widgets::*;
+pub use makepad_widgets_core;
+use makepad_widgets_core::*;
 
 pub mod char;
 pub mod code_editor;

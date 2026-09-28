@@ -19,10 +19,10 @@
 //! deeper. The layout itself is pure arithmetic and runs inline, throttled
 //! while a scan is still feeding it.
 
-use makepad_widgets::makepad_platform::thread::{
+use makepad_widgets_core::makepad_platform::thread::{
     Lane, PoolOptions, SignalToUI, TaskPool, ThreadOptions,
 };
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 use std::{
     collections::HashMap,

@@ -1,6 +1,6 @@
 use crate::{
     code_editor::{CodeEditorAction, KeepCursorInView}, decoration::DecorationSet, history::NewGroup,
-    makepad_widgets::*, selection::Affinity, session::SelectionMode, text::Position, CodeDocument,
+    makepad_widgets_core::*, selection::Affinity, session::SelectionMode, text::Position, CodeDocument,
     CodeEditor, CodeSession,
 };
 

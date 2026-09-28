@@ -8,7 +8,7 @@ use crate::{
 use makepad_score::model::Score;
 use makepad_score_render as render;
 use makepad_score_render::MakepadScoreRenderer;
-use makepad_widgets::{
+use makepad_widgets_core::{
     scroll_bar::{ScrollAxis, ScrollBarAction},
     *,
 };

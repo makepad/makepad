@@ -1,10 +1,11 @@
 #![allow(non_upper_case_globals)]
 use makepad_jni_sys as jni_sys;
+use crate::makepad_network::mpsc;
 use {
     super::{amidi_sys::*, android_jni::attach_jni_env},
     crate::{makepad_live_id::*, midi::*, thread::SignalToUI},
     jni_sys::jobject,
-    std::sync::{mpsc, Arc, Mutex},
+    std::sync::{Arc, Mutex},
 };
 
 // WARNING.. AMidi has inputs and outputs naming reversed,

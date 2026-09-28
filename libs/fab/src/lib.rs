@@ -5,7 +5,7 @@
 //! panel. Applications only compose this shell with one or more format
 //! loaders implementing [`model::Loader`].
 
-pub use makepad_widgets;
+pub use makepad_widgets_core;
 
 pub mod arch;
 pub mod api;
@@ -27,7 +27,7 @@ pub use document::{Document, DocumentBuilder, Edit};
 pub use loader::LoadCoordinator;
 pub use model::{DocumentProvider, Loader, SceneProvider};
 
-use makepad_widgets::ScriptVm;
+use makepad_widgets_core::ScriptVm;
 
 /// Register every framework widget and shader in dependency order.
 pub fn script_mod(vm: &mut ScriptVm) {

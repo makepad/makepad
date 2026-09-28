@@ -1,4 +1,4 @@
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 
 /// The ordinary width used by automatic placement and new-card previews.

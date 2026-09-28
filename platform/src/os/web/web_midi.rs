@@ -1,3 +1,4 @@
+use crate::makepad_network::mpsc::{self, TryRecvError};
 use {
     self::super::{
         from_wasm::{FromWasmQueryMidiPorts, FromWasmSendMidiOutput, FromWasmUseMidiInputs},
@@ -7,7 +8,7 @@ use {
         makepad_live_id::*, makepad_wasm_bridge::FromWasmMsg, midi::*, os::web::CxOs,
         thread::SignalToUI,
     },
-    std::sync::{mpsc, mpsc::TryRecvError, Arc, Mutex},
+    std::sync::{Arc, Mutex},
 };
 
 pub struct OsMidiOutput {

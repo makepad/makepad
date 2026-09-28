@@ -1,0 +1,13 @@
+[package]
+name = "makepad-widgets-editors"
+version = "2.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad widgets: The ease-curve editor, the sequencer timeline, and the 3D gizmo and view cube"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-widgets-core = { path = "../../core", version = "2.0.0" }
+makepad-gizmo = { path = "../../../libs/gizmo", version = "0.1.0" }

@@ -57,7 +57,7 @@ path = "src/main.rs"
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["makepad-app-wm/tweaker"]
 
 [dependencies]
 # Without the window manager's defaults: the design overlay is this app's

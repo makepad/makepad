@@ -15,7 +15,7 @@ name = "makepad_wm_api"
 path = "src/lib.rs"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-widgets-core = { path = "../../widgets/core" }
 
 # The registry turns a viewer's app id into its binary for the standalone
 # sibling spawn (wasm has no processes to spawn).

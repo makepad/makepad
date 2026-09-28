@@ -14,11 +14,12 @@ default-run = "makepad-app-fab"
 default = ["tweaker", "gltf"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
-tweaker = ["makepad-widgets/tweaker"]
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 gltf = ["dep:makepad-fab-loader-gltf"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["data", "dock", "fab"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
 makepad-fab-shell = { path = "../../libs/fab", version = "0.1.0" }
 makepad-fab-loader-gltf = { path = "loaders/gltf", version = "0.1.0", optional = true }
 makepad-video = { package = "makepad-platform-video", path = "../../platform/video", version = "1.0.0" }

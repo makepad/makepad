@@ -4,9 +4,9 @@ use crate::{
     os::shared_framebuf::{aux_chan, ExportedHostSwapchain, SharedSwapchain},
     thread::{to_ui_bounded, TaskHandle, ThreadOptions, ThreadSpawner, ToUIReceiver},
 };
+use crate::makepad_network::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::{
     num::NonZeroUsize,
-    sync::mpsc::{sync_channel, SyncSender, TrySendError},
 };
 
 pub struct SentSwapchain {

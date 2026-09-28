@@ -33,7 +33,7 @@ pub mod snap;
 pub mod sun_study;
 
 use crate::api::*;
-use makepad_widgets::*;
+use makepad_widgets_core::*;
 
 /// Pointer travel (points) beyond which a click becomes a drag.
 const DRAG_SLOP: f64 = 4.0;
