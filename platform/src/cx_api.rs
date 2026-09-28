@@ -373,6 +373,7 @@ pub enum CxOsOp {
     },
     HideClipboardActions,
     CopyToClipboard(String),
+    ShareText(String),
     SetPrimarySelection(String),
     ShowSelectionHandles {
         start: Vec2d,
@@ -543,6 +544,7 @@ impl CxOsOp {
             Self::ShowClipboardActions { .. } => "ShowClipboardActions",
             Self::HideClipboardActions => "HideClipboardActions",
             Self::CopyToClipboard(..) => "CopyToClipboard",
+            Self::ShareText(..) => "ShareText",
             Self::SetPrimarySelection(..) => "SetPrimarySelection",
             Self::ShowSelectionHandles { .. } => "ShowSelectionHandles",
             Self::UpdateSelectionHandles { .. } => "UpdateSelectionHandles",
@@ -1615,6 +1617,13 @@ impl Cx {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::CopyToClipboard(content.to_owned()));
+    }
+
+    /// Open the OS share sheet (Android `ACTION_SEND` chooser) with `content`.
+    /// No-op on platforms whose backend doesn't handle `CxOsOp::ShareText`.
+    pub fn share_text(&mut self, content: &str) {
+        self.platform_ops
+            .push_back(CxOsOp::ShareText(content.to_owned()));
     }
 
     /// Sets the primary selection (Linux middle-click paste).
