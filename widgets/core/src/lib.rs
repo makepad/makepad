@@ -11,8 +11,14 @@ pub use makepad_script::{ScriptValue, ScriptVm};
 pub use makepad_draw::makepad_zune_jpeg;
 pub use makepad_draw::makepad_zune_png;
 
+pub use makepad_tween;
+
 // Core modules (used internally first)
 pub mod animator;
+pub mod tween;
+pub mod tween_inspect;
+pub mod tween_inspector;
+pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
 pub mod app_icon;
@@ -20,6 +26,8 @@ pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
+pub mod conceding_row;
+pub mod width_override;
 pub mod widget;
 pub mod widget_async;
 pub mod splash_host;
@@ -90,7 +98,12 @@ pub mod drop_toggles;
 pub mod overlay_place;
 pub mod tip;
 pub mod popover;
+pub mod overlay_layers;
 pub mod value_input;
+pub mod ease_editor;
+pub mod curve_editor;
+pub mod sequencer;
+pub mod diagonal_text;
 pub mod fab_controls;
 pub mod menu_bar;
 
@@ -113,6 +126,9 @@ pub mod rating;
 pub mod tag_field;
 pub mod radio_group;
 pub mod kbd;
+pub mod hotkeys;
+pub mod hotkey_editor;
+pub mod keyboard_map;
 pub mod typography;
 pub mod list_item;
 pub mod item_selection;
@@ -140,6 +156,7 @@ pub mod svg_select;
 pub mod scroll_marks;
 pub mod scroll_fade;
 pub mod tour;
+pub mod gizmo;
 pub mod wheel_picker;
 pub mod portal_list;
 pub mod reorder_list;
@@ -228,6 +245,7 @@ pub use crate::{
     drop_toggles::*,
     overlay_place::*,
     popover::*,
+    overlay_layers::*,
     expandable_panel::*,
     flat_list::*,
 
@@ -261,6 +279,13 @@ pub use crate::{
     tag_field::*,
     radio_group::*,
     kbd::*,
+    hotkeys::*,
+    hotkey_editor::*,
+    keyboard_map::*,
+    diagonal_text::*,
+    ease_editor::*,
+    curve_editor::*,
+    sequencer::*,
     list_item::*,
     avatar::*,
     card::*,
@@ -419,13 +444,94 @@ pub fn base_theme(cx: &mut Cx) -> BaseTheme {
     cx.global::<BaseThemeChoice>().0
 }
 
+/// The blend `theme_mod` emits over the base theme, whole, as the script that
+/// makes it current. `None` is the ordinary case: no mix, and `theme_mod` ends
+/// on the base theme exactly as it did before there was a mix.
+///
+/// On the Cx and not in the module, for the same reason the base theme is: a
+/// module run is what would otherwise lose it. Evaluating a blend once into
+/// `mod.theme` moves the library's own theme and nothing an APP built off it,
+/// because an app's templates bake `theme.color_x` into a literal when the
+/// app's own module block runs, and only re-running THAT rebuilds them -- which
+/// is `cx.request_style_reload()`, which is a module run, which would throw the
+/// blend away again. Held here it survives, and the reload that makes an app
+/// wear the mix is the same reload that re-emits it.
+#[derive(Default)]
+struct ThemeMixChoice(Option<String>);
+
+/// The name a blend is evaluated under: the theme lab's equalized mix.
+pub const THEME_MIX_NAME: &str = "equalized";
+
+/// The blend in force, if any: the script `theme_mod` re-emits on every run.
+pub fn theme_mix(cx: &mut Cx) -> Option<String> {
+    cx.global::<ThemeMixChoice>().0.clone()
+}
+
+/// Put a blend in force, or take the standing one off with `None`.
+///
+/// Read by `theme_mod`, so like `set_base_theme` it takes effect on the next
+/// module run and no sooner: a caller follows it with
+/// `cx.request_style_reload()`. That is not a detail of this call -- it is the
+/// whole point of it. See the theme lab's `ThemeLab::apply`.
+pub fn set_theme_mix(cx: &mut Cx, code: Option<String>) {
+    cx.global::<ThemeMixChoice>().0 = code;
+}
+
+/// A person's own edits to the theme in force, token by token, as the text
+/// each was set to. Re-emitted on every module run, after the base theme,
+/// the sheet and the mix, so an edit outlives the rebuild that used to
+/// forget it: the heap held the value, and the next reload put the theme
+/// file's own back.
+#[derive(Default)]
+struct ThemeEdits(std::collections::BTreeMap<String, String>);
+
+/// The edits standing over the theme, in token order.
+pub fn theme_edits(cx: &mut Cx) -> Vec<(String, String)> {
+    cx.global::<ThemeEdits>().0.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// Put one edit in force, or take it off with `None`. Like the mix it is
+/// read on the next module run: a caller follows it with
+/// `cx.request_style_reload()`, behind whatever settle its gesture wants.
+pub fn set_theme_edit(cx: &mut Cx, name: &str, text: Option<String>) {
+    let edits = &mut cx.global::<ThemeEdits>().0;
+    match text {
+        Some(text) => {
+            edits.insert(name.to_string(), text);
+        }
+        None => {
+            edits.remove(name);
+        }
+    }
+}
+
+/// Every edit off. Picking a theme does this: the edits were made to the
+/// theme that was up, and would otherwise pin its values over the next.
+pub fn clear_theme_edits(cx: &mut Cx) {
+    cx.global::<ThemeEdits>().0.clear();
+}
+
 /// Choose the base theme. It is read by `theme_mod`, so it takes effect on the
 /// next `script_mod` run and no sooner: a caller switching a running app
 /// follows this with `cx.request_style_reload()`, which re-runs `script_mod`
 /// and then re-applies the tree with `Apply::ScriptReapply` (typed text and
 /// running animations survive, which `Apply::Reload` would not).
+///
+/// A standing mix comes off. Picking a theme is somebody saying which theme
+/// the app should be wearing, and a mix stands over the whole app rather than
+/// over the panel that made it -- so the pick wins. Without this the blend
+/// `theme_mod` re-emits on every run would go straight back over the top of
+/// the theme just chosen, and a picker that had worked for years would sit
+/// there doing nothing for as long as a mix was up.
+///
+/// The lab notices it has been stood down and opens again on the theme now in
+/// force; see the theme lab's `ThemeLab::apply`. The one caller that must
+/// not be caught by this is the lab's own install, which sets no base theme --
+/// it writes the blend and asks for the reload, and nothing else.
 pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
     cx.global::<BaseThemeChoice>().0 = theme;
+    set_theme_mix(cx, None);
+    clear_theme_edits(cx);
 }
 
 /// The `widgets/` directory: the front crate `makepad-widgets`, whose
@@ -466,9 +572,39 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
     crate::animator::script_mod(vm);
+    // `mod.tween` (GSAP-style tweens from script), once per VM.
+    crate::tween_script::script_mod(vm);
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
+    // A person's edit to a GLOBAL -- `space_factor`, `font_size_base` --
+    // builds the base theme again from its own source with that literal in
+    // place, so every rung derived from it moves. Under the base's own name:
+    // the `mod.theme` below and a sheet's first line both point at it by
+    // name. The edits go on again later as pins, in `widgets_mod`; for a
+    // global that is nothing, and for one a base's file does not spell out
+    // it is the only way the value lands at all.
+    let globals: Vec<(String, crate::theme_tokens::TokenValue)> = theme_edits(vm.cx_mut())
+        .into_iter()
+        .filter(|(name, _)| crate::theme_tokens::is_global_key(name))
+        .map(|(name, text)| (name, crate::theme_tokens::TokenValue::Raw(text)))
+        .collect();
+    if !globals.is_empty() {
+        let scheme = match base_theme(vm.cx_mut()) {
+            BaseTheme::Dark => crate::theme_tokens::Scheme::Dark,
+            BaseTheme::Light => crate::theme_tokens::Scheme::Light,
+            BaseTheme::Skeleton => crate::theme_tokens::Scheme::Skeleton,
+        };
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: widgets_dir().into(),
+            module_path: "theme_globals".to_string(),
+            file: format!("theme_{}_rederived.splash", scheme.theme_name()),
+            line: 0,
+            column: 0,
+            code: crate::theme_tokens::theme_rederived_script(scheme, &globals),
+            values: vec![],
+        });
+    }
     #[cfg(not(target_arch = "wasm32"))]
     script_eval!(vm, {
         mod.helper = {
@@ -506,6 +642,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             ..mod.animator.Play,
             ..mod.animator.Ease,
             draw:mod.draw,
+            tween:mod.tween,
             MouseCursor:mod.draw.MouseCursor
         }
     });
@@ -528,6 +665,21 @@ pub fn theme_mod(vm: &mut ScriptVm) {
                 mod.theme = mod.themes.skeleton
             });
         }
+    }
+    // ...and the blend over it, if one is in force. Here, and not in
+    // `widgets_mod`, because this is the seam a mix is seen from: after the
+    // themes exist, and before a widget template bakes `theme.color_x` into a
+    // literal it will not evaluate again.
+    if let Some(code) = theme_mix(vm.cx_mut()) {
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: widgets_dir().into(),
+            module_path: "theme_lab".to_string(),
+            file: format!("{THEME_MIX_NAME}.splash"),
+            line: 0,
+            column: 0,
+            code,
+            values: vec![],
+        });
     }
 }
 
@@ -565,6 +717,37 @@ fn widgets_mod_with_io(
     host_io_only: bool,
 ) {
     crate::desktop_style::apply_theme(vm);
+    // ...and the person's own edits over everything -- base, sheet or mix.
+    // (A global has already rebuilt the base in `theme_mod`; its pin here
+    // is the same value again, and the belt for a base that never named it.)
+    // Here and not beside the mix: a sheet's first line points `mod.theme`
+    // at its own base, so an edit written before `apply_theme` is gone by
+    // now; and before the prelude captures `theme: mod.theme` for every
+    // template, which is the last moment a token is still a token.
+    let edits = theme_edits(vm.cx_mut());
+    if !edits.is_empty() {
+        let mut code = String::from("mod.themes.edited = mod.theme{");
+        for (name, text) in &edits {
+            code.push(' ');
+            code.push_str(name);
+            code.push_str(": ");
+            code.push_str(text);
+        }
+        // The last statement of a script is swallowed; `true` takes the fall.
+        code.push_str(" }
+mod.theme = mod.themes.edited
+true
+");
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: widgets_dir().into(),
+            module_path: "theme_edits".to_string(),
+            file: "theme_edits.splash".to_string(),
+            line: 0,
+            column: 0,
+            code,
+            values: vec![],
+        });
+    }
     // make the prelude for our own widgets
     script_eval!(vm, {
         mod.prelude.widgets_internal = {
@@ -657,6 +840,13 @@ fn widgets_mod_with_io(
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
+    crate::ease_editor::script_mod(vm);
+    crate::curve_editor::script_mod(vm);
+    crate::tween_inspector::script_mod(vm);
+    crate::sequencer::script_mod(vm);
+    // Before the panel kit and the tables: all three turn a heading with the
+    // lean this one declares.
+    crate::diagonal_text::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
@@ -687,6 +877,8 @@ fn widgets_mod_with_io(
     crate::select::script_mod(vm);
     crate::toast::script_mod(vm);
     crate::placeholder::script_mod(vm);
+    // Only needs a View to derive from; the ladder it uses is Rust.
+    crate::conceding_row::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
@@ -713,8 +905,12 @@ fn widgets_mod_with_io(
     crate::column_picker::script_mod(vm);
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
+    // After TextInput, Button, KbdGroup and the tip they build on.
+    crate::hotkey_editor::script_mod(vm);
+    crate::keyboard_map::script_mod(vm);
     crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
+    crate::gizmo::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::masonry::script_mod(vm);
     crate::tile_list::script_mod(vm);
@@ -754,6 +950,13 @@ fn widgets_mod_with_io(
     crate::svg::script_mod(vm);
     crate::perf_graph::script_mod(vm);
     crate::corner_cap_view::script_mod(vm);
+
+    // The overlay layer host registers after every core layer it owns (tip
+    // today; menu layer, toaster and dialog host as they land): a widget
+    // deriving from another must register after it, and Window, which
+    // registers far above tip and modal, cannot own these for the same
+    // reason. Keep it the last core registration in this function.
+    crate::overlay_layers::script_mod(vm);
 
     // The families, after every core widget they may build on.
     for register in families {
@@ -1186,6 +1389,53 @@ fn widgets_mod_source() -> &'static str {
     let start = lib.find("pub fn widgets_mod(vm: &mut ScriptVm)").expect("widgets_mod");
     let end = lib.find("pub fn script_mod(vm: &mut ScriptVm)").expect("script_mod");
     &lib[start..end]
+}
+
+/// Asserts `call` is registered after every one of `bases`, and directly
+/// after the first of them, so each new widget keeps the slot its bases
+/// give it and no later edit slides another registration in between.
+#[cfg(test)]
+fn assert_registered_after(call: &str, bases: &[&str]) {
+    let calls = widgets_mod_source();
+    let at = calls.find(call).unwrap_or_else(|| panic!("{call} is not registered"));
+    for base in bases {
+        let base_at = calls.find(base).unwrap_or_else(|| panic!("{base} is not registered"));
+        assert!(base_at < at, "{base} must register before {call}");
+    }
+    let first = bases[0];
+    let after_first = &calls[calls.find(first).unwrap() + first.len()..];
+    let next = after_first
+        .lines()
+        .map(str::trim)
+        .find(|line| line.ends_with("::script_mod(vm);"))
+        .unwrap_or_default();
+    assert_eq!(next, call, "{call} must follow {first} directly");
+}
+
+#[cfg(test)]
+mod curve_editor_registration_tests {
+    /// The curve editor registers directly after the ease editor it sits
+    /// beside, and after the view, button and badge it is built from and
+    /// measures its captions with, with one type default.
+    #[test]
+    fn test_curve_editor_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let editor = include_str!("curve_editor.rs");
+        assert!(lib.contains("\npub mod curve_editor;"));
+        assert!(lib.contains("\n    curve_editor::*,"));
+        crate::assert_registered_after(
+            "crate::curve_editor::script_mod(vm);",
+            &[
+                "crate::ease_editor::script_mod(vm);",
+                "crate::view::script_mod(vm);",
+                "crate::button::script_mod(vm);",
+                "crate::radio_button::script_mod(vm);",
+                "crate::badge::script_mod(vm);",
+            ],
+        );
+        assert!(editor.contains("mod.widgets.CurveEditorBase = #(CurveEditor::register_widget(vm))"));
+        assert_eq!(editor.matches("set_type_default() do mod.widgets.CurveEditorBase").count(), 1);
+    }
 }
 
 #[cfg(test)]

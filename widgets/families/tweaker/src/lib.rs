@@ -11,7 +11,11 @@
 use makepad_widgets_core::*;
 use makepad_widgets_data::{dock, file_tree};
 
+pub mod designer;
 pub mod reflect;
+pub mod theme_builder;
+pub mod theme_combinations;
+pub mod theme_lab;
 pub mod theme_store;
 pub mod tweaker;
 

@@ -19,6 +19,14 @@ script_mod! {
 
     /** The flat checkbox: an inset mark box with a stroked check, plus its label. */
     mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
+
+        // The compact face this wears when its row runs out of width. Declared
+        // with `:=` so it lands in the vec: a widget proto is frozen VALIDATED,
+        // so a key its props do not list is a hard error at construction -- but
+        // the checked path looks in the vec first, and declaring it once here
+        // makes `tight: {...}` legal on every instance and every preset below.
+        /** the face this wears when its row runs out of width */
+        tight := {}
         width: Fit
         height: Fit
         padding: theme.mspace_2
@@ -90,6 +98,135 @@ script_mod! {
             /** the check, dash or knob ink under the error intent */
             mark_color_error: uniform(theme.color_error)
 
+            // THE MATERIAL, from the theme, packed as `ReliefView` and
+            // `RoundedView` pack theirs. Zero in every stock theme: at
+            // `material` 0 this shader draws what it always drew.
+            /** surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: direction (x right, y down, z out) and intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** bevel width, profile curve, raise, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** occlusion, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** face gradient, hairline, occlusion reach, sink */
+            material_tune: uniform(vec4(theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach, theme.material_sink))
+            /** cast shadow strength, blur, falloff (0 linear 1 expo), contact occlusion */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_shadow_falloff, theme.material_contact_ao))
+            /** inner shadow, inner blur, ground lip, glow */
+            material_inner: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_ground_lip, theme.material_glow))
+            /** how far the mark lifts toward the glow ink while active, and how far past full brightness 0..1 step 0.01 */
+            material_ink: uniform(vec2(theme.material_ink_glow, theme.material_ink_lift))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+            /** the emissive ink an active well, its knob and its mark take */
+            material_glow_ink: uniform(theme.color_material_glow)
+
+            /** the outward gradient of a rounded box centred on c with half size h and corner k, by central differences */
+            material_grad: fn(p: vec2, c: vec2, h: vec2, k: float) -> vec2 {
+                let e = 0.5
+                let g = vec2(
+                    Material.sd_box(p + vec2(e, 0.0), c, h, k) - Material.sd_box(p - vec2(e, 0.0), c, h, k),
+                    Material.sd_box(p + vec2(0.0, e), c, h, k) - Material.sd_box(p - vec2(0.0, e), c, h, k)
+                )
+                if length(g) > 0.00001 {
+                    return normalize(g)
+                }
+                return vec2(0.0, 1.0)
+            }
+
+            /** a well cut into the housing: the box centred on c (half size
+             * h, corner k, distance d at p) lit as a sunken face, with the
+             * surround's inner shadow over it -- the outline shifted
+             * down-light and blurred -- and lit toward the glow ink by
+             * `lit` under an illuminating material. Tier 1 is the relief
+             * alone. */
+            material_well: fn(fill: vec4, p: vec2, d: float, c: vec2, h: vec2, k: float, lit: float) -> vec4 {
+                let g = self.material_grad(p, c, h, k)
+                let elev = -self.material_tune.w * (1.0 - self.disabled)
+                var insh = 0.0
+                if self.material_inner.x > 0.001 && elev < 0.0 {
+                    let ioff = Material.shadow_dir(self.material_light) * abs(elev) * 1.6
+                    insh = 1.0 - Material.box_cov(c - h + ioff, c + h + ioff, p, max(self.material_inner.y * 0.5, 0.35), k)
+                }
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(self.material_relief.x, self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                let uv = (p - c) / (2.0 * h) + vec2(0.5, 0.5)
+                var o = Material.face(
+                    fill.rgb, d, g, uv, elev, elev, 0.0, insh, 0.0,
+                    self.material_light, rel, fin, self.material_tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * lit * (1.0 - self.disabled))
+                }
+                return vec4(o, fill.a)
+            }
+
+            /** a raised domed knob of radius r centred on kc, lit as one
+             * object: the shoulder rolls into a shallow dome so the whole
+             * cap catches the light. */
+            material_knob: fn(fill: vec4, p: vec2, kc: vec2, r: float) -> vec4 {
+                let q = p - kc
+                let rr = length(q)
+                let d = rr - r
+                var g = vec2(0.0, 1.0)
+                if rr > 0.00001 {
+                    g = q / rr
+                }
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let t2 = step(1.5, self.material)
+                let fin = vec4(self.material_finish.x, self.material_finish.y * t2, self.material_finish.z * t2, self.material_finish.w)
+                let rel = vec4(min(self.material_relief.x, r * 0.5), self.material_relief.y, self.material_relief.z, self.material_relief.w * t2)
+                // No face gradient: a dome's normal carries its own.
+                let tune = vec4(0.0, self.material_tune.y, self.material_tune.z, self.material_tune.w)
+                // The dome: a paraboloid, its slope growing with the radius,
+                // over a raise that m_normal multiplies back in.
+                let dome = 0.55 * clamp(rr / max(r, 0.001), 0.0, 1.0) / max(raise, 0.001)
+                let uv = q / (2.0 * r) + vec2(0.5, 0.5)
+                let o = Material.face(
+                    fill.rgb, d, g, uv, raise, raise, dome, 0.0, 0.0,
+                    self.material_light, rel, fin, tune, self.material_inner.x,
+                    self.material_light_ink.rgb, self.material_shadow_ink.rgb, 1.0
+                )
+                return vec4(o, fill.a)
+            }
+
+            /** what a knob of radius r centred on kc throws on the ground at
+             * p, premultiplied: its cast shadow, contact and lip, and its
+             * glow by `lit`. Laid into the well's fill, since the knob
+             * travels inside it. */
+            material_knob_under: fn(p: vec2, kc: vec2, r: float, lit: float) -> vec4 {
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let q = p - kc
+                let rr = length(q)
+                let d = rr - r
+                var g = vec2(0.0, 1.0)
+                if rr > 0.00001 {
+                    g = q / rr
+                }
+                let raise = self.material_relief.z * (1.0 - self.disabled)
+                let off = Material.cast_offset(raise, self.material_light)
+                // The shadow falls inside the well: its blur stays in scale
+                // with the knob.
+                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, r), self.material_shadow.z, self.material_shadow.w)
+                var under = Material.cast(
+                    d, length(q - off) - r, length(q + off) - r, g, px, raise, self.material_relief.z,
+                    self.material_light, sh, self.material_inner.z,
+                    self.material_shadow_ink.rgb, self.material_light_ink.rgb
+                ) * (1.0 - self.disabled)
+                let glow = self.material_inner.w
+                if glow > 0.001 {
+                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * lit * (1.0 - self.disabled)
+                    under = vec4(self.material_glow_ink.rgb * a3, a3) + under * (1.0 - a3)
+                }
+                return under
+            }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -110,7 +247,7 @@ script_mod! {
                             self.border_radius * /** mark box corner scale 0..1 step 0.05 */ 0.5
                         )
 
-                        let color_fill = self.color
+                        var color_fill = self.color
                             .mix(self.color_focus, self.focus)
                             .mix(self.color_active, self.active)
                             .mix(self.color_hover, self.hover)
@@ -125,6 +262,18 @@ script_mod! {
                             .mix(self.border_color_error, self.error)
                             .mix(self.border_color_disabled, self.disabled)
 
+                        // THE MATERIAL: the mark box is a well cut into the
+                        // housing, lit up by an active mark under an
+                        // illuminating material. Nothing changes at 0.
+                        if self.material > 0.5 {
+                            let p = self.pos * self.rect_size
+                            let c = offset_px + vec2(sz_px * 0.5, sz_px * 0.5)
+                            let h = max(vec2(sz_px * 0.5 - self.border_size, sz_px * 0.5 - self.border_size), vec2(0.5, 0.5))
+                            // `sdf.box` draws a corner of TWICE its argument, clamped.
+                            let k = min(self.border_radius, min(h.x, h.y))
+                            color_fill = self.material_well(color_fill, p, sdf.shape, c, h, k, self.active)
+                        }
+
                         sdf.fill_keep(color_fill)
                         sdf.stroke(color_stroke, self.border_size)
 
@@ -134,11 +283,19 @@ script_mod! {
                         sdf.line_to(offset_px.x + center_px.x, center_px.y + sz_px * 0.5 - mark_padding)
                         sdf.line_to(offset_px.x + sz_px - mark_padding, offset_px.y + mark_padding)
 
-                        let mark_color = self.mark_color
+                        var mark_color = self.mark_color
                             .mix(self.mark_color_hover, self.hover)
                             .mix(self.mark_color_active, self.active)
                             .mix(self.mark_color_error, self.error * self.active)
                             .mix(self.mark_color_disabled, self.disabled)
+
+                        // Lit ink: an active mark toward the glow ink and
+                        // past full brightness, one mix on a value already
+                        // computed.
+                        if self.material > 0.5 {
+                            let lit = self.material_ink.x * self.active * (1.0 - self.disabled)
+                            mark_color = vec4(mix(mark_color.rgb, self.material_glow_ink.rgb * self.material_ink.y, lit), mark_color.a)
+                        }
 
                         sdf.stroke(mark_color, self.size * /** check stroke frac 0.02..0.2 step 0.005 */ 0.09)
 
@@ -405,7 +562,7 @@ script_mod! {
                     self.border_radius * self.size * /** pill corner scale 0..0.3 step 0.01 */ 0.1
                 )
 
-                let color_fill = self.color
+                var color_fill = self.color
                     .mix(self.color_focus, self.focus)
                     .mix(self.color_active, self.active)
                     .mix(self.color_hover, self.hover)
@@ -419,6 +576,30 @@ script_mod! {
                     .mix(self.border_color_down, self.down)
                     .mix(self.border_color_error, self.error)
                     .mix(self.border_color_disabled, self.disabled)
+
+                // The knob's geometry, before the pill is filled, because
+                // under a material its shadow is laid INTO the pill's fill.
+                // While dragging the knob follows drag_pos instead of the
+                // active mix, and it grows while pressed.
+                let knob_t = mix(self.active, self.drag_pos, self.drag)
+                let mark_size = (sz_px.y * 0.5 - self.border_size - self.knob_inset) * (1.0 + self.pressed * self.knob_grow)
+                let mark_target_y = sz_px.y - sz_px.x + self.border_size + self.knob_inset
+                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * knob_t
+                let kc = vec2(offset_px.x + mark_pos_y, center_px.y)
+
+                // THE MATERIAL: the pill is a sunken track, the knob a raised
+                // dome travelling in it, throwing its shadow on the track.
+                // Nothing changes at 0.
+                let p = self.pos * self.rect_size
+                if self.material > 0.5 {
+                    let c = offset_px + sz_px * 0.5
+                    let h = max(sz_px * 0.5 - vec2(self.border_size, self.border_size), vec2(0.5, 0.5))
+                    // `sdf.box` draws a corner of TWICE its argument, clamped.
+                    let k = min(2.0 * self.border_radius * self.size * 0.1, min(h.x, h.y))
+                    color_fill = self.material_well(color_fill, p, sdf.shape, c, h, k, 0.0)
+                    let under = self.material_knob_under(p, kc, mark_size, self.active)
+                    color_fill = vec4(mix(color_fill.rgb, under.rgb / max(under.a, 0.0001), under.a), color_fill.a)
+                }
 
                 sdf.fill_keep(color_fill)
                 sdf.stroke(color_stroke, self.border_size)
@@ -436,28 +617,37 @@ script_mod! {
                     sdf.stroke(self.outline_color.mix(vec4(0., 0., 0., 0.), self.active), self.outline_size)
                 }
 
-                // Draw toggle mark. While dragging the knob follows drag_pos
-                // instead of the active mix, and it grows while pressed.
-                let knob_t = mix(self.active, self.drag_pos, self.drag)
-                let mark_size = (sz_px.y * 0.5 - self.border_size - self.knob_inset) * (1.0 + self.pressed * self.knob_grow)
-                let mark_target_y = sz_px.y - sz_px.x + self.border_size + self.knob_inset
-                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * knob_t
-
-                // Draw ring when off, filled circle when on
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
-                sdf.subtract()
-
-                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
-                sdf.blend(self.active)
-
                 let mark_color = self.mark_color
                     .mix(self.mark_color_hover, self.hover)
                     .mix(self.mark_color_active, self.active)
                     .mix(self.mark_color_error, self.error)
                     .mix(self.mark_color_disabled, self.disabled)
 
-                sdf.fill(mark_color)
+                if self.material > 0.5 {
+                    // One solid knob, the same substance as the housing,
+                    // carried toward the active ink as it turns on and lit
+                    // toward the glow ink under an illuminating material.
+                    var knob = self.color
+                        .mix(self.mark_color_active, self.active)
+                        .mix(self.mark_color_error, self.error)
+                        .mix(self.mark_color_disabled, self.disabled)
+                    let glow = self.material_inner.w
+                    if glow > 0.001 {
+                        knob = vec4(mix(knob.rgb, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.active * (1.0 - self.disabled)), knob.a)
+                    }
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.fill(self.material_knob(knob, p, kc, mark_size))
+                } else {
+                    // Draw ring when off, filled circle when on
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.circle(kc.x, kc.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
+                    sdf.subtract()
+
+                    sdf.circle(kc.x, kc.y, mark_size)
+                    sdf.blend(self.active)
+
+                    sdf.fill(mark_color)
+                }
                 return sdf.result
             }
         }
@@ -512,6 +702,80 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.fill(vec4(0., 0., 0., 0.))
                 return sdf.result
+            }
+        }
+    }
+
+    /** The icon-only checkbox: the custom face carrying a mark of its own
+     * for each state and nothing else in the row. Give it a `draw_icon_off`
+     * and a `draw_icon_on`, each with its svg and its ink; the one for the
+     * state it is in is what it draws, in the middle of the face, with no
+     * word beside it.
+     *
+     * The two states are handed different inks here, and a caller that
+     * retunes them should keep them apart. A mark drawn at this size moves
+     * two or three pixels between one shape and the other, so the colour is
+     * what a person reads across a column of them.
+     *
+     * What the two states MEAN is the caller's: a padlock in front of a row,
+     * an eye over a layer, a pin on a panel. The control itself only turns
+     * over, says which side it is on, and reports the change. */
+    mod.widgets.CheckBoxIcon = mod.widgets.CheckBoxCustom{
+        /** icon only: the label is empty */
+        text: ""
+        align: Align{x: 0.5, y: 0.5}
+        padding: theme.mspace_1
+
+        /** no gap: an empty label still takes the margin that clears a
+         * mark box, and that margin is what pushes the icon off centre */
+        label_walk: Walk{
+            width: Fit
+            height: Fit
+            margin: Inset{top: 0., right: 0., bottom: 0., left: 0.}
+        }
+
+        icon_walk: Walk{width: 14.0, height: 14.0}
+
+        /** the mark while off: the quieter of the two inks */
+        draw_icon_off +: {
+            color: theme.color_label_outer_off
+        }
+        /** the mark while on: the label's own ink, a step brighter */
+        draw_icon_on +: {
+            color: theme.color_label_outer
+        }
+
+        // The mark is the whole control, so the mark is what has to go
+        // dim. On every other face the disabled track works through the
+        // box and the label, and this face has neither: left alone, a dead
+        // lock was drawn exactly like a live one.
+        //
+        // It is the mark's opacity that falls, not its colour. A track that
+        // restored two inks would also hand them back on the way out, and
+        // the pair is exactly what a caller is expected to retune -- one
+        // press of a disabled switch would have thrown their colours away.
+        animator +: {
+            disabled: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {disabled: 0.0}
+                        draw_text: {disabled: 0.0}
+                        draw_icon_off: {opacity: 1.0}
+                        draw_icon_on: {opacity: 1.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {disabled: 1.0}
+                        draw_text: {disabled: 1.0}
+                        /** how much of a dead mark is left 0..1 step 0.05 */
+                        draw_icon_off: {opacity: 0.35}
+                        draw_icon_on: {opacity: 0.35}
+                    }
+                }
             }
         }
     }
@@ -589,11 +853,17 @@ pub struct CheckBox {
     #[live]
     pub draggable: bool,
 
-    /// The icon drawn on the toggle's knob while it is on; leave the svg
-    /// unset for none.
+    /// The icon drawn while the box is on; leave the svg unset for none.
+    ///
+    /// On the toggle it rides the knob. On a face with no knob -- the
+    /// icon-only checkbox -- it stands in the row, in `draw_icon`'s place,
+    /// and it is then the whole of what the control shows: its ink is what
+    /// says which state the box is in.
     #[live]
     pub draw_icon_on: DrawSvg,
-    /// The icon drawn on the toggle's knob while it is off.
+    /// The icon drawn while the box is off, in the same place as its
+    /// opposite. Its ink is the other half of the pair and belongs apart
+    /// from the on one.
     #[live]
     pub draw_icon_off: DrawSvg,
     /// Knob icon side as a fraction of the knob's diameter.
@@ -683,6 +953,11 @@ impl CheckBox {
         self.draw_bg.begin(cx, walk, self.layout);
 
         let on = self.animator_in_state(cx, ids!(active.on));
+        // Asked before the label is borrowed, because the answer decides
+        // which of three icons the row draws and all three are fields of
+        // the same struct the label is read out of.
+        let knob_carries_the_pair = self.state_icons_ride_the_knob(cx);
+        let icon_walk = self.icon_walk;
         let text: &str = if on && !self.text_on.is_empty() {
             &self.text_on
         } else if !on && !self.text_off.is_empty() {
@@ -690,31 +965,65 @@ impl CheckBox {
         } else {
             self.text.as_ref()
         };
-        if self.label_before {
-            // The label's outer margin clears the mark box; mirrored, it
-            // clears a box at the end of the row instead.
-            let margin = self.label_walk.margin;
-            let walk = Walk {
+        // The label's outer margin clears the mark box; mirrored, it
+        // clears a box at the end of the row instead.
+        let margin = self.label_walk.margin;
+        let label_walk = if self.label_before {
+            Walk {
                 margin: Inset {
                     left: margin.right,
                     right: margin.left,
                     ..margin
                 },
                 ..self.label_walk
-            };
-            self.draw_text
-                .draw_walk(cx, walk, self.label_align, text);
-            self.draw_icon.draw_walk(cx, self.icon_walk);
+            }
         } else {
-            self.draw_icon.draw_walk(cx, self.icon_walk);
-
+            self.label_walk
+        };
+        // An empty label is no label: walked all the same it still takes
+        // its own line height and the margin that clears the mark box, and
+        // on a face that is nothing but an icon that phantom is what pushes
+        // the mark off the middle.
+        let worded = !text.is_empty();
+        if worded && self.label_before {
             self.draw_text
-                .draw_walk(cx, self.label_walk, self.label_align, text);
+                .draw_walk(cx, label_walk, self.label_align, text);
+        }
+        // The mark in the row: the face for the state it is in when the
+        // pair is the row's own, and the single icon otherwise.
+        if knob_carries_the_pair {
+            self.draw_icon.draw_walk(cx, icon_walk);
+        } else if on {
+            self.draw_icon_on.draw_walk(cx, icon_walk);
+        } else {
+            self.draw_icon_off.draw_walk(cx, icon_walk);
+        }
+        if worded && !self.label_before {
+            self.draw_text
+                .draw_walk(cx, label_walk, self.label_align, text);
         }
         self.draw_bg.end(cx);
         self.draw_knob_icons(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
+    }
+
+    /// Whether the state pair belongs on a knob rather than in the row:
+    /// either there is no pair at all, in which case the row draws the
+    /// single `draw_icon` as it always has, or the mark is a pill and the
+    /// knob is where a pair rides -- drawn over the pill, after the row is
+    /// closed, so it must not also stand in the row.
+    ///
+    /// `pill_aspect` is the toggle's own uniform and reads back zero
+    /// through a shader that never declared one, which is what tells a
+    /// pill from a mark box without either of them saying so.
+    fn state_icons_ride_the_knob(&mut self, cx: &mut Cx) -> bool {
+        if self.draw_icon_on.svg.is_none() && self.draw_icon_off.svg.is_none() {
+            return true;
+        }
+        let mut aspect = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
+        aspect[0] > 0.0
     }
 
     /// The toggle's knob icons, drawn over the pill after it: the on icon
@@ -861,6 +1170,53 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    /// What this would be worth on a row, with `over` in force: the mark box,
+    /// the label beside it, and the gap the label's own margin keeps between
+    /// them.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        if !over.and_then(|o| o.visible).unwrap_or(self.visible) {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.layout.padding);
+        let gap = over.and_then(|o| o.spacing).unwrap_or(self.layout.spacing);
+
+        // The face it is wearing is the one it would draw: a toggle with an
+        // `on` word says that word while it is on.
+        let on = self.animator_in_state(cx.cx, ids!(active.on));
+        let label: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None if on && !self.text_on.is_empty() => self.text_on.as_str(),
+            None if !on && !self.text_off.is_empty() => self.text_off.as_str(),
+            None => self.text.as_ref(),
+        };
+        let text_w = if label.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, label) + self.label_walk.margin.width()
+        };
+
+        let mark = crate::badge::icon_extent(&mut self.draw_icon, cx, self.icon_walk)?;
+        let parts = if text_w > 0.0 { 2 } else { 1 };
+        Some(pad.width() + text_w + mark + gap * (parts as f64 - 1.0) + margin.width())
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -1111,6 +1467,244 @@ impl CheckBoxRef {
             inner.debug_dump_animator(heap)
         } else {
             "no borrow".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod icon_face_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    /// One icon-only checkbox wearing the two padlocks, built from the
+    /// library's own declaration so that a retuning there is a retuning
+    /// here. `side` is the side the mark is asked to take.
+    fn a_lock(cx: &mut Cx, side: f64) -> WidgetRef {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                use mod.widgets.*
+                CheckBoxIcon{
+                    icon_walk: Walk{width: #(side), height: #(side)}
+                    draw_icon_off +: {
+                        svg: crate_resource("makepad_widgets:resources/icons/icon_lock_open.svg")
+                    }
+                    draw_icon_on +: {
+                        svg: crate_resource("makepad_widgets:resources/icons/icon_lock_shut.svg")
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty(), "the icon-only checkbox did not build");
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// One layout pass over the widget, which is what gives every part of
+    /// it a rectangle. A control that was never drawn has none, and a press
+    /// at its middle lands nowhere.
+    fn drawn(cx: &mut Cx, widget: &WidgetRef) {
+        let size = Vec2d { x: 120.0, y: 60.0 };
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, size);
+        let mut draw_list = DrawList2d::new(cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(size, Layout::flow_down());
+        widget.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+    }
+
+    /// A press taken the whole way a hand takes it, down and up on the
+    /// control, and everything that came out of it.
+    fn a_press_on(cx: &mut Cx, widget: &WidgetRef) -> Vec<Action> {
+        const WINDOW: WindowId = WindowId(1, 1);
+        let face = widget.area().rect(cx);
+        assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
+        let at = face.pos + face.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        // Both halves are captured. A checkbox turns over on the press, not
+        // on the release, so a test that watched only the release would
+        // find the box flipped and nothing said about it.
+        let mut actions = cx.capture_actions(|cx| {
+            widget.handle_event(cx, &down, &mut Scope::empty());
+        });
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        });
+        actions.extend(cx.capture_actions(|cx| {
+            widget.handle_event(cx, &up, &mut Scope::empty());
+        }));
+        cx.fingers.first_mouse_button = None;
+        actions
+    }
+
+    /// How many changes the widget reported in these actions, and the last
+    /// of them. Two changes off one press is as wrong as none: whoever
+    /// reads a lock acts on every change it reports.
+    fn changes(actions: &[Action], uid: WidgetUid) -> (usize, Option<bool>) {
+        let mut count = 0;
+        let mut last = None;
+        for action in actions.iter() {
+            let Some(action) = action.downcast_ref::<WidgetAction>() else {
+                continue;
+            };
+            if action.widget_uid != uid {
+                continue;
+            }
+            if let CheckBoxAction::Change(value) = action.cast() {
+                count += 1;
+                last = Some(value);
+            }
+        }
+        (count, last)
+    }
+
+    /// A press turns the face over and says so once, and the next press
+    /// turns it back. Seen failing with the state pair drawn only on a
+    /// knob: an icon-only face has none, so it showed nothing at all and
+    /// there was no mark to press.
+    #[test]
+    fn a_press_turns_the_face_over_and_reports_it_once() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = a_lock(&mut cx, 14.0);
+        let uid = widget.widget_uid();
+        drawn(&mut cx, &widget);
+        assert!(!widget.as_check_box().active(&cx), "it opened already on");
+
+        let actions = a_press_on(&mut cx, &widget);
+        assert_eq!(changes(&actions, uid), (1, Some(true)), "the first press");
+        assert!(widget.as_check_box().active(&cx), "the press did not turn it over");
+
+        drawn(&mut cx, &widget);
+        let actions = a_press_on(&mut cx, &widget);
+        assert_eq!(changes(&actions, uid), (1, Some(false)), "the second press");
+        assert!(!widget.as_check_box().active(&cx), "the second press did not turn it back");
+    }
+
+    /// The mark sits in the middle of the face and nothing else is in the
+    /// row with it, at every size the catalogue shows one at.
+    ///
+    /// Seen failing on the custom face this is built from, whose label walk
+    /// carries the margin that clears a mark box: the word was empty and
+    /// the margin was not, so the face came out wider than it was tall and
+    /// the padlock stood left of its centre by half of that.
+    #[test]
+    fn the_face_draws_its_mark_in_the_middle_with_no_word_beside_it() {
+        for side in [12.0, 14.0, 20.0, 28.0] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let widget = a_lock(&mut cx, side);
+            drawn(&mut cx, &widget);
+            let face = widget.area().rect(&cx);
+            assert!(face.size.x > 0.0 && face.size.y > 0.0, "the face at {side} drew nothing");
+            assert!(
+                (face.size.x - face.size.y).abs() < 0.5,
+                "the face at {side} is {} by {}, so something stands beside the mark",
+                face.size.x,
+                face.size.y
+            );
+            let check = widget.borrow::<CheckBox>().expect("a CheckBox");
+            assert_eq!(check.text.as_ref(), "", "the icon-only face carries a word");
+            let icon = check.draw_icon_off.area().rect(&cx);
+            assert!(icon.size.x > 0.0 && icon.size.y > 0.0, "the mark at {side} drew nothing");
+            assert!((icon.size.x - side).abs() < 0.5, "the mark at {side} is {} wide", icon.size.x);
+            let (mark, middle) = (icon.pos + icon.size * 0.5, face.pos + face.size * 0.5);
+            assert!(
+                (mark.x - middle.x).abs() <= 0.5 && (mark.y - middle.y).abs() <= 0.5,
+                "the mark at {side} sits at {mark:?}, off the face's centre {middle:?}"
+            );
+        }
+    }
+
+    /// A dead one is drawn dead, and its two inks come back untouched. The
+    /// mark is the whole of this face, so being disabled has to reach the
+    /// mark: the box and the label the other faces dim are not there to do
+    /// it. What falls is the mark's opacity, so a caller's own colours
+    /// survive the round trip.
+    ///
+    /// Seen failing before the face carried a disabled track of its own,
+    /// where a lock told to go dim was drawn exactly as it had been.
+    #[test]
+    fn a_disabled_face_goes_dim_without_losing_its_inks() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = a_lock(&mut cx, 14.0);
+        // A caller's own pair, to be found again on the way back.
+        let mine = Vec4f { x: 1.0, y: 0.25, z: 0.0, w: 1.0 };
+        let yours = Vec4f { x: 0.0, y: 0.5, z: 1.0, w: 1.0 };
+        {
+            let mut lock = widget.borrow_mut::<CheckBox>().expect("a CheckBox");
+            lock.draw_icon_off.color = mine;
+            lock.draw_icon_on.color = yours;
+        }
+        drawn(&mut cx, &widget);
+        let live = {
+            let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+            (lock.draw_icon_off.opacity, lock.draw_icon_on.opacity)
+        };
+        // Cut to each state rather than played to it: nothing here pumps
+        // the frames a 0.2 second fade would need, and the question is what
+        // the state HOLDS, not how long it takes to get there.
+        let cut = |cx: &mut Cx, disabled: bool| {
+            widget
+                .borrow_mut::<CheckBox>()
+                .expect("a CheckBox")
+                .animator_toggle(cx, disabled, Animate::No, ids!(disabled.on), ids!(disabled.off));
+        };
+        cut(&mut cx, true);
+        drawn(&mut cx, &widget);
+        let dead = {
+            let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+            assert_eq!(lock.draw_icon_off.color, mine, "going dim repainted the open mark");
+            assert_eq!(lock.draw_icon_on.color, yours, "going dim repainted the shut mark");
+            (lock.draw_icon_off.opacity, lock.draw_icon_on.opacity)
+        };
+        assert!(dead.0 < live.0, "the open mark is drawn the same dead as alive");
+        assert!(dead.1 < live.1, "the shut mark is drawn the same dead as alive");
+
+        cut(&mut cx, false);
+        drawn(&mut cx, &widget);
+        let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+        assert_eq!((lock.draw_icon_off.opacity, lock.draw_icon_on.opacity), live, "it came back dim");
+        assert_eq!(lock.draw_icon_off.color, mine, "coming back took the open mark's colour");
+        assert_eq!(lock.draw_icon_on.color, yours, "coming back took the shut mark's colour");
+    }
+
+    /// The two states are not drawn in one ink, in either appearance the
+    /// library ships. A mark this size moves two or three pixels between
+    /// the shapes, so a pair handed one colour says nothing whatever about
+    /// which state it is in.
+    ///
+    /// Seen failing on the first pair chosen for it, the label ink and the
+    /// checked mark's: the dark sheet resolves both of those to the same
+    /// token, and the two padlocks came out identical.
+    #[test]
+    fn the_two_states_are_not_drawn_in_the_same_ink() {
+        for base in [crate::BaseTheme::Dark, crate::BaseTheme::Light] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            crate::set_base_theme(&mut cx, base);
+            cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+            let widget = a_lock(&mut cx, 14.0);
+            let check = widget.borrow::<CheckBox>().expect("a CheckBox");
+            let (off, on) = (check.draw_icon_off.color, check.draw_icon_on.color);
+            assert_ne!(off, on, "{base:?}: the open mark and the shut one are one colour");
         }
     }
 }

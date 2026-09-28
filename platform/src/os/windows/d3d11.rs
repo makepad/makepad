@@ -1,7 +1,7 @@
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
-    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId, GpuTimeRecorder},
     draw_shader::{
         CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
         UniformBufferBindings,
@@ -54,7 +54,7 @@ use crate::{
                     D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
                     D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
                     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE,
-                    D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
+                    D3D11_MAP_WRITE_DISCARD, D3D11_QUERY, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
                     D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
                     D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
@@ -936,6 +936,7 @@ impl Cx {
         // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
         let mut presented = false;
         crate::gpu_texture::with_media_d3d11_lock(|| {
+            self.d3d_gpu_time_begin(pass_id, d3d11_cx);
             self.setup_pass_render_targets(
                 pass_id,
                 &d3d11_window.render_target_view,
@@ -947,6 +948,7 @@ impl Cx {
             let zbias_step = self.passes[pass_id].zbias_step;
 
             self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
+            self.passes[pass_id].os.gpu_timer.end(d3d11_cx);
             self.textures.1.serials.submit();
             // Read the frame back BEFORE it flips: the chain is FLIP_DISCARD, so
             // the back buffer's contents are undefined the moment `Present` takes
@@ -996,6 +998,7 @@ impl Cx {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
+        self.d3d_gpu_time_begin(pass_id, d3d11_cx);
         if let Some(texture_id) = texture_id {
             let cxtexture = &self.textures[texture_id];
             let render_target_view = cxtexture.os.render_target_view.clone();
@@ -1004,15 +1007,18 @@ impl Cx {
                 .as_ref()
                 .map(|alloc| (alloc.width, alloc.height));
             if !self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx) {
+                self.d3d_gpu_time_abandon(pass_id, d3d11_cx);
                 return;
             }
         } else if !self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx) {
+            self.d3d_gpu_time_abandon(pass_id, d3d11_cx);
             return;
         }
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, &d3d11_cx);
+        self.passes[pass_id].os.gpu_timer.end(d3d11_cx);
         let serial = self.textures.1.serials.submit();
         self.readback_pass_submitted(pass_id, serial);
         if !self.textures.1.readbacks.slots.is_empty() {
@@ -2454,8 +2460,10 @@ impl CxOsTexture {
 
 impl CxOsPass {
     /// Forgets the pipeline state objects; `setup_pass_render_targets` recreates them on the
-    /// next paint because each is created only when its slot is `None`.
+    /// next paint because each is created only when its slot is `None`. The GPU timing queries
+    /// go too, results in flight with them; a timed pass makes new ones on its next paint.
     fn forget_gpu_objects(&mut self) {
+        self.gpu_timer = D3dGpuTimer::default();
         self.pass_uniforms = D3d11Buffer::default();
         self.blend_state = None;
         self.blend_state_no_blend = None;
@@ -3918,6 +3926,223 @@ pub struct CxOsPass {
     raster_state_backface_cull: Option<ID3D11RasterizerState>,
     depth_stencil_state_write: Option<ID3D11DepthStencilState>,
     depth_stencil_state_no_write: Option<ID3D11DepthStencilState>,
+    gpu_timer: D3dGpuTimer,
+}
+
+/// Timed paints of one pass that may await the GPU at once. The swap chain lets the CPU run
+/// `main_window_latency()` (2) frames ahead and the loop polls before each repaint, so a pass
+/// painted once a frame normally finds a free set; a paint that finds none goes untimed and
+/// counts as dropped.
+const GPU_TIME_RING: usize = 4;
+
+/// Not in the vendored bindings, so spelled out from `d3d11.h`.
+const D3D11_QUERY_TIMESTAMP: D3D11_QUERY = D3D11_QUERY(2);
+const D3D11_QUERY_TIMESTAMP_DISJOINT: D3D11_QUERY = D3D11_QUERY(3);
+const D3D11_ASYNC_GETDATA_DONOTFLUSH: u32 = 1;
+
+/// `D3D11_QUERY_DATA_TIMESTAMP_DISJOINT`: the tick rate of the timestamps the disjoint query
+/// brackets, and whether that rate held (a nonzero `disjoint` means it did not).
+#[repr(C)]
+#[derive(Default)]
+struct TimestampDisjoint {
+    frequency: u64,
+    disjoint: i32,
+}
+
+/// `ID3D11DeviceContext::GetData` with `D3D11_ASYNC_GETDATA_DONOTFLUSH`, through the vtable
+/// like `is_gpu_done`: the generated wrapper folds `S_FALSE` ("not yet") into `Ok`, and that is
+/// the answer a poll that never waits has to tell apart.
+unsafe fn get_query_data<T>(
+    context: &ID3D11DeviceContext,
+    query: &ID3D11Query,
+    out: &mut T,
+) -> windows_core::HRESULT {
+    unsafe {
+        (Interface::vtable(context).GetData)(
+            Interface::as_raw(context),
+            Interface::as_raw(query),
+            (out as *mut T).cast(),
+            std::mem::size_of::<T>() as u32,
+            D3D11_ASYNC_GETDATA_DONOTFLUSH,
+        )
+    }
+}
+
+/// One timed paint: a disjoint query around a start and an end timestamp.
+struct D3dGpuTimeSet {
+    disjoint: ID3D11Query,
+    start: ID3D11Query,
+    end: ID3D11Query,
+}
+
+impl D3dGpuTimeSet {
+    fn new(d3d11_cx: &D3d11Cx) -> Option<Self> {
+        let create = |kind| -> windows_core::Result<ID3D11Query> {
+            let mut query = None;
+            unsafe {
+                d3d11_cx.device.CreateQuery(
+                    &D3D11_QUERY_DESC {
+                        Query: kind,
+                        MiscFlags: 0,
+                    },
+                    Some(&mut query),
+                )?;
+            }
+            query.ok_or_else(windows::core::Error::empty)
+        };
+        let set = || -> windows_core::Result<Self> {
+            Ok(Self {
+                disjoint: create(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
+                start: create(D3D11_QUERY_TIMESTAMP)?,
+                end: create(D3D11_QUERY_TIMESTAMP)?,
+            })
+        };
+        set()
+            .map_err(|err| d3d11_cx.note_error("ID3D11Device::CreateQuery (GPU timing)", &err))
+            .ok()
+    }
+
+    /// `None` while the GPU has not finished the paint. Otherwise its duration in seconds, or
+    /// `Some(None)` when it has none: the clock was disjoint (its rate changed or it was reset
+    /// during the paint), or the device failed the read.
+    fn read(&self, context: &ID3D11DeviceContext) -> Option<Option<f64>> {
+        let mut clock = TimestampDisjoint::default();
+        let mut start = 0u64;
+        let mut end = 0u64;
+        unsafe {
+            // The disjoint query ends last, so it is asked first: while it is pending, so is
+            // every set encoded after it.
+            let hr = get_query_data(context, &self.disjoint, &mut clock);
+            if hr == S_FALSE {
+                return None;
+            }
+            if hr.is_err() {
+                return Some(None);
+            }
+            for (query, stamp) in [(&self.start, &mut start), (&self.end, &mut end)] {
+                let hr = get_query_data(context, query, stamp);
+                if hr == S_FALSE {
+                    return None;
+                }
+                if hr.is_err() {
+                    return Some(None);
+                }
+            }
+        }
+        let valid = clock.disjoint == 0 && clock.frequency != 0 && end >= start;
+        Some(valid.then(|| (end - start) as f64 / clock.frequency as f64))
+    }
+}
+
+/// The pass's GPU timing on D3D11 (`DrawPass::set_gpu_timing_enabled`): at most
+/// `GPU_TIME_RING` query sets, made on first use and reused, polled without waiting. Empty
+/// for a pass that never opted in.
+#[derive(Default)]
+struct D3dGpuTimer {
+    /// Encoded paints and the tag each was encoded under, oldest first.
+    in_flight: std::collections::VecDeque<(D3dGpuTimeSet, u64)>,
+    free: Vec<D3dGpuTimeSet>,
+    /// The paint being encoded, between `begin` and `end`.
+    open: Option<(D3dGpuTimeSet, u64)>,
+}
+
+/// A clone starts empty: the queries in flight belong to the pass that encoded them.
+impl Clone for D3dGpuTimer {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl D3dGpuTimer {
+    fn begin(&mut self, recorder: &GpuTimeRecorder, d3d11_cx: &D3d11Cx) {
+        if self.free.is_empty() && self.in_flight.len() >= GPU_TIME_RING {
+            self.poll(&d3d11_cx.context, recorder);
+        }
+        let set = match self.free.pop() {
+            Some(set) => Some(set),
+            None if self.in_flight.len() < GPU_TIME_RING => D3dGpuTimeSet::new(d3d11_cx),
+            None => None,
+        };
+        let Some(set) = set else {
+            // Every set is still on the GPU: skip timing this paint rather than wait.
+            recorder.record_dropped();
+            return;
+        };
+        unsafe {
+            d3d11_cx.context.Begin(&set.disjoint);
+            d3d11_cx.context.End(&set.start);
+        }
+        // The tag names what is encoded now; by completion the owner may have retagged.
+        self.open = Some((set, recorder.current_tag()));
+    }
+
+    fn end(&mut self, d3d11_cx: &D3d11Cx) {
+        if let Some((set, tag)) = self.open.take() {
+            unsafe {
+                d3d11_cx.context.End(&set.end);
+                d3d11_cx.context.End(&set.disjoint);
+            }
+            self.in_flight.push_back((set, tag));
+        }
+    }
+
+    /// Lets go of the paint being encoded when the pass draws nothing after all (it has no
+    /// target to draw into): its queries are closed and released, and it counts as dropped.
+    fn abandon(&mut self, recorder: &GpuTimeRecorder, d3d11_cx: &D3d11Cx) {
+        if let Some((set, _)) = self.open.take() {
+            unsafe {
+                d3d11_cx.context.End(&set.end);
+                d3d11_cx.context.End(&set.disjoint);
+            }
+            recorder.record_dropped();
+        }
+    }
+
+    /// Records every finished paint, oldest first, and stops at the first the GPU has not
+    /// finished: the immediate context completes in order.
+    fn poll(&mut self, context: &ID3D11DeviceContext, recorder: &GpuTimeRecorder) {
+        while let Some((set, tag)) = self.in_flight.front() {
+            let Some(seconds) = set.read(context) else {
+                break;
+            };
+            match seconds {
+                Some(seconds) => recorder.record_seconds_tagged(*tag, seconds),
+                None => recorder.record_dropped(),
+            }
+            let (set, _) = self.in_flight.pop_front().unwrap();
+            self.free.push(set);
+        }
+    }
+}
+
+impl Cx {
+    /// Opens the timestamp bracket around a paint of a pass that opted into GPU timing. A
+    /// pass that did not creates no queries.
+    fn d3d_gpu_time_begin(&mut self, pass_id: DrawPassId, d3d11_cx: &D3d11Cx) {
+        let pass = &mut self.passes[pass_id];
+        if let Some(query) = &pass.gpu_time_query {
+            pass.os.gpu_timer.begin(&query.recorder, d3d11_cx);
+        }
+    }
+
+    /// Closes the bracket `d3d_gpu_time_begin` opened for a paint that stopped before it drew.
+    fn d3d_gpu_time_abandon(&mut self, pass_id: DrawPassId, d3d11_cx: &D3d11Cx) {
+        let pass = &mut self.passes[pass_id];
+        if let Some(query) = &pass.gpu_time_query {
+            pass.os.gpu_timer.abandon(&query.recorder, d3d11_cx);
+        }
+    }
+
+    fn d3d_poll_gpu_times(&mut self, context: &ID3D11DeviceContext) {
+        for item in &mut self.passes.0.pool {
+            let pass = &mut item.item;
+            match &pass.gpu_time_query {
+                Some(query) => pass.os.gpu_timer.poll(context, &query.recorder),
+                // Timing switched off: its queries go with it.
+                None => pass.os.gpu_timer = D3dGpuTimer::default(),
+            }
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -4005,8 +4230,13 @@ impl DrawVars {
                 );
             }
 
-            // Don't proceed if shader compilation had errors
+            // Don't proceed if shader compilation had errors — and SAY SO.
+            // Every other backend logs here (opengl.rs, metal.rs, the headless
+            // raster and draw_vars itself); this one returned in silence, so on
+            // Windows a widget could stop drawing entirely with nothing in the
+            // log to say why, and the error sat unread in `output.errors`.
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 
@@ -4778,6 +5008,8 @@ impl Cx {
         }
     }
 
+    /// The loop's GPU completion poll, run around every repaint whether or
+    /// not anything painted; it also collects finished pass timings.
     pub(crate) fn poll_texture_lifetimes(&mut self) {
         // The adapter draws attached blocks here (no per-publication
         // backing): dropped blocks release from this poll, contract §3.3.
@@ -4832,5 +5064,6 @@ impl Cx {
             }
             state.retired.retain(|retired| retired.serial > completed);
         }
+        self.d3d_poll_gpu_times(&context);
     }
 }

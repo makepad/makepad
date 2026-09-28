@@ -1,8 +1,9 @@
 # Application styles
 
 These Splash files define the shared widget styles used by the window manager:
-`omarchy`, `macos`, `macos-dark`, `windows`, `windows-dark`, `windows-2000`,
-`nextstep`, `ios`, `ios-dark`, `android`, and `android-dark`.
+`omarchy`, `black-orange`, `macos`, `macos-dark`, `windows`, `windows-dark`,
+`windows-2000`, `nextstep`, `ios`, `ios-dark`, `android`, `android-dark`, and
+the four material sheets `neumorphic`, `molded`, `glossy` and `milled`.
 
 Each style has two phases:
 
@@ -11,6 +12,30 @@ Each style has two phases:
 - `widgets.splash` applies component geometry and materials after registration.
   It can replace a widget's shader as well as its properties. Windows 2000's
   raised buttons and sunken edit fields are examples.
+
+## The surface material
+
+The rounded view, the panel, the button, the check box, the toggle, the
+slider and the knob carry a moulded material behind one uniform, `material`,
+whose default is the theme's `material_level`. Every stock theme leaves it at
+0, so those shaders draw exactly what they always did; a material sheet
+raises it in its `theme.splash` before any widget registers (1 relief, 2
+relief with rim, gloss and specular), and the `material_*` tokens beside it
+set the key light, the shoulder, the finish, the cast and inner shadows, the
+glow and the press. The shading is `mod.sdf.Material` in
+`draw/src/shader/surface.rs`, the library `ReliefView` is lit by too.
+
+A material control keeps its quad and insets its face by
+`theme.material_margin`: the room its cast shadow falls into, which the sheet
+pays for again in the control's padding (`neumorphic/widgets.splash` shows
+the sum). Bevel colours are matched to the ground so the old stroke
+disappears and the relief replaces it, and the inset state colours are
+pinned opaque, because the light base derives them as translucent overlays
+that read as black to the contrast tests. The press is one signed number,
+`material_press_depth`: past `-material_raise` a held face inverts
+(`neumorphic`), short of it the cap deepens (`molded`), near zero the glow
+carries the state (`glossy`, `milled`, with `material_ink_glow` lighting the
+label). The storybook's Containers > Material page shows all three.
 
 The loader embeds both files for installed/wasm builds. In a native source
 checkout it reads `widgets/themes/<style>/` on each selection. Edit either file

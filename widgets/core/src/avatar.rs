@@ -220,19 +220,10 @@ script_mod! {
         /** the face; `picture +: {src: crate_resource("...")}` at a call site */
         picture: mod.widgets.Image{
             // Cropped to the plate rather than squashed into it: a face
-            // stretched to a square stops being that face.
+            // stretched to a square stops being that face. Nothing here
+            // says what shape it is cut to: the plate's corner depends on
+            // a size, so the widget writes it on every draw.
             fit: ImageFit.CropToFill
-            draw_bg +: {
-                /** half the visual corner radius; the widget writes it every draw */
-                mask_radius: uniform(10000.0)
-                pixel: fn() {
-                    let c = self.get_color()
-                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                    sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.mask_radius)
-                    sdf.fill(vec4(c.xyz, c.w * self.opacity))
-                    return sdf.result
-                }
-            }
         }
 
         /** the presence dot: the badge's status shapes in the presence colours */
@@ -657,11 +648,9 @@ impl Widget for Avatar {
             AvatarShape::Rounded => (self.radius - ring).clamp(0.0, inner_size * 0.5),
             AvatarShape::Square => 0.0,
         };
-        self.picture.draw_bg.draw_vars.set_uniform(
-            cx.cx.cx,
-            live_id!(mask_radius),
-            &[(inner_radius * 0.5) as f32],
-        );
+        // Halved, because `sdf.box` draws twice the radius it is handed —
+        // the same number a view takes for its own `border_radius`.
+        self.picture.draw_bg.border_radius = (inner_radius * 0.5) as f32;
         // The picture is drawn on every frame even when it holds nothing,
         // because that draw is what starts the load; until there is
         // something in it, it is drawn at no opacity and the initials stand
@@ -1109,6 +1098,65 @@ mod tests {
         let host = dvec2(40.0, 40.0);
         let at = presence_offset(BadgeCorner::TopLeft, AvatarShape::Square, host, 12.0);
         assert_eq!(at, corner_offset(BadgeCorner::TopLeft, host, dvec2(12.0, 12.0), 0.25));
+    }
+
+    /// The face is cut to the plate, and to the plate INSIDE the ring: a
+    /// picture cut to the outer edge would be painted over the very band
+    /// the ring is there to draw. The picture cuts itself now, so what is
+    /// worth pinning is the number the widget hands it — halved, because
+    /// `sdf.box` draws twice what it is given.
+    #[test]
+    fn the_face_is_cut_to_the_plate_inside_the_ring() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::makepad_script::script;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut row = cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 400 height: 120
+                    flow: Right
+                    Avatar{plate: 40. name: "Mira Okafor"}
+                    Avatar{plate: 40. name: "Jun Park" ring: 4. ring_color: #fff}
+                    Avatar{plate: 40. name: "Ada Sorensen" shape: Rounded radius: 8.}
+                    Avatar{plate: 40. name: "Tomas Ruiz" shape: Square}
+                }
+            });
+            View::script_from_value(vm, value)
+        });
+
+        let size = dvec2(400.0, 120.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_overlay());
+            let walk = row.walk;
+            row.draw_walk_all(&mut cx2d, &mut Scope::empty(), walk);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        // A disc 40 across is cut at 20, a ring 4 wide leaves 32 and cuts
+        // at 16, a rounded plate is cut at the radius it was written with
+        // and a square one is not cut at all.
+        for (index, want) in [(0, 10.0), (1, 8.0), (2, 4.0), (3, 0.0)] {
+            let child = row.children[index].1.clone();
+            let avatar = child.borrow::<Avatar>().expect("an avatar");
+            assert_eq!(
+                avatar.picture.draw_bg.border_radius, want,
+                "plate {index} cut its face at the wrong radius"
+            );
+        }
     }
 
     /// The dot is placed against the plate wherever the row puts the plate.

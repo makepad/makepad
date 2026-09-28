@@ -61,20 +61,63 @@ pub struct Story {
 }
 
 pub struct Control {
+    /// The row's name. Controls that share a label are one control: the
+    /// panel shows the first of them, and a hand edit, a preset or a page
+    /// widget setting that label moves every one, each writing its own
+    /// property on its own targets. That is how one value reaches widgets
+    /// that name it differently.
     pub label: &'static str,
     /// Id path of the widget the control writes to, relative to the story
-    /// root; empty means the subject.
+    /// root; empty means the subject. Several paths separated by spaces
+    /// write the same value to every one of them, for a control that tunes
+    /// something a whole page shares.
     pub target: &'static str,
     pub kind: ControlKind,
 }
 
+/// What a control edits. A `prop` names a property of the target, dotted
+/// into its sub-objects (`draw_bg.border_radius`). A prop ending in a lane,
+/// `draw_bg.material_light[2]`, is one component of a vector property: the
+/// panel writes the whole vector, each lane taken from the story's control
+/// for that lane of the same property on the same target, so a vector a
+/// shader packs four values into gets four sliders. A lane no control names
+/// is written as 0.
 pub enum ControlKind {
     Bool { prop: &'static str, default: bool },
     Number { prop: &'static str, min: f64, max: f64, step: f64, default: f64 },
     Choice { prop: &'static str, options: &'static [&'static str], default: usize },
     Text { prop: &'static str, default: &'static str },
+    /// `prop` may name several properties, separated by spaces, that all
+    /// take the one colour: a face and each of its states.
     Color { prop: &'static str, default: u32 },
+    /// A prop that takes an array of `[x, y, kind]` anchors, a curve over
+    /// the unit box, edited in a curve editor. `left` and `right` caption
+    /// the editor's two ends, `guide` draws a dashed reference line at that
+    /// height, named by `guide_label`, and `mirror` draws the curve followed
+    /// by its own mirror across the top, for a half tooth.
+    Curve {
+        prop: &'static str,
+        default: &'static [[f64; 3]],
+        left: &'static str,
+        right: &'static str,
+        guide: Option<f64>,
+        guide_label: &'static str,
+        mirror: bool,
+    },
     Disabled { default: bool },
+    /// A heading, the control's label, over the controls that follow it up
+    /// to the next section. A click on it folds them away or back. Controls
+    /// before the first section belong to none and are always shown, so a
+    /// story that declares no section draws the list it always drew.
+    Section { open: bool },
+    /// A choice that writes other controls rather than a property: picking
+    /// an option sets every control `values` names for it, by label, and
+    /// each of those writes its property as if it had been moved by hand.
+    Preset {
+        options: &'static [&'static str],
+        default: usize,
+        values: fn(usize) -> Vec<(&'static str, crate::controls::ControlValue)>,
+    },
 }
 
 /// Every story, in navigator order.
@@ -330,7 +373,7 @@ mod tests {
                 ("Shape", &["Radius"]),
                 ("Elevation", &["Levels"]),
                 ("State", &["Layers"]),
-                ("Motion", &["Overview"]),
+                ("Motion", &["Overview", "Tween & timeline", "Ease editor", "Curve editor", "Script tweens", "Motion paths", "Sequencer"]),
             ],
         ),
         (
@@ -355,6 +398,7 @@ mod tests {
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
+                ("Material", &["Overview", "Knob presets", "Knob cost"]),
                 ("Splash", &["Overview"]),
             ],
         ),
@@ -391,22 +435,25 @@ mod tests {
             &[
                 ("TextInput", &["Overview", "Field well"]),
                 ("NumberField", &["Overview"]),
-                ("Slider", &["Overview", "Range slider"]),
+                ("Slider", &["Overview", "Fader", "Range slider"]),
                 ("Rotary", &["Overview", "Knob"]),
                 ("Rating", &["Overview"]),
                 ("TagField", &["Overview"]),
                 ("DatePicker", &["Overview", "Calendar"]),
                 ("TimePicker", &["Overview"]),
                 ("ColorPicker", &["Overview"]),
+                ("GradientEditor", &["Overview"]),
                 ("Dropzone", &["Overview", "Well states"]),
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
+                ("Hotkeys", &["Hotkey editor", "Keyboard map"]),
+                ("Gizmo3d", &["3D Gizmo"]),
             ],
         ),
         (
             "Selection",
             &[
-                ("CheckBox", &["Overview"]),
+                ("CheckBox", &["Overview", "Icon toggle"]),
                 ("RadioGroup", &["Overview"]),
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),
@@ -458,7 +505,7 @@ mod tests {
             "Collections",
             &[
                 ("Lists", &["Overview", "List item"]),
-                ("Table", &["Overview"]),
+                ("Table", &["Overview", "Diagonal headings"]),
                 ("Tree", &["Overview", "Files"]),
                 ("DataGrid", &["Overview", "List"]),
                 ("TileList", &["Overview", "Item grid"]),

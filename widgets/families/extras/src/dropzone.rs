@@ -332,6 +332,8 @@ script_mod! {
         // declared in the DSL, writes it on the image itself. It carries no
         // width or height because the well hands it its own rect every draw
         // — the picture IS the well's face, not something laid beside it.
+        // Nor a corner: the ground's is handed over with the rect, so a
+        // caller rounding the well rounds what is in it.
         picture: mod.widgets.Image{
             fit: mod.widgets.ImageFit.CropToFill
         }
@@ -2510,6 +2512,17 @@ impl Widget for ImageWell {
         self.draw_bg.begin(cx, walk, self.layout);
         let rect = cx.turtle().rect();
 
+        // The well's face is cut to the well: the ground's corner goes to
+        // the picture on every draw, since a caller may have written a
+        // different one, and a picture cropped to fill covers the ground
+        // whole — corners and all — the moment it has anything in it.
+        // Written onto the draw struct rather than through a setter: a
+        // setter redraws, and a redraw on every draw is a loop.
+        let image = self.picture.as_image();
+        if let Some(mut image) = image.borrow_mut() {
+            image.draw_bg.border_radius = self.draw_bg.border_radius;
+        }
+
         // The picture is drawn every pass, even while there is nothing to
         // see. A `src` declared in the DSL is fetched by the image's OWN
         // draw, so a slot only drawn once it already had a picture would
@@ -2762,6 +2775,58 @@ mod tests {
         assert_eq!(well.add_mark_size, 28.0);
         assert_eq!(well.add_mark_gap, 6.0);
         assert_eq!(well.reject_secs, 0.7);
+    }
+
+    /// The well is rounded and its face is the picture, so the picture
+    /// has to be rounded with it: cropped to fill, it covers the ground
+    /// whole and a square picture would square the well's own corners off.
+    /// One radius, written on the ground, reaching both.
+    #[test]
+    fn the_picture_is_cut_to_the_well_it_fills() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut well = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                ImageWell{
+                    width: 120.
+                    height: 120.
+                    draw_bg +: {border_radius: 7.0}
+                }
+            });
+            ImageWell::script_from_value(vm, value)
+        });
+
+        let size = dvec2(200.0, 200.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_overlay());
+            let walk = well.walk;
+            well.draw_walk_all(&mut cx2d, &mut Scope::empty(), walk);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        assert_eq!(well.draw_bg.border_radius, 7.0, "the DSL reached the ground");
+        let image = well.picture.as_image();
+        let picture = image.borrow().expect("the slot holds a picture");
+        assert_eq!(
+            picture.draw_bg.border_radius, 7.0,
+            "the face was left square in a rounded well"
+        );
     }
 
     /// Turning the plus on is the only thing that may move the prompt, so

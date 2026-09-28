@@ -7,6 +7,7 @@
 //! pick a theme or reset the canvas without driving the pointer. The
 //! callback runs on the UI thread but outside the app's event handling, so
 //! it queues requests the app drains at the start of its next event.
+use crate::makepad_widgets::tween;
 use crate::makepad_widgets::*;
 use crate::registry;
 use crate::settings;
@@ -25,6 +26,59 @@ static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn install(cx: &mut Cx) {
     cx.tweak_callback = Some(callback);
+    cx.design_preview_callback = Some(design_preview);
+}
+
+/// The designer's preview of a story file, without the app-wide live edit:
+/// the file's override is installed, the evaluated record dropped, and the
+/// canvas rebuilt, which re-runs that one file. Files outside the stories
+/// (a widget's own source) are left to the platform's live edit.
+fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), String>> {
+    let normalized = file.replace('\\', "/");
+    if !normalized.contains("/apps/storybook/src/stories/") {
+        return None;
+    }
+    // The canvas by type, not by name: a name search takes the shallowest
+    // `canvas` in the tree, which need not be the story canvas.
+    let canvas = cx
+        .widget_tree()
+        .flat_tree(cx)
+        .into_iter()
+        .find(|row| row.ty == "StoryCanvas")
+        .map(|row| cx.widget_tree().widget(WidgetUid(row.uid)))
+        .filter(|w| !w.is_empty());
+    let Some(canvas) = canvas else {
+        log!("storybook: design preview found no StoryCanvas; the live edit takes it");
+        return None;
+    };
+    let changed = match cx.install_live_edit_text(file, text) {
+        Ok(changed) => changed,
+        Err(err) => return Some(Err(err)),
+    };
+    crate::stories::forget_evaluated(cx);
+    // The rebuild runs the story file again under reload, as the live edit
+    // would, so widgets that guard their state on `is_reload` behave alike.
+    cx.live_edit_capture_begin();
+    cx.with_vm(|vm| vm.bx.is_reload = true);
+    let rebuilt = match canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
+        Some(mut canvas) => {
+            canvas.rebuild(cx);
+            true
+        }
+        None => false,
+    };
+    cx.with_vm(|vm| vm.bx.is_reload = false);
+    cx.live_edit_capture_end();
+    log!(
+        "storybook: design preview of {} (override {}, canvas {})",
+        normalized.rsplit('/').next().unwrap_or(&normalized),
+        if changed { "installed" } else { "unchanged" },
+        if rebuilt { "rebuilt" } else { "NOT rebuilt" }
+    );
+    if !rebuilt {
+        return None;
+    }
+    Some(Ok(()))
 }
 
 /// The app records the story it shows so `story_state` can report it.
@@ -112,6 +166,50 @@ fn callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, 
                 json_str(&theme::names()[theme::choice()]),
                 json_str(&settings::baseline()),
                 registry::all().count()
+            ))
+        }
+        "tween" => {
+            // The app-wide tween ticker (GSAP globalTimeline.timeScale() /
+            // pause() plus reduced motion): `scale=0.25&paused=1&reduced=0`,
+            // each optional; answers the ticker as it now stands. `scale`
+            // takes 0.1 to 4, the range of the playground's Global speed
+            // slider, so the page always shows the value in effect; to
+            // stop time use `paused=1` (a scale of 0 would keep every
+            // playing host re-arming frames that move nothing).
+            let scale = match arg(args, "scale") {
+                Some(v) => match v.parse::<f64>() {
+                    Ok(s) if (0.1..=4.0).contains(&s) => Some(s),
+                    _ => return Err(format!("bad scale={v}")),
+                },
+                None => None,
+            };
+            let flag = |key: &str| -> Result<Option<bool>, String> {
+                match arg(args, key) {
+                    Some("1" | "true" | "yes" | "on") => Ok(Some(true)),
+                    Some("0" | "false" | "no" | "off") => Ok(Some(false)),
+                    Some(v) => Err(format!("bad {key}={v}")),
+                    None => Ok(None),
+                }
+            };
+            let paused = flag("paused")?;
+            let reduced = flag("reduced")?;
+            if scale.is_some() || paused.is_some() || reduced.is_some() {
+                tween::set_tween_ticker(cx, |t| {
+                    if let Some(s) = scale {
+                        t.time_scale = s;
+                    }
+                    if let Some(p) = paused {
+                        t.paused = p;
+                    }
+                    if let Some(r) = reduced {
+                        t.reduced_motion = r;
+                    }
+                });
+            }
+            let t = tween::tween_ticker(cx);
+            Ok(format!(
+                "{{\"scale\":{},\"paused\":{},\"reduced\":{},\"epoch\":{}}}",
+                t.time_scale, t.paused as u8, t.reduced_motion as u8, t.epoch
             ))
         }
         _ => crate::makepad_widgets::tweaker::tweak_callback(cx, op, args),

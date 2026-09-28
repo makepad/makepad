@@ -1475,6 +1475,361 @@ fn caption_press_is_clients(over_content: bool, mouse_held_outside: bool) -> boo
     over_content || mouse_held_outside
 }
 
+/// The room this window keeps back from its body for a docked design panel,
+/// given the width the panel's band takes (`band`, zero while the panel is
+/// hidden or floats over the app).
+///
+/// The app is laid out in the window less the band, and the panel draws in
+/// the band beside it, so the app looks exactly as if the window had been
+/// made narrower by the panel's width -- without the window being resized,
+/// which would move the caption bar's own buttons and put the panel outside
+/// the surface it draws in.
+///
+/// It is a layout constraint on the body's walk, imposed by the window as it
+/// lays the body out on every draw, and never a property written into the
+/// app. That is the whole point. The body is the app's own template, and
+/// anything written into it is taken away again by the next thing that
+/// re-applies it: a theme install, a live edit, a style reload. The panel
+/// used to run its width into the body as a script margin, and every reload
+/// laid the app out at full width for a frame before the margin was put back
+/// -- the top bar gave its title back and took it away again six times a
+/// second while a theme slider moved. A reserve kept by the window has
+/// nothing to lose to a reload, so the first draw after one is laid out the
+/// same as the draw before it.
+///
+/// It is added to whatever margin the body has of its own, so a body that
+/// keeps a right margin keeps it beside the panel as well.
+///
+/// Only a window whose template has the panel keeps anything back: an app
+/// with a window of its own making, without a `tweaker`, never sees a band.
+fn docked_body_reserve(view: &View, band: f64) -> Option<Inset> {
+    let has_panel = view.children.iter().any(|(id, _)| *id == live_id!(tweaker));
+    (has_panel && band > 0.5).then(|| Inset {
+        right: band,
+        ..Default::default()
+    })
+}
+
+/// Keep [`docked_body_reserve`] back from the body of the window view
+/// `view`, before that view lays the body out.
+fn dock_body(view: &mut View, band: f64) {
+    let reserve = docked_body_reserve(view, band);
+    view.set_child_reserve(live_id!(body), reserve);
+}
+
+#[cfg(test)]
+mod dock_tests {
+    //! The window's view on its own, laid out the way `Window::draw_walk`
+    //! lays it out -- `dock_body` first, then the view -- with no platform
+    //! window under it: a test that makes its own graphics device takes the
+    //! rest of the suite down with it.
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    // The panel's own arithmetic, from the tweaker family, which the core
+    // does not link: a docked panel reserves its width and a closed one
+    // nothing, and a splitter drag clamps the width to 180..560, moving
+    // nothing when it would not change it.
+    fn band_reserve(on: bool, sidebar_width: f64) -> f64 {
+        if on { sidebar_width } else { 0.0 }
+    }
+    fn dragged_sidebar_width(current: f64, window_right: f64, pointer_x: f64) -> Option<f64> {
+        let width = (window_right - pointer_x).clamp(180.0, 560.0);
+        ((current - width).abs() >= 0.01).then_some(width)
+    }
+
+    /// The window's starting size in the storybook, and the panel's default.
+    const WINDOW: DVec2 = dvec2(1400.0, 900.0);
+    const BAND: f64 = 280.0;
+
+    struct Rig {
+        cx: Cx,
+        view: View,
+        /// What the view was built from, and so what a reload applies again.
+        source: ScriptValue,
+        pass: DrawPass,
+        list: DrawList2d,
+    }
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+        cx
+    }
+
+    fn rig(mut cx: Cx, source: ScriptValue) -> Rig {
+        let view = cx.with_vm(|vm| {
+            assert!(vm.take_errors().is_empty(), "the window view did not build");
+            View::script_from_value(vm, source)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let list = DrawList2d::new(&mut cx);
+        Rig { cx, view, source, pass, list }
+    }
+
+    /// The children the window template gives its view, in its order: the
+    /// caption, the app's body (a KeyboardView, as there), the panel. The
+    /// body states its margin, as the storybook's does (`margin: 0.`), so a
+    /// reload writes it.
+    fn window_view() -> Rig {
+        let mut cx = cx();
+        let source = cx.with_vm(|vm| {
+            crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill height: Fill flow: Down
+                    caption := View{width: Fill height: 30}
+                    body := KeyboardView{width: Fill height: Fill margin: 0. cursor: MouseCursor.Default}
+                    tweaker := View{width: 0 height: 0}
+                }
+            })
+        });
+        rig(cx, source)
+    }
+
+    /// The same, with a body that keeps a right margin of its own.
+    fn window_view_with_body_margin() -> Rig {
+        let mut cx = cx();
+        let source = cx.with_vm(|vm| {
+            crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill height: Fill flow: Down
+                    caption := View{width: Fill height: 30}
+                    body := KeyboardView{width: Fill height: Fill margin: Inset{right: 12}}
+                    tweaker := View{width: 0 height: 0}
+                }
+            })
+        });
+        rig(cx, source)
+    }
+
+    /// A window of an app's own making, without the panel in it.
+    fn window_view_without_panel() -> Rig {
+        let mut cx = cx();
+        let source = cx.with_vm(|vm| {
+            crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill height: Fill flow: Down
+                    caption := View{width: Fill height: 30}
+                    body := KeyboardView{width: Fill height: Fill}
+                }
+            })
+        });
+        rig(cx, source)
+    }
+
+    /// One frame of the window view, `band` wide for the panel. Does what
+    /// `Window::draw_walk` does in the order it does it, and nothing that the
+    /// panel's own draw does: the panel is not drawn here at all, which is the
+    /// point -- the body's width may not wait on it.
+    fn frame(rig: &mut Rig, band: f64) {
+        dock_body(&mut rig.view, band);
+        let cx = &mut rig.cx;
+        rig.pass.set_size(cx, WINDOW);
+        cx.redraw_all();
+        let event = std::mem::take(&mut cx.new_draw_event);
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&rig.pass, Some(1.0));
+        rig.list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(WINDOW, Layout::flow_overlay());
+        let walk = rig.view.walk;
+        while rig
+            .view
+            .draw_walk(&mut cx2d, &mut Scope::empty(), walk)
+            .is_step()
+        {}
+        cx2d.end_pass_sized_turtle();
+        rig.list.end(&mut cx2d);
+        cx2d.end_pass(&rig.pass);
+    }
+
+    fn child(rig: &Rig, id: LiveId) -> WidgetRef {
+        rig.view
+            .children
+            .iter()
+            .find(|(c, _)| *c == id)
+            .map(|(_, w)| w.clone())
+            .unwrap_or_else(|| panic!("the window view has no {id}"))
+    }
+
+    fn rect_of(rig: &Rig, id: LiveId) -> Rect {
+        child(rig, id).area().rect(&rig.cx)
+    }
+
+    /// Apply the window view again from its own source, the way a reload
+    /// does: a style reload (a theme install) with `ScriptReapply`, a file
+    /// edit with `Reload`, a safe-area re-bake with `Rebake`.
+    fn reload(rig: &mut Rig, apply: Apply) {
+        let source = rig.source;
+        let view = &mut rig.view;
+        rig.cx.with_vm(|vm| {
+            view.script_apply(vm, &apply, &mut Scope::empty(), source);
+            assert!(vm.take_errors().is_empty(), "the reload did not apply cleanly");
+        });
+    }
+
+    /// The app is laid out beside the panel: the window less the band, from
+    /// the window's left edge. Nothing else in the window gives anything up
+    /// -- the caption bar runs the whole width under the panel as it always
+    /// has.
+    #[test]
+    fn the_body_is_laid_out_beside_the_band() {
+        let mut rig = window_view();
+        frame(&mut rig, BAND);
+        let body = rect_of(&rig, live_id!(body));
+        assert_eq!(body.pos.x, 0.0);
+        assert_eq!(body.size.x, WINDOW.x - BAND, "the body is the window less the band");
+        assert_eq!(body.size.y, WINDOW.y - 30.0, "and keeps its whole height");
+        assert_eq!(rect_of(&rig, live_id!(caption)).size.x, WINDOW.x);
+
+        // The panel going away gives the whole width back on the next draw.
+        frame(&mut rig, 0.0);
+        assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x);
+    }
+
+    /// The panel hidden, floating, or not in the window at all: the body is
+    /// laid out exactly as an app without a panel lays it out, and the
+    /// window keeps nothing back.
+    #[test]
+    fn the_body_has_its_full_width_with_the_panel_hidden_floating_or_absent() {
+        let mut rig = window_view();
+        // Hidden, and floating: both are a band of nothing by the time the
+        // window reads it.
+        for band in [band_reserve(false, BAND), 0.0] {
+            frame(&mut rig, band);
+            assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x);
+            assert!(rig.view.child_reserve().is_none(), "nothing kept back at {band}");
+        }
+        // Absent: a window without the panel keeps nothing back, whatever
+        // the session says.
+        let mut rig = window_view_without_panel();
+        frame(&mut rig, BAND);
+        assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x);
+        assert!(rig.view.child_reserve().is_none());
+    }
+
+    /// The band is added to the body's own margin, never put in its place:
+    /// a body that keeps a right margin keeps it beside the panel, and has
+    /// it back when the panel goes.
+    #[test]
+    fn a_body_keeps_its_own_margin_beside_the_band() {
+        let mut rig = window_view_with_body_margin();
+        frame(&mut rig, BAND);
+        assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x - 12.0 - BAND);
+        frame(&mut rig, 0.0);
+        assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x - 12.0);
+    }
+
+    /// The bug itself. A reload re-applies the app's body from its own
+    /// template, and the very next draw -- with no draw of the panel in
+    /// between -- must lay it out beside the band already. A frame at full
+    /// width there is the top bar giving its title back and taking it away
+    /// again on every theme the equalizer installs.
+    ///
+    /// The first half is the way the panel used to do it, kept as the
+    /// reason: a margin written INTO the body is gone after the reload, and
+    /// the draw that follows is at full width until something writes it
+    /// again.
+    #[test]
+    fn the_first_draw_after_a_reload_is_already_beside_the_band() {
+        for apply in [Apply::ScriptReapply, Apply::Reload, Apply::Rebake] {
+            // Then: the band written into the body as its margin.
+            let mut rig = window_view();
+            {
+                let body = child(&rig, live_id!(body));
+                let mut body = body.borrow_mut::<crate::keyboard_view::KeyboardView>().unwrap();
+                body.walk.margin.right = BAND;
+            }
+            frame(&mut rig, 0.0);
+            assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x - BAND);
+            reload(&mut rig, apply.clone());
+            frame(&mut rig, 0.0);
+            assert_eq!(
+                rect_of(&rig, live_id!(body)).size.x,
+                WINDOW.x,
+                "{apply:?}: a margin written into the body should not have survived its reload"
+            );
+
+            // Now: the band kept back by the window.
+            let mut rig = window_view();
+            frame(&mut rig, BAND);
+            assert_eq!(rect_of(&rig, live_id!(body)).size.x, WINDOW.x - BAND);
+            reload(&mut rig, apply.clone());
+            frame(&mut rig, BAND);
+            assert_eq!(
+                rect_of(&rig, live_id!(body)).size.x,
+                WINDOW.x - BAND,
+                "{apply:?}: the first draw after the reload laid the app out at full width"
+            );
+        }
+    }
+
+    /// A splitter drag is a relayout and nothing more. Each move changes one
+    /// number in the session, and the body follows it on the next draw --
+    /// with nothing parsed, nothing applied to the app and no module rebuilt
+    /// or asked for.
+    ///
+    /// "Nothing applied" is read off the body itself: its cursor is set at
+    /// runtime to something its template does not say, and any apply of the
+    /// body puts the template's back. The same test proves the probe can
+    /// tell, by applying once at the end and watching it go.
+    #[test]
+    fn a_splitter_drag_is_a_relayout_and_nothing_more() {
+        let mut rig = window_view();
+        let body = child(&rig, live_id!(body));
+        let set_probe = |body: &WidgetRef| {
+            body.borrow_mut::<crate::keyboard_view::KeyboardView>().unwrap().cursor =
+                Some(MouseCursor::Hand);
+        };
+        let probe = |body: &WidgetRef| body.borrow::<crate::keyboard_view::KeyboardView>().unwrap().cursor;
+        set_probe(&body);
+
+        let mut width = BAND;
+        frame(&mut rig, band_reserve(true, width));
+        let window_right = WINDOW.x;
+        let mut moves = 0;
+        let mut relayouts = 0;
+        // Out to the wide clamp and back in to the narrow one, a point at a
+        // time, as a hand drags it.
+        let path = (0..400)
+            .map(|step| WINDOW.x - BAND - step as f64)
+            .chain((0..560).map(|step| WINDOW.x - BAND - 400.0 + step as f64));
+        for pointer_x in path {
+            moves += 1;
+            if let Some(next) = dragged_sidebar_width(width, window_right, pointer_x) {
+                width = next;
+                relayouts += 1;
+            }
+            frame(&mut rig, band_reserve(true, width));
+            assert_eq!(
+                rect_of(&rig, live_id!(body)).size.x,
+                WINDOW.x - width,
+                "the body did not follow the band at pointer {pointer_x}"
+            );
+        }
+        assert_eq!(moves, 960);
+        assert!(relayouts > 0 && relayouts < moves, "the clamps should have held some moves still");
+        assert_eq!(width, 180.0, "the drag ended on the narrow clamp");
+
+        // Nothing applied to the body, nothing rebuilt, nothing asked for.
+        assert_eq!(probe(&body), Some(MouseCursor::Hand), "the drag applied the app's body");
+        assert!(!rig.cx.pending_style_reload, "the drag asked for a module rebuild");
+        assert!(!rig.cx.pending_live_edit_request, "the drag asked for a live edit");
+        assert!(!rig.cx.pending_script_reapply, "the drag asked for a re-apply");
+
+        // And the probe is one that can tell: one apply, and it is gone.
+        reload(&mut rig, Apply::ScriptReapply);
+        assert_ne!(probe(&body), Some(MouseCursor::Hand), "the probe survives an apply, so it proves nothing");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2302,6 +2657,12 @@ impl Widget for Window {
         }
 
         if let Some(DrawState::Drawing) = self.draw_state.get() {
+            // Set on every entry, resumes included: the reserve is read off
+            // the panel's state as it is now, and it is the same answer for
+            // every step of one frame.
+            let band = crate::widget_hooks::WidgetHooks::tweaker(cx)
+                .map_or(0.0, |tweaker| (tweaker.docked_band_width)());
+            dock_body(&mut self.view, band);
             self.view.draw_walk(cx, scope, walk)?;
             self.draw_state.end();
             self.end(cx);

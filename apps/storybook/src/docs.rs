@@ -29,27 +29,38 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
-        spacing: theme.space_2
-        doc := Markdown{
-            width: Fill
-            height: Fit
-            body: ""
-        }
-        added := Label{text: ""}
-        props_head := View{
-            width: Fill
-            height: Fit
-            flow: Right
-            spacing: theme.space_2
-            align: Align{x: 0. y: 0.5}
-            props_title := H4{text: "Properties"}
-            Filler{}
-            inherited := CheckBox{text: "inherited"}
-        }
+        // ONE SCROLL. The story's note, its date line and the table's heading
+        // are the list's first row, so a long note scrolls away with the
+        // table under it. Stacked above a list that took whatever height was
+        // left, a note longer than the panel left the list none, and the
+        // list was the only thing that scrolled.
         props := PortalList{
             width: Fill
             height: Fill
             scroll_bar: ScrollBar{}
+            Head := View{
+                width: Fill
+                height: Fit
+                flow: Down
+                spacing: theme.space_2
+                padding: Inset{bottom: theme.space_2}
+                doc := Markdown{
+                    width: Fill
+                    height: Fit
+                    body: ""
+                }
+                added := Label{text: ""}
+                props_head := View{
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: theme.space_2
+                    align: Align{x: 0. y: 0.5}
+                    props_title := H4{text: "Properties"}
+                    Filler{}
+                    inherited := CheckBox{text: "inherited"}
+                }
+            }
             Row := PropRow{}
         }
     }
@@ -71,6 +82,15 @@ pub struct DocsPanel {
     props: Vec<Prop>,
     #[rust]
     show_inherited: bool,
+    /// What the head row shows. The row is a list item, built when it is
+    /// first drawn and rebuilt on a live edit, so it is filled from here at
+    /// every draw rather than set once.
+    #[rust]
+    head_doc: String,
+    #[rust]
+    head_added: String,
+    #[rust]
+    head_title: String,
     /// The subject the table was read from, so it is read again only when
     /// the story is rebuilt.
     #[rust]
@@ -79,15 +99,14 @@ pub struct DocsPanel {
 
 impl DocsPanel {
     pub fn set_story(&mut self, cx: &mut Cx, story: &Story) {
-        self.view.markdown(cx, ids!(doc)).set_text(cx, story.doc);
+        self.head_doc = story.doc.to_string();
         let tags = if story.tags.is_empty() {
             String::new()
         } else {
             format!(" · {}", story.tags.join(", "))
         };
-        self.view
-            .label(cx, ids!(added))
-            .set_text(cx, &format!("Added {}{}", story.added, tags));
+        self.head_added = format!("Added {}{}", story.added, tags);
+        self.head_title = "Properties".to_string();
         self.props.clear();
         self.subject = None;
         self.view.redraw(cx);
@@ -121,7 +140,7 @@ impl DocsPanel {
         } else {
             format!("Properties ({} set, {} inherited)", set, self.props.len() - set)
         };
-        self.view.label(cx, ids!(props_title)).set_text(cx, &title);
+        self.head_title = title;
         self.view.redraw(cx);
     }
 
@@ -146,9 +165,21 @@ impl Widget for DocsPanel {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.borrow_mut::<PortalList>() {
                 let rows = self.visible_props();
-                list.set_item_range(cx, 0, rows.len());
+                list.set_item_range(cx, 0, rows.len() + 1);
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let Some(prop) = rows.get(item_id) else {
+                    if item_id == 0 {
+                        let head = list.item(cx, item_id, live_id!(Head));
+                        head.markdown(cx, ids!(doc)).set_text(cx, &self.head_doc);
+                        head.label(cx, ids!(added)).set_text(cx, &self.head_added);
+                        head.label(cx, ids!(props_title)).set_text(cx, &self.head_title);
+                        let inherited = head.check_box(cx, ids!(inherited));
+                        if inherited.active(cx) != self.show_inherited {
+                            inherited.set_active(cx, self.show_inherited, Animate::No);
+                        }
+                        head.draw_all(cx, &mut Scope::empty());
+                        continue;
+                    }
+                    let Some(prop) = rows.get(item_id - 1) else {
                         continue;
                     };
                     let item = list.item(cx, item_id, live_id!(Row));
@@ -169,9 +200,15 @@ impl Widget for DocsPanel {
         }
         self.view.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
-            if let Some(on) = self.view.check_box(cx, ids!(inherited)).changed(actions) {
-                self.show_inherited = on;
-                self.view.redraw(cx);
+            let list = self.view.portal_list(cx, ids!(props));
+            for (item_id, item) in list.items_with_actions(actions) {
+                if item_id != 0 {
+                    continue;
+                }
+                if let Some(on) = item.check_box(cx, ids!(inherited)).changed(actions) {
+                    self.show_inherited = on;
+                    self.view.redraw(cx);
+                }
             }
         }
     }

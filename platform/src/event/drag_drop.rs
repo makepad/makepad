@@ -6,7 +6,7 @@ use {
         event::{
             event::{DragHit, Event},
             finger::{HitOptions, Inset},
-            KeyModifiers,
+            KeyCode, KeyModifiers,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -94,29 +94,26 @@ pub enum HitTouch {
 pub struct CxDragDrop {
     drag_area: Area,
     next_drag_area: Area,
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     internal_drag_items: Option<Arc<Vec<DragItem>>>,
     /// Held while the pointer event that produced a drag event is itself being
     /// dispatched, so that dispatch neither produces the same drag event again
     /// nor trips `start_dragging`'s "start drag twice".
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     suspended_drag_items: Option<Arc<Vec<DragItem>>>,
 }
 
-#[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
 pub(crate) enum InternalDragEvent {
     Drag(DragEvent),
     Drop(DropEvent),
+    /// The drag was called off (Escape): no drop, only the end.
+    End,
 }
 
 impl CxDragDrop {
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
         assert!(self.internal_drag_items.is_none(), "start drag twice");
         self.internal_drag_items = Some(Arc::new(items));
     }
 
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn internal_drag_event(&mut self, event: &Event) -> Option<InternalDragEvent> {
         match event {
             Event::MouseMove(event) => {
@@ -138,6 +135,12 @@ impl CxDragDrop {
                     items,
                 }))
             }
+            // Escape calls the drag off: the items are dropped on the floor
+            // and everyone who watched the drag hears that it ended.
+            Event::KeyDown(event) if event.key_code == KeyCode::Escape => {
+                self.internal_drag_items.take()?;
+                Some(InternalDragEvent::End)
+            }
             _ => None,
         }
     }
@@ -146,12 +149,10 @@ impl CxDragDrop {
     /// items are out of the way for it, and come back unless it started a new
     /// drag of its own. Losing them to an unwound dispatch ends the drag,
     /// which beats a flag that stays stuck for the life of the process.
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn suspend_internal_drag(&mut self) {
         self.suspended_drag_items = self.internal_drag_items.take();
     }
 
-    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn resume_internal_drag(&mut self) {
         let suspended = self.suspended_drag_items.take();
         if self.internal_drag_items.is_none() {

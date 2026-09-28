@@ -14,6 +14,7 @@ pub mod canvas;
 pub mod controls;
 pub mod coverage;
 pub mod docs;
+pub mod knob;
 pub mod navigator;
 pub mod registry;
 pub mod synonyms;

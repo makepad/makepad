@@ -315,10 +315,16 @@ pub struct TileList {
 
     /// The portal list the rows scroll in. Redrawing and hit testing go
     /// through it because everything this widget draws is inside it.
+    ///
+    /// Open, because a widget that owns one of these has to know where the
+    /// list's own scroll bar is. The bar is painted OVER the last column
+    /// rather than beside it, so an owner claiming presses on items has to
+    /// leave the bar's alone, and the only truthful answer to where the
+    /// bar is comes from the bar.
     #[redraw]
     #[find]
     #[live]
-    list: WidgetRef,
+    pub list: WidgetRef,
 
     /// How many tiles across. Zero derives the count from `min_tile_width`.
     #[live]
@@ -335,8 +341,14 @@ pub struct TileList {
     #[visible]
     visible: bool,
 
+    /// The named entries of the instance. `Tile` is the only one read.
+    ///
+    /// Open, because the template is collected from the instance it was
+    /// written on, and a widget that owns one of these is the instance a
+    /// caller writes `Tile := …` on. Without a way in, such an owner has
+    /// to send its callers through it to reach the layout inside.
     #[rust]
-    templates: HashMap<LiveId, ScriptObjectRef>,
+    pub templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust]
     draw_state: DrawStateWrap<()>,
     /// How many items the host says there are.
@@ -624,6 +636,11 @@ impl TileList {
     }
 
     /// One tile, built from the instance's `Tile` template.
+    ///
+    /// Stays in here: a tile is built where a row turns out to be short of
+    /// one, and nothing outside knows when that is. An owner with a
+    /// template of its own puts it in `templates` and lets the next draw
+    /// build from it.
     fn new_tile(&mut self, cx: &mut Cx) -> Option<WidgetRef> {
         if !self.templates.contains_key(&live_id!(Tile)) {
             if !self.warned {
@@ -1157,6 +1174,38 @@ mod tests {
         let asked = answer_grid(TileGrid::new(4, 1000), 8);
         assert_eq!(asked.rows(), 2);
         assert_eq!(asked.row_of(500), None);
+    }
+
+    /// The two things a widget owning one of these reaches for: the face
+    /// a caller wrote on the instance, and the list the rows scroll in.
+    /// They are open for that reason, so they are worth pinning — a
+    /// rename in here would otherwise break an owner and nothing else.
+    #[test]
+    fn the_tile_template_and_the_list_are_there_to_be_reached() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let tiles = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                TileList{
+                    columns: 3
+                    Tile := View{width: Fill height: 40.}
+                }
+            });
+            TileList::script_from_value(vm, value)
+        });
+        assert_eq!(tiles.columns, 3, "the instance was not applied at all");
+        assert!(
+            tiles.templates.contains_key(&live_id!(Tile)),
+            "the face a caller wrote never reached the map"
+        );
+        assert!(
+            tiles.list.borrow::<PortalList>().is_some(),
+            "the rows are not in a portal list an owner can ask"
+        );
     }
 
     #[test]
