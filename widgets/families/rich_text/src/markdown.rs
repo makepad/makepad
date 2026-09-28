@@ -1,6 +1,17 @@
 use crate::{
-    link_label::LinkLabel, makepad_derive_widget::*, makepad_draw::*, text_flow::TextFlow,
-    widget::*, WidgetMatchEvent,
+    image::{ImageRef, ImageWidgetRefExt},
+    image_cache::{looks_like_svg, AsyncImageLoad},
+    link_label::LinkLabel,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    text_flow::TextFlow,
+    widget::*,
+    WidgetMatchEvent,
+};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use pulldown_cmark::{
@@ -212,6 +223,9 @@ script_mod! {
         }
 
         link := mod.widgets.MarkdownLink{}
+        /** An inline `![alt](src)` image, sized by the Markdown to the
+         * picture's natural size, scaled down to the available width. */
+        inline_image := mod.widgets.Image{width: Fit height: Fit}
     }
 }
 
@@ -251,6 +265,20 @@ pub struct Markdown {
     auto_id: u64,
     #[live]
     heading_base_scale: f64,
+    /// Fetch `http(s)://` images over the network. Off by default, so a
+    /// Markdown body from an untrusted source makes no requests; local
+    /// paths, `file://` and `data:` images always load.
+    #[live(false)]
+    load_http_images: bool,
+    /// Each inline image widget's source and the image-cache key its load
+    /// completes under (`None` when it loaded synchronously or not at all),
+    /// so a redraw does not request the same source again.
+    #[rust]
+    image_requests: HashMap<WidgetUid, (String, Option<PathBuf>)>,
+    /// The inline image widgets drawn this pass; requests of the others are
+    /// dropped at the end of the draw.
+    #[rust]
+    images_drawn: Vec<WidgetUid>,
 }
 
 impl Widget for Markdown {
@@ -260,14 +288,32 @@ impl Widget for Markdown {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
+        // An inline image's decode landed (its widget took the texture while
+        // handling the same actions): lay the text out again around it.
+        if let Event::Actions(actions) = event {
+            let image_loaded = actions.iter().any(|action| {
+                action.downcast_ref::<AsyncImageLoad>().is_some_and(|load| {
+                    self.image_requests
+                        .values()
+                        .any(|(_, key)| key.as_deref() == Some(load.image_path.as_path()))
+                })
+            });
+            if image_loaded {
+                self.redraw(cx);
+            }
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
+        self.images_drawn.clear();
 
         self.begin(cx, walk);
         self.process_markdown_doc(cx);
         self.end(cx);
+
+        let drawn = &self.images_drawn;
+        self.image_requests.retain(|uid, _| drawn.contains(uid));
 
         DrawStep::done()
     }
@@ -294,6 +340,12 @@ impl Markdown {
         // column index within its row. Both are reset when a new table starts.
         let mut table_alignments: Vec<Alignment> = Vec::new();
         let mut table_cell_index: usize = 0;
+        // Nesting depth inside `![alt](src)`, and whether the image is drawn,
+        // in which case its alt text is not; until it loads (or when it
+        // cannot) the alt text stands in for it.
+        let mut image_depth: usize = 0;
+        let mut image_drawn = false;
+        let load_images = !cx.script_data.std.host_io_only();
 
         let parser = Parser::new_ext(
             self.body.as_ref(),
@@ -402,14 +454,27 @@ impl Markdown {
                 MdEvent::End(TagEnd::Link) => {
                     // Link handling is done in Start event
                 }
-                MdEvent::Start(Tag::Image {
-                    dest_url, title, ..
-                }) => {
-                    tf.draw_text(cx, "Image[name:");
-                    tf.draw_text(cx, &title);
-                    tf.draw_text(cx, ", url:");
-                    tf.draw_text(cx, &dest_url);
-                    tf.draw_text(cx, "]");
+                MdEvent::Start(Tag::Image { dest_url, .. }) => {
+                    image_depth += 1;
+                    if image_depth == 1 {
+                        // A restricted Splash reads no files and makes no
+                        // requests on the host's behalf.
+                        image_drawn = load_images
+                            && draw_inline_image(
+                                cx,
+                                tf,
+                                &mut self.image_requests,
+                                &mut self.images_drawn,
+                                self.load_http_images,
+                                &dest_url,
+                            );
+                    }
+                }
+                MdEvent::End(TagEnd::Image) => {
+                    image_depth = image_depth.saturating_sub(1);
+                    if image_depth == 0 {
+                        image_drawn = false;
+                    }
                 }
                 MdEvent::Start(Tag::CodeBlock(kind)) => {
                     if !is_first_block {
@@ -518,6 +583,7 @@ impl Markdown {
                         tf.end_code(cx);
                     }
                 }
+                MdEvent::Text(_) if image_drawn => {}
                 MdEvent::Text(text) => {
                     if self.in_splash_block {
                         self.splash_block_string.push_str(&text);
@@ -631,6 +697,121 @@ impl Markdown {
             }
         }
     }
+}
+
+/// Draws the inline image for `src`, requesting its load the first time its
+/// widget sees that source. True when the picture was drawn; false while it
+/// loads, or when it cannot load, and the caller draws the alt text instead.
+fn draw_inline_image(
+    cx: &mut Cx2d,
+    tf: &mut TextFlow,
+    requests: &mut HashMap<WidgetUid, (String, Option<PathBuf>)>,
+    drawn: &mut Vec<WidgetUid>,
+    load_http: bool,
+    src: &str,
+) -> bool {
+    let entry_id = tf.new_counted_id();
+    let item = tf.item(cx, entry_id, live_id!(inline_image));
+    let uid = item.widget_uid();
+    drawn.push(uid);
+    let image = item.as_image();
+    if requests.get(&uid).map(|(requested, _)| requested.as_str()) != Some(src) {
+        let key = request_inline_image(cx, &image, src, load_http);
+        requests.insert(uid, (src.to_string(), key));
+    }
+    let Some((width, height)) = image.size_in_pixels(cx) else {
+        return false;
+    };
+    if width == 0 || height == 0 {
+        return false;
+    }
+    // A texel is a point, as for a CSS pixel; wider than the text column it
+    // scales down to fit.
+    let (width, height) = (width as f64, height as f64);
+    let max_width = cx.turtle().inner_width();
+    let scale = if max_width.is_finite() && max_width > 0.0 && width > max_width {
+        max_width / width
+    } else {
+        1.0
+    };
+    item.draw_walk_all(
+        cx,
+        &mut Scope::empty(),
+        Walk::fixed(width * scale, height * scale),
+    );
+    true
+}
+
+/// Starts loading `src` into `image` through the shared image cache: an
+/// `http(s)` URL (when allowed) with the platform's HTTP stack, a `data:`
+/// URL from its bytes, anything else as a file path (`file://` or plain,
+/// relative to the working directory), all decoded off the UI thread. An
+/// SVG, from a `data:` URL or a `.svg` file, is parsed in place. Returns the
+/// cache key an asynchronous load completes under.
+fn request_inline_image(cx: &mut Cx, image: &ImageRef, src: &str, load_http: bool) -> Option<PathBuf> {
+    if src.starts_with("http://") || src.starts_with("https://") {
+        if !load_http {
+            return None;
+        }
+        image.load_image_http_by_url_async(cx, src).ok()?;
+        return Some(PathBuf::from(src));
+    }
+    if let Some(data_url) = src.strip_prefix("data:") {
+        let bytes = decode_data_url(data_url)?;
+        if looks_like_svg(&bytes) {
+            image.load_svg_from_data(cx, &bytes).ok()?;
+            return None;
+        }
+        let key = PathBuf::from(format!("data:{:016x}", LiveId::from_str(src).0));
+        image
+            .load_image_from_data_async(cx, &key, Arc::new(bytes))
+            .ok()?;
+        return Some(key);
+    }
+    let path = src.strip_prefix("file://").unwrap_or(src);
+    if path.is_empty() || path.contains("://") {
+        return None;
+    }
+    let path = Path::new(path);
+    let is_svg = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+    if is_svg {
+        let bytes = std::fs::read(path).ok()?;
+        image.load_svg_from_data(cx, &bytes).ok()?;
+        return None;
+    }
+    image.load_image_file_by_path_async(cx, path).ok()?;
+    Some(path.to_path_buf())
+}
+
+/// The bytes of a `data:` URL, given what follows `data:`: base64 when the
+/// media type ends in `;base64`, percent-encoded otherwise.
+fn decode_data_url(data_url: &str) -> Option<Vec<u8>> {
+    let (media_type, payload) = data_url.split_once(',')?;
+    if media_type.ends_with(";base64") {
+        let compact: Vec<u8> = payload
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        return makepad_base64::base64_decode(&compact).ok();
+    }
+    let bytes = payload.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |byte: u8| (byte as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Some(out)
 }
 
 /// Maps pulldown_cmark table-column alignment to `Layout::align.x`.
