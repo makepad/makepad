@@ -278,29 +278,40 @@ pub fn list(state_dir: &Path) -> Result<Value, String> {
     names.sort();
     let mut sessions = Vec::new();
     for name in names {
-        let location = SessionLocation::open(state_dir, &name, false)?;
-        let Some(previous) = claim(&location)? else {
-            continue;
-        };
-        if !location.validate_socket()? {
-            continue;
-        }
-        match running_status(&location, &previous) {
-            Ok(mut value) => {
-                if let Value::Obj(fields) = &mut value {
-                    fields.retain(|(key, _)| key != "state_dir");
-                    fields.push((
-                        "state_dir".into(),
-                        json::s(location.state_dir.to_string_lossy()),
-                    ));
-                }
-                sessions.push(value);
-            }
-            Err(_) if SessionLock::acquire(&location)?.is_some() => {}
-            Err(error) => return Err(error),
+        // One unreadable session (a record left by a moved checkout, a host
+        // running from a deleted binary) must not hide every other session:
+        // it is reported and skipped, and the listing stays complete.
+        match list_one(state_dir, &name) {
+            Ok(Some(value)) => sessions.push(value),
+            Ok(None) => {}
+            Err(error) => eprintln!("makepad-agents: session {name} skipped: {error}"),
         }
     }
     Ok(Value::Arr(sessions))
+}
+
+fn list_one(state_dir: &Path, name: &str) -> Result<Option<Value>, String> {
+    let location = SessionLocation::open(state_dir, name, false)?;
+    let Some(previous) = claim(&location)? else {
+        return Ok(None);
+    };
+    if !location.validate_socket()? {
+        return Ok(None);
+    }
+    match running_status(&location, &previous) {
+        Ok(mut value) => {
+            if let Value::Obj(fields) = &mut value {
+                fields.retain(|(key, _)| key != "state_dir");
+                fields.push((
+                    "state_dir".into(),
+                    json::s(location.state_dir.to_string_lossy()),
+                ));
+            }
+            Ok(Some(value))
+        }
+        Err(_) if SessionLock::acquire(&location)?.is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 pub fn stop(state_dir: &Path, session: &str) -> Result<Value, String> {
     stop_selected(state_dir, session, None)
