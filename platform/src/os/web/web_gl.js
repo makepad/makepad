@@ -3932,16 +3932,21 @@ export class WasmWebGL extends WasmWebBrowser {
       min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       float_color_targets: !!this.ext_color_buffer_float,
-      vendor: "unknown",
-      renderer: "unknown",
+      vendor: gl.getParameter(gl.VENDOR) || "unknown",
+      renderer: gl.getParameter(gl.RENDERER) || "unknown",
     };
-    let debug_info = gl.getExtension("WEBGL_debug_renderer_info");
-
-    if (debug_info) {
-      this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
-      this.gpu_info.renderer = gl.getParameter(
-        debug_info.UNMASKED_RENDERER_WEBGL,
-      );
+    // Firefox reports the real (sanitized) GPU through RENDERER and warns
+    // that WEBGL_debug_renderer_info is deprecated, so the extension is only
+    // asked for when RENDERER is the masked "WebKit WebGL" placeholder
+    // (Chrome, Safari).
+    if (/^(webkit webgl|unknown)$/i.test(this.gpu_info.renderer)) {
+      let debug_info = gl.getExtension("WEBGL_debug_renderer_info");
+      if (debug_info) {
+        this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
+        this.gpu_info.renderer = gl.getParameter(
+          debug_info.UNMASKED_RENDERER_WEBGL,
+        );
+      }
     }
     return true;
   }
