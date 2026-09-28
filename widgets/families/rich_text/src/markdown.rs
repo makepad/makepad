@@ -701,10 +701,16 @@ struct MarkdownLink {
 impl WidgetMatchEvent for MarkdownLink {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
         // A restricted Splash must not hand its URLs to the host, which may open them.
-        if self.link.clicked(actions) && !cx.script_data.std.host_io_only() {
+        let Some(modifiers) = self.link.clicked_modifiers(actions) else {
+            return;
+        };
+        if !cx.script_data.std.host_io_only() {
             cx.widget_action(
                 self.widget_uid(),
-                MarkdownAction::LinkNavigated(self.href.clone()),
+                MarkdownAction::LinkNavigated {
+                    url: self.href.clone(),
+                    modifiers,
+                },
             );
         }
     }
@@ -742,7 +748,14 @@ impl MarkdownLinkRef {
 pub enum MarkdownAction {
     #[default]
     None,
-    LinkNavigated(String),
+    /// A `[text](url)` link was clicked, with the key modifiers held during
+    /// the click, so a desktop host can open links on Cmd/Ctrl-click only
+    /// and leave plain clicks free for selecting text; touch hosts, which
+    /// have no modifiers, open on every tap.
+    LinkNavigated {
+        url: String,
+        modifiers: KeyModifiers,
+    },
 }
 
 #[cfg(test)]
@@ -762,7 +775,7 @@ mod tests {
         let clicked = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(Default::default())));
         let mut navigations = |cx: &mut Cx| cx.capture_actions(|cx| link.handle_actions(cx, &clicked, &mut Scope::empty()))
             .iter()
-            .filter(|action| matches!(action.as_widget_action().cast(), MarkdownAction::LinkNavigated(_)))
+            .filter(|action| matches!(action.as_widget_action().cast(), MarkdownAction::LinkNavigated { .. }))
             .count();
         assert_eq!(navigations(&mut cx), 1);
         cx.script_data.std.restrict_to_host_io();
