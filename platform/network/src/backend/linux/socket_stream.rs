@@ -34,6 +34,10 @@ const SSL_ERROR_SYSCALL: c_int = 5;
 /// bodies are read to end-of-stream, so a server that closes properly
 /// (Cloudflare does) must read as EOF here.
 const SSL_ERROR_ZERO_RETURN: c_int = 6;
+/// OpenSSL 3's `SSL_R_UNEXPECTED_EOF_WHILE_READING`: the peer closed the
+/// connection without close_notify. OpenSSL 1.1.1 reported that as a plain
+/// EOF; many CDNs and proxies close this way after a complete response.
+const SSL_R_UNEXPECTED_EOF_WHILE_READING: c_ulong = 0x0A00_0126;
 
 #[link(name = "ssl")]
 #[link(name = "crypto")]
@@ -55,6 +59,8 @@ unsafe extern "C" {
     fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
 
     fn ERR_get_error() -> c_ulong;
+    fn ERR_peek_error() -> c_ulong;
+    fn ERR_clear_error();
     fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
 }
 
@@ -271,6 +277,16 @@ impl Read for OpenSslStream {
                 } else {
                     Err(io_other(format!("SSL_read syscall error: {os_err}")))
                 }
+            }
+            _ if unsafe { ERR_peek_error() } == SSL_R_UNEXPECTED_EOF_WHILE_READING => {
+                // Reported as its own kind so the HTTP reader can accept it
+                // once the response body is complete by its own framing,
+                // and still fail a body that was cut short.
+                unsafe { ERR_clear_error() };
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed the TLS connection without close_notify",
+                ))
             }
             _ => Err(io_other(format!("SSL_read failed: {}", last_ssl_error()))),
         }

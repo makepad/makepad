@@ -94,8 +94,12 @@ fn run_http_request(
             }
             Err(ReadHeadError::Io(error)) => return Err(format!("read failed: {error}")),
         };
-    let declared = content_length_of(&headers_string);
-    if (!matches!(request.method, crate::types::HttpMethod::HEAD) && declared > max_body)
+    let is_head = matches!(request.method, crate::types::HttpMethod::HEAD);
+    let content_length = content_length_of(&headers_string);
+    let declared = content_length.unwrap_or(0);
+    let mut body_end = BodyEnd::new(is_head, status_code, content_length, chunked);
+    body_end.feed(&body_prefix);
+    if (!is_head && declared > max_body)
         || body_prefix.len() as u64 > max_body
     {
         stream.shutdown();
@@ -117,7 +121,7 @@ fn run_http_request(
         }
 
         let mut buf = [0u8; 16384];
-        loop {
+        while !body_end.is_complete() {
             if cancel_flag.load(Ordering::SeqCst) {
                 return Err("request cancelled".to_string());
             }
@@ -125,6 +129,7 @@ fn run_http_request(
             match stream.read(&mut buf[..read_len]) {
                 Ok(0) => break,
                 Ok(n) => {
+                    body_end.feed(&buf[..n]);
                     streamed = streamed.saturating_add(n as u64);
                     if streamed > max_body {
                         stream.shutdown();
@@ -150,6 +155,7 @@ fn run_http_request(
                 {
                     continue;
                 }
+                Err(err) if body_end.ends_at_close(&err) => break,
                 Err(err) => return Err(format!("stream read failed: {err}")),
             }
         }
@@ -183,7 +189,7 @@ fn run_http_request(
     };
     emit_progress(body.len() as u64);
     let mut buf = [0u8; 16384];
-    loop {
+    while !body_end.is_complete() {
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("request cancelled".to_string());
         }
@@ -191,6 +197,7 @@ fn run_http_request(
         match stream.read(&mut buf[..read_len]) {
             Ok(0) => break,
             Ok(n) => {
+                body_end.feed(&buf[..n]);
                 if body.len().saturating_add(n) as u64 > max_body {
                     stream.shutdown();
                     return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
@@ -214,6 +221,7 @@ fn run_http_request(
             {
                 continue;
             }
+            Err(err) if body_end.ends_at_close(&err) => break,
             Err(err) => return Err(format!("read failed: {err}")),
         }
     }
@@ -417,7 +425,7 @@ fn write_all(stream: &mut SocketStream, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn content_length_of(headers: &str) -> u64 {
+fn content_length_of(headers: &str) -> Option<u64> {
     headers.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
         if name.trim().eq_ignore_ascii_case("content-length") {
@@ -425,7 +433,148 @@ fn content_length_of(headers: &str) -> u64 {
         } else {
             None
         }
-    }).unwrap_or(0)
+    })
+}
+
+/// Where a response body ends (RFC 9112 section 6.3), followed as its bytes
+/// arrive. The reader stops once the body is complete instead of waiting for
+/// the server to close, so a TLS peer that closes without close_notify after
+/// a complete response is never read into an error.
+enum BodyEnd {
+    /// HEAD, 1xx, 204 and 304 responses carry no body.
+    Empty,
+    /// Content-Length: the bytes still to come.
+    Length(u64),
+    Chunked(ChunkedEnd),
+    /// Neither a length nor chunking: the body ends when the connection does.
+    Close,
+}
+
+impl BodyEnd {
+    fn new(is_head: bool, status: u16, content_length: Option<u64>, chunked: bool) -> Self {
+        if is_head || (100..200).contains(&status) || status == 204 || status == 304 {
+            BodyEnd::Empty
+        } else if chunked {
+            BodyEnd::Chunked(ChunkedEnd::default())
+        } else if let Some(length) = content_length {
+            BodyEnd::Length(length)
+        } else {
+            BodyEnd::Close
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        match self {
+            BodyEnd::Length(remaining) => {
+                *remaining = remaining.saturating_sub(bytes.len() as u64)
+            }
+            BodyEnd::Chunked(chunked) => chunked.feed(bytes),
+            BodyEnd::Empty | BodyEnd::Close => {}
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        match self {
+            BodyEnd::Empty | BodyEnd::Length(0) => true,
+            BodyEnd::Length(_) | BodyEnd::Close => false,
+            BodyEnd::Chunked(chunked) => chunked.is_done(),
+        }
+    }
+
+    /// A TLS close without close_notify ends a close-delimited body, as it
+    /// did before OpenSSL 3. A body with its own framing that is still
+    /// incomplete was cut short, so that stays an error.
+    fn ends_at_close(&self, err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::UnexpectedEof
+            && (self.is_complete() || matches!(self, BodyEnd::Close))
+    }
+}
+
+/// Follows a chunked body (RFC 9112 section 7.1) byte by byte to see when its
+/// last chunk and trailer section are in. Malformed framing never completes,
+/// so such a body is still read until the connection closes.
+#[derive(Default)]
+struct ChunkedEnd {
+    state: ChunkState,
+    size: u64,
+    trailer_line_len: usize,
+}
+
+#[derive(Default, PartialEq)]
+enum ChunkState {
+    #[default]
+    Size,
+    Extension,
+    Data,
+    DataCr,
+    DataLf,
+    Trailer,
+    Done,
+    Invalid,
+}
+
+impl ChunkedEnd {
+    fn is_done(&self) -> bool {
+        self.state == ChunkState::Done
+    }
+
+    fn feed(&mut self, mut bytes: &[u8]) {
+        while let Some((&byte, rest)) = bytes.split_first() {
+            match self.state {
+                ChunkState::Done | ChunkState::Invalid => return,
+                ChunkState::Data => {
+                    let take = self.size.min(bytes.len() as u64) as usize;
+                    self.size -= take as u64;
+                    bytes = &bytes[take..];
+                    if self.size == 0 {
+                        self.state = ChunkState::DataCr;
+                    }
+                    continue;
+                }
+                ChunkState::Size => match byte {
+                    b'\r' => {}
+                    b'\n' => self.end_size_line(),
+                    b';' | b' ' | b'\t' => self.state = ChunkState::Extension,
+                    _ => {
+                        let digit = (byte as char).to_digit(16);
+                        match (digit, self.size.checked_mul(16)) {
+                            (Some(digit), Some(size)) => self.size = size + digit as u64,
+                            _ => self.state = ChunkState::Invalid,
+                        }
+                    }
+                },
+                ChunkState::Extension => {
+                    if byte == b'\n' {
+                        self.end_size_line();
+                    }
+                }
+                ChunkState::DataCr => match byte {
+                    b'\r' => self.state = ChunkState::DataLf,
+                    b'\n' => self.state = ChunkState::Size,
+                    _ => self.state = ChunkState::Invalid,
+                },
+                ChunkState::DataLf => match byte {
+                    b'\n' => self.state = ChunkState::Size,
+                    _ => self.state = ChunkState::Invalid,
+                },
+                ChunkState::Trailer => match byte {
+                    b'\r' => {}
+                    b'\n' if self.trailer_line_len == 0 => self.state = ChunkState::Done,
+                    b'\n' => self.trailer_line_len = 0,
+                    _ => self.trailer_line_len += 1,
+                },
+            }
+            bytes = rest;
+        }
+    }
+
+    fn end_size_line(&mut self) {
+        self.state = if self.size == 0 {
+            ChunkState::Trailer
+        } else {
+            ChunkState::Data
+        };
+    }
 }
 
 fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -463,4 +612,59 @@ fn find_crlf(data: &[u8], start: usize) -> Option<usize> {
         .windows(2)
         .position(|w| w == b"\r\n")
         .map(|p| start + p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eof() -> io::Error {
+        io::Error::new(io::ErrorKind::UnexpectedEof, "no close_notify")
+    }
+
+    #[test]
+    fn content_length_body_ends_at_its_length() {
+        let mut end = BodyEnd::new(false, 401, Some(10), false);
+        end.feed(b"01234");
+        assert!(!end.is_complete());
+        assert!(!end.ends_at_close(&eof()), "a short body is truncated");
+        end.feed(b"56789");
+        assert!(end.is_complete());
+        assert!(end.ends_at_close(&eof()));
+        assert!(!end.ends_at_close(&io::Error::new(io::ErrorKind::Other, "tls")));
+    }
+
+    #[test]
+    fn chunked_body_ends_at_its_terminator() {
+        let raw: &[u8] = b"5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: 1\r\n\r\n";
+        // Byte by byte, so every state sees a read boundary.
+        let mut end = BodyEnd::new(false, 200, None, true);
+        for (i, byte) in raw.iter().enumerate() {
+            assert!(!end.is_complete(), "complete early at byte {i}");
+            end.feed(std::slice::from_ref(byte));
+        }
+        assert!(end.is_complete());
+        assert_eq!(decode_chunked_body(raw).unwrap(), b"hello world");
+
+        let mut end = BodyEnd::new(false, 200, Some(3), true);
+        end.feed(b"3\r\nabc\r\n0\r\n");
+        assert!(!end.is_complete(), "chunked wins over content-length");
+        end.feed(b"\r\n");
+        assert!(end.is_complete());
+
+        let mut end = BodyEnd::new(false, 200, None, true);
+        end.feed(b"zz\r\n");
+        assert!(!end.is_complete());
+        assert!(!end.ends_at_close(&eof()));
+    }
+
+    #[test]
+    fn bodyless_and_close_delimited_responses() {
+        assert!(BodyEnd::new(true, 200, Some(512), false).is_complete());
+        assert!(BodyEnd::new(false, 204, None, false).is_complete());
+        assert!(BodyEnd::new(false, 304, Some(9), false).is_complete());
+        let close = BodyEnd::new(false, 200, None, false);
+        assert!(!close.is_complete());
+        assert!(close.ends_at_close(&eof()));
+    }
 }
