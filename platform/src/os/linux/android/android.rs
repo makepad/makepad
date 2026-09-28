@@ -1496,6 +1496,9 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::AppOpen(event) => {
+                self.call_event_handler(&Event::AppOpen(event));
+            }
             FromJavaMessage::SafeAreaInsets {
                 top,
                 right,
@@ -2132,6 +2135,11 @@ impl Cx {
                     }
                     Ok(FromJavaMessage::PhysicalKeyboard { connected }) => {
                         initial_physical_keyboard = Some(connected);
+                    }
+                    // The launch intent, sent from `onCreate`: the `Cx`
+                    // exists now, so it waits in the action pump for Startup.
+                    Ok(FromJavaMessage::AppOpen(event)) => {
+                        crate::app_open::post(event.items, event.source);
                     }
                     Ok(FromJavaMessage::SurfaceDestroyed { ack }) => {
                         if let Some((old_window, _, _)) = initial_surface.take() {

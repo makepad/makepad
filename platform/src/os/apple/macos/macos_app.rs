@@ -351,6 +351,17 @@ impl MacosApp {
             let app_delegate_instance: ObjcId =
                 msg_send![get_macos_class_global().app_delegate, new];
 
+            // AppKit would also hand the command line's arguments to
+            // `application:openURLs:`; they already arrive as the `Launch`
+            // `Event::AppOpen` (see app_open.rs), so only the OS's own open
+            // requests come through the delegate.
+            let defaults: ObjcId = msg_send![class!(NSUserDefaults), standardUserDefaults];
+            let no_open: ObjcId = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObject: str_to_nsstring("NO")
+                forKey: str_to_nsstring("NSTreatUnknownArgumentsAsOpen")
+            ];
+            let () = msg_send![defaults, registerDefaults: no_open];
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
 

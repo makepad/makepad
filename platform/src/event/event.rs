@@ -8,7 +8,7 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            drag_drop::*, finger::*, game_input::*, keyboard::*, location::*, network::*,
+            app_open::*, drag_drop::*, finger::*, game_input::*, keyboard::*, location::*, network::*,
             video_playback::*, window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
@@ -244,6 +244,11 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
 
+    /// The app is asked to open files or URLs: its launch arguments, a
+    /// second launch of a single-instance app, or an OS open request.
+    /// See [`AppOpenEvent`].
+    AppOpen(AppOpenEvent),
+
     /// Application-defined event sent via the studio/debug control protocol.
     /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
     Custom(String),
@@ -352,6 +357,7 @@ impl Event {
             38 => "Drag",
             39 => "Drop",
             40 => "DragEnd",
+            76 => "AppOpen",
 
             41 => "AudioDevices",
             42 => "MidiPorts",
@@ -448,6 +454,7 @@ impl Event {
             Self::Drag(_) => 38,
             Self::Drop(_) => 39,
             Self::DragEnd => 40,
+            Self::AppOpen(_) => 76,
 
             Self::AudioDevices(_) => 41,
             Self::MidiPorts(_) => 42,

@@ -1359,6 +1359,10 @@ public class MakepadActivity
 
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
+        // A recreated activity was already handed its intent.
+        if (savedInstanceState == null) {
+            deliverAppOpenIntent(getIntent(), true);
+        }
         //% MAIN_ACTIVITY_ON_CREATE
         
     }
@@ -1500,6 +1504,28 @@ public class MakepadActivity
         super.onNewIntent(intent);
         setIntent(intent);
         restoreSurfaceViewForWarmResumeIfNeeded();
+        deliverAppOpenIntent(intent, false);
+    }
+
+    // What an intent asks the app to open, as Event::AppOpen: an ACTION_VIEW
+    // URI (a file: URI as its path) or ACTION_SEND text (a shared link).
+    private void deliverAppOpenIntent(Intent intent, boolean atLaunch) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        String item = null;
+        boolean isPath = false;
+        if (Intent.ACTION_VIEW.equals(action)) {
+            Uri uri = intent.getData();
+            if (uri != null) {
+                isPath = "file".equals(uri.getScheme());
+                item = isPath ? uri.getPath() : uri.toString();
+            }
+        } else if (Intent.ACTION_SEND.equals(action) && "text/plain".equals(intent.getType())) {
+            item = intent.getStringExtra(Intent.EXTRA_TEXT);
+        }
+        if (item != null && item.length() > 0) {
+            MakepadNative.onAppOpen(item, isPath, atLaunch);
+        }
     }
 
     @Override

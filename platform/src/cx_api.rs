@@ -307,6 +307,11 @@ pub enum CxOsOp {
     SetWindowTitle(WindowId, String),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
+    /// Bring the app and its windows to the front, restoring a minimized
+    /// one where the backend can (a relaunch of a single-instance app).
+    /// Honored on macOS, Windows and X11; a `--remote` or hidden instance
+    /// never takes focus.
+    ActivateApp,
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
     /// place while mouse deltas keep arriving (as synthesized absolute
     /// positions, so existing MouseMove consumers work unchanged); `false`
@@ -522,6 +527,7 @@ impl CxOsOp {
             Self::SetWindowTitle(..) => "SetWindowTitle",
             Self::SetWindowVisuals(..) => "SetWindowVisuals",
             Self::ShowInDock(..) => "ShowInDock",
+            Self::ActivateApp => "ActivateApp",
             Self::LockMousePointer(..) => "LockMousePointer",
             Self::PinMousePointer(..) => "PinMousePointer",
             Self::RepinMousePointer => "RepinMousePointer",

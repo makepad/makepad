@@ -64,6 +64,10 @@ public class MakepadNative {
     // Called when user presses the action button on the soft keyboard
     public native static void onImeEditorAction(int actionCode);
 
+    // The activity was asked to open something (an ACTION_VIEW URI, a file
+    // as its path, or ACTION_SEND text): Event::AppOpen.
+    public native static void onAppOpen(String item, boolean isPath, boolean atLaunch);
+
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     

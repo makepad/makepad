@@ -1,3 +1,4 @@
+pub mod app_open;
 pub mod cancel_scope;
 pub mod drag_drop;
 pub mod event;
@@ -10,6 +11,7 @@ pub mod video_playback;
 pub mod window;
 pub mod xr;
 
+pub use app_open::*;
 pub use cancel_scope::*;
 pub use drag_drop::*;
 pub use event::*;

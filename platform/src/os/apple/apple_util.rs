@@ -401,6 +401,23 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
     }
 }
 
+/// One `NSURL` the OS asked the app to open: a file URL as its path,
+/// anything else as the URL string.
+pub unsafe fn nsurl_to_app_open_item(url: ObjcId) -> Option<crate::event::AppOpenItem> {
+    if url == nil {
+        return None;
+    }
+    let is_file: BOOL = msg_send![url, isFileURL];
+    if is_file != NO {
+        let path: ObjcId = msg_send![url, path];
+        if path != nil {
+            return Some(crate::event::AppOpenItem::Path(nsstring_to_string(path).into()));
+        }
+    }
+    let string: ObjcId = msg_send![url, absoluteString];
+    (string != nil).then(|| crate::event::AppOpenItem::Url(nsstring_to_string(string)))
+}
+
 pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
     let superclass: ObjcId = msg_send![this, superclass];
     &*(superclass as *const _)

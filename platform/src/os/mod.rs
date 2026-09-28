@@ -19,6 +19,18 @@ pub mod shared_framebuf;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod termination_signal;
 
+#[cfg(all(
+    not(gpusim),
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )
+))]
+// Native-only: the launch handoff runs before any Cx (and its clock) exists.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub(crate) mod single_instance;
+
 #[cfg(gpusim)]
 // The gpusim (simulated-GPU) process backend is native-only and never compiled into a web app.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

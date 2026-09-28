@@ -1095,6 +1095,11 @@ impl Cx {
                     }
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
+                CxOsOp::ActivateApp => {
+                    if let Some(window) = d3d11_windows.first() {
+                        window.win32_window.bring_to_front();
+                    }
+                }
                 CxOsOp::HideWindow(_window_id) => todo!(),
                 CxOsOp::HideWindowButtons(_) => {}
                 CxOsOp::ShowWindowButtons(_) => {}

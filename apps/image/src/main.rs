@@ -1,4 +1,5 @@
-//! image: a dumb picture viewer. `image <path>` opens fit-to-window,
+//! image: a dumb picture viewer. `image <path>` opens fit-to-window (a
+//! second `image <path>` shows the picture in the running viewer),
 //! centered on a dark makepad_wm_theme background. `image --preview <path>` sizes
 //! the window as a small popup instead.
 
@@ -6,7 +7,6 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_app_image::preview::{PreviewAction, PreviewState};
 use makepad_app_image::widget::{MpImageAction, MpImageView};
-use std::path::PathBuf;
 
 app_main!(App);
 
@@ -70,18 +70,8 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let mut preview = false;
-        let mut path: Option<PathBuf> = None;
-        for arg in std::env::args().skip(1) {
-            if arg == "--preview" {
-                preview = true;
-            } else if arg.starts_with("--") {
-                // --remote, --stdin-loop, or any other flag every Makepad app
-                // already understands elsewhere: not ours to parse, ignore.
-            } else if path.is_none() {
-                path = Some(PathBuf::from(arg));
-            }
-        }
+        // The picture itself arrives as the launch's `Event::AppOpen`.
+        let preview = is_preview_launch();
 
         // A theme.splash background (makepad_wm_theme::apply already retinted
         // theme.color_bg_app from it, if MAKEPAD_WM_THEME_SPLASH is set); patch the
@@ -96,13 +86,10 @@ impl MatchEvent for App {
             }
         }
 
-        self.preview = PreviewState::new(preview, path.as_deref());
+        self.preview = PreviewState::new(preview, None);
 
         if let Some(mut viewer) = self.ui.widget(cx, ids!(viewer)).borrow_mut::<MpImageView>() {
             viewer.set_preview(preview);
-            if let Some(path) = &path {
-                viewer.open(cx, path);
-            }
         }
 
         self.set_title(cx);
@@ -136,6 +123,19 @@ impl MatchEvent for App {
 }
 
 impl App {
+    /// `image <path>`, Finder's "Open With", or a later `image <path>` while
+    /// this one runs: show the first file.
+    fn open(&mut self, cx: &mut Cx, event: &AppOpenEvent) {
+        let Some(path) = event.paths().next() else {
+            return;
+        };
+        self.preview.show(path);
+        if let Some(mut viewer) = self.ui.widget(cx, ids!(viewer)).borrow_mut::<MpImageView>() {
+            viewer.open(cx, path);
+        }
+        self.set_title(cx);
+    }
+
     /// Quick Look v2: `StudioToApp::Custom` from wm reaches a hosted app
     /// as `Event::Custom(json)`; this is what the viewer half of the
     /// protocol does with it. `PreviewUnload` never ends the process.
@@ -180,7 +180,16 @@ impl AppMain for App {
         self::script_mod(vm)
     }
 
+    /// One viewer window per user: opening another picture shows it there.
+    /// A `--preview` viewer belongs to its requester and runs on its own.
+    fn single_instance() -> bool {
+        !is_preview_launch()
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::AppOpen(open) = event {
+            self.open(cx, open);
+        }
         if let Event::Custom(json) = event {
             if let Some(wm) = makepad_wm_api::WmEvent::parse(json) {
                 self.handle_wm_event(cx, &wm);
@@ -189,6 +198,11 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
+}
+
+/// `image --preview <path>`: a Quick Look viewer, sized as a popup.
+fn is_preview_launch() -> bool {
+    std::env::args().skip(1).any(|arg| arg == "--preview")
 }
 
 /// Parses a `#rrggbb` (or `#rgb`) hex string into a `Vec4f`, alpha 1.0.

@@ -420,6 +420,32 @@ impl XlibWindow {
 
     /// Sends a `_NET_WM_STATE` client message. `second` is 0 when only one state changes.
     fn set_net_wm_state(&self, add_remove: c_long, first: x11_sys::Atom, second: x11_sys::Atom) {
+        let message_type = get_xlib_app_global().atoms.net_wm_state;
+        self.send_to_window_manager(message_type, [add_remove, first as c_long, second as c_long]);
+    }
+
+    /// Asks the window manager to raise, de-iconify and focus this window
+    /// (`_NET_ACTIVE_WINDOW`, source indication 1: an application).
+    pub fn activate(&self) {
+        if self.window.is_none() {
+            return;
+        }
+        let message_type = unsafe {
+            x11_sys::XInternAtom(
+                get_xlib_app_global().display,
+                "_NET_ACTIVE_WINDOW\0".as_ptr() as *const _,
+                0,
+            )
+        };
+        self.send_to_window_manager(message_type, [1, 0, 0]);
+        unsafe {
+            x11_sys::XFlush(get_xlib_app_global().display);
+        }
+    }
+
+    /// A client message about this window, sent to the root window where
+    /// the window manager listens.
+    fn send_to_window_manager(&self, message_type: x11_sys::Atom, data: [c_long; 3]) {
         unsafe {
             let default_screen = x11_sys::XDefaultScreen(get_xlib_app_global().display);
             let root_window = x11_sys::XRootWindow(get_xlib_app_global().display, default_screen);
@@ -429,13 +455,13 @@ impl XlibWindow {
                 send_event: 0,
                 display: get_xlib_app_global().display,
                 window: self.window.unwrap(),
-                message_type: get_xlib_app_global().atoms.net_wm_state,
+                message_type,
                 format: 32,
                 data: {
                     let mut msg = mem::zeroed::<x11_sys::XClientMessageEvent__bindgen_ty_1>();
-                    msg.l[0] = add_remove;
-                    msg.l[1] = first as c_long;
-                    msg.l[2] = second as c_long;
+                    msg.l[0] = data[0];
+                    msg.l[1] = data[1];
+                    msg.l[2] = data[2];
                     msg
                 },
             };

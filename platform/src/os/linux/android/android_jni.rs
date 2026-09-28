@@ -246,6 +246,7 @@ pub enum FromJavaMessage {
     ImeEditorAction {
         action_code: i32,
     },
+    AppOpen(crate::event::AppOpenEvent),
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -1344,6 +1345,36 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResu
         request_code as i32,
         java_string_array_to_vec(env, uris),
     );
+}
+
+/// The activity was asked to open something: an `ACTION_VIEW` URI (a file
+/// comes as its path, `is_path`) or `ACTION_SEND` text (a URL item as is), from `onCreate` (`at_launch`)
+/// or `onNewIntent`: `Event::AppOpen`.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAppOpen(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    item: jni_sys::jstring,
+    is_path: jni_sys::jboolean,
+    at_launch: jni_sys::jboolean,
+) {
+    let item = jstring_to_string(env, item);
+    let item = if is_path != 0 {
+        crate::event::AppOpenItem::Path(item.into())
+    } else {
+        crate::event::AppOpenItem::Url(item)
+    };
+    let source = if at_launch != 0 {
+        crate::event::AppOpenSource::Launch
+    } else {
+        crate::event::AppOpenSource::System
+    };
+    // The render thread's queue, not the action pump: at launch the `Cx`
+    // (and with it the action channel) is still being made on its thread.
+    send_from_java_message(FromJavaMessage::AppOpen(crate::event::AppOpenEvent {
+        items: vec![item],
+        source,
+    }));
 }
 
 #[no_mangle]

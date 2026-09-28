@@ -6,7 +6,7 @@ use crate::{
     makepad_math::*,
     os::{
         apple::apple_sys::*,
-        apple::apple_util::key_modifiers_from_flags,
+        apple::apple_util::{key_modifiers_from_flags, nsurl_to_app_open_item},
         apple::ios::ios_event::IosEvent,
         apple::ios_app::IosApp,
         apple::ios_app::{with_ios_app, GEOM_CHECK_PENDING, IOS_APP},
@@ -434,6 +434,25 @@ pub fn define_ios_app_delegate() -> *const Class {
         YES
     }
 
+    // A URL scheme, a universal link or a file handed to the app. UIKit
+    // calls this after `didFinishLaunchingWithOptions` for a cold launch
+    // too, so the launch options' URL needs no reading of its own.
+    extern "C" fn application_open_url(
+        _: &Object,
+        _: Sel,
+        _: ObjcId,
+        url: ObjcId,
+        _: ObjcId,
+    ) -> BOOL {
+        match unsafe { nsurl_to_app_open_item(url) } {
+            Some(item) => {
+                crate::app_open::post(vec![item], crate::event::AppOpenSource::System);
+                YES
+            }
+            None => NO,
+        }
+    }
+
     extern "C" fn application_will_enter_foreground(_: &Object, _: Sel, _: ObjcId) {
         IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Foreground);
     }
@@ -459,6 +478,10 @@ pub fn define_ios_app_delegate() -> *const Class {
             sel!(application: didFinishLaunchingWithOptions:),
             did_finish_launching_with_options
                 as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
+        );
+        decl.add_method(
+            sel!(application:openURL:options:),
+            application_open_url as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId) -> BOOL,
         );
         decl.add_method(
             sel!(applicationWillEnterForeground:),

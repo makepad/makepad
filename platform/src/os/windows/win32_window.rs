@@ -1435,6 +1435,23 @@ impl Win32Window {
         }
     }
 
+    /// Restore the window if minimized and make it the foreground window.
+    /// Windows grants the foreground only to a process allowed to take it
+    /// (a relaunch hands its own over with `AllowSetForegroundWindow`);
+    /// otherwise the taskbar button flashes.
+    pub fn bring_to_front(&self) {
+        windows_core::link!("user32.dll" "system" fn SetForegroundWindow(hwnd: HWND) -> crate::windows::core::BOOL);
+        if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+            return;
+        }
+        if self.is_iconic() {
+            self.restore();
+        }
+        unsafe {
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+    }
+
     /// Whether the window is minimized. A minimized window gets no compositor
     /// vsync, so painting it is pure waste and its frame-latency waitable never
     /// signals; the paint loop skips it (keeping the pass dirty) and re-probes.

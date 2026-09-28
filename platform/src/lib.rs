@@ -73,6 +73,7 @@ pub mod linux_gpu;
 #[cfg(all(not(gpusim), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 pub mod app_meta;
+pub mod app_open;
 mod area;
 pub mod component;
 mod component_list;
@@ -213,6 +214,9 @@ pub use {
         draw_vars::DrawVars,
         sploded::{SplodedParams, SplodedView},
         event::{
+            AppOpenEvent,
+            AppOpenItem,
+            AppOpenSource,
             CancelScope,
             CancelScopeKind,
             CharOffset,

@@ -62,6 +62,11 @@ impl PreviewState {
         self.showing.as_deref()
     }
 
+    /// The viewer now shows `path` (an open request, not the WM's).
+    pub fn show(&mut self, path: &Path) {
+        self.showing = Some(path.to_path_buf());
+    }
+
     pub fn is_loaded(&self) -> bool {
         self.showing.is_some()
     }

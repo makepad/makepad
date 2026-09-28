@@ -12,7 +12,7 @@ use {
             apple_classes::get_apple_class_global,
             apple_util::{
                 get_event_key_modifier, get_event_mouse_button, load_mouse_cursor,
-                nsstring_to_string, superclass,
+                nsstring_to_string, nsurl_to_app_open_item, superclass,
             },
             cx_native::EventFlow,
             macos::{
@@ -118,12 +118,32 @@ pub fn define_app_delegate() -> *const Class {
         }
     }
 
+    // Finder, `open`, the Dock and URL schemes: files arrive as file URLs.
+    // Runs on the main thread; the items reach the app through the action
+    // pump, after `Event::Startup` (the delegate first runs inside
+    // `[NSApp run]`, which starts after it).
+    extern "C" fn application_open_urls(_: &Object, _: Sel, _: ObjcId, urls: ObjcId) {
+        let items: Vec<_> = unsafe {
+            let count: usize = msg_send![urls, count];
+            (0..count)
+                .filter_map(|i| nsurl_to_app_open_item(msg_send![urls, objectAtIndex: i]))
+                .collect()
+        };
+        if !items.is_empty() {
+            crate::app_open::post(items, crate::event::AppOpenSource::System);
+        }
+    }
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
     unsafe {
         decl.add_method(
             sel!(applicationShouldTerminate:),
             application_should_terminate as extern "C" fn(&Object, Sel, ObjcId) -> isize,
+        );
+        decl.add_method(
+            sel!(application:openURLs:),
+            application_open_urls as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 

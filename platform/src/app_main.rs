@@ -261,6 +261,22 @@ pub trait AppMain {
     {
     }
 
+    /// Whether the app runs as one instance per user and build. A later
+    /// launch hands its command line to the running instance, which gets a
+    /// `SecondInstance` [`Event::AppOpen`] and comes to the front, and
+    /// exits before anything of the app exists. Asked once, before the
+    /// `Cx`, so it can read the command line but not `Cx`.
+    ///
+    /// Launches for agents, tests and hosts (`--remote`,
+    /// `MAKEPAD_HIDE_WINDOWS`, `--stdin-loop`) and `MAKEPAD_NEW_INSTANCE=1`
+    /// always run on their own. Mobile OSes keep one instance themselves.
+    fn single_instance() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self>
     where
@@ -511,6 +527,17 @@ macro_rules! app_main {
             }
             Cx::init_log();
             $crate::startup_trace("main-entered (dyld done)");
+            // A later launch of a single-instance app hands its command line
+            // to the running instance and ends here, before the VM or a window.
+            let single_instance = if <$app as AppMain>::single_instance() {
+                match $crate::app_open::claim_single_instance(env!("CARGO_PKG_NAME")) {
+                    $crate::app_open::SingleInstance::Forwarded => return,
+                    $crate::app_open::SingleInstance::Primary(server) => Some(server),
+                    $crate::app_open::SingleInstance::Standalone => None,
+                }
+            } else {
+                None
+            };
             if Cx::pre_start() {
                 return;
             }
@@ -539,6 +566,12 @@ macro_rules! app_main {
             // `--remote`: a localhost HTTP control surface for agents / tests.
             // No-op unless the flag (or MAKEPAD_REMOTE) is present.
             $crate::remote::start_if_requested(&mut cx.borrow_mut());
+            // The command line's files and URLs, then later launches': each
+            // an `Event::AppOpen` after `Event::Startup`.
+            $crate::app_open::post_launch_args();
+            if let Some(server) = single_instance {
+                server.serve();
+            }
             Cx::event_loop(cx);
         }
 

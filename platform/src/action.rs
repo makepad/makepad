@@ -1,4 +1,7 @@
+use crate::app_open::AppOpenPosted;
 use crate::cx::Cx;
+use crate::cx_api::CxOsOp;
+use crate::event::{AppOpenSource, Event};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialogLoadAction};
 use crate::thread::SignalToUI;
@@ -106,7 +109,12 @@ impl<T: ActionTrait + ActionDefaultRef> ActionCastRef<T>
 
 impl Cx {
     pub fn handle_action_receiver(&mut self) {
+        let mut app_opens = Vec::new();
         while let Ok(action) = self.action_receiver.try_recv() {
+            if let Some(open) = (&*action as &dyn ActionTrait).downcast_ref::<AppOpenPosted>() {
+                app_opens.push(open.0.clone());
+                continue;
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(completed) = (&*action as &dyn ActionTrait)
                 .downcast_ref::<FileDialogLoadAction>()
@@ -120,6 +128,13 @@ impl Cx {
                 continue;
             }
             self.new_actions.push(action);
+        }
+        for open in app_opens {
+            // A relaunch of a single-instance app means "show me the app".
+            if open.source == AppOpenSource::SecondInstance {
+                self.platform_ops.push_back(CxOsOp::ActivateApp);
+            }
+            self.call_event_handler(&Event::AppOpen(open));
         }
         self.handle_actions();
     }

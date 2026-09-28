@@ -644,14 +644,20 @@ impl Cx {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
-            with_macos_app(|app| {
-                for (window, _view) in &app.cocoa_windows {
-                    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
-                        continue;
-                    }
-                    let () = msg_send![*window, orderFrontRegardless];
+            if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+                return;
+            }
+            // Outside the `MacosApp` borrow: a deminiaturize calls the
+            // window delegate back synchronously.
+            let windows: Vec<ObjcId> =
+                with_macos_app(|app| app.cocoa_windows.iter().map(|(window, _)| *window).collect());
+            for window in windows {
+                let miniaturized: BOOL = msg_send![window, isMiniaturized];
+                if miniaturized != NO {
+                    let () = msg_send![window, deminiaturize: nil];
                 }
-            });
+                let () = msg_send![window, orderFrontRegardless];
+            }
         }
     }
 
@@ -2225,6 +2231,7 @@ impl Cx {
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));
                 }
+                CxOsOp::ActivateApp => self.macos_activate_app(),
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,

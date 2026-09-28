@@ -629,6 +629,11 @@ impl X11Cx {
                     }
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
+                CxOsOp::ActivateApp => {
+                    if let Some(window) = opengl_windows.first() {
+                        window.xlib_window.activate();
+                    }
+                }
                 CxOsOp::HideWindow(_window_id) => todo!(),
                 CxOsOp::HideWindowButtons(_) => {}
                 CxOsOp::ShowWindowButtons(_) => {}
