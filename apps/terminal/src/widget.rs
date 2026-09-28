@@ -472,6 +472,14 @@ pub struct MpTerm {
     style_colors: Option<(Rgb, Rgb)>,
     #[rust]
     original_colors: Option<([Rgb; 16], Rgb, Rgb)>,
+    /// A viewer, not a shell: no key focus on first draw, no typing, paste,
+    /// drop or IME. Selection, copy and scrollback still work.
+    #[rust]
+    pub read_only: bool,
+    /// Rows leaving the primary grid for scrollback also go here (kept
+    /// across session restarts); see `set_scrollback_sink`.
+    #[rust]
+    scrollback_sink: Option<crate::term::screen::ScrollbackSink>,
 }
 
 impl ScriptHook for MpTerm {
@@ -547,6 +555,35 @@ impl MpTerm {
             self.draw_bg.redraw(cx);
         }
     }
+    /// Also hand every row that leaves the primary grid for scrollback to
+    /// `sink` (a host keeping its own copy of the history). The rows already
+    /// in scrollback are sent first, oldest first; later sessions of this
+    /// widget (a restart) keep the sink. `None` stops it.
+    pub fn set_scrollback_sink(&mut self, sink: Option<crate::term::screen::ScrollbackSink>) {
+        self.scrollback_sink = sink.clone();
+        if let Some(session) = self.session.as_mut() {
+            let primary = &mut session.terminal.primary;
+            if let Some(sink) = &sink {
+                for row in &primary.scrollback {
+                    sink(row);
+                }
+            }
+            primary.scrollback_sink = sink;
+        }
+    }
+
+    /// One cell in logical pixels at the current font and presentation
+    /// scale (zero before the first draw), and that scale.
+    pub fn cell_size(&self) -> (DVec2, f64) {
+        (dvec2(self.cell_w, self.cell_h), self.presentation_font_scale)
+    }
+
+    /// The grid's columns and rows (None without a session).
+    pub fn grid(&self) -> Option<(usize, usize)> {
+        let term = &self.session.as_ref()?.terminal;
+        Some((term.cols(), term.rows()))
+    }
+
     /// Start the session now rather than on the first draw: a restored
     /// resident that a hidden presentation has not drawn yet still runs.
     pub fn ensure_started(&mut self, cx: &mut Cx) {
@@ -712,6 +749,7 @@ impl MpTerm {
                     base16[7] = fg;
                 }
                 session.terminal.set_theme(&base16, fg, bg);
+                session.terminal.primary.scrollback_sink = self.scrollback_sink.clone();
                 self.session = Some(session);
             }
             Err(err) => {
@@ -1818,11 +1856,11 @@ impl Widget for MpTerm {
             self.took_focus = true;
             // Canvas hosts decide focus from actual input. Redrawing their
             // areas must still let the framework migrate an existing focus.
-            if self.canvas_ime_anchor.is_none() {
+            if self.canvas_ime_anchor.is_none() && !self.read_only {
                 cx.set_key_focus(self.area);
             }
         }
-        if self.session.is_some() && cx.has_key_focus(self.area) {
+        if self.session.is_some() && cx.has_key_focus(self.area) && !self.read_only {
             let s = self
                 .session
                 .as_ref()
@@ -1848,7 +1886,7 @@ impl Widget for MpTerm {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if matches!(event, Event::Drag(_) | Event::Drop(_)) {
+        if matches!(event, Event::Drag(_) | Event::Drop(_)) && !self.read_only {
             match event.drag_hits(cx, self.area) {
                 DragHit::Drag(drag) => {
                     let accepts = self.session.as_ref().is_some_and(|session| !session.exited)
@@ -2005,6 +2043,7 @@ impl Widget for MpTerm {
                 cx.hide_text_ime();
                 self.draw_bg.redraw(cx);
             }
+            Hit::KeyDown(_) | Hit::TextInput(_) if self.read_only => {}
             Hit::KeyDown(e) => {
                 if self.session.is_some()
                     && e.key_code == KeyCode::ReturnKey

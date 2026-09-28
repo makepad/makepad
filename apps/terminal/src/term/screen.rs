@@ -6,6 +6,7 @@
 //! scrollback rows moving into a `VecDeque` as lines scroll off the top.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::term::charsets::CharsetState;
 use crate::term::page::{Cell, Row, SemanticPrompt};
@@ -47,6 +48,18 @@ pub struct SavedCursor {
     pub charsets: CharsetState,
 }
 
+/// Receives every row as it leaves the active grid for scrollback (after
+/// trimming), in order, on the thread that feeds the terminal. An owner
+/// that keeps its own copy of the history (a log, an index, a zoomed-out
+/// view) appends from here instead of polling `scrollback`.
+///
+/// Only a history screen (`max_scrollback > 0`) calls it, and only for rows
+/// that enter scrollback by scrolling or by a shrinking height. A height
+/// that grows pulls rows back out of scrollback; they are sent again when
+/// they leave again. A width change re-wraps the history in place
+/// (`resize_reflow`) and sends nothing; neither does `clear_all`.
+pub type ScrollbackSink = Arc<dyn Fn(&Row) + Send + Sync>;
+
 pub struct Screen {
     pub cols: usize,
     pub rows: usize,
@@ -74,6 +87,9 @@ pub struct Screen {
     /// Grapheme-cluster state for the print path (mode 2027): x/y of the
     /// previously printed cell, to append combining input.
     pub previous_char: Option<(usize, usize)>,
+
+    /// See [`ScrollbackSink`]; none by default.
+    pub scrollback_sink: Option<ScrollbackSink>,
 }
 
 impl Screen {
@@ -95,6 +111,7 @@ impl Screen {
             left_margin: 0,
             right_margin: cols - 1,
             previous_char: None,
+            scrollback_sink: None,
         }
     }
 
@@ -187,6 +204,9 @@ impl Screen {
                 }
                 if to_history {
                     row.trim();
+                    if let Some(sink) = &self.scrollback_sink {
+                        sink(&row);
+                    }
                     self.scrollback.push_back(row);
                 } else {
                     // Dropped.
@@ -533,6 +553,9 @@ impl Screen {
                         let mut row = self.active.remove(0);
                         if self.max_scrollback > 0 {
                             row.trim();
+                            if let Some(sink) = &self.scrollback_sink {
+                                sink(&row);
+                            }
                             self.scrollback.push_back(row);
                             if self.scrollback.len() > self.max_scrollback {
                                 self.scrollback.pop_front();
@@ -593,6 +616,24 @@ mod tests {
                 ..Default::default()
             };
         }
+    }
+
+    #[test]
+    fn scrollback_sink_sees_rows_leaving_the_grid() {
+        use std::sync::Mutex;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut s = Screen::new(3, 2, 10);
+        let sink_seen = seen.clone();
+        s.scrollback_sink = Some(Arc::new(move |row: &Row| sink_seen.lock().unwrap().push(row.text())));
+        let style = Style::default();
+        put(&mut s, 0, "a");
+        put(&mut s, 1, "b");
+        s.scroll_up(1, &style);
+        assert_eq!(*seen.lock().unwrap(), vec!["a".to_string()]);
+        // A margin-limited region never feeds history, nor the sink.
+        s.scroll_top = 1;
+        s.scroll_up(1, &style);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]

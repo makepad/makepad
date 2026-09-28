@@ -1882,7 +1882,10 @@ impl Terminal {
     /// RIS.
     pub fn full_reset(&mut self) {
         let (cols, rows) = (self.cols(), self.rows());
+        // The history's owner keeps listening across a reset.
+        let sink = self.primary.scrollback_sink.take();
         self.primary = Screen::new(cols, rows, DEFAULT_SCROLLBACK);
+        self.primary.scrollback_sink = sink;
         self.alternate = Screen::new(cols, rows, 0);
         self.active = ActiveScreen::Primary;
         self.modes.reset();
