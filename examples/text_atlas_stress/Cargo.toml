@@ -2,6 +2,7 @@
 name = "makepad-example-text-atlas-stress"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Text rows at several sizes plus a burst of fresh textures in one frame — the glyph-atlas regression stage"
 
 [features]

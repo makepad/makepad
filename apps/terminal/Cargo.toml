@@ -13,6 +13,7 @@
 name = "makepad-app-terminal"
 version = "0.1.0"
 edition = "2021"
+license = "MIT AND Unicode-3.0"
 default-run = "makepad-app-terminal"
 
 [lib]

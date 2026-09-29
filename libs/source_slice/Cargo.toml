@@ -2,6 +2,7 @@
 name = "makepad-source-slice"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Slices of a private source repository per app license: the Cargo path-dependency closure of an app's root packages as a synthetic Git commit"
 

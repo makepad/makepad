@@ -20,7 +20,7 @@ documentation = "https://docs.rs/fxhash"
 readme = "README.md"
 keywords = ["hash"]
 categories = ["algorithms"]
-license = "Apache-2.0/MIT"
+license = "Apache-2.0 OR MIT"
 repository = "https://github.com/cbreeden/fxhash"
 
 [lib]

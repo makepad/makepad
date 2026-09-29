@@ -24,6 +24,7 @@
 name = "makepad-app-wm"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 default-run = "makepad-app-wm"
 
 [lib]

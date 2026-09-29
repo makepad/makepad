@@ -14,6 +14,7 @@
 name = "makepad-app-wm-android"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # What `proc-pack` builds as hosted child libraries: [package, bin] pairs,
 # bin being the WM registry's binary name (apps/wm/src/clients.rs).

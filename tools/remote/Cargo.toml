@@ -2,6 +2,7 @@
 name = "makepad-remote"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Remote file-sync and cargo runner for Makepad"
 default-run = "makepad-remote"
 

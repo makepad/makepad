@@ -2,6 +2,7 @@
 name = "makepad-rmeta"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "rustc crate-metadata (rmeta) header reader and SVH patcher: what the Android super-app's packer records and the phone rewrites"
 
 [dependencies]

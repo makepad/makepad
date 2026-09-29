@@ -18,5 +18,5 @@ description = "Unicode Canonical Combining Class detection"
 documentation = "https://docs.rs/unicode-ccc/"
 readme = "README.md"
 keywords = ["unicode"]
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/RazrFalcon/unicode-ccc"

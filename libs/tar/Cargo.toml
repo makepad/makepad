@@ -2,6 +2,7 @@
 name = "makepad-tar"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "A streaming tar reader for the archives Makepad ships: ustar, GNU long names, pax headers; LZ4 frames through makepad-lz4, gzip through makepad-fast-inflate"
 
 [dependencies]

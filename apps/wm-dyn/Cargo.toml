@@ -24,6 +24,7 @@
 name = "makepad-app-wm-dyn"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 default-run = "makepad-app-wm-dyn"
 
 # What `cargo makepad android dyn-pack` stages, proves and packs: the engine
