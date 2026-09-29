@@ -567,6 +567,7 @@ mod tests {
             infinite_zoom: None,
             tab_width: None,
             map_hidden: None,
+            recent_folders: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);
