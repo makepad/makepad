@@ -2,6 +2,7 @@
 pub mod app_icon;
 pub mod cab;
 pub mod catalog;
+pub mod changes;
 pub mod command;
 #[cfg(target_os = "macos")]
 pub mod desktop;
@@ -654,6 +655,12 @@ pub fn cli_main() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("build") {
         let app = std::env::args().nth(2).ok_or("Usage: makepad-builder build APP")?;
         return runtime::build_local(&app);
+    }
+    if std::env::args().nth(1).as_deref() == Some("changes") {
+        return changes::cli_changes();
+    }
+    if std::env::args().nth(1).as_deref() == Some("send-changes") {
+        return changes::cli_send();
     }
     if std::env::args().nth(1).as_deref() == Some("rebuild") {
         return runtime::rebuild_local();

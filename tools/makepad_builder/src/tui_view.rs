@@ -60,6 +60,8 @@ pub(super) struct Item {
     pub child: bool,
     /// Said on the line under the rule while the row is selected.
     pub info: String,
+    /// An app whose source is here: e sends the person's changes.
+    pub send: bool,
 }
 #[derive(Clone)]
 pub(super) enum Row {
@@ -87,8 +89,8 @@ pub(super) enum Nav {
     /// Something changed in the background (an app exited, disk measured):
     /// rebuild the view and call `menu` again.
     Refresh,
-    /// A letter key on the main menu (c cancel, s start when done) and the
-    /// selected row's id.
+    /// A letter key on the main menu (c cancel, s start when done, e send
+    /// my changes) and the selected row's id.
     Key(char, String),
 }
 
@@ -665,6 +667,11 @@ fn menu_keys(item: Option<&Item>) -> Text {
         spans.push(Span("c".into(), KEY));
         spans.push(Span(" cancel   ".into(), DIM));
     }
+    // Not while the app compiles or waits in the queue.
+    if item.is_some_and(|item| item.send) && open.is_none() {
+        spans.push(Span("e".into(), KEY));
+        spans.push(Span(" send my changes   ".into(), DIM));
+    }
     spans.push(Span("q quit".into(), DIM));
     spans
 }
@@ -854,8 +861,9 @@ pub(super) fn menu(view: View, selected: &mut usize, changed: &dyn Fn() -> bool)
             Key::Enter => return Ok(Nav::Select(ids[sel].clone())),
             Key::Back => return Ok(Nav::Back),
             Key::Quit | Key::Char('q') | Key::Char('Q') => return Ok(Nav::Quit),
-            // Background work: s (start when done) and c (cancel).
-            Key::Char(c @ ('c' | 's')) if main => return Ok(Nav::Key(c, ids[sel].clone())),
+            // Background work: s (start when done) and c (cancel); e sends
+            // the changes made to an app.
+            Key::Char(c @ ('c' | 's' | 'e')) if main => return Ok(Nav::Key(c, ids[sel].clone())),
             Key::Other => {
                 // Background builds report on every tick, each tick redraws.
                 let exited = super::reap_apps();

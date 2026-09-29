@@ -9,6 +9,7 @@
 
 use crate::{
     catalog::{self, Release},
+    changes,
     progress,
     rustc,
     runtime::{self, Dependency, Environment, RustChoice, WindowsChain},
@@ -147,6 +148,11 @@ fn show_menu(setup: &mut Setup) -> Result<(), String> {
                 Err(error) if error == QUIT => break,
                 Err(error) => setup.report(error),
                 Ok(()) => {}
+            },
+            Nav::Key('e', id) => match id.strip_prefix("app:").map(|app| setup.send_changes(app)) {
+                Some(Err(error)) if error == QUIT => break,
+                Some(Err(error)) => setup.report(error),
+                _ => {}
             },
             Nav::Key(key, id) => setup.background_key(key, &id),
         }
@@ -460,7 +466,7 @@ impl Setup {
         rows.extend(self.experiment_rows());
         rows.push(Row::Head("CODING AGENTS".into()));
         for (command, title) in &self.agents {
-            rows.push(info(item(format!("agent-{command}"), *title, "", Vec::new(), "open"), "Ask it to change an app; it can rebuild them here."));
+            rows.push(info(item(format!("agent-{command}"), *title, "", Vec::new(), "open"), "Ask it to change an app (it rebuilds them here), or to \"send what I changed\" to Makepad."));
         }
         rows.push(info(item("agent-shell", "Shell", "", text("with this folder's Rust on PATH", DIM), "open"), "A shell in this folder; type exit to come back."));
         rows.push(Row::Head("SETUP".into()));
@@ -510,7 +516,7 @@ impl Setup {
                 State::Merge => (text("updated · your changes to merge", WARN), "merge with agent"),
                 _ => (Vec::new(), "download"),
             };
-            rows.push(child(info(item(format!("app:{id}"), title.clone(), "", status, action), &app_info(id, state))));
+            rows.push(sendable(child(info(item(format!("app:{id}"), title.clone(), "", status, action), &app_info(id, state))), &self.root, id, state));
         }
         rows
     }
@@ -655,7 +661,7 @@ impl Setup {
             action = "compile and run".into();
         }
         let license = if release.license == "beta" { "beta" } else { "commercial" };
-        info(item(format!("app:{}", release.id), release.title.clone(), license, status, action), &app_info(&release.id, state))
+        sendable(info(item(format!("app:{}", release.id), release.title.clone(), license, status, action), &app_info(&release.id, state)), &self.root, &release.id, state)
     }
     fn disk_row(&self) -> Row {
         // Folder total, then what "clear build data" can delete.
@@ -1974,6 +1980,132 @@ impl Setup {
     }
 }
 
+/// Send my changes: e on an app's row.
+impl Setup {
+    /// Review and send the change report a coding agent left for `app` in
+    /// changes/, or, when there is none yet, ask an agent to write it.
+    /// Nothing is sent without "Send" chosen on the review page.
+    fn send_changes(&mut self, app: &str) -> Result<(), String> {
+        if JOBS.with(|j| j.borrow().involves(app)) {
+            view::message(text("Wait until it is compiled, then send your changes.", DIM));
+            return Ok(());
+        }
+        let Some(release) = self.app_release(app).filter(|r| r.installed(&self.root)) else {
+            view::message(text("Download the app and change it first; then your coding agent describes your changes.", DIM));
+            return Ok(());
+        };
+        let path = match changes::waiting(&self.root, app) {
+            Some(path) => path,
+            None => {
+                self.write_report(&release)?;
+                match changes::waiting(&self.root, app) {
+                    Some(path) => path,
+                    None => return Ok(()),
+                }
+            }
+        };
+        view::busy("Checking the report");
+        let package = match changes::load(&path, app) {
+            Ok(package) => package,
+            Err(error) => {
+                activity(&format!("The change report {} cannot be sent: {error}", crate::shown(&path)));
+                let first = error.lines().next().unwrap_or_default().trim_end_matches(':').to_owned();
+                view::message(text(format!("Not sent: {first}. Ask your coding agent to fix the report (details in builder.log)."), WARN));
+                return Ok(());
+            }
+        };
+        let Some(choice) = self.review_page(&release, &package)? else {
+            view::message(text("Nothing was sent. The report stays in changes/ until you send it.", DIM));
+            return Ok(());
+        };
+        let email = (choice == "email").then(|| self.email.clone());
+        view::busy("Sending your changes to Makepad");
+        match changes::send(&package, email.as_deref()) {
+            Ok(id) => {
+                if let Err(error) = changes::mark_sent(&self.root, &path, id) {
+                    activity(&format!("Sent report #{id}, but could not rename {}: {error}", crate::shown(&path)));
+                }
+                activity(&format!("Sent the change report for {} as #{id}{}.", release.title, if email.is_some() { " with the account email" } else { " anonymously" }));
+                view::message(done(format!("Sent. Makepad received your changes to {} as report #{id}. Thank you!", release.title)));
+            }
+            Err(error) => view::warn(&error),
+        }
+        Ok(())
+    }
+    /// No report yet: a coding agent writes one, as AGENTS.md describes
+    /// ("Sending your changes to Makepad"), and leaves it in changes/.
+    fn write_report(&self, release: &Release) -> Result<(), String> {
+        let app = release.id.as_str();
+        let agent = match self.agents.iter().filter(|a| a.0 != "grok").collect::<Vec<_>>().as_slice() {
+            [] => {
+                view::message(text(format!("Ask your coding agent to \"send what I changed\" in {}; it leaves the report in changes/ for you to read here.", release.title), DIM));
+                return Ok(());
+            }
+            [one] => **one,
+            several => {
+                let names: Vec<&str> = several.iter().map(|a| a.0).collect();
+                let Some(chosen) = view::choose("Describe your changes with which agent?", "It writes the report; you read it here before anything is sent.", &names, 0)? else { return Ok(()) };
+                **several.iter().find(|a| a.0 == chosen).ok_or("Unknown agent")?
+            }
+        };
+        let task = format!(
+            "Send what I changed in {} to Makepad. Follow \"Sending your changes to Makepad\" in the Makepad AGENTS.md: describe my changes as concepts, anonymise them, show me the list and wait for my approval, then write the report folder changes/{app}-report in the builder folder of the installation root. I read and send it from the Builder.",
+            release.title
+        );
+        self.launch_agent(agent.0, Some(app), Some(&task))
+    }
+    /// The review: every change by title, what else goes with it, then
+    /// Send, Send with my email (when logged in), Read it all, or Don't send.
+    /// Returns "send" or "email"; None when nothing is to be sent.
+    fn review_page(&self, release: &Release, package: &changes::Package) -> Result<Option<String>, String> {
+        let report = &package.report;
+        let mut selected = 0;
+        loop {
+            let mut rows = vec![Row::Note(Vec::new())];
+            rows.extend(wrap(&format!("Your coding agent described {} change{} to {} (release {}). This is what goes to Makepad:", report.changes.len(), if report.changes.len() == 1 { "" } else { "s" }, release.title, report.release), 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+            rows.push(Row::Note(Vec::new()));
+            for (n, change) in report.changes.iter().enumerate() {
+                rows.push(Row::Note(vec![view::Span(format!("{:>3}. {}", n + 1, change.title), PLAIN), view::Span(format!("  {}", change.kind), DIM)]));
+            }
+            rows.push(Row::Note(Vec::new()));
+            let taken: Vec<String> = report.redactions.iter().map(|r| format!("{} × {}", r.what, r.count)).collect();
+            let taken = if taken.is_empty() { "nothing needed taking out".to_owned() } else { format!("taken out: {}", taken.join(", ")) };
+            for line in wrap(&format!("{} · {taken}. No account, file or system information goes with it.", changes::contents(package)), 74) {
+                rows.push(Row::Note(text(line, DIM)));
+            }
+            rows.push(Row::Note(Vec::new()));
+            rows.push(item("send", format!("{:<34}", "Send anonymously"), "", Vec::new(), "send to Makepad"));
+            if !self.email.is_empty() {
+                rows.push(item("email", format!("{:<34}", "Send with my email"), "", Vec::new(), "so Makepad can reply"));
+            }
+            rows.push(item("read", format!("{:<34}", "Read it all"), "", Vec::new(), "the whole report"));
+            rows.push(item("cancel", format!("{:<34}", "Don't send"), "", Vec::new(), "keep it for later"));
+            let view = View {
+                crumb: " › Send my changes".into(),
+                subtitle: "Read what goes to Makepad; nothing is sent until you choose Send.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc cancel"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "read" => {
+                    let _pause = Screen::pause();
+                    println!("\n{}\n\n{}\n", package.markdown.trim_end(), changes::contents(package));
+                    if let Some(diff) = &package.diff {
+                        println!("changes.diff ({} lines) goes with it:\n\n{}", diff.lines().count(), diff.trim_end());
+                    }
+                    let _ = line("\nPress Enter to go back to the review.");
+                }
+                Nav::Select(id) if id == "send" || id == "email" => return Ok(Some(id)),
+                Nav::Select(_) | Nav::Back | Nav::Quit => return Ok(None),
+                Nav::Refresh | Nav::Key(..) => {}
+            }
+        }
+    }
+}
+
 /// Coding agents and the shell.
 impl Setup {
     /// Coding agents and the shell work in an app whose source is here.
@@ -2167,7 +2299,18 @@ impl Setup {
 // ---- Row helpers -----------------------------------------------------------
 
 fn item(id: impl Into<String>, name: impl Into<String>, license: &'static str, status: view::Text, action: impl Into<String>) -> Row {
-    Row::Item(Item { id: id.into(), name: name.into(), license, status, action: action.into(), child: false, info: String::new() })
+    Row::Item(Item { id: id.into(), name: name.into(), license, status, action: action.into(), child: false, info: String::new(), send: false })
+}
+/// An app row whose source is downloaded: e sends the changes made to it,
+/// and when a coding agent left a change report the row says so.
+fn sendable(mut row: Row, root: &Path, app: &str, state: State) -> Row {
+    if let Row::Item(item) = &mut row {
+        item.send = matches!(state, State::Ready | State::Compile | State::Merge) && !stopped(app);
+        if item.send && changes::waiting(root, app).is_some() {
+            item.info = "Your change report is ready: press e to read it and send it to Makepad.".into();
+        }
+    }
+    row
 }
 /// The row with what it does, said under the rule while it is selected.
 fn info(mut row: Row, about: &str) -> Row {

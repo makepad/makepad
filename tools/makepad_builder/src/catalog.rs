@@ -614,21 +614,7 @@ pub fn email(value: &str) -> Result<String, String> {
 /// menu offers the merge. The edited snapshot itself stays on disk. Nothing
 /// is written for an unchanged snapshot. Returns the diff's file name.
 pub fn save_changes(root: &Path, app: &str, previous: &Release, date: &str) -> Result<Option<String>, String> {
-    let snapshot = previous.directory(root);
-    let mut diff = String::new();
-    let mut files = String::new();
-    for repo in &previous.repositories {
-        let checkout = snapshot.join(&repo.path);
-        if !checkout.join(".git").is_dir() {
-            continue;
-        }
-        // Nested repositories (an app checked out inside Makepad) report
-        // their own edits; the parent skips their folders.
-        let nested: Vec<String> = previous.repositories.iter()
-            .filter_map(|other| other.path.strip_prefix(&format!("{}/", repo.path)).map(|rest| format!("{rest}/")))
-            .collect();
-        local_changes(&checkout, &repo.path, &nested, &mut diff, &mut files)?;
-    }
+    let (diff, files) = current_changes(root, previous)?;
     if files.is_empty() {
         return Ok(None);
     }
@@ -645,6 +631,31 @@ pub fn save_changes(root: &Path, app: &str, previous: &Release, date: &str) -> R
     let diff_name = format!("{name}.diff");
     fs::write(changes.join(format!("{app}.merge")), &diff_name).map_err(|e| e.to_string())?;
     Ok(Some(diff_name))
+}
+
+/// The edits made in `release`'s source snapshot, against the commits it
+/// was checked out at: a unified diff (new files included, paths prefixed
+/// with each repository's path in the snapshot, e.g. `makepad/apps/scope/…`)
+/// and one "M|A|D path" line per changed file. Both are empty for an
+/// unchanged snapshot. `save_changes` keeps them before an update;
+/// `makepad-builder changes APP` prints them for a coding agent.
+pub fn current_changes(root: &Path, release: &Release) -> Result<(String, String), String> {
+    let snapshot = release.directory(root);
+    let mut diff = String::new();
+    let mut files = String::new();
+    for repo in &release.repositories {
+        let checkout = snapshot.join(&repo.path);
+        if !checkout.join(".git").is_dir() {
+            continue;
+        }
+        // Nested repositories (an app checked out inside Makepad) report
+        // their own edits; the parent skips their folders.
+        let nested: Vec<String> = release.repositories.iter()
+            .filter_map(|other| other.path.strip_prefix(&format!("{}/", repo.path)).map(|rest| format!("{rest}/")))
+            .collect();
+        local_changes(&checkout, &repo.path, &nested, &mut diff, &mut files)?;
+    }
+    Ok((diff, files))
 }
 
 fn local_changes(checkout: &Path, label: &str, skip: &[String], diff: &mut String, files: &mut String) -> Result<(), String> {

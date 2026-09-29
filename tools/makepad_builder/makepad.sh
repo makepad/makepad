@@ -36,6 +36,9 @@ makepad_builder() {
 #   ./makepad list             every app, its state and its source folder
 #   ./makepad env              this folder's build environment, for eval
 #   ./makepad agent-context    what coding agents are told about this folder
+#   ./makepad changes APP      the edits made to an app's source, as a diff
+#   ./makepad send-changes APP check and show the change report a coding
+#                              agent wrote; with --yes send it to Makepad
 #
 # One shell script and nothing compiled for itself; Rust is installed only to
 # build the apps. Every run is a restart: all state is read from the folder,
@@ -1168,10 +1171,28 @@ EOF
 # "M|A|D path" line each), and changes/<app>.merge names the diff. Updates
 # never merge; the person's coding agent reapplies the diff.
 save_changes() {
-    rel_load "$2" || return 0
+    sv_diff="$root/tmp/changes.diff" sv_files="$root/tmp/changes.files"
+    collect_changes "$2" "$sv_diff" "$sv_files" || return 0
+    sv_dir=$rel_directory
+    [ -s "$sv_files" ] || return 0
+    mkdir -p "$root/changes"
+    sv_name="$1-$(date +%Y-%m-%d)" sv_n=2
+    while [ -e "$root/changes/$sv_name.diff" ]; do sv_name="$1-$(date +%Y-%m-%d)-$sv_n"; sv_n=$((sv_n + 1)); done
+    mv "$sv_diff" "$root/changes/$sv_name.diff"
+    mv "$sv_files" "$root/changes/$sv_name.files"
+    put "$root/changes/$1.merge" "$sv_name.diff"
+    log "Saved your changes to $1 in changes/$sv_name.diff before updating; the edited source stays in $sv_dir"
+}
+# collect_changes RELEASE-FILE DIFF FILES: the edits made in the release's
+# source snapshot, as a unified diff (new files included, paths starting
+# with each repository's path in the snapshot) and one "M|A|D path" line per
+# file; both empty when nothing changed. save_changes keeps them before an
+# update, ./makepad changes APP prints them for a coding agent.
+collect_changes() {
+    rel_load "$1" || return 1
     rel_dir
     sv_dir=$rel_directory
-    sv_diff="$root/tmp/changes.diff" sv_files="$root/tmp/changes.files"
+    sv_diff=$2 sv_files=$3
     : > "$sv_diff"; : > "$sv_files"
     while IFS='|' read -r v_name v_path v_commit v_sha v_bytes; do
         sv_co="$sv_dir/$v_path"
@@ -1194,14 +1215,6 @@ save_changes() {
     done <<EOF
 $rel_repos
 EOF
-    [ -s "$sv_files" ] || return 0
-    mkdir -p "$root/changes"
-    sv_name="$1-$(date +%Y-%m-%d)" sv_n=2
-    while [ -e "$root/changes/$sv_name.diff" ]; do sv_name="$1-$(date +%Y-%m-%d)-$sv_n"; sv_n=$((sv_n + 1)); done
-    mv "$sv_diff" "$root/changes/$sv_name.diff"
-    mv "$sv_files" "$root/changes/$sv_name.files"
-    put "$root/changes/$1.merge" "$sv_name.diff"
-    log "Saved your changes to $1 in changes/$sv_name.diff before updating; the edited source stays in $sv_dir"
 }
 keep_edits() { # keep_edits APP NEW-RELEASE-FILE
     [ -f "$root/installed/$1.json" ] || return 0
@@ -1217,6 +1230,241 @@ keep_edits() { # keep_edits APP NEW-RELEASE-FILE
     save_changes "$1" "$root/installed/$1.json"
     mkdir -p "$root/changes"
     put "$root/changes/$1.saved" "$ke_old $ke_new"
+}
+
+# ------------------------------------------------------- send my changes ---
+# The Windows Builder's changes.rs: a coding agent describes the person's
+# changes as concepts (AGENTS.md, "Sending your changes to Makepad") in
+# changes/<app>-report/ (report.json, REPORT.md, optionally changes.diff) or
+# changes/<app>-report.zip. The Builder checks it, shows it, and only on an
+# explicit yes sends the zip to POST /api/feedback/changes (or
+# $MAKEPAD_FEEDBACK_URL/changes). The server checks it again with the full
+# rules (libs/change_report); these checks stop what they can find before
+# anything leaves the machine. A sent report becomes <app>-report-sent-<id>.
+
+# report_waiting APP -> report_path: the report an agent left; 1 when none.
+report_waiting() {
+    for rw_path in "$root/changes/$1-report" "$root/changes/$1-report.zip"; do
+        [ -e "$rw_path" ] || continue
+        report_path=$rw_path; return 0
+    done
+    return 1
+}
+report_fail() { report_problem=$1; return 1; }
+# report_check APP PATH: check the report (a folder or a zip); on success
+# report_zip is the zip to send and report_dir holds its files, otherwise
+# report_problem says why (its first line; findings follow one per line).
+report_check() {
+    report_app=$1 report_dir="$scratch/report" report_zip="$scratch/report.zip" report_problem=
+    [ ! -e "$report_dir" ] || remove_inside "$report_dir"
+    rm -f "$report_zip"
+    mkdir -p "$report_dir"
+    if [ -d "$2" ]; then
+        for ck_file in "$2"/*; do
+            [ -e "$ck_file" ] || continue
+            ck_name=${ck_file##*/}
+            case "$ck_name" in
+                report.json | REPORT.md | changes.diff) [ -f "$ck_file" ] && cp "$ck_file" "$report_dir/$ck_name" || report_fail "\"$ck_name\" in the report folder is not a file" || return 1 ;;
+                *) report_fail "The report folder holds \"$ck_name\"; only report.json, REPORT.md and changes.diff belong in it" || return 1 ;;
+            esac
+        done
+        [ -f "$report_dir/report.json" ] || report_fail 'The report has no report.json' || return 1
+        report_pack || return 1
+    else
+        [ -f "$2" ] || report_fail "There is no report at $2" || return 1
+        cp "$2" "$report_zip"
+        report_unpack || return 1
+        ck_other=$(find "$report_dir" -mindepth 1 ! -name report.json ! -name REPORT.md ! -name changes.diff | head -n 1)
+        [ -z "$ck_other" ] || report_fail "The report holds \"${ck_other#"$report_dir"/}\"; only report.json, REPORT.md and changes.diff belong in it" || return 1
+    fi
+    ck_size=$(size_of "$report_zip")
+    [ "$ck_size" -le 262144 ] || report_fail "The report is $(( (ck_size + 1023) / 1024 )) KB; at most 256 KB can be sent" || return 1
+    report_files || return 1
+    report_scan
+}
+# The zip from report_dir: zip, else Python's zipfile, else bsdtar.
+report_pack() {
+    set -- report.json
+    [ ! -f "$report_dir/REPORT.md" ] || set -- "$@" REPORT.md
+    [ ! -f "$report_dir/changes.diff" ] || set -- "$@" changes.diff
+    if command -v zip >/dev/null 2>&1; then (cd "$report_dir" && zip -q -X "$report_zip" "$@")
+    elif command -v python3 >/dev/null 2>&1; then (cd "$report_dir" && python3 -m zipfile -c "$report_zip" "$@")
+    elif command -v bsdtar >/dev/null 2>&1; then (cd "$report_dir" && bsdtar -a -cf "$report_zip" "$@")
+    else report_fail 'Packing the report needs zip or python3; ask the agent to write the .zip itself'; return 1; fi || report_fail 'Could not pack the report' || return 1
+}
+report_unpack() {
+    if command -v unzip >/dev/null 2>&1; then unzip -qq -o "$report_zip" -d "$report_dir" >/dev/null 2>&1
+    elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$report_zip" "$report_dir" >/dev/null 2>&1
+    elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$report_zip" -C "$report_dir" >/dev/null 2>&1
+    else report_fail 'Reading the report needs unzip or python3'; return 1; fi || report_fail 'The report is not a zip file' || return 1
+}
+# report_json KEY: one value of report.json (json flat paths: app/id, diff).
+report_json() { printf '%s\n' "$cf_flat" | awk -F'\t' -v k="$1" '$1 == k { print $2; exit }'; }
+# The files: present, within their sizes, UTF-8 text, report.json's main
+# rules, REPORT.md naming every change, the diff exactly when announced.
+report_files() {
+    [ -f "$report_dir/report.json" ] || report_fail 'The report has no report.json' || return 1
+    [ -f "$report_dir/REPORT.md" ] || report_fail 'The report has no REPORT.md' || return 1
+    for cf_name in report.json:131072 REPORT.md:131072 changes.diff:1048576; do
+        cf_file="$report_dir/${cf_name%:*}"
+        [ -f "$cf_file" ] || continue
+        [ "$(size_of "$cf_file")" -le "${cf_name#*:}" ] || report_fail "${cf_name%:*} is larger than $(( ${cf_name#*:} / 1024 )) KB" || return 1
+        if command -v iconv >/dev/null 2>&1; then
+            iconv -f UTF-8 -t UTF-8 < "$cf_file" >/dev/null 2>&1 || report_fail "${cf_name%:*} is not UTF-8 text" || return 1
+        fi
+        [ "$(LC_ALL=C tr -d '\011\012\015\040-\176\200-\377' < "$cf_file" | wc -c | tr -d ' ')" = 0 ] || report_fail "${cf_name%:*} holds binary data or control characters" || return 1
+    done
+    cf_flat=$(json flat < "$report_dir/report.json")
+    [ "$(report_json format)" = makepad-change-report ] || report_fail 'report.json: "format" must be "makepad-change-report"' || return 1
+    [ "$(report_json version)" = 1 ] || report_fail 'report.json: "version" must be 1' || return 1
+    cf_app=$(report_json app/id)
+    [ "$cf_app" = "$report_app" ] || report_fail "This report is about ${cf_app:-no app}, not $report_app" || return 1
+    [ -n "$(report_json app/release)" ] || report_fail 'report.json: "app" needs its "release"' || return 1
+    grep -q '"redactions"[[:space:]]*:' "$report_dir/report.json" || report_fail 'report.json: "redactions" must be a list (empty when nothing was taken out)' || return 1
+    cf_titles=$(printf '%s\n' "$cf_flat" | awk -F'\t' '$1 ~ /^changes\/[0-9]+\/title$/ { print $2 }')
+    [ -n "$cf_titles" ] || report_fail 'The report lists no changes' || return 1
+    cf_kind=$(printf '%s\n' "$cf_flat" | awk -F'\t' '$1 ~ /^changes\/[0-9]+\/kind$/ && $2 !~ /^(fix|feature|tweak|ui|performance|refactor|docs|other)$/ { print $2; exit }')
+    [ -z "$cf_kind" ] || report_fail "The kind \"$cf_kind\" is not one of fix, feature, tweak, ui, performance, refactor, docs, other" || return 1
+    while IFS= read -r cf_title; do
+        [ -n "$cf_title" ] || continue
+        grep -qF -- "$cf_title" "$report_dir/REPORT.md" || report_fail "REPORT.md does not list \"$cf_title\"; it shows the same changes as report.json" || return 1
+    done <<EOF
+$cf_titles
+EOF
+    case "$(report_json diff)|$([ -f "$report_dir/changes.diff" ] && echo 1)" in
+        'true|1' | 'false|') ;;
+        'false|1') report_fail 'changes.diff is included but report.json says "diff": false'; return 1 ;;
+        'true|') report_fail 'report.json says "diff": true but there is no changes.diff'; return 1 ;;
+        *) report_fail 'report.json: "diff" must be true or false'; return 1 ;;
+    esac
+    ! grep -q 'GIT binary patch' "$report_dir/changes.diff" 2>/dev/null || report_fail 'changes.diff holds a binary patch; leave binary files out' || return 1
+    report_count=$(printf '%s\n' "$cf_titles" | grep -c . || :)
+}
+# report_hits FILE WHAT PATTERN [EXCLUDE] [-i]: add each line of FILE that
+# matches the extended regular expression to report_findings.
+report_hits() {
+    cn_hits=$(LC_ALL=C grep -nEo ${5:-} -- "$3" "$report_dir/$1" 2>/dev/null || :)
+    [ -z "${4:-}" ] || cn_hits=$(printf '%s\n' "$cn_hits" | LC_ALL=C grep -vE -- "$4" || :)
+    [ -n "$cn_hits" ] || return 0
+    report_findings="$report_findings$(printf '%s\n' "$cn_hits" | awk -v f="$1" -v w="$2" 'NF {
+        n = index($0, ":"); m = substr($0, n + 1); sub(/^[^A-Za-z0-9\/\\~-]+/, "", m); sub(/[^A-Za-z0-9._-]+$/, "", m)
+        if (w ~ /network/) sub(/^[^A-Za-z0-9]+/, "", m)
+        if (w ~ /key/ && length(m) > 12) m = substr(m, 1, 12) "…"
+        printf "  %s line %s: %s (%s)\n", f, substr($0, 1, n - 1), w, m }')
+"
+}
+# The anonymisation scan (the checks of libs/change_report's scan, as far
+# as grep can make them): email addresses, absolute and home folder paths,
+# keys and tokens, credentials in URLs, private network addresses.
+report_scan() {
+    report_findings=
+    cn_q="'"
+    for cn_file in report.json REPORT.md changes.diff; do
+        [ -f "$report_dir/$cn_file" ] || continue
+        report_hits "$cn_file" 'email address' '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' '^[0-9]+:git@|@(example\.(com|org|net)|makepad\.nl)$|\.(example|invalid|test|localhost)$'
+        report_hits "$cn_file" 'absolute or home folder path' '(^|[^A-Za-z0-9._/-])/(Users|home|root|Volumes|mnt|media|private/var|var/folders|run/user)/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*' '/Users/Shared(/|$)'
+        report_hits "$cn_file" 'absolute or home folder path' '(^|[^A-Za-z0-9_])[A-Za-z]:[\\/]{1,2}[A-Za-z0-9][A-Za-z0-9._\\/-]*'
+        report_hits "$cn_file" 'absolute or home folder path' '\\\\[A-Za-z0-9.-]+\\[A-Za-z0-9][A-Za-z0-9._\\-]*'
+        report_hits "$cn_file" 'key, token or password' '-----BEGIN [A-Z ]*PRIVATE KEY'
+        report_hits "$cn_file" 'key, token or password' '(^|[^A-Za-z0-9_-])(sk-[A-Za-z0-9_-]{20,}|(sk|rk|pk)_(live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|xox[bpa]-[A-Za-z0-9-]{20,}|xapp-[A-Za-z0-9-]{20,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{30,}|(AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})'
+        report_hits "$cn_file" 'key, token or password' 'Bearer [A-Za-z0-9._=/+-]{20,}'
+        report_hits "$cn_file" 'key, token or password' "(api_key|apikey|api-key|secret|token|password|passwd|credential|private_key|access_key|auth_key)[A-Za-z0-9_]*[\"$cn_q]?[[:space:]]*[=:][=[:space:]]*[\"$cn_q\`][^][\"$cn_q\`[:space:]\$<%]{8,}" '' -i
+        report_hits "$cn_file" 'credentials in a URL' "://[^/@[:space:]:\"$cn_q]+:[^/@[:space:]\"$cn_q]+@"
+        report_hits "$cn_file" 'private network address' '://([^/@[:space:]]*@)?[A-Za-z0-9.-]+\.(local|lan|internal|intranet|corp|home|localdomain|ts\.net|home\.arpa)([^A-Za-z0-9.-]|$)'
+        report_hits "$cn_file" 'private network address' '(^|[^0-9.])(10(\.[0-9]{1,3}){3}|192\.168(\.[0-9]{1,3}){2}|169\.254(\.[0-9]{1,3}){2}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(\.[0-9]{1,3}){2})([^0-9.]|$)'
+    done
+    [ -n "$report_findings" ] || return 0
+    cn_n=$(printf '%s' "$report_findings" | grep -c . || :)
+    if [ "$cn_n" = 1 ]; then cn_s=; else cn_s=s; fi
+    report_problem=$(printf 'The report still holds %s thing%s to take out:\n%s' "$cn_n" "$cn_s" "$report_findings")
+    return 1
+}
+# report_contents -> cv_text: the files that go and the zip's size.
+report_contents() {
+    cv_text='report.json, REPORT.md'
+    [ ! -f "$report_dir/changes.diff" ] || cv_text="$cv_text, changes.diff"
+    cv_text="$cv_text ($(( ($(size_of "$report_zip") + 1023) / 1024 )) KB zipped)"
+}
+# report_send [EMAIL] -> report_id, or report_problem. The address goes in a
+# header through curl's config on stdin, never on the command line.
+report_send() {
+    cq_url=https://makepad.nl/api/feedback/changes
+    [ -z "${MAKEPAD_FEEDBACK_URL:-}" ] || cq_url="${MAKEPAD_FEEDBACK_URL%/}/changes"
+    cq_body="$scratch/report-answer"
+    rm -f "$cq_body"
+    cq_status=$( { [ -z "${1:-}" ] || printf 'header = "X-Makepad-Reply-To: %s"\n' "$1"; } | curl -sS --max-time 60 --proto '=https,http' --config - -X POST \
+        -H 'Content-Type: application/zip' -H 'X-Makepad-Feedback: 1' --data-binary "@$report_zip" -o "$cq_body" -w '%{http_code}' "$cq_url" 2>"$scratch/report-error") \
+        || { report_fail "Could not reach $cq_url: $(sed -n '1s/^curl: ([0-9]*) //p' "$scratch/report-error")"; return 1; }
+    report_id=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$cq_body" 2>/dev/null | head -n 1)
+    [ "$cq_status" != 200 ] || [ -z "$report_id" ] || return 0
+    cq_error=$(sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cq_body" 2>/dev/null | head -n 1)
+    report_fail "Not sent: ${cq_error:-the server answered $cq_status}"
+}
+# report_sent PATH ID -> report_kept: a sent report in changes/ is renamed.
+report_sent() {
+    report_kept=$1
+    case "$1" in "$root/changes/"*) ;; *) return 0 ;; esac
+    case "$1" in *.zip) report_kept="${1%.zip}-sent-$2.zip" ;; *) report_kept="$1-sent-$2" ;; esac
+    mv "$1" "$report_kept" || report_kept=$1
+}
+# ./makepad changes APP [--files]: the edits in APP's source for a coding
+# agent (the diff, or one "M|A|D path" line per file).
+cmd_changes() {
+    session
+    cx_app= cx_list=0
+    for cx_arg in "$@"; do
+        case "$cx_arg" in
+            --files) cx_list=1 ;;
+            *) [ -z "$cx_app" ] && identifier "$cx_arg" || die 'Usage: ./makepad changes APP [--files]'; cx_app=$cx_arg ;;
+        esac
+    done
+    [ -n "$cx_app" ] || die 'Usage: ./makepad changes APP [--files]'
+    cx_file="$root/installed/$cx_app.json"
+    if [ ! -f "$cx_file" ]; then app_release_file "$cx_app" || die "Unknown app $cx_app; ./makepad list shows every app."; cx_file=$release_file; fi
+    rel_load "$cx_file" || die "$cx_app has no usable release; open ./makepad and update."
+    rel_dir
+    rel_installed || die "The sources of $rel_title are not downloaded yet."
+    collect_changes "$cx_file" "$scratch/changes.diff" "$scratch/changes.files"
+    if [ ! -s "$scratch/changes.files" ]; then printf 'No changes in the %s source (%s).\n' "$rel_title" "$rel_release" >&2; return 0; fi
+    if [ "$cx_list" = 1 ]; then cat "$scratch/changes.files"; else cat "$scratch/changes.diff"; fi
+}
+# ./makepad send-changes APP [PATH] [--yes] [--with-email]: check and show
+# the report; with --yes (only after the person approved this list) send it.
+cmd_send_changes() {
+    session
+    cy_path= cy_yes=0 cy_mail=0 report_app=
+    for cy_arg in "$@"; do
+        case "$cy_arg" in
+            --yes) cy_yes=1 ;;
+            --with-email) cy_mail=1 ;;
+            *)
+                if [ -z "$report_app" ] && identifier "$cy_arg"; then report_app=$cy_arg
+                elif [ -n "$report_app" ] && [ -z "$cy_path" ]; then cy_path=$cy_arg
+                else die 'Usage: ./makepad send-changes APP [PATH] [--yes] [--with-email]'; fi ;;
+        esac
+    done
+    [ -n "$report_app" ] || die 'Usage: ./makepad send-changes APP [PATH] [--yes] [--with-email]'
+    if [ -z "$cy_path" ]; then
+        report_waiting "$report_app" || die "No report for $report_app: write it to $root/changes/$report_app-report first."
+        cy_path=$report_path
+    fi
+    report_check "$report_app" "$cy_path" || die "$report_problem"
+    cat "$report_dir/REPORT.md"
+    report_contents
+    printf '\n---\nWould send: %s\n' "$cv_text"
+    cy_email=
+    if [ "$cy_mail" = 1 ]; then
+        [ -n "$email" ] || die 'This installation is not logged in, so there is no email to include.'
+        cy_email=$email
+        printf 'With the email this installation is logged in with, so Makepad can reply.\n'
+    else
+        printf 'Anonymously: no email or account goes with it.\n'
+    fi
+    if [ "$cy_yes" != 1 ]; then printf 'Nothing was sent. Once the person has read and approved this list, run again with --yes.\n'; return 0; fi
+    report_send "$cy_email" || die "$report_problem"
+    report_sent "$cy_path" "$report_id"
+    log "Sent the change report for $report_app as #$report_id"
+    printf 'Sent. Makepad received report #%s. Kept here as %s.\n' "$report_id" "$report_kept"
 }
 
 # ------------------------------------------------------------- compiling ---
@@ -1675,6 +1923,25 @@ keep the intent of each change where the new release moved code, then
 ../makepad build <app> until it compiles. Report any change that no longer
 applies.
 
+## Sending your changes to Makepad
+
+When the person asks to "send what I changed" (share their changes with
+Makepad), follow "Sending your changes to Makepad" in the Makepad AGENTS.md
+(the makepad folder of the app's source snapshot). In short:
+
+    ../makepad changes <app>             the edits to describe (a diff)
+    changes/<app>-report/                write report.json and REPORT.md here
+    ../makepad send-changes <app>        check it and show what would be sent
+    ../makepad send-changes <app> --yes  send it, only after the person
+                                         approved exactly that list
+
+Describe what changed and why as concepts, not code. Take out names, email
+addresses, usernames, host names, absolute paths, keys, tokens and private
+URLs, and list what you took out. Show the list and wait for approval; or
+leave the report for the person to read and send in the Builder (e on the
+app's row). Add --with-email only when they want Makepad to be able to
+reply; you never see or need their address.
+
 ## Rules
 
 - Keep edits inside sources/. Built apps (<app>.bin, <Title>.app) are regenerated.
@@ -1866,6 +2133,12 @@ case "${1:-}" in
     env)
         [ -n "$root" ] || die 'Run this command from your Makepad folder.'
         print_env; exit 0 ;;
+    changes)
+        [ -n "$root" ] || die 'Run this command from your Makepad folder: ./makepad changes APP'
+        shift; cmd_changes "$@"; exit 0 ;;
+    send-changes)
+        [ -n "$root" ] || die 'Run this command from your Makepad folder: ./makepad send-changes APP'
+        shift; cmd_send_changes "$@"; exit 0 ;;
     agent-context)
         [ -n "$root" ] || die 'Run this command from your Makepad folder.'
         session; rust_version; print_agent_context; exit 0 ;;
@@ -1903,7 +2176,7 @@ case "${1:-}" in
         sudo $packages_cmd
         tools_check || die 'Some development packages are still missing; see the package manager output above.'
         exit 0 ;;
-    -h | --help) sed -n '2,15p' "$self"; exit 0 ;;
+    -h | --help) sed -n '2,18p' "$self"; exit 0 ;;
     '') ;;
     *) die "Unknown command $1; ./makepad --help lists them." ;;
 esac
@@ -2122,10 +2395,11 @@ screen_meta() {
         packages) crumb=' › System packages' sub='Installed outside this folder, so please check them.' ;;
         folder) crumb=' › Folder' sub='Everything the Builder installs goes into one folder.' ;;
         gpu) crumb=' › Graphics' sub='Before you continue.' ;;
+        review) crumb=' › Send my changes' sub='Read what goes to Makepad; nothing is sent until you choose Send.' ;;
     esac
     default_footer='↑↓ move   ⏎ select   esc back   q quit'
     [ "$back" = 1 ] || default_footer='↑↓ move   ⏎ select   q quit'
-    case "$screen" in gpu | xcode | packages | rustpick) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
+    case "$screen" in gpu | xcode | packages | rustpick | review) default_footer='↑↓ move   ⏎ select   esc cancel' ;; esac
 }
 screen_rows() {
     case "$screen" in
@@ -2137,6 +2411,7 @@ screen_rows() {
         xcode) xcode_rows ;;
         rustpick) rustpick_rows ;;
         packages) packages_rows ;;
+        review) review_rows ;;
     esac
 }
 # item_line NAME LICENSE STATUS ACTION SELECTED CHILD -> il. A row of an
@@ -2255,6 +2530,8 @@ menu_keys() {
     if [ "$mk_open" = 1 ]; then mk="${mk}${key_c}s${r0}${dim} don't start   ${r0}"
     elif [ "$mk_open" = 0 ]; then mk="${mk}${key_c}s${r0}${dim} start when done   ${r0}"; fi
     [ -z "$mk_cancel" ] || mk="${mk}${key_c}c${r0}${dim} cancel   ${r0}"
+    # e: not while the app compiles or waits in the queue.
+    case "$mk_open|$1|${m_send:-}" in "|app:"*) case "${m_send:-}" in *" ${1#app:} "*) mk="${mk}${key_c}e${r0}${dim} send my changes   ${r0}" ;; esac ;; esac
     mk="${mk}${dim}q quit${r0}"
 }
 # plain TEXT -> pl: TEXT without its colour codes (ESC [ ... m), by the
@@ -2781,7 +3058,7 @@ scan() {
         m_rust_ok=1
         case "$selected_rust" in /*) m_rust_external=$rust_sysroot ;; esac
     fi
-    m_license_rows=
+    m_license_rows= m_send=' '
     if [ "$lic_state" = ok ] || [ -z "$email" ]; then sc_ids=$licensed_ids
     else
         sc_ids=
@@ -2798,6 +3075,7 @@ scan() {
         if ! rel_supported; then st_text="${dim}not available for this platform yet${r0}" st_act=; fi
         if is_stopped "$sc_id"; then st_text="${warn}stopped · continue${r0}" st_act='compile and run'; fi
         app_info "$sc_id" "$state"
+        sendable "$sc_id" "$state"
         sc_lic=commercial; [ "$rel_license" != beta ] || sc_lic=beta
         m_license_rows="${m_license_rows}item|app:$sc_id|$rel_title|$sc_lic|$st_text|$st_act|$ai
 "
@@ -2825,6 +3103,7 @@ scan() {
 " ;;
         esac
         app_info "$sc_id" "$state"
+        sendable "$sc_id" "$state"
         m_free_rows="${m_free_rows}sub|app:$sc_id|$sc_title||$sc_st|$sc_act|$ai
 "
     done <<EOF
@@ -2886,7 +3165,7 @@ main_rows() {
         printf 'item|free|▸ Experiments|free|%s%s apps · %s ready%s|open|%s\n' "$dim" "$m_free_total" "$m_free_ready" "$r0" "$mr_about"
     fi
     printf 'head|CODING AGENTS\n'
-    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open|Ask it to change an app; it can rebuild them here.\n' "$mr_cmd" "$mr_title"; done
+    [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open|Ask it to change an app (it rebuilds them here), or to "send what I changed" to Makepad.\n' "$mr_cmd" "$mr_title"; done
     printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open|A shell in this folder; type exit to come back.\n" "$dim" "$r0"
     printf 'head|SETUP\n'
     mr_info='Log in, switch or log out.'
@@ -2925,6 +3204,16 @@ app_info() {
         merge) ai='Updated; a coding agent reapplies your saved changes.' ;;
         *) ai='Downloads its source, compiles it and opens it.' ;;
     esac
+}
+# sendable ID STATE: an app whose source is here takes e (send my changes,
+# m_send); when a coding agent left a change report the row says so (ai).
+sendable() {
+    case "$2" in ready | compile | merge) ;; *) return 0 ;; esac
+    ! is_stopped "$1" || return 0
+    m_send="$m_send$1 "
+    if [ -e "$root/changes/$1-report" ] || [ -e "$root/changes/$1-report.zip" ]; then
+        ai='Your change report is ready: press e to read it and send it to Makepad.'
+    fi
 }
 # The index of the item row with ID on the current screen.
 select_id() {
@@ -3609,6 +3898,121 @@ merge_changes() { # merge_changes APP
     message="${ok}✓${r0} $mc_title finished merging. Select the app to run it."
     scan
 }
+# send_changes APP (e on an app's row): read and send the change report a
+# coding agent left in changes/, or have one write it first. Nothing is
+# sent without Send chosen on the review page.
+send_changes() {
+    sd_app=$1
+    case "${m_send:-}" in *" $sd_app "*) ;; *) message="${dim}Download the app and change it first; then your coding agent describes your changes.${r0}"; return 0 ;; esac
+    if { [ -n "$b_pid" ] && [ "$b_app" = "$sd_app" ]; } || queue_place "$sd_app"; then
+        message="${dim}Wait until it is compiled, then send your changes.${r0}"; return 0
+    fi
+    app_release_file "$sd_app" && rel_load "$release_file" || return 0
+    sd_title=$rel_title
+    if ! report_waiting "$sd_app"; then
+        write_report || return 0
+        report_waiting "$sd_app" || return 0
+    fi
+    sd_path=$report_path
+    busy 'Checking the report'
+    if ! report_check "$sd_app" "$sd_path"; then
+        log "The change report $sd_path cannot be sent: $report_problem"
+        sd_first=$(printf '%s\n' "$report_problem" | head -n 1 | sed 's/:$//')
+        message="${warn}Not sent: $sd_first. Ask your coding agent to fix the report (details in builder.log).${r0}"
+        return 0
+    fi
+    report_contents
+    review_page || { message="${dim}Nothing was sent. The report stays in changes/ until you send it.${r0}"; return 0; }
+    sd_email=
+    [ "$chosen" != email ] || sd_email=$email
+    busy 'Sending your changes to Makepad'
+    if report_send "$sd_email"; then
+        report_sent "$sd_path" "$report_id"
+        if [ -n "$sd_email" ]; then log "Sent the change report for $sd_title as #$report_id with the account email"
+        else log "Sent the change report for $sd_title as #$report_id anonymously"; fi
+        message="${ok}✓${r0} Sent. Makepad received your changes to $sd_title as report #$report_id. Thank you!"
+    else
+        log "$report_problem"
+        message="${warn}$report_problem${r0}"
+    fi
+    scan
+}
+# write_report: no report yet for sd_app, so a coding agent writes one as
+# AGENTS.md describes and leaves it in changes/. 1 when none was started.
+write_report() {
+    sd_agents=$(printf '%s\n' "$agents" | grep -v '^grok|' | grep . || :)
+    sd_count=$(printf '%s\n' "$sd_agents" | grep -c . || :)
+    case "$sd_count" in
+        0) message="${dim}Ask your coding agent to \"send what I changed\" in $sd_title; it leaves the report in changes/ for you to read here.${r0}"; return 1 ;;
+        1) sd_agent=${sd_agents%%|*} ;;
+        *)
+            # shellcheck disable=SC2046 # agent commands, no spaces
+            set -- $(printf '%s\n' "$sd_agents" | cut -d'|' -f1)
+            choose 'Describe your changes with which agent?' 'It writes the report; you read it here before anything is sent.' "$1" "$@" || return 1
+            sd_agent=$chosen ;;
+    esac
+    launch_agent "$sd_agent" "Send what I changed in $sd_title to Makepad. Follow \"Sending your changes to Makepad\" in the Makepad AGENTS.md: describe my changes as concepts, anonymise them, show me the list and wait for my approval, then write the report folder changes/$sd_app-report in this folder. I read and send it from the Builder."
+}
+# review_page -> chosen (send or email): every change by title, what else
+# goes with it, then Send, Send with my email (when logged in), Read it all
+# or Don't send. 1 when nothing is to be sent.
+review_page() {
+    rv_screen=$screen rv_sel=$sel
+    screen=review sel=0 top=0 message=
+    rv_result=1
+    while :; do
+        draw; key
+        case "$key" in
+            up) sel=$(( (sel + items - 1) % items )) ;;
+            down) sel=$(( (sel + 1) % items )) ;;
+            enter)
+                select_row
+                case "$id" in
+                    send | email) chosen=$id rv_result=0; break ;;
+                    read)
+                        pause_screen
+                        printf '\n'
+                        cat "$report_dir/REPORT.md"
+                        printf '\n%s\n' "$cv_text"
+                        if [ -f "$report_dir/changes.diff" ]; then
+                            printf 'changes.diff (%s lines) goes with it:\n\n' "$(wc -l < "$report_dir/changes.diff" | tr -d ' ')"
+                            cat "$report_dir/changes.diff"
+                        fi
+                        printf '\nPress Return to go back to the review. '
+                        IFS= read -r rv_answer <&3 || :
+                        resume_screen ;;
+                    *) break ;;
+                esac ;;
+            esc | q) break ;;
+        esac
+    done
+    screen=$rv_screen sel=$rv_sel
+    return "$rv_result"
+}
+review_rows() {
+    printf 'note|\n'
+    if [ "$report_count" = 1 ]; then rv_s=; else rv_s=s; fi
+    wrap '' "Your coding agent described $report_count change$rv_s to $sd_title (release $(report_json app/release)). This is what goes to Makepad:"
+    printf 'note|\n'
+    printf '%s\n' "$cf_flat" | awk -F'\t' -v dim="$dim" -v r0="$r0" '
+        $1 ~ /^changes\/[0-9]+\/(title|kind)$/ { split($1, a, "/"); v[a[2] "," a[3]] = $2; if (a[2] + 1 > n) n = a[2] + 1 }
+        END { for (i = 0; i < n; i++) { t = v[i ",title"]; gsub(/\|/, "/", t); printf "note|%3d. %s  %s%s%s\n", i + 1, t, dim, v[i ",kind"], r0 } }'
+    printf 'note|\n'
+    rv_taken=$(printf '%s\n' "$cf_flat" | awk -F'\t' '
+        $1 ~ /^redactions\/[0-9]+\/(what|count)$/ { split($1, a, "/"); v[a[2] "," a[3]] = $2; if (a[2] + 1 > n) n = a[2] + 1 }
+        END { for (i = 0; i < n; i++) { w = v[i ",what"]; gsub(/\|/, "/", w); s = s (i ? ", " : "") w " × " v[i ",count"] } print s }')
+    if [ -n "$rv_taken" ]; then rv_taken="taken out: $rv_taken"; else rv_taken='nothing needed taking out'; fi
+    report_contents
+    wrap "$dim" "$cv_text · $rv_taken. No account, file or system information goes with it."
+    printf 'note|\n'
+    pad 'Send anonymously' 34
+    printf 'item|send|%s|||send to Makepad\n' "$padded"
+    if [ -n "$email" ]; then pad 'Send with my email' 34; printf 'item|email|%s|||so Makepad can reply\n' "$padded"; fi
+    pad 'Read it all' 34
+    printf 'item|read|%s|||the whole report\n' "$padded"
+    pad "Don't send" 34
+    printf 'item|cancel|%s|||keep it for later\n' "$padded"
+}
 # real_tty: the terminal's own device (/dev/ttys003), for programs started in
 # it. Handed /dev/tty, Claude Code (Bun) stops at once on macOS with "EINVAL:
 # invalid argument, kqueue", since kqueue cannot watch that alias.
@@ -3859,6 +4263,7 @@ while :; do
         q) exit 0 ;;
         esc) exit 0 ;;
         c | s) select_row; background_key "$key" "$id" ;;
+        e) select_row; case "$id" in app:*) send_changes "${id#app:}" ;; esac ;;
         enter)
             select_row
             case "$screen/$id" in

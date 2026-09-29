@@ -22,6 +22,7 @@ makepad-zip-file = { path = "../../libs/zip_file" }
 makepad-git = { path = "../../libs/git" }
 makepad-fast-inflate = { path = "../../libs/fast_inflate" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-change-report = { path = "../../libs/change_report" }
 
 [target.'cfg(windows)'.dependencies]
 makepad-win-resource = { path = "../../libs/win_resource" }
