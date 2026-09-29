@@ -2659,7 +2659,12 @@ $ll_art
 EOF
         fi
         ll_line=${ll_line%"$r0"}
-        while [ "${ll_line% }" != "$ll_line" ]; do ll_line=${ll_line% }; done
+        # Trailing spaces are padding, except a one-line editor's cursor: an
+        # inverse space ending its row (trimmed, the email field showed none).
+        case "$ll_line" in
+            *"$inv ") ;;
+            *) while [ "${ll_line% }" != "$ll_line" ]; do ll_line=${ll_line% }; done ;;
+        esac
         plain "$ll_line"; ll_plain=$pl
         [ "$ll_line" = "$ll_plain" ] || ll_line="$ll_line$r0"
         # The mark's part of this line: from two columns after the text.
