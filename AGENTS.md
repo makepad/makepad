@@ -28,6 +28,55 @@ use current source for API signatures and working examples.
 - This is the user's current workflow (2026-09-27) and supersedes older role
   assignments in local skills or memories (including the 2026-09-16 one).
 
+## Sending your changes to Makepad
+
+People who installed Makepad apps with the Makepad Builder change them with
+their own coding agent. When the person asks you to "send what I changed",
+"share my changes with Makepad" or similar, write a change report and send
+it only with their approval. The format, limits and anonymisation rules are
+in [Change reports](docs/agents/change-report.md); the steps:
+
+1. Find the installation. This checkout is `builder/sources/<release>/makepad`
+   inside it (app repositories at `makepad/apps/<name>`); the installation
+   folder holds `makepad-builder.exe` (Windows) or the `makepad` command
+   (macOS, Linux). `builder/installed/<app>.json` names the app (`"id"`) and
+   the release its source came from (`"release"`, `"repositories"`). Below,
+   `BUILDER` is `<installation>\makepad-builder.exe` or
+   `<installation>/makepad`.
+2. Collect the changes: `BUILDER changes <app>` prints the diff of the app's
+   source against that release (`--files` lists the files). Edits saved by
+   an earlier update are in `builder/changes/<app>-<date>.diff`. With git
+   available, `git status` and `git diff HEAD` in each repository give the
+   same. Skip build output and anything unrelated to the app.
+3. Write the list as concepts, not code: per change a one-line title, a
+   kind (fix, feature, tweak, ui, performance, refactor, docs, other), what
+   is different for someone using the app and why, and the screens or
+   components it touches. Add a tiny snippet only when a change cannot be
+   told without it.
+4. Anonymise everything that will be sent: replace names and usernames,
+   email addresses, host names and private IP addresses, absolute and home
+   folder paths (use repo-relative paths), keys, tokens and passwords,
+   private service URLs and personal data in strings or comments with
+   `[name]`, `[email]`, `[host]`, `[path]`, `[secret]`, `[private-url]` or
+   `[personal]`, and count what you took out, by kind.
+5. Show the person the list and what was taken out, ask whether to include
+   a trimmed diff (default: no) and whether Makepad may reply by email, and
+   wait for their explicit approval or edits. Never send without it.
+6. Write `builder/changes/<app>-report/` with `report.json` (schema:
+   `docs/agents/change-report.schema.json`), `REPORT.md` (the same list for
+   people) and, only when they opted in, `changes.diff`. `BUILDER
+   send-changes <app>` checks it (schema, 256 KB limit, the anonymisation
+   scan) and prints what would be sent; fix what it reports.
+7. Send it: `BUILDER send-changes <app> --yes`, adding `--with-email` only
+   when the person wants a reply (the Builder adds the address it is logged
+   in with; you never need it). Or leave the report for them to read and
+   send in the Builder (`e` on the app's row). Without the Builder, POST the
+   zip: `curl -sS -X POST -H 'X-Makepad-Feedback: 1' -H 'Content-Type:
+   application/zip' --data-binary @report.zip
+   https://makepad.nl/api/feedback/changes`.
+8. Tell the person the report id the Builder (or the server's
+   `{"ok":true,"id":N}`) returned.
+
 ## Software installation requires explicit approval
 
 - NEVER install, upgrade, bootstrap, or download and run external software

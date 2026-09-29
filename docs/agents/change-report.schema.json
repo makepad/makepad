@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://makepad.nl/schemas/change-report-1.json",
+  "title": "Makepad change report (report.json)",
+  "description": "What someone changed in a Makepad app, told as concepts. See docs/agents/change-report.md. libs/change_report checks exactly these rules (plus the anonymisation scan) before a report is sent and when it is received.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "version", "app", "changes", "redactions", "diff"],
+  "properties": {
+    "format": {"const": "makepad-change-report"},
+    "version": {"const": 1},
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "release"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier", "description": "The app's id in the Builder (scope, stage, calculator, ...)."},
+        "release": {"$ref": "#/$defs/identifier", "description": "The release the edits were made against: \"release\" in builder/installed/<app>.json."}
+      }
+    },
+    "base": {
+      "type": "array",
+      "maxItems": 8,
+      "description": "The commits of that release's repositories, from the same file.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "commit"],
+        "properties": {
+          "repository": {"$ref": "#/$defs/identifier"},
+          "commit": {"type": "string", "pattern": "^[0-9a-fA-F]{7,64}$"}
+        }
+      }
+    },
+    "summary": {"$ref": "#/$defs/text", "maxLength": 2000},
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "kind", "what"],
+        "properties": {
+          "title": {"$ref": "#/$defs/line", "minLength": 1, "maxLength": 120},
+          "kind": {"enum": ["fix", "feature", "tweak", "ui", "performance", "refactor", "docs", "other"]},
+          "what": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 2000, "description": "What changed, as the person using the app sees it. Concepts, not code."},
+          "why": {"$ref": "#/$defs/text", "maxLength": 1000, "description": "Why it was changed."},
+          "areas": {
+            "type": "array",
+            "maxItems": 16,
+            "description": "Screens, components or modules it touches, by name (repo-relative paths are fine).",
+            "items": {"$ref": "#/$defs/line", "minLength": 1, "maxLength": 80}
+          },
+          "snippet": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text"],
+            "description": "Only when the change cannot be told without it.",
+            "properties": {
+              "language": {"type": "string", "maxLength": 32},
+              "text": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 1500, "description": "At most 40 lines."}
+            }
+          }
+        }
+      }
+    },
+    "redactions": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "What the agent took out, by kind (never the removed value itself). Empty when nothing was.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["what", "count"],
+        "properties": {
+          "what": {"$ref": "#/$defs/line", "minLength": 1, "maxLength": 120},
+          "count": {"type": "integer", "minimum": 1, "maximum": 100000}
+        }
+      }
+    },
+    "diff": {"type": "boolean", "description": "True exactly when the zip holds changes.diff (only when the person chose to include it)."}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$"},
+    "text": {"type": "string", "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"},
+    "line": {"type": "string", "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"}
+  }
+}

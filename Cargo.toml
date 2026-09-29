@@ -79,6 +79,7 @@ workspace.members = [
     "libs/core_util",
     "libs/strict_json",
     "libs/loader_bundle",
+    "libs/change_report",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
