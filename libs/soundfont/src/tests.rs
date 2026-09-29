@@ -341,6 +341,18 @@ fn stereo_links_and_rom_samples_have_nonblocking_semantics() {
         SampleRead::Resident { left: 1000.0 / 32768.0, right: 5000.0 / 32768.0 }
     );
 
+    // A left half whose partner does not link back plays as mono.
+    let broken = [
+        TestSample { start: 0, end: 4, loop_start: 1, loop_end: 3, link: 1, sample_type: 4 },
+        TestSample { start: 4, end: 8, loop_start: 5, loop_end: 7, link: 1, sample_type: 1 },
+    ];
+    let font = parse_sf2(&make_sf2_with_samples(false, &broken, 0)).unwrap();
+    assert_eq!(font.samples[0].kind, SampleKind::Mono);
+    assert_eq!(
+        font.read_frame(0, 1),
+        SampleRead::Resident { left: 1000.0 / 32768.0, right: 1000.0 / 32768.0 }
+    );
+
     let rom = [TestSample {
         start: 1_000_000,
         end: 1_000_008,

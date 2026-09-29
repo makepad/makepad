@@ -314,8 +314,9 @@ pub fn parse_sf2_with_limits(bytes: &[u8], limits: ParseLimits) -> Result<SoundF
     let hydra = parse_hydra(pdta, pdta_offset, limits)?;
     let presets = build_presets(&hydra)?;
     let instruments = build_instruments(&hydra)?;
-    let samples = parse_sample_headers(hydra.shdr, limits)?;
+    let mut samples = parse_sample_headers(hydra.shdr, limits)?;
     validate_samples(&samples, pcm.len())?;
+    unlink_broken_pairs(&mut samples);
     let zones = resolve_zones(&presets, &instruments, &samples, pcm.len())?;
 
     Ok(SoundFont {
@@ -795,25 +796,35 @@ fn validate_samples(samples: &[SampleHeader], pcm_len: usize) -> Result<(), Load
         if !sample.is_rom && sample.end as usize > pcm_len {
             return Err(LoadError::InvalidSample { sample: index, reason: "sample exceeds smpl data" });
         }
-        if matches!(sample.kind, SampleKind::Left | SampleKind::Right | SampleKind::Linked) {
-            let Some(linked) = samples.get(sample.link as usize) else {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link is out of range" });
-            };
-            if linked.link as usize != index {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link is not reciprocal" });
+    }
+    Ok(())
+}
+
+/// A stereo half whose partner is missing, does not link back or is not
+/// its other half plays as mono, as other SF2 players do: released fonts
+/// (FluidR3 GM among them) carry such links, and the samples are sound.
+fn unlink_broken_pairs(samples: &mut [SampleHeader]) {
+    let broken: Vec<usize> = (0..samples.len())
+        .filter(|&index| {
+            let sample = &samples[index];
+            if !matches!(sample.kind, SampleKind::Left | SampleKind::Right | SampleKind::Linked) {
+                return false;
             }
-            let compatible = matches!(
+            let Some(linked) = samples.get(sample.link as usize) else {
+                return true;
+            };
+            let paired = matches!(
                 (sample.kind, linked.kind),
                 (SampleKind::Left, SampleKind::Right)
                     | (SampleKind::Right, SampleKind::Left)
                     | (SampleKind::Linked, SampleKind::Linked)
             );
-            if !compatible {
-                return Err(LoadError::InvalidSample { sample: index, reason: "stereo link type mismatch" });
-            }
-        }
+            linked.link as usize != index || !paired
+        })
+        .collect();
+    for index in broken {
+        samples[index].kind = SampleKind::Mono;
     }
-    Ok(())
 }
 
 fn level_set(global: Option<&[Generator]>, local: &[Generator]) -> GeneratorSet {
