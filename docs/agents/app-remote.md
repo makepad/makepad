@@ -161,8 +161,17 @@ MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 ./target/release/APP --remote \
 - `/settled` answers `{"settled":bool,"reasons":[...]}`: `next_frame` (an
   animator or anything else waiting on a frame), `redraw`, `repaint`,
   `timer` (a virtual timer due within the next frame), `step` (one is
-  running), `shaders` (Metal pipelines still compiling). Step until it
-  settles rather than sleeping.
+  running), `shaders` (Metal pipelines still compiling), `loads`
+  (asynchronous work whose result will change a frame, counted by kind in
+  `"loads":{"image":2,...}`: image decodes and fetches, glyph rasters,
+  Splash resources; subsystems and apps add kinds with
+  `Cx::register_async_load_probe`). Step until it settles rather than
+  sleeping.
+- Loads run on workers and the network, off the virtual clock, so under
+  load a picture can land a frame earlier or later from run to run.
+  `/step?frames=K&wait_loads=1` opens no frame while loads are in flight
+  (each wait bounded at 30 s; then the step fails naming them, e.g.
+  `image=1`), which makes such runs deterministic.
 - `/cap/start?path=/ABS/file.mp4[&fps=60][&audio=1][&overwrite=1][&w=ID]`
   starts an in-process H.264 recording of the window at native pixels. The
   directory must exist and an existing file needs `overwrite=1`; both are

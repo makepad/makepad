@@ -1729,6 +1729,12 @@ fn profile_root_cache_path() -> Result<PathBuf> {
         }
         return Ok(path);
     }
+    // A hidden instance (tests, batch renders, agents) never takes the
+    // stable profile: holding it would push the person's own instance of
+    // the same app onto a throwaway profile, logged out of every site.
+    if env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+        return temp_root_cache_path();
+    }
     let Some(home) = home_dir() else {
         return temp_root_cache_path();
     };

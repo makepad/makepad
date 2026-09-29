@@ -3252,6 +3252,8 @@ impl CxVulkan {
             // paths already do this) instead of being freed and re-allocated with
             // several vkAllocateMemory/vkCreateDescriptorPool calls every frame.
             self.recycle_completed_frame_resources()?;
+            // ...and so is any recorder copy it carried.
+            super::capture_surface::deliver_completed();
         }
         let fence_waited = Instant::now();
 
@@ -3300,6 +3302,27 @@ impl CxVulkan {
                 "swapchain capture requested but readback buffer is unavailable".to_string(),
             );
         }
+        // A recorder's frame (ScreenCap): copied into a ring buffer with the
+        // frame and handed over after the next fence wait, never waited for
+        // here. A frame that is read back anyway serves only the grab.
+        #[cfg(target_os = "linux")]
+        let surface_capture = if capture_swapchain || self.swapchain_readback_buffer.is_none() {
+            None
+        } else {
+            super::capture_surface::begin(
+                &self.device,
+                capture_window_id,
+                self.swapchain_extent.width,
+                self.swapchain_extent.height,
+                matches!(self.swapchain_format, vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB),
+                |len| {
+                    let buffer = self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, len)?;
+                    Ok((buffer.buffer, buffer.memory))
+                },
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let surface_capture: Option<()> = None;
 
         #[cfg(target_os = "linux")]
         unsafe {
@@ -3407,13 +3430,25 @@ impl CxVulkan {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
 
-        if capture_swapchain {
+        if capture_swapchain || surface_capture.is_some() {
             let width = self.swapchain_extent.width;
             let height = self.swapchain_extent.height;
             let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
-            let staging = self
+            #[cfg(target_os = "linux")]
+            let target = match &surface_capture {
+                Some(ring_buffer) => ring_buffer.buffer,
+                None => self
+                    .swapchain_readback_buffer
+                    .as_ref()
+                    .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?
+                    .buffer,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let target = self
                 .swapchain_readback_buffer
-                .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?;
+                .as_ref()
+                .ok_or_else(|| "swapchain color readback buffer unavailable".to_string())?
+                .buffer;
             let image = self.swapchain_images[image_index as usize];
             let to_transfer = vk::ImageMemoryBarrier::default()
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -3469,7 +3504,7 @@ impl CxVulkan {
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)
-                .buffer(staging.buffer)
+                .buffer(target)
                 .offset(0)
                 .size(byte_len);
 
@@ -3487,7 +3522,7 @@ impl CxVulkan {
                     self.command_buffer,
                     image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    staging.buffer,
+                    target,
                     &[copy_region],
                 );
                 self.device.cmd_pipeline_barrier(
@@ -3521,6 +3556,15 @@ impl CxVulkan {
         self.submit_frame(&submit_info)?;
         self.publish_draw_submission(cx, &draw_stats);
         self.acquired_image_pending = false;
+        #[cfg(target_os = "linux")]
+        if let Some(ring_buffer) = surface_capture {
+            super::capture_surface::queue(
+                capture_window_id,
+                ring_buffer,
+                self.swapchain_extent.width,
+                self.swapchain_extent.height,
+            );
+        }
 
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
@@ -8931,6 +8975,9 @@ impl CxVulkan {
             && self.swapchain_extent.width > 0
             && self.swapchain_extent.height > 0
         {
+            // ...and so can a recorder, as ring-buffer surfaces.
+            #[cfg(target_os = "linux")]
+            crate::screen_capture::set_surfaces_supported();
             Some(self.create_host_buffer(
                 vk::BufferUsageFlags::TRANSFER_DST,
                 self.swapchain_extent.width as vk::DeviceSize

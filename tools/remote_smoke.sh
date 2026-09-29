@@ -202,6 +202,8 @@ for run in a b; do
     B="http://127.0.0.1:$PORT"
     check "--window 400x300@2 gives 800x600 pixels" "$(curl -s "$B/s")" '"px":[800,600]'
     check "/step answers after its frames" "$(curl -s "$B/step?frames=2")" '"frame":2'
+    check "/step?wait_loads=1 steps once no load is in flight" \
+        "$(curl -s --max-time 60 "$B/step?frames=2&wait_loads=1")" '"frame":4'
     curl -s "$B/cursor?show=1" >/dev/null
     MP4=/tmp/remote-smoke-virtual-$run.mp4
     rm -f "$MP4"

@@ -370,6 +370,68 @@ impl VideoFileEncoder {
         }
     }
 
+    /// Push one frame as a `CVPixelBuffer` (BGRA or NV12, IOSurface-backed
+    /// for a copy-free path; any size, VideoToolbox scales it to the
+    /// track's). Nothing is converted or copied on the CPU: the buffer goes
+    /// to the encoder as is, and the encoder retains it until it is encoded.
+    ///
+    /// # Safety
+    /// `pixel_buffer` must be a valid `CVPixelBufferRef` for the call.
+    #[cfg(target_vendor = "apple")]
+    pub unsafe fn push_frame_pixel_buffer(
+        &mut self,
+        pixel_buffer: makepad_apple_sys::CVPixelBufferRef,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        unsafe { self.os.push_pixel_buffer(pixel_buffer, pts_100ns) }
+    }
+
+    /// Windows: an encoder fed BGRA8 `ID3D11Texture2D`s of
+    /// `source_width` x `source_height` on `device`, scaled to the track's
+    /// size and converted on the GPU by Media Foundation (no CPU readback).
+    /// Frames go in with [`Self::push_frame_d3d11_texture`], or as RGBA bytes
+    /// of the source's size with [`Self::push_frame_d3d11_rgba8`].
+    #[cfg(target_os = "windows")]
+    pub fn new_d3d11(
+        path: &str,
+        options: VideoFileEncoderOptions,
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        source_width: u32,
+        source_height: u32,
+    ) -> Result<Self, VideoFileError> {
+        if options.width == 0 || options.height == 0 || options.width % 2 != 0 || options.height % 2 != 0 {
+            return Err(VideoFileError::new(format!(
+                "invalid encoder frame size {}x{} (must be nonzero and even)",
+                options.width, options.height
+            )));
+        }
+        if options.fps_num == 0 || options.fps_den == 0 {
+            return Err(VideoFileError::new("invalid encoder fps 0"));
+        }
+        let os = OsVideoFileEncoder::new_d3d11(path, &options, device, source_width, source_height)?;
+        Ok(Self { options, os })
+    }
+
+    /// Windows, an encoder from [`Self::new_d3d11`]: encode `texture` as the
+    /// next frame. Media Foundation holds a reference to the texture until
+    /// it has read it; do not write the texture while its reference count
+    /// says someone else still holds it.
+    #[cfg(target_os = "windows")]
+    pub fn push_frame_d3d11_texture(
+        &mut self,
+        texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        self.os.push_d3d11_texture(texture, pts_100ns)
+    }
+
+    /// Windows, an encoder from [`Self::new_d3d11`]: a frame of tightly
+    /// packed RGBA bytes at the source's size.
+    #[cfg(target_os = "windows")]
+    pub fn push_frame_d3d11_rgba8(&mut self, rgba: &[u8], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        self.os.push_d3d11_rgba8(rgba, pts_100ns)
+    }
+
     /// Push interleaved 16-bit PCM for the audio track. Timestamps are derived
     /// from the running sample count. Requires `options.audio`.
     pub fn push_audio_i16(&mut self, samples: &[i16]) -> Result<(), VideoFileError> {

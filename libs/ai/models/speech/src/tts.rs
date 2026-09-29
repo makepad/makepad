@@ -11,6 +11,17 @@ pub struct WordTiming {
     pub end: f64,
 }
 
+/// One phoneme of the audio and when it sounds, in seconds from the start:
+/// IPA (Kokoro's diphthong letters written out, `eɪ` for its `A`), stress
+/// and length marks folded into the phoneme before them. Pauses between
+/// words have no entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhoneTiming {
+    pub phone: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// Mono PCM produced by a backend.
 #[derive(Clone, Debug)]
 pub struct SpeechAudio {
@@ -20,6 +31,10 @@ pub struct SpeechAudio {
     /// backend knows when it spoke them (Kokoro does, from its duration
     /// predictor). `None` when it does not, or when the run stopped early.
     pub timings: Option<Vec<WordTiming>>,
+    /// Every phoneme spoken, in order, when the backend knows them (Kokoro
+    /// does: its duration predictor times each phoneme token). `None` as
+    /// for `timings`. What lip sync reads.
+    pub phones: Option<Vec<PhoneTiming>>,
 }
 
 impl SpeechAudio {
@@ -28,6 +43,7 @@ impl SpeechAudio {
             samples: Vec::new(),
             sample_rate: 24_000,
             timings: None,
+            phones: None,
         }
     }
 

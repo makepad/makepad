@@ -112,6 +112,11 @@ impl<'a> CxDraw<'a> {
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
+        cx.register_async_load_probe("glyph", |cx| {
+            cx.get_global_ref::<Rc<RefCell<Fonts>>>()
+                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))
+                .unwrap_or(0)
+        });
         true
     }
 

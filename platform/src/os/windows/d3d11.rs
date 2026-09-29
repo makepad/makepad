@@ -1210,7 +1210,9 @@ impl Cx {
         let window_id = Some(window_id.id());
         // A continuous capture sink (the ScreenCap recorder) is standing
         // permission rather than a queued request, so it is asked separately.
-        if crate::screen_capture::capture_wants_window(window_id) {
+        if crate::screen_capture::capture_wants_window(window_id)
+            || crate::screen_capture::capture_wants_surface(window_id)
+        {
             return true;
         }
         if self.screenshot_requests.is_empty() {
@@ -1234,6 +1236,13 @@ impl Cx {
     /// argument `debug_read_render_texture` already relies on.
     fn capture_window_screenshot(&mut self, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
         let capture_window_id = Some(d3d11_window.window_id.id());
+        // A recorder's frame (ScreenCap): one GPU copy into a ring texture
+        // the encoder reads on the GPU; nothing mapped here.
+        crate::os::windows::capture_surface::encode_capture_surface(
+            d3d11_cx,
+            d3d11_window.swap_texture.as_ref(),
+            capture_window_id,
+        );
         let request_ids = self.take_studio_screenshot_request_ids_for_window(0, capture_window_id);
         let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
         if request_ids.is_empty() && !wants_capture {

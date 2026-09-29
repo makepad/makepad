@@ -2431,9 +2431,12 @@ impl Widget for Window {
         }
         if self.screen_cap.take_repaint_request() {
             // A still app presents no frames, and a recorder with no frames is
-            // an empty file. A pass repaint re-presents the existing draw lists
-            // at frame rate without re-running the widget tree.
-            cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
+            // an empty file. A repaint of the window's own pass re-presents its
+            // draw lists without re-running the widget tree. Only that pass:
+            // its offscreen children are unchanged, and re-dirtying them on
+            // every tick re-rendered them all and kept them from ever reading
+            // painted (the EDIT preview stalled "did not report painted").
+            cx.repaint_pass(self.pass.handle.draw_pass_id());
         }
         if self.managed_quit_pending && !ScreenCap::managed_recordings_pending() && !self.screen_cap.is_busy() {
             self.managed_quit_pending = false;

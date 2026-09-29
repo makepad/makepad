@@ -50,4 +50,4 @@ pub mod vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
-pub use tts::{SpeechAudio, TtsError, WordTiming};
+pub use tts::{PhoneTiming, SpeechAudio, TtsError, WordTiming};

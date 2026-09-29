@@ -808,6 +808,14 @@ impl Cx {
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
+                    // An unpaced offscreen renderer (MAKEPAD_PAINT_INTERVAL):
+                    // its hidden window shows nothing anyone sees, and its
+                    // drawable would pace every repaint to the display.
+                    // Its offscreen passes paint; the window pass does not.
+                    if paint_interval_override().is_some() && self.os.remote_present_window != Some(window_id) {
+                        self.passes[*draw_pass_id].paint_dirty = false;
+                        continue;
+                    }
                     if let Some(metal_window) =
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
@@ -1094,7 +1102,7 @@ impl Cx {
             // phases as the beat drifted through vblank alignment). Matching
             // the refresh period (+0.2% so NSTimer lateness drains the queue
             // instead of accumulating) keeps acquisition non-blocking.
-            let interval = fastest_display_interval();
+            let interval = paint_interval_override().unwrap_or_else(fastest_display_interval);
             with_macos_app(|app| app.start_timer(0, interval, true));
             self.os.timer0_armed = true;
             self.os.timer0_idle_since = None;
@@ -1102,6 +1110,10 @@ impl Cx {
     }
 
     fn ensure_timer0_stopped(&mut self) {
+        // An unpaced offscreen renderer never idles its beat down.
+        if paint_interval_override().is_some() {
+            return;
+        }
         if self.os.pointer_capture_pacing {
             return;
         }
@@ -2741,4 +2753,19 @@ fn dev_launch_begin() -> Option<std::path::PathBuf> {
         std::process::exit(1);
     }
     Some(dir)
+}
+
+/// `MAKEPAD_PAINT_INTERVAL` (seconds): for a process whose windows are
+/// hidden (`MAKEPAD_HIDE_WINDOWS`) and draw offscreen work only (a batch
+/// renderer), the beat that paces draws and paints runs at this interval
+/// instead of the display's refresh, so frames go back to back as fast as
+/// the GPU admits them (repaints stay bounded by the frames in flight).
+/// Ignored for visible windows, which pace on their display link.
+fn paint_interval_override() -> Option<f64> {
+    static INTERVAL: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var_os("MAKEPAD_HIDE_WINDOWS")?;
+        let value: f64 = std::env::var("MAKEPAD_PAINT_INTERVAL").ok()?.trim().parse().ok()?;
+        (value.is_finite() && value > 0.0).then_some(value.max(0.0005))
+    })
 }

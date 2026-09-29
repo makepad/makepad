@@ -48,7 +48,7 @@ use decoder::Decoder;
 use ops::{expand_to_frames, round_half_even};
 use predictor::Predictor;
 use text_encoder::TextEncoder;
-use timing::WordClock;
+use timing::{chunk_phones, WordClock};
 use weights::Weights;
 
 /// Default weights filename, resolved relative to the working directory.
@@ -155,6 +155,7 @@ impl KokoroSpeaker {
         let total = chunks.len();
         let mut samples = Vec::new();
         let mut clock = WordClock::new(text);
+        let mut phones = Vec::new();
         let mut finished = true;
         for (index, (start, end)) in chunks.iter().enumerate() {
             if !on_chunk(index, total) {
@@ -172,6 +173,7 @@ impl KokoroSpeaker {
                     // output rather than assuming it.
                     let frame_secs = rendered as f64 / frames as f64 / SAMPLE_RATE as f64;
                     clock.add_chunk(*start, &spoken.sources, &spoken.frames, offset, frame_secs);
+                    chunk_phones(&spoken.tokens, &spoken.sources, &spoken.frames, offset, frame_secs, &mut phones);
                 }
             }
         }
@@ -191,10 +193,12 @@ impl KokoroSpeaker {
         // A run stopped early has no timings: most of its words were never
         // spoken.
         let timings = finished.then(|| clock.finish(text));
+        let phones = finished.then_some(phones);
         Ok(SpeechAudio {
             samples,
             sample_rate: SAMPLE_RATE,
             timings,
+            phones,
         })
     }
 
@@ -227,13 +231,14 @@ impl KokoroSpeaker {
         let prosody = self.predictor.prosody(&en, predictor_style);
         let out = self.decoder.run(&asr, &prosody.f0, &prosody.noise, decoder_style);
         samples.extend_from_slice(&out.generator.waveform);
-        Some(SpokenChunk { frames, sources })
+        Some(SpokenChunk { frames, sources, tokens })
     }
 }
 
 struct SpokenChunk {
     frames: Vec<usize>,
     sources: Vec<Option<usize>>,
+    tokens: Vec<u16>,
 }
 
 /// Break text into pieces that each fit the 510-phoneme window: whole sentences

@@ -2857,6 +2857,60 @@ mod tests {
 
 }
 
+/// How many asynchronous loads of one kind a subsystem still has in flight:
+/// work started on a worker or the network whose result will change what
+/// the app draws once it lands (an image decode, a glyph raster, a fetched
+/// resource).
+pub type AsyncLoadProbe = fn(&Cx) -> usize;
+
+impl Cx {
+    /// Let a subsystem report its asynchronous loads in flight under `kind`
+    /// ("image", "glyph", ...). Registering a kind again replaces its probe.
+    /// A probe must only count, cheaply: it runs when someone asks
+    /// (`pending_async_loads`), never per frame.
+    pub fn register_async_load_probe(&mut self, kind: &'static str, probe: AsyncLoadProbe) {
+        match self.async_load_probes.iter_mut().find(|(name, _)| *name == kind) {
+            Some(entry) => entry.1 = probe,
+            None => self.async_load_probes.push((kind, probe)),
+        }
+    }
+
+    /// Asynchronous loads still in flight, by kind, only the kinds with
+    /// any: what a frame drawn now would not show yet. Script resources
+    /// (files and fetches Splash asked for) are counted here as
+    /// "resource"; image decodes, glyph rasters and the like by the
+    /// subsystems that registered a probe. Texture uploads are not loads:
+    /// a backend uploads a texture in the frame that first samples it.
+    pub fn pending_async_loads(&self) -> Vec<(&'static str, usize)> {
+        let mut pending = Vec::new();
+        let resources = self
+            .script_data
+            .resources
+            .resources
+            .try_borrow()
+            .map(|resources| {
+                resources
+                    .iter()
+                    .filter(|resource| {
+                        matches!(resource.data, crate::script::res::CxScriptResourceData::Loading)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+            .max(self.script_data.resources.http_resources.len());
+        if resources > 0 {
+            pending.push(("resource", resources));
+        }
+        for (kind, probe) in &self.async_load_probes {
+            let count = probe(self);
+            if count > 0 {
+                pending.push((*kind, count));
+            }
+        }
+        pending
+    }
+}
+
 impl Cx {
     /// Drain completed tickets without waiting. Call on Event::Signal, also
     /// when no pass needs repainting. Returned Arc payloads belong to the
@@ -3139,5 +3193,23 @@ mod readback_routing_tests {
         let rest = cx.try_take_texture_readbacks();
         assert_eq!(rest.iter().map(|r| r.ticket).collect::<Vec<_>>(), vec![tickets[2]]);
         assert_eq!(cx.texture_readback_usage().reserved_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod async_load_tests {
+    use super::*;
+
+    #[test]
+    fn pending_async_loads_sum_registered_probes_by_kind() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(cx.pending_async_loads().is_empty());
+        cx.register_async_load_probe("image", |_| 2);
+        cx.register_async_load_probe("glyph", |_| 0);
+        assert_eq!(cx.pending_async_loads(), vec![("image", 2)]);
+        // registering a kind again replaces its probe
+        cx.register_async_load_probe("image", |_| 0);
+        cx.register_async_load_probe("glyph", |_| 5);
+        assert_eq!(cx.pending_async_loads(), vec![("glyph", 5)]);
     }
 }

@@ -1909,6 +1909,14 @@ impl Cx {
         window_id: Option<usize>,
     ) -> Option<ScreenshotInfo> {
         self.copy_window_snapshots(metal_cx, command_buffer, in_texture, window_id);
+        // A recorder's frame (ScreenCap): one GPU blit into a pooled
+        // IOSurface the encoder takes as is; no readback below for it.
+        crate::os::apple::capture_surface::encode_capture_surface(
+            metal_cx.device,
+            command_buffer,
+            in_texture,
+            window_id,
+        );
         let request_ids =
             self.take_studio_screenshot_request_ids_for_window(kind_id as u32, window_id);
         // A pending grab/probe request, or a screen-capture sink that is due a

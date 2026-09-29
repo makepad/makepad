@@ -22,6 +22,11 @@ pub fn pronounce(word: &str) -> String {
     lts::phonemize(word)
 }
 
+/// The phoneme symbol of a token id (the inverse of `vocab::token`).
+pub fn symbol(id: u16) -> Option<char> {
+    vocab::VOCAB.iter().find(|(_, token)| *token == id).map(|(symbol, _)| *symbol)
+}
+
 /// Kokoro accepts at most 510 phoneme tokens, plus a zero at each end.
 pub const MAX_TOKENS: usize = 510;
 

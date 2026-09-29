@@ -11,7 +11,45 @@
 //! "forty two", and a word Kokoro has no sound for (`"—"`, `"&"`) still gets
 //! an entry, zero-length, where it falls between its neighbours.
 
-use crate::tts::WordTiming;
+use crate::tts::{PhoneTiming, WordTiming};
+
+/// Kokoro's single-letter diphthongs (misaki's), written out in IPA.
+fn ipa(symbol: char) -> Option<&'static str> {
+    Some(match symbol {
+        'A' => "eɪ",
+        'I' => "aɪ",
+        'O' => "oʊ",
+        'W' => "aʊ",
+        'Y' => "ɔɪ",
+        'Q' => "əʊ",
+        _ => return None,
+    })
+}
+
+/// The phonemes of one synthesized chunk, appended to `out`: every token
+/// that sounds a word (`sources[i]` set) with its frames, from `offset`
+/// seconds at `frame_secs` a frame. Stress and length marks lengthen the
+/// phoneme before them; spaces and punctuation are pauses, not phonemes.
+pub fn chunk_phones(tokens: &[u16], sources: &[Option<usize>], frames: &[usize], offset: f64, frame_secs: f64, out: &mut Vec<PhoneTiming>) {
+    let mut frame = 0usize;
+    for ((token, source), count) in tokens.iter().zip(sources).zip(frames) {
+        let begin = offset + frame as f64 * frame_secs;
+        frame += count;
+        let end = offset + frame as f64 * frame_secs;
+        let Some(symbol) = crate::g2p::symbol(*token) else { continue };
+        if source.is_none() || symbol.is_whitespace() || symbol.is_ascii_punctuation() || matches!(symbol, '—' | '…' | '“' | '”') {
+            continue;
+        }
+        if matches!(symbol, 'ˈ' | 'ˌ' | 'ː') {
+            if let Some(last) = out.last_mut() {
+                last.end = last.end.max(end);
+            }
+            continue;
+        }
+        let phone = ipa(symbol).map_or_else(|| symbol.to_string(), str::to_string);
+        out.push(PhoneTiming { phone, start: begin, end });
+    }
+}
 
 /// The whitespace-separated words of `text` with their byte ranges.
 pub fn split_words(text: &str) -> Vec<(usize, usize)> {
@@ -157,5 +195,22 @@ mod tests {
         for pair in timings.windows(2) {
             assert!(pair[0].start <= pair[0].end && pair[0].end <= pair[1].start, "{timings:?}");
         }
+    }
+
+    #[test]
+    fn phonemes_take_their_frames_and_marks_fold_in() {
+        let token = |c: char| crate::g2p::vocab::token(c).unwrap();
+        // pad h ə l ˈ O space w pad: "hello w…", the pads and space unspoken.
+        let tokens = [0, token('h'), token('ə'), token('l'), token('ˈ'), token('O'), token(' '), token('w'), 0];
+        let sources = [None, Some(0), Some(0), Some(0), Some(0), Some(0), None, Some(6), None];
+        let frames = [2, 1, 1, 2, 1, 3, 2, 1, 2];
+        let mut out = Vec::new();
+        chunk_phones(&tokens, &sources, &frames, 1.0, 0.025, &mut out);
+        let phones: Vec<&str> = out.iter().map(|p| p.phone.as_str()).collect();
+        assert_eq!(phones, ["h", "ə", "l", "oʊ", "w"]);
+        assert!((out[0].start - 1.05).abs() < 1e-9 && (out[0].end - 1.075).abs() < 1e-9);
+        // `ˈ` lengthened the `l` before it.
+        assert!((out[2].end - (1.0 + 7.0 * 0.025)).abs() < 1e-9, "{:?}", out[2]);
+        assert!((out[4].start - (1.0 + 12.0 * 0.025)).abs() < 1e-9, "the space is a pause");
     }
 }

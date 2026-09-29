@@ -131,6 +131,10 @@ impl Rasterizer {
         self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
     }
 
+    pub fn queued_msdf_job_count(&self) -> usize {
+        self.queued_msdf_jobs.len()
+    }
+
     pub fn take_queued_msdf_jobs(&mut self) -> Vec<QueuedMsdfJob> {
         std::mem::take(&mut self.queued_msdf_jobs)
     }

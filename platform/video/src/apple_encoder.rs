@@ -203,14 +203,21 @@ impl MacosVideoFileEncoder {
                     &[bitrate_number, fps_number],
                 )
             };
+            // A pushed pixel buffer of another size (a recorder scaling a
+            // window, or a window resized mid-recording) is fitted into the
+            // track keeping its aspect, black bars around it, by
+            // VideoToolbox; frames of the track's size are untouched.
+            let scaling_key = str_to_nsstring("AVVideoScalingModeKey");
+            let resize_aspect = str_to_nsstring("AVVideoScalingModeResizeAspect");
             let video_settings = ns_dictionary(
                 &[
                     AVVideoCodecKey,
                     AVVideoWidthKey,
                     AVVideoHeightKey,
                     AVVideoCompressionPropertiesKey,
+                    scaling_key,
                 ],
-                &[codec_type, width_number, height_number, compression],
+                &[codec_type, width_number, height_number, compression, resize_aspect],
             );
             let video_input: ObjcId = msg_send![
                 class!(AVAssetWriterInput),
@@ -411,6 +418,33 @@ impl MacosVideoFileEncoder {
         let result = self.push_frame_nv12(&scratch, pts_100ns);
         self.nv12_scratch = scratch;
         result
+    }
+
+    /// Append a caller's pixel buffer (see `VideoFileEncoder::push_frame_pixel_buffer`).
+    pub unsafe fn push_pixel_buffer(
+        &mut self,
+        pixel_buffer: CVPixelBufferRef,
+        pts_100ns: Option<i64>,
+    ) -> Result<(), VideoFileError> {
+        if self.finalized {
+            return Err(VideoFileError::new("encoder already finalized"));
+        }
+        let pts = pts_100ns.unwrap_or_else(|| self.frame_pts(self.frame_index));
+        let _pool = AutoreleasePool::new();
+        unsafe {
+            wait_for_input_ready(self.video_input.as_id(), "push_pixel_buffer")?;
+            let appended: BOOL = msg_send![
+                self.pixel_adaptor.as_id(),
+                appendPixelBuffer: pixel_buffer
+                withPresentationTime: hns_time(pts)
+            ];
+            if appended == NO {
+                let error: ObjcId = msg_send![self.writer.as_id(), error];
+                return Err(nserror_to_video_error("appendPixelBuffer", error));
+            }
+        }
+        self.frame_index += 1;
+        Ok(())
     }
 
     pub fn push_frame_nv12(

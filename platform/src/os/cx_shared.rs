@@ -1272,6 +1272,23 @@ impl Cx {
         }
     }
 
+    /// Deliver everything the last event or draw left queued (actions
+    /// posted from other threads and from handlers, triggers, a key-focus
+    /// change requested while drawing, window geometry changes, a cleared
+    /// hover) now, at the current time. The virtual clock does this before
+    /// it advances a frame: otherwise such work ran with whatever event came
+    /// next, before or after the advance depending on the machine's load,
+    /// and a timer it started (a caret blink) landed a frame apart from run
+    /// to run.
+    pub(crate) fn settle_deferred_events(&mut self) {
+        self.handle_action_receiver();
+        self.handle_triggers();
+        self.handle_actions();
+        self.inner_key_focus_change();
+        self.handle_pending_window_geom_changes();
+        self.handle_pending_clear_hover();
+    }
+
     fn inner_key_focus_change(&mut self) {
         if let Some((prev, focus)) = self.keyboard.cycle_key_focus_changed() {
             self.inner_call_event_handler(&Event::KeyFocus(KeyFocusEvent { prev, focus }));

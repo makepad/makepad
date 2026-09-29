@@ -18,8 +18,12 @@
 //! Both halves come off platform seams added for this:
 //!
 //! - picture: `makepad_platform::screen_capture` — a standing sink on the
-//!   window's presented frames. Same readback the `--remote` `/g` grab uses,
-//!   but continuous and without the PNG encode.
+//!   window's presented frames. On Apple it is a surface sink: the window
+//!   pass blits its drawable into a pooled IOSurface-backed pixel buffer on
+//!   the GPU and the encoder takes that buffer as is (no readback, no CPU
+//!   colour conversion, a frame skipped rather than waited for when the
+//!   encoder is behind). Elsewhere it is the byte readback the `--remote`
+//!   `/g` grab uses, continuous and without the PNG encode.
 //! - sound: `makepad_platform::audio_output_tap` — a fork of the buffers the
 //!   app hands its output device, taken right after the app fills them. This
 //!   is the app's OWN audio, not a system loopback: no screen-recording
@@ -37,9 +41,10 @@
 //! selecting feedback). The frame index is taken from the wall clock, and
 //! the audio position derived from that index —
 //! so an encoder that falls behind leaves a gap in both tracks rather than
-//! letting sound drift away from picture. A window that presents nothing is
-//! kept ticking by a pass repaint, which costs a re-present of the existing
-//! draw lists and no widget redraw.
+//! letting sound drift away from picture. A window that has not presented a
+//! recorded frame for most of a frame interval is repainted (a re-present of
+//! the existing draw lists, no widget redraw), so the file catches up with a
+//! still window; an app that animates on its own is never repainted for it.
 //!
 //! Key events are not scoped to a window in Makepad, so in a multi-window app
 //! Ctrl+F10 starts one recording per window, each into its own file. That is
@@ -52,6 +57,10 @@ use makepad_platform::audio_output_tap::{add_audio_output_tap, remove_audio_outp
 use makepad_platform::devtools;
 use makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
+};
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+use makepad_platform::screen_capture::{
+    add_screen_capture_surface, surfaces_supported, ScreenCaptureSurface,
 };
 use makepad_platform::script::timer::script_local_utc_offset_secs;
 use makepad_platform::video_file::{
@@ -102,6 +111,7 @@ script_mod! {
         dot_size: 13.0
         dot_margin: 12.0
         max_fps: 60.0
+        scale: 1.0
     }
 }
 
@@ -123,6 +133,25 @@ const AUDIO_RATE_GRACE: Duration = Duration::from_millis(300);
 /// Tap backlog ceiling. Reaching it means the encoder thread is wedged; drop
 /// the oldest rather than grow without bound behind a realtime callback.
 const AUDIO_BACKLOG_SECONDS: usize = 4;
+
+/// The video's size against the window, from `MAKEPAD_SCREENCAP_SCALE` or
+/// the widget's `scale`, kept within (0.1, 1].
+fn capture_scale(scale: f64) -> f64 {
+    static ENV: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    let env = *ENV.get_or_init(|| {
+        std::env::var("MAKEPAD_SCREENCAP_SCALE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+    });
+    let scale = env.unwrap_or(scale);
+    if scale.is_finite() && scale > 0.0 { scale.clamp(0.1, 1.0) } else { 1.0 }
+}
+
+/// Even video dimensions for a `width` x `height` window at `scale`.
+fn track_size(width: u32, height: u32, scale: f64) -> (u32, u32) {
+    let fit = |v: u32| ((((v as f64) * scale).round() as u32) & !1).max(2);
+    (fit(width), fit(height))
+}
 
 /// The requested normal recording rate. The entry points cap this at 60
 /// (15 for managed evidence); the high-rate shortcut selects 120 directly.
@@ -181,6 +210,12 @@ pub struct ScreenCap {
     dot_margin: f64,
     #[live(60.0)]
     max_fps: f64,
+    /// Size of the video against the window's device pixels: 0.5 records a
+    /// Retina window at half its resolution (smaller files for progress
+    /// videos). `MAKEPAD_SCREENCAP_SCALE` overrides it. The scaling happens
+    /// in the encoder (Apple, Windows), not on the app's thread.
+    #[live(1.0)]
+    scale: f64,
     /// Only a Studio-managed recording (an absolute directory handed over by
     /// the flow) sets this. Every other recording, in every app of a repo,
     /// lands in that repo's `local/screencap/` (see `repo_screencap_dir`).
@@ -309,7 +344,8 @@ impl ScreenCap {
         };
         let path = capture_path(&dir, self.window_id);
         let fps = if self.managed { fps.min(MANAGED_MAX_FPS) } else { fps };
-        let session = Session::start(cx, path.clone(), self.window_id, fps, self.managed);
+        let scale = if self.managed { 1.0 } else { capture_scale(self.scale) };
+        let session = Session::start(cx, path.clone(), self.window_id, fps, scale, self.managed);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
         self.next_frame = cx.new_next_frame();
@@ -399,11 +435,15 @@ impl Widget for ScreenCap {
             if let Some(action) = self.poll_finish() {
                 cx.widget_action(self.uid, action);
             }
-            if self.is_busy() {
+            if let Some(session) = &self.session {
                 // Keep the window presenting: a still app presents nothing,
-                // and a recorder with no frames is an empty file.
+                // and a recorder with no frames is an empty file. Only when
+                // no recorded frame came for most of an interval: an app
+                // that animates by itself feeds the recorder already.
                 self.next_frame = cx.new_next_frame();
-                self.repaint_requested = true;
+                if session.frame_overdue() {
+                    self.repaint_requested = true;
+                }
             }
         }
     }
@@ -422,7 +462,34 @@ impl Widget for ScreenCap {
 struct CapturedFrame {
     width: u32,
     height: u32,
-    rgba: Vec<u8>,
+    pixels: FramePixels,
+}
+
+enum FramePixels {
+    /// Tightly packed RGBA8 (the byte readback).
+    Rgba(Vec<u8>),
+    /// The GPU surface itself; holding it holds one capture buffer.
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+    Surface(ScreenCaptureSurface),
+}
+
+impl CapturedFrame {
+    /// The frame as RGBA bytes: its own, or read out of the surface into
+    /// `scratch` (PNG evidence and letterboxing only, never per frame).
+    #[cfg_attr(
+        not(any(target_vendor = "apple", target_os = "windows", target_os = "linux")),
+        allow(unused_variables)
+    )]
+    fn rgba<'a>(&'a self, scratch: &'a mut Vec<u8>) -> &'a [u8] {
+        match &self.pixels {
+            FramePixels::Rgba(rgba) => rgba,
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+            FramePixels::Surface(surface) => {
+                surface.read_rgba(scratch);
+                scratch
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -450,6 +517,10 @@ struct AudioQueue {
 
 struct Session {
     slot: Arc<(Mutex<FrameSlot>, Condvar)>,
+    /// When the sink last took a frame (`Cx::monotonic_now` nanoseconds, 0 =
+    /// none yet), and the recording's frame interval.
+    last_frame_ns: Arc<AtomicU64>,
+    interval_ns: u64,
     stop: Arc<AtomicBool>,
     /// Cleared by the encoder thread on exit, so the UI can poll for the
     /// finalize without blocking on a join.
@@ -459,11 +530,13 @@ struct Session {
 }
 
 impl Session {
-    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32, managed: bool) -> Self {
+    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32, scale: f64, managed: bool) -> Self {
         let slot = Arc::new((Mutex::new(FrameSlot::default()), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let audio = Arc::new(Mutex::new(AudioQueue::default()));
         let running = Arc::new(AtomicBool::new(true));
+        let last_frame_ns = Arc::new(AtomicU64::new(0));
+        let sink_last_frame_ns = last_frame_ns.clone();
 
         let thread_slot = slot.clone();
         let thread_audio = audio.clone();
@@ -478,38 +551,11 @@ impl Session {
                     let _pending = pending;
                     let capture_slot = thread_slot.clone();
                     let capture_stop = thread_stop.clone();
-                    let capture_id = add_screen_capture(
-            ScreenCaptureOptions {
-                window_id,
-                max_fps: fps as f64,
-            },
-            move |frame| {
-                if capture_stop.load(Ordering::Acquire) {
-                    return;
-                }
-                let (lock, cvar) = &*capture_slot;
-                let Ok(mut slot) = lock.try_lock() else {
-                    return;
-                };
-                let mut buf = match slot.pending.take() {
-                    Some(old) => {
-                        slot.dropped += 1;
-                        old.rgba
-                    }
-                    None => std::mem::take(&mut slot.spare),
-                };
-                buf.clear();
-                buf.extend_from_slice(frame.rgba);
-                slot.pending = Some(CapturedFrame {
-                    width: frame.width,
-                    height: frame.height,
-                    rgba: buf,
-                });
-                slot.wake_generation = slot.wake_generation.wrapping_add(1);
-                drop(slot);
-                cvar.notify_one();
-            },
-        );
+                    let options = ScreenCaptureOptions {
+                        window_id,
+                        max_fps: fps as f64,
+                    };
+                    let capture_id = install_sink(options, capture_slot, capture_stop, sink_last_frame_ns);
 
         let tap_audio = thread_audio.clone();
         let tap_id = add_audio_output_tap(move |info, buffer| {
@@ -543,7 +589,7 @@ impl Session {
                         // previous run if a filesystem/clock collision occurs.
                         std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
                             .map_err(|error| error.to_string())?;
-                        encode_loop(&path, thread_slot, thread_audio, thread_stop, fps, managed, window_id, &mut info)
+                        encode_loop(&path, thread_slot, thread_audio, thread_stop, fps, scale, managed, window_id, &mut info)
                     })();
                     drop(attachments);
                     if managed {
@@ -562,11 +608,24 @@ impl Session {
 
         Self {
             slot,
+            last_frame_ns,
+            interval_ns: 1_000_000_000 / fps.max(1) as u64,
             stop,
             running,
             join,
             stopping: false,
         }
+    }
+
+    /// No recorded frame for three quarters of a frame interval (the sink's
+    /// own due gate): the window should present one.
+    fn frame_overdue(&self) -> bool {
+        if self.stopping {
+            return false;
+        }
+        let last = self.last_frame_ns.load(Ordering::Acquire);
+        let now = (Cx::monotonic_now() * 1_000_000_000.0) as u64;
+        last == 0 || now.saturating_sub(last) >= self.interval_ns / 4 * 3
     }
 
     /// Detach from the live streams and tell the encoder to finalize. The
@@ -604,6 +663,79 @@ impl Session {
             None => Some(Err("encoder thread could not be started".to_string())),
         }
     }
+}
+
+/// Attach the recorder to the window's presented frames: as GPU surfaces
+/// where the renderer delivers them (the frame is never read back or copied
+/// on the render thread; the sink keeps a handle to the newest), as bytes
+/// elsewhere. Only the newest frame waits in the slot either way.
+fn install_sink(
+    options: ScreenCaptureOptions,
+    slot: Arc<(Mutex<FrameSlot>, Condvar)>,
+    stop: Arc<AtomicBool>,
+    last_frame_ns: Arc<AtomicU64>,
+) -> u64 {
+    // Hand a frame to the encoder thread, replacing (and dropping) one it has
+    // not taken yet. `try_lock`: never wait on the encoder from here.
+    fn offer(slot: &(Mutex<FrameSlot>, Condvar), make: impl FnOnce(&mut FrameSlot) -> CapturedFrame) {
+        let (lock, cvar) = slot;
+        let Ok(mut slot) = lock.try_lock() else {
+            return;
+        };
+        let frame = make(&mut slot);
+        slot.pending = Some(frame);
+        slot.wake_generation = slot.wake_generation.wrapping_add(1);
+        drop(slot);
+        cvar.notify_one();
+    }
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+    if surfaces_supported() {
+        let (slot, stop, last_frame_ns) = (slot.clone(), stop.clone(), last_frame_ns.clone());
+        return add_screen_capture_surface(options, move |surface| {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            last_frame_ns.store(surface.time_ns.max(1), Ordering::Release);
+            offer(&slot, |slot| {
+                // The one it replaces goes back to the capture ring.
+                if slot.pending.take().is_some() {
+                    slot.dropped += 1;
+                }
+                CapturedFrame {
+                    width: surface.width,
+                    height: surface.height,
+                    pixels: FramePixels::Surface(surface.clone()),
+                }
+            });
+        });
+    }
+    add_screen_capture(options, move |frame| {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        last_frame_ns.store(frame.time_ns.max(1), Ordering::Release);
+        offer(&slot, |slot| {
+            let mut buf = match slot.pending.take() {
+                Some(CapturedFrame { pixels: FramePixels::Rgba(old), .. }) => {
+                    slot.dropped += 1;
+                    old
+                }
+                #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+                Some(_) => {
+                    slot.dropped += 1;
+                    std::mem::take(&mut slot.spare)
+                }
+                None => std::mem::take(&mut slot.spare),
+            };
+            buf.clear();
+            buf.extend_from_slice(frame.rgba);
+            CapturedFrame {
+                width: frame.width,
+                height: frame.height,
+                pixels: FramePixels::Rgba(buf),
+            }
+        });
+    })
 }
 
 /// `tap_id` is `None` when every output tap was taken at start: the
@@ -741,6 +873,7 @@ fn encode_loop(
     audio: Arc<Mutex<AudioQueue>>,
     stop: Arc<AtomicBool>,
     fps: u32,
+    scale: f64,
     save_final_frame: bool,
     window_id: Option<usize>,
     info: &mut RecordingInfo,
@@ -752,8 +885,19 @@ fn encode_loop(
     let Some(first) = take_frame(&slot, &stop, &wait, None) else {
         return Err("stopped before the window presented a frame".to_string());
     };
-    let width = (first.width & !1).max(2);
-    let height = (first.height & !1).max(2);
+    let (width, height) = track_size(first.width, first.height, scale);
+    // Frames that reach the encoder as bytes are fitted onto this canvas.
+    // Windows' encoder reads the capture textures at the window's size and
+    // scales them itself, so its canvas (uploaded the same way) is that size.
+    #[cfg(target_os = "windows")]
+    let d3d11_source = match &first.pixels {
+        FramePixels::Surface(surface) => Some((surface.width, surface.height)),
+        _ => None,
+    };
+    #[cfg(target_os = "windows")]
+    let canvas_size = d3d11_source.unwrap_or((width, height));
+    #[cfg(not(target_os = "windows"))]
+    let canvas_size = (width, height);
     info.width = width;
     info.height = height;
     info.original_width = first.width;
@@ -794,11 +938,22 @@ fn encode_loop(
     log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, app audio AAC 128kbps",
         width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0);
     let path_str = path.to_string_lossy().to_string();
-    let mut encoder =
-        VideoFileEncoder::new(&path_str, options).map_err(|err| format!("{path_str}: {err}"))?;
+    #[cfg(target_os = "windows")]
+    let encoder = match (&first.pixels, d3d11_source) {
+        (FramePixels::Surface(surface), Some((source_width, source_height))) => {
+            VideoFileEncoder::new_d3d11(&path_str, options, surface.d3d11_device(), source_width, source_height)
+        }
+        _ => VideoFileEncoder::new(&path_str, options),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let encoder = VideoFileEncoder::new(&path_str, options);
+    let mut encoder = encoder.map_err(|err| format!("{path_str}: {err}"))?;
 
-    let mut canvas = vec![0u8; width as usize * height as usize * 4];
-    blit_into(&mut canvas, width, height, &first.rgba, first.width, first.height);
+    // RGBA canvas for byte frames and for surfaces that no longer match the
+    // track (a resized window); a matching surface goes to the encoder as is.
+    let mut canvas = Vec::new();
+    let mut scratch = Vec::new();
+    let mut shown = show(&first, canvas_size, &mut canvas, &mut scratch);
     // Retain only the latest original drawable for pixel-accurate inspection;
     // the fixed MP4 canvas may have padding or scaling after a window resize.
     let mut latest_frame = first;
@@ -809,14 +964,28 @@ fn encode_loop(
     let mut encode_error: Option<String> = None;
     let mut encoded: u64 = 0;
     let mut push_time = 0.0;
+    // Pushes (video + its audio) that took longer than a frame: the encoder
+    // pushing back, which is what leaves gaps.
+    let mut slow_pushes = 0u64;
+    let mut slowest_push: f64 = 0.0;
     let mut last_preview = 0.0;
 
     loop {
         // Video frame `frame_index` covers [n/fps, (n+1)/fps).
         let pts_100ns = (frame_index as u128 * 10_000_000u128 / fps as u128) as i64;
         let t0 = Cx::monotonic_now();
-        let push = encoder.push_frame_rgba8(&canvas, Some(pts_100ns));
-        push_time += Cx::monotonic_now() - t0;
+        let push = match &shown {
+            // SAFETY: the surface retains its pixel buffer for the call.
+            #[cfg(target_vendor = "apple")]
+            Shown::Surface(surface) => unsafe {
+                encoder.push_frame_pixel_buffer(surface.pixel_buffer(), Some(pts_100ns))
+            },
+            #[cfg(target_os = "windows")]
+            Shown::Surface(surface) => encoder.push_frame_d3d11_texture(surface.d3d11_texture(), Some(pts_100ns)),
+            #[cfg(target_os = "windows")]
+            Shown::Canvas if d3d11_source.is_some() => encoder.push_frame_d3d11_rgba8(&canvas, Some(pts_100ns)),
+            Shown::Canvas => encoder.push_frame_rgba8(&canvas, Some(pts_100ns)),
+        };
         encoded += 1;
         if let Err(err) = push {
             encode_error = Some(format!("video frame {frame_index}: {err}"));
@@ -827,11 +996,25 @@ fn encode_loop(
             encode_error = Some(err);
             break;
         }
+        let took = Cx::monotonic_now() - t0;
+        push_time += took;
+        slowest_push = slowest_push.max(took);
+        if took * fps as f64 > 1.0 {
+            slow_pushes += 1;
+        }
         info.frames = encoded;
         info.elapsed_ms = ((Cx::monotonic_now() - start).max(0.0) * 1000.0) as u64;
         if save_final_frame && (!info.preview_written || Cx::monotonic_now() - last_preview >= 1.0) {
             let published = (|| {
-                write_live_preview(path, width, height, &canvas)?;
+                let (rgba, rgba_width, rgba_height) = match &shown {
+                    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+                    Shown::Surface(surface) => {
+                        surface.read_rgba(&mut scratch);
+                        (&scratch, surface.width, surface.height)
+                    }
+                    Shown::Canvas => (&canvas, canvas_size.0, canvas_size.1),
+                };
+                write_live_preview(path, rgba_width, rgba_height, rgba)?;
                 info.preview_written = true;
                 info.current_written = write_inspection_frame(path, "current.png", &latest_frame)?;
                 info.current_width = latest_frame.width;
@@ -859,9 +1042,12 @@ fn encode_loop(
         if let Some(frame) = next {
             info.original_width = frame.width;
             info.original_height = frame.height;
-            blit_into(&mut canvas, width, height, &frame.rgba, frame.width, frame.height);
+            shown = show(&frame, canvas_size, &mut canvas, &mut scratch);
             let previous = std::mem::replace(&mut latest_frame, frame);
-            recycle(&slot, previous.rgba);
+            #[allow(irrefutable_let_patterns)] // no surfaces on this platform
+            if let FramePixels::Rgba(rgba) = previous.pixels {
+                recycle(&slot, rgba);
+            }
         } else if stopped(&stop) {
             break;
         }
@@ -880,7 +1066,7 @@ fn encode_loop(
     let dropped = slot.0.lock().map(|s| s.dropped).unwrap_or(0);
     let audio_dropped = audio.lock().map(|q| q.dropped).unwrap_or(0);
     log!(
-        "ScreenCap: {}x{} asked {}fps, held {:.1}fps over {:.1}s          ({} encoded, {} gaps, {} presents coalesced, {} audio samples dropped);          encode {:.2}ms/frame of {:.2}ms budget",
+        "ScreenCap: {}x{} asked {}fps, held {:.1}fps over {:.1}s          ({} encoded, {} gaps, {} presents coalesced, {} audio samples dropped);          encode {:.2}ms/frame of {:.2}ms budget ({} over it, slowest {:.1}ms)",
         width,
         height,
         fps,
@@ -892,6 +1078,8 @@ fn encode_loop(
         audio_dropped,
         push_time * 1000.0 / encoded.max(1) as f64,
         1000.0 / fps as f64,
+        slow_pushes,
+        slowest_push * 1000.0,
     );
 
     encoder
@@ -926,12 +1114,44 @@ struct RecordingInfo {
     final_written: bool,
 }
 
+/// What the file shows until the window presents another frame.
+enum Shown {
+    /// A GPU surface, pushed to the encoder as is.
+    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+    Surface(ScreenCaptureSurface),
+    /// The RGBA canvas.
+    Canvas,
+}
+
+/// Put `frame` on the recording. A GPU surface the encoder can take goes to
+/// it as is: on Apple any size (VideoToolbox fits it into the track, keeping
+/// its aspect), on Windows the size its encoder was opened with. Bytes, and
+/// surfaces the encoder cannot take (Linux; a resized window on Windows),
+/// are fitted onto the RGBA canvas on this thread.
+fn show(frame: &CapturedFrame, canvas_size: (u32, u32), canvas: &mut Vec<u8>, scratch: &mut Vec<u8>) -> Shown {
+    let (width, height) = canvas_size;
+    #[cfg(target_vendor = "apple")]
+    if let FramePixels::Surface(surface) = &frame.pixels {
+        return Shown::Surface(surface.clone());
+    }
+    #[cfg(target_os = "windows")]
+    if let FramePixels::Surface(surface) = &frame.pixels {
+        if (surface.width, surface.height) == canvas_size {
+            return Shown::Surface(surface.clone());
+        }
+    }
+    canvas.resize(width as usize * height as usize * 4, 0);
+    blit_into(canvas, width, height, frame.rgba(scratch), frame.width, frame.height);
+    Shown::Canvas
+}
+
 fn write_inspection_frame(path: &Path, extension: &str, frame: &CapturedFrame) -> Result<bool, String> {
     let pixels = u64::from(frame.width) * u64::from(frame.height);
     if pixels == 0 || pixels > MANAGED_MAX_INSPECTION_PIXELS {
         return Ok(false);
     }
-    let png = Cx::encode_rgba_as_png(frame.width, frame.height, &frame.rgba)?;
+    let mut scratch = Vec::new();
+    let png = Cx::encode_rgba_as_png(frame.width, frame.height, frame.rgba(&mut scratch))?;
     let temporary = path.with_extension(format!("{extension}.tmp"));
     std::fs::write(&temporary, png).map_err(|error| error.to_string())?;
     std::fs::rename(temporary, path.with_extension(extension)).map_err(|error| error.to_string())?;
@@ -1218,6 +1438,16 @@ mod tests {
         assert_eq!(&canvas[16..20], &[255, 0, 0, 255]);
         assert_eq!(&canvas[28..32], &[0, 0, 255, 255]);
         assert_eq!(&canvas[48..], &[0, 0, 0, 255].repeat(4));
+    }
+
+    #[test]
+    fn track_size_is_even_and_scaled() {
+        assert_eq!(track_size(3360, 2080, 1.0), (3360, 2080));
+        assert_eq!(track_size(3360, 2080, 0.5), (1680, 1040));
+        assert_eq!(track_size(1921, 1081, 1.0), (1920, 1080));
+        assert_eq!(track_size(3, 3, 0.1), (2, 2));
+        assert_eq!(capture_scale(0.0), 1.0);
+        assert_eq!(capture_scale(0.01), 0.1);
     }
 
     #[test]

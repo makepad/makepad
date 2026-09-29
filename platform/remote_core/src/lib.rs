@@ -415,6 +415,9 @@ pub enum Cmd {
         window: Option<usize>,
         frames: u64,
         fps: u32,
+        /// `wait_loads=1`: no frame opens while asynchronous loads are in
+        /// flight (bounded; the step fails naming them).
+        wait_loads: bool,
         tx: Sender<Reply>,
     },
     /// Is anything still moving: a pending NextFrame, redraw, repaint or
@@ -1083,7 +1086,8 @@ pub fn cheat_sheet() -> String {
          \x20                 q=path:a.b (or path=a.b) matches the id path p exactly or as a suffix of whole segments\n\
          /d                whole widget tree as indented text (id, type, x y w h); /d?paths=1 one line per widget: path type x y w h\n\
          /step?frames=K&fps=60  --virtual-clock only: run K frames of 1/fps (timers, NextFrame, draw, present); answers {{\"frame\",\"time\"}} after the K-th\n\
-         /settled          {{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders]}}\n\
+         \x20                 wait_loads=1: no frame opens while async loads (image decodes, glyph rasters, resources) are in flight; fails after 30 s naming them\n\
+         /settled          {{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{{kind:n}}}}\n\
          /cap/start?path=/ABS.mp4&fps=60&audio=1&overwrite=1  record the window in process (native pixels, H.264); virtual clock: one frame per /step frame (step at the same fps), pts=n/fps\n\
          \x20                 the directory must exist; an existing file needs overwrite=1; quitting with a capture open finishes the file\n\
          /cap/stop[?hashes=1]  finalize; {{\"frames\",\"sz\",\"missing\",\"hash\"}}\n\
@@ -1133,14 +1137,17 @@ pub fn route_step(p: &Params) -> Out {
         _ => return err("step fps must be an integer in 1..=1000"),
     };
     let window = p.window();
+    let wait_loads = p.flag(&["wait_loads"]);
     // A frame normally takes well under a second; the bound only keeps
-    // a wedged app from pinning this request thread.
-    let timeout = 30 + frames;
+    // a wedged app from pinning this request thread. Waiting on loads adds
+    // their own bound (30 s) once per wait.
+    let timeout = 30 + frames + if wait_loads { 30 } else { 0 };
     reply_to_out(ask(
         move |tx| Cmd::Step {
             window,
             frames,
             fps,
+            wait_loads,
             tx,
         },
         timeout,

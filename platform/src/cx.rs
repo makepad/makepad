@@ -274,6 +274,9 @@ pub struct Cx {
     /// root (named widgets only), registered by the widgets layer; the remote
     /// bridge's `/snap` path addressing reads it.
     pub widget_paths_callback: Option<fn(&Cx) -> Vec<(WidgetSnapshot, String)>>,
+    /// Subsystems' counts of asynchronous loads in flight, by kind (see
+    /// `Cx::register_async_load_probe`).
+    pub(crate) async_load_probes: Vec<(&'static str, crate::cx_api::AsyncLoadProbe)>,
     pub widget_tree_ptr: *mut (),
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
@@ -1070,6 +1073,7 @@ impl Cx {
             widget_query_invalidation_event: None,
             app_clock: Default::default(),
             widget_paths_callback: None,
+            async_load_probes: Vec::new(),
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
             widget_query_callback: None,

@@ -237,6 +237,10 @@ mod imp {
         open: Option<OpenFrame>,
         /// Since when the step has been waiting on the capture encoder.
         wait_since: Option<Instant>,
+        /// `wait_loads=1`: no frame opens while asynchronous loads (image
+        /// decodes, glyph rasters, fetched resources) are in flight.
+        wait_loads: bool,
+        loads_since: Option<Instant>,
         tx: Sender<Reply>,
     }
 
@@ -273,6 +277,18 @@ mod imp {
     /// How long one step frame may fail to reach the screen, or a step may
     /// wait on the capture encoder, before `/step` gives up with an error.
     const STEP_FRAME_LIMIT: Duration = Duration::from_secs(20);
+
+    /// How long `/step?wait_loads=1` waits for asynchronous loads before a
+    /// frame, before it fails naming them.
+    const STEP_LOADS_LIMIT: Duration = Duration::from_secs(30);
+
+    fn loads_text(loads: &[(&'static str, usize)]) -> String {
+        loads
+            .iter()
+            .map(|(kind, count)| format!("{kind}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 
     /// What a `/step` must wait for from a running capture.
     enum CaptureGate {
@@ -981,6 +997,25 @@ mod imp {
                     let _ = job.tx.send(Reply::Text(answer));
                     return false;
                 }
+                // Loads earlier frames started land before the next frame,
+                // however slowly their workers run.
+                if job.wait_loads {
+                    let loads = cx.pending_async_loads();
+                    if !loads.is_empty() {
+                        let since = *job.loads_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() < STEP_LOADS_LIMIT {
+                            break true;
+                        }
+                        let _ = job.tx.send(Reply::Err(format!(
+                            "asynchronous loads still in flight after {:?} before step frame {}: {}",
+                            STEP_LOADS_LIMIT,
+                            app_clock::frame() + 1,
+                            loads_text(&loads)
+                        )));
+                        return false;
+                    }
+                    job.loads_since = None;
+                }
                 job.open = Some(open_step_frame(cx, &job));
             }
             let open = job.open.as_mut().unwrap();
@@ -998,7 +1033,8 @@ mod imp {
                     }
                     open.prepared = true;
                 }
-                present(cx, job.window, PresentStage::Present) == Some(true)
+                let presented = present(cx, job.window, PresentStage::Present);
+                presented == Some(true)
             } else {
                 cx.repaint_id > open.repaint_id
             };
@@ -1045,9 +1081,13 @@ mod imp {
     /// owes the app, in the order a real frame would: timers due by now,
     /// then NextFrame. The draw happens when the frame is presented.
     fn open_step_frame(cx: &mut Cx, job: &StepJob) -> OpenFrame {
+        // What the previous frame or the commands since left queued happens
+        // at the time it was queued, never after the advance by chance.
+        cx.settle_deferred_events();
         let (_, time) = app_clock::advance(job.fps);
         // The batch due now; timers its handlers start fire next frame.
-        for timer_id in cx.app_clock.take_due(time) {
+        let due = cx.app_clock.take_due(time);
+        for timer_id in due {
             let event = crate::event::TimerEvent {
                 time: Some(time),
                 timer_id,
@@ -1159,6 +1199,11 @@ mod imp {
         if STEP.with_borrow(|step| step.is_some()) {
             reasons.push("step");
         }
+        // Work on workers or the network whose result will change a frame.
+        let loads = cx.pending_async_loads();
+        if !loads.is_empty() {
+            reasons.push("loads");
+        }
         #[cfg(all(
             not(gpusim),
             any(target_os = "macos", target_os = "ios", target_os = "tvos")
@@ -1172,6 +1217,13 @@ mod imp {
             reasons.is_empty(),
             list.join(",")
         );
+        if !loads.is_empty() {
+            let entries: Vec<String> = loads
+                .iter()
+                .map(|(kind, count)| format!("{}:{count}", json_str(kind)))
+                .collect();
+            out.push_str(&format!(",\"loads\":{{{}}}", entries.join(",")));
+        }
         if let Some(now) = app_clock::now() {
             out.push_str(&format!(",\"frame\":{},\"time\":{}", app_clock::frame(), num(now)));
         }
@@ -1658,6 +1710,7 @@ mod imp {
                 window,
                 frames,
                 fps,
+                wait_loads,
                 tx,
             } => {
                 if !app_clock::enabled() {
@@ -1696,6 +1749,8 @@ mod imp {
                     remaining: frames,
                     open: None,
                     wait_since: None,
+                    wait_loads,
+                    loads_since: None,
                     tx,
                 }));
             }

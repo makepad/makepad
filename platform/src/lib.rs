@@ -3,6 +3,7 @@ pub mod gl_render_bridge;
 pub mod home;
 pub mod archive_cache;
 pub mod folder_access;
+pub mod clipboard_image;
 pub mod os;
 
 #[cfg(any(

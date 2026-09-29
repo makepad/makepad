@@ -72,6 +72,8 @@ pub struct Fonts {
     slug_built_glyphs_this_redraw: usize,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
+    /// Glyph rasters sent to the MSDF worker and not applied yet.
+    msdf_jobs_in_flight: usize,
     /// Fonts whose resource this process could not read (see
     /// [`Self::note_font_unavailable`]); their families render without them
     /// until the resource registry moves on (`unavailable_generation`).
@@ -143,6 +145,7 @@ impl Fonts {
             slug_built_glyphs_this_redraw: 0,
             msdf_job_sender,
             msdf_result_receiver,
+            msdf_jobs_in_flight: 0,
             unavailable_fonts: FxHashSet::default(),
             unavailable_generation: 0,
         }
@@ -221,6 +224,17 @@ impl Fonts {
         }
 
         self.slug_atlas.get_or_cache_glyph(font, glyph_id, true)
+    }
+
+    /// Glyph rasters queued for or running on the MSDF worker: text that
+    /// draws with a fallback until they land (`Cx::pending_async_loads`).
+    pub fn pending_glyph_rasters(&self) -> usize {
+        let queued = self
+            .layouter
+            .rasterizer()
+            .try_borrow()
+            .map_or(0, |rasterizer| rasterizer.queued_msdf_job_count());
+        self.msdf_jobs_in_flight + queued
     }
 
     pub fn slug_cache_generation(&self) -> u64 {
@@ -413,7 +427,9 @@ impl Fonts {
             .borrow_mut()
             .take_queued_msdf_jobs();
         for job in jobs {
-            let _ = self.msdf_job_sender.send(job);
+            if self.msdf_job_sender.send(job).is_ok() {
+                self.msdf_jobs_in_flight += 1;
+            }
         }
     }
 
@@ -425,6 +441,7 @@ impl Fonts {
                 .borrow_mut()
                 .apply_completed_msdf_job(job);
             completed += 1;
+            self.msdf_jobs_in_flight = self.msdf_jobs_in_flight.saturating_sub(1);
         }
         completed
     }

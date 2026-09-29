@@ -48,6 +48,8 @@ pub mod module_loader;
 pub mod opengl;
 #[cfg(use_vulkan)]
 pub mod vulkan;
+#[cfg(all(use_vulkan, target_os = "linux"))]
+pub(crate) mod capture_surface;
 #[cfg(use_vulkan)]
 pub mod vulkan_naga;
 

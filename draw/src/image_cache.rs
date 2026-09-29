@@ -1328,7 +1328,21 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
 fn ensure_image_cache_inner(cx: &mut Cx) {
     if !cx.has_global::<ImageCache>() {
         cx.set_global(ImageCache::new());
+        cx.register_async_load_probe("image", pending_image_loads);
     }
+}
+
+/// Images still decoding on a worker or being fetched: they draw as their
+/// placeholder until the result lands (`Cx::pending_async_loads`).
+fn pending_image_loads(cx: &Cx) -> usize {
+    cx.get_global_ref::<ImageCache>().map_or(0, |cache| {
+        let loading = cache
+            .map
+            .values()
+            .filter(|entry| matches!(entry, ImageCacheEntry::Loading(..)))
+            .count();
+        loading.max(cache.pending_http_requests.len())
+    })
 }
 
 #[cfg(test)]
