@@ -100,9 +100,9 @@ use current source for API signatures and working examples.
 - Validate the exact resulting source for each feature/milestone promotion so
   `dev` remains useful for bisecting. Public squash/push operations must expose
   their source, destination, included changes, validation, and conflicts.
-- An app with its own `AGENTS.md` (including private apps checked out under
-  `apps/` from their own repositories) adds flow instructions for agents
-  working in it; follow them alongside these.
+- An app with its own `AGENTS.md` (including the private products in the
+  commercial repository checked out at `apps/commercial`) adds flow
+  instructions for agents working in it; follow them alongside these.
 
 ## Builds and runtime verification
 
@@ -119,12 +119,14 @@ use current source for API signatures and working examples.
 - Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
   release is incremental without LTO. cargo-makepad's packaging commands
   build release non-incrementally.
-- A private app repository cloned into `apps/<name>` (Stage) has no
-  workspace of its own: its root `Cargo.toml` is a package whose
-  `cfg(any())` path dependencies make its crates members of this workspace
+- The private commercial repository (`makepad/commercial`: Stage with Amp,
+  Scope, Sandbox) is cloned into `apps/commercial` and has no workspace of
+  its own: its root `Cargo.toml` is a package whose `cfg(any())` path
+  dependencies make Stage's and Scope's crates members of this workspace
   (matched by `apps/*/src/..`), so they share its profiles, patches and
-  `target/`, and every Makepad crate compiles once for all apps. Nothing is
-  required when it is absent. `Cargo.lock` is not committed.
+  `target/`, and every Makepad crate compiles once for all apps. Sandbox
+  (`apps/commercial/sandbox`) is its own workspace, excluded here. Nothing is
+  required when the clone is absent. `Cargo.lock` is not committed.
 - The parallel rustc frontend is a local opt-in, never for CI or shipped
   builds. It needs `RUSTC_BOOTSTRAP` on stable and roughly halves a clean
   dev build. Put it in the user config, `~/.cargo/config.toml`, so every

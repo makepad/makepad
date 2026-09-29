@@ -1,6 +1,6 @@
 //! ── Provenance ──────────────────────────────────────────────────────────────
 //! Vendored verbatim (plus the additions marked "teamtalk addition") from
-//! `apps/sandbox/libs/audio/src/voice_codec.rs` — the sandbox voice lane's
+//! `apps/commercial/sandbox/libs/audio/src/voice_codec.rs` — the sandbox voice lane's
 //! codec. The sandbox tree lives outside this workspace, so a cargo
 //! dependency is impossible; keep the two copies synced by hand.
 //!

@@ -382,7 +382,7 @@ pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
 /// Take the sheet off again, so the next evaluation runs under the plain
 /// theme. `install` had no way back: an app that lets somebody try a sheet
 /// could put one on and never return to what it started with. A sheet named
-/// by `MAKEPAD_WIDGET_STYLE` comes back on the next read, as it would have
+/// by `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) comes back on the next read, as it would have
 /// arrived in the first place.
 pub fn uninstall(vm: &mut ScriptVm) {
     let key = vm.bx.heap.heap_key();
@@ -401,10 +401,23 @@ pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     // Opt-in only. Picking a sheet from OsType restyled every app that had
     // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
     // without `script_mod` got the theme half of it and not the widget half.
-    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok()?;
-    let sheet = StyleSheet::named(&name)?;
+    let sheet = env_sheet()?;
     install(vm, sheet.clone());
     Some(sheet)
+}
+/// The sheet the environment names. `MAKEPAD_WIDGET_STYLE_FILE` is a
+/// `StyleSheet::to_json` file, so a launcher hands an app a sheet the app
+/// never registered (Stage's app runs launch other apps under Stage's
+/// sheets); it wins over `MAKEPAD_WIDGET_STYLE`, a catalogue id.
+fn env_sheet() -> Option<StyleSheet> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = std::env::var_os("MAKEPAD_WIDGET_STYLE_FILE") {
+        match std::fs::read_to_string(&path).ok().as_deref().and_then(StyleSheet::parse) {
+            Some(sheet) => return Some(sheet),
+            None => error!("MAKEPAD_WIDGET_STYLE_FILE: no style sheet in {}", std::path::Path::new(&path).display()),
+        }
+    }
+    StyleSheet::named(&std::env::var("MAKEPAD_WIDGET_STYLE").ok()?)
 }
 /// Read just the active appearance without cloning the Splash and SVG payloads.
 pub fn current_name(vm: &mut ScriptVm) -> Option<String> {

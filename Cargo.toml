@@ -216,10 +216,11 @@ workspace.members = [
     "widgets/families/fab",
     # === private app repositories ===
     # Every app directory with a `src/`: the public apps above, and a private
-    # app repository cloned into apps/<name> whose root Cargo.toml is a
-    # package (Scope, Source Library) or a members package (Stage) naming its
-    # crates as path dependencies, which makes them members too. Its crates then compile in this workspace and share its
-    # target/, profiles and patches. Cargo fails on a member path that does
+    # repository cloned into apps/<name> whose root Cargo.toml is a package
+    # (Source Library) or a members package (apps/commercial: Stage and
+    # Scope) naming its crates as path dependencies, which makes them members
+    # too. Its crates then compile in this workspace and share its target/,
+    # profiles and patches. Cargo fails on a member path that does
     # not exist and on a glob that matches nothing; this glob always matches
     # the public apps, so a tree without the private repositories loads as
     # before. Directories without a `src/` (local data) are not matched.
@@ -227,16 +228,17 @@ workspace.members = [
 ]
 
 workspace.exclude = [
-    # Private app repositories cloned into apps/<name> are members through
-    # apps/*/src/.. above: Scope (its deps/* come with it as path
-    # dependencies), Source Library, and Stage (a members package at its
-    # root).
-    # Private Arcade frontend (apps/sandbox) keeps its own workspace for now:
-    # its libs/* reuse the package names of Stage's libs/game/* crates
-    # (makepad-game-sim, -math, ...), which one workspace cannot hold twice.
-    "apps/sandbox",
+    # Private repositories cloned into apps/<name> are members through
+    # apps/*/src/.. above: Source Library, and the commercial products at
+    # apps/commercial (a members package at its root naming Stage's and
+    # Scope's crates).
+    # The private Arcade frontend (apps/commercial/sandbox) keeps its own
+    # workspace for now: its libs/* reuse the package names of Stage's
+    # libs/game/* crates (makepad-game-sim, -math, ...), which one workspace
+    # cannot hold twice.
+    "apps/commercial/sandbox",
     # Stage's donors are preserved sources, not built.
-    "apps/stage/donors",
+    "apps/commercial/stage/donors",
     "libs/terminal_core",
     "libs/diffusion",
     "widgets/test",

@@ -147,7 +147,7 @@ impl Renderer {
             while let Some(d) = dir {
                 candidates.push(d.join("local/sky/starmap_2020_4k.png"));
                 candidates
-                    .push(d.join("apps/sandbox/resources/sky/starmap_2020_4k.png"));
+                    .push(d.join("apps/commercial/sandbox/resources/sky/starmap_2020_4k.png"));
                 dir = d.parent();
             }
         }

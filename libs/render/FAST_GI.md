@@ -27,8 +27,8 @@ former faint directional source. Its roof edge casts a real line across the
 floor even with GI off. `MAKEPAD_GI_TEST_NO_SPOT_SHADOW=1` isolates spot shadows
 (it also removes that light from GI bounce lighting; do not compare GI energy).
 
-Build from `apps/sandbox` with `cargo build --release -p makepad-sandbox`,
-then launch `apps/sandbox/target/release/makepad-sandbox --remote` from the
+Build from `apps/commercial/sandbox` with `cargo build --release -p makepad-sandbox`,
+then launch `apps/commercial/sandbox/target/release/makepad-sandbox --remote` from the
 repository root with those environment variables. Close agent-owned test
 instances through `/gq`.
 

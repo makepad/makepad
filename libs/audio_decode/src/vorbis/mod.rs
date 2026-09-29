@@ -1,7 +1,7 @@
 //! Vorbis I decoder.
 //!
 //! Adapted from the same author's decoder in the sandbox repo
-//! (`apps/sandbox/libs/audio/src/vorbis/*`), re-homed here so the non-sandbox
+//! (`apps/commercial/sandbox/libs/audio/src/vorbis/*`), re-homed here so the non-sandbox
 //! apps can use it: same transform and bitstream reading, rebuilt around this
 //! crate's [`DecodedAudio`]/[`Limits`] contract and around a streaming
 //! [`VorbisDecoder`] whose per-block loop allocates nothing.

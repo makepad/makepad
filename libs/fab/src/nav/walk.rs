@@ -1,7 +1,7 @@
 //! Lane C. First-person navigation: **fly** (free 6-DOF) and **walk**
 //! (eye height locked to the floor under you, gliding over slabs and stairs).
 //!
-//! Capture follows `apps/sandbox/src/sandbox_view.rs` — click to take the
+//! Capture follows `apps/commercial/sandbox/src/sandbox_view.rs` — click to take the
 //! pointer (cursor hidden, OS pointer locked/warped), `lock_delta` is the
 //! real motion while it is ours, and **Escape / right-click always give it
 //! back**. Window blur (and the viewport's `HoverOut`) also release the

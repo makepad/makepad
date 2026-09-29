@@ -18,7 +18,7 @@ containing mirror.tar.*, realtek-firmware.tar, fanatec.tar.gz and cargo-cache.ta
 Use --base-image for a different pristine raw Arch cloud image. All executable
 build/setup/writer logic lives beside this script, independently of the cache.
 The source snapshot is refreshed from this checkout unless --cached-source is set.
-Use --include-checkout apps/sandbox to package an optional local Sandbox clone;
+Use --include-checkout apps/commercial to package an optional local commercial clone;
 the default snapshot does not require a network or private clone.
 SSH is enabled for arch using a memorable password generated on first boot
 and shown on the local console. No personal SSH key is copied into the image.
@@ -414,7 +414,7 @@ def main():
     clone.add_argument('--cached-clone', action='store_true', help='Reuse the last verified clone snapshot without SSH')
     parser.add_argument('--clone-root', default='/home/arch/makepad', help='Source directory on the installed clone')
     parser.add_argument('--include-checkout', action='append', default=[], type=Path, metavar='PATH',
-                        help='Optional nested git checkout to package (repeatable; e.g. apps/sandbox)')
+                        help='Optional nested git checkout to package (repeatable; e.g. apps/commercial)')
     parser.add_argument('--cef-archive', type=Path, help='Cached Linux x86_64 CEF tar.bz2 (default: ASSETS/cef-linux.tar.bz2)')
     parser.add_argument('--writer-app', type=Path, nargs='?', const=Path.home()/'Applications/Makepad USB Writer.app')
     args = parser.parse_args()

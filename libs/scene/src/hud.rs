@@ -1,5 +1,5 @@
 //! The retained HUD document: named elements, layout, and values that read
-//! themselves off the game. The design record is `apps/sandbox/UI_DESIGN.md`.
+//! themselves off the game. The design record is `apps/commercial/sandbox/UI_DESIGN.md`.
 //!
 //! The older `hud_slots`/`hud_bars` are a line of text and a 140x10 gauge, and
 //! they stay exactly as they are — every game that draws with them keeps

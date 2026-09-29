@@ -84,7 +84,7 @@ After a release sandbox build, launch from the checkout root:
 
 ```sh
 SANDBOX_WORLD=clustered MAKEPAD_CLUSTER_DEMO_HEADLIGHTS=1 \
-  ./apps/sandbox/target/release/makepad-sandbox --remote
+  ./apps/commercial/sandbox/target/release/makepad-sandbox --remote
 ```
 
 A moving body carries two lights toward a freestanding blocker and a rear wall.

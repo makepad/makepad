@@ -76,10 +76,10 @@ Inherited texture bindings are resolved by name for derived PBR materials.
 Build the sandbox in its own workspace, then launch from the checkout root:
 
 ```sh
-# In apps/sandbox:
+# In apps/commercial/sandbox:
 cargo build --release -p makepad-sandbox
 # From the checkout root:
-SANDBOX_WORLD=clustered MAKEPAD_CLUSTER_STATS=1 ./apps/sandbox/target/release/makepad-sandbox --remote
+SANDBOX_WORLD=clustered MAKEPAD_CLUSTER_STATS=1 ./apps/commercial/sandbox/target/release/makepad-sandbox --remote
 ```
 
 The fixture supplies 256 moving lights and a single large floor, independent of
