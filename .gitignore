@@ -2,6 +2,9 @@
 # will have compiled files and executables
 **/target/
 
+# Private commercial repository (Stage with Amp, Scope, Sandbox). Clone into this path:
+#   git clone git@github.com:makepad/commercial.git apps/commercial
+/apps/commercial/
 # Private Scope (the Architecture map). Clone into this path:
 #   git clone git@github.com:makepad/scope.git apps/scope
 /apps/scope/
