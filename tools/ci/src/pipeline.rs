@@ -174,34 +174,31 @@ fn sync(run: &mut Run, base: &Path, config: &Config, i: usize) -> Result<()> {
             return Err(crate::process::error_lines(&out.out));
         }
     }
-    for name in ["stage", "scope"] {
-        let dir = checkout.join("apps").join(name);
-        if !dir.join(".git").exists() {
-            run.log(&format!("apps/{name}: not present"));
-            continue;
-        }
-        // The app checkout lives inside the CI-owned checkout: it is the
-        // CI's, and it takes its branch's tip as it is. A pull stopped for
-        // good at a lockfile a build had regenerated there (every run went
-        // red at sync from then on); a fetch and a hard reset cannot.
-        for args in [["fetch", "--prune", "origin"].as_slice(), ["reset", "--hard", "@{upstream}"].as_slice()] {
-            let out = run.command("git", &strings(args), &dir, &[], 300)?;
-            if out.code != 0 {
-                return Err(format!(
-                    "apps/{name}: {}",
-                    crate::process::error_lines(&out.out)
-                ));
-            }
-        }
-        let out = run.command("git", &strings(&["rev-parse", "HEAD"]), &dir, &[], 30)?;
-        if out.code != 0 {
-            return Err(format!("apps/{name}: could not record tip"));
-        }
-        run.evidence.push(json::obj(vec![
-            ("repository", json::s(format!("apps/{name}"))),
-            ("tip", json::s(out.out.trim())),
-        ]));
+    // The private commercial repository (Stage with Amp, Scope, Sandbox)
+    // is one checkout inside the CI-owned checkout, tracking its `main`: it
+    // is the CI's, and it takes that tip as it is. A pull stopped for good at
+    // a lockfile a build had regenerated there (every run went red at sync
+    // from then on); a fetch and a hard reset cannot.
+    let dir = checkout.join(crate::smoke::COMMERCIAL);
+    let name = crate::smoke::COMMERCIAL;
+    if !dir.join(".git").exists() {
+        run.log(&format!("{name}: not present"));
+        return Ok(());
     }
+    for args in [["fetch", "--prune", "origin"].as_slice(), ["reset", "--hard", "origin/main"].as_slice()] {
+        let out = run.command("git", &strings(args), &dir, &[], 300)?;
+        if out.code != 0 {
+            return Err(format!("{name}: {}", crate::process::error_lines(&out.out)));
+        }
+    }
+    let out = run.command("git", &strings(&["rev-parse", "HEAD"]), &dir, &[], 30)?;
+    if out.code != 0 {
+        return Err(format!("{name}: could not record tip"));
+    }
+    run.evidence.push(json::obj(vec![
+        ("repository", json::s(name)),
+        ("tip", json::s(out.out.trim())),
+    ]));
     Ok(())
 }
 pub fn run_once(
@@ -337,6 +334,19 @@ pub fn run_quick(
     notify: Notify,
 ) -> Result<i32> {
     let mut run = Run::new(base, base.into(), "script", "working-tree", control, notify)?;
+    // `--run slice:<app>`: that license's slice tile, as the CI runs it,
+    // from this checkout's HEAD and its apps/commercial HEAD.
+    if let Some(app) = path.to_str().and_then(|p| p.strip_prefix("slice:")) {
+        let slice = smoke::slices(base)?
+            .into_iter()
+            .find(|s| s.app == app)
+            .ok_or_else(|| format!("{}/slices.json has no slice {app}", smoke::COMMERCIAL))?;
+        let script = Script { path: smoke::SLICE_SCRIPT.into(), name: format!("slice:{app}"), target: None, slice: Some(slice) };
+        if let Err(e) = crate::runner::run(&mut run, config, vec![script], &[]) {
+            run.fail("script runner", &e);
+        }
+        return Ok(run.finish());
+    }
     let source = base.join(path).canonicalize().map_err(|e| e.to_string())?;
     let relative = source
         .strip_prefix(base)
@@ -352,6 +362,7 @@ pub fn run_quick(
         path: relative,
         name,
         target: None,
+        slice: None,
     };
     if let Err(e) = crate::runner::run(&mut run, config, vec![script], &[]) {
         run.fail("script runner", &e);

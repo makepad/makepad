@@ -78,6 +78,7 @@ workspace.members = [
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
     "libs/core_util",
     "libs/strict_json",
+    "libs/source_slice",
     "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",

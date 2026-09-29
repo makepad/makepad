@@ -352,7 +352,9 @@ curl_safe() {
 # The header file for the email; created once per run, readable only by you.
 email_headers() {
     email_header_file="$scratch/email-headers"
-    printf 'X-Makepad-Email: %s\r\nCache-Control: no-store\r\n' "$email" > "$email_header_file"
+    # One header per line; curl ends each with CRLF itself (a CR here went out
+    # as CR CR LF, which a strict HTTP parser refuses).
+    printf 'X-Makepad-Email: %s\nCache-Control: no-store\n' "$email" > "$email_header_file"
 }
 # http_get URL FILE [HEADERFILE]: body to FILE; prints the HTTP status.
 http_get() {
@@ -1408,6 +1410,7 @@ publish_app() {
 # installed/<app>.json (not yet replaced when this runs); they go, so the
 # folder shows the app once. The old command only when a Builder wrote it.
 remove_renamed_binary() {
+    [ -f "$root/installed/$rel_id.json" ] || return 0
     rb_old=$(json flat < "$root/installed/$rel_id.json" 2>/dev/null | awk -F'\t' '$1 == "binary" { print $2; exit }')
     case "$rb_old" in ''|.*|*/*|"$rel_binary") return 0 ;; esac
     rm -f "$root/$rb_old.bin" "$root/$rb_old.bin.makepad-package-paths" "$root/installed/$rb_old.project"

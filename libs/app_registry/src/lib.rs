@@ -18,10 +18,12 @@
 //!   they open through Files and previews, not the menu.
 //! - aichat is the assistant the WM seats in its pane slot, never a menu
 //!   row or a tile; splash and counter are the WM's pacing/protocol rigs.
-//! - scope and stage are optional private checkouts: cloned into
-//!   apps/scope (apps/stage) they are members of this workspace and build
-//!   into its target/; absent, `is_available` is false and the WM drops
-//!   the row.
+//! - scope, stage and amp come from the optional private checkout of
+//!   makepad/commercial at apps/commercial (Scope at scope/, Stage's app at
+//!   stage/app, Amp at stage/apps/amp, or a Builder's slice of it holding
+//!   only the licensed app): present, they are members of this workspace and
+//!   build into its target/; absent, `is_available` is false and the WM
+//!   drops the row.
 //! - studio (apps/studio) is absent in this checkout today; its row stays
 //!   and is filtered out the same way.
 //! - wm, wm-all and ai-hub are built by Builder but are not
@@ -431,7 +433,7 @@ mod tests {
             let target = entry.target();
             let manifest = root.join(package_manifest(&target));
             if !manifest.is_file() {
-                // Optional private clones (scope, stage) and absent apps.
+                // The optional commercial checkout (scope, stage, amp) and absent apps.
                 assert!(!has_sources(&target, &root), "{} claims to be available", entry.id);
                 continue;
             }
@@ -465,6 +467,13 @@ mod tests {
         assert!(find("nonesuch").is_none() && find_by_bin("nonesuch").is_none());
         let stage = find("stage").unwrap();
         assert!(!stage.menu_visible && !stage.wm_launchable);
+        let amp = find("amp").unwrap();
+        assert!(!amp.menu_visible && !amp.wm_launchable);
+        assert_eq!(find_by_bin("makepad-amp").unwrap().id, "amp");
+        // The commercial repository's apps sit in its checkout inside Makepad.
+        for id in ["scope", "stage", "amp"] {
+            assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
+        }
     }
 
     #[test]
@@ -472,6 +481,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("app-registry-absent-{}", std::process::id()));
         assert!(!has_sources(&find("stage").unwrap().target(), &root));
         assert!(!has_sources(&find("scope").unwrap().target(), &root));
+        assert!(!has_sources(&find("amp").unwrap().target(), &root));
     }
 
     #[test]

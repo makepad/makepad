@@ -41,6 +41,8 @@ struct Runtime {
     permit: Option<crate::runner::Permit>,
     warning: String,
     manifest: Option<(String, PathBuf)>,
+    /// A slice tile's app license and roots (`slice:<app>`).
+    slice: Option<crate::smoke::Slice>,
     /// Preflight (`ci --preflight`): a developer's checkout before a push.
     /// Only the cheap parts run for real, the other-platform checks of these
     /// packages and the host builds of what a script launches; the rest
@@ -1247,6 +1249,7 @@ fn execute_with(
             permit,
             warning: String::new(),
             manifest,
+            slice: script.slice.clone(),
             preflight,
             worked: false,
         },
@@ -1335,6 +1338,7 @@ mod tests {
             ("ci.splash".into(), 3),
             ("apps/wm/ci.splash".into(), 6),
             ("tools/ci/default.ci.splash".into(), 2),
+            (crate::smoke::SLICE_SCRIPT.into(), 3),
         ];
         let mut apps: Vec<_> = fs::read_dir(root.join("apps"))
             .unwrap()
@@ -1371,6 +1375,8 @@ mod tests {
                     manifest: PathBuf::new(),
                     name: "test".into(),
                 }),
+                slice: (path == crate::smoke::SLICE_SCRIPT)
+                    .then(|| crate::smoke::Slice { app: "amp".into(), roots: vec!["makepad-amp".into()] }),
             };
             let mut run = run;
             run.app_targets = Arc::new(script.target.iter().cloned().collect());
