@@ -7,8 +7,13 @@
 
 use crate::calibration::{CalibrationNote, CALIBRATION_PARTIALS};
 use crate::hammer::Hammer;
-use crate::keys::{velocity_to_speed, KeyDesign, PH_MODES};
-use crate::modal::{run_modes, run_modes_c, KernelPath, MAX_CHUNK};
+use crate::keys::{velocity_to_speed, KeyDesign, PH_MODES, PH_PARENTS};
+
+/// Row stride of the parent-slope scratch: parents plus a zero tail wide
+/// enough for the 4-wide read at m + 5 from the last parent.
+const PH_Q_STRIDE: usize = PH_PARENTS + PH_MODES;
+use crate::modal::{run_modes_c, KernelPath, MAX_CHUNK};
+use crate::simd::{fma_v4, hsum_v4, load_v4, mul_v4, splat_v4, store_v4, sub_v4, zero_v4};
 use crate::params::Voicing;
 
 /// Deterministic per-voice noise burst (hammer-action thump, damper felt
@@ -194,8 +199,6 @@ pub struct Voice {
     /// Damper engagement currently baked into the effective rotations
     /// (0 = damper off the string, 1 = fully seated).
     pub eng: f32,
-    /// Bath-loading radius factor currently baked in (1.0 = none).
-    pub extra_r: f32,
     pub zr: Vec<f32>,
     pub zi: Vec<f32>,
     pub eff_cr: Vec<f32>,
@@ -222,26 +225,24 @@ pub struct Voice {
     pub thump: NoiseBurst,
     pub click: NoiseBurst,
     pub damper_noise: NoiseBurst,
-    /// Longitudinal/phantom bank state (see keys.rs): a small resonator
-    /// bank at the string's longitudinal mode frequencies, driven by the
-    /// high-passed SQUARE of this voice's bridge force — the tension-
-    /// modulation mechanism that generates phantom partials at sums and
-    /// differences of the transverse partials.
+    /// Longitudinal/phantom bank state (see keys.rs): the string's
+    /// longitudinal modes, each driven by its own sum of transverse modal
+    /// products.
     ph_zr: [f32; PH_MODES],
     ph_zi: [f32; PH_MODES],
-    ph_lp: f32,
-    /// previous drive sample for the slope-weighting differentiator
-    ph_x1: f32,
-    /// pre-filter chain for the un-differentiated factor of the drive
-    ph_pre1b: f32,
-    ph_pre2b: f32,
-    /// two-pole band-limit on the drive BEFORE squaring: squaring doubles
-    /// bandwidth, so anything above fs/4 in the drive folds. The phantom
-    /// parents are partials below ~4 kHz; content above contributes only
-    /// aliases. Corner ~5.2 kHz.
-    ph_pre1: f32,
-    ph_pre2: f32,
-    ph_buf: [f32; MAX_CHUNK],
+    /// Own copy of the parent partials' vertical modal states: advanced by
+    /// the same recursion as the kernel but never re-synchronised from it,
+    /// so the products do not depend on where chunk boundaries fall (the
+    /// kernels round differently per backend; a per-chunk resync made the
+    /// output differ in the last bit between host block sizes).
+    ph_mr: [f32; PH_PARENTS],
+    ph_mi: [f32; PH_PARENTS],
+    /// per-sample slope amplitudes of the parent partials this chunk,
+    /// sample-major with a zero tail (the product sums read past the last
+    /// parent in 4-wide steps)
+    ph_q: [[f32; PH_Q_STRIDE]; MAX_CHUNK],
+    /// per-sample drive of each longitudinal mode this chunk
+    ph_d: [[f32; PH_MODES]; MAX_CHUNK],
     pub body_tap: BodyTap,
     knock_lp: f32,
     /// voicing amounts cached at note-on (a strike keeps the voicing it
@@ -266,7 +267,6 @@ impl Voice {
             held: false,
             sost_held: false,
             eng: 1.0,
-            extra_r: 1.0,
             zr: vec![0.0; n],
             zi: vec![0.0; n],
             eff_cr: vec![0.0; n],
@@ -286,13 +286,10 @@ impl Voice {
             damper_noise: NoiseBurst::new(),
             ph_zr: [0.0; PH_MODES],
             ph_zi: [0.0; PH_MODES],
-            ph_lp: 0.0,
-            ph_x1: 0.0,
-            ph_pre1b: 0.0,
-            ph_pre2b: 0.0,
-            ph_pre1: 0.0,
-            ph_pre2: 0.0,
-            ph_buf: [0.0; MAX_CHUNK],
+            ph_mr: [0.0; PH_PARENTS],
+            ph_mi: [0.0; PH_PARENTS],
+            ph_q: [[0.0; PH_Q_STRIDE]; MAX_CHUNK],
+            ph_d: [[0.0; PH_MODES]; MAX_CHUNK],
             body_tap: BodyTap::new(),
             knock_lp: 0.0,
             vc_knock: 1.0,
@@ -308,20 +305,11 @@ impl Voice {
 
     /// Bake damper engagement into the effective rotations. Lerping (cr,ci)
     /// between sustain and damped rotations is exact radius interpolation
-    /// because both share the mode angle. `extra_r` multiplies every mode
-    /// radius on top: the bath-loading loss into open sympathetic strings
-    /// (<= 1.0, so it can only add damping).
+    /// because both share the mode angle.
     pub fn rebuild(&mut self, key: &KeyDesign, eng: f32) {
-        let extra = self.extra_r;
-        self.rebuild_with(key, eng, extra)
-    }
-
-    pub fn rebuild_with(&mut self, key: &KeyDesign, eng: f32, extra_r: f32) {
         self.eng = eng;
-        self.extra_r = extra_r;
-        let x = extra_r.min(1.0);
         for m in 0..self.eff_cr.len() {
-            let k = (1.0 + (key.damp_mul[m] - 1.0) * eng) * x;
+            let k = 1.0 + (key.damp_mul[m] - 1.0) * eng;
             self.eff_cr[m] = key.cr_sus[m] * k;
             self.eff_ci[m] = key.ci_sus[m] * k;
         }
@@ -517,6 +505,34 @@ impl Voice {
         // Raw instruments read the original table directly, preserving exact
         // identity and the existing diagnostic shaping path.
         let gin = if self.calibration.is_some() { &self.eff_gin } else { &key.gin };
+        let phantoms = key.ph_gain != 0.0 && self.vc_phantoms != 0.0;
+        if phantoms {
+            // Per-sample vertical modal states of the parent partials (the
+            // voice's own copy, see ph_mr), scaled to slope amplitude; four
+            // parents per lane group like the kernels (a scalar recursion
+            // per parent is latency-bound and cost more than the products).
+            // Lanes past ph_parents carry zero slope weight.
+            let g = self.osc_gain[0];
+            let mut m = 0;
+            while m < key.ph_parents {
+                let crv = load_v4(&self.eff_cr[m..]);
+                let civ = load_v4(&self.eff_ci[m..]);
+                let ginv = mul_v4(load_v4(&gin[m..]), splat_v4(g));
+                let wv = mul_v4(load_v4(&key.ph_slope[m..]), splat_v4(key.ph_drive));
+                let mut zr = load_v4(&self.ph_mr[m..]);
+                let mut zi = load_v4(&self.ph_mi[m..]);
+                for k in 0..n {
+                    let f = splat_v4(self.force[k]);
+                    let t = fma_v4(ginv, f, sub_v4(mul_v4(crv, zr), mul_v4(civ, zi)));
+                    zi = fma_v4(civ, zr, mul_v4(crv, zi));
+                    zr = t;
+                    store_v4(&mut self.ph_q[k][m..], mul_v4(wv, zi));
+                }
+                store_v4(&mut self.ph_mr[m..], zr);
+                store_v4(&mut self.ph_mi[m..], zi);
+                m += 4;
+            }
+        }
         for osc in 0..key.n_osc {
             let a = osc * mp;
             let b = a + mp;
@@ -534,51 +550,57 @@ impl Voice {
                 &mut self.acc[..n],
             );
         }
-        if key.ph_gain != 0.0 && self.vc_phantoms != 0.0 {
-            // squared bridge force, high-passed: the tension-modulation
-            // drive. Feedforward only (drive is read before phantoms are
-            // added), so no loop exists anywhere.
+        if phantoms {
+            // Longitudinal mode j is driven by the j-th spatial component
+            // of d/dx (y_x)^2: j * (sum_m s_m s_(m+j) + 1/2 sum_(m+n=j) s_m s_n)
+            // with s_m the slope amplitude of partial m (keys.rs), i.e. by
+            // the products at f_m + f_(m+j) and f_(m+j) - f_m — the phantom
+            // series, resonantly amplified near j times the longitudinal
+            // fundamental. Feedforward only: no loop exists anywhere.
+            let np = key.ph_parents;
             for k in 0..n {
-                let s = self.acc[k] * key.ph_drive;
-                // Tension-modulation drive as a PRODUCT of two weighted
-                // sums (Bank & Sujbert's common-drive form), not one
-                // squared signal: one factor is slope-weighted via d/dt
-                // (partial n gains ~f_n, restoring the published n.m
-                // product weighting on one side), the other keeps the
-                // plain sine-onset bus. The product therefore starts at
-                // ZERO at the strike — squaring the differentiated bus
-                // alone put its cosine-onset jump through the quadratic
-                // and sprayed 3-9 kHz into the first 30 ms, where the
-                // real bass onsets measure -26..-37 dB (the phantom bed
-                // belongs to the note BODY: it builds and decays with
-                // the parents).
-                let d = (s - self.ph_x1) * key.ph_diff_c;
-                self.ph_x1 = s;
-                self.ph_pre1 += key.ph_pre_c * (d - self.ph_pre1);
-                self.ph_pre2 += key.ph_pre_c * (self.ph_pre1 - self.ph_pre2);
-                self.ph_pre1b += key.ph_pre_c * (s - self.ph_pre1b);
-                self.ph_pre2b += key.ph_pre_c * (self.ph_pre1b - self.ph_pre2b);
-                let sq = self.ph_pre2 * self.ph_pre2b;
-                self.ph_lp += key.ph_hp_c * (sq - self.ph_lp);
-                self.ph_buf[k] = sq - self.ph_lp;
-            }
-            run_modes(
-                path,
-                &mut self.ph_zr,
-                &mut self.ph_zi,
-                &key.ph_cr,
-                &key.ph_ci,
-                &key.ph_gin,
-                &key.ph_gout,
-                &self.ph_buf[..n],
-                key.ph_gain * self.vc_phantoms,
-                &mut self.acc[..n],
-            );
-            if key.ph_direct != 0.0 {
-                for k in 0..n {
-                    self.acc[k] += key.ph_direct * self.ph_buf[k];
+                let q = &self.ph_q[k];
+                // difference pairs, all eight modes at once: parent m
+                // meets parents m+1..m+8 (the zero tail covers the end)
+                let (mut lo, mut hi) = (zero_v4(), zero_v4());
+                for m in 0..np {
+                    let qm = splat_v4(q[m]);
+                    lo = fma_v4(qm, load_v4(&q[m + 1..]), lo);
+                    hi = fma_v4(qm, load_v4(&q[m + 5..]), hi);
+                }
+                let d = &mut self.ph_d[k];
+                store_v4(&mut d[..4], lo);
+                store_v4(&mut d[4..], hi);
+                // sum pairs: m + n = j (1-based), each unordered pair once
+                for j in 2..=PH_MODES {
+                    for m in 1..=j / 2 {
+                        let pair = q[m - 1] * q[j - m - 1];
+                        d[j - 1] += if 2 * m == j { 0.5 * pair } else { pair };
+                    }
                 }
             }
+            // the eight longitudinal resonators, two lane groups
+            let out = splat_v4(key.ph_gain * self.vc_phantoms);
+            let (cr_a, cr_b) = (load_v4(&key.ph_cr[..4]), load_v4(&key.ph_cr[4..]));
+            let (ci_a, ci_b) = (load_v4(&key.ph_ci[..4]), load_v4(&key.ph_ci[4..]));
+            let (gi_a, gi_b) = (load_v4(&key.ph_gin[..4]), load_v4(&key.ph_gin[4..]));
+            let (go_a, go_b) = (mul_v4(load_v4(&key.ph_gout[..4]), out), mul_v4(load_v4(&key.ph_gout[4..]), out));
+            let (mut zr_a, mut zr_b) = (load_v4(&self.ph_zr[..4]), load_v4(&self.ph_zr[4..]));
+            let (mut zi_a, mut zi_b) = (load_v4(&self.ph_zi[..4]), load_v4(&self.ph_zi[4..]));
+            for k in 0..n {
+                let d = &self.ph_d[k];
+                let t_a = fma_v4(gi_a, load_v4(&d[..4]), sub_v4(mul_v4(cr_a, zr_a), mul_v4(ci_a, zi_a)));
+                let t_b = fma_v4(gi_b, load_v4(&d[4..]), sub_v4(mul_v4(cr_b, zr_b), mul_v4(ci_b, zi_b)));
+                zi_a = fma_v4(ci_a, zr_a, mul_v4(cr_a, zi_a));
+                zi_b = fma_v4(ci_b, zr_b, mul_v4(cr_b, zi_b));
+                zr_a = t_a;
+                zr_b = t_b;
+                self.acc[k] += hsum_v4(fma_v4(go_b, zi_b, mul_v4(go_a, zi_a)));
+            }
+            store_v4(&mut self.ph_zr[..4], zr_a);
+            store_v4(&mut self.ph_zr[4..], zr_b);
+            store_v4(&mut self.ph_zi[..4], zi_a);
+            store_v4(&mut self.ph_zi[4..], zi_b);
         }
         self.thump.render_add(&mut self.case_buf, n);
         self.click.render_add(&mut self.case_buf, n);
@@ -591,12 +613,8 @@ impl Voice {
         self.zi.fill(0.0);
         self.ph_zr.fill(0.0);
         self.ph_zi.fill(0.0);
-        self.ph_lp = 0.0;
-        self.ph_x1 = 0.0;
-        self.ph_pre1 = 0.0;
-        self.ph_pre2 = 0.0;
-        self.ph_pre1b = 0.0;
-        self.ph_pre2b = 0.0;
+        self.ph_mr.fill(0.0);
+        self.ph_mi.fill(0.0);
         self.knock_lp = 0.0;
         self.power = 0.0;
         self.quiet_ticks = 0;
@@ -648,7 +666,7 @@ mod calibration_tests {
     #[test]
     fn every_a0_mode_receives_its_own_excitation_and_decay_correction() {
         let raw = build_key(21, 48000.0, &DesignParams::default());
-        assert_eq!(raw.modes_per_osc, CALIBRATION_PARTIALS);
+        assert!(raw.modes_per_osc > 200 && raw.modes_per_osc <= CALIBRATION_PARTIALS);
         let mut calibration = note(21);
         for m in 0..CALIBRATION_PARTIALS {
             for v in 0..3 {

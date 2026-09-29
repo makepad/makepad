@@ -56,7 +56,9 @@ pub fn radiativity(f: f64, p: &DesignParams) -> f64 {
     // params::rad_hp1): the real bottom octave speaks through its partial
     // cluster, not its fundamental
     let hp1 = f * f / (f * f + p.rad_hp1 * p.rad_hp1);
-    let hp2 = f / (f + p.rad_hp2);
+    // first-order (a realisable magnitude: RadFilter runs exactly this
+    // term on the direct paths)
+    let hp2 = f / (f * f + p.rad_hp2 * p.rad_hp2).sqrt();
     let x = (f / p.rad_lp) * (f / p.rad_lp);
     let lp = (1.0 / (1.0 + x)).powf(0.5 * p.rad_lp_pow);
     // Low-mid body emphasis: the board's main resonances sit in the
@@ -148,6 +150,128 @@ pub fn bridge_admittance_c(f: f64, p: &DesignParams) -> (f64, f64) {
     (re / norm, im / norm)
 }
 
+/// One-pole high-pass, |H| ~ f / sqrt(f^2 + fc^2).
+#[derive(Clone, Copy)]
+struct Hp1 {
+    a: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl Hp1 {
+    fn new(fc: f64, fs: f64) -> Self {
+        Self { a: (-core::f64::consts::TAU * fc / fs).exp() as f32, x1: 0.0, y1: 0.0 }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.a * (self.y1 + x - self.x1);
+        self.x1 = x;
+        self.y1 = y;
+        y
+    }
+}
+
+/// RBJ peaking biquad, transposed direct form II.
+#[derive(Clone, Copy)]
+struct Peak {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    s1: f32,
+    s2: f32,
+}
+
+impl Peak {
+    fn new(fc: f64, gain_db: f64, q: f64, fs: f64) -> Self {
+        let a = 10f64.powf(gain_db / 40.0);
+        let w = core::f64::consts::TAU * fc / fs;
+        let alpha = w.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        Self {
+            b0: ((1.0 + alpha * a) / a0) as f32,
+            b1: (-2.0 * w.cos() / a0) as f32,
+            b2: ((1.0 - alpha * a) / a0) as f32,
+            a1: (-2.0 * w.cos() / a0) as f32,
+            a2: ((1.0 - alpha / a) / a0) as f32,
+            s1: 0.0,
+            s2: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.s1;
+        self.s1 = self.b1 * x - self.a1 * y + self.s2;
+        self.s2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+/// The radiativity curve R(f) as a running filter, for the instant
+/// (non-modal) radiation paths: the board's direct velocity coupling and
+/// the panned direct string path. Both used to run their own shape (a
+/// differentiator flattened at ~150 Hz): -15 dB at A0's fundamental where
+/// R(f) itself is -27.5, and without the 100-250 Hz body emphasis — so the
+/// two loudest paths spoke a different, fundamental-heavy bottom octave
+/// from the one the board and the key voicing assume. Now every path
+/// radiates one curve: the two low knees as realised first-order sections
+/// (hp1 twice, hp2 once), the body emphasis as a minimum-phase peaking
+/// section (a parallel band-pass sum notched out near its corner), and the
+/// same top corner the paths always had. Plateau gain ~1, so the path gains
+/// stay plateau gains. Matches radiativity() within ~1 dB from 20 Hz to
+/// 2 kHz (test: direct_filter_follows_radiativity).
+#[derive(Clone, Copy)]
+pub(crate) struct RadFilter {
+    hp: [Hp1; 3],
+    body: Peak,
+    top_c: f32,
+    top: f32,
+}
+
+impl RadFilter {
+    pub(crate) fn new(sample_rate: f64, p: &DesignParams) -> Self {
+        // peak of radiativity's body term (it sits at ~0.75 rad_body_hz),
+        // placed as a Q 0.68 peak at 0.64 rad_body_hz: fitted to the
+        // term's shape, max error 0.6 dB at the defaults
+        let peak = (1..400)
+            .map(|i| {
+                let f = i as f64 * p.rad_body_hz / 200.0;
+                let b = f / p.rad_body_hz;
+                1.0 + p.rad_body * (1.0 / (1.0 + b * b * b * b)) * (f * f / (f * f + 85.0 * 85.0))
+            })
+            .fold(1.0, f64::max);
+        Self {
+            hp: [Hp1::new(p.rad_hp1, sample_rate), Hp1::new(p.rad_hp1, sample_rate), Hp1::new(p.rad_hp2, sample_rate)],
+            body: Peak::new(0.64 * p.rad_body_hz, 1.06 * 20.0 * peak.log10(), 0.68, sample_rate),
+            top_c: (1.0 - (-core::f64::consts::TAU * p.rad_lp / sample_rate).exp()) as f32,
+            top: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn process(&mut self, x: f32) -> f32 {
+        let y = self.body.process(x);
+        let y = self.hp[0].process(y);
+        let y = self.hp[1].process(y);
+        let y = self.hp[2].process(y);
+        self.top += self.top_c * (y - self.top);
+        self.top
+    }
+
+    pub(crate) fn reset(&mut self) {
+        for h in &mut self.hp {
+            h.x1 = 0.0;
+            h.y1 = 0.0;
+        }
+        self.body.s1 = 0.0;
+        self.body.s2 = 0.0;
+        self.top = 0.0;
+    }
+}
+
 pub struct Soundboard {
     // Region banks concatenated: region r occupies [r*n .. (r+1)*n).
     zr: Vec<f32>,
@@ -161,15 +285,9 @@ pub struct Soundboard {
     n_padded: usize,
     /// Direct radiation plateau gain (velocity coupling), per region.
     pub direct: f32,
-    /// Diagnostic scale on the direct path (1.0 in normal use).
-    pub dbg_direct: f32,
-    dx1: [f32; BOARD_REGIONS],
-    dlp: [f32; BOARD_REGIONS],
-    dlp2: [f32; BOARD_REGIONS],
-    dir_pl: [f32; BOARD_REGIONS],
-    dir_pr: [f32; BOARD_REGIONS],
-    dc_lp: f32,
-    dc_lp2: f32,
+    /// Per-region pan of the direct radiation (the region's azimuth).
+    pub dir_pl: [f32; BOARD_REGIONS],
+    pub dir_pr: [f32; BOARD_REGIONS],
 }
 
 fn hash01(mut x: u32) -> f32 {
@@ -269,20 +387,18 @@ impl Soundboard {
             gout_ri,
             gout_rr,
             n_padded: n,
-            // Plateau-normalised velocity coupling (see RadTilt in lib.rs).
-            direct: (p.board_direct * sample_rate / (core::f64::consts::TAU * p.rad_vel_hz)) as f32,
-            dbg_direct: 1.0,
-            dx1: [0.0; BOARD_REGIONS],
-            dlp: [0.0; BOARD_REGIONS],
-            dlp2: [0.0; BOARD_REGIONS],
+            // plateau gain of the direct path (RadFilter is plateau-normalised)
+            direct: p.board_direct as f32,
             dir_pl,
             dir_pr,
-            dc_lp: (1.0 - (-core::f64::consts::TAU * p.rad_vel_hz / sample_rate).exp()) as f32,
-            dc_lp2: (1.0 - (-core::f64::consts::TAU * p.rad_lp / sample_rate).exp()) as f32,
         }
     }
 
-    /// Accumulates board response to the per-region bridge-force inputs.
+    /// Accumulates the modal board response to the per-region bridge-force
+    /// inputs. The board's direct (non-modal) radiation is panned per region
+    /// with dir_pl/dir_pr and filtered together with the direct string path
+    /// in lib.rs: both run the same R(f), so one filter per channel serves
+    /// every instant path.
     pub fn render(
         &mut self,
         path: KernelPath,
@@ -311,27 +427,44 @@ impl Soundboard {
                 l,
                 r,
             );
-            // per-region velocity-coupled direct radiation, panned by the
-            // region's azimuth: differentiate, flatten at the bottom of the
-            // plateau, roll off above the top corner
-            for k in 0..n {
-                let x = inputs[reg][k];
-                let diff = x - self.dx1[reg];
-                self.dx1[reg] = x;
-                self.dlp[reg] += self.dc_lp * (diff - self.dlp[reg]);
-                self.dlp2[reg] += self.dc_lp2 * (self.dlp[reg] - self.dlp2[reg]);
-                let d = self.dbg_direct * self.direct * self.dlp2[reg];
-                l[k] += self.dir_pl[reg] * d;
-                r[k] += self.dir_pr[reg] * d;
-            }
         }
     }
 
     pub fn reset(&mut self) {
         self.zr.fill(0.0);
         self.zi.fill(0.0);
-        self.dx1 = [0.0; BOARD_REGIONS];
-        self.dlp = [0.0; BOARD_REGIONS];
-        self.dlp2 = [0.0; BOARD_REGIONS];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Steady-state sine gain of the direct-path filter.
+    fn gain(f: f64, fs: f64, p: &DesignParams) -> f64 {
+        let mut filt = RadFilter::new(fs, p);
+        let n = (fs * 1.5) as usize;
+        let (mut acc_y, mut acc_x) = (0.0, 0.0);
+        for i in 0..n {
+            let x = (core::f64::consts::TAU * f * i as f64 / fs).sin();
+            let y = filt.process(x as f32) as f64;
+            if i > n / 2 {
+                acc_y += y * y;
+                acc_x += x * x;
+            }
+        }
+        (acc_y / acc_x).sqrt()
+    }
+
+    #[test]
+    fn direct_filter_follows_radiativity() {
+        let p = DesignParams::default();
+        for fs in [44100.0, 48000.0, 96000.0] {
+            for f in [20.0, 27.5, 41.0, 55.0, 82.0, 110.0, 165.0, 220.0, 330.0, 500.0, 1000.0, 2000.0] {
+                let want = 20.0 * radiativity(f, &p).log10();
+                let got = 20.0 * gain(f, fs, &p).log10();
+                assert!((got - want).abs() < 1.0, "fs {fs} f {f}: filter {got:.2} dB vs R(f) {want:.2} dB");
+            }
+        }
     }
 }

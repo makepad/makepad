@@ -1,14 +1,14 @@
-//! Native-recording measurements and targeted default-model promotion gates.
-//! Regenerate the reference-only TSV with tools/acoustic.py; no new dependencies.
-//! The promotion contract targets missing bass body, early partial balance,
-//! register loudness and treble brightness, while protecting C3 attack and touch.
-//! It does not gate late high-register subfundamental/noise bands or divide by
-//! small raw errors. These numerical regressions are neither full reference
-//! matching nor perceptual proof; the old all-metrics test remains diagnostic.
+//! Native-recording measurements and ABSOLUTE default-model gates: the
+//! stock instrument (Piano::new, dry) must sit within fixed tolerances of the
+//! Salamander recordings' own metrics — not merely closer than the raw model.
+//! Gates that only asked the calibrated model to beat the uncalibrated one
+//! passed while the bottom octave still decayed like a plucked bass (2-8 kHz
+//! falling 13 dB/s faster than the recordings, late 2-8 kHz share 11 dB
+//! low). Regenerate the reference-only TSV with tools/acoustic.py.
 mod common;
 
 use common::{ev, fft, render, FS};
-use makepad_piano_model::{calibration_data::DEFAULT_CALIBRATION, Piano, PianoEvent};
+use makepad_piano_model::{Piano, PianoEvent};
 use std::sync::OnceLock;
 
 const FIXTURE: &str = include_str!("data/salamander_v3.tsv");
@@ -146,144 +146,118 @@ fn measure(l: &[f32], r: &[f32], note: u8) -> Measurement {
     Measurement { rms: mean_square.sqrt(), metrics }
 }
 
-struct PromotionRow {
-    reference: Reference,
-    model: Measurement,
-    raw: Measurement,
-}
-
-fn promotion_rows() -> &'static [PromotionRow] {
-    // Fail every promotion gate explicitly until a real default is installed.
-    assert!(!DEFAULT_CALIBRATION.is_empty(),
-        "DEFAULT_CALIBRATION is empty; Piano::new cannot be promoted as an unchanged raw model");
-    static ROWS: OnceLock<Vec<PromotionRow>> = OnceLock::new();
+/// Dry stock measurements for every fixture row, rendered once (fresh
+/// instrument per note/velocity), with the register metric against the
+/// model's own C4 at the same velocity.
+fn stock_rows() -> &'static [(Reference, Measurement)] {
+    static ROWS: OnceLock<Vec<(Reference, Measurement)>> = OnceLock::new();
     ROWS.get_or_init(|| {
-        let mut rows = fixture().0.into_iter().filter(|r| {
-            [21, 24, 30, 36, 48, 60, 84].contains(&r.note)
-                || ([69, 72].contains(&r.note) && r.velocity == 112)
-        }).map(|reference| {
-            // Fresh state for EACH constructor/note/velocity, with identical
-            // dry 48 kHz settings. Share only the resulting stereo measurements.
-            let dry_measure = |mut piano: Piano| {
-                piano.set_reverb_mix(0.0);
-                piano.set_early_reflection_level(0.0);
-                piano.set_soft_clip(false);
-                let event = ev(0.0, PianoEvent::NoteOn { key: reference.note, velocity: reference.velocity });
-                // measure() reads at most 2.0 s after onset (RMS 0.0..2.0 and the
-                // late window 1.0..2.0) and onset() only searches the first 0.5 s,
-                // so 2.5 s includes every sample the previous 4.0 s render fed
-                // into a metric: 2.0 + 0.5 = 2.5.
-                let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
-                measure(&l, &r, reference.note)
-            };
-            let model = dry_measure(Piano::new(FS));
-            let raw = dry_measure(Piano::new_uncalibrated(FS));
-            PromotionRow { reference, model, raw }
+        let mut rows = fixture().0.into_iter().map(|reference| {
+            let mut piano = Piano::new(FS);
+            piano.set_reverb_mix(0.0);
+            piano.set_early_reflection_level(0.0);
+            piano.set_soft_clip(false);
+            let event = ev(0.0, PianoEvent::NoteOn { key: reference.note, velocity: reference.velocity });
+            // measure() reads at most 2.0 s after an onset found in the
+            // first 0.5 s
+            let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
+            let m = measure(&l, &r, reference.note);
+            (reference, m)
         }).collect::<Vec<_>>();
-        assert_eq!(rows.len(), 23);
         for i in 0..rows.len() {
-            let c4 = rows.iter().position(|r| r.reference.note == 60
-                && r.reference.velocity == rows[i].reference.velocity).unwrap();
-            rows[i].model.metrics[6] = 20.0 * (rows[i].model.rms / rows[c4].model.rms).log10();
-            rows[i].raw.metrics[6] = 20.0 * (rows[i].raw.rms / rows[c4].raw.rms).log10();
+            let c4 = rows.iter().position(|r| r.0.note == 60 && r.0.velocity == rows[i].0.velocity).unwrap();
+            rows[i].1.metrics[6] = 20.0 * (rows[i].1.rms / rows[c4].1.rms).log10();
         }
         rows
     })
 }
 
-fn promotion_row(note: u8, velocity: u8) -> &'static PromotionRow {
-    promotion_rows().iter().find(|r| r.reference.note == note && r.reference.velocity == velocity)
-        .unwrap_or_else(|| panic!("missing promotion measurement: MIDI {note} v{velocity}"))
+fn stock_row(note: u8, velocity: u8) -> &'static (Reference, Measurement) {
+    stock_rows().iter().find(|r| r.0.note == note && r.0.velocity == velocity)
+        .unwrap_or_else(|| panic!("missing measurement: MIDI {note} v{velocity}"))
 }
 
-fn promotion_register(notes: &[u8]) -> Vec<&'static PromotionRow> {
-    notes.iter().flat_map(|&note| [28, 68, 112].map(|v| promotion_row(note, v))).collect()
-}
-
-// The optional individual bound is max(absolute floor, raw error + margin).
-// Compare aggregate errors by multiplication, never division by raw error.
+/// Per metric: the mean |model - reference| over `notes` x {28, 68, 112}
+/// must stay within `mean_limit`, and every row within `row_limit`
+/// (None skips the metric).
 #[track_caller]
-fn assert_reference_promotion(metric: usize, rows: &[&PromotionRow], mean_factor: Option<f64>, individual: Option<(f64, f64)>) {
-    assert!(!rows.is_empty());
-    let name = METRICS[metric];
-    let mut report = vec!["metric\tnote\tvelocity\tmodel\treference\traw\tmodel_abs_error\traw_abs_error\tlimit_db\tstatus".to_string()];
-    let (mut model_sum, mut raw_sum) = (0.0, 0.0);
+fn assert_matches_reference(notes: &[u8], mean_limit: [Option<f64>; 11], row_limit: [Option<f64>; 11]) {
+    let rows = notes.iter().flat_map(|&n| [28, 68, 112].map(|v| stock_row(n, v))).collect::<Vec<_>>();
+    let mut report = vec!["metric\tnote\tvelocity\tmodel\treference\tabs_error\trow_limit\tstatus".to_string()];
     let mut passed = true;
-    for row in rows {
-        let (model, reference, raw) = (row.model.metrics[metric], row.reference.metrics[metric], row.raw.metrics[metric]);
-        let (model_error, raw_error) = ((model - reference).abs(), (raw - reference).abs());
-        let limit = individual.map(|(floor, margin)| floor.max(raw_error + margin));
-        let ok = [model, reference, raw, model_error, raw_error].iter().all(|v| v.is_finite())
-            && limit.map_or(true, |limit| model_error <= limit);
+    for (i, name) in METRICS.iter().enumerate() {
+        let Some(mean_lim) = mean_limit[i] else { continue };
+        let mut sum = 0.0;
+        for (reference, model) in &rows {
+            let (m, r) = (model.metrics[i], reference.metrics[i]);
+            let err = (m - r).abs();
+            let ok = err.is_finite() && row_limit[i].map_or(true, |l| err <= l);
+            passed &= ok;
+            sum += err;
+            if !ok {
+                report.push(format!("{name}\t{}\t{}\t{m:.3}\t{r:.3}\t{err:.3}\t{:?}\tFAIL",
+                    reference.note, reference.velocity, row_limit[i]));
+            }
+        }
+        let mean = sum / rows.len() as f64;
+        let ok = mean <= mean_lim;
         passed &= ok;
-        model_sum += model_error;
-        raw_sum += raw_error;
-        report.push(format!("{name}\t{}\t{}\t{model:.6}\t{reference:.6}\t{raw:.6}\t{model_error:.6}\t{raw_error:.6}\t{}\t{}",
-            row.reference.note, row.reference.velocity,
-            limit.map_or_else(|| "-".into(), |v| format!("{v:.6}")), if ok { "ok" } else { "FAIL" }));
+        report.push(format!("{name}: mean abs error {mean:.3} (limit {mean_lim}) {}", if ok { "ok" } else { "FAIL" }));
     }
-    let (model_mean, raw_mean) = (model_sum / rows.len() as f64, raw_sum / rows.len() as f64);
-    let mean_limit = mean_factor.map(|factor| factor * raw_mean);
-    let mean_ok = model_mean.is_finite() && raw_mean.is_finite()
-        && mean_limit.map_or(true, |limit| model_mean <= limit);
-    report.push(format!("{name} mean_abs_error_db (n={}): before(raw)={raw_mean:.6} after(default)={model_mean:.6} {} [{}]",
-        rows.len(), mean_limit.map_or_else(|| "individual bounds only".into(), |v| {
-            format!("limit={v:.6} ({} * raw)", mean_factor.unwrap())
-        }), if mean_ok { "ok" } else { "FAIL" }));
-    assert!(passed && mean_ok, "targeted default-model promotion failed:\n{}", report.join("\n"));
+    println!("{}", report.join("\n"));
+    assert!(passed, "default model outside the native-reference tolerances:\n{}", report.join("\n"));
 }
 
 #[test]
-fn default_promotes_bass_sustained_body() {
-    // Relative late mid-band share measures missing body, not total bass gain.
-    assert_reference_promotion(2, &promotion_register(&[21, 24, 30, 36]), Some(0.65), Some((0.0, 3.0)));
+fn bass_register_matches_native_reference() {
+    // A0..C3, measured 2026-09-29 at (mean / worst row): early 0.5-2 kHz
+    // share 1.8/6.8, early 2-8 kHz 4.0/12.2, late 0.5-2 kHz 1.9/5.6, late
+    // 2-8 kHz 3.4/10.9, fundamental/cluster 3.7/9.1 and 6.3/13.3, register
+    // 1.4/2.9 dB, onset share 0.03/0.09, decays 2.1/8.3, 2.8/8.2 and
+    // 2.3/6.4 dB/s. The instrument before the low-register rework failed
+    // four of these means (early/late 2-8 kHz share 6.4/11.1, 0.5-2 kHz
+    // decay 4.5, 2-8 kHz decay 13.4 dB/s) and the late-share row limits.
+    assert_matches_reference(
+        &[21, 24, 30, 33, 36, 45, 48],
+        [Some(2.5), Some(5.0), Some(2.5), Some(4.5), Some(4.5), Some(7.5), Some(2.0), Some(0.05), Some(3.0), Some(3.5), Some(3.0)],
+        [Some(9.0), Some(15.0), Some(8.0), Some(14.0), Some(12.0), Some(16.0), Some(4.0), Some(0.15), Some(11.0), Some(11.0), Some(9.0)],
+    );
 }
 
 #[test]
-fn default_promotes_bass_early_partial_balance() {
-    assert_reference_promotion(4, &promotion_register(&[21, 24, 30, 36]), Some(0.70), Some((0.0, 3.0)));
-}
-
-#[test]
-fn default_promotes_register_loudness() {
-    // C4 at the SAME velocity is only the anchor, never a counted success.
-    assert_reference_promotion(6, &promotion_register(&[21, 24, 30, 36, 84]), Some(0.65), None);
-}
-
-#[test]
-fn default_promotes_treble_early_brightness() {
-    let rows = [(69, 112), (72, 112), (84, 68), (84, 112)].map(|(n, v)| promotion_row(n, v));
-    assert_reference_promotion(1, &rows, Some(0.70), Some((0.0, 2.0)));
-}
-
-#[test]
-fn default_protects_c3_attack() {
-    // An earlier fit improved aggregate sustain by losing C3's attack.
-    assert_reference_promotion(4, &promotion_register(&[48]), None, Some((8.0, 3.0)));
+fn mid_and_treble_hold_the_native_reference() {
+    // C4, A4, C5, C6, C7: limits are the previous instrument's mean errors
+    // plus ~0.5 dB, so the bass work cannot trade the upper compass away.
+    // The 20-500 Hz decay is skipped: above C5 that band holds no partial.
+    assert_matches_reference(
+        &[60, 69, 72, 84, 96],
+        [Some(5.5), Some(3.0), Some(6.3), Some(8.6), Some(3.9), Some(8.8), Some(1.9), Some(0.07), None, Some(12.0), Some(6.3)],
+        [None; 11],
+    );
 }
 
 #[test]
 fn default_preserves_c4_velocity_dynamics() {
     // The reference WAVs deliberately omit SFZ amp_veltrack=73 during timbre
-    // fitting. Their amplitudes are context only: preserve RAW touch response.
-    let anchor = promotion_row(60, 68);
-    let mut report = vec!["metric\tnote\tvelocity\tmodel\treference\traw\tabs_model_minus_raw\tlimit_db\tstatus".to_string()];
-    let mut passed = true;
-    let mut error_sum = 0.0;
+    // fitting (tools/VOICING.md). Their amplitudes are context only: the
+    // calibrated touch must follow the RAW model's.
+    let anchor = stock_row(60, 68);
+    let raw_level = |velocity| {
+        let mut piano = Piano::new_uncalibrated(FS);
+        piano.set_reverb_mix(0.0);
+        piano.set_early_reflection_level(0.0);
+        piano.set_soft_clip(false);
+        let event = ev(0.0, PianoEvent::NoteOn { key: 60, velocity });
+        let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
+        measure(&l, &r, 60).rms
+    };
+    let raw_anchor = raw_level(68);
     for velocity in [28, 112] {
-        let row = promotion_row(60, velocity);
-        let model = 20.0 * (row.model.rms / anchor.model.rms).log10();
-        let reference = 20.0 * (row.reference.rms / anchor.reference.rms).log10();
-        let raw = 20.0 * (row.raw.rms / anchor.raw.rms).log10();
-        let error = (model - raw).abs();
-        let ok = [model, reference, raw, error].iter().all(|v| v.is_finite()) && error <= 3.0;
-        passed &= ok;
-        error_sum += error;
-        report.push(format!("rms_velocity_vs_68_db\t60\t{velocity}\t{model:.6}\t{reference:.6}\t{raw:.6}\t{error:.6}\t3.000000\t{}",
-            if ok { "ok" } else { "FAIL" }));
+        let model = 20.0 * (stock_row(60, velocity).1.rms / anchor.1.rms).log10();
+        let raw = 20.0 * (raw_level(velocity) / raw_anchor).log10();
+        println!("C4 v{velocity} re v68: default {model:.2} dB, raw {raw:.2} dB");
+        assert!((model - raw).abs() <= 3.0, "C4 v{velocity} touch {model:.2} dB vs raw {raw:.2} dB");
     }
-    report.push(format!("mean_abs_error_vs_raw_db (n=2): before(raw)=0.000000 after(default)={:.6}; each must be <=3 dB", error_sum / 2.0));
-    assert!(passed, "targeted default-model touch protection failed:\n{}", report.join("\n"));
 }
 
 #[test]
@@ -340,29 +314,79 @@ fn onset_and_decay_have_the_documented_units() {
 }
 
 #[test]
-#[ignore = "requires calibrated model; run explicitly during voicing; provisional tolerances are not final acceptance"]
+#[ignore = "diagnostic: every row within the provisional per-row limits is not yet met"]
 fn stock_matches_native_acoustic_reference() {
-    let (rows, limits) = fixture();
-    let mut model = rows.iter().map(|row| {
-        let mut piano = Piano::new(FS);
-        let event = ev(0.0, PianoEvent::NoteOn { key: row.note, velocity: row.velocity });
-        let (l, r) = render(&mut piano, &[event], (4.0 * FS) as usize, 256);
-        measure(&l, &r, row.note)
-    }).collect::<Vec<_>>();
-    for (i, row) in rows.iter().enumerate() {
-        let c4 = rows.iter().position(|r| r.note == 60 && r.velocity == row.velocity).unwrap();
-        model[i].metrics[6] = 20.0 * (model[i].rms / model[c4].rms).log10();
-    }
+    let (_, limits) = fixture();
     let mut failures = Vec::new();
-    for (row, measured) in rows.iter().zip(&model) {
+    for (reference, measured) in stock_rows() {
         for (i, &name) in METRICS.iter().enumerate() {
-            let delta = measured.metrics[i] - row.metrics[i];
+            let delta = measured.metrics[i] - reference.metrics[i];
             if !delta.is_finite() || delta.abs() > limits[i] {
                 failures.push(format!("MIDI {} v{} {name}: model={:.6} reference={:.6} delta={delta:+.6} limit={:.6}",
-                    row.note, row.velocity, measured.metrics[i], row.metrics[i], limits[i]));
+                    reference.note, reference.velocity, measured.metrics[i], reference.metrics[i], limits[i]));
             }
         }
     }
     assert!(failures.is_empty(), "{} deviations from native recordings (provisional, NOT final acceptance):\n{}",
         failures.len(), failures.join("\n"));
+}
+
+const AFTERSOUND: &str = include_str!("data/salamander_bass_aftersound.tsv");
+
+/// Median late (1.5-3.5 s) decay, dB/s, of partials `lo..=hi`, measured
+/// the way tools produced the fixture: 0.2 s Hann band power around f_n.
+fn late_group_slope(l: &[f32], r: &[f32], f0: f64, b: f64, lo: usize, hi: usize) -> f64 {
+    let times = (0..41).map(|i| 1.5 + 0.05 * i as f64).collect::<Vec<_>>();
+    let spectra = times.iter().map(|&t| spectrum(section(l, t, t + 0.2), section(r, t, t + 0.2))).collect::<Vec<_>>();
+    let mut slopes = (lo..=hi).map(|n| {
+        let n = n as f64;
+        let f = n * f0 * (1.0 + b * n * n).sqrt();
+        let half = (0.3 * f0).min(12.0);
+        let db = spectra.iter().map(|s| 10.0 * band(s, f - half, f + half).max(1e-30).log10()).collect::<Vec<_>>();
+        -common::linreg_slope(&times, &db).unwrap()
+    }).collect::<Vec<_>>();
+    slopes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let m = slopes.len();
+    if m % 2 == 1 { slopes[m / 2] } else { 0.5 * (slopes[m / 2 - 1] + slopes[m / 2]) }
+}
+
+#[test]
+fn bass_aftersound_and_scale_match_native_reference() {
+    // The plucked-bass signature was a missing double decay: the old model's
+    // bottom octaves decayed at 4-10 dB/s straight through where the
+    // recordings settle onto a 1-5 dB/s aftersound (mean errors 2.8 and
+    // 3.1 dB/s over these rows; now 2.0 and 1.7), on a nearly harmonic
+    // scale (A0 B 2.4e-5 against the recording's 2.2e-4).
+    assert!(AFTERSOUND.starts_with("# salamander-bass-aftersound-v1\n"));
+    assert!(AFTERSOUND.contains("Alexander Holm") && AFTERSOUND.contains("CC BY 3.0"));
+    let rows = AFTERSOUND.lines().filter(|l| !l.starts_with('#')).skip(1).map(|line| {
+        let f = line.split('\t').collect::<Vec<_>>();
+        (f[0].parse::<u8>().unwrap(), f[2].parse::<f64>().unwrap(), f[3].parse::<f64>().unwrap(), f[4].parse::<f64>().unwrap())
+    }).collect::<Vec<_>>();
+    assert_eq!(rows.len(), 10);
+    let (mut e_low, mut e_mid) = (0.0, 0.0);
+    let mut report = Vec::new();
+    for &(note, ref_low, ref_mid, ref_b) in &rows {
+        let mut piano = Piano::new(FS);
+        piano.set_reverb_mix(0.0);
+        piano.set_early_reflection_level(0.0);
+        piano.set_soft_clip(false);
+        let info = piano.key_info(note).unwrap();
+        assert!((info.b_coeff as f64 / ref_b - 1.0).abs() < 0.12,
+            "MIDI {note}: B {:.3e} vs the recording's {ref_b:.3e}", info.b_coeff);
+        let event = ev(0.0, PianoEvent::NoteOn { key: note, velocity: 68 });
+        let (l, r) = render(&mut piano, &[event], (3.8 * FS as f64) as usize, 256);
+        let offset = onset(&l, &r);
+        let (l, r) = (&l[offset..], &r[offset..]);
+        let (f0, b) = (info.f0 as f64, info.b_coeff as f64);
+        let low = late_group_slope(l, r, f0, b, 2, 6);
+        let mid = late_group_slope(l, r, f0, b, 7, 20);
+        e_low += (low - ref_low).abs();
+        e_mid += (mid - ref_mid).abs();
+        report.push(format!("MIDI {note}: partials 2-6 {low:+.2} dB/s (ref {ref_low:+.2}), 7-20 {mid:+.2} (ref {ref_mid:+.2})"));
+    }
+    let (e_low, e_mid) = (e_low / rows.len() as f64, e_mid / rows.len() as f64);
+    println!("{}\nmean abs error: 2-6 {e_low:.2} dB/s, 7-20 {e_mid:.2} dB/s", report.join("\n"));
+    assert!(e_low <= 2.5 && e_mid <= 2.3,
+        "bass aftersound off the recordings (2-6: {e_low:.2}, 7-20: {e_mid:.2} dB/s):\n{}", report.join("\n"));
 }

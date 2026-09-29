@@ -15,13 +15,23 @@ dB; decay corrections interpolate in log space. The table changes string
 excitation and decay while retaining the hammer, soundboard, pedals and room.
 `Piano::new_uncalibrated` preserves the raw instrument for comparisons.
 
-The fit improves bass sustained body, early partial balance, register loudness
-and selected treble brightness measurements against Salamander Grand Piano V3
-(Alexander Holm, CC BY 3.0). Six active tests in `acoustic_reference.rs` protect
-those improvements, C3 attack and C4 velocity dynamics. `sound.rs` additionally
-checks C7's early second-partial balance against the native recording while
-keeping the old FluidR3 bounds as an explicit raw-model regression. These
-targeted checks do not imply that every note matches the recorded piano.
+`acoustic_reference.rs` gates the stock instrument ABSOLUTELY against the
+Salamander Grand Piano V3 metrics (Alexander Holm, CC BY 3.0) in
+`tests/data/salamander_v3.tsv`: per-metric mean and per-row error limits over
+A0..C3, the previous instrument's mean errors (plus ~0.5 dB) over C4..C7, and
+C4's touch against the raw model. (The older gates asked only that the
+calibrated model beat the raw one; they passed while the bottom octave still
+decayed like a plucked bass.) `sound.rs` additionally checks C7's early
+second-partial balance against the native recording.
+
+The 2026-09-29 table (keys 21..72; 75..108 keep the earlier fit) was made
+with five `fit_voicing.py` passes from raw renders, then
+`preserve_touch.py` (three rounds) so each key's level against velocity
+follows the raw model's touch. `examples/low_register.rs` renders dry
+low-register sets (held, released, pedalled; design and voicing overrides on
+the calibrated instrument) and a listening passage. The corpus is read from
+a directory outside the repository (`--corpus` / `PIANO_REFERENCE_DIR` in
+analysis scripts); nothing in the tests needs it.
 
 Run the complete offline verification with:
 

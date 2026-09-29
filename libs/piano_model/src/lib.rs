@@ -58,7 +58,7 @@ use fx::{soft_clip, DcBlock, EarlyReflections, Eq, Limiter, Perspective, Reverb,
 use keys::{build_key, KeyDesign, FIRST_KEY, LAST_KEY, NUM_KEYS};
 pub use params::{DesignParams, PianoPreset, Voicing, PIANO_PRESETS};
 use modal::{detect_path, run_modes, KernelPath, MAX_CHUNK};
-use soundboard::{Soundboard, BOARD_REGIONS};
+use soundboard::{RadFilter, Soundboard, BOARD_REGIONS};
 use sympathetic::SymBank;
 use voice::Voice;
 
@@ -163,49 +163,6 @@ const PEDAL_FULL_LIFT: f32 = 0.75;
 const CASE_GAIN: f32 = 6.0;
 const CASE_LP_HZ: f64 = 700.0;
 
-/// Radiation filter for the panned direct-string path: differentiate
-/// (pressure couples to velocity), flatten at the bottom of the radiativity
-/// plateau (~150 Hz), and roll off above ~2.4 kHz — the same R(f) shape as
-/// the modal soundboard (see soundboard::radiativity). Plateau-normalised:
-/// the per-sample difference is scaled by fs / (2 pi 150), so the path's
-/// plateau gain is its coefficient and is sample-rate independent.
-struct RadTilt {
-    dx1: f32,
-    dlp: f32,
-    dlp2: f32,
-    c: f32,
-    c2: f32,
-    scale: f32,
-}
-
-impl RadTilt {
-    fn new(sample_rate: f64, lp_hz: f64, vel_hz: f64) -> Self {
-        Self {
-            dx1: 0.0,
-            dlp: 0.0,
-            dlp2: 0.0,
-            c: (1.0 - (-core::f64::consts::TAU * vel_hz / sample_rate).exp()) as f32,
-            c2: (1.0 - (-core::f64::consts::TAU * lp_hz / sample_rate).exp()) as f32,
-            scale: (sample_rate / (core::f64::consts::TAU * vel_hz)) as f32,
-        }
-    }
-
-    #[inline(always)]
-    fn process(&mut self, x: f32) -> f32 {
-        let diff = x - self.dx1;
-        self.dx1 = x;
-        self.dlp += self.c * (diff - self.dlp);
-        self.dlp2 += self.c2 * (self.dlp - self.dlp2);
-        self.scale * self.dlp2
-    }
-
-    fn reset(&mut self) {
-        self.dx1 = 0.0;
-        self.dlp = 0.0;
-        self.dlp2 = 0.0;
-    }
-}
-
 /// Bridge region for a key index: the bass bridge carries the wound
 /// strings (single and double unisons), then the long bridge in thirds.
 #[inline(always)]
@@ -260,9 +217,6 @@ pub(crate) struct EngineCore {
     /// the listener kept flagging. The threshold still decides the TARGET;
     /// the applied gain glides.
     damped_gain: f32,
-    couple_loss: f32,
-    // quantised bath-loading extra radius currently applied to voices
-    bath_r: f32,
     // duplex / aliquot bank (shared, driven by the bridge bus)
     dup_zr: Vec<f32>,
     dup_zi: Vec<f32>,
@@ -301,8 +255,10 @@ pub(crate) struct EngineCore {
     case_lp: [f32; 4],
     case_lp_c: f32,
 
-    dir_tilt_l: RadTilt,
-    dir_tilt_r: RadTilt,
+    /// every instant radiation path (direct strings + board direct
+    /// coupling) runs through the board's own R(f), one filter per channel
+    dir_tilt_l: RadFilter,
+    dir_tilt_r: RadFilter,
 }
 
 pub struct Piano {
@@ -360,6 +316,14 @@ impl Piano {
     /// default parameters are equivalent to `Piano::new_uncalibrated`.
     pub fn new_with_params(sample_rate: f32, dp: &DesignParams) -> Self {
         Self::build(sample_rate, dp, &[])
+    }
+
+    /// Explicit design parameters WITH a calibration table (verification
+    /// tooling only: ablating one mechanism of the calibrated instrument).
+    #[doc(hidden)]
+    pub fn new_with_params_calibrated(sample_rate: f32, dp: &DesignParams, notes: &[CalibrationNote]) -> Self {
+        calibration::validate(notes);
+        Self::build(sample_rate, dp, notes)
     }
 
     fn build(sample_rate: f32, dp: &DesignParams, notes: &[CalibrationNote]) -> Self {
@@ -428,8 +392,6 @@ impl Piano {
             sym_gate: dp.sym_gate as f32,
             bus_pow_acc: 0.0,
             damped_gain: 0.0,
-            couple_loss: dp.couple_loss as f32,
-            bath_r: 1.0,
             dup_zr: dup.0,
             dup_zi: dup.1,
             dup_cr: dup.2,
@@ -463,8 +425,8 @@ impl Piano {
             case_lp: [0.0; 4],
             case_lp_c: (1.0 - (-core::f64::consts::TAU * CASE_LP_HZ / sample_rate as f64).exp()) as f32,
 
-            dir_tilt_l: RadTilt::new(sample_rate as f64, dp.rad_lp, dp.rad_vel_hz),
-            dir_tilt_r: RadTilt::new(sample_rate as f64, dp.rad_lp, dp.rad_vel_hz),
+            dir_tilt_l: RadFilter::new(fs, dp),
+            dir_tilt_r: RadFilter::new(fs, dp),
         };
         Self { keys, core, voices }
     }
@@ -689,15 +651,15 @@ impl Piano {
     }
 
     /// Scales the radiation paths for diagnostics/verification only:
-    /// `board_modal` scales the modal soundboard response, `direct` scales
-    /// both instant (non-modal) radiation paths. (1.0, 1.0) is the shipped
+    /// `board_modal` scales everything the soundboard radiates (its modes
+    /// and its direct coupling), `direct` scales the panned direct-string
+    /// and case paths. (1.0, 1.0) is the shipped
     /// instrument. Used by tests to assert the soundboard's share of the
     /// output; never call this from an app.
     #[doc(hidden)]
     pub fn debug_set_path_gains(&mut self, board_modal: f32, direct: f32) {
         self.core.dbg_board_modal = board_modal;
         self.core.dbg_direct = direct;
-        self.core.board.dbg_direct = direct;
     }
 
     /// Renders the isolated hammer force pulse for one key/velocity
@@ -845,7 +807,6 @@ impl Piano {
             v.sost_held = false;
             v.strike_count = 0;
             v.eng = 1.0;
-            v.extra_r = 1.0;
         }
         for (s, k) in self.core.sym.iter_mut().zip(self.keys.iter()) {
             s.clear();
@@ -858,7 +819,6 @@ impl Piano {
         self.core.board.reset();
         self.core.dup_zr.fill(0.0);
         self.core.dup_zi.fill(0.0);
-        self.core.bath_r = 1.0;
         self.core.bus_pow_acc = 0.0;
         self.core.damped_gain = 0.0;
         self.core.er.reset();
@@ -955,22 +915,13 @@ impl EngineCore {
         }
         self.bus_pow_acc = 0.0;
         let lift_target = ((PEDAL_FULL_LIFT - self.sustain).max(0.0) / PEDAL_FULL_LIFT).min(1.0).powf(2.5);
-        // Bath-loading: how much open string is there for a sounding string
-        // to bleed into through the bridge (quantised so voices only
-        // rebuild on material change; the factor can only add damping).
-        let mut bath_r = 1.0f32;
+        // (No bath loading on the played strings: a uniform extra loss on
+        // every mode of a sounding key — 2.4 dB/s pedal up from the
+        // undamped treble alone, 10 dB/s at full pedal — ate exactly the
+        // upper-partial sustain the recordings hold. Energy exchange with
+        // open strings is the sympathetic bank's job, partial by partial.)
         let sym_amt = self.voicing.sympathetic;
         self.openness = ((sym_amt - 1.0).max(0.0) / 1.5).min(1.0);
-        if self.couple_loss > 0.0 && sym_amt > 0.0 {
-            let mut open_w = 0.0f32;
-            for v in voices.iter() {
-                open_w += 1.0 - v.eng;
-            }
-            let w = (open_w / NUM_KEYS as f32).clamp(0.0, 1.0);
-            let sx_q = (self.couple_loss * sym_amt.min(1.5) * w / 0.05).round() * 0.05;
-            bath_r = (-sx_q / self.sample_rate).exp();
-        }
-        self.bath_r = bath_r;
         for i in 0..NUM_KEYS {
             let key = &keys[i];
             let v = &mut voices[i];
@@ -980,9 +931,6 @@ impl EngineCore {
             let mut eng = old + 0.35 * (target - old);
             if (eng - target).abs() < 1e-3 {
                 eng = target;
-            }
-            if v.active && v.extra_r != bath_r {
-                v.rebuild_with(key, eng, bath_r);
             }
             if eng != old {
                 if v.active {
@@ -1150,6 +1098,24 @@ impl EngineCore {
             }
         }
         self.board.render(self.path, &self.board_in, n, &mut self.board_l[..n], &mut self.board_r[..n]);
+        // All instant radiation — the panned direct strings and the board's
+        // per-region direct coupling — runs through ONE R(f) per channel
+        // (soundboard::RadFilter; the filter is linear, so summing first is
+        // the same sound for a third of the work).
+        // (diagnostic path gains: the board's direct coupling belongs to the
+        // board, as it did when the board filtered it itself)
+        let bd = self.dbg_board_modal * self.board.direct;
+        let ds = self.dbg_direct * self.direct_string;
+        for k in 0..n {
+            let (mut xl, mut xr) = (ds * self.dir_l[k], ds * self.dir_r[k]);
+            for reg in 0..BOARD_REGIONS {
+                let x = bd * self.board_in[reg][k];
+                xl += self.board.dir_pl[reg] * x;
+                xr += self.board.dir_pr[reg] * x;
+            }
+            self.dir_l[k] = xl;
+            self.dir_r[k] = xr;
+        }
         for k in 0..n {
             let dsl = self.dir_tilt_l.process(self.dir_l[k]);
             let dsr = self.dir_tilt_r.process(self.dir_r[k]);
@@ -1161,10 +1127,10 @@ impl EngineCore {
             self.case_lp[3] += cc * (self.case_lp[2] - self.case_lp[3]);
             let pl = self.master
                 * (self.dbg_board_modal * self.board_l[k]
-                    + self.dbg_direct * (self.direct_string * dsl + self.case_lp[1]));
+                    + dsl + self.dbg_direct * self.case_lp[1]);
             let pr = self.master
                 * (self.dbg_board_modal * self.board_r[k]
-                    + self.dbg_direct * (self.direct_string * dsr + self.case_lp[3]));
+                    + dsr + self.dbg_direct * self.case_lp[3]);
             // channel EQ ahead of the room: the reflections and tail hear
             // the EQ'd source, the way a desk insert feeds the sends
             let (pl, pr) = self.eq.process(pl, pr);

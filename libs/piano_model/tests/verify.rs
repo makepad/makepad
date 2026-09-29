@@ -134,7 +134,12 @@ fn decay_times_and_double_decay() {
     let m = mono(&l, &r);
     let (f1, _) = peak_near(sec(&m, 0.2, 1.2), f0, 6.0);
 
-    let sig_late = decay_sigma(&m, f1, 2.5, 5.5);
+    // 1.0-5.8 s: the late stage is an aftersound pair beating at well
+    // under 0.1 Hz (polarisation vs mistuned unison mode), and a 3 s
+    // window on one flank of that beat read the fundamental as RISING
+    // once the bass decay law gave C3 its measured prompt stage (the
+    // Salamander C3's fundamental drains within half a second).
+    let sig_late = decay_sigma(&m, f1, 1.0, 5.8);
     println!("C3 fundamental: sigma late {sig_late:.2}/s (T60 late {:.1} s)", 6.91 / sig_late.max(1e-9));
     assert!(sig_late > 0.0, "fundamental must decay");
     let t60_late = 6.91 / sig_late;

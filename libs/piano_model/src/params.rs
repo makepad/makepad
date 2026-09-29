@@ -44,21 +44,18 @@ design_params! {
     /// radiation step that had been calibrated against the falsified MP3
     /// C2 row and is now deleted.
     rad_hp1 = 90.0,
-    rad_hp2 = 40.0,
+    /// rad_hp2 is a first-order section (|H| = f/sqrt(f^2+hp2^2)), which the
+    /// direct paths can run exactly; 64 Hz tracks the old f/(f+40) shape
+    /// within ~1.5 dB over 25-400 Hz.
+    rad_hp2 = 64.0,
     /// top roll-off corner (Hz)
     rad_lp = 5292.031102101306,
     /// top roll-off order: amplitude (1/(1+(f/lp)^2))^(rad_lp_pow/2); 1.0 = -6 dB/oct
     rad_lp_pow = 0.30407600034647625,
     /// low-mid body emphasis (see soundboard::radiativity): amplitude gain
     /// rad_body on a 4th-order shelf below rad_body_hz — the main-resonance
-    /// region of the board, where the middle octaves' fundamentals radiate
-    /// velocity-coupling flattening corner (Hz) of the DIRECT radiation
-    /// paths (board direct + panned string direct). These paths
-    /// differentiate the bridge force and flatten above this corner, so
-    /// below it they fall 6 dB/oct — at the old fixed 150 Hz they gutted
-    /// 60-150 Hz on the two loudest paths (which also bypass the modal
-    /// board's body emphasis entirely): a lean, radio-like lower register.
-    rad_vel_hz = 153.24610995333614,
+    /// region of the board, where the middle octaves' fundamentals radiate.
+    /// The direct radiation paths run this same curve (soundboard::RadFilter).
     rad_body = 2.2,
     rad_body_hz = 150.0,
     // --- string losses (keys.rs) ---------------------------------------
@@ -169,6 +166,43 @@ design_params! {
     /// have; the calibrated curve reproduces the measured per-note
     /// knees, so it stands.
     bridge_couple_taper = 2.6,
+    /// Wound-bass decay law (keys.rs, weight 1 up to bass_law_t0, fading
+    /// to 0 at bass_law_t1), measured 2026-09-29 as two-stage fits of every
+    /// partial of the Salamander A0..D#3 recordings (10 s, native layers):
+    /// a PROMPT stage of ~8-14 dB/s holding the note 16-37 dB above an
+    /// AFTERSOUND that then decays at only ~1 dB/s below 450 Hz and 2-4 dB/s
+    /// to 1.5 kHz. The compass law above (intrinsic + squared-admittance
+    /// coupling, singles factor 0.03) gave the bottom octave ONE ~3 dB/s
+    /// decay with a +2..12 dB split — no double decay at all, the steady
+    /// fading of a plucked bass guitar — while its partials above 700 Hz
+    /// drained at 10-20 dB/s where the recordings hold 5-8.
+    /// Aftersound (intrinsic) sigma = base + slope * f_kHz^pow
+    /// + a2 (1-t)^6 f_kHz^2 (+ a4 f^4): at A0 ~1.5 dB/s at 200 Hz, ~4 at
+    /// 1 kHz, ~8 at 1.8 kHz, ~16 at 3 kHz — the recordings' late slopes and
+    /// 2-8 kHz band decays; the f^2 term fades out toward C3, whose
+    /// 3-5 kHz partials hold ~6 dB/s.
+    bass_after_base = 0.12,
+    bass_after_slope = 0.2,
+    bass_after_pow = 0.8,
+    bass_after_a2 = 0.15,
+    /// prompt coupling sigma = bass_couple * (floor + Re Y) / (1 + (f/bass_couple_hz)^2)
+    bass_couple = 4.0,
+    bass_couple_hz = 500.0,
+    /// extra prompt drain below bass_couple_lo_hz (4th order): the bottom
+    /// strings' fundamentals sit below the board's first resonances,
+    /// where the bass bridge moves most freely. The recordings' A0..D#1
+    /// fundamentals fall 15-25 dB/s for their first half second yet sit
+    /// only ~3 dB lower re the cluster at 1-2 s than at 50-300 ms; a drain
+    /// sized to the first figure (2.5) left the late A0 fundamental 21 dB
+    /// under the recording's, so this is the compromise that holds both
+    /// fundamental/cluster metrics.
+    bass_couple_lo = 0.8,
+    bass_couple_lo_hz = 40.0,
+    /// horizontal drive share in the bass (the split: prompt ~16-37 dB over
+    /// the aftersound in the recordings)
+    bass_pol_drive = 0.12,
+    bass_law_t0 = 0.31,
+    bass_law_t1 = 0.45,
     // --- per-partial normal-mode reduction (keys.rs mode tables) --------
     /// Horizontal-polarisation drive share: the hammer imparts mostly
     /// vertical motion; termination asymmetry leaks this fraction
@@ -228,42 +262,26 @@ design_params! {
     /// felt power p: feltp_lo + feltp_span*t
     feltp_lo = 2.332016978017561,
     feltp_span = 1.4310157297332198,
-    /// Bass-hammer felt regime (2026-09-01, measured against the
-    /// Salamander corpus). Below felt_bass_t the felt exponent is lowered
-    /// by feltp_bass*(1 - t/felt_bass_t)^2 and log10 K by feltk_bass
-    /// times the same ramp, so the bottom octave's hammers work in a
-    /// nearly LINEAR-spring regime while everything from ~D#3 up is
-    /// untouched. Why: the real bass ladder is velocity-INVARIANT below
-    /// ~1 kHz — the Salamander A0's partials 8-20 sit at -25/-24/-24 dB
-    /// rel the strongest at pp/mf/ff, C2's at -31/-29/-27 — and the
-    /// measured bass contact time varies only ~20-30% over the dynamic
-    /// range (Askenfelt & Jansson). With the compass-wide felt law
-    /// (p 2.33 at A0) the model's A0 contact ran 6.2 -> 3.0 ms from pp
-    /// to ff and its p8-20 swung -35 -> -19 dB (16 dB where the real
-    /// instrument shows 1): pianissimo bass was a dull thud and forte a
-    /// bright pluck that then died. Heavy, deep, hysteretic bass felt
-    /// that never compacts under playing loads behaves far closer to a
-    /// linear spring (Stulov; Giordano & Winans report the lowest
-    /// dynamic exponents on bass hammers) — the effective exponent here
-    /// is that of the felt working against the string's yield, not the
-    /// rigid-anvil loading curve.
-    /// The bass regime's own felt law: exponent feltp_bass and
-    /// log10 K = feltk_bass_lo + feltk_bass_slope*t, blended into the
-    /// compass law with weight w = (1 - t/felt_bass_t)^felt_bass_pow
-    /// (w = 1 at A0, 0 from felt_bass_t up; felt_bass_t = 0 disables).
-    /// Blending log K and p linearly keeps the force at ~1 mm of felt
-    /// compression — hence the contact time — continuous across the
-    /// blend, so nothing steps.
-    /// Measured result at these values (A0 / C2, pp-mf-ff = Salamander
-    /// layers 4/9/14): contact 2.8/2.7/2.7 ms and 3.15/3.15/3.15 ms (the
-    /// old law: 6.2/3.8/3.0 and 5.5/3.8/3.2); partials 8-20 rel strongest
-    /// at 100 ms -25.9/-24.2/-21.2 dB vs real -25/-24/-24, and
-    /// -30/-27.5/-25.3 vs real -31.5/-28.7/-27.3. The hammer's
-    /// pianissimo-to-fortissimo brightening in the bass now comes from
-    /// where the recordings put it — the 2-8 kHz band (real A0 -57/-38/-29,
-    /// model -43/-37/-29) — not from the sub-kHz ladder.
-    feltp_bass = 1.05,
-    feltk_bass_lo = 4.3,
+    /// Bass-hammer felt regime. Below felt_bass_t the compass felt law is
+    /// blended into the bass regime's own law: exponent feltp_bass and
+    /// log10 K = feltk_bass_lo + feltk_bass_slope*t, with weight
+    /// w = (1 - t/felt_bass_t)^felt_bass_pow (w = 1 at A0, 0 from
+    /// felt_bass_t up; felt_bass_t = 0 disables). Blending log K and p
+    /// linearly keeps the force at ~1 mm of felt compression — hence the
+    /// contact time — continuous across the blend, so nothing steps.
+    /// History: 2026-09-01 made this regime nearly LINEAR (p 1.05) because
+    /// the recordings' partials 8-20 barely move with velocity. But a
+    /// linear spring makes the whole bass pulse velocity-invariant,
+    /// including the 2-8 kHz band the recordings swing by ~30 dB (A0 early
+    /// share -58/-36/-27 dB at pp/mf/ff): a pianissimo bass note came out
+    /// as bright as a forte one. 2026-09-29: p 2.0, log10 K 7.2 (contact
+    /// A0 3.3/2.7/2.2 ms, C2 3.8/3.6/3.1 ms at pp/mf/ff). Measured on the
+    /// fixture's A0..C3 rows (raw model, all other terms equal), p 2.0
+    /// against 1.05 cuts the early/late 2-8 kHz share errors from 9.4/11.8
+    /// to 4.7/6.8 dB while the early 0.5-2 kHz error holds (3.7 -> 4.0 dB);
+    /// p 2.3 over-darkens pianissimo (0.5-2 kHz errors of 8-12 dB).
+    feltp_bass = 2.0,
+    feltk_bass_lo = 7.2,
     feltk_bass_slope = 2.2,
     /// the regime holds fully (w = 1) up to felt_bass_t0 (~C2, the top of
     /// the wound doubles), then ramps out to zero at felt_bass_t (~G#3;
@@ -352,7 +370,9 @@ design_params! {
     tens_base = 700.0,
     tens_span = 800.0,
     // --- inharmonicity ---------------------------------------------------
-    /// B = 10^(b_lo + b_span*t).
+    /// B = 10^(b_lo + b_span*t) ABOVE C5 only; up to C5 the measured scale
+    /// in keys.rs (MEASURED_SCALE) decides, and this law is met continuously
+    /// over the octave above it.
     /// Fitted to the reference recordings with a sequential partial
     /// tracker: log10 B = -4.771 + 2.891 t (C2 7.1e-5, C4 3.2e-4,
     /// C6 1.9e-3). The old (-4.35, 2.7) law sat ~0.42 decades above that
@@ -416,38 +436,19 @@ design_params! {
     sym_in = 0.002,
     sym_out = 0.35,
     // --- phantom partials / longitudinal modes (0 = off) ----------------
-    /// output gain of the per-voice longitudinal/phantom bank.
-    /// 0.25 -> 0.08 (2026-09-01): with the bass hammer re-voiced, the FREE
-    /// longitudinal modes were the single largest 2-8 kHz source of a
-    /// forte C1 after the attack — the bank alone put the 50-100 ms
-    /// 2-8 kHz share at -14 dB against the recording's -33 (A0/C2 were
-    /// within 3 dB, C1's three modes at 2.0-2.7 kHz happen to sit inside
-    /// the high-passed drive). Bank & Sujbert measured the free
-    /// longitudinal mode of a real F1 dying in ~0.15 s and the sustained
-    /// phantom content coming from the FORCED response (ph_direct, kept);
-    /// the free modes are a colour, not a voice.
+    /// Output gain of the per-voice longitudinal/phantom bank. Since
+    /// 2026-09-29 the bank is driven the way the string drives it: each
+    /// longitudinal mode by its own sum of transverse modal PRODUCTS
+    /// (|m - n| = k or m + n = k, slope-weighted; voice.rs), replacing a
+    /// filtered s * ds/dt of the summed bridge force that fed one common
+    /// signal to every mode plus a direct "forced" copy (the square of a
+    /// weighted sum is not the modal coupling, and it put every product at
+    /// every mode). The forced phantoms are the bank's own off-resonance
+    /// response to those products.
     ph_gain = 0.08,
-    /// FORCED-response phantom path: the high-passed quadratic signal
-    /// itself, fed to the bridge alongside the free-mode bank. Bank &
-    /// Sujbert (JASA 2005) measured exactly this split on a recorded F1:
-    /// the FREE longitudinal mode died in ~0.15 s while the FORCED
-    /// phantoms — sum/difference products of transverse partials — persist
-    /// with decay comparable to the partials themselves: sustaining tonal
-    /// energy through the bass cluster, resupplied as long as the strings
-    /// ring (a mechanism a plucked rendering lacks by definition). A
-    /// design search once raised this for cheap high-band score when it
-    /// was un-gated and driven by the un-weighted square of everything —
-    /// that read as rasp and was zeroed. It is now wound-gated in keys.rs
-    /// (full on the bass, gone by C4) and the drive is slope-weighted per
-    /// the published equation (see voice.rs), which makes it discrete
-    /// partial products, not spray.
-    ph_direct = 0.35,
-    /// high-pass corner on the squared drive (Hz)
-    ph_hp = 1876.8296431768078,
     /// longitudinal mode damping sigma base (1/s) and per-kHz slope
     ph_sigma = 7.699981217781476,
     ph_sigma_slope = 18.781099465421295,
-    /// scale on the estimated longitudinal/transverse speed ratio
     /// scale on the estimated longitudinal/transverse speed ratio; the
     /// physical ratio for real scales — searching it far below 1 parks the
     /// longitudinal series among the transverse mid partials, which is not
@@ -471,8 +472,9 @@ design_params! {
     /// don't belong". Real phantom-partial audibility is a wound-bass
     /// phenomenon; the knob's lower bound now enforces that.
     ph_taper = 1.8,
-    /// drive normalisation (bridge-force units -> unity-ish)
-    ph_norm = 2.013475554770291,
+    /// drive normalisation (modal-state units -> unity-ish); the output is
+    /// quadratic in it
+    ph_norm = 0.08,
     // --- commuted-style body excitation (0 = off) ------------------------
     /// Per-strike diffuse body-tap excitation injected into the string
     /// input, standing for the dense high-order body response the sparse
@@ -495,6 +497,12 @@ design_params! {
     /// (Askenfelt), and listeners preferred the soft-playing "air" it gives;
     /// steeper laws mute it exactly where it is heard.
     cs_vpow = 1.761657571640498,
+    /// the same exponent on the bass-hammer regime (blended with the felt
+    /// regime's weight, see feltp_bass): with the bass hammer's own
+    /// pianissimo pulse dark again, a 1.76 law left the tap as the whole
+    /// 2-8 kHz band of a soft bass note (A0 v28 2-4 kHz: -43 dB with the
+    /// tap, -58 without; the recording -58)
+    cs_vpow_bass = 2.6,
     /// tap-length taper toward the treble: len *= ((1-t) + 0.12)^cs_taper
     /// (0 = uniform; treble attacks are ms-scale, bass tens of ms)
     cs_taper = 2.5,
@@ -511,12 +519,6 @@ design_params! {
     // --- soundboard mode count -------------------------------------------
     board_modes = 128.0,
     // --- sympathetic coupling ideas beyond one-directional drive ---------
-    /// Bath-loading: a sounding string loses energy through the bridge into
-    /// every OPEN (undamped) string. First-order coupling to that bath adds
-    /// damping to the source: sigma_extra = couple_loss * open_fraction.
-    /// Only ever increases damping, so the coupled system stays stable by
-    /// construction (1/s at full pedal).
-    couple_loss = 1.1355357753472148,
     /// Damped strings still couple: felt heavily damps but does not silence
     /// a string. Relative drive of a DAMPED key's sympathetic bank (its
     /// fast-decaying rotations are already baked by the damper model).
@@ -582,7 +584,7 @@ pub struct Voicing {
     /// as a legitimate voicing. Continuous between.
     pub attack_body: f32,
     /// Sympathetic resonance sends: open-string bloom, damped-string
-    /// coupling, duplex scale and bridge bath-loading together.
+    /// coupling and the duplex scale together.
     pub sympathetic: f32,
 }
 
