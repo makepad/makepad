@@ -176,6 +176,12 @@ in [Change reports](docs/agents/change-report.md); the steps:
   `target/`, and every Makepad crate compiles once for all apps. Sandbox
   (`apps/commercial/sandbox`) is its own workspace, excluded here. Nothing is
   required when the clone is absent. `Cargo.lock` is not committed.
+- Reference videos from the web (YouTube, X posts, most pages with a video):
+  `./target/release/makepad-stage-web-grab <url> --every 0.5 --dir <folder>
+  --launch <scratch>` grabs one through Stage's web grab in its own hidden,
+  muted Stage (H.264-only sites such as X via the media file behind the page)
+  and writes the clip, provenance and frames. See
+  `apps/commercial/stage/WEB-GRABS.md`.
 - The parallel rustc frontend is a local opt-in, never for CI or shipped
   builds. It needs `RUSTC_BOOTSTRAP` on stable and roughly halves a clean
   dev build. Put it in the user config, `~/.cargo/config.toml`, so every
