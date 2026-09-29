@@ -389,6 +389,128 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
     }
     if failed { Err("one or more cargo batches failed; see target/build steps".into()) } else { Ok(()) }
 }
+/// A slice tile's app and roots (the script's `slices.json` entry).
+fn slice_spec(vm: &mut ScriptVm) -> Result<(String, Vec<String>)> {
+    let slice = rt(vm).slice.clone().ok_or("only a slice tile (slices.json) checks a slice")?;
+    Ok((slice.app, slice.roots))
+}
+/// The slice tile's Makepad checkout: a Git worktree of the CI checkout in
+/// its target directory (never a workspace member, never walked for
+/// scripts), `target/ci-slices/<app>`.
+fn slice_dir(root: &Path, app: &str) -> PathBuf {
+    root.join("target").join("ci-slices").join(app)
+}
+fn slice_git(vm: &mut ScriptVm, args: &[&str], cwd: &Path) -> Result<String> {
+    let out = rt(vm).run.command("git", &crate::report::strings(args), cwd, &[], 900)?;
+    if out.code != 0 {
+        return Err(format!("git {}: {}", args.join(" "), crate::process::error_lines(&out.out)));
+    }
+    Ok(out.out.trim().to_owned())
+}
+/// Cut the slice of the tested commercial commit (`apps/commercial` HEAD)
+/// and put it where a customer's Builder puts it: a clean checkout of the
+/// tested Makepad commit with the slice at `apps/commercial`, and nothing
+/// else of the commercial repository.
+fn slice_checkout(vm: &mut ScriptVm) -> Result<Value> {
+    let (app, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let root = rt(vm).run.root.clone();
+    let commercial = root.join(crate::smoke::COMMERCIAL);
+    let slice = makepad_source_slice::slice(&commercial, "HEAD", &app, &roots)?;
+    let dir = slice_dir(&root, &app);
+    let tip = slice_git(vm, &["rev-parse", "HEAD"], &root)?;
+    if dir.join(".git").exists() {
+        slice_git(vm, &["checkout", "-q", "-f", "--detach", &tip], &dir)?;
+        slice_git(vm, &["clean", "-q", "-ffdx", "-e", "/Cargo.lock", "-e", "/apps/commercial/"], &dir)?;
+    } else {
+        // A removed target directory takes the worktree with it.
+        slice_git(vm, &["worktree", "prune"], &root)?;
+        fs::create_dir_all(dir.parent().unwrap()).map_err(|e| e.to_string())?;
+        slice_git(vm, &["worktree", "add", "-q", "--detach", &dir.display().to_string(), &tip], &root)?;
+    }
+    // The slice is its own repository, whose objects are the commercial
+    // checkout's (where the slicer wrote the slice commit).
+    let sliced = dir.join(crate::smoke::COMMERCIAL);
+    if !sliced.join(".git").exists() {
+        fs::create_dir_all(&sliced).map_err(|e| e.to_string())?;
+        slice_git(vm, &["init", "-q"], &sliced)?;
+        let objects = commercial.join(".git/objects").canonicalize().map_err(|e| e.to_string())?;
+        fs::write(sliced.join(".git/objects/info/alternates"), format!("{}\n", objects.display())).map_err(|e| e.to_string())?;
+    }
+    slice_git(vm, &["checkout", "-q", "-f", "--detach", &slice.commit], &sliced)?;
+    slice_git(vm, &["clean", "-q", "-ffdx"], &sliced)?;
+    let crates = slice.crates.iter().map(|(name, dir)| format!("{name} ({dir})")).collect::<Vec<_>>().join(", ");
+    let summary = format!(
+        "slice {} of commercial {} for {app}: {} crates, {} files, {} bytes: {crates}",
+        &slice.commit[..12],
+        &slice.source[..12],
+        slice.crates.len(),
+        slice.files,
+        slice.bytes
+    );
+    let r = rt(vm);
+    r.run.log(&summary);
+    if let Some(i) = r.step {
+        r.run.annotate(i, &summary);
+    }
+    Ok(json::obj(vec![
+        ("commit", json::s(&slice.commit)),
+        ("source", json::s(&slice.source)),
+        ("dir", json::s(dir.display().to_string())),
+        ("crates", Value::Arr(slice.crates.iter().map(|(name, _)| json::s(name)).collect())),
+    ]))
+}
+/// References the slice's crates make to files outside their directory
+/// that their `[package.metadata.commercial] include` does not cover.
+fn slice_lint(vm: &mut ScriptVm) -> Result<Value> {
+    let (_, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let commercial = rt(vm).run.root.join(crate::smoke::COMMERCIAL);
+    let findings = makepad_source_slice::lint(&commercial, "HEAD", &roots)?;
+    if findings.is_empty() {
+        return Ok(Value::Null);
+    }
+    let shown: Vec<String> = findings.iter().take(40).map(|f| f.to_string()).collect();
+    Err(format!(
+        "{} references outside their crate are not in its [package.metadata.commercial] include{}:\n{}",
+        findings.len(),
+        if findings.len() > shown.len() { " (the first 40)" } else { "" },
+        shown.join("\n")
+    ))
+}
+/// `cargo check --release` of the root packages in the slice checkout: the
+/// slice ships everything they compile from.
+fn slice_check(vm: &mut ScriptVm) -> Result<Value> {
+    let (app, roots) = slice_spec(vm)?;
+    if rt(vm).validate {
+        return Ok(Value::Null);
+    }
+    rt(vm).worked = true;
+    let root = rt(vm).run.root.clone();
+    let expected = makepad_source_slice::slice(&root.join(crate::smoke::COMMERCIAL), "HEAD", &app, &roots)?;
+    let dir = slice_dir(&root, &app);
+    let sliced = dir.join(crate::smoke::COMMERCIAL);
+    if !sliced.join(".git").exists() || slice_git(vm, &["rev-parse", "HEAD"], &sliced)? != expected.commit {
+        return Err(format!("{} does not hold the slice {}; the slice step failed", sliced.display(), expected.commit));
+    }
+    let opts = Options { target: None, timeout: 3600, env: Vec::new(), allow_fail: false, deny: Vec::new(), toolchain: None };
+    let mut args = vec!["check".to_string(), "--release".into()];
+    for package in &roots {
+        args.extend(["-p".to_string(), package.clone()]);
+    }
+    let host = rt(vm).host.target.clone();
+    let args = cargo::command_args(&args, &opts, &host)?;
+    let env = vec![("CARGO_TERM_COLOR".to_string(), "never".to_string())];
+    let result = rt(vm).run.cargo_command("cargo", &args, &dir, &env, opts.timeout)?;
+    record(vm, &result, &opts)?;
+    Ok(result.json())
+}
 pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
     let host = rt(vm).host.json();
     let host = json_value(vm, host);
@@ -445,6 +567,19 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             result(vm, result_value)
         },
     );
+    for (name, native) in [
+        (id_lut!(slice_checkout), slice_checkout as fn(&mut ScriptVm) -> Result<Value>),
+        (id_lut!(slice_lint), slice_lint),
+        (id_lut!(slice_check), slice_check),
+    ] {
+        vm.add_method(ci, name, script_args!(), move |vm, _| {
+            if !allow(vm) {
+                return NIL;
+            }
+            let r = native(vm);
+            result(vm, r)
+        });
+    }
     for (name, warm) in [(id_lut!(check_targets), false), (id_lut!(warm), true)] {
         vm.add_method(ci, name, script_args!(options = NIL), move |vm, args| {
             if !allow(vm) { return NIL; }

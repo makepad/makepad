@@ -13,10 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Apps whose tiles do not run: matched against a package name (with or
+/// without `makepad-`), its directory's name or its path. The commercial
+/// checkout's products are matched the same way where their scripts sit
+/// (apps/commercial/stage/app is `stage`, apps/commercial/sandbox is
+/// `sandbox`); Scope, Amp and the `slice:<app>` tiles run.
 pub const DEFAULT_SKIPS: &[&str] = &[
     "stage",
-    "stage-browser",
-    "stage-live",
     "sandbox",
     "source-library",
     "mixer",

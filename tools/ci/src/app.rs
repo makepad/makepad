@@ -231,19 +231,8 @@ pub struct App {
     #[rust]
     shown: Option<PathBuf>,
 }
-/// What a tile is called: `apps/wm` is `wm`, the root script is `workspace`.
 fn short_name(name: &str) -> String {
-    match name {
-        "." | "" => "workspace".into(),
-        name => {
-            let name = name.strip_prefix("apps/").unwrap_or(name);
-            if name.contains('/') {
-                let mut parts = name.rsplit('/');
-                let leaf = parts.next().unwrap_or(name);
-                format!("{}/{leaf}", parts.next().unwrap_or(""))
-            } else { name.into() }
-        },
-    }
+    crate::smoke::tile_name(name)
 }
 fn key(branch: &str, name: &str) -> String {
     format!("{branch}\n{name}")

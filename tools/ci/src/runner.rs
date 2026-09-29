@@ -299,6 +299,7 @@ mod tests {
             path: name.into(),
             name: name.into(),
             target: None,
+            slice: None,
         };
         let order = ordered(vec![
             script("apps/z/ci.splash"),
