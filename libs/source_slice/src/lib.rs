@@ -544,7 +544,11 @@ impl Source {
             let Some(owner) = owner else { continue };
             let relative = &entry.path[owner.dir.len() + 1..];
             let script = owner.build.as_deref().is_some_and(|b| resolve("", b).as_deref() == Some(relative));
-            if script || entry.path.ends_with(".rs") || entry.path.ends_with(".splash") {
+            // A `fixtures/` directory holds inputs a test reads as data (Scope's
+            // syntax fixtures are Rust source that is parsed, never compiled), so
+            // the references written in them are not the crate's.
+            let fixture = relative.split('/').any(|part| part == "fixtures");
+            if !fixture && (script || entry.path.ends_with(".rs") || entry.path.ends_with(".splash")) {
                 files.push((owner, entry));
             }
         }

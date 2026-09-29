@@ -323,6 +323,14 @@ fn lint_reports_references_outside_the_crate_that_its_include_does_not_cover() {
 }
 
 #[test]
+fn lint_leaves_test_fixtures_alone() {
+    let f = commercial("lint-fixtures");
+    f.write("scope/tests/fixtures/syntax/shaped.rs", "include!(\"not_here.rs\");\n");
+    let commit = f.commit();
+    assert!(lint(&f.dir, &commit, &roots(&["makepad-scope"])).unwrap().is_empty());
+}
+
+#[test]
 fn materialize_writes_the_slice_tree() {
     let f = commercial("materialize");
     let commit = f.commit();
