@@ -427,6 +427,10 @@ struct SharedBrowserState {
     /// Evaluations handed out so far: each one's answer comes back through
     /// the console under its own number.
     evaluations: AtomicU64,
+    /// The page's current text selection, as Chromium last reported it
+    /// (`OnTextSelectionChanged`): what a copy or cut puts on the
+    /// embedder's clipboard. Written and read on the thread that pumps CEF.
+    selection: Mutex<String>,
 }
 
 /// Packets the queue to the embedder holds before the capture thread drops
@@ -3908,6 +3912,17 @@ impl DownloadImageCallback {
     }
 }
 
+unsafe extern "system" fn render_on_text_selection_changed(
+    self_: *mut ffi::cef_render_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    selected_text: *const ffi::cef_string_t,
+    _selected_range: *const ffi::cef_range_t,
+) {
+    release_param(browser);
+    let render = &*(self_ as *mut RenderHandler);
+    *render.state.selection.lock().unwrap() = cef_string_to_string(selected_text);
+}
+
 unsafe extern "system" fn render_on_virtual_keyboard_requested(
     self_: *mut ffi::cef_render_handler_t,
     browser: *mut ffi::cef_browser_t,
@@ -3949,7 +3964,7 @@ impl RenderHandler {
                 update_drag_cursor: None,
                 on_scroll_offset_changed: None,
                 on_ime_composition_range_changed: None,
-                on_text_selection_changed: None,
+                on_text_selection_changed: Some(render_on_text_selection_changed),
                 on_virtual_keyboard_requested: Some(render_on_virtual_keyboard_requested),
             },
             ref_count: AtomicUsize::new(1),
@@ -4126,6 +4141,23 @@ impl Browser {
             }
             let result = f(host);
             release_ref_counted(&mut (*host).base as *mut _);
+            result
+        }
+    }
+
+    /// The frame holding the keyboard focus (an iframe the user clicked
+    /// into), else the main frame.
+    fn with_focused_frame<T>(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<T>) -> Result<T> {
+        unsafe {
+            let frame = match (*self.browser).get_focused_frame {
+                Some(get_focused_frame) => get_focused_frame(self.browser),
+                None => ptr::null_mut(),
+            };
+            if frame.is_null() {
+                return self.with_main_frame(f);
+            }
+            let result = f(frame);
+            release_ref_counted(&mut (*frame).base as *mut _);
             result
         }
     }
@@ -4501,6 +4533,34 @@ impl Browser {
         self.state.editable_focus()
     }
 
+    /// The text the user has selected in the page (in a field or in the
+    /// document), empty when nothing is. Chromium reports every selection
+    /// the user makes; one a script makes without input is not seen.
+    pub fn selected_text(&self) -> String {
+        self.state.selection.lock().unwrap().clone()
+    }
+
+    /// The page's own Copy command on the focused frame: the page sees its
+    /// `copy` event and Chromium writes its clipboard (the system one on
+    /// macOS and Windows; on Linux, where the windowless browser runs
+    /// without a display server, one private to this process — the
+    /// embedder puts [`Self::selected_text`] on the real clipboard).
+    pub fn copy_selection(&mut self) -> Result<()> {
+        self.with_focused_frame(|frame| unsafe {
+            (*frame).copy.ok_or_else(|| Error::new("cef_frame_t::copy missing"))?(frame);
+            Ok(())
+        })
+    }
+
+    /// The page's own Cut command on the focused frame: as
+    /// [`Self::copy_selection`], and an editable selection is removed.
+    pub fn cut_selection(&mut self) -> Result<()> {
+        self.with_focused_frame(|frame| unsafe {
+            (*frame).cut.ok_or_else(|| Error::new("cef_frame_t::cut missing"))?(frame);
+            Ok(())
+        })
+    }
+
     /// What the page wrote to its console since the last take, oldest
     /// first: `console.log` and its siblings, and the errors Chromium
     /// reports there. The answers to [`Self::evaluate_javascript`] are
@@ -4757,13 +4817,16 @@ impl Browser {
     pub fn ime_commit_text(&mut self, text: &str) -> Result<()> {
         let runtime = runtime()?;
         let text = CefString::new(&runtime.api, text)?;
+        // "No replacement" is CefRange::InvalidRange(), never a null range:
+        // CEF drops a call whose by-reference range is null, text and all.
+        let no_replacement = ffi::cef_range_t { from: u32::MAX, to: u32::MAX };
         self.with_host(|host| unsafe {
             (*host)
                 .ime_commit_text
                 .ok_or_else(|| Error::new("cef_browser_host_t::ime_commit_text missing"))?(
                 host,
                 &text.value,
-                ptr::null(),
+                &no_replacement,
                 0,
             );
             Ok(())

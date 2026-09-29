@@ -98,8 +98,10 @@ pub struct WebView {
     pressed_buttons: MouseButton,
     #[rust]
     scroll_remainder: Vec2d,
+    /// A text paste arrived (`TextInput { was_paste }`) ahead of its key
+    /// chord: that chord's key-down is not sent to the page as well.
     #[rust]
-    suppress_next_paste_shortcut: bool,
+    pasted_text: bool,
     #[rust]
     pump_started: bool,
     #[rust]
@@ -794,7 +796,7 @@ impl Widget for WebView {
                     let _ = browser.set_focus(false);
                 }
                 cx.hide_text_ime();
-                self.suppress_next_paste_shortcut = false;
+                self.pasted_text = false;
             }
             Hit::FingerDown(fe) => {
                 let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
@@ -839,18 +841,23 @@ impl Widget for WebView {
             Hit::FingerScroll(fe) => {
                 self.send_mouse_wheel(cx, fe.abs, fe.modifiers, fe.scroll);
             }
+            Hit::TextCopy(event) => {
+                if let Some(browser) = self.active_browser() {
+                    BrowserKeys::answer_clipboard(browser, &event, false);
+                }
+            }
+            Hit::TextCut(event) => {
+                if let Some(browser) = self.active_browser() {
+                    BrowserKeys::answer_clipboard(browser, &event, true);
+                }
+            }
             Hit::KeyDown(key_event) => {
                 // Browser-level shortcuts (Cmd+T/W/L/R/[ ]) are the app's;
                 // they never reach the page.
                 if key_event.modifiers.logo && crate::is_app_shortcut(&key_event) {
                     return;
                 }
-                if self.suppress_next_paste_shortcut
-                    && key_event.key_code == KeyCode::KeyV
-                    && key_event.modifiers.is_primary()
-                {
-                    self.suppress_next_paste_shortcut = false;
-                } else {
+                if BrowserKeys::page_takes_key_down(&key_event, &mut self.pasted_text) {
                     self.send_key(&key_event, makepad_cef::KEY_EVENT_KEYDOWN);
                 }
             }
@@ -867,7 +874,7 @@ impl Widget for WebView {
                     .unwrap_or_default();
                 self.update_ime_spot(cx, ime_pos);
                 if text_event.was_paste {
-                    self.suppress_next_paste_shortcut = true;
+                    self.pasted_text = true;
                 }
                 let modifiers = BrowserKeys::cef_modifiers(cx.keyboard.modifiers(), MouseButton::empty());
                 let char_data = BrowserKeys::char_event_data(&text_event.input);

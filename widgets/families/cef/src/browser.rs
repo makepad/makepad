@@ -134,8 +134,10 @@ pub struct Browser {
     pressed_buttons: MouseButton,
     #[rust]
     scroll_remainder: Vec2d,
+    /// A text paste arrived (`TextInput { was_paste }`) ahead of its key
+    /// chord: that chord's key-down is not sent to the page as well.
     #[rust]
-    suppress_next_paste_shortcut: bool,
+    pasted_text: bool,
     /// Size of the IOSurface-backed texture currently registered as the
     /// accelerated paint target (None on the software path).
     #[rust]
@@ -708,6 +710,43 @@ impl Browser {
         )
     }
 
+    /// Whether a key-down goes on to the page. For the copy, cut and paste
+    /// chords every platform raises `TextCopy` / `TextCut` / a `TextInput`
+    /// with `was_paste` (and the WM forwards its own to a hosted app); the
+    /// page is served from those ([`Self::answer_clipboard`], the paste
+    /// commit), so running the chord in the page as well would do it twice.
+    /// A paste chord still reaches the page on macOS and Windows when no text
+    /// paste came first (an image on the clipboard: Chromium reads the system
+    /// clipboard itself); never on Linux, where the windowless Chromium runs
+    /// without a display server and its clipboard is private to the process.
+    pub fn page_takes_key_down(key_event: &KeyEvent, pasted_text: &mut bool) -> bool {
+        let modifiers = &key_event.modifiers;
+        if !(modifiers.control || modifiers.logo) || modifiers.alt {
+            return true;
+        }
+        match key_event.key_code {
+            KeyCode::KeyC | KeyCode::KeyX => false,
+            KeyCode::KeyV => !std::mem::take(pasted_text) && !cfg!(target_os = "linux"),
+            _ => true,
+        }
+    }
+
+    /// Answer a copy or cut from the page: the selection the user made goes
+    /// on the clipboard every app shares (the system one, or the WM's), and
+    /// the page runs its own command too, so it sees its `copy` / `cut`
+    /// event, a cut removes an editable selection, and on macOS and Windows
+    /// Chromium adds its richer formats to the system clipboard.
+    pub fn answer_clipboard(browser: &mut makepad_cef::Browser, event: &TextClipboardEvent, cut: bool) {
+        let text = browser.selected_text();
+        let command = if cut { browser.cut_selection() } else { browser.copy_selection() };
+        if let Err(err) = command {
+            log!("Browser {} failed: {err}", if cut { "cut" } else { "copy" });
+        }
+        if !text.is_empty() {
+            *event.response.borrow_mut() = Some(text);
+        }
+    }
+
     pub fn char_event_data(text: &str) -> Option<(i32, u16)> {
         let mut chars = text.chars();
         let ch = chars.next()?;
@@ -1192,7 +1231,7 @@ impl Widget for Browser {
                         }
                     }
                     cx.hide_text_ime();
-                    self.suppress_next_paste_shortcut = false;
+                    self.pasted_text = false;
                 }
                 Hit::FingerDown(fe) if !pointer_held_elsewhere => {
                     let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
@@ -1253,13 +1292,18 @@ impl Widget for Browser {
                 Hit::FingerScroll(fe) => {
                     self.send_mouse_wheel_internal(cx, fe.abs, fe.modifiers, fe.scroll);
                 }
+                Hit::TextCopy(event) => {
+                    if let Some(browser) = &mut self.cef_browser {
+                        Self::answer_clipboard(browser, &event, false);
+                    }
+                }
+                Hit::TextCut(event) => {
+                    if let Some(browser) = &mut self.cef_browser {
+                        Self::answer_clipboard(browser, &event, true);
+                    }
+                }
                 Hit::KeyDown(key_event) => {
-                    if self.suppress_next_paste_shortcut
-                        && key_event.key_code == KeyCode::KeyV
-                        && key_event.modifiers.is_primary()
-                    {
-                        self.suppress_next_paste_shortcut = false;
-                    } else {
+                    if Self::page_takes_key_down(&key_event, &mut self.pasted_text) {
                         let modifiers = Self::key_event_modifiers(&key_event);
                         let windows_key_code = Self::windows_key_code(key_event.key_code);
                         let native_key_code = Self::native_key_code(key_event.key_code);
@@ -1347,7 +1391,7 @@ impl Widget for Browser {
                         .unwrap_or_default();
                     self.update_ime_spot(cx, ime_pos);
                     if text_event.was_paste {
-                        self.suppress_next_paste_shortcut = true;
+                        self.pasted_text = true;
                     }
 
                     if let Some(browser) = &mut self.cef_browser {

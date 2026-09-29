@@ -1136,8 +1136,8 @@ pub struct cef_frame_t {
     pub is_valid: cef_unused_callback_t,
     pub undo: cef_unused_callback_t,
     pub redo: cef_unused_callback_t,
-    pub cut: cef_unused_callback_t,
-    pub copy: cef_unused_callback_t,
+    pub cut: Option<unsafe extern "system" fn(self_: *mut cef_frame_t)>,
+    pub copy: Option<unsafe extern "system" fn(self_: *mut cef_frame_t)>,
     pub paste: cef_unused_callback_t,
     pub paste_and_match_style: cef_unused_callback_t,
     pub del: cef_unused_callback_t,
@@ -1179,6 +1179,8 @@ pub struct cef_browser_t {
     pub is_popup: cef_unused_callback_t,
     pub has_document: cef_unused_callback_t,
     pub get_main_frame:
+        Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> *mut cef_frame_t>,
+    pub get_focused_frame:
         Option<unsafe extern "system" fn(self_: *mut cef_browser_t) -> *mut cef_frame_t>,
 }
 
