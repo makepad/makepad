@@ -653,6 +653,10 @@ impl CodeEditor {
         self.document_read_only = session.document().is_read_only();
         // This needs to be called first to ensure the session is up to date.
         session.handle_changes();
+        // A fold animation steps before this frame is laid out, so what is
+        // drawn and what `position_rect` reports after the draw agree (a
+        // host drawing over the text, block widgets, stays in place).
+        let folds_moving = session.update_folds();
 
         self.reset_draw_font_scale();
         if self.is_read_only() || self.caret_policy == CaretPolicy::Steady {
@@ -913,7 +917,7 @@ impl CodeEditor {
             cx.show_text_ime(self.scroll_bars.area(), ime_pos);
         }
 
-        if session.update_folds() {
+        if folds_moving {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
             self.keep_cursor_in_view = KeepCursorInView::Off;

@@ -315,6 +315,44 @@ impl CodeSession {
         }
     }
 
+    /// Fold exactly `lines` (animated, like `fold`): each keeps its first
+    /// `column` columns at full size and shrinks the rest (0: the whole
+    /// line shrinks). Lines already folded stay folded.
+    pub fn fold_lines(&self, lines: &[usize], column: usize) {
+        let mut fold_state = self.fold_state.borrow_mut();
+        let line_count = self.document().as_text().as_lines().len();
+        for &line_index in lines.iter().filter(|line| **line < line_count) {
+            if fold_state.folded_lines.contains(&line_index) || fold_state.folding_lines.contains(&line_index) {
+                continue;
+            }
+            self.layout.borrow_mut().fold_column[line_index] = column;
+            fold_state.unfolding_lines.remove(&line_index);
+            fold_state.folding_lines.insert(line_index);
+        }
+    }
+
+    /// Unfold exactly `lines` (animated).
+    pub fn unfold_lines(&self, lines: &[usize]) {
+        let fold_state = &mut *self.fold_state.borrow_mut();
+        for line in lines {
+            if fold_state.folding_lines.remove(line) | fold_state.folded_lines.remove(line) {
+                fold_state.unfolding_lines.insert(*line);
+            }
+        }
+    }
+
+    /// Whether a fold or unfold is still animating.
+    pub fn folds_animating(&self) -> bool {
+        let fold_state = self.fold_state.borrow();
+        !fold_state.folding_lines.is_empty() || !fold_state.unfolding_lines.is_empty()
+    }
+
+    /// Whether `line` is folded or folding.
+    pub fn is_folded(&self, line: usize) -> bool {
+        let fold_state = self.fold_state.borrow();
+        fold_state.folded_lines.contains(&line) || fold_state.folding_lines.contains(&line)
+    }
+
     pub fn unfold(&self) {
         let fold_state = &mut *self.fold_state.borrow_mut();
         for line in fold_state.folding_lines.drain() {
