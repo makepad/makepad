@@ -228,6 +228,12 @@ impl MacosVideoFileEncoder {
                 return Err(VideoFileError::new("AVAssetWriterInput(video) init failed"));
             }
             let _: () = msg_send![video_input, setExpectsMediaDataInRealTime: YES];
+            // The track's timescale is the frame rate's numerator, so every
+            // frame time is a whole number of ticks (the default, 600, puts
+            // 90, 144 and the NTSC rates 24000/1001 … on a jittered grid).
+            if options.fps_den > 0 && options.fps_num > 0 && options.fps_num <= i32::MAX as u32 {
+                let _: () = msg_send![video_input, setMediaTimeScale: options.fps_num as i32];
+            }
             let can_add: BOOL = msg_send![writer, canAddInput: video_input];
             if can_add == NO {
                 let error: ObjcId = msg_send![writer, error];
