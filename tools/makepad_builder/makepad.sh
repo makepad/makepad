@@ -2398,6 +2398,7 @@ screen_meta() {
         packages) crumb=' › System packages' sub='Installed outside this folder, so please check them.' ;;
         folder) crumb=' › Folder' sub='Everything the Builder installs goes into one folder.' ;;
         gpu) crumb=' › Graphics' sub='Before you continue.' ;;
+        send) crumb=' › Send my changes' sub='Your coding agent describes your changes; nothing is sent until you choose Send.' ;;
         review) crumb=' › Send my changes' sub='Read what goes to Makepad; nothing is sent until you choose Send.' ;;
     esac
     default_footer='↑↓ move   ⏎ select   esc back   q quit'
@@ -2414,6 +2415,7 @@ screen_rows() {
         xcode) xcode_rows ;;
         rustpick) rustpick_rows ;;
         packages) packages_rows ;;
+        send) send_rows ;;
         review) review_rows ;;
     esac
 }
@@ -2533,8 +2535,6 @@ menu_keys() {
     if [ "$mk_open" = 1 ]; then mk="${mk}${key_c}s${r0}${dim} don't start   ${r0}"
     elif [ "$mk_open" = 0 ]; then mk="${mk}${key_c}s${r0}${dim} start when done   ${r0}"; fi
     [ -z "$mk_cancel" ] || mk="${mk}${key_c}c${r0}${dim} cancel   ${r0}"
-    # e: not while the app compiles or waits in the queue.
-    case "$mk_open|$1|${m_send:-}" in "|app:"*) case "${m_send:-}" in *" ${1#app:} "*) mk="${mk}${key_c}e${r0}${dim} send my changes   ${r0}" ;; esac ;; esac
     mk="${mk}${dim}q quit${r0}"
 }
 # plain TEXT -> pl: TEXT without its colour codes (ESC [ ... m), by the
@@ -3066,7 +3066,7 @@ scan() {
         m_rust_ok=1
         case "$selected_rust" in /*) m_rust_external=$rust_sysroot ;; esac
     fi
-    m_license_rows= m_send=' '
+    m_license_rows= m_send=' ' m_reports=
     if [ "$lic_state" = ok ] || [ -z "$email" ]; then sc_ids=$licensed_ids
     else
         sc_ids=
@@ -3175,6 +3175,9 @@ main_rows() {
     printf 'head|CODING AGENTS\n'
     [ -z "$agents" ] || printf '%s\n' "$agents" | while IFS='|' read -r mr_cmd mr_title; do printf 'item|agent-%s|%s|||open|Ask it to change an app (it rebuilds them here), or to "send what I changed" to Makepad.\n' "$mr_cmd" "$mr_title"; done
     printf "item|agent-shell|Shell||%swith this folder's Rust on PATH%s|open|A shell in this folder; type exit to come back.\n" "$dim" "$r0"
+    mr_info="Your coding agent describes what you changed; you read it before anything is sent."
+    if [ -n "$m_reports" ]; then printf 'item|send|Send my changes||%sreport ready%s|open|%s\n' "$ok" "$r0" "$mr_info"
+    else printf 'item|send|Send my changes||%sto Makepad%s|open|%s\n' "$dim" "$r0" "$mr_info"; fi
     printf 'head|SETUP\n'
     mr_info='Log in, switch or log out.'
     if [ -z "$email" ]; then printf 'item|account|Account||%snot logged in%s|log in|%s\n' "$warn" "$r0" "$mr_info"
@@ -3213,14 +3216,16 @@ app_info() {
         *) ai='Downloads its source, compiles it and opens it.' ;;
     esac
 }
-# sendable ID STATE: an app whose source is here takes e (send my changes,
-# m_send); when a coding agent left a change report the row says so (ai).
+# sendable ID STATE: an app whose source is here can send its changes
+# (m_send, Send my changes); when a coding agent left a change report the
+# row says so (ai) and so does Send my changes (m_reports).
 sendable() {
     case "$2" in ready | compile | merge) ;; *) return 0 ;; esac
     ! is_stopped "$1" || return 0
     m_send="$m_send$1 "
     if [ -e "$root/changes/$1-report" ] || [ -e "$root/changes/$1-report.zip" ]; then
-        ai='Your change report is ready: press e to read it and send it to Makepad.'
+        ai='Your change report is ready: open Send my changes under Coding agents.'
+        m_reports="$m_reports$1 "
     fi
 }
 # The index of the item row with ID on the current screen.
@@ -3906,11 +3911,101 @@ merge_changes() { # merge_changes APP
     message="${ok}✓${r0} $mc_title finished merging. Select the app to run it."
     scan
 }
-# send_changes APP (e on an app's row): read and send the change report a
-# coding agent left in changes/, or have one write it first. Nothing is
-# sent without Send chosen on the review page.
+# send_page (Send my changes under Coding agents): what sending does, then
+# the app, the coding agent and an optional note for Makepad; Describe my
+# changes starts the agent (or, when a report waits, reads and sends it).
+send_page() {
+    sp_screen=$screen sp_sel=$sel sp_top=$top
+    sp_app= sp_agent= sp_note=
+    for sp_id in $m_send; do sp_app=$sp_id; break; done
+    for sp_id in $m_reports; do sp_app=$sp_id; break; done
+    sp_agents=$(printf '%s\n' "$agents" | grep -v '^grok|' | grep . || :)
+    sp_agent=${sp_agents%%|*}
+    sp_agent=${sp_agent%%"$nl"*}
+    screen=send sel=0 top=0 message=
+    sp_message=
+    while :; do
+        draw; key
+        case "$key" in
+            up) [ "$items" = 0 ] || sel=$(( (sel + items - 1) % items )) ;;
+            down) [ "$items" = 0 ] || sel=$(( (sel + 1) % items )) ;;
+            esc) break ;;
+            q) exit 0 ;;
+            enter)
+                select_row
+                case "$id" in
+                    app)
+                        set --
+                        for sp_id in $m_send; do app_title "$sp_id"; set -- "$@" "$at"; done
+                        [ "$#" -gt 1 ] || continue
+                        app_title "$sp_app"
+                        choose "Whose changes?" '' "$at" "$@" || continue
+                        for sp_id in $m_send; do app_title "$sp_id"; [ "$at" != "$chosen" ] || sp_app=$sp_id; done ;;
+                    agent)
+                        set --
+                        while IFS='|' read -r sp_cmd sp_title; do [ -z "$sp_cmd" ] || set -- "$@" "$sp_title"; done <<EOF
+$sp_agents
+EOF
+                        [ "$#" -gt 1 ] || continue
+                        choose 'Describe your changes with which agent?' 'It writes the report; you read it here before anything is sent.' "$(agent_title "$sp_agent")" "$@" || continue
+                        sp_agent=$(printf '%s\n' "$sp_agents" | awk -F'|' -v t="$chosen" '$2 == t { print $1; exit }') ;;
+                    note)
+                        edit 'A short note for Makepad (optional):' "$sp_note" "${dim}It becomes the report's summary; your agent takes out names and paths.${r0}" '⏎ keep   esc cancel' && sp_note=$edited ;;
+                    start)
+                        send_changes "$sp_app" "$sp_agent" "$sp_note"
+                        sp_message=$message
+                        break ;;
+                    *) break ;;
+                esac ;;
+        esac
+    done
+    screen=$sp_screen sel=$sp_sel top=$sp_top message=$sp_message
+}
+# app_title ID -> at: the app's title from its release, else its id.
+app_title() {
+    at=$1
+    if app_release_file "$1" 2>/dev/null; then at=$(json flat < "$release_file" 2>/dev/null | awk -F'\t' '$1 == "title" { print $2; exit }'); [ -n "$at" ] || at=$1; fi
+}
+agent_title() { printf '%s\n' "$agents" | awk -F'|' -v id="$1" '$1 == id { print $2; exit }'; }
+send_rows() {
+    printf 'note|\n'
+    wrap '' "Your coding agent reads what you changed in an app's source and describes each change as an idea, not code: what is different and why. It takes out names, emails, paths and secrets and shows you the list first."
+    printf 'note|\n'
+    wrap "$dim" 'Then you read the report here and choose Send, anonymously or with your email. Nothing goes to Makepad before that.'
+    printf 'note|\n'
+    if [ -z "$sp_app" ]; then
+        wrap "$warn" 'Download an app and change it first.'
+        printf 'note|\n'
+        pad 'Back' 16; printf 'item|back|%s|||\n' "$padded"
+        return 0
+    fi
+    set -- $m_send
+    app_title "$sp_app"
+    sr_change=; [ "$#" -lt 2 ] || sr_change=change
+    printf 'item|app|App||%s|%s\n' "$at" "$sr_change"
+    if [ -z "$sp_agent" ]; then
+        printf 'item|agent|Coding agent||%snone installed%s|\n' "$warn" "$r0"
+    else
+        sr_change=; [ "$(printf '%s\n' "$sp_agents" | grep -c . || :)" -lt 2 ] || sr_change=change
+        printf 'item|agent|Coding agent||%s|%s\n' "$(agent_title "$sp_agent")" "$sr_change"
+    fi
+    if [ -n "$sp_note" ]; then printf 'item|note|Note||%s|write\n' "$(printf '%s' "$sp_note" | tr '|' '/')"
+    else printf 'item|note|Note||%soptional%s|write\n' "$dim" "$r0"; fi
+    printf 'note|\n'
+    if [ -e "$root/changes/$sp_app-report" ] || [ -e "$root/changes/$sp_app-report.zip" ]; then
+        pad 'Read and send the report' 34; printf 'item|start|%s|||report ready\n' "$padded"
+    elif [ -n "$sp_agent" ]; then
+        pad 'Describe my changes' 34; printf 'item|start|%s|||starts %s\n' "$padded" "$(agent_title "$sp_agent")"
+    else
+        wrap "$warn" 'Install Claude Code or Codex to describe your changes.'
+    fi
+    pad 'Back' 34; printf 'item|back|%s|||\n' "$padded"
+}
+# send_changes APP AGENT NOTE (Send my changes): read and send the change
+# report a coding agent left in changes/, or have AGENT write it first, with
+# NOTE as its summary. Nothing is sent without Send chosen on the review page.
 send_changes() {
-    sd_app=$1
+    sd_app=$1 sd_agent=$2 sd_note=$3
     case "${m_send:-}" in *" $sd_app "*) ;; *) message="${dim}Download the app and change it first; then your coding agent describes your changes.${r0}"; return 0 ;; esac
     if { [ -n "$b_pid" ] && [ "$b_app" = "$sd_app" ]; } || queue_place "$sd_app"; then
         message="${dim}Wait until it is compiled, then send your changes.${r0}"; return 0
@@ -3945,21 +4040,16 @@ send_changes() {
     fi
     scan
 }
-# write_report: no report yet for sd_app, so a coding agent writes one as
-# AGENTS.md describes and leaves it in changes/. 1 when none was started.
+# write_report: no report yet for sd_app, so sd_agent writes one as
+# AGENTS.md describes and leaves it in changes/, with sd_note (if any) as
+# its summary. 1 when none was started.
 write_report() {
-    sd_agents=$(printf '%s\n' "$agents" | grep -v '^grok|' | grep . || :)
-    sd_count=$(printf '%s\n' "$sd_agents" | grep -c . || :)
-    case "$sd_count" in
-        0) message="${dim}Ask your coding agent to \"send what I changed\" in $sd_title; it leaves the report in changes/ for you to read here.${r0}"; return 1 ;;
-        1) sd_agent=${sd_agents%%|*} ;;
-        *)
-            # shellcheck disable=SC2046 # agent commands, no spaces
-            set -- $(printf '%s\n' "$sd_agents" | cut -d'|' -f1)
-            choose 'Describe your changes with which agent?' 'It writes the report; you read it here before anything is sent.' "$1" "$@" || return 1
-            sd_agent=$chosen ;;
-    esac
-    launch_agent "$sd_agent" "Send what I changed in $sd_title to Makepad. Follow \"Sending your changes to Makepad\" in the Makepad AGENTS.md: describe my changes as concepts, anonymise them, show me the list and wait for my approval, then write the report folder changes/$sd_app-report in this folder. I read and send it from the Builder."
+    if [ -z "$sd_agent" ]; then
+        message="${dim}Ask your coding agent to \"send what I changed\" in $sd_title; it leaves the report in changes/ for you to read here.${r0}"; return 1
+    fi
+    wr_note=
+    [ -z "$sd_note" ] || wr_note=" The person's note for Makepad, to use as the report's summary (anonymised like the rest): \"$sd_note\""
+    launch_agent "$sd_agent" "Send what I changed in $sd_title to Makepad. Follow \"Sending your changes to Makepad\" in the Makepad AGENTS.md: describe my changes as concepts, anonymise them, show me the list and wait for my approval, then write the report folder changes/$sd_app-report in this folder. I read and send it from the Builder.$wr_note"
 }
 # review_page -> chosen (send or email): every change by title, what else
 # goes with it, then Send, Send with my email (when logged in), Read it all
@@ -4273,7 +4363,6 @@ while :; do
         q) exit 0 ;;
         esc) exit 0 ;;
         c | s) select_row; background_key "$key" "$id" ;;
-        e) select_row; case "$id" in app:*) send_changes "${id#app:}" ;; esac ;;
         enter)
             select_row
             case "$screen/$id" in
@@ -4290,6 +4379,7 @@ while :; do
                 main/free) free_open=$((1 - free_open)) ;;
                 main/all) compile_all ;;
                 main/agent-shell) open_shell ;;
+                main/send) send_page ;;
                 main/agent-*) launch_agent "${id#agent-}" || : ;;
                 main/app:*) open_app "${id#app:}" ;;
             esac ;;
