@@ -178,6 +178,7 @@ script_mod! {
         color_cursor_border: #FFFFFF
 
         color_highlight: #f00
+        color_ctrl_selected: theme.color_highlight
         color_text_cursor: #FFFFFF
         color_bg_highlight_inline: #00000011
 
