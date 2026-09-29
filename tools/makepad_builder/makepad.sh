@@ -4258,10 +4258,12 @@ while :; do
     # Finished work reports on the status line, and the next queued app
     # starts; the screen redraws a few times a second while work runs.
     service_background
+    was_polling=${polling:-idle}
     polling=idle
     if [ ! -f "$scratch/disk" ] || [ -n "$b_pid" ] || [ -n "$u_pid" ]; then polling=1; fi
-    # Idle, the screen is drawn again only when the window was resized.
-    if [ "$polling" != idle ] || [ "${key:-}" != none ] || [ "$winched" = 1 ]; then draw; fi
+    # Idle, the screen is drawn again only when the window was resized, and
+    # once when work has just ended: the finished build's row and message.
+    if [ "$polling" != idle ] || [ "$was_polling" != idle ] || [ "${key:-}" != none ] || [ "$winched" = 1 ]; then draw; fi
     key
     [ "$key" = none ] && continue
     message=
