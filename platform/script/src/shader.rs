@@ -1341,6 +1341,8 @@ impl ShaderFnCompiler {
             // [id] stream slot the dynamic forms use is still present
             // (shape parity); only PUSH_SLOT needs the name table.
             Opcode::SLOTS_FRAME | Opcode::ARGS_TO_SLOTS => {}
+            // A valueless arm's nil: shader if arms stay valueless.
+            Opcode::NIL_ARM => {}
             Opcode::PUSH_SLOT => {
                 let name = {
                     let bodies = vm.bx.code.bodies.borrow();

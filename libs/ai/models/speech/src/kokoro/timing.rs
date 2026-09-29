@@ -26,16 +26,28 @@ fn ipa(symbol: char) -> Option<&'static str> {
     })
 }
 
+/// Frames the audio runs ahead of the predicted durations: the leading pad
+/// token's duration overstates the silence before the first phoneme by
+/// three frames, so every phoneme sounds that much earlier than the
+/// cumulative frame count says. Upstream Kokoro's timestamps drop the same
+/// three frames (`2 * (pred_dur[0] - 3)` at 80 steps a second). Measured on
+/// our takes (vowels on voiced frames, fricatives on hiss): the raw phoneme
+/// times sat 60-70 ms late at speeds 0.8, 1.0 and 1.25 (af_heart, bf_lily);
+/// with this correction they sit 5-15 ms early, under half a video frame.
+pub const LEADING_PAD_FRAMES: usize = 3;
+
 /// The phonemes of one synthesized chunk, appended to `out`: every token
 /// that sounds a word (`sources[i]` set) with its frames, from `offset`
-/// seconds at `frame_secs` a frame. Stress and length marks lengthen the
-/// phoneme before them; spaces and punctuation are pauses, not phonemes.
+/// seconds at `frame_secs` a frame, less [`LEADING_PAD_FRAMES`] so they sit
+/// on the audio. Stress and length marks lengthen the phoneme before them;
+/// spaces and punctuation are pauses, not phonemes.
 pub fn chunk_phones(tokens: &[u16], sources: &[Option<usize>], frames: &[usize], offset: f64, frame_secs: f64, out: &mut Vec<PhoneTiming>) {
     let mut frame = 0usize;
+    let lead = LEADING_PAD_FRAMES as f64 * frame_secs;
     for ((token, source), count) in tokens.iter().zip(sources).zip(frames) {
-        let begin = offset + frame as f64 * frame_secs;
+        let begin = (offset + frame as f64 * frame_secs - lead).max(offset);
         frame += count;
-        let end = offset + frame as f64 * frame_secs;
+        let end = (offset + frame as f64 * frame_secs - lead).max(offset);
         let Some(symbol) = crate::g2p::symbol(*token) else { continue };
         if source.is_none() || symbol.is_whitespace() || symbol.is_ascii_punctuation() || matches!(symbol, '—' | '…' | '“' | '”') {
             continue;
@@ -208,9 +220,12 @@ mod tests {
         chunk_phones(&tokens, &sources, &frames, 1.0, 0.025, &mut out);
         let phones: Vec<&str> = out.iter().map(|p| p.phone.as_str()).collect();
         assert_eq!(phones, ["h", "ə", "l", "oʊ", "w"]);
-        assert!((out[0].start - 1.05).abs() < 1e-9 && (out[0].end - 1.075).abs() < 1e-9);
+        // Frames counted from the chunk, less the leading pad's 3 surplus
+        // frames (never before the chunk's start).
+        let at = |frames: usize| 1.0 + (frames as f64 - LEADING_PAD_FRAMES as f64).max(0.0) * 0.025;
+        assert!((out[0].start - at(2)).abs() < 1e-9 && (out[0].end - at(3)).abs() < 1e-9, "{:?}", out[0]);
         // `ˈ` lengthened the `l` before it.
-        assert!((out[2].end - (1.0 + 7.0 * 0.025)).abs() < 1e-9, "{:?}", out[2]);
-        assert!((out[4].start - (1.0 + 12.0 * 0.025)).abs() < 1e-9, "the space is a pause");
+        assert!((out[2].end - at(7)).abs() < 1e-9, "{:?}", out[2]);
+        assert!((out[4].start - at(12)).abs() < 1e-9, "the space is a pause");
     }
 }

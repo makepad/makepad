@@ -247,6 +247,13 @@ impl CodeSession {
         &self.document
     }
 
+    /// Recompute every line's position, after the document's block inlays
+    /// changed ([`CodeDocument::set_block_inlays`]).
+    pub fn relayout(&self) {
+        self.layout.borrow_mut().y.clear();
+        self.update_y();
+    }
+
     pub fn layout(&self) -> Layout<'_> {
         Layout {
             text: self.document.as_text(),

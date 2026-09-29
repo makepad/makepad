@@ -28,7 +28,18 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_if_else(&mut self, opargs: OpcodeArgs) {
+        // NEED_NIL: the true arm left no value but the if's value is used
+        if opargs.is_need_nil() {
+            self.bx.threads.cur().push_stack_unchecked(NIL);
+        }
         self.bx.threads.cur().trap.goto_rel(opargs.to_u32());
+    }
+
+    /// The value of an if/match arm that leaves none (see the parser's
+    /// close_if_else).
+    pub(crate) fn handle_nil_arm(&mut self) {
+        self.bx.threads.cur().push_stack_unchecked(NIL);
+        self.bx.threads.cur().trap.goto_next();
     }
 
     // RETURN handlers

@@ -66,29 +66,44 @@ enum State {
         code_start: u32,
     },
 
+    // `stmt`: the if sits in statement position (its value is only popped
+    // to `me`, or kept as the block's value when last), so when no arm
+    // leaves a value the if leaves none either. In expression position a
+    // valueless arm yields nil. `true_valued`: the true arm left a value.
     IfTest {
         index: u32,
+        stmt: bool,
     },
     IfTrueExpr {
         if_start: u32,
+        stmt: bool,
     },
     IfTrueBlock {
         if_start: u32,
         last_was_sep: bool,
+        stmt: bool,
     },
     IfMaybeElse {
         if_start: u32,
         was_block: bool,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElse {
         else_start: u32,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElseExpr {
         else_start: u32,
+        stmt: bool,
+        true_valued: bool,
     },
     IfElseBlock {
         else_start: u32,
         last_was_sep: bool,
+        stmt: bool,
+        true_valued: bool,
     },
 
     OkTest {
@@ -839,6 +854,12 @@ pub struct ScriptParser {
     /// executes the commit.
     last_jump_target: u32,
 
+    /// Code position right after a statement-position if whose arms all
+    /// left no value: the statement ending here leaves nothing to pop to
+    /// `me` (see `last_stmt_leaves_no_value`), and an arm or `else if`
+    /// ending here counts as valueless.
+    valueless_end: u32,
+
     // Storage for nested patterns during parsing
     // Each entry is (pattern_info). The index into this vec is encoded in the ids list.
     nested_patterns: Vec<NestedPattern>,
@@ -876,6 +897,7 @@ impl Default for ScriptParser {
             slot_ctxs: Default::default(),
             slot_frames: Default::default(),
             last_jump_target: u32::MAX,
+            valueless_end: u32::MAX,
         }
     }
 }
@@ -1381,9 +1403,57 @@ impl ScriptParser {
             || opcode == Opcode::CONTINUE
             || opcode == Opcode::ME_SPLAT
             || code.is_let_opcode()
+            || self.code_len() == self.valueless_end
+    }
+
+    /// Close the block arm of an if/match at its `}`: the last statement's
+    /// value stays on the stack as the arm's value (its pop to `me` is
+    /// undone). Returns false when the arm leaves no value: it is empty,
+    /// ends in `;`, or ends in a statement that leaves none (a loop, a
+    /// `let`, a valueless statement if).
+    fn close_arm_block(&mut self, last_was_sep: bool) -> bool {
+        if !last_was_sep && self.has_pop_to_me() {
+            self.clear_pop_to_me();
+            return true;
+        }
+        false
+    }
+
+    /// Finish an if/else once its else arm is parsed: make both arms agree.
+    /// Both valued: the if's value is theirs. A statement if whose arms left
+    /// no value leaves none. Otherwise (one arm valued, or expression
+    /// position) each valueless arm yields nil: the true arm through its
+    /// IF_ELSE jump (NEED_NIL), the else arm through a trailing NIL_ARM.
+    /// Both are invisible to the shader compiler, whose ifs are statements.
+    fn close_if_else(
+        &mut self,
+        else_start: u32,
+        stmt: bool,
+        true_valued: bool,
+        else_valued: bool,
+    ) {
+        let valueless = stmt && !true_valued && !else_valued;
+        if !valueless && !else_valued {
+            self.push_code(Opcode::NIL_ARM.into(), self.index);
+        }
+        self.last_jump_target = self.code_len();
+        let args = OpcodeArgs::from_u32(self.code_len() as u32 - else_start);
+        if !valueless && !true_valued {
+            self.set_opcode_args(else_start, args.set_need_nil());
+        } else {
+            self.set_opcode_args(else_start, args);
+        }
+        if valueless {
+            self.valueless_end = self.code_len();
+        }
     }
 
     fn has_pop_to_me(&self) -> bool {
+        // A valueless statement if ends here: the flag on its last arm's
+        // last statement is that arm's own, not the if's.
+        if self.code_len() == self.valueless_end {
+            return false;
+        }
         if let Some(code) = self.opcodes.last() {
             if let Some((opcode, args)) = code.as_opcode() {
                 if opcode == Opcode::POP_TO_ME {
@@ -1655,8 +1725,10 @@ impl ScriptParser {
             } => {
                 // Block body done, expect }
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
+                    // A match is an expression: a valueless arm yields nil
+                    // like a missing `_` arm does.
+                    if !self.close_arm_block(last_was_sep) {
+                        self.push_code(Opcode::NIL_ARM.into(), self.index);
                     }
                     self.state.push(State::MatchMaybeArm {
                         temp_id,
@@ -1719,8 +1791,8 @@ impl ScriptParser {
             } => {
                 // Wildcard block body done, expect }
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
+                    if !self.close_arm_block(last_was_sep) {
+                        self.push_code(Opcode::NIL_ARM.into(), self.index);
                     }
                     self.state.push(State::MatchWildcardEnd {
                         prev_else_start,
@@ -3782,13 +3854,14 @@ impl ScriptParser {
                     return 0;
                 }
             }
-            State::IfTest { index } => {
+            State::IfTest { index, stmt } => {
                 let if_start = self.code_len() as _;
                 self.push_code(Opcode::IF_TEST.into(), index);
                 if tok.is_open_curly() {
                     self.state.push(State::IfTrueBlock {
                         if_start,
                         last_was_sep: false,
+                        stmt,
                     });
                     self.state.push(State::BeginStmt {
                         last_was_sep: false,
@@ -3799,28 +3872,31 @@ impl ScriptParser {
                     error!(self, tokenizer, "Unexpected else, use {{}} to disambiguate");
                     return 1;
                 }
-                self.state.push(State::IfTrueExpr { if_start });
+                self.state.push(State::IfTrueExpr { if_start, stmt });
                 self.state.push(State::BeginExpr { required: true });
                 return 0;
             }
-            State::IfTrueExpr { if_start } => {
+            State::IfTrueExpr { if_start, stmt } => {
                 self.state.push(State::IfMaybeElse {
                     if_start,
                     was_block: false,
+                    stmt,
+                    true_valued: true,
                 });
                 return 0;
             }
             State::IfTrueBlock {
                 if_start,
                 last_was_sep,
+                stmt,
             } => {
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                    }
+                    let true_valued = self.close_arm_block(last_was_sep);
                     self.state.push(State::IfMaybeElse {
                         if_start,
                         was_block: true,
+                        stmt,
+                        true_valued,
                     });
                     return 1;
                 } else {
@@ -3832,6 +3908,8 @@ impl ScriptParser {
             State::IfMaybeElse {
                 if_start,
                 was_block,
+                stmt,
+                true_valued,
             } => {
                 if id == id!(elif) {
                     // Desugar `elif ...` as `else { if ... }`: the rest of the
@@ -3847,8 +3925,15 @@ impl ScriptParser {
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start),
                     );
 
-                    self.state.push(State::IfElseExpr { else_start });
-                    self.state.push(State::IfTest { index: self.index });
+                    self.state.push(State::IfElseExpr {
+                        else_start,
+                        stmt,
+                        true_valued,
+                    });
+                    self.state.push(State::IfTest {
+                        index: self.index,
+                        stmt,
+                    });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
@@ -3859,56 +3944,78 @@ impl ScriptParser {
                         if_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start),
                     );
-                    self.state.push(State::IfElse { else_start });
+                    self.state.push(State::IfElse {
+                        else_start,
+                        stmt,
+                        true_valued,
+                    });
                     return 1;
                 }
+                // No else: the missing arm is worth nil (IF_TEST's NEED_NIL).
+                // A statement if whose true arm leaves no value leaves none
+                // at all; in expression position that arm yields nil too.
+                let valueless = stmt && !true_valued;
+                if !true_valued && !stmt {
+                    self.push_code(Opcode::NIL_ARM.into(), self.index);
+                }
                 self.last_jump_target = self.code_len();
-                self.set_opcode_args(
-                    if_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil(),
-                );
-                // self.push_code_none(NIL);
+                let args = OpcodeArgs::from_u32(self.code_len() as u32 - if_start);
+                if valueless {
+                    self.set_opcode_args(if_start, args);
+                    self.valueless_end = self.code_len();
+                } else {
+                    self.set_opcode_args(if_start, args.set_need_nil());
+                }
                 if was_block {
                     // allow expression to chain
                     self.state.push(State::EndExpr)
                 }
             }
-            State::IfElse { else_start } => {
+            State::IfElse {
+                else_start,
+                stmt,
+                true_valued,
+            } => {
                 if tok.is_open_curly() {
                     self.state.push(State::IfElseBlock {
                         else_start,
                         last_was_sep: false,
+                        stmt,
+                        true_valued,
                     });
                     self.state.push(State::BeginStmt {
                         last_was_sep: false,
                     });
                     return 1;
                 }
-                self.state.push(State::IfElseExpr { else_start });
+                self.state.push(State::IfElseExpr {
+                    else_start,
+                    stmt,
+                    true_valued,
+                });
                 self.state.push(State::BeginExpr { required: true });
                 return 0;
             }
-            State::IfElseExpr { else_start } => {
-                self.last_jump_target = self.code_len();
-                self.set_opcode_args(
-                    else_start,
-                    OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
-                );
+            State::IfElseExpr {
+                else_start,
+                stmt,
+                true_valued,
+            } => {
+                // An expression arm leaves a value, except an `else if`
+                // chain in statement position whose arms left none.
+                let else_valued = self.valueless_end != self.code_len();
+                self.close_if_else(else_start, stmt, true_valued, else_valued);
                 return 0;
             }
             State::IfElseBlock {
                 else_start,
                 last_was_sep,
+                stmt,
+                true_valued,
             } => {
                 if tok.is_close_curly() {
-                    if !last_was_sep && self.has_pop_to_me() {
-                        self.clear_pop_to_me();
-                    }
-                    self.last_jump_target = self.code_len();
-                    self.set_opcode_args(
-                        else_start,
-                        OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
-                    );
+                    let else_valued = self.close_arm_block(last_was_sep);
+                    self.close_if_else(else_start, stmt, true_valued, else_valued);
                     self.state.push(State::EndExpr);
                     return 1;
                 } else {
@@ -4066,8 +4173,17 @@ impl ScriptParser {
                     return 1;
                 }
                 if id == id!(if) {
-                    // do if as an expression
-                    self.state.push(State::IfTest { index: self.index });
+                    // do if as an expression; a statement's own expression
+                    // (or the `else if` of one) is in statement position
+                    let stmt = match self.state.last() {
+                        Some(State::EndStmt { .. }) => true,
+                        Some(State::IfElseExpr { stmt, .. }) => *stmt,
+                        _ => false,
+                    };
+                    self.state.push(State::IfTest {
+                        index: self.index,
+                        stmt,
+                    });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
@@ -4797,6 +4913,16 @@ impl ScriptParser {
                             *last_was_sep = true
                         }
                         if let Some(State::IfElseBlock { last_was_sep, .. }) = self.state.last_mut()
+                        {
+                            *last_was_sep = true
+                        }
+                        if let Some(State::MatchArmBlock { last_was_sep, .. }) =
+                            self.state.last_mut()
+                        {
+                            *last_was_sep = true
+                        }
+                        if let Some(State::MatchWildcardBlock { last_was_sep, .. }) =
+                            self.state.last_mut()
                         {
                             *last_was_sep = true
                         }

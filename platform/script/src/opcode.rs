@@ -233,6 +233,10 @@ impl Opcode {
     pub const ASSIGN_SLOT_MUL: Self = Self(138);
     pub const ASSIGN_SLOT_DIV: Self = Self(139);
     pub const ASSIGN_SLOT_MOD: Self = Self(140);
+
+    // Push nil: the value of an if/match arm that leaves none, where the
+    // construct's value is used. The shader compiler ignores it.
+    pub const NIL_ARM: Self = Self(141);
 }
 
 impl fmt::Debug for OpcodeArgs {
@@ -427,6 +431,7 @@ impl Opcode {
             Self::ASSIGN_SLOT_MUL => Some("slot*="),
             Self::ASSIGN_SLOT_DIV => Some("slot/="),
             Self::ASSIGN_SLOT_MOD => Some("slot%="),
+            Self::NIL_ARM => Some("nil_arm"),
             _ => None,
         }
     }

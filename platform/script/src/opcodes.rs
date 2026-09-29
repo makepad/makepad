@@ -241,6 +241,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::ASSIGN_SLOT_DIV => self.handle_slot_num_assign_op(opargs, |a, b| a / b),
             Opcode::ASSIGN_SLOT_MOD => self.handle_slot_num_assign_op(opargs, |a, b| a % b),
 
+            Opcode::NIL_ARM => self.handle_nil_arm(),
+
             Opcode::DUP => self.handle_dup(),
             Opcode::DROP => self.handle_drop(),
             Opcode::ARRAY_INDEX_NIL => self.handle_array_index_nil(),

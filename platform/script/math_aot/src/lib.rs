@@ -1118,6 +1118,10 @@ impl<'a> Translator<'a> {
                 reject!();
             }
 
+            // The interpreter's nil for a valueless if/match arm whose value
+            // is used: a statement marker like NEED_NIL's.
+            Opcode::NIL_ARM => self.stack.push(CtItem::Nil),
+
             Opcode::SLOTS_FRAME => {
                 if !args.is_u32() {
                     reject!();

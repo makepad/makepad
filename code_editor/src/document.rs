@@ -385,6 +385,16 @@ impl CodeDocument {
         self.0.decorations.borrow_mut().clear()
     }
 
+    /// Reserve rows above lines for content a host draws over the editor
+    /// itself (inline visualisations, block widgets): `(line, block)` pairs
+    /// in any order, replacing the previous set. The space is not moved by
+    /// edits; a host sets it again after the text changes, then calls
+    /// [`crate::CodeSession::relayout`] on each session of this document.
+    pub fn set_block_inlays(&self, mut inlays: Vec<(usize, crate::inlays::BlockInlay)>) {
+        inlays.sort_by_key(|(line, _)| *line);
+        self.0.layout.borrow_mut().block_inlays = inlays;
+    }
+
     pub fn add_session(
         &mut self,
         session_id: SessionId,
