@@ -17,7 +17,7 @@
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_app_clock::{ai, view::ClockView};
-use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets::desktop_style::{self, StyleSheet};
 use makepad_widgets::*;
 
 app_main!(App, font_assets: [INTER_FONT_ASSET, ROBOTO_FLEX_FONT_ASSET]);
@@ -175,8 +175,7 @@ impl AppMain for App {
         if let Some((timer, name)) = &self.switch {
             if timer.is_event(event).is_some() {
                 // The same receive path a host's appearance change takes.
-                if let Some(style) = DesktopStyle::parse(name) {
-                    let sheet = StyleSheet::load_with_appearance(style, name.ends_with("-dark"));
+                if let Some(sheet) = StyleSheet::named(name) {
                     desktop_style::handle_event(cx, &Event::Custom(sheet.to_json()));
                 }
                 self.switch = None;

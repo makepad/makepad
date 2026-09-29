@@ -744,7 +744,7 @@ script_mod! {
 
 #[cfg(test)]
 mod crate_tint_role_tests {
-    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+    use crate::desktop_style::{catalogue, install, StyleSheet};
     use crate::makepad_platform::*;
     use crate::script_eval;
 
@@ -845,20 +845,6 @@ mod crate_tint_role_tests {
         }
     }
 
-    /// Every sheet the library ships, each followed by its dark appearance
-    /// where it has one: read off `DesktopStyle::ALL`, so a sheet added there
-    /// is checked here without anybody writing it in.
-    fn shipped_sheets() -> Vec<(DesktopStyle, bool)> {
-        let mut out = Vec::new();
-        for style in DesktopStyle::ALL {
-            out.push((style, false));
-            if style.supports_dark() {
-                out.push((style, true));
-            }
-        }
-        out
-    }
-
     const DESIGN_KIND_ROLES: [&str; 7] = [
         "color_map_kind_component",
         "color_map_kind_thread",
@@ -893,14 +879,13 @@ mod crate_tint_role_tests {
                 mod.theme = mod.themes.light
             });
             assert_design_kind_roles(vm, "light-default");
-            for (style, dark) in shipped_sheets() {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+            for entry in catalogue() {
+                install(vm, StyleSheet::load(entry));
                 vm.bx.captured_errors = Some(Vec::new());
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(style, dark).name;
-                assert!(errors.is_empty(), "{label}: {errors:?}");
-                assert_design_kind_roles(vm, &label);
+                assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
+                assert_design_kind_roles(vm, entry.id);
             }
         });
     }
@@ -922,22 +907,21 @@ mod crate_tint_role_tests {
     fn crate_tint_roles_resolve_in_every_shipped_theme() {
         // The palette a sheet leaves alone is its base theme's, so which of
         // the two it must resolve to is the sheet's own appearance group.
-        let sheets = shipped_sheets().into_iter().map(|(style, dark)| {
-            let light = crate::theme_tokens::BlendTheme::Sheet(style, dark).appearance()
+        let sheets = catalogue().into_iter().map(|entry| {
+            let light = crate::theme_tokens::BlendTheme::Sheet(entry.id).appearance()
                 == crate::theme_tokens::Appearance::Light;
-            (style, dark, if light { &LIGHT_TINTS } else { &DARK_TINTS })
+            (entry, if light { &LIGHT_TINTS } else { &DARK_TINTS })
         });
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            for (style, dark, expected) in sheets {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+            for (entry, expected) in sheets {
+                install(vm, StyleSheet::load(entry));
                 vm.bx.captured_errors = Some(Vec::new());
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(style, dark).name;
-                assert!(errors.is_empty(), "{label}: {errors:?}");
-                assert_tints(vm, expected, &label);
+                assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
+                assert_tints(vm, expected, entry.id);
             }
         });
     }

@@ -8560,7 +8560,8 @@ enum PanelTab {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ThemePreset {
     Base(crate::BaseTheme),
-    Sheet(crate::desktop_style::DesktopStyle, bool),
+    /// A sheet of the catalogue, by id.
+    Sheet(&'static str),
 }
 
 impl ThemePreset {
@@ -8568,8 +8569,7 @@ impl ThemePreset {
     fn label(self) -> String {
         match self {
             Self::Base(base) => base.label().to_string(),
-            Self::Sheet(style, false) => style.label().to_string(),
-            Self::Sheet(style, true) => format!("{} dark", style.label()),
+            Self::Sheet(id) => crate::desktop_style::find(id).map_or(id, |entry| entry.label).to_string(),
         }
     }
 }
@@ -8586,12 +8586,7 @@ fn theme_presets() -> Vec<ThemePreset> {
         .into_iter()
         .map(ThemePreset::Base)
         .collect();
-    for style in crate::desktop_style::DesktopStyle::ALL {
-        out.push(ThemePreset::Sheet(style, false));
-        if style.supports_dark() {
-            out.push(ThemePreset::Sheet(style, true));
-        }
-    }
+    out.extend(crate::desktop_style::catalogue().into_iter().map(|entry| ThemePreset::Sheet(entry.id)));
     out
 }
 
@@ -8700,13 +8695,8 @@ fn theme_choices(saved: &[String]) -> Vec<ThemeChoice> {
 fn current_theme_preset(cx: &mut Cx) -> usize {
     let sheet = cx.with_vm(|vm| crate::desktop_style::current_name(vm));
     let base = crate::base_theme(cx);
-    let wanted = match sheet
-        .as_deref()
-        .and_then(|name| {
-            crate::desktop_style::DesktopStyle::parse(name)
-                .map(|style| (style, name.ends_with("-dark")))
-        }) {
-        Some((style, dark)) => ThemePreset::Sheet(style, dark),
+    let wanted = match sheet.as_deref().and_then(crate::desktop_style::find) {
+        Some(entry) => ThemePreset::Sheet(entry.id),
         None => ThemePreset::Base(base),
     };
     theme_presets()
@@ -19333,13 +19323,13 @@ impl Tweaker {
                 crate::set_base_theme(cx, base);
                 cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
             }
-            ThemePreset::Sheet(style, dark) => {
+            ThemePreset::Sheet(id) => {
                 // A sheet is laid over the dark base, exactly as it is when
                 // one arrives from the window manager.
                 crate::set_base_theme(cx, crate::BaseTheme::Dark);
-                let sheet =
-                    crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
-                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                if let Some(sheet) = crate::desktop_style::StyleSheet::named(id) {
+                    cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                }
             }
         }
         log!("TWEAK theme preset: {}", preset.label());
@@ -19559,9 +19549,10 @@ impl Tweaker {
         let building = self.theme_choice_takes_the_build_off(cx);
         crate::set_base_theme(cx, base);
         match theme.sheet {
-            Some((style, dark)) => {
-                let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
-                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            Some(id) => {
+                if let Some(sheet) = crate::desktop_style::StyleSheet::named(id) {
+                    cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                }
             }
             // A theme saved over a bare base theme must take the last sheet
             // OFF, or it wears whatever was tried before it.
@@ -23833,15 +23824,10 @@ mod tests {
         for (slot, base) in crate::BaseTheme::ALL.into_iter().enumerate() {
             assert_eq!(presets[slot], ThemePreset::Base(base));
         }
-        // Then every sheet, each followed by its dark appearance where it
-        // has one -- read off `DesktopStyle::ALL`, never written out here.
-        let mut expect = Vec::new();
-        for style in crate::desktop_style::DesktopStyle::ALL {
-            expect.push(ThemePreset::Sheet(style, false));
-            if style.supports_dark() {
-                expect.push(ThemePreset::Sheet(style, true));
-            }
-        }
+        // Then every sheet of the catalogue, in its order -- read off the
+        // catalogue, never written out here.
+        let expect: Vec<ThemePreset> =
+            crate::desktop_style::catalogue().into_iter().map(|entry| ThemePreset::Sheet(entry.id)).collect();
         assert_eq!(&presets[crate::BaseTheme::ALL.len()..], &expect[..]);
         // And every label says something.
         for preset in presets {
@@ -23883,8 +23869,7 @@ mod tests {
         for preset in theme_presets() {
             let name = match preset {
                 ThemePreset::Base(base) => base.id().to_string(),
-                ThemePreset::Sheet(style, false) => style.id().to_string(),
-                ThemePreset::Sheet(style, true) => format!("{}-dark", style.id()),
+                ThemePreset::Sheet(id) => id.to_string(),
             };
             assert!(
                 crate::theme_store::is_builtin(&name),
@@ -24424,7 +24409,7 @@ mod tests {
     /// the value moving, however it is spelled.
     #[test]
     fn no_sheet_moves_the_mixs_weight_row() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
         let own = fab_slider_stamp(&mut cx);
@@ -24433,34 +24418,17 @@ mod tests {
             "the weight row did not resolve, so nothing below compares anything: {own:?}"
         );
         let bare = theme_color(&mut cx, "color_bg_app");
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load_with_appearance(style, dark));
-                    vm.with_reload(crate::script_mod);
-                });
-                // The sheet is really on and really reached the module -- the
-                // app's own ground moved -- so the row standing still below
-                // is a row that was asked and answered, not a reading taken
-                // off a module nothing happened to.
-                assert_ne!(
-                    theme_color(&mut cx, "color_bg_app"),
-                    bare,
-                    "`{}`{} did not reach the theme at all",
-                    style.id(),
-                    if dark { " dark" } else { "" }
-                );
-                assert_eq!(
-                    fab_slider_stamp(&mut cx),
-                    own,
-                    "`{}`{} moved the mix's weight row",
-                    style.id(),
-                    if dark { " dark" } else { "" }
-                );
-            }
+        for entry in catalogue() {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(entry));
+                vm.with_reload(crate::script_mod);
+            });
+            // The sheet is really on and really reached the module -- the
+            // app's own ground moved -- so the row standing still below
+            // is a row that was asked and answered, not a reading taken
+            // off a module nothing happened to.
+            assert_ne!(theme_color(&mut cx, "color_bg_app"), bare, "`{}` did not reach the theme at all", entry.id);
+            assert_eq!(fab_slider_stamp(&mut cx), own, "`{}` moved the mix's weight row", entry.id);
         }
         // ...and taking the last sheet off leaves it where it started, which
         // is what says the readings above were being taken at all.
@@ -24495,7 +24463,7 @@ mod tests {
         let own = fab_palette_stamp(&mut cx);
         for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
             cx.with_vm(|vm| {
-                install(vm, StyleSheet::load(style));
+                install(vm, StyleSheet::load(style.sheet(false)));
                 vm.with_reload(crate::script_mod);
             });
             assert_eq!(
@@ -25645,7 +25613,7 @@ line two");
     /// it calls. `is_open` is the assertion that says which kind this is.
     fn open_the_mix_on(cx: &mut Cx, panel: &mut Tweaker, sheet: crate::desktop_style::DesktopStyle) {
         use crate::desktop_style::{install, StyleSheet};
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(sheet, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(sheet.sheet(false))));
         crate::set_base_theme(cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.toggle_equalizer(cx);
@@ -26174,7 +26142,7 @@ line two");
         assert_eq!(sheet_in_force(&mut cx), None, "the mix never came on over the sheet");
 
         // macOS dark, off the picker, with the blend still standing.
-        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
         let index = panel
             .theme_entry_list()
             .iter()
@@ -26515,7 +26483,7 @@ line two");
         let mut cx = Cx::new(Box::new(|_, _| {}));
         // A theme to open the section ON, so that raising a second one is a
         // blend of two rather than a switch to one.
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(DesktopStyle::Omarchy.sheet(false))));
         crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
 
         // Startup: the app's module, the app value captured, and a widget
@@ -26764,7 +26732,7 @@ line two");
         // pinned tokens and all, and not the sheet the section was opened on.
         let row = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         panel.eq_set_mode(WeightMode::Absolute);
         // A quarter and not a half: the mix that was saved was half of each,
@@ -26809,7 +26777,7 @@ line two");
     /// no-op, and a test of no-ops asserts nothing whatever it calls.
     fn open_the_build_on(cx: &mut Cx, panel: &mut Tweaker, sheet: crate::desktop_style::DesktopStyle) {
         use crate::desktop_style::{install, StyleSheet};
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(sheet, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(sheet.sheet(false))));
         crate::set_base_theme(cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.toggle_theme_builder(cx);
@@ -31506,7 +31474,7 @@ line two");
         cx.pending_style_reload = false;
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.land_the_pending_pins(&mut cx);
-        let macos = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let macos = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
         let entries = panel.theme_entry_list();
         let index = entries
             .iter()
@@ -31601,8 +31569,8 @@ line two");
         let preset = panel.theme_preset;
 
         let entries = panel.theme_entry_list();
-        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
-        let plain = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, false));
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
+        let plain = ThemeChoice::Builtin(ThemePreset::Sheet("macos"));
         let macos = entries
             .iter()
             .position(|entry| *entry == wanted)
@@ -31683,7 +31651,7 @@ line two");
         panel.eq_lab.reset();
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let others: Vec<usize> = (0..panel.eq_lab.rows().len())
             .filter(|index| *index != anchor)
@@ -31800,7 +31768,7 @@ line two");
 
         // A sheet on, which is the whole point: it is `apply_theme` running
         // after the seam that used to eat what follows.
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(DesktopStyle::Omarchy.sheet(false))));
         crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         let sheets_own = theme_color(&mut cx, GROUND).expect("the sheet has a page colour");
@@ -31874,7 +31842,6 @@ line two");
     /// is read off the app.
     #[test]
     fn a_save_as_carries_the_pins_of_what_it_saved() {
-        use crate::desktop_style::DesktopStyle;
         use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
         // Two colours nobody arrives at by accident, so that what is on the
         // app at the end names the theme it came from.
@@ -31926,7 +31893,7 @@ line two");
         panel.eq_settle(&mut cx, 0.0);
         let row = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the dark group offers a sheet to mix in");
         panel.eq_set_mode(WeightMode::Absolute);
         panel.eq_gesture_ended(row, RELATIVE_TOTAL);
@@ -32079,7 +32046,7 @@ line two");
         panel.eq_lab.reset();
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let others: Vec<usize> = (0..panel.eq_lab.rows().len())
             .filter(|index| *index != anchor)
@@ -32191,7 +32158,7 @@ line two");
         open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let count = panel.eq_lab.rows().len();
         assert!(count >= 4, "the dark group is too short to have a tail at all");
@@ -32312,7 +32279,7 @@ line two");
         assert!(
             panel
                 .eq_lab
-                .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+                .index_of(BlendTheme::Sheet("omarchy"))
                 .is_some(),
             "the theme the section was opened on is not one of the rows"
         );
@@ -34741,7 +34708,7 @@ mod flat_tree_tests {
 
 #[cfg(test)]
 mod panel_ink_tests {
-    use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+    use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
     use crate::makepad_draw::*;
     use crate::makepad_script::trap::NoTrap;
     use crate::theme_tokens::{reads_on, LEGIBLE};
@@ -34766,15 +34733,15 @@ mod panel_ink_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for entry in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
-                match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                match entry {
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = entry.map(|entry| entry.id).unwrap_or("no sheet");
             for (ground, ink) in [("color_area", "text_dim"), ("color_input", "text_muted")] {
                 let g = table_color(&mut cx, id!(fab), ground);
                 let i = table_color(&mut cx, id!(tweak_panel), ink);

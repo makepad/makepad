@@ -7,7 +7,7 @@
 //! `script_mod` runs again and every widget is re-applied from its template
 //! under the new theme, in about ten milliseconds. Typed text and running
 //! animations do not survive that, which is the price of a real switch.
-use crate::makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
+use crate::makepad_widgets::desktop_style::{self, SheetEntry, StyleSheet};
 use crate::makepad_widgets::*;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -17,29 +17,33 @@ const BASE: &[&str] = &["dark", "light", "skeleton"];
 
 static CHOICE: AtomicU8 = AtomicU8::new(0);
 
-/// One thing the picker offers: a base theme, or a sheet and which of its
-/// two appearances.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// One thing the picker offers: a base theme, or a sheet of the catalogue.
+#[derive(Clone, Copy, Debug)]
 pub enum Choice {
     Base(usize),
-    Sheet(DesktopStyle, bool),
+    Sheet(&'static SheetEntry),
+}
+
+impl PartialEq for Choice {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Choice::Base(a), Choice::Base(b)) => a == b,
+            (Choice::Sheet(a), Choice::Sheet(b)) => std::ptr::eq(*a, *b),
+            _ => false,
+        }
+    }
 }
 
 /// Everything the picker offers, in the order it offers it: the base themes,
-/// then every sheet the library ships, each followed by its dark appearance
-/// where it has one.
+/// then every sheet of the catalogue, in its order (each dark variant after
+/// its light one).
 ///
 /// Read off the library's own list rather than written out here, so a sheet
 /// added there turns up in the catalogue without anybody remembering to add
 /// it, and so the catalogue names none of them itself.
 pub fn choices() -> Vec<Choice> {
     let mut out: Vec<Choice> = (0..BASE.len()).map(Choice::Base).collect();
-    for style in DesktopStyle::ALL {
-        out.push(Choice::Sheet(style, false));
-        if style.supports_dark() {
-            out.push(Choice::Sheet(style, true));
-        }
-    }
+    out.extend(desktop_style::catalogue().into_iter().map(Choice::Sheet));
     out
 }
 
@@ -48,8 +52,7 @@ impl Choice {
     pub fn name(self) -> String {
         match self {
             Choice::Base(i) => BASE[i].to_string(),
-            Choice::Sheet(style, false) => style.id().to_string(),
-            Choice::Sheet(style, true) => format!("{}-dark", style.id()),
+            Choice::Sheet(entry) => entry.id.to_string(),
         }
     }
 
@@ -60,8 +63,7 @@ impl Choice {
                 let mut c = BASE[i].chars();
                 c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
             }
-            Choice::Sheet(style, false) => style.label().to_string(),
-            Choice::Sheet(style, true) => format!("{} dark", style.label()),
+            Choice::Sheet(entry) => entry.label.to_string(),
         }
     }
 }
@@ -106,8 +108,8 @@ pub fn apply_choice(vm: &mut ScriptVm, picked: Choice) {
     // half as its first act; and comes off again for a base theme, or the
     // last sheet tried would stay under every theme picked after it.
     match picked {
-        Choice::Sheet(style, dark) => {
-            desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark));
+        Choice::Sheet(entry) => {
+            desktop_style::install(vm, StyleSheet::load(entry));
         }
         Choice::Base(_) => desktop_style::uninstall(vm),
     }

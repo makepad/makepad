@@ -181,7 +181,7 @@ mod tests {
             replies,
         };
         let open = CLOCK_MODULE.open_schema().empty_open().unwrap();
-        let sheet = |dark: bool| StyleSheet::load_with_appearance(DesktopStyle::Ios, dark);
+        let sheet = |dark: bool| StyleSheet::load(DesktopStyle::Ios.sheet(dark));
         let InstanceParts { mut root, executor, shutdown } = cx.with_script_vm_id_trusted(vm_id, |vm| {
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
             desktop_style::install(vm, sheet(false));

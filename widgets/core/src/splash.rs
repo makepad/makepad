@@ -919,7 +919,7 @@ mod style_tests {
         let uid=field.widget_uid();
         field.clone().set_text(&mut cx,"edited document");
         cx.with_vm(|vm| {
-            desktop_style::install(vm,StyleSheet::load_with_appearance(DesktopStyle::Macos,true));
+            desktop_style::install(vm,StyleSheet::load(DesktopStyle::Macos.sheet(true)));
             let source=splash.script_source();
             splash.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
         });
@@ -946,7 +946,7 @@ mod style_tests {
     /// Splash (which notices the new sheet), then let it restyle its isolate.
     fn restyle(cx: &mut Cx, splash: &mut Splash, style: DesktopStyle, dark: bool) {
         cx.with_vm(|vm| {
-            desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark));
+            desktop_style::install(vm, StyleSheet::load(style.sheet(dark)));
             let source = splash.script_source();
             splash.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
         });
@@ -962,12 +962,12 @@ mod style_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut splash = new_splash(&mut cx);
         splash.set_text(&mut cx, "label := Label{text: \"under a sheet\"}");
-        restyle(&mut cx, &mut splash, DesktopStyle::Neumorphic, false);
+        restyle(&mut cx, &mut splash, DesktopStyle::Ios, false);
         cx.with_script_vm_id(splash.vm_id, |vm| {
             let theme = vm.module(id!(theme));
             let font = vm.bx.heap.value(theme, id!(font_regular).into(), NoTrap).as_object().unwrap();
             let family = vm.bx.heap.value(font, id!(font_family).into(), NoTrap).as_object().unwrap();
-            let member = vm.bx.heap.value(family, id!(ibm_plex_text).into(), NoTrap).as_object().unwrap();
+            let member = vm.bx.heap.value(family, id!(latin).into(), NoTrap).as_object().unwrap();
             let res = vm.bx.heap.value(member, id!(res).into(), NoTrap);
             assert!(res.as_handle().is_some(), "the sheet's font member has no file: {:?}", res);
             let modules = vm.bx.heap.modules;

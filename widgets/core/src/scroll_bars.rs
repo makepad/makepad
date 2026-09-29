@@ -730,7 +730,7 @@ mod style_reapply_tests {
             });
             assert_eq!(bars.get_scroll_pos(), dvec2(0.0, 120.0));
             for (style, dark) in [(DesktopStyle::NextStep, false), (DesktopStyle::Windows, true), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 bars.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
                 assert_eq!(bars.get_scroll_pos(), dvec2(0.0, 120.0), "{}", style.id());

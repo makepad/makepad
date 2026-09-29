@@ -5,28 +5,37 @@
 //! family.
 
 use crate::state::Settings;
-use makepad_widgets_core::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets_core::desktop_style::{self, DesktopStyle, SheetEntry, StyleSheet};
 use makepad_widgets_core::*;
 
-/// Picker rows: index 0 follows the host OS, then `DesktopStyle::ALL` in
-/// order except BlackOrange. The labels are made from that same list rather
-/// than typed out a second time: a typed copy fell behind the styles, and a
-/// row that said macOS picked another family.
+/// Picker rows: index 0 follows the host OS, then the sheets of the
+/// catalogue a picker offers (`desktop_style::picks`) in order, except
+/// black-orange. The labels are made from that same list rather than typed
+/// out a second time: a typed copy fell behind the styles, and a row that
+/// said macOS picked another sheet.
 pub const FOLLOW_HOST: &str = "Follow host OS";
 
-/// What the picker shows, row for row with `family_at`.
+/// What the picker shows, row for row with `sheet_at`.
 pub fn picker_labels() -> Vec<String> {
     std::iter::once(FOLLOW_HOST.to_string())
-        .chain(picker_families().map(|style| style.label().to_string()))
+        .chain(picker_sheets().map(|entry| entry.label.to_string()))
         .collect()
 }
 
-/// A resolved appearance: one family and whether its dark variant is on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A resolved appearance: one sheet and whether its dark variant is on.
+#[derive(Clone, Copy, Debug)]
 pub struct StyleChoice {
-    pub family: DesktopStyle,
+    /// The sheet as a picker offers it: never another's dark variant.
+    pub sheet: &'static SheetEntry,
     pub dark: bool,
 }
+
+impl PartialEq for StyleChoice {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.sheet, other.sheet) && self.dark == other.dark
+    }
+}
+impl Eq for StyleChoice {}
 
 impl StyleChoice {
     /// Follow both the host family and its reported light/dark appearance.
@@ -36,34 +45,32 @@ impl StyleChoice {
         let selected = settings
             .style
             .as_deref()
-            .and_then(DesktopStyle::parse);
-        let family = selected.unwrap_or(host);
+            .and_then(desktop_style::find)
+            .map(|entry| entry.light());
+        let sheet = selected.unwrap_or_else(|| host.sheet(false));
         let dark = if selected.is_none() {
             host_dark.unwrap_or(settings.dark)
         } else {
             settings.dark
         };
         Self {
-            family,
-            dark: dark && family.supports_dark(),
+            sheet,
+            dark: dark && sheet.dark.is_some(),
         }
     }
 
     pub fn sheet(self) -> StyleSheet {
-        StyleSheet::load_with_appearance(self.family, self.dark)
+        StyleSheet::load(self.entry())
+    }
+
+    /// The catalogue entry this choice installs, in its appearance.
+    pub fn entry(self) -> &'static SheetEntry {
+        self.sheet.with_appearance(self.dark)
     }
 
     /// The stylesheet name this choice installs (`macos-dark`, `omarchy`, ...).
     pub fn name(self) -> String {
-        self.sheet_name()
-    }
-
-    fn sheet_name(self) -> String {
-        if self.dark {
-            format!("{}-dark", self.family.id())
-        } else {
-            self.family.id().to_string()
-        }
+        self.entry().id.to_string()
     }
 }
 
@@ -73,23 +80,23 @@ pub fn picker_index(settings: &Settings) -> usize {
     settings
         .style
         .as_deref()
-        .and_then(DesktopStyle::parse)
-        .and_then(|f| picker_families().position(|s| s == f))
+        .and_then(desktop_style::find)
+        .and_then(|entry| picker_sheets().position(|s| std::ptr::eq(s, entry.light())))
         .map(|i| i + 1)
         .unwrap_or(0)
 }
 
-/// Settings family for a picker index (`None` = follow host).
-pub fn family_at(index: usize) -> Option<DesktopStyle> {
+/// Settings sheet for a picker index (`None` = follow host).
+pub fn sheet_at(index: usize) -> Option<&'static SheetEntry> {
     index
         .checked_sub(1)
-        .and_then(|i| picker_families().nth(i))
+        .and_then(|i| picker_sheets().nth(i))
 }
 
-fn picker_families() -> impl Iterator<Item = DesktopStyle> {
-    DesktopStyle::ALL
+fn picker_sheets() -> impl Iterator<Item = &'static SheetEntry> {
+    desktop_style::picks()
         .into_iter()
-        .filter(|style| *style != DesktopStyle::BlackOrange)
+        .filter(|entry| entry.id != DesktopStyle::BlackOrange.id())
 }
 
 /// The family a standalone Studio follows on this machine.
@@ -157,12 +164,7 @@ pub fn host_dark() -> Option<bool> {
 
 /// Human label for a stylesheet name, for the status strip.
 pub fn describe(name: &str) -> String {
-    let dark = name.ends_with("-dark");
-    match DesktopStyle::parse(name) {
-        Some(family) if dark => format!("{} (dark)", family.label()),
-        Some(family) => family.label().to_string(),
-        None => name.to_string(),
-    }
+    desktop_style::find(name).map_or_else(|| name.to_string(), |entry| entry.label.to_string())
 }
 
 /// Standalone first start: install the persisted (or host) stylesheet into
@@ -189,54 +191,48 @@ mod tests {
     fn labels_match_the_picker() {
         let labels = picker_labels();
         assert_eq!(labels[0], FOLLOW_HOST);
-        assert_eq!(labels.len(), picker_families().count() + 1);
-        for (i, style) in picker_families().enumerate() {
-            assert_eq!(labels[i + 1], style.label());
-            assert_eq!(family_at(i + 1), Some(style));
+        assert_eq!(labels.len(), picker_sheets().count() + 1);
+        for (i, entry) in picker_sheets().enumerate() {
+            assert_eq!(labels[i + 1], entry.label);
+            assert!(sheet_at(i + 1).is_some_and(|s| std::ptr::eq(s, entry)));
         }
-        assert_eq!(family_at(0), None);
-        assert_eq!(family_at(99), None);
+        assert!(sheet_at(0).is_none());
+        assert!(sheet_at(99).is_none());
     }
 
     #[test]
     fn settings_round_trip_through_the_picker() {
-        for (i, family) in picker_families().enumerate() {
-            let settings = Settings { style: Some(family.id().into()), ..Default::default() };
+        for (i, entry) in picker_sheets().enumerate() {
+            let settings = Settings { style: Some(entry.id.into()), ..Default::default() };
             assert_eq!(picker_index(&settings), i + 1);
-            assert_eq!(family_at(picker_index(&settings)), Some(family));
+            assert!(sheet_at(picker_index(&settings)).is_some_and(|s| std::ptr::eq(s, entry)));
         }
         let hidden = Settings { style: Some("blackorange".into()), ..Default::default() };
         assert_eq!(picker_index(&hidden), 0);
-        assert_eq!(
-            StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).family,
-            DesktopStyle::Macos
-        );
+        assert_eq!(StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).sheet.id, "macos");
         let hidden = Settings { style: Some("black-orange".into()), ..Default::default() };
         assert_eq!(picker_index(&hidden), 0);
-        assert_eq!(
-            StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).family,
-            DesktopStyle::BlackOrange
-        );
+        assert_eq!(StyleChoice::from_settings(&hidden, DesktopStyle::Macos, None).sheet.id, "black-orange");
 
         let s = Settings { style: Some("nextstep".into()), dark: true, ..Default::default() };
-        let row = picker_families().position(|f| f == DesktopStyle::NextStep).map(|i| i + 1);
+        let row = picker_sheets().position(|entry| entry.id == "nextstep").map(|i| i + 1);
         assert_eq!(Some(picker_index(&s)), row);
         let c = StyleChoice::from_settings(&s, DesktopStyle::Macos, Some(true));
-        assert_eq!(c.family, DesktopStyle::NextStep);
-        assert!(!c.dark, "a family without a dark variant stays light");
+        assert_eq!(c.sheet.id, "nextstep");
+        assert!(!c.dark, "a sheet without a dark variant stays light");
         assert_eq!(c.name(), "nextstep");
 
         let follow = Settings { style: None, dark: true, ..Default::default() };
         assert_eq!(picker_index(&follow), 0);
         let c = StyleChoice::from_settings(&follow, DesktopStyle::Macos, Some(true));
-        assert_eq!(c, StyleChoice { family: DesktopStyle::Macos, dark: true });
+        assert_eq!(c, StyleChoice { sheet: DesktopStyle::Macos.sheet(false), dark: true });
         assert_eq!(c.name(), "macos-dark");
-        assert_eq!(describe("macos-dark"), "macOS (dark)");
+        assert_eq!(describe("macos-dark"), "macOS dark");
         assert_eq!(describe("windows-2000"), "Windows 2000");
 
         let junk = Settings { style: Some("beos".into()), dark: false, ..Default::default() };
         assert_eq!(picker_index(&junk), 0);
-        assert_eq!(StyleChoice::from_settings(&junk, DesktopStyle::Omarchy, None).family, DesktopStyle::Omarchy);
+        assert_eq!(StyleChoice::from_settings(&junk, DesktopStyle::Omarchy, None).sheet.id, "omarchy");
     }
 
     #[test]
@@ -245,7 +241,7 @@ mod tests {
             let settings = Settings { style: None, dark: saved_dark, ..Default::default() };
             for host_dark in [true, false, true] {
                 let choice = StyleChoice::from_settings(&settings, DesktopStyle::Macos, Some(host_dark));
-                assert_eq!(choice.family, DesktopStyle::Macos);
+                assert_eq!(choice.sheet.id, "macos");
                 assert_eq!(choice.dark, host_dark);
                 assert_eq!(settings.dark, saved_dark, "following does not overwrite the manual preference");
             }
@@ -255,13 +251,13 @@ mod tests {
 
     #[test]
     fn explicit_styles_keep_manual_appearance_when_host_changes() {
-        for family in DesktopStyle::ALL {
+        for entry in desktop_style::picks() {
             for dark in [false, true] {
-                let settings = Settings { style: Some(family.id().into()), dark, ..Default::default() };
+                let settings = Settings { style: Some(entry.id.into()), dark, ..Default::default() };
                 for host_dark in [Some(true), Some(false), None] {
                     let choice = StyleChoice::from_settings(&settings, DesktopStyle::Macos, host_dark);
-                    assert_eq!(choice.family, family);
-                    assert_eq!(choice.dark, dark && family.supports_dark());
+                    assert!(std::ptr::eq(choice.sheet, entry));
+                    assert_eq!(choice.dark, dark && entry.dark.is_some());
                 }
             }
         }

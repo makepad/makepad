@@ -3410,7 +3410,7 @@ mod tests {
             (DesktopStyle::Macos, false),
         ] {
             cx.with_vm(|vm| {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 let value = initial_style_test_dock(vm);
                 dock.borrow_mut().unwrap().script_apply(

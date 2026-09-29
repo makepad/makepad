@@ -3203,7 +3203,7 @@ mod style_reapply_tests {
             vm.with_cx_mut(|cx| slider.set_value(cx, 70.0));
             assert_eq!(slider.text_input.text(), "70.00");
             for (style, dark) in [(DesktopStyle::Macos, true), (DesktopStyle::Windows2000, false), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 slider.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
                 assert!(

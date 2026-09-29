@@ -7026,36 +7026,25 @@ mod tests {
     /// own content box (`TextInput::scroll_to_cursor`), which put the word
     /// "Filter" a dozen pixels below the well's floor, straddling its border.
     ///
-    /// Read off `DesktopStyle::ALL` rather than written out, so a sheet added
+    /// Read off the sheet catalogue rather than written out, so a sheet added
     /// later -- or an existing one that starts overriding `max_height`, the
     /// margin or the padding -- fails HERE and not on somebody's screen.
     #[test]
     fn the_fab_controls_resolve_the_same_box_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
         let plain = fab_geometry(&mut cx);
         assert_eq!(plain.len(), 8, "a control was dropped from the reading");
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load_with_appearance(style, dark));
-                    vm.with_reload(crate::script_mod);
-                });
-                let under = fab_geometry(&mut cx);
-                for ((name, want), (_, got)) in plain.iter().zip(under.iter()) {
-                    assert_eq!(
-                        want,
-                        got,
-                        "`{name}` resolves to a different box under `{}`{}",
-                        style.id(),
-                        if dark { " dark" } else { "" }
-                    );
-                }
+        for entry in catalogue() {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(entry));
+                vm.with_reload(crate::script_mod);
+            });
+            let under = fab_geometry(&mut cx);
+            for ((name, want), (_, got)) in plain.iter().zip(under.iter()) {
+                assert_eq!(want, got, "`{name}` resolves to a different box under `{}`", entry.id);
             }
         }
         // ...and taking the sheet off puts the panel back where it started.
@@ -7187,15 +7176,15 @@ mod tests {
     /// other side, and this is the reading that keeps it that way.
     #[test]
     fn the_panels_palette_is_untouched_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let declared = declared_fab_colors();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
@@ -7205,7 +7194,7 @@ mod tests {
                     table_color(&mut cx, id!(fab), name),
                     *want,
                     "`fab.{name}` moved under `{}`",
-                    style.map(|s| s.id()).unwrap_or("no sheet")
+                    style.map(|s| s.id).unwrap_or("no sheet")
                 );
             }
         }
@@ -7223,7 +7212,7 @@ mod tests {
     /// reading the test above takes.
     #[test]
     fn the_panels_palette_reads_against_itself_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         use crate::theme_tokens::{reads_on, LEGIBLE, READABLE};
         // (ground, ink, how far apart they have to stand)
         const PAIRS: &[(&str, &str, f64)] = &[
@@ -7249,15 +7238,15 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = style.map(|s| s.id).unwrap_or("no sheet");
             for (ground, ink, need) in PAIRS {
                 let g = table_color(&mut cx, id!(fab), ground);
                 let i = table_color(&mut cx, id!(fab), ink);
@@ -7356,7 +7345,7 @@ mod tests {
 
     #[test]
     fn the_kits_words_keep_one_face_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         // (where it is written, the size that template asks for)
         const SITES: &[(&str, f32)] = &[
             ("FabValueInput.draw_text", 8.5),
@@ -7376,15 +7365,15 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = style.map(|s| s.id).unwrap_or("no sheet");
             let read = kit_text_styles(&mut cx);
             assert_eq!(read.len(), SITES.len());
             for (style, (site, size)) in read.into_iter().zip(SITES) {
@@ -7425,7 +7414,7 @@ mod tests {
     /// door -- the very thing the sunken filter field was.
     #[test]
     fn the_panels_density_and_type_never_move_under_a_sheet() {
-        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, StyleSheet};
         const NUMBERS: &[(&str, f64)] = &[
             ("row_height", 24.0),
             ("row_height_sm", 20.0),
@@ -7438,9 +7427,9 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in DesktopStyle::ALL {
+        for entry in catalogue() {
             cx.with_vm(|vm| {
-                install(vm, StyleSheet::load(style));
+                install(vm, StyleSheet::load(entry));
                 vm.with_reload(crate::script_mod);
             });
             for (name, want) in NUMBERS {
@@ -7451,7 +7440,7 @@ mod tests {
                         .value(fab, LiveId::from_str(name).into(), NoTrap)
                         .as_f64()
                 });
-                assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", style.id());
+                assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", entry.id);
             }
         }
     }

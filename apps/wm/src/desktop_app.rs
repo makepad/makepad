@@ -16,7 +16,14 @@ pub(super) fn browser_appearance(style: DesktopStyle, dark: bool, omarchy_source
 }
 
 impl App {
+    /// The family's own sheet.
     pub(super) fn set_desktop_style(&mut self, cx: &mut Cx, style: DesktopStyle) {
+        self.set_desktop_sheet(cx, style.sheet(false));
+    }
+    /// A sheet of the catalogue, in the appearance the toggle has, laid out
+    /// as its family.
+    pub(super) fn set_desktop_sheet(&mut self, cx: &mut Cx, entry: &'static desktop_style::SheetEntry) {
+        let style = entry.family;
         let previous = self.state_mut().style.target;
         let changes_size = previous.mobile() != style.mobile() || (style.mobile() && previous != style);
         self.close_shell_menu(cx);
@@ -33,9 +40,10 @@ impl App {
         cx.stop_timer(self.snap_hover_timer);
         let area = self.desk_area(cx);
         let dark = self.state_mut().style.dark;
-        let sheet = desktop_style::StyleSheet::load_with_appearance(style, dark);
+        let sheet = desktop_style::StyleSheet::load(entry.light().with_appearance(dark));
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {desk.set_startup_style(cx, &sheet);}
         let sheet_name = sheet.name.clone();
+        let sheet_ground = sheet.theme_color("color_bg_app");
         app_icon::install(cx, style, &sheet.icons);
         let state = self.state_mut();
         state.dragging.clear();
@@ -75,41 +83,23 @@ impl App {
         // selected wallpaper; the other desktop identities have their own ground.
         self.ui.widget(cx, ids!(bg_image)).set_visible(
             cx,
-            style == DesktopStyle::Omarchy
+            entry.light().id == DesktopStyle::Omarchy.id()
                 && !theme::theme_backgrounds(&self.state_mut().theme_name).is_empty(),
         );
+        // A family's own sheet has the family's desktop behind it; any other
+        // sheet's desktop is its own window ground (`theme.color_bg_app`), a
+        // shade darker at the foot, so a tiled app sits on what it draws.
         let (top, bottom) = match style {
+            _ if entry.light().id != style.id() => {
+                let ground = sheet_ground.unwrap_or(0x101315ff);
+                let [r, g, b] = [ground >> 24, ground >> 16, ground >> 8].map(|c| (c & 0xff) as u8);
+                let shade = |c: u8| (c as f32 * 0.9) as u8;
+                (shell::rgb(r, g, b), shell::rgb(shade(r), shade(g), shade(b)))
+            }
             DesktopStyle::Omarchy => (shell::rgb(16, 19, 21), shell::rgb(24, 30, 34)),
-            // The twelfth sheet: near-black grounds, so the desktop behind it
-            // is the same flat dark the style itself draws.
+            // Near-black grounds, so the desktop behind it is the same flat
+            // dark the style itself draws.
             DesktopStyle::BlackOrange => (shell::rgb(20, 23, 28), shell::rgb(16, 19, 23)),
-            DesktopStyle::Neumorphic if dark => (shell::rgb(42, 45, 51), shell::rgb(31, 34, 38)),
-            DesktopStyle::Neumorphic => (shell::rgb(238, 240, 246), shell::rgb(222, 226, 238)),
-            DesktopStyle::Molded => (shell::rgb(216, 218, 214), shell::rgb(196, 199, 194)),
-            DesktopStyle::Glossy => (shell::rgb(43, 47, 52), shell::rgb(30, 33, 37)),
-            DesktopStyle::Milled => (shell::rgb(21, 23, 27), shell::rgb(12, 13, 16)),
-            DesktopStyle::Cyberpunk => (shell::rgb(13, 15, 20), shell::rgb(7, 8, 12)),
-            // The reference sheets: each desktop is its own ground, a shade
-            // darker at the foot, so a tiled app sits on what it draws.
-            DesktopStyle::Aluminium => (shell::rgb(217, 219, 222), shell::rgb(195, 199, 204)),
-            DesktopStyle::Frosted => (shell::rgb(29, 36, 48), shell::rgb(20, 26, 35)),
-            DesktopStyle::Liquid => (shell::rgb(238, 242, 246), shell::rgb(221, 227, 234)),
-            DesktopStyle::Luminous => (shell::rgb(22, 24, 29), shell::rgb(13, 15, 18)),
-            DesktopStyle::FieldKit => (shell::rgb(232, 230, 225), shell::rgb(214, 211, 203)),
-            DesktopStyle::Terminal => (shell::rgb(12, 15, 12), shell::rgb(6, 8, 6)),
-            DesktopStyle::Lcd => (shell::rgb(201, 211, 184), shell::rgb(182, 193, 162)),
-            DesktopStyle::Neon => (shell::rgb(11, 11, 18), shell::rgb(5, 5, 9)),
-            DesktopStyle::Hud => (shell::rgb(7, 17, 20), shell::rgb(3, 9, 10)),
-            DesktopStyle::Lacquer => (shell::rgb(42, 14, 16), shell::rgb(28, 8, 9)),
-            DesktopStyle::Safety => (shell::rgb(230, 196, 64), shell::rgb(210, 176, 48)),
-            DesktopStyle::FieldRadio => (shell::rgb(43, 47, 34), shell::rgb(31, 34, 24)),
-            DesktopStyle::Brass => (shell::rgb(42, 33, 22), shell::rgb(29, 23, 15)),
-            DesktopStyle::FuturePlastic => (shell::rgb(28, 33, 41), shell::rgb(20, 24, 30)),
-            DesktopStyle::FutureMetal => (shell::rgb(26, 30, 34), shell::rgb(18, 21, 24)),
-            DesktopStyle::Anthracite => (shell::rgb(29, 33, 38), shell::rgb(20, 23, 27)),
-            DesktopStyle::Concrete => (shell::rgb(194, 193, 188), shell::rgb(177, 176, 171)),
-            DesktopStyle::Pixel => (shell::rgb(185, 205, 112), shell::rgb(169, 189, 94)),
-            DesktopStyle::Porcelain => (shell::rgb(246, 246, 244), shell::rgb(232, 232, 229)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),
@@ -155,8 +145,17 @@ impl App {
     }
     pub(super) fn toggle_desktop_appearance(&mut self, cx: &mut Cx) {
         self.state_mut().style.dark = !self.state_mut().style.dark;
-        let style = self.state_mut().style.target;
-        self.set_desktop_style(cx, style);
+        let entry = self.current_desktop_sheet();
+        self.set_desktop_sheet(cx, entry);
+    }
+    /// The sheet the desktop wears, as a picker offers it (its light one).
+    pub(super) fn current_desktop_sheet(&mut self) -> &'static desktop_style::SheetEntry {
+        let family = self.state_mut().style.target;
+        self.stylesheet
+            .as_ref()
+            .and_then(|sheet| desktop_style::find(&sheet.name))
+            .map(|entry| entry.light())
+            .unwrap_or_else(|| family.sheet(false))
     }
     pub(super) fn open_style_menu(&mut self, cx: &mut Cx) {
         let anchor = if self.state_mut().style.target.mobile() {
@@ -167,7 +166,7 @@ impl App {
                 .and_then(|bar| bar.module_rect(BarModule::Style))
         };
         self.open_shell_menu(cx, "desktop", MenuSkin::Menu);
-        let active = format!("desktop.{}", self.state_mut().style.target.id());
+        let active = format!("desktop.{}", self.current_desktop_sheet().id);
         if let Some(mut menu) = self.ui.widget(cx, ids!(shell_menu)).borrow_mut::<ShellMenu>() {
             menu.anchor = anchor;
             if let Some(index) = menu.model.rows.iter().position(|row| row.target == active) {

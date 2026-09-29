@@ -20,6 +20,9 @@ pub mod tween_inspect;
 pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
+#[cfg(any(test, feature = "sheet-checks"))]
+#[doc(hidden)]
+pub mod sheet_checks;
 pub mod app_icon;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
