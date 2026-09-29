@@ -302,8 +302,8 @@ pub struct Tab {
 
     #[live]
     closeable: bool,
-    /// Icon only while inactive: the name shows on the active tab and as
-    /// a hover tip on the others, so a bar of icon tabs holds more tabs.
+    /// Icon only: the name shows as a hover tip, so a bar of icon tabs
+    /// holds more tabs and keeps its layout when the selection changes.
     /// Give the template a `draw_icon` svg.
     #[live]
     compact: bool,
@@ -370,9 +370,9 @@ impl Tab {
         self.draw_bg.end(cx);
     }
 
-    /// A compact tab that is not active shows its icon alone.
+    /// A compact tab shows its icon alone.
     fn hides_name(&self) -> bool {
-        self.compact && !self.is_active
+        self.compact
     }
 
     pub fn area(&self) -> Area {
