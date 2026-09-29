@@ -195,6 +195,7 @@ workspace.members = [
     # === tests ===
     "platform/script/test",
     "platform/script/math_aot",
+    "platform/script/audio_aot",
     "platform/remote_core",
     # === makepad-widgets: the core and its family crates (widgets/ is the
     # front, a member through its dependents) ===

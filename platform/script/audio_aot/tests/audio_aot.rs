@@ -1,0 +1,575 @@
+//! The audio shader suite: every example shader compiles, renders the same
+//! bits on every backend and under any host slicing, never allocates on
+//! the audio path, and the math and error paths behave.
+
+use makepad_script_audio_aot::{compile_with, AudioShader, Backend, Instance, Kind, ShaderError, CTX_FRAME};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+// -- a counting allocator (only counts on the thread that armed it) ----------
+
+struct Counting;
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if ARMED.with(|a| a.get()) {
+            ALLOCS.fetch_add(1, Ordering::SeqCst);
+        }
+        System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if ARMED.with(|a| a.get()) {
+            ALLOCS.fetch_add(1, Ordering::SeqCst);
+        }
+        System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new: usize) -> *mut u8 {
+        if ARMED.with(|a| a.get()) {
+            ALLOCS.fetch_add(1, Ordering::SeqCst);
+        }
+        System.realloc(ptr, layout, new)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn counting<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    let before = ALLOCS.load(Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
+    let r = f();
+    ARMED.with(|a| a.set(false));
+    (r, ALLOCS.load(Ordering::SeqCst) - before)
+}
+
+// -- helpers -------------------------------------------------------------------
+
+const RATE: f32 = 48000.0;
+
+fn shader_src(name: &str) -> String {
+    std::fs::read_to_string(format!("{}/shaders/{}.splash", env!("CARGO_MANIFEST_DIR"), name)).unwrap()
+}
+
+fn build(src: &str, backend: Backend) -> Arc<AudioShader> {
+    match compile_with(src, backend) {
+        Ok(s) => s,
+        Err(errs) => {
+            let e = &errs[0];
+            let (line, col) = e.line_col(src);
+            panic!("compile error at {}:{}: {}\n{}", line, col, e.message, src.lines().nth(line - 1).unwrap_or(""));
+        }
+    }
+}
+
+const INSTRUMENTS: &[&str] = &["saw_svf", "fm4", "pluck", "wavetable_pad", "fm2_svf"];
+const EFFECTS: &[&str] = &["allpass_reverb", "waveshaper4x"];
+
+/// A deterministic test input for effects: a decaying chirp plus clicks.
+fn test_input(n: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut l = vec![0.0; n];
+    let mut r = vec![0.0; n];
+    for i in 0..n {
+        let t = i as f32 / RATE;
+        let env = (-(t % 0.5) * 6.0).exp();
+        l[i] = (t * 220.0 * (1.0 + t) * std::f32::consts::TAU).sin() * env * 0.7;
+        r[i] = if i % 9000 == 0 { 0.9 } else { l[i] * 0.5 };
+    }
+    (l, r)
+}
+
+/// Renders a scripted performance: two notes, a param change, releases.
+/// `slices` gives the host's call sizes (cycled).
+fn perform(shader: &Arc<AudioShader>, interp: bool, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut ctx = shader.new_ctx(RATE);
+    let mut state = shader.new_state();
+    let mut scratch = shader.new_scratch();
+    let mut out_l = vec![0.0f32; total];
+    let mut out_r = vec![0.0f32; total];
+    let (in_l, in_r) = test_input(total);
+    let zeros = vec![0.0f32; total];
+    // Event frames: note on at 0 and at 30000; param at 12345; off at 24000.
+    let events = [0usize, 12345, 24000, 30000, 52000];
+    let mut frame = 0usize;
+    let mut k = 0;
+    while frame < total {
+        for (e, at) in events.iter().enumerate() {
+            if *at == frame {
+                match e {
+                    0 => shader.note_on(&mut state, 57.0, 0.9, frame as u32, 7),
+                    1 => {
+                        if !shader.params().is_empty() {
+                            let p = &shader.params()[0];
+                            shader.set_param(&mut ctx, 0, p.min + (p.max - p.min) * 0.3);
+                        }
+                    }
+                    2 => shader.note_off(&mut state),
+                    3 => shader.note_on(&mut state, 64.5, 0.6, frame as u32, 11),
+                    _ => shader.note_off(&mut state),
+                }
+            }
+        }
+        let next_event = events.iter().copied().filter(|e| *e > frame).min().unwrap_or(total);
+        let n = slices[k % slices.len()].min(next_event - frame).min(total - frame);
+        k += 1;
+        ctx[CTX_FRAME as usize] = frame as u32;
+        let (ins_l, ins_r): (&[f32], &[f32]) = if shader.kind == Kind::Effect {
+            (&in_l[frame..frame + n], &in_r[frame..frame + n])
+        } else {
+            (&zeros[frame..frame + n], &zeros[frame..frame + n])
+        };
+        let (ol, or) = (&mut out_l[frame..frame + n], &mut out_r[frame..frame + n]);
+        if interp {
+            shader.run_interp(&mut ctx, &mut state, &mut scratch, [ins_l, ins_r], [ol, or], n);
+        } else {
+            shader.run(&mut ctx, &mut state, &mut scratch, [ins_l, ins_r], [ol, or], n);
+        }
+        frame += n;
+    }
+    (out_l, out_r)
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+fn first_diff(a: &[f32], b: &[f32]) -> Option<(usize, f32, f32)> {
+    a.iter().zip(b).enumerate().find(|(_, (x, y))| x.to_bits() != y.to_bits()).map(|(i, (x, y))| (i, *x, *y))
+}
+
+// -- tests -------------------------------------------------------------------
+
+#[test]
+fn examples_compile_and_make_sound() {
+    for name in INSTRUMENTS.iter().chain(EFFECTS) {
+        let src = shader_src(name);
+        let s = build(&src, Backend::Native);
+        let (l, r) = perform(&s, false, &[128], 60000);
+        let peak = l.iter().chain(&r).fold(0.0f32, |m, x| m.max(x.abs()));
+        let finite = l.iter().chain(&r).all(|x| x.is_finite());
+        assert!(finite, "{} produced non-finite samples", name);
+        assert!(peak > 0.01 && peak < 4.0, "{} peak {}", name, peak);
+        eprintln!(
+            "{:16} {:?} peak {:.3} state {} words, {} AIR vals, {} bytes native",
+            name,
+            s.backend(),
+            peak,
+            s.state_words(),
+            s.program().vals.len(),
+            s.native_code_bytes()
+        );
+    }
+}
+
+#[test]
+fn native_is_bit_identical_to_the_interpreter() {
+    for name in INSTRUMENTS.iter().chain(EFFECTS) {
+        let s = build(&shader_src(name), Backend::Native);
+        let (nl, nr) = perform(&s, false, &[128], 60000);
+        let (il, ir) = perform(&s, true, &[128], 60000);
+        if let Some(d) = first_diff(&nl, &il).or(first_diff(&nr, &ir)) {
+            panic!("{}: native and interpreter differ at frame {}: {} vs {}", name, d.0, d.1, d.2);
+        }
+    }
+}
+
+#[test]
+fn host_slicing_never_changes_the_output() {
+    for name in INSTRUMENTS.iter().chain(EFFECTS) {
+        let s = build(&shader_src(name), Backend::Native);
+        let whole = perform(&s, false, &[128], 40000);
+        let ragged = perform(&s, false, &[1, 7, 64, 128, 3, 100, 31, 128, 2], 40000);
+        let big = perform(&s, false, &[4096], 40000);
+        assert_eq!(bits(&whole.0), bits(&ragged.0), "{}: slicing changed the left channel", name);
+        assert_eq!(bits(&whole.1), bits(&ragged.1), "{}: slicing changed the right channel", name);
+        assert_eq!(bits(&whole.0), bits(&big.0), "{}: 4096-frame calls changed the output", name);
+    }
+}
+
+#[test]
+fn renders_are_deterministic_across_compiles() {
+    for name in INSTRUMENTS {
+        let a = build(&shader_src(name), Backend::Native);
+        let b = build(&shader_src(name), Backend::Native);
+        assert_eq!(bits(&perform(&a, false, &[128], 20000).0), bits(&perform(&b, false, &[128], 20000).0), "{}", name);
+    }
+}
+
+#[test]
+fn the_audio_path_never_allocates() {
+    for name in INSTRUMENTS.iter().chain(EFFECTS) {
+        for backend in [Backend::Native, Backend::Interp] {
+            let s = build(&shader_src(name), backend);
+            let mut inst = Instance::new(s.clone(), RATE);
+            let mut l = vec![0.0f32; 128];
+            let mut r = vec![0.0f32; 128];
+            let (in_l, in_r) = test_input(128);
+            let (_, allocs) = counting(|| {
+                inst.note_on(60.0, 1.0, 1);
+                for block in 0..200 {
+                    if block == 100 {
+                        inst.note_off();
+                    }
+                    inst.set_param("mix", 0.5);
+                    if s.kind == Kind::Effect {
+                        inst.process(&in_l, &in_r, &mut l, &mut r);
+                    } else {
+                        inst.render(&mut l, &mut r);
+                    }
+                }
+            });
+            assert_eq!(allocs, 0, "{} ({:?}) allocated on the audio path", name, backend);
+        }
+    }
+}
+
+#[test]
+fn native_code_runs_on_another_thread() {
+    let s = build(&shader_src("fm2_svf"), Backend::Native);
+    let here = perform(&s, false, &[128], 8000);
+    let s2 = s.clone();
+    let there = std::thread::spawn(move || perform(&s2, false, &[128], 8000)).join().unwrap();
+    assert_eq!(bits(&here.0), bits(&there.0));
+}
+
+/// An effect that outputs f(l) on the left, for checking math intrinsics.
+fn math_probe(expr: &str) -> Arc<AudioShader> {
+    build(&format!("fn effect(l, r) {{ let x = l\n vec2({}, 0.0) }}", expr), Backend::Native)
+}
+
+fn probe(s: &Arc<AudioShader>, xs: &[f32], interp: bool) -> Vec<f32> {
+    let mut ctx = s.new_ctx(RATE);
+    let mut state = s.new_state();
+    let mut scratch = s.new_scratch();
+    let mut out = vec![0.0f32; xs.len()];
+    let mut other = vec![0.0f32; xs.len()];
+    let zeros = vec![0.0f32; xs.len()];
+    for (k, chunk) in xs.chunks(4096).enumerate() {
+        let at = k * 4096;
+        let n = chunk.len();
+        if interp {
+            s.run_interp(&mut ctx, &mut state, &mut scratch, [chunk, &zeros[..n]], [&mut out[at..at + n], &mut other[at..at + n]], n);
+        } else {
+            s.run(&mut ctx, &mut state, &mut scratch, [chunk, &zeros[..n]], [&mut out[at..at + n], &mut other[at..at + n]], n);
+        }
+    }
+    out
+}
+
+#[test]
+fn math_is_accurate_and_backend_exact() {
+    let mut xs: Vec<f32> = (0..20000).map(|i| (i as f32 - 10000.0) * 0.00173).collect();
+    xs.extend([0.0, -0.0, 1e-30, -1e-30, 88.0, -87.0, 0.5, 1.0, 100.0, -100.0, f32::MAX, f32::MIN_POSITIVE]);
+    let cases: &[(&str, fn(f64) -> f64, f64, &dyn Fn(f32) -> bool)] = &[
+        ("sin(x)", f64::sin, 3e-7, &|x: f32| x.abs() < 400.0),
+        ("cos(x)", f64::cos, 3e-7, &|x: f32| x.abs() < 400.0),
+        ("tanh(x)", f64::tanh, 4e-7, &|_| true),
+        ("exp(x)", f64::exp, 3e-7, &|x: f32| x.abs() < 80.0),
+        ("log(x)", f64::ln, 3e-7, &|x: f32| x > 0.0 && x < 1e30),
+        ("sqrt(x)", f64::sqrt, 1e-7, &|x: f32| x >= 0.0),
+    ];
+    for (expr, reference, tol, domain) in cases {
+        let s = math_probe(expr);
+        let native = probe(&s, &xs, false);
+        let interp = probe(&s, &xs, true);
+        assert_eq!(bits(&native), bits(&interp), "{}: backends differ", expr);
+        let mut worst = 0.0f64;
+        for (x, y) in xs.iter().zip(&native) {
+            if !domain(*x) {
+                continue;
+            }
+            let want = reference(*x as f64);
+            let err = (*y as f64 - want).abs() / want.abs().max(1.0);
+            worst = worst.max(err);
+        }
+        eprintln!("{:8} worst relative error {:.2e}", expr, worst);
+        assert!(worst < *tol, "{}: worst error {:e}", expr, worst);
+    }
+}
+
+#[test]
+fn integer_and_edge_ops_match() {
+    // Division by zero, i32::MIN / -1, shifts past 31, saturating casts,
+    // NaN compares, wrapping indices.
+    let src = r#"
+        var buf = [0.0; 7]
+        var k = int(0)
+        fn effect(l, r) {
+            let i = int(l * 1000.0)
+            let j = int(r * 3.0) - 1
+            let a = i / j + i % j + (i << (j + 40)) + (i >> 33)
+            let big = int(l * 1e12)
+            let m = (i32_min() / -1) + big
+            buf[k * 5 - 3] = l
+            k = k + 1
+            let nan = sqrt(-1.0 - abs(l))
+            let c = if nan < 1.0 { 1.0 } elif nan != nan { 2.0 } else { 3.0 }
+            let rd = round(l * 10.5) + trunc(-l * 3.3) + ceil(l) + floor(-l)
+            vec2(float(a) + float(m & 255) + c + rd + buf[k - 2], min(l, nan) + max(nan, r))
+        }
+        fn i32_min() { -2147483647 - 1 }
+    "#;
+    let s = build(src, Backend::Native);
+    let n = 5000;
+    let mut ctx = s.new_ctx(RATE);
+    let mut st_a = s.new_state();
+    let mut st_b = s.new_state();
+    let mut scratch = s.new_scratch();
+    let l: Vec<f32> = (0..n).map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 1.0).collect();
+    let r: Vec<f32> = (0..n).map(|i| ((i * 104729) % 1001) as f32 / 1000.0).collect();
+    let (mut a0, mut a1) = (vec![0.0; n], vec![0.0; n]);
+    let (mut b0, mut b1) = (vec![0.0; n], vec![0.0; n]);
+    s.run(&mut ctx, &mut st_a, &mut scratch, [&l, &r], [&mut a0, &mut a1], n);
+    s.run_interp(&mut ctx, &mut st_b, &mut scratch, [&l, &r], [&mut b0, &mut b1], n);
+    assert_eq!(bits(&a0), bits(&b0));
+    assert_eq!(bits(&a1), bits(&b1));
+    assert_eq!(st_a, st_b);
+}
+
+#[test]
+fn register_pressure_spills_exactly() {
+    // 48 values live at once force spills of both register classes.
+    let mut src = String::from("var acc = 0.0\nvar n = int(0)\nfn effect(l, r) {\n");
+    for i in 0..48 {
+        src.push_str(&format!("    let f{} = l * {}.5 + r\n    let i{} = n * {} + {}\n", i, i, i, i + 1, i));
+    }
+    src.push_str("    let s = 0.0\n");
+    for i in 0..48 {
+        src.push_str(&format!("    s = s + f{} * float(i{} % 7)\n", 47 - i, i));
+    }
+    src.push_str("    n = n + 1\n    acc = acc * 0.5 + s\n    vec2(acc, s)\n}\n");
+    let s = build(&src, Backend::Native);
+    let (l, r) = test_input(3000);
+    let mut ctx = s.new_ctx(RATE);
+    let (mut sa, mut sb) = (s.new_state(), s.new_state());
+    let mut scratch = s.new_scratch();
+    let (mut a0, mut a1) = (vec![0.0; 3000], vec![0.0; 3000]);
+    let (mut b0, mut b1) = (vec![0.0; 3000], vec![0.0; 3000]);
+    s.run(&mut ctx, &mut sa, &mut scratch, [&l, &r], [&mut a0, &mut a1], 3000);
+    s.run_interp(&mut ctx, &mut sb, &mut scratch, [&l, &r], [&mut b0, &mut b1], 3000);
+    assert_eq!(bits(&a0), bits(&b0));
+    assert_eq!(bits(&a1), bits(&b1));
+}
+
+#[test]
+fn control_flow_matches() {
+    // Loops with runtime bounds, break/continue, early returns from helpers,
+    // match, while, short-circuit with side effects.
+    let src = r#"
+        var hits = int(0)
+        var st = [0.0; 16]
+        fn bump() { hits = hits + 1
+            true }
+        fn find(x) {
+            for i in 0..16 {
+                if st[i] > x { return float(i) }
+            }
+            -1.0
+        }
+        fn effect(l, r) {
+            let n = int(abs(l) * 20.0)
+            let s = 0.0
+            for i in 0..n {
+                if i % 3 == 1 { continue }
+                if s > 4.0 { break }
+                s = s + float(i) * 0.25
+            }
+            let w = 0
+            while w * w < n { w = w + 1 }
+            let q = match w % 4 { 0 => 1.5, 1 | 2 => s, _ => -s }
+            if l > 0.0 && bump() { st[hits] = l }
+            if l < -0.5 || bump() { s = s + 1.0 }
+            loop { s = s * 0.5
+                if s < 1.0 { break } }
+            vec2(s + q + find(l), float(hits))
+        }
+    "#;
+    let s = build(src, Backend::Native);
+    let (l, r) = test_input(6000);
+    let mut ctx = s.new_ctx(RATE);
+    let (mut sa, mut sb) = (s.new_state(), s.new_state());
+    let mut scratch = s.new_scratch();
+    let (mut a0, mut a1) = (vec![0.0; 6000], vec![0.0; 6000]);
+    let (mut b0, mut b1) = (vec![0.0; 6000], vec![0.0; 6000]);
+    s.run(&mut ctx, &mut sa, &mut scratch, [&l, &r], [&mut a0, &mut a1], 4096);
+    s.run_interp(&mut ctx, &mut sb, &mut scratch, [&l, &r], [&mut b0, &mut b1], 4096);
+    assert_eq!(bits(&a0[..4096]), bits(&b0[..4096]));
+    assert_eq!(bits(&a1[..4096]), bits(&b1[..4096]));
+    assert!(a1[4095] > 100.0, "side effects of && / || ran: {}", a1[4095]);
+}
+
+fn compile_err(src: &str) -> ShaderError {
+    match compile_with(src, Backend::Interp) {
+        Ok(_) => panic!("expected an error for:\n{}", src),
+        Err(e) => e[0].clone(),
+    }
+}
+
+#[test]
+fn errors_point_at_the_code() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("fn voice() { foo + 1.0 }", "foo", "unknown name"),
+        ("fn voice() { let x = 1.0\n x = \"s\" }", "\"s", "no strings"),
+        ("fn voice() { f(1.0) }\nfn f(x) { f(x) }", "f(x)", "itself"),
+        ("var b = [0.0; n]\nfn voice() { 0.0 }", "n]", "unknown name"),
+        ("fn voice() { break }", "break", "outside a loop"),
+        ("fn nothing() { 1.0 }", "f", "missing entry"),
+        ("fn voice() { vec2(1.0, 2.0) + true }", "vec2", "vec2"),
+        ("let t = [0.0; 4]\nfn voice() { t[0] = 1.0\n 0.0 }", "t[0] = 1.0", "read-only"),
+    ];
+    for (src, at, msg) in cases {
+        let e = compile_err(src);
+        assert!(e.message.contains(msg), "{:?}: message {:?} lacks {:?}", src, e.message, msg);
+        let start = src.rfind(at).unwrap();
+        if *msg != "missing entry" {
+            assert_eq!(e.start, start, "{:?}: error at {} ({:?}), expected {}", src, e.start, &src[e.start..e.end.min(src.len())], start);
+        }
+    }
+}
+
+#[test]
+fn hot_swap_state_carry_by_name() {
+    let a = build("var phase = 0.0\nvar amp = 1.0\nfn voice() { phase = fract(phase + freq / sample_rate)\n sin(TAU * phase) * amp }", Backend::Native);
+    let b = build("var amp = 1.0\nvar phase = 0.0\nvar extra = 5.0\nfn voice() { phase = fract(phase + freq / sample_rate)\n sin(TAU * phase) * amp * 0.5 }", Backend::Native);
+    // Same names: phase and amp map across the reordered layout.
+    let va = &a.state_vars()[0];
+    let vb = b.state_vars().iter().find(|v| v.name == va.name).unwrap();
+    assert_eq!(va.sig, vb.sig);
+    assert_ne!(va.offset, vb.offset);
+}
+
+/// Fundamental by autocorrelation with parabolic peak interpolation.
+fn pitch(x: &[f32], rate: f32, lo_hz: f32, hi_hz: f32) -> f32 {
+    let min_lag = (rate / hi_hz) as usize;
+    let max_lag = (rate / lo_hz) as usize;
+    let ac = |lag: usize| -> f64 { x.iter().zip(&x[lag..]).map(|(a, b)| *a as f64 * *b as f64).sum::<f64>() / (x.len() - lag) as f64 };
+    let vals: Vec<f64> = (min_lag..=max_lag + 1).map(ac).collect();
+    // The first strong peak (avoids octave errors).
+    let top = vals.iter().cloned().fold(f64::MIN, f64::max);
+    let mut best = 1;
+    for k in 1..vals.len() - 1 {
+        if vals[k] > vals[k - 1] && vals[k] >= vals[k + 1] && vals[k] > 0.9 * top {
+            best = k;
+            break;
+        }
+    }
+    let (a, b, c) = (vals[best - 1], vals[best], vals[best + 1]);
+    let shift = 0.5 * (a - c) / (a - 2.0 * b + c);
+    rate / ((min_lag + best) as f64 + shift) as f32
+}
+
+#[test]
+fn pluck_stays_in_tune_up_high() {
+    let s = build(&shader_src("pluck"), Backend::Native);
+    for note in [48.0f32, 60.0, 72.0, 84.0, 93.0] {
+        let mut inst = Instance::new(s.clone(), RATE);
+        inst.set_param("t60", 10.0);
+        inst.note_on(note, 1.0, 5);
+        let mut l = vec![0.0f32; 24000];
+        let mut r = vec![0.0f32; 24000];
+        inst.render(&mut l, &mut r);
+        let want = 440.0 * 2f32.powf((note - 69.0) / 12.0);
+        let got = pitch(&l[4000..20000], RATE, want * 0.7, want * 1.4);
+        let cents = 1200.0 * (got / want).log2();
+        eprintln!("pluck note {:>4}: want {:8.2} Hz got {:8.2} Hz ({:+.2} cents)", note, want, got, cents);
+        assert!(cents.abs() < 3.0, "note {} is {:+.1} cents off", note, cents);
+    }
+}
+
+// -- dataflow fusion -----------------------------------------------------------
+
+use makepad_script_audio_aot::{fuse, FuseNode, Port};
+
+#[test]
+fn fused_instrument_chain_equals_the_nodes_run_one_by_one() {
+    let synth = shader_src("saw_svf");
+    let drive = shader_src("waveshaper4x");
+    let fused = fuse(
+        &[FuseNode { name: "lead", code: &synth, inputs: vec![] }, FuseNode { name: "drive", code: &drive, inputs: vec![Port::Node(0)] }],
+        &[Port::Node(1)],
+        Backend::Native,
+    )
+    .unwrap_or_else(|e| panic!("{:?}", e));
+    assert!(fused.param_index("lead_cutoff").is_some() && fused.param_index("drive_drive").is_some());
+    let n = 20000;
+    // Fused: one program per voice.
+    let mut f = Instance::new(fused.clone(), RATE);
+    f.note_on(45.0, 1.0, 9);
+    let (mut fl, mut fr) = (vec![0.0; n], vec![0.0; n]);
+    for k in 0..n / 100 {
+        f.render(&mut fl[k * 100..k * 100 + 100], &mut fr[k * 100..k * 100 + 100]);
+    }
+    // Separate: the synth into a buffer, the buffer through the effect.
+    let mut a = Instance::new(build(&synth, Backend::Native), RATE);
+    let mut b = Instance::new(build(&drive, Backend::Native), RATE);
+    a.note_on(45.0, 1.0, 9);
+    let (mut al, mut ar) = (vec![0.0; n], vec![0.0; n]);
+    a.render(&mut al, &mut ar);
+    let (mut bl, mut br) = (vec![0.0; n], vec![0.0; n]);
+    b.process(&al, &ar, &mut bl, &mut br);
+    if let Some(d) = first_diff(&fl, &bl) {
+        panic!("fused and chained differ at {}: {} vs {}", d.0, d.1, d.2);
+    }
+    assert_eq!(bits(&fr), bits(&br));
+    eprintln!("fused lead+drive: {} AIR vals, {} bytes native (vs {} + {})", fused.program().vals.len(), fused.native_code_bytes(),
+        a.shader.native_code_bytes(), b.shader.native_code_bytes());
+}
+
+#[test]
+fn fused_effect_graph_with_fan_in_and_feedback() {
+    // y = half(x + y[n-1]) as a graph with a feedback edge, against the
+    // same thing written by hand.
+    let half = "fn effect(l, r) { vec2(l * 0.5, r * 0.5) }";
+    let graph = fuse(&[FuseNode { name: "h", code: half, inputs: vec![Port::Input, Port::Feedback(0)] }], &[Port::Node(0)], Backend::Native).unwrap();
+    let by_hand = build("var y = vec2(0.0)\nfn effect(l, r) { y = vec2((l + y.x) * 0.5, (r + y.y) * 0.5)\n y }", Backend::Native);
+    let (l, r) = test_input(5000);
+    let mut out = [(vec![0.0; 5000], vec![0.0; 5000]), (vec![0.0; 5000], vec![0.0; 5000])];
+    for (s, o) in [graph.clone(), by_hand].iter().zip(out.iter_mut()) {
+        let mut i = Instance::new(s.clone(), RATE);
+        i.process(&l, &r, &mut o.0, &mut o.1);
+    }
+    assert_eq!(bits(&out[0].0), bits(&out[1].0));
+    // Fan-out and fan-in: reverb and drive in parallel on the input, summed.
+    let verb = shader_src("allpass_reverb");
+    let drive = shader_src("waveshaper4x");
+    let par = fuse(
+        &[
+            FuseNode { name: "verb", code: &verb, inputs: vec![Port::Input] },
+            FuseNode { name: "drive", code: &drive, inputs: vec![Port::Input] },
+        ],
+        &[Port::Node(0), Port::Node(1)],
+        Backend::Native,
+    )
+    .unwrap();
+    let mut i = Instance::new(par.clone(), RATE);
+    let (mut pl, mut pr) = (vec![0.0; 5000], vec![0.0; 5000]);
+    i.process(&l, &r, &mut pl, &mut pr);
+    let mut v = Instance::new(build(&verb, Backend::Native), RATE);
+    let mut d = Instance::new(build(&drive, Backend::Native), RATE);
+    let (mut sl, mut sr) = (vec![0.0; 5000], vec![0.0; 5000]);
+    let (mut vl, mut vr) = (vec![0.0; 5000], vec![0.0; 5000]);
+    let (mut dl, mut dr) = (vec![0.0; 5000], vec![0.0; 5000]);
+    v.process(&l, &r, &mut vl, &mut vr);
+    d.process(&l, &r, &mut dl, &mut dr);
+    for k in 0..5000 {
+        sl[k] = vl[k] + dl[k];
+        sr[k] = vr[k] + dr[k];
+    }
+    assert_eq!(bits(&pl), bits(&sl));
+    assert_eq!(bits(&pr), bits(&sr));
+}
+
+#[test]
+fn fusion_errors_name_the_node() {
+    let good = "fn effect(l, r) { vec2(l, r) }";
+    let bad = "fn effect(l, r) { vec2(l, nope) }";
+    let e = fuse(&[FuseNode { name: "a", code: good, inputs: vec![Port::Input] }, FuseNode { name: "b", code: bad, inputs: vec![Port::Node(0)] }], &[Port::Node(1)], Backend::Interp).unwrap_err();
+    assert_eq!(e.node, Some(1));
+    assert_eq!(&bad[e.error.start..e.error.end], "nope");
+    let e = fuse(&[FuseNode { name: "a", code: good, inputs: vec![Port::Node(0)] }], &[Port::Node(0)], Backend::Interp).unwrap_err();
+    assert!(e.error.message.contains("not before it"));
+}

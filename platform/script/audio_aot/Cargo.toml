@@ -1,0 +1,11 @@
+[package]
+name = "makepad-script-audio-aot"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Splash audio shaders: compiles instruments and effects written in Splash syntax into realtime-safe code (AIR + reference interpreter + native ARM64 backend)"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

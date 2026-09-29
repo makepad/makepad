@@ -1,0 +1,56 @@
+// A dense stereo reverb: four blocks in one loop, each block two allpasses
+// then a delay, a damping low-pass and the decay gain; the input enters at
+// every block head and the blocks' outputs alternate left and right.
+let AP_LEN = [263, 863, 1319, 1433, 439, 359, 887, 1399]
+let DL_LEN = [233, 1367, 4253, 2903]
+let decay = param(0.6, 0, 0.95)
+let damp = param(0.3, 0, 0.9)
+let mix = param(0.3, 0, 1)
+
+struct Allpass {
+    buf: [0.0; 2048]
+    w: int(0)
+}
+
+struct Delay {
+    buf: [0.0; 8192]
+    w: int(0)
+}
+
+var aps = [Allpass{}; 8]
+var dls = [Delay{}; 4]
+var lp = [0.0; 4]
+var fb = 0.0
+
+fn allpass(ap, x, len, g) {
+    let d = ap.buf[ap.w - len]
+    let v = x + g * d
+    ap.buf[ap.w] = v
+    ap.w = ap.w + 1
+    d - g * v
+}
+
+fn effect(l, r) {
+    let input = (l + r) * 0.5
+    let x = fb
+    let wl = 0.0
+    let wr = 0.0
+    for b in 0..4 {
+        x = x + input
+        x = allpass(aps[2 * b], x, int(AP_LEN[2 * b]), 0.5)
+        x = allpass(aps[2 * b + 1], x, int(AP_LEN[2 * b + 1]), 0.5)
+        let dl = dls[b]
+        let y = dl.buf[dl.w - int(DL_LEN[b])]
+        dl.buf[dl.w] = x
+        dl.w = dl.w + 1
+        lp[b] = lp[b] + (y - lp[b]) * (1.0 - damp)
+        x = lp[b] * decay
+        if b % 2 == 0 {
+            wl = wl + y
+        } else {
+            wr = wr + y
+        }
+    }
+    fb = x
+    vec2(l + (wl * 0.5 - l) * mix, r + (wr * 0.5 - r) * mix)
+}
