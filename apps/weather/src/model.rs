@@ -12,23 +12,34 @@
 //! tolerate nulls and unequal lengths.
 use makepad_widgets::*;
 use makepad_widgets::makepad_micro_serde::*;
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Owned, not `&'static str`: a city can now come from a person's own
+/// geocoding search (`GeocodeResult::into_city`) as well as the built-in
+/// defaults, and the whole list is persisted (`serialize_cities`).
+#[derive(Clone, Debug, PartialEq)]
 pub struct City {
-    pub name: &'static str,
-    pub country: &'static str,
+    pub name: String,
+    pub country: String,
     pub lat: f64,
     pub lon: f64,
 }
 
-pub const CITIES: [City; 4] = [
-    City { name: "Amsterdam", country: "Netherlands", lat: 52.37, lon: 4.90 },
-    City { name: "London", country: "United Kingdom", lat: 51.51, lon: -0.13 },
-    City { name: "New York", country: "United States", lat: 40.71, lon: -74.01 },
-    City { name: "Tokyo", country: "Japan", lat: 35.68, lon: 139.65 },
-];
+/// The list a fresh install (or a wiped one) starts from.
+pub fn default_cities() -> Vec<City> {
+    vec![
+        City { name: "Amsterdam".into(), country: "Netherlands".into(), lat: 52.37, lon: 4.90 },
+        City { name: "London".into(), country: "United Kingdom".into(), lat: 51.51, lon: -0.13 },
+        City { name: "New York".into(), country: "United States".into(), lat: 40.71, lon: -74.01 },
+        City { name: "Tokyo".into(), country: "Japan".into(), lat: 35.68, lon: 139.65 },
+    ]
+}
 
 pub const DEFAULT_CITY: usize = 0;
+/// A generous personal list, not a hard platform limit: the sheet's row
+/// slots are declared up to this count (view.rs).
+pub const MAX_CITIES: usize = 12;
 pub const REFRESH_EVERY: Duration = Duration::from_secs(15 * 60);
 /// After this the tile shows when the data was last good instead of H/L.
 pub const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -52,6 +63,94 @@ pub fn forecast_url(city: &City) -> String {
          &timezone=auto&forecast_days=10",
         city.lat, city.lon
     )
+}
+
+/// Percent-encode a query for a URL's path/query component: everything but
+/// the small set of ASCII bytes that are always safe unescaped. City names
+/// carry spaces and, in plenty of countries, non-ASCII letters.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Open-Meteo's own geocoder (api.open-meteo.com's sibling service): the
+/// same provider the forecast comes from, so a search result's lat/lon
+/// plugs straight into `forecast_url`.
+pub fn geocode_url(query: &str) -> String {
+    format!("https://geocoding-api.open-meteo.com/v1/search?name={}&count=8&language=en&format=json", percent_encode(query))
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+pub struct GeocodeResponse {
+    pub results: Option<Vec<GeocodeResult>>,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+pub struct GeocodeResult {
+    pub name: String,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub country: Option<String>,
+    pub admin1: Option<String>,
+}
+
+impl GeocodeResponse {
+    pub fn parse(json: &str) -> Result<Self, String> {
+        DeJson::deserialize_json_lenient(json).map_err(|e| format!("{e:?}"))
+    }
+}
+
+impl GeocodeResult {
+    /// The country when the geocoder gave one; the admin region (a state,
+    /// a province) when it only gave that; blank rather than a fabricated
+    /// guess when it gave neither.
+    pub fn into_city(self) -> City {
+        City {
+            name: self.name,
+            country: self.country.or(self.admin1).unwrap_or_default(),
+            lat: self.latitude,
+            lon: self.longitude,
+        }
+    }
+}
+
+/// `name\tcountry\tlat\tlon` per line: plain enough to hand-inspect the
+/// storage file, and every field but the name is guaranteed free of the
+/// separators (a raw tab could only arrive by tampering with storage
+/// directly, which parsing a short, malformed line then just drops).
+pub fn serialize_cities(cities: &[City]) -> Vec<u8> {
+    let mut out = String::new();
+    for city in cities {
+        out.push_str(&city.name);
+        out.push('\t');
+        out.push_str(&city.country);
+        out.push('\t');
+        out.push_str(&format!("{}\t{}\n", city.lat, city.lon));
+    }
+    out.into_bytes()
+}
+
+pub fn parse_cities(bytes: &[u8]) -> Vec<City> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return Vec::new() };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?.to_string();
+            let country = parts.next()?.to_string();
+            let lat: f64 = parts.next()?.parse().ok()?;
+            let lon: f64 = parts.next()?.parse().ok()?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(City { name, country, lat, lon })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, DeJson)]
@@ -396,9 +495,58 @@ pub fn glyph(code: u32, is_day: bool) -> Glyph {
     }
 }
 
-pub fn temp(v: Option<f64>) -> String {
+/// The display unit for a temperature. Every value the model holds (the
+/// fetch, the range domain, the fixed Celsius palette below) stays in
+/// Celsius regardless; only `temp()`'s formatted text ever converts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TempUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+impl TempUnit {
+    pub fn toggle(self) -> Self {
+        match self {
+            TempUnit::Celsius => TempUnit::Fahrenheit,
+            TempUnit::Fahrenheit => TempUnit::Celsius,
+        }
+    }
+
+    /// The toggle's own label: the unit shown is the one currently active.
+    pub fn label(self) -> &'static str {
+        match self {
+            TempUnit::Celsius => "°C",
+            TempUnit::Fahrenheit => "°F",
+        }
+    }
+
+    fn convert(self, celsius: f64) -> f64 {
+        match self {
+            TempUnit::Celsius => celsius,
+            TempUnit::Fahrenheit => celsius * 9.0 / 5.0 + 32.0,
+        }
+    }
+
+    pub fn storage_byte(self) -> u8 {
+        match self {
+            TempUnit::Celsius => b'C',
+            TempUnit::Fahrenheit => b'F',
+        }
+    }
+
+    pub fn from_storage(bytes: &[u8]) -> Option<Self> {
+        match bytes.first() {
+            Some(b'F') => Some(TempUnit::Fahrenheit),
+            Some(b'C') => Some(TempUnit::Celsius),
+            _ => None,
+        }
+    }
+}
+
+pub fn temp(v: Option<f64>, unit: TempUnit) -> String {
     match v {
-        Some(t) => format!("{}°", t.round() as i64),
+        Some(t) => format!("{}°", unit.convert(t).round() as i64),
         None => "—°".into(),
     }
 }
@@ -498,6 +646,24 @@ pub fn hhmm_of(stamp: &str) -> String {
     stamp.split('T').nth(1).map(|t| t.chars().take(5).collect()).unwrap_or_else(|| stamp.to_string())
 }
 
+/// The wall clock right now at a city, from the forecast's own
+/// `utc_offset_seconds` (Open-Meteo's `timezone=auto`, DST included) rather
+/// than a stamp from the last fetch: it keeps ticking between refreshes
+/// instead of freezing at whatever time the data happened to load.
+pub fn local_hhmm(utc_offset_seconds: Option<f64>) -> String {
+    let utc_now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    hhmm_from_epoch(utc_now, utc_offset_seconds.unwrap_or(0.0) as i64)
+}
+
+/// "14:05" for an epoch instant, `utc_offset_seconds` away from UTC — a
+/// city's own (`local_hhmm`, its forecast's `utc_offset_seconds`) or the
+/// device's (view.rs's "last refreshed" line, `script_local_utc_offset_secs`,
+/// 0 — UTC — when nothing has told the platform layer its host's offset).
+pub fn hhmm_from_epoch(epoch_secs: i64, utc_offset_seconds: i64) -> String {
+    let secs_of_day = (epoch_secs + utc_offset_seconds).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+}
+
 fn minute_of_day(stamp: &str) -> Option<f64> {
     let time = stamp.split('T').nth(1)?;
     let mut parts = time.split(':');
@@ -529,94 +695,151 @@ fn weekday_of(date: &str) -> &'static str {
 
 /// What the faces show, independent of how it is laid out.
 pub struct WeatherState {
+    /// A person's own list: the defaults, plus anything added from the
+    /// Locations sheet's search (capped at `MAX_CITIES`, persisted whole
+    /// under storage's "cities" key since it can no longer be rebuilt from
+    /// a fixed constant).
+    pub cities: Vec<City>,
     pub city: usize,
-    /// The good forecast most recently received, tagged with its city.
-    pub data: Option<(usize, Forecast, Instant)>,
-    /// A request in flight: its id and the city it was sent for.
-    pub pending: Option<(LiveId, usize)>,
-    pub last_error: Option<String>,
+    /// Every city's most recent good forecast, keyed by its index in
+    /// `cities` — "Refresh" asks for all of them (view.rs's
+    /// `refresh_all`), not only the one on screen, so switching cities
+    /// afterward is instant instead of a reload.
+    pub data: HashMap<usize, (Forecast, Instant)>,
+    /// Requests in flight, keyed by the city they are for: at most one per
+    /// city, so a second refresh for the same one just replaces the id
+    /// here rather than racing it.
+    pub pending: HashMap<usize, LiveId>,
+    /// Per city, like `data` and `pending`: one city's background refresh
+    /// failing must not paint another (or the one on screen) as offline.
+    pub last_error: HashMap<usize, String>,
+    pub unit: TempUnit,
+    /// When "Refresh" was last asked for (device-epoch seconds, not a
+    /// city's own time — see `hhmm_from_epoch`); shown in the Locations
+    /// sheet, persisted under storage's "refreshed" key.
+    pub last_refreshed: Option<i64>,
     seq: u64,
 }
 
 impl Default for WeatherState {
     fn default() -> Self {
-        Self { city: DEFAULT_CITY, data: None, pending: None, last_error: None, seq: 0 }
+        Self {
+            cities: default_cities(),
+            city: DEFAULT_CITY,
+            data: HashMap::new(),
+            pending: HashMap::new(),
+            last_error: HashMap::new(),
+            unit: TempUnit::default(),
+            last_refreshed: None,
+            seq: 0,
+        }
     }
 }
 
 impl WeatherState {
-    pub fn city(&self) -> &'static City {
-        &CITIES[self.city.min(CITIES.len() - 1)]
+    pub fn city(&self) -> &City {
+        &self.cities[self.city.min(self.cities.len() - 1)]
     }
 
+    /// Whether the city on screen specifically is loading — a background
+    /// refresh for some other city must not paint this one as loading.
     pub fn loading(&self) -> bool {
-        self.pending.is_some()
+        self.pending.contains_key(&self.city)
     }
 
-    /// A fresh request id; any earlier in-flight reply is now superseded.
-    pub fn begin_fetch(&mut self) -> (LiveId, String) {
+    /// A fresh request id for `index`; any earlier in-flight reply for
+    /// that same city is now superseded (its id is gone from `pending`,
+    /// so `complete` drops it on arrival).
+    pub fn begin_fetch(&mut self, index: usize) -> (LiveId, String) {
         self.seq += 1;
         let id = LiveId::from_str(&format!("weather_forecast_{}", self.seq));
-        self.pending = Some((id, self.city));
-        (id, forecast_url(self.city()))
+        self.pending.insert(index, id);
+        (id, forecast_url(&self.cities[index]))
     }
 
     pub fn select_city(&mut self, city: usize) -> bool {
-        let city = city.min(CITIES.len() - 1);
+        let city = city.min(self.cities.len() - 1);
         if city == self.city {
             return false;
         }
         self.city = city;
-        // Whatever was in flight answers for the old city: drop it.
-        self.pending = None;
+        // Left running, unlike the old single-city model that dropped it:
+        // a fetch already in flight for the city just left fills its
+        // cache same as any other background one, for a fast switch back.
         true
     }
 
-    /// True when the id matches the request we are waiting for.
-    pub fn owns(&self, id: LiveId) -> bool {
-        self.pending.is_some_and(|(p, _)| p == id)
+    /// Add a city from a search result and return its index — the
+    /// existing one's, unchanged, if it (by name and country) is already
+    /// on the list, so searching for a city already added just selects
+    /// it rather than duplicating it. `None` only when the list is full
+    /// of cities that are not this one.
+    pub fn add_city(&mut self, city: City) -> Option<usize> {
+        if let Some(i) = self.cities.iter().position(|c| c.name.eq_ignore_ascii_case(&city.name) && c.country.eq_ignore_ascii_case(&city.country)) {
+            return Some(i);
+        }
+        if self.cities.len() >= MAX_CITIES {
+            return None;
+        }
+        self.cities.push(city);
+        Some(self.cities.len() - 1)
+    }
+
+    /// The city `id` was requested for, if that request is still the one
+    /// `pending` is waiting on for it (a superseded reply owns nothing).
+    pub fn owner_of(&self, id: LiveId) -> Option<usize> {
+        self.pending.iter().find(|(_, &v)| v == id).map(|(&k, _)| k)
     }
 
     pub fn complete(&mut self, id: LiveId, result: Result<Forecast, String>) -> bool {
-        if !self.owns(id) {
+        let Some(city) = self.owner_of(id) else {
             return false;
-        }
-        let (_, city) = self.pending.take().unwrap();
+        };
+        self.pending.remove(&city);
         match result {
             Ok(f) => {
-                self.data = Some((city, f, Instant::now()));
-                self.last_error = None;
+                self.data.insert(city, (f, Instant::now()));
+                self.last_error.remove(&city);
             }
-            Err(e) => self.last_error = Some(e),
+            Err(e) => {
+                self.last_error.insert(city, e);
+            }
         }
         true
     }
 
-    /// The good data to show: only if it belongs to the selected city.
+    /// The good data to show for the selected city.
     pub fn current(&self) -> Option<(&Forecast, Instant)> {
-        self.data.as_ref().filter(|(c, _, _)| *c == self.city).map(|(_, f, t)| (f, *t))
+        self.data.get(&self.city).map(|(f, t)| (f, *t))
     }
 
-    pub fn due_for_refresh(&self) -> bool {
-        if self.loading() {
+    fn city_due_for_refresh(&self, index: usize) -> bool {
+        if self.pending.contains_key(&index) {
             return false;
         }
-        match self.current() {
+        match self.data.get(&index) {
             Some((_, at)) => at.elapsed() >= REFRESH_EVERY,
             None => true,
         }
     }
 
+    /// Whether the city on screen is due — the periodic tick's own
+    /// question, not "Refresh"'s (view.rs's `refresh_all` asks every city
+    /// unconditionally, since a person pressing it means it regardless of
+    /// how fresh the data already looks).
+    pub fn due_for_refresh(&self) -> bool {
+        self.city_due_for_refresh(self.city)
+    }
+
     pub fn is_stale(&self) -> bool {
-        self.current().is_some_and(|(_, at)| at.elapsed() >= REFRESH_EVERY)
-            || (self.current().is_some() && self.last_error.is_some())
+        self.current().is_some_and(|(_, at)| at.elapsed() >= REFRESH_EVERY) || (self.current().is_some() && self.last_error.contains_key(&self.city))
     }
 
     /// The tile swaps its H/L line for this after a failed refresh or
     /// thirty minutes of age: when the data was last good.
     pub fn tile_freshness(&self) -> Option<String> {
         let (forecast, at) = self.current()?;
-        if at.elapsed() < STALE_AFTER && self.last_error.is_none() {
+        if at.elapsed() < STALE_AFTER && !self.last_error.contains_key(&self.city) {
             return None;
         }
         Some(format!("Updated {}", forecast.current.time.as_deref().map(hhmm_of).unwrap_or_else(|| "earlier".into())))
@@ -628,14 +851,15 @@ impl WeatherState {
             let mins = at.elapsed().as_secs() / 60;
             if mins == 0 { "just now".to_string() } else { format!("{} min ago", mins) }
         };
-        match (self.loading(), self.current(), &self.last_error) {
+        let failed = self.last_error.contains_key(&self.city);
+        match (self.loading(), self.current(), failed) {
             (true, None, _) => "Loading".into(),
             (true, Some((_, at)), _) => format!("Refreshing · updated {}", age(at)),
-            (false, None, Some(_)) => "Unavailable".into(),
-            (false, None, None) => "No data yet".into(),
-            (false, Some((_, at)), Some(_)) => format!("Offline · showing data from {}", age(at)),
-            (false, Some((_, at)), None) if self.is_stale() => format!("Stale · updated {}", age(at)),
-            (false, Some((_, at)), None) => format!("Updated {}", age(at)),
+            (false, None, true) => "Unavailable".into(),
+            (false, None, false) => "No data yet".into(),
+            (false, Some((_, at)), true) => format!("Offline · showing data from {}", age(at)),
+            (false, Some((_, at)), false) if self.is_stale() => format!("Stale · updated {}", age(at)),
+            (false, Some((_, at)), false) => format!("Updated {}", age(at)),
         }
     }
 }
@@ -673,7 +897,7 @@ mod tests {
         assert_eq!(days[2].high, None);
         assert_eq!(days[2].sunrise, None);
         assert_eq!(days[1].sunset.as_deref(), Some("2026-09-07T19:33"));
-        assert_eq!(temp(days[1].high), "21°");
+        assert_eq!(temp(days[1].high, TempUnit::Celsius), "21°");
         assert_eq!(days[0].uv_max, Some(4.4));
         assert_eq!(days[0].precip_sum, Some(0.0));
         assert_eq!(f.current.apparent_temperature, Some(17.1));
@@ -747,28 +971,41 @@ mod tests {
     }
 
     #[test]
-    fn superseded_replies_are_ignored_and_good_data_survives_failure() {
+    fn background_refreshes_land_on_their_own_city_regardless_of_what_is_selected() {
         let mut s = WeatherState::default();
-        let (first, _) = s.begin_fetch();
-        assert!(s.complete(first, Forecast::parse(SAMPLE)));
-        assert!(s.current().is_some());
+        let (amsterdam_req, _) = s.begin_fetch(0);
+        assert!(s.complete(amsterdam_req, Forecast::parse(SAMPLE)));
         assert_eq!(s.tile_freshness(), None, "fresh data keeps the H/L line");
-        let (second, _) = s.begin_fetch();
+
+        // "Refresh" (view.rs's `refresh_all`): a fetch for Tokyo (3) is
+        // already running while Amsterdam (0) is still on screen.
+        let (tokyo_req, _) = s.begin_fetch(3);
+        assert!(!s.loading(), "a background fetch for another city does not mark THIS one loading");
+
+        // Switching to Tokyo before its reply lands leaves that fetch
+        // running rather than cancelling or restarting it.
         assert!(s.select_city(3));
-        assert!(!s.complete(second, Err("late".into())), "old city's reply is dropped");
-        assert!(s.current().is_none(), "Amsterdam data is not shown as Tokyo");
-        let (third, _) = s.begin_fetch();
-        assert!(s.complete(third, Err("offline".into())));
+        assert!(s.loading());
+        assert!(s.complete(tokyo_req, Err("offline".into())));
         assert_eq!(s.status_text(), "Unavailable");
+
+        // Back to Amsterdam: its own data and status are untouched by
+        // Tokyo's failure — no shared, single `last_error` to bleed across.
         s.select_city(0);
-        assert!(s.current().is_some(), "last good Amsterdam data is still there");
-        assert!(s.status_text().starts_with("Offline"));
-        assert_eq!(s.tile_freshness().as_deref(), Some("Updated 12:10"), "a failed refresh shows when the data was good");
+        assert!(s.current().is_some(), "Amsterdam's data was never touched");
+        assert!(!s.status_text().starts_with("Offline"), "Tokyo's error must not appear on Amsterdam");
+        assert_eq!(s.tile_freshness(), None, "Amsterdam's own data is still fresh");
+
+        // A superseded reply — a second fetch for the same city already
+        // replaced the first in `pending` — is dropped.
+        let (stale_req, _) = s.begin_fetch(0);
+        let _fresh_req = s.begin_fetch(0);
+        assert!(!s.complete(stale_req, Err("late".into())), "an id `pending` no longer holds is dropped");
     }
 
     #[test]
     fn url_is_the_documented_query() {
-        let url = forecast_url(&CITIES[0]);
+        let url = forecast_url(&default_cities()[0]);
         assert!(url.starts_with("https://api.open-meteo.com/v1/forecast?latitude=52.37&longitude=4.90&current="));
         assert!(url.contains("&hourly=temperature_2m,weather_code,is_day,precipitation_probability"));
         assert!(url.contains("&daily=temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset,uv_index_max"));

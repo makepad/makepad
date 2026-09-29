@@ -2,7 +2,7 @@
 //! inserted where they fall, in 56 pt cells 8 apart that scroll sideways
 //! under the finger (release decays at 6/s). Cells are drawn here, not
 //! instantiated: the strip is one widget with its own texts and glyphs.
-use crate::model::{glyph, temp, Glyph, HourCell};
+use crate::model::{glyph, temp, Glyph, HourCell, TempUnit};
 use makepad_widgets::*;
 
 pub const CELL_W: f64 = 56.0;
@@ -90,6 +90,8 @@ pub struct HourlyStrip {
     #[rust]
     cells: Vec<HourCell>,
     #[rust]
+    unit: TempUnit,
+    #[rust]
     scroll: f64,
     #[rust]
     velocity: f64,
@@ -102,11 +104,15 @@ pub struct HourlyStrip {
 }
 
 impl HourlyStrip {
-    pub fn set_cells(&mut self, cx: &mut Cx, cells: Vec<HourCell>) {
-        if cells != self.cells {
+    pub fn set_cells(&mut self, cx: &mut Cx, cells: Vec<HourCell>, unit: TempUnit) {
+        if cells != self.cells || unit != self.unit {
+            let city_changed = cells != self.cells;
             self.cells = cells;
-            self.scroll = 0.0;
-            self.velocity = 0.0;
+            self.unit = unit;
+            if city_changed {
+                self.scroll = 0.0;
+                self.velocity = 0.0;
+            }
             self.redraw(cx);
         }
     }
@@ -214,7 +220,7 @@ impl Widget for HourlyStrip {
                     if let Some(c) = chance.filter(|c| *c >= 1.0) {
                         draw_centered(&mut self.chance_text, cx, rect, 51.0, 14.0, &format!("{}%", c.round() as i64));
                     }
-                    draw_centered(&mut self.temp_text, cx, rect, 67.0, 21.0, &temp(*t));
+                    draw_centered(&mut self.temp_text, cx, rect, 67.0, 21.0, &temp(*t, self.unit));
                 }
                 HourCell::Sunrise { label } | HourCell::Sunset { label } => {
                     draw_centered(&mut self.time_text, cx, rect, 0.0, 18.0, label);
