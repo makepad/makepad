@@ -1758,7 +1758,7 @@ impl XlibAtoms {
                 ),
                 targets: x11_sys::XInternAtom(display, "TARGETS\0".as_ptr() as *const _, 0),
                 string: x11_sys::XInternAtom(display, "STRING\0".as_ptr() as *const _, 0),
-                utf8_string: x11_sys::XInternAtom(display, "UTF8_STRING\0".as_ptr() as *const _, 1),
+                utf8_string: x11_sys::XInternAtom(display, "UTF8_STRING\0".as_ptr() as *const _, 0),
                 atom: x11_sys::XInternAtom(display, "ATOM\0".as_ptr() as *const _, 0),
                 text: x11_sys::XInternAtom(display, "TEXT\0".as_ptr() as *const _, 0),
                 text_plain: x11_sys::XInternAtom(display, "text/plain\0".as_ptr() as *const _, 0),
