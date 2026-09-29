@@ -405,8 +405,42 @@ pub fn draw_billboard_labels(
 
 use crate::shaders::{DrawHudImage, DrawHudShape};
 use makepad_scene::hud::{
-    text_size_for, CAPTION_SIZE, HUD_REFERENCE_HEIGHT, TEXT_SIZE,
+    text_icon_box, text_line_top, text_size_for, text_wrap_width, CAPTION_SIZE, TEXT_SIZE,
 };
+use makepad_scene::HudTextMetrics;
+
+/// A string's HUD metrics as the text engine lays it out at `size` (points):
+/// its line box, and its baseline and cap height from the first row. The
+/// layout and every draw below read text through this, so a plate sized in
+/// the layout is the plate the text is drawn into.
+fn text_metrics(cx: &mut Cx2d, draw: &mut DrawText, size: f32, text: &str) -> HudTextMetrics {
+    draw.text_style.font_size = size;
+    let l = draw.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+    let (ascent, cap) = l.rows.first().map_or((0.0, 0.0), |r| (r.ascender_in_lpxs, r.cap_height_in_lpxs));
+    HudTextMetrics { w: l.size_in_lpxs.width, h: l.size_in_lpxs.height, ascent, cap }
+}
+
+/// `text` broken into rows no wider than `wrap` pixels (one row when `wrap`
+/// is 0), and the metrics of the whole block: its widest row by one line
+/// height per row.
+fn text_block(cx: &mut Cx2d, draw: &mut DrawText, size: f32, text: &str, wrap: f32) -> (Vec<String>, HudTextMetrics) {
+    let line = text_metrics(cx, draw, size, text);
+    if wrap <= 0.0 || line.w <= wrap {
+        return (vec![text.to_string()], line);
+    }
+    let rows = wrap_rows(cx, draw, size, text, wrap as f64);
+    let mut m = line;
+    m.w = rows.iter().map(|r| text_metrics(cx, draw, size, r).w).fold(0.0f32, f32::max);
+    m.h = line.h * rows.len() as f32;
+    (rows, m)
+}
+
+/// Where a line of text starts (its line box's top) so its capitals are
+/// centred on `mid_y`: how a number sits in a gauge or a ring.
+fn cap_centred_top(m: &HudTextMetrics, mid_y: f64) -> f64 {
+    let cap = if m.cap > 0.0 { m.cap } else { m.h * 0.6 };
+    mid_y - (m.ascent - cap * 0.5) as f64
+}
 use makepad_scene::{
     hud_affine_mul, hud_counted, hud_pose, CrosshairStyle, HudDoc, HudElement, HudKind, HudMapDot,
     HudMapFit, HudSeen, HudValue, HUD_AFFINE_IDENTITY,
@@ -430,20 +464,27 @@ pub struct HudStyle {
     pub accent: Vec4f,
     pub low: Vec4f,
     pub track: Vec4f,
+    /// The soft drop shadow under every readout: what keeps plate-less type
+    /// legible over the scene. Zero alpha draws none.
+    pub text_shadow: Vec4f,
 }
 
 impl Default for HudStyle {
+    /// Light by default: a slim translucent plate with a faint hairline, so a
+    /// HUD frames the game instead of covering it; readouts carry a drop
+    /// shadow, so a panel can be `bare` and still read.
     fn default() -> Self {
         Self {
-            plate: vec4(0.027, 0.031, 0.047, 0.80),
-            plate_border: vec4(0.078, 0.941, 1.0, 0.38),
-            plate_radius: 6.0,
+            plate: vec4(0.02, 0.024, 0.036, 0.52),
+            plate_border: vec4(0.078, 0.941, 1.0, 0.16),
+            plate_radius: 5.0,
             plate_border_width: 1.0,
-            ink: vec4(0.90, 0.98, 1.0, 1.0),
-            caption: vec4(0.55, 0.66, 0.75, 1.0),
+            ink: vec4(0.94, 0.98, 1.0, 1.0),
+            caption: vec4(0.70, 0.78, 0.85, 1.0),
             accent: vec4(0.078, 0.941, 1.0, 1.0),
             low: vec4(1.0, 0.23, 0.36, 1.0),
-            track: vec4(0.078, 0.941, 1.0, 0.10),
+            track: vec4(1.0, 1.0, 1.0, 0.12),
+            text_shadow: vec4(0.0, 0.0, 0.0, 0.55),
         }
     }
 }
@@ -491,8 +532,10 @@ pub struct HudDraws<'a> {
 
 /// Draw the whole HUD document over `rect`, and report the fraction each
 /// gauge was asked to show so the host can settle its trailing chip bars.
-/// Every drawn element's rect is appended to `occupied`, so the slot HUD
-/// drawn after it (`draw_hud_overlay`) can keep its stacks clear of them.
+/// Every drawn element's index and rect is appended to `occupied`, so the
+/// slot HUD drawn after it (`draw_hud_overlay`) can keep its stacks clear of
+/// them, and so a host hit-tests a HUD menu against where its rows really
+/// are instead of re-deriving the layout.
 /// `pane` is which split-screen pane this is (0 = the main one): motion
 /// state is kept per pane, and moving elements report into `seen` with it.
 pub fn draw_hud_doc(
@@ -503,7 +546,7 @@ pub fn draw_hud_doc(
     style: &HudStyle,
     binder: &mut HudBinder,
     spread: f32,
-    occupied: &mut Vec<Rect>,
+    occupied: &mut Vec<(usize, Rect)>,
     seen: &mut Vec<HudSeen>,
     pane: usize,
 ) -> Vec<(String, f32)> {
@@ -511,9 +554,7 @@ pub fn draw_hud_doc(
     // 1.2 : 1 (a split-screen slice) scales by its WIDTH instead, so a bar
     // laid out for a landscape screen still fits across a portrait one.
     // Every landscape pane scales exactly as before.
-    let scale = (rect.size.y as f32 / HUD_REFERENCE_HEIGHT)
-        .min(rect.size.x as f32 / (HUD_REFERENCE_HEIGHT * 1.2))
-        .max(0.35);
+    let scale = hud_scale(rect);
     // Motion is paid for only by a document that has some: a still HUD takes
     // the plain path below with no pose work, no lists and no reports.
     let moving = doc.elements.iter().any(moves);
@@ -541,13 +582,7 @@ pub fn draw_hud_doc(
     }
 
     let placed = {
-        let mut measure = |text: &str, size: f32| {
-            draws.text.text_style.font_size = size;
-            let l = draws
-                .text
-                .layout(cx, 0.0, 0.0, None, false, Align::default(), text);
-            (l.size_in_lpxs.width as f32, l.size_in_lpxs.height as f32)
-        };
+        let mut measure = |text: &str, size: f32, wrap: f32| text_block(cx, draws.text, size, text, wrap).1;
         let mut text_of = |e: &HudElement| element_text(e, binder);
         makepad_scene::hud_layout(
             doc,
@@ -592,9 +627,10 @@ pub fn draw_hud_doc(
             size: dvec2(p.w as f64, p.h as f64),
         };
         if !matches!(e.kind, HudKind::Flash | HudKind::Marker) {
-            occupied.push(at);
+            occupied.push((p.index, at));
         }
         let pose = if moving { poses[p.index] } else { None };
+        let scale = p.scale;
         let Some((affine, opacity)) = pose else {
             draw_element(cx, at, e, doc, draws, style, scale, binder, &mut map_dots, &mut fractions);
             continue;
@@ -694,6 +730,16 @@ pub fn draw_hud_doc(
     }
     restore(draws, style);
     fractions
+}
+
+/// HUD units to pixels for a pane (logical points, so the same on a Retina
+/// and a standard display). The HUD is authored against a 1080-high pane; a
+/// pane narrower than 1.2 : 1 (a split-screen slice, a portrait window)
+/// scales by its WIDTH instead, so a bar laid out for a landscape screen
+/// still fits across it. Clamped so a small window keeps legible type and a
+/// very large one does not blow the HUD up past a comfortable size.
+pub fn hud_scale(rect: Rect) -> f32 {
+    makepad_scene::hud::pane_scale(rect.size.x as f32, rect.size.y as f32)
 }
 
 /// Whether an element takes part in motion this frame: declared motion, or
@@ -798,7 +844,7 @@ fn faded(e: &HudElement, a: f32) -> HudElement {
 
 fn faded_style(style: &HudStyle, a: f32) -> HudStyle {
     let mut s = *style;
-    for c in [&mut s.plate, &mut s.plate_border, &mut s.ink, &mut s.caption, &mut s.accent, &mut s.low, &mut s.track] {
+    for c in [&mut s.plate, &mut s.plate_border, &mut s.ink, &mut s.caption, &mut s.accent, &mut s.low, &mut s.track, &mut s.text_shadow] {
         c.w *= a;
     }
     s
@@ -912,10 +958,15 @@ fn visible(e: &HudElement, binder: &mut HudBinder) -> bool {
 fn plate(e: &HudElement, style: &HudStyle) -> (Vec4f, Vec4f, f32, f32) {
     let bare = e.style == "bare";
     let frame = e.style == "frame";
+    // A panel's `color` is what its style draws: a plate's fill, a frame's
+    // rim. `track` names the fill explicitly.
+    let panel_color = e.kind == HudKind::Panel && e.color.w > 0.0;
     let ground = if e.track.w > 0.0 {
         e.track
     } else if bare || frame {
         vec4(0.0, 0.0, 0.0, 0.0)
+    } else if panel_color {
+        e.color
     } else {
         style.plate
     };
@@ -928,6 +979,8 @@ fn plate(e: &HudElement, style: &HudStyle) -> (Vec4f, Vec4f, f32, f32) {
     };
     let border_color = if e.border_color.w > 0.0 {
         e.border_color
+    } else if frame && panel_color {
+        e.color
     } else {
         style.plate_border
     };
@@ -996,7 +1049,7 @@ fn draw_bar(
     let cap_h = if e.label.is_empty() {
         0.0
     } else {
-        (CAPTION_SIZE * scale) as f64 + 2.0
+        (text_metrics(cx, draws.text, CAPTION_SIZE * scale, &e.label).h + 2.0 * scale) as f64
     };
     let track_rect = Rect {
         pos: dvec2(at.pos.x, at.pos.y + cap_h),
@@ -1070,18 +1123,13 @@ fn draw_bar(
     if e.show_value {
         let text = number_text(e, binder);
         let vsize = ((track_rect.size.y as f32) * 0.72).max(9.0);
-        draws.text.text_style.font_size = vsize;
+        let m = text_metrics(cx, draws.text, vsize, &text);
         draws.text.color = style.ink;
-        let w = draws
-            .text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), &text)
-            .size_in_lpxs
-            .width as f64;
         draws.text.draw_abs(
             cx,
             dvec2(
-                track_rect.pos.x + track_rect.size.x - w - inset * 2.0,
-                track_rect.pos.y + (track_rect.size.y - vsize as f64) * 0.5,
+                track_rect.pos.x + track_rect.size.x - m.w as f64 - inset * 2.0,
+                cap_centred_top(&m, track_rect.pos.y + track_rect.size.y * 0.5),
             ),
             &text,
         );
@@ -1119,19 +1167,11 @@ fn draw_ring(
     if e.show_value {
         let text = number_text(e, binder);
         let size = ((at.size.y as f32) * 0.34).max(10.0);
-        draws.text.text_style.font_size = size;
+        let m = text_metrics(cx, draws.text, size, &text);
         draws.text.color = ink;
-        let w = draws
-            .text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), &text)
-            .size_in_lpxs
-            .width as f64;
         draws.text.draw_abs(
             cx,
-            dvec2(
-                at.pos.x + (at.size.x - w) * 0.5,
-                at.pos.y + (at.size.y - size as f64) * 0.5,
-            ),
+            dvec2(at.pos.x + (at.size.x - m.w as f64) * 0.5, cap_centred_top(&m, at.pos.y + at.size.y * 0.5)),
             &text,
         );
     }
@@ -1151,12 +1191,16 @@ fn draw_map(
     binder: &mut HudBinder,
     dots: &mut Vec<HudMapDot>,
 ) {
-    // A radar is round, centred on the pane's own subject at a fixed
-    // scale, and clips what it draws to its circle.
+    // A radar is centred on the pane's own subject at a fixed scale. It is
+    // round and clips what it draws to its circle, unless its `radius`
+    // leaves it a (rounded) square, which clips to its box: the shooter's
+    // radar, whose floor plan has to reach the corners.
     let radar = e.range > 0.0;
     let (ground, border_color, border, radius) = plate(e, style);
+    let square = radar && e.radius >= 0.0 && (e.radius * scale) < (at.size.x.min(at.size.y) * 0.5 - 0.5) as f32;
+    let round = radar && !square;
     if ground.w > 0.0 || border > 0.0 {
-        draws.shape.shape = if radar { 5.0 } else { 0.0 };
+        draws.shape.shape = if round { 5.0 } else { 0.0 };
         draws.shape.fill = ground;
         draws.shape.stroke = border_color;
         draws.shape.border = border * scale;
@@ -1202,7 +1246,39 @@ fn draw_map(
     let segments = if e.closed { n } else { n.saturating_sub(1) };
     draws.shape.border = 0.0;
     draws.shape.radius = 0.0;
-    if radar {
+    // A square radar draws inside a clipping turtle of its own box.
+    if square {
+        cx.begin_turtle(
+            Walk { abs_pos: Some(at.pos), width: Size::Fixed(at.size.x), height: Size::Fixed(at.size.y), ..Default::default() },
+            Layout::default(),
+        );
+    }
+    if !e.areas.is_empty() {
+        // The floor plan: each world rectangle as a box turned with the map.
+        let fill = if e.area_color.w > 0.0 { e.area_color } else { vec4(line.x, line.y, line.z, 0.22) };
+        let (ux, uy) = fit.apply_dir(1.0, 0.0);
+        let angle = uy.atan2(ux);
+        let (sn, cs) = (angle.sin().abs() as f64, angle.cos().abs() as f64);
+        draws.shape.shape = 6.0;
+        draws.shape.fill = fill;
+        draws.shape.from = angle;
+        draws.shape.radius = 2.0 * scale;
+        for [lo, hi] in &e.areas {
+            let (px, py) = to_px((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5);
+            let w = ((hi.x - lo.x).abs() * fit.scale) as f64;
+            let h = ((hi.y - lo.y).abs() * fit.scale) as f64;
+            let (bw, bh) = (w * cs + h * sn + 2.0, w * sn + h * cs + 2.0);
+            if round && ((px - ox).powi(2) + (py - oy).powi(2)).sqrt() > rim + (bw.max(bh)) * 0.5 {
+                continue;
+            }
+            draws.shape.thickness = w as f32;
+            draws.shape.sweep = h as f32;
+            draws.shape.draw_abs(cx, Rect { pos: dvec2(px - bw * 0.5, py - bh * 0.5), size: dvec2(bw, bh) });
+        }
+        draws.shape.from = 0.0;
+        draws.shape.radius = 0.0;
+    }
+    if round {
         // A faint ring at half range: distance at a glance.
         draws.shape.shape = 1.0;
         draws.shape.fill = vec4(line.x, line.y, line.z, 0.18);
@@ -1222,7 +1298,7 @@ fn draw_map(
             let b = e.points[(k + 1) % n];
             let (x0, y0) = to_px(a.x, a.y);
             let (x1, y1) = to_px(b.x, b.y);
-            let ((x0, y0), (x1, y1)) = if radar {
+            let ((x0, y0), (x1, y1)) = if round {
                 match clip_to_circle((x0 - ox, y0 - oy), (x1 - ox, y1 - oy), clip_r - w as f64 * 0.5) {
                     Some(((ax, ay), (bx, by))) => ((ax + ox, ay + oy), (bx + ox, by + oy)),
                     None => continue,
@@ -1255,7 +1331,7 @@ fn draw_map(
                 continue;
             }
             let (x, y) = to_px(dot.x, dot.z);
-            if radar && !dot.is_self && ((x - ox).powi(2) + (y - oy).powi(2)).sqrt() > clip_r {
+            if round && !dot.is_self && ((x - ox).powi(2) + (y - oy).powi(2)).sqrt() > clip_r {
                 continue;
             }
             if dot.is_self {
@@ -1315,6 +1391,29 @@ fn draw_map(
                 draws.shape.from = 0.0;
             }
         }
+    }
+    if square {
+        cx.end_turtle();
+    }
+    // The caption (`label`, or a text `bind` such as the callout you stand
+    // in) sits INSIDE the map, along its bottom, outlined over the plan.
+    let caption = if !e.label.is_empty() {
+        e.label.clone()
+    } else if let HudValue::Bind(name) = &e.value {
+        (binder.string)(name, e.of).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if !caption.is_empty() {
+        let m = text_metrics(cx, draws.text, CAPTION_SIZE * scale, &caption);
+        let bottom = if round { oy + rim * 0.78 } else { at.pos.y + at.size.y - (6.0 * scale) as f64 };
+        let (tx, ty) = (ox - m.w as f64 * 0.5, bottom - m.h as f64);
+        draws.text.color = vec4(0.0, 0.0, 0.0, 0.8);
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            draws.text.draw_abs(cx, dvec2(tx + dx, ty + dy), &caption);
+        }
+        draws.text.color = style.ink;
+        draws.text.draw_abs(cx, dvec2(tx, ty), &caption);
     }
     draws.shape.shape = 0.0;
     draws.shape.border = 0.0;
@@ -1400,45 +1499,67 @@ fn draw_readout(
     };
     let ink = ink_for(e, style, frac, style.ink);
     let mut x = at.pos.x;
-    let mut y = at.pos.y;
+    // The same arithmetic the layout sized this box with: the caption on
+    // top, then the line centred in what is left.
+    let label_h = if e.label.is_empty() {
+        0.0
+    } else {
+        text_metrics(cx, draws.text, CAPTION_SIZE * scale, &e.label).h + scale
+    };
+    let line = text_metrics(cx, draws.text, size, if text.is_empty() { " " } else { &text });
+    let (rows, m) = text_block(cx, draws.text, size, &text, text_wrap_width(e, scale, &line));
+    let y = at.pos.y + text_line_top(at.size.y as f32, label_h, &m) as f64;
     if !e.label.is_empty() {
         draws.text.text_style.font_size = CAPTION_SIZE * scale;
         draws.text.color = style.caption;
-        draws.text.draw_abs(cx, dvec2(x, y), &e.label);
-        y += (CAPTION_SIZE * scale) as f64 + 1.0;
+        draws.text.draw_abs(cx, at.pos, &e.label);
     }
     if !(e.icon.is_empty() && e.svg.is_empty() && e.image.is_empty()) {
-        let d = (size * 0.95) as f64;
+        // Level with the digits: the icon centres on the capitals, not on
+        // the line box (whose ascender room would lift it above them).
+        let (d, gap) = text_icon_box(&m);
+        let mid = y + (m.ascent - m.cap.max(m.h * 0.3) * 0.5) as f64;
         draw_glyph(
             cx,
-            Rect { pos: dvec2(x, y + (size as f64 - d) * 0.5), size: dvec2(d, d) },
+            Rect { pos: dvec2(x, mid - d as f64 * 0.5), size: dvec2(d as f64, d as f64) },
             e,
             draws,
             ink,
             binder,
         );
-        x += d + (4.0 * scale) as f64;
+        x += (d + gap) as f64;
     }
     draws.text.text_style.font_size = size;
     draws.text.color = ink;
     // A banner is centred on its own box and outlined, because it is read
     // against whatever the world happens to be showing behind it.
+    let row_h = (m.h / rows.len().max(1) as f32) as f64;
     if e.style == "banner" {
-        let w = draws
-            .text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), &text)
-            .size_in_lpxs
-            .width as f64;
-        let bx = at.pos.x + (at.size.x - w) * 0.5;
-        draws.text.color = vec4(0.03, 0.04, 0.06, ink.w * 0.85);
-        for (ox, oy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
-            draws.text.draw_abs(cx, dvec2(bx + ox, y + oy), &text);
+        for (k, row) in rows.iter().enumerate() {
+            let w = text_metrics(cx, draws.text, size, row).w as f64;
+            let (bx, by) = (at.pos.x + (at.size.x - w) * 0.5, y + row_h * k as f64);
+            draws.text.color = vec4(0.03, 0.04, 0.06, ink.w * 0.85);
+            for (ox, oy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
+                draws.text.draw_abs(cx, dvec2(bx + ox, by + oy), row);
+            }
+            draws.text.color = ink;
+            draws.text.draw_abs(cx, dvec2(bx, by), row);
         }
-        draws.text.color = ink;
-        draws.text.draw_abs(cx, dvec2(bx, y), &text);
         return;
     }
-    draws.text.draw_abs(cx, dvec2(x, y), &text);
+    // Over the open scene (no plate of its own) a readout carries a soft
+    // shadow, so it reads on a white sky and a black floor alike.
+    let shadow = style.text_shadow.w > 0.0;
+    for (k, row) in rows.iter().enumerate() {
+        let ry = y + row_h * k as f64;
+        if shadow {
+            let off = (1.5 * scale).max(1.0) as f64;
+            draws.text.color = vec4(style.text_shadow.x, style.text_shadow.y, style.text_shadow.z, style.text_shadow.w * ink.w);
+            draws.text.draw_abs(cx, dvec2(x + off * 0.5, ry + off), row);
+            draws.text.color = ink;
+        }
+        draws.text.draw_abs(cx, dvec2(x, ry), row);
+    }
 }
 
 /// The cells of a `style: "sheet"` glyph strip, left to right.
@@ -1467,7 +1588,9 @@ fn draw_sheet_readout(
     }
     let text = element_text(e, binder);
     let gh = at.size.y;
-    let gw = gh * ((w / cells) / h) as f64;
+    // On a classic screen the glyph's pixels are as tall as its screen's.
+    let aspect = if e.screen.x > 0.0 && e.screen_aspect > 0.0 { e.screen_aspect as f64 } else { 1.0 };
+    let gw = gh * ((w / cells) / h) as f64 / aspect;
     draws.image.tint = if e.color.w > 0.0 { e.color } else { vec4(1.0, 1.0, 1.0, 1.0) };
     draws.image.tex_size = vec2f(w, h);
     draws.image.pixelated = 1.0;
@@ -1497,20 +1620,13 @@ fn draw_icon(
     draw_glyph(cx, at, e, draws, tint, binder);
     if let Some(count) = (binder.number)(&e.count, e.of) {
         let size = ((at.size.y as f32) * 0.45).max(9.0);
-        draws.text.text_style.font_size = size;
-        draws.text.color = style.ink;
         let text = format!("{}", count.round() as i64);
-        let w = draws
-            .text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), &text)
-            .size_in_lpxs
-            .width as f64;
+        let m = text_metrics(cx, draws.text, size, &text);
+        draws.text.color = style.ink;
+        // Its baseline on the icon's bottom edge, right-aligned: a badge.
         draws.text.draw_abs(
             cx,
-            dvec2(
-                at.pos.x + at.size.x - w,
-                at.pos.y + at.size.y - size as f64,
-            ),
+            dvec2(at.pos.x + at.size.x - m.w as f64, at.pos.y + at.size.y - m.ascent as f64),
             &text,
         );
     }
@@ -1540,7 +1656,9 @@ fn draw_glyph(
             draws.image.draw_vars.set_texture(0, &texture);
             // Keep the picture's own proportions inside the box it was given;
             // a stretched key sprite reads as a rendering bug.
-            let fit = fit_rect(at, w as f64, h as f64);
+            // On a classic screen (`screen`) the box already IS the picture
+            // at that screen's pixel aspect: fill it, as the original did.
+            let fit = if e.screen.x > 0.0 { at } else { fit_rect(at, w as f64, h as f64) };
             draws.image.draw_abs(cx, fit);
             return;
         }
@@ -1587,7 +1705,10 @@ fn draw_log(
     // Newest at the bottom, the way every kill feed and console reads. A
     // line wider than the log wraps onto rows of its own (the newest line's
     // rows stay in reading order, bottom row last).
-    let mut y = at.pos.y + at.size.y - size;
+    // Rows step by the face's own line height, the same one the layout
+    // gave this log its room with.
+    let row_h = text_metrics(cx, draws.text, size_f, "Ag").h as f64;
+    let mut y = at.pos.y + at.size.y - row_h;
     for line in mine {
         // The last fifth of a line's life is its fade; a message that
         // vanishes mid-word looks like a dropped frame.
@@ -1598,7 +1719,7 @@ fn draw_log(
         draws.text.color = vec4(c.x, c.y, c.z, c.w * fade);
         for row in rows.iter().rev() {
             draws.text.draw_abs(cx, dvec2(at.pos.x, y), row);
-            y -= size * 1.35;
+            y -= row_h;
         }
     }
 }

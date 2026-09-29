@@ -111,7 +111,9 @@ pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64
             let value = ((1. - ao * occlusion.powf(1.3)) * (1. - edges * 0.14 * (1. - wear))).clamp(0.15, 1.);
             if value >= 0.995 { continue; }
             ids.push(json::s(id.0.to_string()));
-            colors.push(Value::Arr(vec![Value::F64(value), Value::F64(value), Value::F64(value), Value::F64(1.)]));
+            // Multiply any authored vertex tint (faces, lips, iris shading).
+            let base = doc.surface().vertex_colors.get(&(name.clone(), *id)).copied().unwrap_or([1.; 4]);
+            colors.push(Value::Arr(vec![Value::F64(base[0] * value), Value::F64(base[1] * value), Value::F64(base[2] * value), Value::F64(base[3])]));
         }
         if !ids.is_empty() {
             ops.push(json::obj(vec![("op", json::s("surface_vertex_colors")), ("object", json::s(&name)), ("vertices", Value::Arr(ids)), ("colors", Value::Arr(colors))]));

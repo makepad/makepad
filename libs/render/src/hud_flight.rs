@@ -76,6 +76,8 @@ pub struct FlightHud {
     pub threat: f32,
     pub threat_bearing: f32,
     pub pull_up: bool,
+    /// The easy-mode assist has the stick (pulling out of terrain).
+    pub assist: bool,
     /// First-person (cockpit) view: the full HUD. Otherwise the chase set
     /// (tapes, targets, weapons; no ladder clutter over the aircraft).
     pub cockpit: bool,
@@ -497,7 +499,9 @@ pub fn draw_flight(cx: &mut Cx2d, rect: Rect, e: &HudElement, draws: &mut HudDra
     if hud.threat > 0.0 {
         warnings.push(format!("MISSILE  {:.1}", hud.threat / 1000.0));
     }
-    if hud.pull_up {
+    if hud.assist {
+        warnings.push("AUTO PULL-UP".into());
+    } else if hud.pull_up {
         warnings.push("PULL UP".into());
     }
     if hud.stall > 0.5 {

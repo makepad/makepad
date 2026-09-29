@@ -152,12 +152,15 @@ fn fire_cell(out: &mut [u32], col: usize, row: usize, f: f32) {
         // h = 0 at the base (bottom of the cell), 1 at the tip.
         let h = (1.0 - (py * 0.5 + 0.5)).clamp(0.0, 1.0);
         let n = fbm(px * 3.0, h * 3.0 - f * 5.0, f * 2.0, 4);
-        let width = 0.62 * (1.0 - h).powf(0.65) + 0.04;
-        let edge = px.abs() + (n - 0.5) * 0.45 * (0.3 + h);
-        let body = smoothstep(width, width * 0.35, edge);
-        let tip = smoothstep(1.0, 0.55, h + (n - 0.5) * 0.5);
-        let base = smoothstep(0.0, 0.12, h);
-        let cover = (body * tip * base).clamp(0.0, 1.0);
+        // A rounded, soft-edged tongue: wide soft sides and a feathered
+        // base, so a quad never shows its outline once additive light
+        // saturates the dense middle.
+        let width = 0.55 * (1.0 - h).powf(0.5) + 0.06;
+        let edge = px.abs() + (n - 0.5) * 0.5 * (0.3 + h);
+        let body = smoothstep(width, width * 0.1, edge);
+        let tip = smoothstep(0.95, 0.4, h + (n - 0.5) * 0.5);
+        let base = smoothstep(0.0, 0.3, h);
+        let cover = (body * tip * base).clamp(0.0, 1.0).powf(1.4);
         let heat = cover * (1.0 - h).powf(0.7) * (0.65 + 0.35 * n);
         out[(row * CELL + y) * ATLAS_SIZE + col * CELL + x] = pack(heat, heat * heat, 0.0, cover);
     }

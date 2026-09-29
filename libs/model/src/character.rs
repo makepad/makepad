@@ -48,7 +48,7 @@ pub const CHARACTER_JOINTS: [(&str, Option<usize>); 44] = [
 ];
 /// Bumped whenever generated geometry, materials or clips change, so
 /// content-addressed caches of script characters rebuild.
-pub const CHARACTER_GENERATOR_VERSION: i64 = 13;
+pub const CHARACTER_GENERATOR_VERSION: i64 = 41;
 
 pub fn joint_index(name: &str) -> u32 { CHARACTER_JOINTS.iter().position(|j| j.0 == name).unwrap_or_else(|| panic!("joint {name}")) as u32 }
 pub(crate) fn j(name: &str) -> u32 { joint_index(name) }
@@ -56,12 +56,12 @@ pub(crate) fn j(name: &str) -> u32 { joint_index(name) }
 // ── spec ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Tex { Plain, Skin, Fabric, Knit, Denim, Leather, Nylon, Rubber, Metal, Plastic, Camo, Hair, Glossy, Emissive }
+pub enum Tex { Plain, Skin, Fabric, Knit, Denim, Leather, Nylon, Rubber, Metal, Plastic, Camo, Check, Hair, Glossy, Emissive }
 impl Tex {
     fn parse(s: &str) -> Option<Tex> {
         Some(match s { "plain" => Tex::Plain, "skin" => Tex::Skin, "fabric" | "cotton" | "cloth" => Tex::Fabric, "knit" | "wool" => Tex::Knit, "denim" => Tex::Denim,
             "leather" => Tex::Leather, "nylon" | "cordura" | "tactical" => Tex::Nylon, "rubber" => Tex::Rubber, "metal" => Tex::Metal, "plastic" | "polymer" => Tex::Plastic,
-            "camo" => Tex::Camo, "hair" => Tex::Hair, "glossy" | "visor" | "glass" => Tex::Glossy, "glow" | "emissive" => Tex::Emissive, _ => return None })
+            "camo" => Tex::Camo, "check" | "shemagh" | "plaid" => Tex::Check, "hair" => Tex::Hair, "glossy" | "visor" | "glass" => Tex::Glossy, "glow" | "emissive" => Tex::Emissive, _ => return None })
     }
 }
 
@@ -105,6 +105,10 @@ pub struct CharacterSpec {
     pub clips: Option<Vec<String>>,
     /// Adds the versus-kit state clips (guard, hit_high, getup, ko, ...).
     pub fighter: bool,
+    /// `mesh: false` builds only the skeleton and clips: a rig and its
+    /// animation for a model whose parts are authored by hand and bound to
+    /// the kit's joints.
+    pub mesh: bool,
     /// First material ordinal the generator uses (other builders own lower ones).
     pub material_base: u32,
     pub warnings: Vec<String>,
@@ -144,7 +148,7 @@ fn merge(base: &Value, over: &Value) -> Value {
 
 pub(crate) fn merge_pub(base: &Value, over: &Value) -> Value { merge(base, over) }
 
-const TOP_KEYS: &[&str] = &["op", "name", "preset", "height", "heads", "stylize", "body", "skin", "face", "hair", "outfit", "colors", "clips", "hands", "facial_hair", "fighter", "material_base", "generator", "hold", "support"];
+const TOP_KEYS: &[&str] = &["op", "name", "preset", "height", "heads", "stylize", "body", "skin", "face", "hair", "outfit", "colors", "clips", "hands", "facial_hair", "fighter", "material_base", "generator", "hold", "support", "mesh"];
 const BODY_KEYS: &[&str] = &["fem", "shoulders", "chest", "waist", "hips", "belly", "muscle", "arms", "legs", "neck", "hands", "feet", "head_width", "jaw", "chin"];
 const FACE_KEYS: &[&str] = &["eye_color", "eye_size", "eye_spacing", "eye_tilt", "lids", "brows", "brow_angle", "brow_color", "nose", "nose_size", "mouth_width", "smile", "lip_color", "ears", "ear_size", "blush", "freckles"];
 const HAIR_KEYS: &[&str] = &["style", "color", "color2", "volume"];
@@ -211,6 +215,7 @@ impl CharacterSpec {
             hand_style: t(Some(&v), "hands", if stylize > 0.6 { "mitten" } else { "fingers" }),
             material_base: v.get("material_base").and_then(num).map_or(1, |b| b.clamp(1., 400.) as u32),
             fighter: v.get("fighter").and_then(Value::as_bool).unwrap_or(false),
+            mesh: v.get("mesh").and_then(Value::as_bool).unwrap_or(true),
             outfit, primary, secondary, accent, clips, warnings,
         })
     }
@@ -224,8 +229,8 @@ impl CharacterSpec {
 pub(crate) struct MatDef { pub color: [f64; 3], pub color2: Option<[f64; 3]>, pub tex: Tex, pub rough: f64, pub metal: f64, pub emissive: f64, pub scale: f64 }
 impl MatDef {
     pub fn new(color: [f64; 3], tex: Tex) -> Self {
-        let (rough, metal) = match tex { Tex::Skin => (0.62, 0.), Tex::Fabric | Tex::Knit | Tex::Denim => (0.88, 0.), Tex::Leather => (0.5, 0.), Tex::Nylon => (0.8, 0.), Tex::Rubber => (0.92, 0.),
-            Tex::Metal => (0.32, 0.9), Tex::Plastic => (0.45, 0.), Tex::Camo => (0.85, 0.), Tex::Hair => (0.58, 0.), Tex::Glossy => (0.08, 0.2), Tex::Emissive => (0.4, 0.), Tex::Plain => (0.6, 0.) };
+        let (rough, metal) = match tex { Tex::Skin => (0.5, 0.), Tex::Fabric | Tex::Knit | Tex::Denim => (0.88, 0.), Tex::Leather => (0.62, 0.), Tex::Nylon => (0.8, 0.), Tex::Rubber => (0.92, 0.),
+            Tex::Metal => (0.32, 0.9), Tex::Plastic => (0.45, 0.), Tex::Camo => (0.85, 0.), Tex::Check => (0.86, 0.), Tex::Hair => (0.58, 0.), Tex::Glossy => (0.08, 0.2), Tex::Emissive => (0.4, 0.), Tex::Plain => (0.6, 0.) };
         Self { color, color2: None, tex, rough, metal, emissive: if tex == Tex::Emissive { 3. } else { 0. }, scale: 1. }
     }
     pub fn rough(mut self, r: f64) -> Self { self.rough = r; self }
@@ -252,14 +257,17 @@ impl Mats {
                 match m.tex {
                     Tex::Skin => ([1.; 4], Some(("perlin", [(c[0] * 1.02).min(1.), c[1] * 0.86, c[2] * 0.82], c, [18. * s, 18. * s], 0.25))),
                     Tex::Fabric => ([1.; 4], Some(("stripes", dk(0.95), c, [640. * s, 640. * s], 0.06))),
-                    Tex::Knit => ([1.; 4], Some(("yarn", dk(0.9), c, [48. * s, 48. * s], 0.2))),
-                    Tex::Denim => ([1.; 4], Some(("stripes", c2.unwrap_or(dk(0.9)), c, [700. * s, 700. * s], 0.08))),
-                    Tex::Leather => ([1.; 4], Some(("fbm", dk(0.8), c, [28. * s, 28. * s], 0.9))),
-                    Tex::Nylon => ([1.; 4], Some(("noise", dk(0.96), c, [400. * s, 400. * s], 0.))),
+                    Tex::Knit => ([1.; 4], Some(("yarn", dk(0.82), c, [48. * s, 48. * s], 0.5))),
+                    // Twill in its own darker shade (a layer's colour2 is its trim, not the weave).
+                    Tex::Denim => ([1.; 4], Some(("stripes", dk(0.82), c, [700. * s, 700. * s], 0.08))),
+                    Tex::Leather => ([1.; 4], Some(("fbm", dk(0.72), c, [34. * s, 34. * s], 0.9))),
+                    Tex::Nylon => ([1.; 4], Some(("checker", dk(0.93), c, [420. * s, 420. * s], 0.12))),
                     Tex::Rubber => ([1.; 4], Some(("noise", dk(0.85), c, [160. * s, 160. * s], 0.6))),
                     Tex::Metal => ([1.; 4], Some(("fbm", dk(0.82), c, [10. * s, 10. * s], 0.25))),
-                    Tex::Plastic => ([1.; 4], Some(("perlin", dk(0.93), c, [20. * s, 20. * s], 0.2))),
-                    Tex::Camo => ([1.; 4], Some(("fbm", c2.unwrap_or(dk(0.5)), c, [3. * s, 3. * s], 0.9))),
+                    Tex::Plastic => ([1.; 4], Some(("fbm", dk(0.88), c, [24. * s, 24. * s], 0.35))),
+                    Tex::Camo => ([1.; 4], Some(("camo", c2.unwrap_or(dk(0.5)), c, [5. * s, 5. * s], 0.25))),
+                    // Woven check (shemagh): a coarse two-colour grid.
+                    Tex::Check => ([1.; 4], Some(("checker", c2.unwrap_or(dk(0.6)), c, [180. * s, 180. * s], 0.04))),
                     Tex::Hair => ([1.; 4], Some(("stripes", c2.unwrap_or(dk(0.8)), c, [140. * s, 1.], 0.3))),
                     _ => ([c[0], c[1], c[2], 1.], None),
                 }
@@ -275,7 +283,10 @@ impl Mats {
                 out.push(json::obj(vec![("op", json::s("surface_pattern")), ("material", id.clone()), ("channel", json::s("base_color")), ("layer", json::s("pattern")),
                     ("pattern", json::obj(vec![("kind", json::s(kind)), ("color_a", arr(&[a[0], a[1], a[2], 1.])), ("color_b", arr(&[b[0], b[1], b[2], 1.])), ("scale", arr(&scale)), ("seed", json::s(((i * 7919) % 9973).to_string()))]))]));
                 out.push(json::obj(vec![("op", json::s("surface_mips")), ("material", id.clone()), ("channel", json::s("base_color")), ("layer", json::s("pattern"))]));
-                if bump > 0. && matches!(m.tex, Tex::Fabric | Tex::Knit | Tex::Denim | Tex::Leather | Tex::Nylon) {
+                // Skin gets only a whisper of relief from its mottle (pores and soft
+                // unevenness catch the light); a stronger derive reads as lumps.
+                let bump = if m.tex == Tex::Skin { 0.05 } else { bump };
+                if bump > 0. && matches!(m.tex, Tex::Skin | Tex::Fabric | Tex::Knit | Tex::Denim | Tex::Leather | Tex::Nylon | Tex::Plastic | Tex::Camo | Tex::Check) {
                     out.push(json::obj(vec![("op", json::s("surface_derive")), ("material", id.clone()), ("source_channel", json::s("base_color")), ("channel", json::s("normal")), ("layer", json::s("bump")), ("strength", Value::F64(bump))]));
                     out.push(json::obj(vec![("op", json::s("surface_mips")), ("material", id.clone()), ("channel", json::s("normal")), ("layer", json::s("bump"))]));
                 }
@@ -315,17 +326,23 @@ pub fn character_spec_error(v: &Value) -> Option<String> { CharacterSpec::parse(
 pub fn build_from_spec(spec: &CharacterSpec, limits: &Limits) -> Result<CharacterBuild> {
     let b = body::Body::new(spec);
     let mut g = Gen { spec, b, mats: Mats { list: Vec::new(), base: spec.material_base }, parts: Vec::new(), sockets: Vec::new() };
-    body::build(&mut g);
-    head::build(&mut g);
-    gear::build(&mut g);
+    if spec.mesh {
+        body::build(&mut g);
+        head::build(&mut g);
+        gear::build(&mut g);
+    } else {
+        head::place_face_joints(spec, &mut g.b);
+    }
     let skeleton = g.b.skeleton();
     let mut operations = vec![Operation::SetSkeleton { skeleton: skeleton.clone() }];
     let mut late = Vec::new();
-    // One object: every primitive then shares its material's textures
-    // instead of each part preparing its own copy.
-    let (op, paint) = Part::export_merged("character", &g.parts, limits)?;
-    operations.push(op);
-    late.extend(paint);
+    if spec.mesh {
+        // One object: every primitive then shares its material's textures
+        // instead of each part preparing its own copy.
+        let (op, paint) = Part::export_merged("character", &g.parts, limits)?;
+        operations.push(op);
+        late.extend(paint);
+    }
     let wanted: Vec<String> = spec.clips.clone().unwrap_or_else(|| {
         let mut v: Vec<String> = clips::CLIP_NAMES.iter().map(|s| s.to_string()).collect();
         if spec.has("gi") || spec.name.contains("fighter") || spec.fighter { v.extend(clips::FIGHT_CLIP_NAMES.iter().map(|s| s.to_string())); }
@@ -355,4 +372,176 @@ pub fn rest_joints(spec: &CharacterSpec) -> Vec<(String, [f64; 3])> {
     let mut b = body::Body::new(spec);
     head::place_face_joints(spec, &mut b);
     CHARACTER_JOINTS.iter().zip(&b.joints).map(|(j, p)| (j.0.to_string(), *p)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json::{self, Value};
+
+    fn program(preset: &str, op: &str, extra: Vec<(&str, Value)>) -> Vec<Value> {
+        let mut pairs = vec![("op", json::s(op)), ("preset", json::s(preset))];
+        pairs.extend(extra);
+        vec![json::obj(pairs)]
+    }
+    fn build(ops: &[Value]) -> crate::BuiltProgram {
+        let limits = Limits { max_joints: 128, ..Default::default() };
+        crate::build_program(ops, limits, &mut |_| Err("no imports".into()), None).unwrap_or_else(|e| panic!("{}", e.message))
+    }
+
+    /// Every preset builds, and first-person arms stay small. Build time is
+    /// cold-cache load time, so it is printed (run with --nocapture).
+    #[test]
+    fn presets_build_and_arms_stay_small() {
+        for name in character_preset_names() {
+            let t = std::time::Instant::now();
+            let built = build(&program(name, "character", Vec::new()));
+            eprintln!("character {name}: {} ms, {} B", t.elapsed().as_millis(), built.compiled.glb.len());
+        }
+        for (preset, hold) in [("halcyon_warden", "rifle"), ("kestrel_striker", "pistol"), ("kestrel_striker", "one")] {
+            let t = std::time::Instant::now();
+            let bytes = build(&program(preset, "fps_arms", vec![("hold", json::s(hold))])).compiled.glb.len();
+            eprintln!("fps_arms {preset} {hold}: {} ms, {bytes} B", t.elapsed().as_millis());
+            assert!(bytes < 1_500_000, "arms {preset}/{hold}: {bytes} B");
+        }
+    }
+
+    /// Locomotion clips never jump: consecutive keys of every arm joint stay
+    /// within a small angle, and walk/run/sprint agree in hemisphere at the
+    /// same phase so a speed blend never takes the long way round.
+    #[test]
+    fn locomotion_arm_keys_are_continuous() {
+        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("adult")), ("height", Value::F64(1.82)),
+            ("body", json::obj(vec![("muscle", Value::F64(1.15)), ("shoulders", Value::F64(1.1)), ("hands", Value::F64(1.05))]))])).unwrap();
+        let mut b = body::Body::new(&spec);
+        head::place_face_joints(&spec, &mut b);
+        let rig = clips::RigInfo::new(&b);
+        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.acos().to_degrees() };
+        let arms: Vec<u32> = ["shoulder_l", "upper_arm_l", "lower_arm_l", "hand_l", "shoulder_r", "upper_arm_r", "lower_arm_r", "hand_r"].iter().map(|n| joint_index(n)).collect();
+        let at = |c: &crate::AnimationClip, jn: u32, u: f64| -> Option<[f64; 4]> {
+            let ch = c.channels.iter().find(|ch| ch.joint == jn && ch.path == crate::AnimationPath::Rotation)?;
+            let k = ((u * (ch.keys.len() - 1) as f64).round() as usize).min(ch.keys.len() - 1);
+            Some(ch.keys[k].value)
+        };
+        let names = ["idle", "walk", "run", "sprint", "walk_back", "strafe_l", "strafe_r", "crouch_move", "run_back", "strafe_run_l", "strafe_run_r", "crouch_back", "crouch_strafe_l", "crouch_strafe_r"];
+        let all: Vec<crate::AnimationClip> = names.iter().map(|n| clips::clip(n, &rig).unwrap()).collect();
+        for c in &all {
+            for ch in c.channels.iter().filter(|ch| arms.contains(&ch.joint) && ch.path == crate::AnimationPath::Rotation) {
+                for w in ch.keys.windows(2) {
+                    let a = ang(w[0].value, w[1].value);
+                    assert!(a < 25., "{} {}: {:.1}° between keys at {:.3}s", c.name, CHARACTER_JOINTS[ch.joint as usize].0, a, w[1].time);
+                }
+            }
+        }
+        // Blend partners at the same phase: walk-run-sprint and idle-walk.
+        for (x, y) in [(0usize, 1usize), (1, 2), (2, 3), (1, 4), (1, 5), (1, 6)] {
+            for &jn in &arms {
+                for k in 0..=20 {
+                    let u = k as f64 / 20.;
+                    if let (Some(a), Some(b)) = (at(&all[x], jn, u), at(&all[y], jn, u)) {
+                        let deg = ang(a, b);
+                        assert!(deg < 100., "{}-{} {} at phase {u:.2}: {deg:.1}° apart", names[x], names[y], CHARACTER_JOINTS[jn as usize].0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Leg joints never flip between keys in the locomotion and platformer
+    /// clips, for a realistic build and a short-legged stylised one (the
+    /// hand-built Leap hero's rig).
+    #[test]
+    fn leg_keys_are_continuous() {
+        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.acos().to_degrees() };
+        let legs: Vec<u32> = ["upper_leg_l", "lower_leg_l", "foot_l", "upper_leg_r", "lower_leg_r", "foot_r", "upper_arm_l", "lower_arm_l", "upper_arm_r", "lower_arm_r"].iter().map(|n| joint_index(n)).collect();
+        let specs = [
+            json::obj(vec![("preset", json::s("halcyon_warden"))]),
+            json::obj(vec![("preset", json::s("hero_mia"))]),
+            json::obj(vec![("preset", json::s("chibi"))]),
+            json::obj(vec![("mesh", Value::Bool(false)), ("height", Value::F64(1.84)), ("heads", Value::F64(3.3)), ("stylize", Value::F64(0.3)), ("body", json::obj(vec![("legs", Value::F64(1.15))]))]),
+        ];
+        let mut bad = Vec::new();
+        for spec in &specs {
+            let spec = CharacterSpec::parse(spec).unwrap();
+            let mut b = body::Body::new(&spec);
+            head::place_face_joints(&spec, &mut b);
+            let rig = clips::RigInfo::new(&b);
+            for name in ["walk", "run", "sprint", "crouch_move", "jump", "land", "skid", "run_back", "strafe_run_l", "strafe_run_r", "crouch_back", "crouch_strafe_l", "crouch_strafe_r"] {
+                let c = clips::clip(name, &rig).unwrap();
+                for ch in c.channels.iter().filter(|ch| legs.contains(&ch.joint) && ch.path == crate::AnimationPath::Rotation) {
+                    // Per second of clip, so a dense clip is not penalised.
+                    for w in ch.keys.windows(2) {
+                        let a = ang(w[0].value, w[1].value);
+                        let rate = a / (w[1].time - w[0].time).max(1e-6);
+                        if rate >= 1500. { bad.push(format!("{} {} {}: {:.1}° in {:.3}s at {:.3}s", spec.name, name, CHARACTER_JOINTS[ch.joint as usize].0, a, w[1].time - w[0].time, w[1].time)); }
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "leg flips:\n{}", bad.join("\n"));
+    }
+
+    /// Foot-planted gaits: while a foot is on the ground it slides BACK
+    /// against the way the clip travels (under a body moving forward the
+    /// planted foot stays put in the world). Forward is where the toes point;
+    /// right is forward × up.
+    #[test]
+    fn stance_feet_slide_against_the_travel() {
+        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("halcyon_warden"))])).unwrap();
+        let mut b = body::Body::new(&spec);
+        head::place_face_joints(&spec, &mut b);
+        let rig = clips::RigInfo::new(&b);
+        let (an, ball) = (b.leg[0][2], b.leg[0][3]);
+        let fl = ((ball[0] - an[0]).powi(2) + (ball[2] - an[2]).powi(2)).sqrt();
+        let fwd = [(ball[0] - an[0]) / fl, 0., (ball[2] - an[2]) / fl];
+        let right = [-fwd[2], 0., fwd[0]];
+        let back = [-fwd[0], 0., -fwd[2]];
+        let left = [-right[0], 0., -right[2]];
+        for (name, travel) in [("walk", fwd), ("run", fwd), ("sprint", fwd), ("crouch_move", fwd), ("walk_back", back), ("strafe_r", right), ("strafe_l", left), ("run_back", back), ("strafe_run_r", right), ("strafe_run_l", left), ("crouch_back", back), ("crouch_strafe_r", right), ("crouch_strafe_l", left)] {
+            let c = clips::clip(name, &rig).unwrap();
+            let n = c.channels[0].keys.len();
+            let mut feet: Vec<[[f64; 3]; 2]> = Vec::with_capacity(n);
+            for k in 0..n {
+                let mut p = clips::Pose::new(&rig);
+                for ch in &c.channels {
+                    let v = ch.keys[k].value;
+                    match ch.path {
+                        crate::AnimationPath::Rotation => { p.set(CHARACTER_JOINTS[ch.joint as usize].0, v); }
+                        crate::AnimationPath::Translation if ch.joint == 0 => { p.shift([v[0] - rig.rest[0][0], v[1] - rig.rest[0][1], v[2] - rig.rest[0][2]]); }
+                        _ => {}
+                    }
+                }
+                feet.push([p.pos("foot_l"), p.pos("foot_r")]);
+            }
+            for side in 0..2 {
+                let low = feet.iter().map(|f| f[side][1]).fold(f64::MAX, f64::min);
+                let planted = |k: usize| feet[k][side][1] < low + 0.01 * rig.u;
+                let mut slide = 0.;
+                for k in 1..n {
+                    if planted(k - 1) && planted(k) {
+                        let d = [feet[k][side][0] - feet[k - 1][side][0], 0., feet[k][side][2] - feet[k - 1][side][2]];
+                        slide += d[0] * travel[0] + d[2] * travel[2];
+                    }
+                }
+                assert!(slide < -0.05 * rig.leg_len, "{name} foot {side}: the planted foot moves {slide:.3} along the travel (it must slide back)");
+            }
+        }
+    }
+
+    /// Vertex tints go in as one op covering every vertex: one op per colour
+    /// cost ~25 ms each, and an uncovered vertex costs a closest-point search
+    /// when the model compiles (together ~3 s of a 4.5 s build).
+    #[test]
+    fn vertex_tints_are_one_op_covering_every_vertex() {
+        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("halcyon_warden"))])).unwrap();
+        let built = build_from_spec(&spec, &Limits { max_joints: 128, ..Default::default() }).unwrap();
+        let tints: Vec<&Value> = built.late.iter().filter(|o| o.get("op").and_then(Value::as_str).is_some_and(|k| k.starts_with("surface_vertex"))).collect();
+        assert_eq!(tints.len(), 1);
+        assert_eq!(tints[0].get("op").and_then(Value::as_str), Some("surface_vertex_colors"));
+        let Some(crate::Operation::ImportMesh { .. }) = built.operations.iter().find(|o| matches!(o, crate::Operation::ImportMesh { .. })) else { panic!("no mesh") };
+        let n = tints[0].get("vertices").and_then(Value::as_arr).map_or(0, |a| a.len());
+        let doc = build(&program("halcyon_warden", "character", vec![("clips", Value::Arr(Vec::new()))])).document;
+        let mesh_vertices: usize = doc.objects().map(|(_, m)| m.vertices().len()).sum();
+        assert_eq!(n, mesh_vertices);
+    }
 }

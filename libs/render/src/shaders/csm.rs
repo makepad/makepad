@@ -171,6 +171,46 @@ script_mod! {
             return s
         }
 
+        // One hardware 2x2 compare instead of the 13-tap disk: for foliage
+        // and grass (swaying leaf cards overdraw several layers deep, and a
+        // leaf's shadow edge never needs the soft kernel). The seam band
+        // still cross-fades into the next cascade (a second tap there only),
+        // or a tree's shadow on the grass would pop where its caster changes
+        // from leaves to stand-in.
+        csm_vis_fast: fn(wp: vec3, n: vec3, ndl: float) -> float {
+            if self.csm_p.x < 0.5 {
+                return 1.0
+            }
+            var ci = 0.0
+            var q = self.csm_proj(0.0, wp)
+            while ci < 3.5 && self.csm_inside(q, 0.99) < 0.5 {
+                ci = ci + 1.0
+                q = self.csm_proj(min(ci, 3.0), wp)
+            }
+            if ci > 3.5 {
+                return 1.0
+            }
+            var s = self.csm_tap1(ci, wp, n, ndl)
+            let edge = max(abs(q.x), abs(q.y))
+            if ci < 2.5 && edge > 0.9 {
+                if self.csm_inside(self.csm_proj(ci + 1.0, wp), 0.99) > 0.5 {
+                    s = mix(s, self.csm_tap1(ci + 1.0, wp, n, ndl), smoothstep(0.9, 0.99, edge))
+                }
+            }
+            if ci > 2.5 {
+                s = mix(s, 1.0, smoothstep(0.85, 0.98, edge))
+            }
+            return s
+        }
+
+        csm_tap1: fn(ci: float, wp: vec3, n: vec3, ndl: float) -> float {
+            let tw = self.csm_pick(self.csm_texel, ci)
+            let nl = clamp(ndl, 0.0, 1.0)
+            let q2 = self.csm_proj(ci, wp + normalize(n) * (tw * (1.0 + 1.5 * (1.0 - nl))))
+            let depth = (q2.z - tw * 2.0 * self.csm_pick(self.csm_zw, ci)) * self.csm_pick(self.csm_da, ci) + self.csm_pick(self.csm_db, ci)
+            return self.csm_tap(q2.x * 0.5 + 0.5, 0.5 - q2.y * 0.5, ci, depth)
+        }
+
         csm_debug_view: fn(color: vec4, wp: vec3, n: vec3) -> vec4 {
             if self.csm_debug < 0.5 || self.csm_p.x < 0.5 { return color }
             var tint = vec3(0.55, 0.55, 0.55)

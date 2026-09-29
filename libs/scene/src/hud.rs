@@ -39,6 +39,14 @@ use makepad_math::*;
 /// The reference pane height HUD units are a fraction of.
 pub const HUD_REFERENCE_HEIGHT: f32 = 1080.0;
 
+/// HUD units to pixels for a `w` x `h` pane (logical points): its height over
+/// the 1080 reference, or its width over 1.2 x that for a pane narrower than
+/// 1.2 : 1, clamped so a small window keeps legible type and a huge one does
+/// not blow the HUD up.
+pub fn pane_scale(w: f32, h: f32) -> f32 {
+    (h / HUD_REFERENCE_HEIGHT).min(w / (HUD_REFERENCE_HEIGHT * 1.2)).clamp(0.4, 1.25)
+}
+
 /// What an element draws as. Deliberately few: each is something a game HUD
 /// cannot be built without, and a model that remembers only four of them can
 /// still build a status bar. An inventory grid is a panel of icons; a big
@@ -130,6 +138,10 @@ pub enum HudAlign {
     #[default]
     Center,
     End,
+    /// A row's text children share one baseline (a big magazine count and
+    /// its small reserve read as one line), and its other children centre
+    /// on the cap height of its tallest text. Anywhere else it is `Start`.
+    Baseline,
 }
 
 impl HudAlign {
@@ -138,13 +150,14 @@ impl HudAlign {
             "start" | "left" | "top" | "begin" => HudAlign::Start,
             "center" | "centre" | "middle" => HudAlign::Center,
             "end" | "right" | "bottom" => HudAlign::End,
+            "baseline" => HudAlign::Baseline,
             _ => return None,
         })
     }
 
     fn offset(self, outer: f32, inner: f32) -> f32 {
         match self {
-            HudAlign::Start => 0.0,
+            HudAlign::Start | HudAlign::Baseline => 0.0,
             HudAlign::Center => (outer - inner) * 0.5,
             HudAlign::End => outer - inner,
         }
@@ -565,6 +578,19 @@ pub struct HudElement {
     pub at: Vec2f,
     /// Explicit size in HUD units. Zero on either axis means "measure me".
     pub size: Vec2f,
+    /// A classic game's own SCREEN (`screen: vec2(320, 200)`), for a root:
+    /// `at` is then the element's top-left and `size` its extent in that
+    /// screen's pixels, and the screen is fitted to the pane exactly as the
+    /// held-weapon artwork is (rows fill the height unless that would be
+    /// wider than the pane, columns centred, sitting on the bottom edge,
+    /// pixels `screen_aspect` times as tall as wide). A status bar, its
+    /// digits and the gun in the hand then share one anchor and one scale,
+    /// and the bar is the screen's own — never lifted off the bottom edge
+    /// for the host's reserved corner. Zero = an ordinary element.
+    pub screen: Vec2f,
+    /// Pixel aspect of `screen` (height over width): 1.2 for the 320×200
+    /// games drawn on a 4:3 monitor. Zero reads as 1.
+    pub screen_aspect: f32,
     pub stack: HudStack,
     pub align: HudAlign,
     pub gap: f32,
@@ -660,6 +686,11 @@ pub struct HudElement {
     /// drawn in place when in range and as an arrow on the rim when not.
     pub targets: Vec<Vec2f>,
     pub target_color: Vec4f,
+    /// Map: the floor plan as world rectangles (min x, min z)..(max x, max z),
+    /// filled in `track`-contrasting `area_color` under the polyline: what a
+    /// shooter's radar shows (rooms, lanes, sites) instead of a bare route.
+    pub areas: Vec<[Vec2f; 2]>,
+    pub area_color: Vec4f,
     /// How it moves (tweens, transform, count-up), and the live state of
     /// that PER PANE: split screen draws one document into several panes,
     /// each with its own player, so each pane's copy of an element appears,
@@ -677,6 +708,8 @@ impl Default for HudElement {
             anchor: HudAnchor::TopLeft,
             at: vec2f(0.0, 0.0),
             size: vec2f(0.0, 0.0),
+            screen: Vec2f::default(),
+            screen_aspect: 0.0,
             stack: HudStack::Column,
             align: HudAlign::Center,
             gap: 6.0,
@@ -733,6 +766,8 @@ impl Default for HudElement {
             range: 0.0,
             targets: Vec::new(),
             target_color: vec4(0.0, 0.0, 0.0, 0.0),
+            areas: Vec::new(),
+            area_color: vec4(0.0, 0.0, 0.0, 0.0),
             motion: HudMotion::default(),
             motion_panes: Vec::new(),
         }
@@ -817,8 +852,20 @@ pub struct HudDoc {
     pub crosshair: Option<Crosshair>,
     /// Which preset installed this, for `game.hud("none")` and for reporting.
     pub preset: String,
+    /// A corner the host keeps for itself, in pane pixels (w, h) measured
+    /// from the pane's bottom-right corner; zero when none. The app's
+    /// performance meter sits there: layout lifts a bottom-anchored root
+    /// that would cover it to sit on top of it, and the lint flags anything
+    /// else drawn over it. Set by the host on the copy it draws, never by a
+    /// game.
+    pub reserved: Vec2f,
     next_order: i32,
 }
+
+/// The corner the app's performance meter keeps (its compact box plus the
+/// gap around it), in logical pixels. Shared with the headless lint so a
+/// game checked without a window is checked against the same corner.
+pub const PERF_METER_RESERVE: Vec2f = Vec2f { x: 204.0, y: 54.0 };
 
 /// Ceiling on live log lines across every log element.
 pub const MAX_LINES: usize = 24;
@@ -1100,6 +1147,9 @@ pub struct HudPlaced {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// HUD units to pixels for this element: the pane's scale, or less when
+    /// its root was shrunk to fit the pane. Draw it at this scale.
+    pub scale: f32,
 }
 
 /// Default sizes in HUD units, in the one place a renderer and a test can
@@ -1117,7 +1167,53 @@ pub const NUMERAL_SIZE: f32 = 34.0;
 pub const CAPTION_SIZE: f32 = 12.0;
 pub const BANNER_SIZE: f32 = 40.0;
 /// Distance a root element keeps from the pane's edge when `at` is zero.
-pub const MARGIN: f32 = 18.0;
+pub const MARGIN: f32 = 24.0;
+
+/// One string as the renderer's text engine lays it out, in pixels: its
+/// line box (`w` x `h`, ascender to descender), how far below the box's top
+/// its baseline sits, and the height of a capital above that baseline.
+/// Layout needs all four: a plate sized to `h` holds its text, an icon sized
+/// and centred on `cap` sits level with the digits beside it, and a row can
+/// put mixed sizes on one `ascent` line.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudTextMetrics {
+    pub w: f32,
+    pub h: f32,
+    pub ascent: f32,
+    pub cap: f32,
+}
+
+/// The icon a readout carries ahead of its text: a square a little taller
+/// than the text's capitals (a glyph drawn to its box reads smaller than a
+/// letter of the same height), and the gap after it. Layout and renderer
+/// both size it from here, so the text lands where the width was measured.
+pub fn text_icon_box(m: &HudTextMetrics) -> (f32, f32) {
+    let cap = if m.cap > 0.0 { m.cap } else { m.h * 0.6 };
+    (cap * 1.3, cap * 0.4)
+}
+
+/// The width a text element wraps its text at, in pixels: an explicit
+/// width (`wrap:`, or both axes of `size`) less its icon; 0 = one line.
+pub fn text_wrap_width(e: &HudElement, scale: f32, line: &HudTextMetrics) -> f32 {
+    if e.kind != HudKind::Text || e.size.x <= 0.0 {
+        return 0.0;
+    }
+    let icon = if e.icon.is_empty() && e.svg.is_empty() && e.image.is_empty() {
+        0.0
+    } else {
+        let (d, gap) = text_icon_box(line);
+        d + gap
+    };
+    (e.size.x * scale - icon).max(1.0)
+}
+
+/// Where a text element's line sits inside its box: the top of the line
+/// box (below the caption, centred in whatever room an explicit size
+/// leaves). The renderer draws at exactly this offset, and a baseline row
+/// aligns on `offset + ascent`.
+pub fn text_line_top(box_h: f32, label_h: f32, m: &HudTextMetrics) -> f32 {
+    label_h + ((box_h - label_h - m.h) * 0.5).max(0.0)
+}
 
 /// The default glyph size for a text element's style.
 pub fn text_size_for(style: &str) -> f32 {
@@ -1131,11 +1227,13 @@ pub fn text_size_for(style: &str) -> f32 {
 
 /// Measure and place every visible element.
 ///
-/// `scale` converts HUD units to pixels (`pane_h / 1080`). `measure` returns
-/// the pixel width and height of a string at a PIXEL font size — the one
+/// `scale` converts HUD units to pixels (`pane_h / 1080`). `measure` lays a
+/// string out at a scaled font size and returns its pixel metrics — the one
 /// thing layout cannot know on its own, and the only reason this is not a
 /// pure function. The renderer passes its text engine; a test passes
-/// arithmetic.
+/// arithmetic. A text element's box is never smaller than its text: an
+/// explicit `size` can make it roomier (the line then centres in it), never
+/// make the text spill out of the plate around it.
 ///
 /// `text_of` supplies the string an element will actually draw, because a
 /// bound readout's width depends on the number it shows. Nesting is resolved
@@ -1145,7 +1243,7 @@ pub fn layout(
     pane_w: f32,
     pane_h: f32,
     scale: f32,
-    measure: &mut dyn FnMut(&str, f32) -> (f32, f32),
+    measure: &mut dyn FnMut(&str, f32, f32) -> HudTextMetrics,
     text_of: &mut dyn FnMut(&HudElement) -> String,
 ) -> Vec<HudPlaced> {
     let n = doc.elements.len();
@@ -1180,37 +1278,111 @@ pub fn layout(
         false
     };
 
-    let mut sizes: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
-    let mut ctx = Measure { doc, order: &order, scale, measure, text_of };
-    for &i in &order {
-        if rooted(i) {
-            sizes[i] = ctx.of(i, &mut Vec::new(), 0);
-        }
-    }
-    // The child measurements the panel pass computed are the ones to place
-    // with, so recompute into the shared table.
-    let mut sized = sizes.clone();
-    for &i in &order {
-        if rooted(i) {
-            sized[i] = ctx.of(i, &mut Vec::new(), 0);
-            fill_children(&mut ctx, i, &mut sized, 0);
-        }
-    }
-
-    let mut out = Vec::with_capacity(order.len());
-    for &i in &order {
+    let is_root = |i: usize| {
         let e = &doc.elements[i];
-        if !e.parent.is_empty() && visible(&e.parent).is_some() {
-            continue; // placed by its parent
-        }
-        if !rooted(i) {
+        rooted(i) && (e.parent.is_empty() || visible(&e.parent).is_none())
+    };
+    let mut ctx = Measure { doc, order: &order, scale, measure, text_of };
+    let mut sized: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
+    let mut scales: Vec<f32> = vec![scale; n];
+    let mut above = vec![0.0f32; n];
+    let mut out = Vec::with_capacity(order.len());
+    let (room_w, room_h) = ((pane_w - 2.0 * MARGIN * scale).max(1.0), (pane_h - 2.0 * MARGIN * scale).max(1.0));
+    let mut roots: Vec<(usize, f32)> = Vec::new();
+    for &i in &order {
+        if !is_root(i) {
             continue;
         }
+        // Everything a root holds fits the pane. An axis the author sized
+        // past the pane (a backdrop, a band, a full-screen card) is cut to
+        // the pane; content that does not fit is laid out again at the scale
+        // that makes it fit, so a menu authored for a wide screen shrinks on
+        // a narrow one instead of leaving it.
+        ctx.scale = scale;
+        let (w, h) = ctx.of(i, &mut Vec::new(), 0);
+        let e = &doc.elements[i];
+        let kw = if e.size.x > 0.0 { 1.0 } else { room_w / w.max(1.0e-3) };
+        let kh = if e.size.y > 0.0 { 1.0 } else { room_h / h.max(1.0e-3) };
+        let k = kw.min(kh).min(1.0);
+        ctx.scale = scale * k;
+        sized[i] = if k < 1.0 { ctx.of(i, &mut Vec::new(), 0) } else { (w, h) };
+        sized[i] = (sized[i].0.min(pane_w), sized[i].1.min(pane_h));
+        if let Some((_, _, w, h)) = screen_rect(&doc.elements[i], pane_w, pane_h) {
+            sized[i] = (w, h);
+        }
+        fill_children(&mut ctx, i, &mut sized, 0);
+        // Each child of a baseline row: how far its top sits above the row's
+        // shared line.
+        let mut stack = vec![i];
+        let mut visited: Vec<usize> = Vec::new();
+        while let Some(p) = stack.pop() {
+            if visited.contains(&p) {
+                continue;
+            }
+            visited.push(p);
+            scales[p] = ctx.scale;
+            let pe = &doc.elements[p];
+            let kids = ctx.children(&pe.name);
+            if pe.kind == HudKind::Panel && pe.stack == HudStack::Row && pe.align == HudAlign::Baseline {
+                let sized_kids: Vec<(usize, f32, f32)> = kids.iter().map(|c| (*c, sized[*c].0, sized[*c].1)).collect();
+                for (k, top) in sized_kids.iter().zip(ctx.baseline_offsets(&sized_kids)) {
+                    above[k.0] = top;
+                }
+            }
+            stack.extend(kids);
+        }
+        roots.push((i, ctx.scale));
+    }
+
+    let table = Sized { size: &sized, above: &above, scale: &scales };
+    for (i, s) in roots {
+        let e = &doc.elements[i];
         let (w, h) = sized[i];
-        let (x, y) = anchor_origin(e.anchor, pane_w, pane_h, w, h, e.at * scale);
-        place(doc, i, x, y, w, h, &order, &sized, scale, &mut out);
+        if let Some((x, y, w, h)) = screen_rect(e, pane_w, pane_h) {
+            place(doc, i, x, y, w, h, &order, &table, s, &mut out);
+            continue;
+        }
+        let (x, y) = anchor_origin(e.anchor, pane_w, pane_h, w, h, e.at * s, MARGIN * scale);
+        // Kept on the pane: an offset that would push a box past an edge
+        // stops at it (a box as large as the pane sits at its origin).
+        let x = x.min(pane_w - w).max(0.0);
+        let mut y = y.min(pane_h - h).max(0.0);
+        // The host's corner (`HudDoc::reserved`): a bottom-anchored root
+        // that would cover it stacks on top of it instead.
+        let (rx, ry) = (pane_w - doc.reserved.x, pane_h - doc.reserved.y);
+        if doc.reserved.x > 0.0
+            && matches!(e.anchor, HudAnchor::BottomLeft | HudAnchor::Bottom | HudAnchor::BottomRight)
+            && x + w > rx
+            && y + h > ry
+        {
+            y = (ry - h).max(0.0);
+        }
+        place(doc, i, x, y, w, h, &order, &table, s, &mut out);
     }
     out
+}
+
+/// A `screen` element's pixel box: its classic screen fitted to the pane
+/// (the held-weapon rule, `weapon_sprites::quads`), then `at`/`size` in that
+/// screen's pixels. None for an ordinary element.
+pub fn screen_rect(e: &HudElement, pane_w: f32, pane_h: f32) -> Option<(f32, f32, f32, f32)> {
+    if e.screen.x <= 0.0 || e.screen.y <= 0.0 || !e.parent.is_empty() {
+        return None;
+    }
+    let aspect = if e.screen_aspect > 0.0 { e.screen_aspect } else { 1.0 };
+    let sy = (pane_h / e.screen.y).min(pane_w * aspect / e.screen.x);
+    let sx = sy / aspect;
+    let ox = (pane_w - e.screen.x * sx) * 0.5;
+    let oy = pane_h - e.screen.y * sy;
+    Some((ox + e.at.x * sx, oy + e.at.y * sy, e.size.x * sx, e.size.y * sy))
+}
+
+/// What placing reads: every element's measured box, and for a baseline
+/// row's children their top's height above the row's line.
+struct Sized<'a> {
+    size: &'a [(f32, f32)],
+    above: &'a [f32],
+    scale: &'a [f32],
 }
 
 /// Where a root element's box goes. The corner an anchor names is the corner
@@ -1224,8 +1396,8 @@ fn anchor_origin(
     w: f32,
     h: f32,
     at: Vec2f,
+    m: f32,
 ) -> (f32, f32) {
-    let m = MARGIN;
     match anchor {
         HudAnchor::TopLeft => (m + at.x, m + at.y),
         HudAnchor::Top => ((pane_w - w) * 0.5 + at.x, m + at.y),
@@ -1241,7 +1413,7 @@ struct Measure<'a> {
     doc: &'a HudDoc,
     order: &'a [usize],
     scale: f32,
-    measure: &'a mut dyn FnMut(&str, f32) -> (f32, f32),
+    measure: &'a mut dyn FnMut(&str, f32, f32) -> HudTextMetrics,
     text_of: &'a mut dyn FnMut(&HudElement) -> String,
 }
 
@@ -1269,7 +1441,7 @@ impl Measure<'_> {
                 let cap = if e.label.is_empty() {
                     0.0
                 } else {
-                    self.measure_text(&e.label, CAPTION_SIZE * s).1 + 2.0 * s
+                    self.measure_text(&e.label, CAPTION_SIZE * s).h + 2.0 * s
                 };
                 (BAR_W * s, BAR_H * s + cap)
             }
@@ -1278,21 +1450,14 @@ impl Measure<'_> {
                 (r * 2.0 * s, r * 2.0 * s)
             }
             HudKind::Text => {
-                let size = if e.glyph > 0.0 { e.glyph } else { text_size_for(&e.style) } * s;
-                let text = (self.text_of)(e);
-                let shown = if text.is_empty() { " " } else { text.as_str() };
-                let (tw, th) = self.measure_text(shown, size);
-                let (lw, lh) = if e.label.is_empty() {
-                    (0.0, 0.0)
-                } else {
-                    self.measure_text(&e.label, CAPTION_SIZE * s)
-                };
+                let (label, m) = self.text_line(i);
                 let icon = if e.icon.is_empty() && e.svg.is_empty() && e.image.is_empty() {
                     0.0
                 } else {
-                    size * 0.95 + 4.0 * s
+                    let (d, gap) = text_icon_box(&m);
+                    d + gap
                 };
-                (tw.max(lw) + icon, th + if lh > 0.0 { lh + 1.0 * s } else { 0.0 })
+                (m.w.max(label.w) + icon, m.h + label.h)
             }
             HudKind::Icon => {
                 let d = if e.glyph > 0.0 { e.glyph } else { ICON_D } * s;
@@ -1305,7 +1470,7 @@ impl Measure<'_> {
                 // number is the font size) is the wrap width; wrapped lines
                 // take their room above the newest.
                 let w = if e.size.x >= 60.0 { e.size.x } else { 220.0 } * s;
-                (w, rows * size * 1.35)
+                (w, rows * self.measure_text("Ag", size).h)
             }
             HudKind::Flash | HudKind::Marker | HudKind::Flight => (0.0, 0.0),
             // Square unless both axes were given: `size: 200` means a
@@ -1322,8 +1487,13 @@ impl Measure<'_> {
                 let mut cross = 0.0f32;
                 let mut free_w = 0.0f32;
                 let mut free_h = 0.0f32;
+                let baseline = stack == HudStack::Row && e.align == HudAlign::Baseline;
+                let mut sized_kids: Vec<(usize, f32, f32)> = Vec::new();
                 for (k, c) in kids.iter().enumerate() {
                     let (cw, ch) = self.of(*c, seen, depth + 1);
+                    if baseline {
+                        sized_kids.push((*c, cw, ch));
+                    }
                     match stack {
                         HudStack::Row => {
                             main += cw + if k > 0 { gap } else { 0.0 };
@@ -1340,6 +1510,14 @@ impl Measure<'_> {
                         }
                     }
                 }
+                if baseline {
+                    let (above, below) = self
+                        .baseline_offsets(&sized_kids)
+                        .iter()
+                        .zip(&sized_kids)
+                        .fold((0.0f32, 0.0f32), |(a, b), (top, k)| (a.max(*top), b.max(k.2 - top)));
+                    cross = above + below;
+                }
                 let (w, h) = match stack {
                     HudStack::Row => (main, cross),
                     HudStack::Column => (cross, main),
@@ -1349,14 +1527,68 @@ impl Measure<'_> {
             }
         };
         seen.pop();
-        (
-            if e.size.x > 0.0 { e.size.x * s } else { intrinsic.0 },
-            if e.size.y > 0.0 { e.size.y * s } else { intrinsic.1 },
-        )
+        // Text is never cut to an explicit size: the size is room, and the
+        // plate around a readout grows with what it reads.
+        let text = e.kind == HudKind::Text;
+        let fit = |explicit: f32, own: f32| {
+            if explicit <= 0.0 {
+                own
+            } else if text {
+                (explicit * s).max(own)
+            } else {
+                explicit * s
+            }
+        };
+        (fit(e.size.x, intrinsic.0), fit(e.size.y, intrinsic.1))
     }
 
-    fn measure_text(&mut self, text: &str, size: f32) -> (f32, f32) {
-        (self.measure)(text, size)
+    fn measure_text(&mut self, text: &str, size: f32) -> HudTextMetrics {
+        (self.measure)(text, size, 0.0)
+    }
+
+    /// A text element's caption (zero when it has none; its `h` includes
+    /// the caption's gap) and its line, at this pane's scale.
+    fn text_line(&mut self, i: usize) -> (HudTextMetrics, HudTextMetrics) {
+        let e = &self.doc.elements[i];
+        let s = self.scale;
+        let size = if e.glyph > 0.0 { e.glyph } else { text_size_for(&e.style) } * s;
+        let label = if e.label.is_empty() {
+            HudTextMetrics::default()
+        } else {
+            let label = e.label.clone();
+            let mut l = self.measure_text(&label, CAPTION_SIZE * s);
+            l.h += 1.0 * s;
+            l
+        };
+        let text = (self.text_of)(&self.doc.elements[i]);
+        let shown = if text.is_empty() { " " } else { text.as_str() };
+        let line = self.measure_text(shown, size);
+        let wrap = text_wrap_width(&self.doc.elements[i], s, &line);
+        if wrap > 0.0 && line.w > wrap {
+            return (label, (self.measure)(shown, size, wrap));
+        }
+        (label, line)
+    }
+
+    /// For the children of a baseline row, each one's distance from the
+    /// row's shared line to its own top — a text's to its baseline, anything
+    /// else's to where it must start to centre on the capitals of the row's
+    /// tallest text. `kids` is (index, w, h).
+    fn baseline_offsets(&mut self, kids: &[(usize, f32, f32)]) -> Vec<f32> {
+        let lines: Vec<Option<(HudTextMetrics, HudTextMetrics)>> = kids
+            .iter()
+            .map(|(c, _, _)| (self.doc.elements[*c].kind == HudKind::Text).then(|| self.text_line(*c)))
+            .collect();
+        let cap = lines.iter().flatten().map(|(_, m)| m.cap).fold(0.0f32, f32::max);
+        kids.iter()
+            .zip(&lines)
+            .map(|((_, _, h), line)| match line {
+                Some((label, m)) => text_line_top(*h, label.h, m) + m.ascent,
+                // No text in the row: the line is the middle of each child.
+                None if cap <= 0.0 => h * 0.5,
+                None => cap * 0.5 + h * 0.5,
+            })
+            .collect()
     }
 }
 
@@ -1382,11 +1614,12 @@ fn place(
     w: f32,
     h: f32,
     order: &[usize],
-    sized: &[(f32, f32)],
+    table: &Sized,
     scale: f32,
     out: &mut Vec<HudPlaced>,
 ) {
-    out.push(HudPlaced { index: i, x, y, w, h });
+    let sized = table.size;
+    out.push(HudPlaced { index: i, x, y, w, h, scale: table.scale[i] });
     let e = &doc.elements[i];
     if e.kind != HudKind::Panel {
         return;
@@ -1418,7 +1651,7 @@ fn place(
                     cw,
                     ch,
                     order,
-                    sized,
+                    table,
                     scale,
                     out,
                 );
@@ -1428,10 +1661,18 @@ fn place(
             let total: f32 =
                 kids.iter().map(|c| sized[*c].0).sum::<f32>() + gap * kids.len().saturating_sub(1) as f32;
             let mut cx = inner_x + e.align.offset(inner_w, total).max(0.0);
+            // A baseline row puts every child's line on the lowest top-to-line
+            // drop among them, the whole run centred in the row's height.
+            let line = kids.iter().map(|c| table.above[*c]).fold(0.0f32, f32::max);
+            let run = line + kids.iter().map(|c| sized[*c].1 - table.above[*c]).fold(0.0f32, f32::max);
             for &c in &kids {
                 let (cw, ch) = sized[c];
-                let cy = inner_y + e.align.offset(inner_h, ch).max(0.0);
-                place(doc, c, cx, cy, cw, ch, order, sized, scale, out);
+                let cy = if e.align == HudAlign::Baseline {
+                    inner_y + ((inner_h - run) * 0.5).max(0.0) + line - table.above[c]
+                } else {
+                    inner_y + e.align.offset(inner_h, ch).max(0.0)
+                };
+                place(doc, c, cx, cy, cw, ch, order, table, scale, out);
                 cx += cw + gap;
             }
         }
@@ -1442,11 +1683,141 @@ fn place(
             for &c in &kids {
                 let (cw, ch) = sized[c];
                 let cx = inner_x + e.align.offset(inner_w, cw).max(0.0);
-                place(doc, c, cx, cy, cw, ch, order, sized, scale, out);
+                place(doc, c, cx, cy, cw, ch, order, table, scale, out);
                 cy += ch + gap;
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lint
+// ---------------------------------------------------------------------------
+
+/// One thing wrong with a laid-out HUD, in words an author (or the AI
+/// designer) can act on: which element, and what to change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HudIssue {
+    pub element: String,
+    /// `overflow`, `offscreen`, `overlap`, `tiny`, `huge`, `bulky`,
+    /// `reserved`.
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+impl std::fmt::Display for HudIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} '{}': {}", self.kind, self.element, self.detail)
+    }
+}
+
+/// Check a drawn HUD: `drawn` is every element that drew, with its box in
+/// pane pixels (x, y, w, h; the pane's top-left at 0,0). Reports what a
+/// player would call sloppy: something spilling out of the panel it is in,
+/// off the pane, two panels covering each other, type too small to read or
+/// big enough to shout, and a corner cluster eating the view.
+pub fn lint(doc: &HudDoc, pane_w: f32, pane_h: f32, drawn: &[(usize, [f32; 4])]) -> Vec<HudIssue> {
+    let mut out = Vec::new();
+    let px = |v: f32| v.round() as i32;
+    let rect_of = |name: &str| drawn.iter().find(|(i, _)| doc.elements[*i].name == name).map(|(_, r)| *r);
+    let backdrop = |r: &[f32; 4]| r[2] >= pane_w * 0.9 && r[3] >= pane_h * 0.12 || r[2] >= pane_w * 0.9 && r[3] <= 8.0;
+    const SLACK: f32 = 1.5;
+    for (i, r) in drawn {
+        let e = &doc.elements[*i];
+        if matches!(e.kind, HudKind::Flash | HudKind::Marker | HudKind::Flight) {
+            continue;
+        }
+        let parent = if e.parent.is_empty() { None } else { rect_of(&e.parent) };
+        match parent {
+            Some(p) => {
+                let spill = (p[0] - r[0]).max(p[1] - r[1]).max(r[0] + r[2] - p[0] - p[2]).max(r[1] + r[3] - p[1] - p[3]);
+                if spill > SLACK {
+                    out.push(HudIssue {
+                        element: e.name.clone(),
+                        kind: "overflow",
+                        detail: format!("spills {} px out of its panel '{}' — let the panel size to its content (drop its fixed size) or lay the children out with stack: \"row\"/\"column\"", px(spill), e.parent),
+                    });
+                }
+            }
+            None => {
+                let off = (-r[0]).max(-r[1]).max(r[0] + r[2] - pane_w).max(r[1] + r[3] - pane_h);
+                if off > SLACK {
+                    out.push(HudIssue { element: e.name.clone(), kind: "offscreen", detail: format!("{} px off the pane", px(off)) });
+                }
+            }
+        }
+        if e.kind == HudKind::Text {
+            let lines = r[3];
+            if lines < 9.0 && lines > 0.0 {
+                out.push(HudIssue { element: e.name.clone(), kind: "tiny", detail: format!("text {} px tall — too small to read; raise its size", px(lines)) });
+            }
+            if e.style != "banner" && lines > pane_h * 0.2 {
+                out.push(HudIssue { element: e.name.clone(), kind: "huge", detail: format!("text {} px tall is {}% of the view; a readout wants about 3-6%", px(lines), px(lines / pane_h * 100.0)) });
+            }
+        }
+        let corner = matches!(e.anchor, HudAnchor::TopLeft | HudAnchor::TopRight | HudAnchor::BottomLeft | HudAnchor::BottomRight);
+        let (fw, fh) = (r[2] / pane_w, r[3] / pane_h);
+        if parent.is_none() && corner && !backdrop(r) && ((fw > 0.34 && fh > 0.08) || fh > 0.3 || fw * fh > 0.06) {
+            out.push(HudIssue {
+                element: e.name.clone(),
+                kind: "bulky",
+                detail: format!("a corner cluster {}% wide and {}% tall; keep corners under about a quarter of the view", px(r[2] / pane_w * 100.0), px(r[3] / pane_h * 100.0)),
+            });
+        }
+    }
+    // Roots covering each other (a band behind its own banner contains it,
+    // which is layering, not a collision).
+    let roots: Vec<&(usize, [f32; 4])> = drawn
+        .iter()
+        .filter(|(i, r)| {
+            let e = &doc.elements[*i];
+            (e.parent.is_empty() || rect_of(&e.parent).is_none())
+                && !matches!(e.kind, HudKind::Flash | HudKind::Marker | HudKind::Flight)
+                && !backdrop(r)
+        })
+        .collect();
+    // The host's corner (the performance meter): nothing may draw over it.
+    if doc.reserved.x > 0.0 && doc.reserved.y > 0.0 {
+        let (rx, ry) = (pane_w - doc.reserved.x, pane_h - doc.reserved.y);
+        for (i, r) in &roots {
+            // A classic screen's own bar is the game's screen, not a
+            // cluster: the meter draws over its edge.
+            if doc.elements[*i].screen.x > 0.0 {
+                continue;
+            }
+            let ix = (r[0] + r[2]).min(pane_w) - r[0].max(rx);
+            let iy = (r[1] + r[3]).min(pane_h) - r[1].max(ry);
+            if ix > SLACK && iy > SLACK {
+                out.push(HudIssue {
+                    element: doc.elements[*i].name.clone(),
+                    kind: "reserved",
+                    detail: format!("covers the performance meter's corner (bottom right, {}x{} px) by {}x{} px — anchor it bottom_right or bottom (layout stacks it above the meter), or move it", px(doc.reserved.x), px(doc.reserved.y), px(ix), px(iy)),
+                });
+            }
+        }
+    }
+    for (k, (a, ra)) in roots.iter().enumerate() {
+        for (b, rb) in roots.iter().skip(k + 1) {
+            let ix = (ra[0] + ra[2]).min(rb[0] + rb[2]) - ra[0].max(rb[0]);
+            let iy = (ra[1] + ra[3]).min(rb[1] + rb[3]) - ra[1].max(rb[1]);
+            if ix <= SLACK || iy <= SLACK {
+                continue;
+            }
+            let inside = |p: &[f32; 4], q: &[f32; 4]| p[0] >= q[0] - SLACK && p[1] >= q[1] - SLACK && p[0] + p[2] <= q[0] + q[2] + SLACK && p[1] + p[3] <= q[1] + q[3] + SLACK;
+            if inside(ra, rb) || inside(rb, ra) {
+                continue;
+            }
+            let smaller = (ra[2] * ra[3]).min(rb[2] * rb[3]).max(1.0);
+            if ix * iy > smaller * 0.08 {
+                out.push(HudIssue {
+                    element: doc.elements[*a].name.clone(),
+                    kind: "overlap",
+                    detail: format!("covers '{}' ({}x{} px) — move one, or put both in one panel", doc.elements[*b].name, px(ix), px(iy)),
+                });
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1637,7 +2008,7 @@ mod tests {
     fn map_measures_square_from_one_size_axis() {
         let mut doc = HudDoc::default();
         doc.set(HudElement { name: "map".into(), kind: HudKind::Map, size: vec2f(150.0, 0.0), ..Default::default() });
-        let placed = layout(&doc, 1920.0, 1080.0, 1.0, &mut |_, s| (s, s), &mut |_| String::new());
+        let placed = layout(&doc, 1920.0, 1080.0, 1.0, &mut |_, s, _| HudTextMetrics { w: s, h: s, ascent: s * 0.8, cap: s * 0.7 }, &mut |_| String::new());
         assert_eq!(placed.len(), 1);
         assert_eq!((placed[0].w, placed[0].h), (150.0, 150.0));
     }
@@ -1645,9 +2016,15 @@ mod tests {
     use super::*;
 
     /// A stand-in text engine: every glyph is half the font size wide, every
-    /// line is the font size tall. Enough to pin layout without a GPU.
-    fn measurer() -> impl FnMut(&str, f32) -> (f32, f32) {
-        |text: &str, size: f32| (text.chars().count() as f32 * size * 0.5, size)
+    /// line is the font size tall with its baseline at 0.8 and capitals 0.7
+    /// high. Enough to pin layout without a GPU.
+    fn measurer() -> impl FnMut(&str, f32, f32) -> HudTextMetrics {
+        |text: &str, size: f32, wrap: f32| {
+            let w = text.chars().count() as f32 * size * 0.5;
+            // Wrapped: as many rows as the width needs, each full.
+            let rows = if wrap > 0.0 { (w / wrap).ceil().max(1.0) } else { 1.0 };
+            HudTextMetrics { w: if rows > 1.0 { wrap } else { w }, h: size * rows, ascent: size * 0.8, cap: size * 0.7 }
+        }
     }
 
     fn texter() -> impl FnMut(&HudElement) -> String {
@@ -1662,6 +2039,131 @@ mod tests {
         let mut m = measurer();
         let mut t = texter();
         layout(doc, w, h, 1.0, &mut m, &mut t)
+    }
+
+    /// An explicit size is room for a readout, never a cut: the "/ 24"
+    /// under a size smaller than its glyphs used to hang out of its plate.
+    #[test]
+    fn a_text_box_never_shrinks_below_its_text() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { stack: HudStack::Row, pad: 10.0, gap: 0.0, ..el("plate", HudKind::Panel) });
+        doc.set(HudElement {
+            parent: "plate".into(),
+            text: "/ 24".into(),
+            glyph: 40.0,
+            size: vec2f(0.0, 20.0),
+            ..el("reserve", HudKind::Text)
+        });
+        let placed = run(&doc, 800.0, 600.0);
+        let plate = placed.iter().find(|p| p.index == 0).unwrap();
+        let text = placed.iter().find(|p| p.index == 1).unwrap();
+        assert_eq!(text.h, 40.0, "the line's own height, not the 20 asked for");
+        assert!(text.y >= plate.y && text.y + text.h <= plate.y + plate.h);
+        // Roomier than the text is kept, and the line centres in it.
+        doc.get_mut("reserve").unwrap().size = vec2f(0.0, 60.0);
+        let placed = run(&doc, 800.0, 600.0);
+        assert_eq!(placed.iter().find(|p| p.index == 1).unwrap().h, 60.0);
+        let m = HudTextMetrics { w: 80.0, h: 40.0, ascent: 32.0, cap: 28.0 };
+        assert_eq!(text_line_top(60.0, 0.0, &m), 10.0);
+    }
+
+    /// A readout's icon is sized on the text's capitals and its width is in
+    /// the measure, so the number after it starts where the plate expects.
+    #[test]
+    fn a_readout_icon_is_sized_on_the_capitals() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { text: "100".into(), glyph: 50.0, icon: "heart".into(), ..el("hp", HudKind::Text) });
+        let placed = run(&doc, 800.0, 600.0);
+        let (d, gap) = text_icon_box(&HudTextMetrics { w: 75.0, h: 50.0, ascent: 40.0, cap: 35.0 });
+        assert_eq!(placed[0].w, 75.0 + d + gap);
+        assert!(d > 35.0 && d < 50.0, "a little over cap height, under the line: {d}");
+    }
+
+    /// `align: "baseline"`: a big magazine count and its small reserve stand
+    /// on one line, and an icon centres on the big one's capitals.
+    #[test]
+    fn a_baseline_row_puts_mixed_sizes_on_one_line() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { stack: HudStack::Row, align: HudAlign::Baseline, pad: 0.0, gap: 4.0, ..el("ammo", HudKind::Panel) });
+        doc.set(HudElement { parent: "ammo".into(), text: "12".into(), glyph: 60.0, ..el("clip", HudKind::Text) });
+        doc.set(HudElement { parent: "ammo".into(), text: "/ 24".into(), glyph: 30.0, ..el("reserve", HudKind::Text) });
+        doc.set(HudElement { parent: "ammo".into(), size: vec2f(20.0, 20.0), ..el("gun", HudKind::Icon) });
+        let placed = run(&doc, 800.0, 600.0);
+        let get = |i: usize| *placed.iter().find(|p| p.index == i).unwrap();
+        let (panel, clip, reserve, gun) = (get(0), get(1), get(2), get(3));
+        let base_clip = clip.y + 60.0 * 0.8;
+        let base_reserve = reserve.y + 30.0 * 0.8;
+        assert!((base_clip - base_reserve).abs() < 1e-3, "{base_clip} vs {base_reserve}");
+        // The icon's centre is half the big capitals above the line.
+        assert!(((gun.y + 10.0) - (base_clip - 60.0 * 0.7 * 0.5)).abs() < 1e-3);
+        // The panel holds all of it.
+        for p in [clip, reserve, gun] {
+            assert!(p.y >= panel.y - 1e-3 && p.y + p.h <= panel.y + panel.h + 1e-3);
+        }
+        assert!((panel.h - 60.0).abs() < 1e-3);
+    }
+
+    /// The lint names what a player calls sloppy: a label out of its box,
+    /// a panel off the pane, two clusters on top of each other, a corner
+    /// cluster eating the view, unreadably small type.
+    #[test]
+    fn the_lint_reports_spills_offscreen_overlaps_bulk_and_tiny_type() {
+        let mut doc = HudDoc::default();
+        doc.set(el("button", HudKind::Panel));
+        doc.set(HudElement { parent: "button".into(), text: "START MATCH".into(), ..el("label", HudKind::Text) });
+        doc.set(el("radar", HudKind::Map));
+        doc.set(el("clock", HudKind::Panel));
+        doc.set(HudElement { anchor: HudAnchor::TopLeft, ..el("hearts", HudKind::Panel) });
+        doc.set(HudElement { text: "hint".into(), ..el("tiny", HudKind::Text) });
+        doc.set(el("dim", HudKind::Panel));
+        let drawn = vec![
+            (0, [100.0, 400.0, 300.0, 60.0]),
+            (1, [150.0, 420.0, 200.0, 52.0]), // 12 px below the button
+            (2, [10.0, 10.0, 200.0, 200.0]),
+            (3, [150.0, 20.0, 200.0, 60.0]), // over the radar's corner
+            (4, [-30.0, 300.0, 60.0, 400.0]), // off the left edge, 40% tall
+            (5, [500.0, 500.0, 40.0, 7.0]),
+            (6, [0.0, 0.0, 1000.0, 1000.0]), // a backdrop: never an overlap
+        ];
+        let issues = lint(&doc, 1000.0, 1000.0, &drawn);
+        let has = |kind: &str, name: &str| issues.iter().any(|i| i.kind == kind && i.element == name);
+        assert!(has("overflow", "label"), "{issues:?}");
+        assert!(has("overlap", "radar") || has("overlap", "clock"), "{issues:?}");
+        assert!(has("offscreen", "hearts"), "{issues:?}");
+        assert!(has("bulky", "hearts"), "{issues:?}");
+        assert!(has("tiny", "tiny"), "{issues:?}");
+        assert!(!issues.iter().any(|i| i.element == "dim"), "{issues:?}");
+        // A laid-out HUD with plates sized to their text has nothing to say.
+        let clean = vec![(0, [100.0, 400.0, 300.0, 60.0]), (1, [150.0, 404.0, 200.0, 52.0])];
+        assert!(lint(&doc, 1000.0, 1000.0, &clean).is_empty());
+    }
+
+    /// A page wider than the pane is laid out again at the scale that fits
+    /// it, children included; a childless backdrop is cut to the pane.
+    #[test]
+    fn a_page_too_big_for_the_pane_shrinks_to_fit_it() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { anchor: HudAnchor::Center, stack: HudStack::Row, pad: 0.0, gap: 0.0, ..el("page", HudKind::Panel) });
+        doc.set(HudElement { parent: "page".into(), size: vec2f(1200.0, 300.0), ..el("body", HudKind::Icon) });
+        doc.set(HudElement { anchor: HudAnchor::Center, size: vec2f(5000.0, 5000.0), ..el("dim", HudKind::Panel) });
+        let placed = run(&doc, 800.0, 600.0);
+        let page = placed.iter().find(|p| p.index == 0).unwrap();
+        let body = placed.iter().find(|p| p.index == 1).unwrap();
+        let dim = placed.iter().find(|p| p.index == 2).unwrap();
+        assert!(page.w <= 800.0 - 2.0 * MARGIN + 0.01 && page.x >= 0.0, "{page:?}");
+        assert!(page.scale < 1.0 && body.scale == page.scale);
+        assert!((body.w - 1200.0 * page.scale).abs() < 0.01);
+        assert_eq!((dim.x, dim.y, dim.w, dim.h), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    /// A text with a width wraps to it and the box grows down, not out.
+    #[test]
+    fn a_text_with_a_width_wraps_inside_it() {
+        let mut doc = HudDoc::default();
+        doc.set(HudElement { text: "Anyone on this network joins this room".into(), glyph: 10.0, size: vec2f(60.0, 0.0), ..el("hint", HudKind::Text) });
+        let p = run(&doc, 800.0, 600.0)[0];
+        assert_eq!(p.w, 60.0);
+        assert!(p.h > 10.0 * 3.0, "{p:?}");
     }
 
     #[test]
@@ -1723,6 +2225,31 @@ mod tests {
         let p = run(&doc, 800.0, 600.0)[0];
         assert_eq!(p.x, MARGIN + 20.0);
         assert_eq!(p.y, MARGIN + 30.0);
+    }
+
+    /// The host's corner (the performance meter): a bottom-anchored root
+    /// over it stacks on top of it, one clear of it stays put, and the lint
+    /// flags a root of another anchor that still covers it.
+    #[test]
+    fn bottom_roots_stack_above_the_reserved_corner_and_the_lint_guards_it() {
+        let mut doc = HudDoc { reserved: vec2f(180.0, 44.0), ..Default::default() };
+        doc.set(HudElement { size: vec2f(100.0, 50.0), anchor: HudAnchor::BottomRight, ..el("ammo", HudKind::Panel) });
+        doc.set(HudElement { size: vec2f(100.0, 50.0), anchor: HudAnchor::BottomLeft, ..el("dash", HudKind::Panel) });
+        doc.set(HudElement { size: vec2f(80.0, 560.0), anchor: HudAnchor::TopRight, ..el("feed", HudKind::Panel) });
+        let placed = run(&doc, 800.0, 600.0);
+        let ammo = placed.iter().find(|p| p.index == 0).unwrap();
+        let dash = placed.iter().find(|p| p.index == 1).unwrap();
+        assert_eq!(ammo.y + ammo.h, 600.0 - 44.0, "lifted onto the meter");
+        assert_eq!(ammo.x + ammo.w, 800.0 - MARGIN, "not pushed sideways");
+        assert_eq!(dash.y + dash.h, 600.0 - MARGIN, "a root clear of the corner stays");
+        let drawn: Vec<(usize, [f32; 4])> = placed.iter().map(|p| (p.index, [p.x, p.y, p.w, p.h])).collect();
+        let issues = lint(&doc, 800.0, 600.0, &drawn);
+        let reserved: Vec<&HudIssue> = issues.iter().filter(|i| i.kind == "reserved").collect();
+        assert_eq!(reserved.len(), 1, "{issues:?}");
+        assert_eq!(reserved[0].element, "feed");
+        doc.reserved = Vec2f::default();
+        let placed = run(&doc, 800.0, 600.0);
+        assert_eq!(placed[0].y + placed[0].h, 600.0 - MARGIN, "no corner, no lift");
     }
 
     /// Everything is in units of 1/1080 of the pane, so the same declaration

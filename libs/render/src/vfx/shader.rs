@@ -325,7 +325,10 @@ script_mod! {
             if self.lin_ctl.x > 0.5 {
                 glow = glow * self.lin_ctl.z
             }
-            let hot = mix(base, vec3(1.0, 1.0, 1.0), clamp(heat * 0.7, 0.0, 1.0))
+            // Hot cores go white, except flames, whose cores go yellow: an
+            // orange mixed toward white reads as peach-pink.
+            let is_fire = step(3.5, sprite) * step(sprite, 4.5)
+            let hot = mix(base, mix(vec3(1.0, 1.0, 1.0), vec3(1.0, 0.72, 0.22), is_fire), clamp(heat * 0.7, 0.0, 1.0))
             let emissive = hot * glow * (1.0 + heat * 1.5)
             // Sun + sky on the sprite's normal, wrapped so the shadow side
             // of a puff is dim rather than black.

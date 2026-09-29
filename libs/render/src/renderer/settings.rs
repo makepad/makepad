@@ -5,10 +5,9 @@ use super::*;
 /// Emission gain in the HDR lane: a glowing window or beacon is a light
 /// source, several times brighter than a lit wall once night exposure opens.
 const HDR_GLOW_GAIN: f32 = 3.0;
-/// Auto-exposure: the mean scene luminance maps to this after exposure, and
-/// it may not drop the exposure below this factor of the metered one.
+/// Auto-exposure: the mean scene luminance maps to this after exposure (its
+/// band around the metered exposure is the grade's, see [`Renderer::set_grade`]).
 const AUTO_EXPOSURE_KEY: f32 = 0.2;
-const AUTO_EXPOSURE_FLOOR: f32 = 0.75;
 
 impl Renderer {
     /// Opt into the linear HDR lighting convention. The HOST must then
@@ -43,7 +42,7 @@ impl Renderer {
     /// The composite's post-chain control for `DrawSceneTexture::post`.
     pub fn composite_post(&self) -> Vec4f {
         if self.hdr_output {
-            vec4(1.0, self.hdr_exposure, if self.fxaa { 1.0 } else { 0.0 }, if self.auto_exposure && self.post.exposure().1 { 1.0 } else { 0.0 })
+            vec4(1.0, self.hdr_exposure, if self.fxaa { 1.0 } else { 0.0 }, if self.auto_exposure && self.grade.auto && self.post.exposure().1 { 1.0 } else { 0.0 })
         } else {
             vec4(0.0, 1.0, 0.0, 0.0)
         }
@@ -58,6 +57,12 @@ impl Renderer {
     /// within a band around the metered exposure.
     pub fn set_auto_exposure(&mut self, on: bool) {
         self.auto_exposure = on;
+    }
+
+    /// The game's colour grade (exposure bias, contrast, saturation, fixed
+    /// or auto exposure and its band); applied in the HDR composite.
+    pub fn set_grade(&mut self, grade: makepad_scene::ColorGrade) {
+        self.grade = grade;
     }
 
     /// Record the HDR post chain (bloom + auto-exposure) for this frame.
@@ -83,11 +88,19 @@ impl Renderer {
         draw.post = self.composite_post();
         draw.texel = vec2(1.0 / texels.x.max(1.0), 1.0 / texels.y.max(1.0));
         let bloom = self.post.bloom().filter(|_| self.hdr_output && self.bloom > 0.0);
+        let g = &self.grade;
+        let finite = |v: f32, d: f32| if v.is_finite() { v } else { d };
         draw.post2 = vec4(
             if bloom.is_some() { self.bloom } else { 0.0 },
             AUTO_EXPOSURE_KEY,
-            AUTO_EXPOSURE_FLOOR,
+            2.0f32.powf(finite(g.auto_min_ev, -0.415).clamp(-8.0, 0.0)),
             1.0 / self.post.levels().max(1) as f32,
+        );
+        draw.grade = vec4(
+            finite(g.contrast, 1.0).clamp(0.25, 4.0),
+            finite(g.saturation, 1.0).clamp(0.0, 4.0),
+            2.0f32.powf(finite(g.auto_max_ev, 0.678).clamp(0.0, 8.0)),
+            2.0f32.powf(finite(g.exposure_ev, 0.0).clamp(-8.0, 8.0)),
         );
         if let Some(bloom) = bloom {
             draw.draw_vars.set_texture(1, bloom);

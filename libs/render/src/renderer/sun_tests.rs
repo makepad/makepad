@@ -46,3 +46,26 @@ fn the_default_sun_is_the_legacy_look() {
     // Flat hemisphere collapses mix(ground, sky, h) to the old constant.
     assert_eq!(sun.sky, sun.ground);
 }
+
+/// A painted sky on a running clock takes the analytic dome — so it sets,
+/// dusks and goes dark — tinted by its palette in daylight and neutral at
+/// night; a painted sky under a fixed hour keeps its gradient.
+#[test]
+fn a_painted_sky_on_a_clock_runs_the_day_cycle() {
+    let mut world = World::new();
+    world.sky = Some(makepad_scene::SkyConfig {
+        top: vec4(0.62, 0.71, 0.84, 1.0),
+        ..Default::default()
+    });
+    world.sun.time_of_day = Some(12.0);
+    world.sun.latitude = 52.0;
+    let noon = crate::sun::solar_dir(12.0, 52.0);
+    assert!(analytic_sky_frame(&world, noon, true, true, false).is_none(), "a fixed hour keeps the painted gradient");
+    let day = analytic_sky_frame(&world, noon, true, true, true).expect("a running clock takes the analytic dome");
+    assert!(day.dome_tint.x > day.dome_tint.z, "a pale, warm top tints the day dome");
+    let night = analytic_sky_frame(&world, crate::sun::solar_dir(0.0, 52.0), true, true, true).unwrap();
+    assert!((night.dome_tint - vec3f(1.0, 1.0, 1.0)).length() < 1.0e-4, "every night is the stock night");
+    world.sky = Some(makepad_scene::SkyConfig::default());
+    let stock = analytic_sky_frame(&world, noon, true, true, false).unwrap();
+    assert_eq!(stock.dome_tint, vec3f(1.0, 1.0, 1.0), "the stock sky is untinted");
+}

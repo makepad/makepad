@@ -258,9 +258,16 @@ impl DesktopInit {
                 vk::KHR_PRESENT_WAIT_NAME.as_ptr(),
             ]);
         }
+        // Block-compressed sampling (BC7, ASTC 4x4) must be enabled to be
+        // used; turn on whatever the device supports.
+        let supported = unsafe { instance.get_physical_device_features(physical_device) };
+        let features = vk::PhysicalDeviceFeatures::default()
+            .texture_compression_bc(supported.texture_compression_bc == vk::TRUE)
+            .texture_compression_astc_ldr(supported.texture_compression_astc_ldr == vk::TRUE);
         let mut info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
-            .enabled_extension_names(&extensions);
+            .enabled_extension_names(&extensions)
+            .enabled_features(&features);
         if desktop.shared.enabled {
             info = info.push_next(&mut timeline);
         }

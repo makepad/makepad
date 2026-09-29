@@ -13,6 +13,8 @@ pub struct GlbPbrTexture {
 pub struct GlbPbrMaterial {
     /// Short fur rendered from repeated surface shells; no strand geometry.
     pub fur: Option<GlbFurMaterial>,
+    /// Foliage wind and clear-coat paint (`extras.makepadShading`).
+    pub shading: Option<GlbShading>,
     pub base_color: [f64; 4],
     pub metallic: f64,
     pub roughness: f64,
@@ -45,6 +47,26 @@ impl GlbFurMaterial {
             && self.density.is_finite() && (0.05..=1.0).contains(&self.density)
             && self.scale.is_finite() && (20.0..=1000.0).contains(&self.scale)
             && self.seed <= 65535
+    }
+}
+/// Makepad shading terms a stock glTF material has no field for, all 0..1:
+/// `wind` sways the vertices with the breeze (more toward the model's top),
+/// `clearcoat` lays a mirror-smooth lacquer over the base lobe (race paint)
+/// and `flake` sparkles metallic flakes under it. `impostor` (metres, 0 =
+/// none) marks the layer as the model's far stand-in: drawn from that
+/// distance on, when the model's other layers stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlbShading {
+    pub wind: f64,
+    pub clearcoat: f64,
+    pub flake: f64,
+    pub impostor: f64,
+}
+
+impl GlbShading {
+    pub fn valid(self) -> bool {
+        [self.wind, self.clearcoat, self.flake].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            && self.impostor.is_finite() && (0.0..=100_000.0).contains(&self.impostor)
     }
 }
 #[derive(Clone, Debug)]
@@ -143,6 +165,9 @@ pub fn augment_glb_pbr(
         if m.fur.is_some_and(|fur| !fur.valid()) {
             return Err(validation("invalid fur material"));
         }
+        if m.shading.is_some_and(|s| !s.valid()) {
+            return Err(validation("invalid shading material"));
+        }
         if m.base_color
             .iter()
             .chain(&m.emissive)
@@ -215,6 +240,14 @@ pub fn augment_glb_pbr(
                 ("density", JsonValue::F64(fur.density)),
                 ("scale", JsonValue::F64(fur.scale)),
                 ("seed", number(fur.seed as usize)),
+            ]));
+        }
+        if let Some(s) = m.shading {
+            extras.insert("makepadShading".into(), object([
+                ("wind", JsonValue::F64(s.wind)),
+                ("clearcoat", JsonValue::F64(s.clearcoat)),
+                ("flake", JsonValue::F64(s.flake)),
+                ("impostor", JsonValue::F64(s.impostor)),
             ]));
         }
         if !mip_maps.is_empty() { extras.insert("makepadMips".into(), JsonValue::Object(mip_maps)); }

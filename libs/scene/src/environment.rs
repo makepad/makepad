@@ -39,6 +39,41 @@ impl Default for SkyConfig {
     }
 }
 
+/// A game's colour grade (`game.grade({...})`), applied where the HDR
+/// composite tone maps. Every default reproduces the stock look.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorGrade {
+    /// Exposure bias in EV on top of the metered (and adapted) exposure.
+    pub exposure_ev: f32,
+    /// Contrast about mid-grey, in the tone map's log domain (1 = stock).
+    pub contrast: f32,
+    /// Saturation multiplier (1 = stock).
+    pub saturation: f32,
+    /// Auto-exposure on; off holds the metered exposure (plus the bias).
+    pub auto: bool,
+    /// How far auto-exposure may move from the metered exposure, in EV.
+    pub auto_min_ev: f32,
+    pub auto_max_ev: f32,
+    /// Screen-space ambient occlusion strength multiplier (1 = stock): how
+    /// dark corners, wall feet and the undersides of things read.
+    pub ao: f32,
+}
+
+impl Default for ColorGrade {
+    fn default() -> Self {
+        Self {
+            exposure_ev: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            auto: true,
+            // x0.75 .. x1.6 of the metered exposure.
+            auto_min_ev: -0.415,
+            auto_max_ev: 0.678,
+            ao: 1.0,
+        }
+    }
+}
+
 /// What `game.sun({...})` asked for. The sim stores only the request — it
 /// cannot depend on `makepad_draw`, so the renderer resolves this against
 /// the shared `SceneSun` model (see game_render's `resolve_sun`). Lighting

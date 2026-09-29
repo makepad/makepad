@@ -12,7 +12,7 @@ pub const LAYER_KINDS: &[&str] = &[
     "shirt", "tshirt", "tank", "sweater", "hoodie", "jacket", "vest", "plate_carrier", "chest_rig", "armor",
     "pants", "cargo", "shorts", "suit", "gi", "overalls", "belt", "gloves", "wraps", "boots", "shoes", "sneakers",
     "helmet", "cap", "beanie", "balaclava", "headband", "headset", "goggles", "glasses", "scarf",
-    "backpack", "holster", "armband", "barefoot", "shin_wraps", "gauntlets", "knee_pads", "elbow_pads", "shoulder_pads", "bracers", "greaves", "cape_collar",
+    "backpack", "holster", "armband", "dump_pouch", "sling", "patch", "barefoot", "shin_wraps", "gauntlets", "knee_pads", "elbow_pads", "shoulder_pads", "bracers", "greaves", "cape_collar",
 ];
 
 /// Default colours for a layer from the character's palette.
@@ -31,11 +31,11 @@ pub(crate) fn tex_for(l: &Layer, d: Tex) -> Tex { l.tex.unwrap_or(d) }
 pub(crate) struct HeadCover { pub balaclava: Option<[f64; 3]>, pub hair: bool, pub ears: bool, pub mouth_visible: bool }
 pub(crate) fn head_cover(sp: &CharacterSpec) -> HeadCover {
     let bal = sp.layer("balaclava").map(|l| l.color);
-    let full_helmet = sp.layer("helmet").is_some_and(|l| l.style == "racing" || l.style == "full");
+    let full_helmet = sp.layer("helmet").is_some_and(|l| l.style == "racing" || l.style == "full" || l.style == "visor");
     HeadCover {
         balaclava: bal,
         // Short hair stays under a helmet: it shows at the temples and nape.
-        hair: bal.is_some() || full_helmet || sp.has("helmet") && !matches!(sp.hair.as_str(), "buzz" | "short" | "long" | "ponytail" | "bob"),
+        hair: bal.is_some() || full_helmet || sp.has("helmet") && !matches!(sp.hair.as_str(), "long" | "ponytail" | "bob"),
         ears: bal.is_some() || full_helmet,
         mouth_visible: bal.is_none() && !full_helmet,
     }
@@ -57,8 +57,12 @@ pub(crate) fn wardrobe(g: &mut Gen) -> Wardrobe {
             "shirt" | "tshirt" | "sweater" | "hoodie" => {
                 let t = if l.kind == "sweater" || l.kind == "hoodie" { Tex::Knit } else { Tex::Fabric };
                 let id = m(g, t);
-                w.torso.push((shirt_low, top, id, 0.));
-                let sleeves = if l.style.is_empty() { if l.kind == "tshirt" { "short" } else { "long" } } else { l.style.as_str() };
+                // Combat shirts have a mock collar up the neck; the torso paint
+                // then runs to the collar so no skin ring shows between them.
+                let combat = l.style == "combat";
+                w.torso.push((shirt_low, if combat { top + 0.03 * u } else { top }, id, 0.));
+                if combat { w.neck = Some(id); }
+                let sleeves = if l.style.is_empty() || l.style == "combat" { if l.kind == "tshirt" { "short" } else { "long" } } else { l.style.as_str() };
                 match sleeves { "short" => w.arm.push((-1., 0.48, id)), "none" => {}, "three_quarter" => w.arm.push((-1., 1.45, id)), _ => w.arm.push((-1., 1.96, id)) }
             }
             "tank" => { let id = m(g, Tex::Fabric); w.torso.push((shirt_low, g.b.armpit + 0.02 * u, id, 0.)); }
@@ -202,9 +206,10 @@ fn torso_shell_rings(b: &Body, y0: f64, y1: f64, grow: f64, boxy: f64) -> Vec<Ri
         (mix(b.waist_y, b.chest_y, 0.5), mix(ww[0], cw[0], 0.6), mix(ww[1], cw[1], 0.55), mix(ww[2], cw[2], 0.6)),
         (b.chest_y, cw[0], cw[1], cw[2]),
         (b.armpit, cw[0] * 1.03, cw[1] * 0.96, cw[2] * 1.02),
-        (b.sh - 0.06 * u, b.sh_half - 0.03 * u, cw[1] * 0.8, cw[2] * 0.86),
-        (b.sh - 0.03 * u, b.sh_half - 0.045 * u, cw[1] * 0.66, cw[2] * 0.74),
-        (b.sh - 0.005 * u, mix(b.sh_half - 0.05 * u, b.neck_r * 1.6, 0.45), cw[1] * 0.55, cw[2] * 0.62),
+        (b.sh - 0.06 * u, b.shoulder_x() + 0.012 * u, cw[1] * 0.8, cw[2] * 0.86),
+        (b.sh - 0.03 * u, b.shoulder_x() + 0.004 * u, cw[1] * 0.66, cw[2] * 0.74),
+        (b.sh - 0.005 * u, mix(b.shoulder_x(), b.neck_r * 1.6, 0.35), cw[1] * 0.55, cw[2] * 0.62),
+        (mix(b.sh, b.nb, 0.5), mix(b.shoulder_x(), b.neck_r * 1.32, 0.65), cw[1] * 0.5, cw[2] * 0.56),
         (b.nb, b.neck_r * 1.32, b.neck_r * 1.12, b.neck_r * 1.18),
     ];
     let key: Vec<Ring> = rows.iter().map(|&(y, x, f, bk)| { let mut r = Ring::new([0., y, 0.], [1., 0., 0.], [0., 0., 1.], x + grow, 1., Vec::new()); r.rz = [bk + grow, f + grow]; r.exp = 2.3 + boxy; r }).collect();
@@ -227,11 +232,11 @@ fn torso_shell_rings(b: &Body, y0: f64, y1: f64, grow: f64, boxy: f64) -> Vec<Ri
 /// Arm rings for a sleeve between chain parameters t0..t1 (0 shoulder,
 /// 1 elbow, 2 wrist), grown outward.
 fn arm_shell_rings(b: &Body, side: usize, t0: f64, t1: f64, grow: f64, puff: f64) -> Vec<(Ring, f64)> {
-    let u = b.u; let l = b.limb;
+    let u = b.u; let l = b.arm_limb();
     let [p0, p1, p2, _] = b.arm[side];
     let d1 = norm(sub(p1, p0)); let d2 = norm(sub(p2, p1));
     let (l1, l2) = (length(sub(p1, p0)), length(sub(p2, p1)));
-    let keys: [(f64, f64); 11] = [(-0.16, 0.05), (-0.02, 0.062), (0.18, 0.061), (0.45, 0.054), (0.7, 0.048), (0.9, 0.041), (1.0, 0.039), (1.12, 0.045), (1.3, 0.046), (1.55, 0.041), (1.8, 0.033)];
+    let keys: [(f64, f64); 11] = [(-0.16, 0.04), (-0.02, 0.055), (0.18, 0.058), (0.45, 0.054), (0.7, 0.048), (0.9, 0.041), (1.0, 0.039), (1.12, 0.045), (1.3, 0.046), (1.55, 0.041), (1.8, 0.033)];
     let keys: Vec<(f64, f64)> = keys.iter().copied().chain([(1.97, 0.029), (2.04, 0.029)]).collect();
     let radius = |t: f64| { for i in 0..keys.len() - 1 { if t <= keys[i + 1].0 { let k = ((t - keys[i].0) / (keys[i + 1].0 - keys[i].0)).clamp(0., 1.); return mix(keys[i].1, keys[i + 1].1, k); } } keys[keys.len() - 1].1 };
     let n = (((t1 - t0) / 0.1).ceil() as usize).max(2);
@@ -252,10 +257,10 @@ pub(crate) fn arm_weight(b: &Body, side: usize, t: f64) -> W {
     let d_el = if t <= 1. { (t - 1.) * l1 } else { (t - 1.) * l2 };
     let mut w = wmix(&ua, &la, smooth01(-0.06 * u, 0.054 * u, d_el));
     w = wmix(&w, &hd, smooth01(-0.02 * u, 0.02 * u, (t - 2.) * l2));
-    wmix(&wmix(&sh, &ua, 0.55), &w, smooth01(-0.04 * u, 0.1 * u, t * l1))
+    wmix(&wmix(&sh, &ua, 0.3), &w, smooth01(-0.04 * u, 0.1 * u, t * l1))
 }
 fn leg_shell_rings(b: &Body, side: usize, t0: f64, t1: f64, grow: f64, flare: f64) -> Vec<Ring> {
-    let u = b.u; let l = b.limb;
+    let u = b.u; let l = b.leg_limb();
     let x = sfx(side);
     let [hip, kn, an, _, _, _] = b.leg[side];
     let d1 = norm(sub(kn, hip)); let d2 = norm(sub(an, kn));
@@ -315,13 +320,20 @@ pub(crate) fn build(g: &mut Gen) {
             "jacket" => {
                 let m = mat(g, if l.style == "leather" { Tex::Leather } else { Tex::Fabric });
                 let lining = g.mats.id(MatDef::new(l.color2, Tex::Fabric));
-                let grow = 0.014 * u;
-                let rings = torso_shell_rings(b, b.hipj - 0.04 * u, b.nb + 0.005 * u, grow, 0.);
+                let grow = 0.01 * u;
+                let rings = torso_shell_rings(b, b.hipj - 0.04 * u, b.nb + 0.005 * u, grow, 0.5);
                 let bb = b;
                 let wf = move |p: [f64; 3], _: usize| torso_weight_pub(bb, p);
                 let open = l.open;
                 let skip = move |theta: f64| open && front_angle(theta).abs() < 0.28;
                 shell(&mut part, &rings, 32, m, lining, 0.012 * u, Some(&wf), Some(&skip));
+                // Seams that break up the back: a yoke band across the
+                // shoulder blades and a hem band, in the lining colour.
+                let seam = g.mats.id(MatDef::new(l.color.map(|c| c * 0.62), Tex::Fabric));
+                let yoke = torso_shell_rings(b, b.armpit + 0.005 * u, b.armpit + 0.018 * u, grow + 0.002 * u, 0.5);
+                shell(&mut part, &yoke, 32, seam, seam, 0.002 * u, Some(&wf), Some(&skip));
+                let hem = torso_shell_rings(b, b.hipj - 0.04 * u, b.hipj - 0.005 * u, grow + 0.003 * u, 0.5);
+                shell(&mut part, &hem, 32, seam, seam, 0.003 * u, Some(&wf), Some(&skip));
                 // Collar: a standing band that flares out.
                 let top = rings[rings.len() - 1].clone();
                 let collar: Vec<Ring> = (0..4).map(|i| { let t = i as f64 / 3.; let mut r = top.scaled(1. + 0.12 * t, 0.004 * u); r.c = add(r.c, [0., 0.03 * u * t, 0.006 * u * t]); r.w = wmix(&w1(j("chest")), &w1(j("neck")), t * 0.7); r }).collect();
@@ -349,11 +361,12 @@ pub(crate) fn build(g: &mut Gen) {
                 let (s0, e) = (rings[0].c, rings[6].c);
                 tube(&mut part, &rings, 14, Cap::Point(s0), Cap::Point(e), &|_, _| m, 1., 0., None);
             }
-            "vest" | "plate_carrier" | "armor" => {
-                let (m, t) = if l.kind == "armor" { (mat(g, Tex::Metal), 0.03) } else { (mat(g, Tex::Nylon), if l.kind == "vest" { 0.018 } else { 0.034 }) };
+            "plate_carrier" => plate_carrier(g, &mut part, &mut hard, b, l),
+            "vest" | "armor" => {
+                let (m, t) = if l.kind == "armor" { (mat(g, Tex::Metal), 0.03) } else { (mat(g, Tex::Nylon), 0.018) };
                 let dark = g.mats.id(MatDef::new(l.color.map(|c| c * 0.55), Tex::Nylon));
                 let y0 = if l.kind == "vest" { b.hipj + 0.02 * u } else { b.waist_y - 0.03 * u };
-                let rings = torso_shell_rings(b, y0, b.armpit + 0.03 * u, t * u, if l.kind == "vest" { 0.3 } else { 1.2 });
+                let rings = torso_shell_rings(b, y0, b.armpit - if l.kind == "vest" { -0.03 } else { 0.005 } * u, t * u, if l.kind == "vest" { 0.3 } else { 0.7 });
                 let bb = b;
                 let wf = move |p: [f64; 3], _: usize| torso_weight_pub(bb, p);
                 shell(&mut part, &rings, 32, m, dark, 0.012 * u, Some(&wf), None);
@@ -366,34 +379,6 @@ pub(crate) fn build(g: &mut Gen) {
                     let rings: Vec<Ring> = pts.iter().enumerate().map(|(i, &p)| { let tan = norm(sub(pts[(i + 1).min(4)], pts[i.saturating_sub(1)])); Ring::around(p, tan, [1., 0., 0.], 0.03 * u, 0.008 * u, wmix(&w1(j("chest")), &w1(j(&format!("shoulder_{}", sfx(side)))), 0.3 * (i == 2) as i32 as f64)) }).collect();
                     tube(&mut hard, &rings, 8, Cap::Point(pts[0]), Cap::Point(pts[4]), &|_, _| dark, 1., 0., None);
                 }
-                if l.kind == "plate_carrier" {
-                    // Three rifle-magazine pouches across the front, and a radio pouch.
-                    let front_z = -(b.chest_w[1] + t * u) - 0.012 * u;
-                    for k in 0..3 {
-                        let x = (k as f64 - 1.) * 0.07 * u;
-                        rounded_box(&mut hard, [x, b.waist_y + 0.07 * u, front_z - 0.012 * u], [0.03 * u, 0.055 * u, 0.02 * u], ID3, 4., w1(j("spine")), m, 16);
-                        rounded_box(&mut hard, [x, b.waist_y + 0.125 * u, front_z - 0.014 * u], [0.032 * u, 0.012 * u, 0.022 * u], ID3, 5., w1(j("spine")), dark, 12);
-                    }
-                    // Magazine bodies standing out of the open pouch tops.
-                    let mag = g.mats.id(MatDef::new(hex("#2b2a27"), Tex::Plastic));
-                    for k in 0..3 {
-                        let x = (k as f64 - 1.) * 0.07 * u;
-                        rounded_box(&mut hard, [x, b.waist_y + 0.145 * u, front_z - 0.014 * u], [0.022 * u, 0.02 * u, 0.012 * u], rot_x(8.), 6., w1(j("spine")), mag, 10);
-                    }
-                    // Radio with a stubby antenna on the chest, flashlight on the shoulder strap.
-                    let radio = [0.13 * u, b.chest_y + 0.02 * u, front_z - 0.004 * u];
-                    rounded_box(&mut hard, radio, [0.022 * u, 0.045 * u, 0.018 * u], ID3, 4., w1(j("chest")), dark, 12);
-                    let ant: Vec<Ring> = (0..4).map(|i| Ring::around(add(radio, [0.008 * u, 0.045 * u + 0.03 * u * i as f64, 0.]), [0., 1., 0.], [1., 0., 0.], 0.004 * u * (1. - 0.2 * i as f64), 0.004 * u * (1. - 0.2 * i as f64), w1(j("chest")))).collect();
-                    let top = ant[3].c;
-                    tube(&mut hard, &ant, 6, Cap::Open, Cap::Point(add(top, [0., 0.004 * u, 0.])), &|_, _| mag, 1., 0., None);
-                    let lamp = [-0.13 * u, b.chest_y + 0.07 * u, front_z + 0.006 * u];
-                    let lamp_rings: Vec<Ring> = (0..3).map(|i| Ring::around(add(lamp, [0., 0., -0.02 * u * i as f64]), [0., 0., -1.], [1., 0., 0.], 0.012 * u, 0.012 * u, w1(j("chest")))).collect();
-                    let lens_c = lamp_rings[2].c;
-                    tube(&mut hard, &lamp_rings, 10, Cap::Point(lamp), Cap::Point(lens_c), &|_, _| mag, 1., 0., None);
-                    // Name tape / patch in the accent colour.
-                    let patch = g.mats.id(MatDef::new(l.color2, Tex::Fabric));
-                    rounded_box(&mut hard, [-0.08 * u, b.chest_y + 0.035 * u, front_z + 0.006 * u], [0.035 * u, 0.018 * u, 0.004 * u], ID3, 6., w1(j("chest")), patch, 10);
-                }
                 if l.kind == "armor" {
                     let trim = g.mats.id(MatDef::new(l.color2, Tex::Metal));
                     rounded_box(&mut hard, [0., b.chest_y + 0.02 * u, -(b.chest_w[1] + t * u) - 0.004 * u], [b.chest_w[0] * 0.75, 0.1 * u, 0.02 * u], ID3, 3., w1(j("chest")), trim, 18);
@@ -404,7 +389,12 @@ pub(crate) fn build(g: &mut Gen) {
                 let dark = g.mats.id(MatDef::new(l.color.map(|c| c * 0.6), Tex::Nylon));
                 let fz = -b.chest_w[1] - 0.01 * u;
                 // Panel with four pouches, straps over the shoulders.
-                rounded_box(&mut hard, [0., b.chest_y - 0.02 * u, fz - 0.01 * u], [b.chest_w[0] * 0.95, 0.06 * u, 0.018 * u], ID3, 4., w1(j("chest")), m, 16);
+                rounded_box(&mut hard, [0., b.chest_y - 0.02 * u, fz - 0.014 * u], [b.chest_w[0] * 0.95, 0.065 * u, 0.028 * u], ID3, 4., w1(j("chest")), m, 16);
+                // Side straps round the ribs to the back.
+                let bb = b;
+                let wfr = move |p: [f64; 3], _: usize| torso_weight_pub(bb, p);
+                let band = torso_shell_rings(b, b.chest_y - 0.045 * u, b.chest_y - 0.01 * u, 0.012 * u, 0.3);
+                shell(&mut part, &band, 28, dark, dark, 0.004 * u, Some(&wfr), None);
                 for k in 0..4 {
                     let x = (k as f64 - 1.5) * 0.058 * u;
                     rounded_box(&mut hard, [x, b.chest_y - 0.035 * u, fz - 0.035 * u], [0.025 * u, 0.05 * u, 0.017 * u], ID3, 4., w1(j("chest")), m, 12);
@@ -526,24 +516,72 @@ pub(crate) fn build(g: &mut Gen) {
                 for side in 0..2 {
                     let rs: Vec<Ring> = arm_shell_rings(b, side, -0.16, 1.93, grow * 0.9, 0.6).into_iter().map(|(r, _)| r).collect();
                     shell(&mut part, &rs, 16, m, m, 0.005 * u, None, None);
+                    // Cuff and an elbow fold.
+                    let cuff: Vec<Ring> = arm_shell_rings(b, side, 1.84, 1.94, grow * 1.6, 0.).into_iter().map(|(r, _)| r).collect();
+                    shell(&mut part, &cuff, 16, m, m, 0.003 * u, None, None);
+                    let fold: Vec<Ring> = arm_shell_rings(b, side, 0.96, 1.08, grow * 1.5, 0.).into_iter().map(|(r, _)| r).collect();
+                    shell(&mut part, &fold, 16, m, m, 0.003 * u, None, None);
                 }
             }
             "pants" | "cargo" => {
                 let m = mat(g, if l.kind == "cargo" { Tex::Nylon } else { Tex::Denim });
                 let hem = if l.style == "rolled" { 1.8 } else { 1.97 };
                 let bottom = if sp.has("boots") { sp.layer("boots").map_or(1.5, |b| if b.style == "low" { 1.76 } else { 1.52 }) + 0.04 } else { hem };
+                // Seat and fly: the trousers stand off the hips instead of painting them.
+                // Thin: the hip rows are already full, and the leg shells overlap the seat.
+                let grow = if l.kind == "cargo" { 0.006 } else { 0.003 } * u;
+                let seat = torso_shell_rings(b, b.crotch + 0.01 * u, b.hipj + 0.1 * u, grow, 0.);
+                let bb = b;
+                let wfs = move |p: [f64; 3], _: usize| torso_weight_pub(bb, p);
+                shell(&mut part, &seat, 32, m, m, 0.005 * u, Some(&wfs), None);
                 for side in 0..2 {
                     let x = sfx(side);
                     let rs = leg_shell_rings(b, side, -0.02, bottom, if l.kind == "cargo" { 0.013 } else { 0.007 } * u, if l.kind == "cargo" { 0.008 } else { 0.004 } * u);
                     shell(&mut part, &rs, 20, m, m, 0.006 * u, None, None);
+                    // Bloused hem: a fuller roll where the trouser meets the boot.
+                    if sp.has("boots") {
+                        let blouse = leg_shell_rings(b, side, bottom - 0.08, bottom, 0.019 * u, 0.01 * u);
+                        shell(&mut part, &blouse, 20, m, m, 0.008 * u, None, None);
+                    }
                     // A thigh cargo pocket.
                     let [hip, kn, _, _, _, _] = b.leg[side];
                     let sg = side_sign(side);
                     if l.kind == "cargo" {
-                        let c = add(lerp3(hip, kn, 0.55), [sg * 0.085 * u * b.limb, 0., -0.01 * u]);
+                        let c = add(lerp3(hip, kn, 0.55), [sg * 0.085 * u * b.leg_limb(), 0., -0.01 * u]);
                         rounded_box(&mut hard, c, [0.016 * u, 0.06 * u, 0.05 * u], ID3, 4., w1(j(&format!("upper_leg_{x}"))), m, 12);
                     }
                 }
+            }
+            "dump_pouch" => {
+                // Rolled dump pouch on the left hip, behind the belt line.
+                let m = mat(g, Tex::Nylon);
+                let dark = g.mats.id(MatDef::new(l.color.map(|c| c * 0.6), Tex::Nylon));
+                let c = [-(b.hip_w[0] + 0.03 * u), b.hipj + 0.02 * u, 0.05 * u];
+                rounded_box(&mut hard, c, [0.03 * u, 0.07 * u, 0.06 * u], rot_y(-20.), 3., w1(j("hips")), m, 14);
+                rounded_box(&mut hard, add(c, [0., 0.07 * u, 0.]), [0.034 * u, 0.012 * u, 0.064 * u], rot_y(-20.), 5., w1(j("hips")), dark, 10);
+            }
+            "sling" => {
+                // Two-point rifle sling: left shoulder front, across the back to the right hip.
+                let m = mat(g, Tex::Nylon);
+                let front = torso_depth_front(b, b.chest_y) + 0.03 * u;
+                let pts = [[-0.1 * u, b.sh + 0.02 * u, -0.02 * u], [-0.06 * u, b.chest_y + 0.06 * u, -front], [0.06 * u, b.waist_y + 0.02 * u, -front * 0.95], [0.16 * u, b.hipj + 0.04 * u, -0.06 * u], [0.12 * u, b.hipj + 0.1 * u, b.hip_w[2] + 0.02 * u], [-0.05 * u, b.chest_y, b.chest_w[2] + 0.04 * u], [-0.1 * u, b.sh + 0.02 * u, 0.04 * u]];
+                let n = pts.len();
+                let rings: Vec<Ring> = pts.iter().enumerate().map(|(i, &p)| { let tan = norm(sub(pts[(i + 1).min(n - 1)], pts[i.saturating_sub(1)])); let bb = b; Ring::around(p, tan, norm([p[0], 0., p[2]]), 0.004 * u, 0.016 * u, torso_weight_pub(bb, p)) }).collect();
+                tube(&mut hard, &rings, 6, Cap::Point(pts[0]), Cap::Point(pts[n - 1]), &|_, _| m, 1., 0., None);
+            }
+            "patch" => {
+                // Two-tone shoulder flag patch on the upper right arm (original design, no insignia).
+                let a = mat(g, Tex::Fabric);
+                let c2 = g.mats.id(MatDef::new(l.color2, Tex::Fabric));
+                let [p0, p1, _, _] = b.arm[1];
+                let d = norm(sub(p1, p0));
+                let out = norm(cross(d, [0., 0., 1.]));
+                let out = if out[0] < 0. { mul(out, -1.) } else { out };
+                let c = add(lerp3(p0, p1, 0.3), mul(out, 0.055 * u * b.arm_limb()));
+                let frame = [cross(out, d), d, out];
+                let rot = [frame[0], frame[1], frame[2]];
+                rounded_box(&mut hard, c, [0.03 * u, 0.022 * u, 0.004 * u], rot, 6., w1(j("upper_arm_r")), a, 10);
+                rounded_box(&mut hard, add(c, mul(d, -0.01 * u)), [0.031 * u, 0.007 * u, 0.0045 * u], rot, 6., w1(j("upper_arm_r")), c2, 8);
             }
             "armband" => {
                 // High-value team band round both upper arms (reads at 40 m).
@@ -588,7 +626,7 @@ pub(crate) fn build(g: &mut Gen) {
                 for side in 0..2 {
                     let x = sfx(side);
                     let [_, kn, _, _, _, _] = b.leg[side];
-                    rounded_box(&mut hard, add(kn, [0., -0.012 * u, -0.06 * u * b.limb]), [0.05 * u, 0.058 * u, 0.022 * u], rot_x(-6.), 3., w1(j(&format!("lower_leg_{x}"))), m, 16);
+                    rounded_box(&mut hard, add(kn, [0., -0.012 * u, -0.06 * u * b.leg_limb()]), [0.05 * u, 0.058 * u, 0.022 * u], rot_x(-6.), 3., w1(j(&format!("lower_leg_{x}"))), m, 16);
                 }
             }
             "elbow_pads" => {
@@ -596,7 +634,7 @@ pub(crate) fn build(g: &mut Gen) {
                 for side in 0..2 {
                     let x = sfx(side);
                     let [_, el, _, _] = b.arm[side];
-                    rounded_box(&mut hard, add(el, [0., 0., 0.045 * u * b.limb]), [0.04 * u, 0.045 * u, 0.016 * u], ID3, 3., w1(j(&format!("lower_arm_{x}"))), m, 12);
+                    rounded_box(&mut hard, add(el, [0., 0., 0.045 * u * b.arm_limb()]), [0.04 * u, 0.045 * u, 0.016 * u], ID3, 3., w1(j(&format!("lower_arm_{x}"))), m, 12);
                 }
             }
             "shoulder_pads" => {
@@ -606,7 +644,7 @@ pub(crate) fn build(g: &mut Gen) {
                     let sg = side_sign(side);
                     let [p0, _, _, _] = b.arm[side];
                     let c = add(p0, [sg * 0.02 * u, 0.035 * u, 0.]);
-                    let r = 0.085 * u * b.limb;
+                    let r = 0.085 * u * b.arm_limb();
                     let f = move |q: [f64; 3]| add(c, [q[0] * r * 1.05, q[1].max(-0.2) * r * 0.7, q[2] * r * 1.1]);
                     blob(&mut hard, c, [0., 1., 0.], [1., 0., 0.], 18, 10, &f, &|_| wmix(&w1(j(&format!("shoulder_{x}"))), &w1(j(&format!("upper_arm_{x}"))), 0.6), &|_, _| m, 1.);
                 }
@@ -623,7 +661,7 @@ pub(crate) fn build(g: &mut Gen) {
                 let m = mat(g, Tex::Nylon);
                 let dark = g.mats.id(MatDef::new(hex("#18181a"), Tex::Plastic));
                 let [hip, kn, _, _, _, _] = b.leg[1];
-                let c = add(lerp3(hip, kn, 0.3), [0.075 * u * b.limb, 0., 0.01 * u]);
+                let c = add(lerp3(hip, kn, 0.3), [0.075 * u * b.leg_limb(), 0., 0.01 * u]);
                 rounded_box(&mut hard, c, [0.018 * u, 0.075 * u, 0.04 * u], ID3, 4., w1(j("upper_leg_r")), m, 14);
                 rounded_box(&mut hard, add(c, [0.004 * u, 0.09 * u, -0.012 * u]), [0.014 * u, 0.03 * u, 0.018 * u], rot_x(-15.), 4., w1(j("upper_leg_r")), dark, 10);
                 g.sockets.push(("hip.r".into(), j("upper_leg_r"), c, [0., 0., 0., 1.]));
@@ -639,11 +677,26 @@ pub(crate) fn build(g: &mut Gen) {
             "scarf" => {
                 let m = mat(g, tex_for(l, Tex::Knit));
                 let y = b.nb + 0.012 * u;
-                let rings: Vec<Ring> = (0..3).map(|i| Ring::new([0., y + 0.02 * u * i as f64 - 0.02 * u, 0.004 * u], [1., 0., 0.], [0., 0., 1.], b.neck_r * 1.55 - 0.004 * u * i as f64, b.neck_r * 1.5, wmix(&w1(j("chest")), &w1(j("neck")), 0.5))).collect();
-                shell(&mut part, &rings, 24, m, m, 0.01 * u, None, None);
-                let tail: Vec<Ring> = (0..5).map(|i| { let t = i as f64 / 4.; Ring::around([0.05 * u + 0.02 * u * t, y - 0.01 * u - 0.16 * u * t, -b.neck_r * 1.4 - 0.02 * u - 0.02 * u * t], [0.15, -1., -0.1], [1., 0., 0.], 0.035 * u, 0.008 * u, w1(j("chest"))) }).collect();
-                let (s0, e) = (tail[0].c, tail[4].c);
-                tube(&mut part, &tail, 8, Cap::Point(s0), Cap::Point(e), &|_, _| m, 1., 0., None);
+                // A bulky wrap round the neck (a fat ring of cloth, lower at
+                // the front), a knot at the throat and two hanging tails.
+                let ww = wmix(&w1(j("chest")), &w1(j("neck")), 0.5);
+                let n = 20;
+                let wrap: Vec<Ring> = (0..=n).map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / n as f64;
+                    let front = (0.5 - 0.5 * a.cos()).powi(2);
+                    let c = [a.sin() * b.neck_r * 1.45, y - 0.03 * u * front + 0.006 * u, -a.cos() * b.neck_r * 1.4 + 0.006 * u];
+                    let tan = [a.cos(), 0., a.sin()];
+                    Ring::around(c, tan, [0., 1., 0.], 0.04 * u, 0.016 * u, ww.clone())
+                }).collect();
+                tube(&mut part, &wrap, 10, Cap::Open, Cap::Open, &|_, _| m, 1., 0., None);
+                let knot = [0.02 * u, y - 0.035 * u, -b.neck_r * 1.45 - 0.015 * u];
+                rounded_box(&mut part, knot, [0.022 * u, 0.02 * u, 0.014 * u], ID3, 2.4, w1(j("chest")), m, 12);
+                for (k, dx) in [(0usize, -0.03), (1, 0.04)] {
+                    let len = if k == 0 { 0.2 } else { 0.14 } * u;
+                    let tail: Vec<Ring> = (0..6).map(|i| { let t = i as f64 / 5.; let c = add(knot, [dx * u * t, -len * t, -0.01 * u * t - 0.012 * u * (PI * t).sin()]); Ring::around(c, [0.05, -1., -0.1], [1., 0., 0.], 0.032 * u * (1. + 0.15 * t), 0.007 * u, w1(j("chest"))) }).collect();
+                    let (s0, e) = (tail[0].c, tail[5].c);
+                    tube(&mut part, &tail, 8, Cap::Point(s0), Cap::Point(e), &|_, _| m, 1., 0., None);
+                }
             }
             "helmet" | "cap" | "beanie" | "headband" | "headset" | "goggles" | "glasses" => headgear(g, &mut part, &mut hard, &face, l),
             _ => {}
@@ -661,6 +714,102 @@ pub(crate) fn build(g: &mut Gen) {
     g.sockets.push(("head".into(), j("head"), add(hp, [0., g.b.hh * 0.45, 0.]), [0., 0., 0., 1.]));
     if !part.is_empty() { g.parts.push(part); }
     if !hard.is_empty() { g.parts.push(hard); }
+}
+
+/// Plate carrier: a rigid front and back plate bag (flat, tilted to the
+/// chest, with a shooter's cut at the top corners), a cummerbund round the
+/// ribs, shoulder straps, webbing rows, magazine pouches, a radio, a light
+/// and a name tape. Plates are rigid pieces, so they stay flat when the
+/// torso bends instead of creasing like cloth.
+fn plate_carrier(g: &mut Gen, part: &mut Part, hard: &mut Part, b: &Body, l: &Layer) {
+    let u = b.u;
+    let m = g.mats.id(MatDef { color2: Some(l.color2), ..MatDef::new(l.color, tex_for(l, Tex::Nylon)) });
+    let dark = g.mats.id(MatDef::new(l.color.map(|c| c * 0.55), Tex::Nylon));
+    let web = g.mats.id(MatDef::new(l.color.map(|c| c * 0.72), Tex::Nylon).rough(0.9));
+    let shirt = 0.009 * u;
+    let (y0, y1) = (b.waist_y - 0.025 * u, b.armpit + 0.035 * u);
+    let yc = (y0 + y1) * 0.5;
+    let half_t = 0.017 * u;
+    let pw = b.chest_w[0] * 0.66;
+    let plate_w = wmix(&w1(j("spine")), &w1(j("chest")), 0.7);
+    // Front or back plate: its centre, rotation and the outer surface z at a height.
+    let plate = |back: bool| {
+        let depth = |y: f64| { let r = torso_shell_rings(b, y - 0.001, y + 0.001, 0., 0.); r.first().map_or(b.chest_w[1], |r| if back { r.rz[0] } else { r.rz[1] }) };
+        // Rest the plate on the most prominent point (chest front, shoulder blades behind).
+        let (dt, db) = (depth(y1 - 0.06 * u).max(depth(yc)), depth(y0 + 0.02 * u));
+        let tilt = ((dt - db) / (y1 - y0 - 0.08 * u)).atan().to_degrees().clamp(-4., 14.);
+        let zc = dt.max(db) + shirt + half_t - (dt - db).abs() * 0.35;
+        // Local up leans back behind (+z) and forward in front (-z) with the tilt.
+        let sg = if back { 1. } else { -1. };
+        let rot = rot_x(sg * tilt);
+        let slope = tilt.to_radians().tan();
+        let at = move |y: f64| sg * (zc + half_t + (y - yc) * slope);
+        ([0., yc, sg * zc], rot, at)
+    };
+    for back in [false, true] {
+        let (c, rot, _) = plate(back);
+        let h = (y1 - y0) * 0.5;
+        // Lower body of the plate bag, then the narrower top (shooter's cut).
+        rounded_box(hard, add(c, mul(rot[1], -h * 0.2)), [pw, h * 0.8, half_t], rot, 5., plate_w.clone(), m, 20);
+        rounded_box(hard, add(c, mul(rot[1], h * 0.55)), [pw * 0.72, h * 0.45, half_t * 0.96], rot, 5., w1(j("chest")), m, 16);
+        // Binding round the edge reads as a darker rim.
+        rounded_box(hard, add(c, mul(rot[1], -h * 0.2)), [pw * 1.025, h * 0.82, half_t * 0.7], rot, 6., plate_w.clone(), dark, 16);
+        if back {
+            // Webbing rows across the back panel, and a drag handle.
+            for k in 0..4 {
+                let y = y0 + (0.05 + 0.045 * k as f64) * u;
+                let (_, _, at) = plate(true);
+                rounded_box(hard, [0., y, at(y) + 0.002 * u], [pw * 0.9, 0.009 * u, 0.004 * u], rot, 8., plate_w.clone(), web, 10);
+            }
+            let top = y1 - 0.01 * u;
+            let (_, _, at) = plate(true);
+            rounded_box(hard, [0., top, at(top) + 0.012 * u], [0.045 * u, 0.012 * u, 0.008 * u], rot, 4., w1(j("chest")), dark, 10);
+        }
+    }
+    // Cummerbund round the ribs, joining the plates at the sides.
+    let cb = torso_shell_rings(b, y0 + 0.005 * u, mix(b.waist_y, b.chest_y, 0.85), shirt + 0.012 * u, 0.4);
+    let bb = b;
+    let wfc = move |p: [f64; 3], _: usize| torso_weight_pub(bb, p);
+    shell(part, &cb, 32, dark, dark, 0.008 * u, Some(&wfc), None);
+    // Shoulder straps from the front plate top over the trapezius to the back plate.
+    let (_, _, front_at) = plate(false);
+    let (_, _, back_at) = plate(true);
+    for side in 0..2 {
+        let sg = side_sign(side);
+        let x = sg * pw * 0.62;
+        let top = b.sh + 0.012 * u;
+        let pts = [[x, y1 - 0.01 * u, front_at(y1 - 0.01 * u) + 0.004 * u], [x * 1.02, top - 0.02 * u, -b.chest_w[1] * 0.5], [x * 1.04, top + 0.006 * u, 0.004 * u], [x * 1.02, top - 0.02 * u, b.chest_w[2] * 0.55], [x, y1 - 0.01 * u, back_at(y1 - 0.01 * u) - 0.004 * u]];
+        let rings: Vec<Ring> = pts.iter().enumerate().map(|(i, &p)| { let tan = norm(sub(pts[(i + 1).min(4)], pts[i.saturating_sub(1)])); Ring::around(p, tan, [1., 0., 0.], 0.028 * u, 0.007 * u, wmix(&w1(j("chest")), &w1(j(&format!("shoulder_{}", sfx(side)))), 0.3 * (i == 2) as i32 as f64)) }).collect();
+        tube(hard, &rings, 8, Cap::Point(pts[0]), Cap::Point(pts[4]), &|_, _| dark, 1., 0., None);
+    }
+    // Three rifle-magazine pouches low on the front, magazines standing in them.
+    let mag = g.mats.id(MatDef::new(hex("#2b2a27"), Tex::Plastic));
+    let py = y0 + 0.075 * u;
+    for k in 0..3 {
+        let x = (k as f64 - 1.) * 0.066 * u;
+        let z = front_at(py) - 0.018 * u;
+        rounded_box(hard, [x, py, z], [0.029 * u, 0.055 * u, 0.019 * u], rot_x(4.), 5., w1(j("spine")), m, 14);
+        rounded_box(hard, [x, py + 0.052 * u, z - 0.001 * u], [0.031 * u, 0.011 * u, 0.021 * u], rot_x(4.), 6., w1(j("spine")), dark, 10);
+        rounded_box(hard, [x, py + 0.072 * u, z + 0.002 * u], [0.021 * u, 0.018 * u, 0.011 * u], rot_x(8.), 6., w1(j("spine")), mag, 10);
+    }
+    // Webbing row above the pouches.
+    let wy = py + 0.1 * u;
+    rounded_box(hard, [0., wy, front_at(wy) - 0.002 * u], [pw * 0.9, 0.008 * u, 0.004 * u], ID3, 8., w1(j("chest")), web, 10);
+    // Radio with a stubby antenna, flashlight on the left strap, name tape.
+    let ry = b.chest_y + 0.035 * u;
+    let radio = [0.06 * u, ry, front_at(ry) - 0.02 * u];
+    rounded_box(hard, radio, [0.022 * u, 0.042 * u, 0.017 * u], ID3, 4., w1(j("chest")), dark, 12);
+    let ant: Vec<Ring> = (0..4).map(|i| Ring::around(add(radio, [0.008 * u, 0.042 * u + 0.03 * u * i as f64, 0.]), [0., 1., 0.], [1., 0., 0.], 0.004 * u * (1. - 0.2 * i as f64), 0.004 * u * (1. - 0.2 * i as f64), w1(j("chest")))).collect();
+    let top = ant[3].c;
+    tube(hard, &ant, 6, Cap::Open, Cap::Point(add(top, [0., 0.004 * u, 0.])), &|_, _| mag, 1., 0., None);
+    let ly = y1 + 0.02 * u;
+    let lamp = [-pw * 0.62, ly, front_at(ly) - 0.004 * u];
+    let lamp_rings: Vec<Ring> = (0..3).map(|i| Ring::around(add(lamp, [0., 0., -0.018 * u * i as f64]), [0., 0., -1.], [1., 0., 0.], 0.011 * u, 0.011 * u, w1(j("chest")))).collect();
+    let lens_c = lamp_rings[2].c;
+    tube(hard, &lamp_rings, 10, Cap::Point(lamp), Cap::Point(lens_c), &|_, _| mag, 1., 0., None);
+    let patch = g.mats.id(MatDef::new(l.color2, Tex::Fabric));
+    let ty = b.chest_y + 0.04 * u;
+    rounded_box(hard, [-0.06 * u, ty, front_at(ty) - 0.003 * u], [0.04 * u, 0.014 * u, 0.003 * u], ID3, 6., w1(j("chest")), patch, 10);
 }
 
 pub(crate) fn torso_weight_pub(b: &Body, p: [f64; 3]) -> W {
@@ -739,12 +888,19 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
     let u = g.b.u;
     let a = face.r[0];
     let headw = w1(j("head"));
+    let hair = super::head::hair_clearance(g.spec, a);
     let mat = |g: &mut Gen, t: Tex| g.mats.id(MatDef { color2: Some(l.color2), ..MatDef::new(l.color, tex_for(l, t)) });
     match l.kind.as_str() {
         "helmet" => match l.style.as_str() {
-            "racing" | "full" => {
+            "racing" | "full" | "visor" => {
                 let m = mat(g, Tex::Plastic);
-                let visor = g.mats.id(MatDef::new(l.color2.map(|c| c * 0.25), Tex::Glossy).metal(0.5));
+                // `visor`: a sealed helmet whose visor glows in color2 (a
+                // readable team light at any distance).
+                let visor = if l.style == "visor" {
+                    g.mats.id(MatDef::new(l.color2, Tex::Emissive))
+                } else {
+                    g.mats.id(MatDef::new(l.color2.map(|c| c * 0.25), Tex::Glossy).metal(0.5))
+                };
                 let stripe = g.mats.id(MatDef::new(g.spec.accent, Tex::Plastic));
                 let fy = face.eye_y; let re = face.re / face.r[1];
                 let opening = move |d: [f64; 3]| d[2] < -0.45 && (d[1] - fy).abs() < re * 2.4 + 0.06 && d[0].abs() < 0.72;
@@ -768,7 +924,7 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
                 let dark = g.mats.id(MatDef::new(l.color.map(|c| c * 0.45), Tex::Plastic));
                 let tactical = l.style != "round";
                 let edge = if tactical { [70., 92., 104.] } else { [74., 98., 108.] };
-                head_shell(part, face, edge, a * 0.3, a * 0.06, m, dark, headw.clone(), None);
+                head_shell(part, face, edge, (a * 0.17).max(hair + a * 0.03), a * 0.05, m, dark, headw.clone(), None);
                 if tactical {
                     for side in 0..2 {
                         let sg = side_sign(side);
@@ -790,18 +946,18 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
         },
         "cap" => {
             let m = mat(g, Tex::Fabric);
-            head_shell(part, face, [60., 84., 100.], a * 0.07, a * 0.015, m, m, headw.clone(), None);
+            head_shell(part, face, [60., 84., 100.], (a * 0.07).max(hair + a * 0.02), a * 0.015, m, m, headw.clone(), None);
             // Brim.
             let d = face.dir(0., 0.52);
             let s = face.point_opt(d, false);
-            let c = add(add(s, mul(norm(sub(s, face.c)), a * 0.08)), [0., -a * 0.02, -a * 0.28]);
-            rounded_box(hard, c, [a * 0.62, a * 0.025, a * 0.36], rot_x(-8.), 5., headw.clone(), m, 16);
+            let c = add(add(s, mul(norm(sub(s, face.c)), (a * 0.08).max(hair * 0.8))), [0., -a * 0.02, -a * 0.28]);
+            rounded_box(hard, c, [a * 0.64, a * 0.04, a * 0.4], rot_x(-10.), 5., headw.clone(), m, 16);
             let top = face.point_opt([0., 1., 0.], false);
-            rounded_box(hard, add(top, [0., a * 0.08, 0.]), [a * 0.06, a * 0.03, a * 0.06], ID3, 2., headw.clone(), m, 8);
+            rounded_box(hard, add(top, [0., (a * 0.08).max(hair + a * 0.03), 0.]), [a * 0.06, a * 0.03, a * 0.06], ID3, 2., headw.clone(), m, 8);
         }
         "beanie" => {
             let m = mat(g, Tex::Knit);
-            head_shell(part, face, [58., 86., 104.], a * 0.12, a * 0.06, m, m, headw.clone(), None);
+            head_shell(part, face, [58., 86., 104.], (a * 0.12).max(hair + a * 0.03), a * 0.06, m, m, headw.clone(), None);
         }
         "headband" => {
             let m = mat(g, Tex::Fabric);
@@ -838,6 +994,45 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
                 }
             }
         }
+        "glasses" if l.style == "ballistic" => {
+            // Wraparound shooting glasses: one curved tinted lens across both
+            // eyes under a thin brow bar, temple arms back to the ears.
+            let frame = mat(g, Tex::Plastic);
+            let lens = g.mats.id(MatDef::new(l.color2.map(|c| c * 0.6 + 0.04), Tex::Glossy).metal(0.85).rough(0.05));
+            let fy = face.eye_y + 0.01;
+            let half_h = face.re / face.r[1] * 1.0;
+            let n = 11;
+            let off = |fx: f64, fy: f64, k: f64| { let d = face.dir(fx, fy); let s = face.point_opt(d, false); add(s, mul(norm(sub(s, face.c)), face.re * k)) };
+            let rings: Vec<Ring> = (0..n).map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                let fx = mix(-0.8, 0.8, t);
+                // Deeper at the temples, a nose notch in the middle.
+                let h = half_h * face.r[1] * (1. - 0.3 * (2. * t - 1.).powi(4)) * (1. - 0.2 * (-((2. * t - 1.) / 0.12).powi(2)).exp());
+                let p = off(fx, fy, 0.75);
+                Ring::around(p, [1., 0., 0.], [0., 1., 0.], h, face.re * 0.06, headw.clone())
+            }).collect();
+            let (s0, e) = (rings[0].c, rings[n - 1].c);
+            tube(hard, &rings, 8, Cap::Point(s0), Cap::Point(e), &|_, _| lens, 1., 0., None);
+            let bar: Vec<Ring> = (0..n).map(|i| {
+                let t = i as f64 / (n - 1) as f64;
+                let fx = mix(-0.82, 0.82, t);
+                let p = add(off(fx, fy + half_h * 0.95, 0.8), [0., 0., 0.]);
+                Ring::around(p, [1., 0., 0.], [0., 1., 0.], face.re * 0.16, face.re * 0.12, headw.clone())
+            }).collect();
+            let (s0, e) = (bar[0].c, bar[n - 1].c);
+            tube(hard, &bar, 6, Cap::Point(s0), Cap::Point(e), &|_, _| frame, 1., 0., None);
+            for side in 0..2 {
+                let sg = side_sign(side);
+                let front = off(sg * 0.8, fy + half_h * 0.8, 0.8);
+                let d = norm([sg, fy, 0.35]);
+                let ear = add(face.point_opt(d, false), [sg * 0.004 * u, 0., 0.]);
+                let c = lerp3(front, ear, 0.5);
+                let len = length(sub(ear, front)) * 0.5;
+                let z = norm(sub(ear, front));
+                let x = norm(cross([0., 1., 0.], z));
+                rounded_box(hard, c, [face.re * 0.08, face.re * 0.14, len], [x, cross(z, x), z], 3., headw.clone(), frame, 8);
+            }
+        }
         "goggles" | "glasses" => {
             let frame = mat(g, Tex::Plastic);
             let lens = g.mats.id(MatDef::new(l.color2.map(|c| c * 0.5), Tex::Glossy).metal(0.6));
@@ -849,6 +1044,25 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
                 let rot = if on_helmet { rot_x(-55.) } else { ID3 };
                 rounded_box(hard, c, [r, r * 0.8, face.re * 0.3], rot, if l.kind == "glasses" { 3. } else { 2.4 }, headw.clone(), frame, 14);
                 rounded_box(hard, add(c, if on_helmet { [0., r * 0.25, -r * 0.2] } else { [0., 0., -face.re * 0.2] }), [r * 0.82, r * 0.64, face.re * 0.2], rot, 2.6, headw.clone(), lens, 14);
+            }
+            if l.kind == "glasses" {
+                // Bridge over the nose and temple arms back to the ears.
+                let (e0, e1) = (face.eye_centre(0), face.eye_centre(1));
+                let r = face.re * 1.35;
+                let mid = add(lerp3(e0, e1, 0.5), [0., r * 0.35, -face.re * 1.5]);
+                rounded_box(hard, mid, [r * 0.35, r * 0.1, face.re * 0.12], ID3, 3., headw.clone(), frame, 8);
+                for side in 0..2 {
+                    let sg = side_sign(side);
+                    let e = face.eye_centre(side);
+                    let front = add(e, [sg * r * 0.95, r * 0.3, -face.re * 1.2]);
+                    let d = norm([sg, face.eye_y, 0.35]);
+                    let ear = add(face.point_opt(d, false), [sg * 0.004 * u, 0., 0.]);
+                    let c = lerp3(front, ear, 0.5);
+                    let len = length(sub(ear, front)) * 0.5;
+                    let z = norm(sub(ear, front));
+                    let x = norm(cross([0., 1., 0.], z));
+                    rounded_box(hard, c, [face.re * 0.08, r * 0.09, len], [x, cross(z, x), z], 3., headw.clone(), frame, 8);
+                }
             }
             if l.kind == "goggles" && !on_helmet {
                 let strap = g.mats.id(MatDef::new(l.color, Tex::Nylon));

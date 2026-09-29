@@ -8,7 +8,7 @@
 //! period. Without the flag none of this is consulted beyond one relaxed
 //! load. Transport deadlines (HTTP, GPU watchdogs) keep using `Instant`.
 //!
-//! The same launch configuration carries `--window WxH@scale` (the first
+//! The same launch configuration carries `--window WxH@scale` or `MAKEPAD_WINDOW` (the first
 //! window's logical size and dpi scale) and `--seed N` / `MAKEPAD_SEED`
 //! (Splash `random`), the other two inputs a reproducible capture pins.
 // No remote bridge on these targets, so nothing steps the clock there.
@@ -107,6 +107,11 @@ fn configuration() -> &'static Configuration {
                 std::env::var("MAKEPAD_VIRTUAL_CLOCK").ok(),
                 std::env::var("MAKEPAD_SEED").ok(),
             );
+            // MAKEPAD_WINDOW=WxH@scale: `--window` for launchers that pass
+            // env but not arguments.
+            if config.window.is_none() {
+                config.window = std::env::var("MAKEPAD_WINDOW").ok().as_deref().and_then(parse_window);
+            }
             // Only the remote bridge's `/step` moves the clock: without it
             // (a child that inherited MAKEPAD_VIRTUAL_CLOCK, a forgotten
             // --remote) the app would freeze, so the clock stays real.

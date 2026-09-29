@@ -38,7 +38,10 @@ script_mod! {
             )
             let lo = -12.47393
             let hi = 4.026069
-            let e = (clamp(log2(max(i, vec3(0.0000001, 0.0000001, 0.0000001))), vec3(lo, lo, lo), vec3(hi, hi, hi)) - vec3(lo, lo, lo)) / (hi - lo)
+            var e = (clamp(log2(max(i, vec3(0.0000001, 0.0000001, 0.0000001))), vec3(lo, lo, lo), vec3(hi, hi, hi)) - vec3(lo, lo, lo)) / (hi - lo)
+            // The game's contrast (grade.x): a slope about mid-grey (0.18
+            // encodes to 0.606) before the sigmoid, which rolls both ends off.
+            e = clamp((e - vec3(0.606, 0.606, 0.606)) * self.grade.x + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
             let s = self.agx_curve(e)
             let o = vec3(
                 dot(s, vec3(1.19687900512017, -0.0980208811401368, -0.0990297440797205)),
@@ -47,7 +50,7 @@ script_mod! {
             )
             let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
             let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
-            return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * 1.35, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * (1.35 * self.grade.y), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
         }
         // One tone-mapped scene texel at exposure `e`, bloom mixed in
         // (energy-conserving: a few percent of the blurred image replaces
@@ -67,11 +70,21 @@ script_mod! {
         }
         // The exposure this frame: the host's metered value, or with
         // auto-exposure the adapted scene mean mapped to the key, held
-        // within a band around the metered value (night stays night).
-        exposure: fn() -> float {
+        // within a band around the metered value (night stays night);
+        // the game's bias (grade.w) on top.
+        adapted_exposure: fn() -> float {
             if self.post.w < 0.5 { return self.post.y }
-            let mean = max(self.exposure_texture.sample_nearest(vec2(0.5, 0.5)).x, 0.00001)
-            return clamp(self.post2.y / mean, self.post.y * self.post2.z, self.post.y * 1.6)
+            let raw = self.exposure_texture.sample_nearest(vec2(0.5, 0.5)).x
+            // A non-finite adapted mean falls back to the metered exposure
+            // instead of blacking out the frame (false for NaN and Inf).
+            if raw > 0.0 && raw < 60000.0 {
+                let mean = max(raw, 0.00001)
+                return clamp(self.post2.y / mean, self.post.y * self.post2.z, self.post.y * self.grade.z)
+            }
+            return self.post.y
+        }
+        exposure: fn() -> float {
+            return self.adapted_exposure() * self.grade.w
         }
 
         pixel: fn() {

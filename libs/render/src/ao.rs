@@ -70,9 +70,14 @@ pub const AO_RADIUS_WORLD: f32 = 0.12;
 /// darkest crevice lands here instead.
 pub const AO_FLOOR: f32 = 0.18;
 
-/// Grid cells along the longest axis. Small models get a coarse grid, which is
-/// fine — the win is skipping most triangles, not perfect bucketing.
-const GRID_DIM: usize = 8;
+/// Grid cells along the longest axis: 8 for a small model (the win is
+/// skipping most triangles, not perfect bucketing), finer as the triangle
+/// count grows, to about two cells per cube-root of the triangles. A fixed 8
+/// left ~130 triangles per cell on a classic map (68k triangles), and its
+/// navigation build (tens of thousands of probe rays) took 5-6 s.
+fn grid_dim(tri_count: usize) -> usize {
+    (((tri_count as f32).cbrt() * 2.0) as usize).clamp(8, 128)
+}
 
 /// Above this vertex count the ray budget is halved, and halved again past
 /// twice it.
@@ -105,11 +110,12 @@ pub(crate) struct TriGrid {
 impl TriGrid {
     fn build(positions: &[Vec3f], indices: &[u32], min: Vec3f, max: Vec3f) -> TriGrid {
         let span = vec_max3(max.x - min.x, max.y - min.y, max.z - min.z).max(1.0e-4);
-        let cell = span / GRID_DIM as f32;
+        let grid = grid_dim(indices.len() / 3);
+        let cell = span / grid as f32;
         let dim = [
-            (((max.x - min.x) / cell).ceil() as usize).clamp(1, GRID_DIM),
-            (((max.y - min.y) / cell).ceil() as usize).clamp(1, GRID_DIM),
-            (((max.z - min.z) / cell).ceil() as usize).clamp(1, GRID_DIM),
+            (((max.x - min.x) / cell).ceil() as usize).clamp(1, grid),
+            (((max.y - min.y) / cell).ceil() as usize).clamp(1, grid),
+            (((max.z - min.z) / cell).ceil() as usize).clamp(1, grid),
         ];
         let inv_cell = Vec3f {
             x: dim[0] as f32 / (max.x - min.x).max(1.0e-4),
@@ -440,6 +446,14 @@ impl MeshRaycaster {
     pub fn new(positions: Vec<Vec3f>, indices: Vec<u32>, min: Vec3f, max: Vec3f) -> Self {
         let grid = TriGrid::build(&positions, &indices, min, max);
         Self { positions, indices, min, max, grid }
+    }
+
+    pub fn positions(&self) -> &[Vec3f] {
+        &self.positions
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
     }
 
     pub fn tri_count(&self) -> usize {

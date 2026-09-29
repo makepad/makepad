@@ -180,6 +180,13 @@ pub struct Part {
     pub glow: f32,
     pub shape: Shape,
     pub animated: bool,
+    /// Skeleton joint (LiveId of its name, 0 = none) the part follows on a
+    /// rigged owner.
+    pub joint: u64,
+    /// This frame's motion of that joint, world space: where the host has
+    /// posed the owner's skeleton, the joint's drawn frame times its frame
+    /// in the rest pose inverted. Applied over the owner-local placement.
+    pub follow: Option<Mat4f>,
 }
 
 /// Immediate-mode stretched box between two points (grapple cables, lasers,

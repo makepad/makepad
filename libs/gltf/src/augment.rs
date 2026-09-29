@@ -255,3 +255,73 @@ impl GlbRewrite {
         Ok(output)
     }
 }
+
+/// Rewrite a GLB's embedded image payloads: `replace(image_index, bytes)`
+/// returns the new payload (for example a small reference to a texture stored
+/// elsewhere). The BIN chunk is rebuilt compactly: every buffer view keeps its
+/// place in order, image views shrink or grow, the rest are copied as they were.
+/// Images without a buffer view are left alone.
+pub fn rewrite_glb_images(input: &[u8], mut replace: impl FnMut(usize, &[u8]) -> Vec<u8>) -> Result<Vec<u8>, GltfError> {
+    rewrite_images(input, &mut |index, bytes| Some(replace(index, bytes)), None)
+}
+
+/// Replace embedded images with KTX2 (Basis Universal) payloads, the glTF
+/// `KHR_texture_basisu` way: `encode(image_index, bytes)` returns the KTX2 or
+/// `None` to keep the image as it is. A replaced image gets mimeType
+/// `image/ktx2`, each texture using it the extension (its `source` stays, so
+/// readers that follow `source` read the KTX2 bytes), and the extension is
+/// listed as used and required.
+pub fn embed_ktx2_images(input: &[u8], mut encode: impl FnMut(usize, &[u8]) -> Option<Vec<u8>>) -> Result<Vec<u8>, GltfError> {
+    rewrite_images(input, &mut encode, Some("image/ktx2"))
+}
+
+fn rewrite_images(input: &[u8], replace: &mut dyn FnMut(usize, &[u8]) -> Option<Vec<u8>>, mime: Option<&str>) -> Result<Vec<u8>, GltfError> {
+    let mut glb = GlbRewrite::begin(input)?;
+    let mut images = glb.take_array("images")?;
+    let mut views = glb.take_array("bufferViews")?;
+    let index_of = |value: Option<&JsonValue>| match value { Some(JsonValue::U64(v)) => Some(*v as usize), Some(JsonValue::I64(v)) => Some(*v as usize), Some(JsonValue::F64(v)) => Some(*v as usize), _ => None };
+    // Which buffer view holds which image.
+    let mut image_of_view = HashMap::new();
+    for (i, image) in images.iter().enumerate() {
+        if let Some(v) = index_of(image.key("bufferView")) { image_of_view.insert(v, i); }
+    }
+    let old_bin = std::mem::take(&mut glb.bin);
+    let field = |view: &JsonValue, key: &str| -> usize { index_of(view.key(key)).unwrap_or(0) };
+    let mut bin = Vec::with_capacity(old_bin.len());
+    let mut replaced = Vec::new();
+    for (index, view) in views.iter_mut().enumerate() {
+        let (offset, length) = (field(view, "byteOffset"), field(view, "byteLength"));
+        let bytes = old_bin.get(offset..offset + length).ok_or_else(|| validation("buffer view outside the BIN chunk"))?;
+        let payload = match image_of_view.get(&index).and_then(|&image| replace(image, bytes).map(|p| (image, p))) {
+            Some((image, payload)) => { replaced.push(image); payload }
+            None => bytes.to_vec(),
+        };
+        // Views keep their original stride alignment (accessor data needs 4).
+        while bin.len() % 4 != 0 { bin.push(0); }
+        let JsonValue::Object(view) = view else { return Err(validation("buffer view is not an object")) };
+        view.insert("byteOffset".to_string(), number(bin.len()));
+        view.insert("byteLength".to_string(), number(payload.len()));
+        bin.extend_from_slice(&payload);
+    }
+    glb.bin = bin;
+    glb.put_array("bufferViews", views);
+    if let (Some(mime), false) = (mime, replaced.is_empty()) {
+        for &image in &replaced {
+            if let Some(JsonValue::Object(image)) = images.get_mut(image) { image.insert("mimeType".to_string(), string(mime)); }
+        }
+        const EXT: &str = "KHR_texture_basisu";
+        for texture in glb.array_mut("textures")? {
+            let JsonValue::Object(texture) = texture else { continue };
+            let Some(source) = index_of(texture.get("source")).filter(|s| replaced.contains(s)) else { continue };
+            let extensions = texture.entry("extensions".to_string()).or_insert_with(|| JsonValue::Object(HashMap::new()));
+            if let JsonValue::Object(extensions) = extensions { extensions.insert(EXT.to_string(), object([("source", number(source))])); }
+        }
+        for list in ["extensionsUsed", "extensionsRequired"] {
+            let list = glb.array_mut(list)?;
+            if !list.iter().any(|e| matches!(e, JsonValue::String(s) if s == EXT)) { list.push(string(EXT)); }
+        }
+    }
+    glb.put_array("images", images);
+    glb.finish()
+}
+

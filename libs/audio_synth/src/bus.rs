@@ -33,6 +33,21 @@ const BLOCK: usize = 256;
 pub const STALE_FRAMES: u64 = 8;
 /// Stolen voices fade over this many seconds.
 const STEAL_FADE: f32 = 0.003;
+/// A stopped tone's level falls this much per second (~55 ms).
+const TONE_RELEASE_RATE: f32 = 18.0;
+
+/// A player-facing volume group. Recipes, vehicles and tones are effects;
+/// each instrument is in the group it was put in
+/// ([`SynthBus::set_instrument_group`]; effects until then). The external
+/// (sampled) input is already balanced by its host and passes as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Fx,
+    Music,
+}
+
+/// Seconds a group volume change glides over (a mute is a quick fade).
+const GROUP_GLIDE: f32 = 0.08;
 
 /// Where a voice is and how it carries. `positional: false` is a 2D sound
 /// (UI, the player's own gun): centred, no distance, no doppler.
@@ -130,6 +145,8 @@ struct ToneSlot {
     gain: Smooth,
     level: f32,
     releasing: bool,
+    /// Level lost per second while releasing.
+    release_rate: f32,
     noise: crate::dsp::Noise,
     is_noise: bool,
 }
@@ -144,6 +161,19 @@ struct InstrumentSlot {
     place: Placement3,
     gain: f32,
     send: f32,
+    /// A retiring slot's gain ramp, 1 -> 0; its sequence is gone and no
+    /// lookup finds it. The control side reaps it at 0
+    /// ([`SynthBus::reap_instruments`]), so the callback never drops it.
+    fade: f32,
+    /// Per-sample ramp step; 0 while the slot is live.
+    fade_step: f32,
+    group: Group,
+}
+
+impl InstrumentSlot {
+    fn live(&self) -> bool {
+        self.fade_step == 0.0
+    }
 }
 
 /// Live numbers for diagnostics.
@@ -178,6 +208,9 @@ pub struct SynthBus {
     ducker: Ducker,
     duck_key: f32,
     master: f32,
+    /// Group volumes ([`Group`]), smoothed so a mute fades.
+    fx_gain: Smooth,
+    music_gain: Smooth,
     /// Reverb send for the external (sampled) input.
     pub external_send: f32,
     mono: [f32; BLOCK],
@@ -238,6 +271,7 @@ impl SynthBus {
                 gain: Smooth::new(0.0),
                 level: 0.0,
                 releasing: false,
+                release_rate: TONE_RELEASE_RATE,
                 noise: crate::dsp::Noise::new(crate::dsp::NoiseColor::Pink, 0x51ed + i as u32),
                 is_noise: false,
             })
@@ -250,7 +284,9 @@ impl SynthBus {
             recipes,
             vehicles,
             tones,
-            instruments: Vec::with_capacity(INSTRUMENT_SLOTS),
+            // Room for a full set retiring (fading) beside a full new set:
+            // a world switch never allocates in a lock the callback takes.
+            instruments: Vec::with_capacity(INSTRUMENT_SLOTS * 2),
             reverb,
             comp: {
                 let mut c = Compressor::new(rate, -14.0, 2.5, 0.01, 0.2);
@@ -261,6 +297,8 @@ impl SynthBus {
             ducker: Ducker::new(rate, 9.0),
             duck_key: 0.0,
             master: 1.0,
+            fx_gain: Smooth::new(1.0),
+            music_gain: Smooth::new(1.0),
             external_send: 0.12,
             mono: [0.0; BLOCK],
             dry_l: [0.0; BLOCK],
@@ -302,6 +340,29 @@ impl SynthBus {
 
     pub fn set_master(&mut self, gain: f32) {
         self.master = finite(gain, 1.0).clamp(0.0, 4.0);
+    }
+
+    /// A group's volume, 0..4 (0 = that group muted); glides.
+    pub fn set_group_gain(&mut self, group: Group, gain: f32) {
+        let g = finite(gain, 1.0).clamp(0.0, 4.0);
+        match group {
+            Group::Fx => self.fx_gain.target = g,
+            Group::Music => self.music_gain.target = g,
+        }
+    }
+
+    pub fn group_gain(&self, group: Group) -> f32 {
+        match group {
+            Group::Fx => self.fx_gain.target,
+            Group::Music => self.music_gain.target,
+        }
+    }
+
+    /// Which volume group an instrument plays in.
+    pub fn set_instrument_group(&mut self, key: u64, group: Group) {
+        if let Some(s) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
+            s.group = group;
+        }
     }
 
     /// Voice-activity key 0..1 (NPC speech, voice chat): ducks the bus.
@@ -551,6 +612,7 @@ impl SynthBus {
         t.freq.target = f;
         t.gain.target = finite(gain, 0.0).clamp(0.0, 1.0);
         t.releasing = false;
+        t.release_rate = TONE_RELEASE_RATE;
     }
 
     pub fn tone_set(&mut self, id: u64, freq: Option<f32>, gain: Option<f32>) {
@@ -567,6 +629,16 @@ impl SynthBus {
     pub fn tone_stop(&mut self, id: u64) {
         if let Some(t) = self.tones.iter_mut().find(|t| t.active && t.id == id) {
             t.releasing = true;
+        }
+    }
+
+    /// Release every tone `owned` claims, fading its gain out over `secs`
+    /// (a world leaving: slower than a stop, so a hum does not end in a
+    /// cut).
+    pub fn fade_tones(&mut self, owned: impl Fn(u64) -> bool, secs: f32) {
+        for t in self.tones.iter_mut().filter(|t| t.active && owned(t.id)) {
+            t.releasing = true;
+            t.release_rate = 1.0 / finite(secs, 0.05).max(0.005);
         }
     }
 
@@ -606,14 +678,18 @@ impl SynthBus {
                 place,
                 gain: finite(gain, 1.0).clamp(0.0, 4.0),
                 send: 0.15,
+                fade: 1.0,
+                fade_step: 0.0,
+                group: Group::Fx,
             }
         };
-        if let Some(slot) = self.instruments.iter_mut().find(|s| s.key == key) {
+        if let Some(slot) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
             let new = make(inst);
             let old = std::mem::replace(slot, new);
             return Ok(Some(old.inst));
         }
-        if self.instruments.len() >= INSTRUMENT_SLOTS {
+        // Retiring slots fade beside the new ones and do not count.
+        if self.instruments.iter().filter(|s| s.live()).count() >= INSTRUMENT_SLOTS {
             return Err(inst);
         }
         self.instruments.push(make(inst));
@@ -622,21 +698,52 @@ impl SynthBus {
 
     /// Remove an instrument, handing it (and its sequence) back to drop.
     pub fn remove_instrument(&mut self, key: u64) -> Option<(Box<dyn Instrument>, Option<Sequencer>)> {
-        let i = self.instruments.iter().position(|s| s.key == key)?;
+        let i = self.instruments.iter().position(|s| s.live() && s.key == key)?;
         let slot = self.instruments.swap_remove(i);
         Some((slot.inst, slot.seq))
     }
 
-    pub fn instrument_mut(&mut self, key: u64) -> Option<&mut (dyn Instrument + 'static)> {
-        self.instruments.iter_mut().find(|s| s.key == key).map(|s| s.inst.as_mut())
+    /// Retire an instrument without a click: its sequence stops (handed
+    /// back to drop), held notes release, and its output fades to silence
+    /// over `secs`. From now on no lookup finds it, so the same key can be
+    /// installed again at once; [`SynthBus::reap_instruments`] frees it
+    /// once the fade has run out.
+    pub fn fade_instrument(&mut self, key: u64, secs: f32) -> Option<Sequencer> {
+        let old = self.set_sequence(key, None);
+        let rate = self.rate;
+        let s = self.instruments.iter_mut().find(|s| s.live() && s.key == key)?;
+        s.inst.all_notes_off();
+        s.fade_step = 1.0 / (finite(secs, 0.25).max(0.005) * rate);
+        old
     }
 
+    /// Hand back every retired instrument whose fade has finished, to be
+    /// dropped by the caller outside its lock.
+    pub fn reap_instruments(&mut self) -> Vec<Box<dyn Instrument>> {
+        let mut done = Vec::new();
+        let mut i = 0;
+        while i < self.instruments.len() {
+            let s = &self.instruments[i];
+            if !s.live() && s.fade <= 0.0 {
+                done.push(self.instruments.swap_remove(i).inst);
+            } else {
+                i += 1;
+            }
+        }
+        done
+    }
+
+    pub fn instrument_mut(&mut self, key: u64) -> Option<&mut (dyn Instrument + 'static)> {
+        self.instruments.iter_mut().find(|s| s.live() && s.key == key).map(|s| s.inst.as_mut())
+    }
+
+    /// Keys of the live (not retiring) instruments.
     pub fn instrument_keys(&self) -> impl Iterator<Item = u64> + '_ {
-        self.instruments.iter().map(|s| s.key)
+        self.instruments.iter().filter(|s| s.live()).map(|s| s.key)
     }
 
     pub fn set_instrument_emitter(&mut self, key: u64, emitter: Emitter, gain: Option<f32>) {
-        if let Some(s) = self.instruments.iter_mut().find(|s| s.key == key) {
+        if let Some(s) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
             s.emitter = emitter;
             s.spatial_l.flat = !emitter.positional;
             s.spatial_r.flat = !emitter.positional;
@@ -649,7 +756,7 @@ impl SynthBus {
     /// Start a sequence on an instrument, handing back the one it replaces.
     /// Notes the old sequence held are released first.
     pub fn set_sequence(&mut self, key: u64, seq: Option<Sequencer>) -> Option<Sequencer> {
-        let s = self.instruments.iter_mut().find(|s| s.key == key)?;
+        let s = self.instruments.iter_mut().find(|s| s.live() && s.key == key)?;
         let mut old = std::mem::replace(&mut s.seq, seq);
         if let Some(old) = old.as_mut() {
             let inst = &mut s.inst;
@@ -774,13 +881,13 @@ impl SynthBus {
         let dry_l = &mut self.dry_l[..len];
         let dry_r = &mut self.dry_r[..len];
         let send = &mut self.send[..len];
-        // External input is the starting dry mix.
-        dry_l.copy_from_slice(out_l);
-        dry_r.copy_from_slice(out_r);
-        let ext_send = self.external_send;
-        for i in 0..len {
-            send[i] = (out_l[i] + out_r[i]) * 0.5 * ext_send;
-        }
+        // The effects (recipes, vehicles, tones) mix alone first, so their
+        // group volume can scale them before the external input and the
+        // instruments join.
+        dry_l.fill(0.0);
+        dry_r.fill(0.0);
+        send.fill(0.0);
+        let group_coef = crate::dsp::Smooth::coef(GROUP_GLIDE, rate);
         let mono = &mut self.mono[..len];
 
         // Recipes.
@@ -837,7 +944,7 @@ impl SynthBus {
                 let f = t.freq.next(tc);
                 let g = t.gain.next(tc);
                 if t.releasing {
-                    t.level -= 18.0 * inv;
+                    t.level -= t.release_rate * inv;
                 } else {
                     t.level = (t.level + 60.0 * inv).min(1.0);
                 }
@@ -851,6 +958,22 @@ impl SynthBus {
                 dry_r[i] += x;
             }
         }
+
+        // The effects' group volume, then the external input (already
+        // balanced by its host) as it is.
+        let ext_send = self.external_send;
+        for i in 0..len {
+            let g = self.fx_gain.next(group_coef);
+            dry_l[i] = dry_l[i] * g + out_l[i];
+            dry_r[i] = dry_r[i] * g + out_r[i];
+            send[i] = send[i] * g + (out_l[i] + out_r[i]) * 0.5 * ext_send;
+        }
+        // One ramp per group for this block, shared by its instruments.
+        let music = &mut self.mono[..len];
+        for m in music.iter_mut() {
+            *m = self.music_gain.next(group_coef);
+        }
+        let fx_now = self.fx_gain.value;
 
         // Instruments (stereo sources: each side placed at the emitter).
         let il = &mut self.inst_l[..len];
@@ -886,8 +1009,16 @@ impl SynthBus {
             s.spatial_l.set(&s.place, s.emitter.occlusion);
             s.spatial_r.set(&s.place, s.emitter.occlusion);
             let g = s.gain;
+            let step = s.fade_step;
             for i in 0..len {
-                let (a, b) = (il[i] * g, ir[i] * g);
+                // A retiring slot ramps to silence and stays there until
+                // the control side reaps it.
+                let f = s.fade;
+                if step > 0.0 {
+                    s.fade = (s.fade - step).max(0.0);
+                }
+                let f = f * if s.group == Group::Music { music[i] } else { fx_now };
+                let (a, b) = (il[i] * g * f, ir[i] * g * f);
                 if s.emitter.positional {
                     // A positioned instrument is a point source: its own
                     // stereo image folds into the placement.
@@ -956,6 +1087,104 @@ mod tests {
         bus.render(&mut l, &mut rr);
         let peak = l.iter().chain(rr.iter()).fold(0.0f32, |a, x| a.max(x.abs()));
         assert!(peak <= 0.9, "{peak}");
+    }
+
+    /// A drone that ignores note-offs: whatever the bus outputs after a
+    /// retire is the fade alone, not the instrument's own release.
+    struct Drone;
+    impl Instrument for Drone {
+        fn name(&self) -> &str {
+            "drone"
+        }
+        fn sample_rate(&self) -> f32 {
+            48_000.0
+        }
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn all_notes_off(&mut self) {}
+        fn render(&mut self, l: &mut [f32], r: &mut [f32]) {
+            for (i, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                let x = if i % 64 < 32 { 0.02 } else { -0.02 };
+                *a = x;
+                *b = x;
+            }
+        }
+    }
+
+    #[test]
+    fn a_retired_instrument_fades_frees_its_key_and_is_reaped() {
+        let mut bus = SynthBus::new(48_000.0);
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0).is_ok());
+        let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+        bus.render(&mut l, &mut r);
+        let before = l.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(before > 0.005 && before < 0.5, "the drone sounds, under the limiter: {before}");
+        bus.fade_instrument(1, 0.2);
+        assert!(bus.instrument_mut(1).is_none(), "a retiring slot is not found");
+        // The same key installs again at once, beside the fading one.
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 0.0).is_ok());
+        assert_eq!(bus.live_counts().3, 2);
+        // The first 50 ms of the fade: no cut, and falling.
+        let (mut l, mut r) = (vec![0.0; 2400], vec![0.0; 2400]);
+        bus.render(&mut l, &mut r);
+        let peak = |s: &[f32]| s.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        let (first, later) = (peak(&l[..240]), peak(&l[2160..]));
+        assert!(first > before * 0.5, "no cut at the retire: {first} vs {before}");
+        assert!(later < first, "falling: {later} after {first}");
+        assert!(bus.reap_instruments().is_empty(), "not reaped mid-fade");
+        let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
+        bus.render(&mut l, &mut r);
+        // Only the room's (slowly decaying) tail is left.
+        let after = l[4800..].iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(after < before * 0.5, "the fade ended: {after} vs {before}");
+        assert_eq!(bus.reap_instruments().len(), 1, "the retired one is handed back");
+        assert_eq!(bus.live_counts().3, 1, "the new one stays");
+    }
+
+    #[test]
+    fn a_group_volume_silences_its_group_only() {
+        let peak = |bus: &mut SynthBus| {
+            // Long enough for the room's tail of the previous state to die.
+            let (mut l, mut r) = (vec![0.0; 144_000], vec![0.0; 144_000]);
+            bus.render(&mut l, &mut r);
+            l[139_200..].iter().fold(0.0f32, |a, x| a.max(x.abs()))
+        };
+        // Music: an instrument in the music group, muted -> near silence.
+        let mut bus = SynthBus::new(48_000.0);
+        assert!(bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0).is_ok());
+        bus.set_instrument_group(1, Group::Music);
+        let loud = peak(&mut bus);
+        bus.set_group_gain(Group::Music, 0.0);
+        let muted = peak(&mut bus);
+        assert!(loud > 0.005 && muted < loud * 0.05, "music muted: {muted} vs {loud}");
+        // The effects group does not touch it...
+        bus.set_group_gain(Group::Music, 1.0);
+        bus.set_group_gain(Group::Fx, 0.0);
+        let still = peak(&mut bus);
+        assert!(still > loud * 0.5, "fx volume left music alone: {still} vs {loud}");
+        // ...but silences a tone.
+        let mut bus = SynthBus::new(48_000.0);
+        bus.tone(5, 220.0, Some(Wave::Sine), 0.5);
+        let tone = peak(&mut bus);
+        bus.set_group_gain(Group::Fx, 0.0);
+        let quiet = peak(&mut bus);
+        assert!(tone > 0.01 && quiet < tone * 0.05, "fx muted: {quiet} vs {tone}");
+    }
+
+    #[test]
+    fn faded_tones_release_only_the_owned_ones() {
+        let mut bus = SynthBus::new(48_000.0);
+        bus.tone(1 << 56 | 3, 220.0, Some(Wave::Sine), 0.5);
+        bus.tone(2 << 56 | 3, 330.0, Some(Wave::Sine), 0.5);
+        let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+        bus.render(&mut l, &mut r);
+        bus.fade_tones(|id| id >> 56 == 1, 0.2);
+        let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+        bus.render(&mut l, &mut r);
+        assert_eq!(bus.live_counts().2, 2, "100 ms into a 200 ms fade");
+        let (mut l, mut r) = (vec![0.0; 9600], vec![0.0; 9600]);
+        bus.render(&mut l, &mut r);
+        assert_eq!(bus.live_counts().2, 1, "only the owned tone ended");
     }
 
     #[test]

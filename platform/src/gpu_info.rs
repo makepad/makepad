@@ -15,6 +15,11 @@ pub struct GpuInfo {
     /// that build the matching pipeline variant (Metal; Vulkan where the
     /// device blends RGBA16Float, see `CxVulkan::float16_blend_targets`).
     pub float16_blend_targets: bool,
+    /// Block-compressed texture formats the backend samples and uploads as
+    /// [`crate::texture::TextureFormat::VecMipCompressed`]. Off unless the
+    /// backend sets them after probing the device.
+    pub texture_bc7: bool,
+    pub texture_astc4x4: bool,
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
@@ -27,6 +32,8 @@ impl Default for GpuInfo {
             min_uniform_vectors: 1024,
             float_color_targets: true,
             float16_blend_targets: false,
+            texture_bc7: false,
+            texture_astc4x4: false,
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),

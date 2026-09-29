@@ -68,6 +68,18 @@ struct Bounds {
     max: Vec3f,
 }
 
+/// Whether box `b` lies wholly outside the cone at `apex` along unit `axis`
+/// with half angle (sin, cos): the box's bounding sphere is tested, so the
+/// answer is conservative (a box it keeps may still miss the cone).
+fn outside_cone(b: Bounds, apex: Vec3f, axis: Vec3f, sin: f32, cos: f32) -> bool {
+    let center = (b.min + b.max) * 0.5;
+    let radius = (b.max - b.min).length() * 0.5;
+    let v = center - apex;
+    let along = v.dot(axis);
+    let across = (v.dot(v) - along * along).max(0.0).sqrt();
+    along < -radius || cos * across - along * sin > radius
+}
+
 fn finite(v: Vec3f) -> bool {
     v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
 }
@@ -429,6 +441,14 @@ impl ClusteredLights {
             let tile =
                 |v: f32, n: usize| ((v.clamp(0.0, 1.0) * n as f32).floor() as usize).min(n - 1);
             let intensity = l.color.x.max(l.color.y).max(l.color.z);
+            // A spot with a hard cone lights nothing past its outer angle
+            // (the shader's angular term is exactly zero there): clusters
+            // outside the cone do not get it. Axis in the grid's space.
+            let cone = l.cone.filter(|(_, outer)| *outer < 89.0 && l.dir.length() > 1.0e-8).map(|(_, outer)| {
+                let a = view_matrix.transform_vec4(vec4(l.dir.x, l.dir.y, l.dir.z, 0.0));
+                let (sin, cos) = outer.to_radians().sin_cos();
+                (vec3f(a.x, a.y, a.z).normalize(), sin, cos)
+            });
             for z in self.slice(d0)..=self.slice(d1) {
                 for y in tile(v0, c.tiles_y)..=tile(v1, c.tiles_y) {
                     for x in tile(u0, c.tiles_x)..=tile(u1, c.tiles_x) {
@@ -436,6 +456,11 @@ impl ClusteredLights {
                         let ds = distance_squared(self.bounds[ci], p);
                         if ds > r * r {
                             continue;
+                        }
+                        if let Some((axis, sin, cos)) = cone {
+                            if outside_cone(self.bounds[ci], p, axis, sin, cos) {
+                                continue;
+                            }
                         }
                         // Rank by a conservative contribution bound; nearest
                         // bright lights win over faint far ones on overflow.
@@ -619,6 +644,7 @@ impl ClusteredLights {
     }
 }
 
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     // Spread AFTER each family's existing texture declarations to preserve
@@ -673,6 +699,67 @@ script_mod! {
             let col = at - row / self.cluster_tex.x
             return self.cluster_data.sample_nearest(vec2((col+0.5)*self.cluster_tex.x,(row+0.5)*self.cluster_tex.y))
         }
+        // One light's contribution at `wp` (index into the light texels).
+        cluster_light: fn(index: float, wp: vec3, n: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
+            let pos=self.cluster_fetch(self.cluster_z.w+index*3.0)
+            let delta=pos.xyz-wp
+            let distance=length(delta)
+            // The cluster is a conservative box: many of its lights
+            // miss this pixel, and those need no colour or direction.
+            if distance<pos.w {
+                let color=self.cluster_fetch(self.cluster_z.w+index*3.0+1.0)
+                let light=delta/max(distance,0.0001)
+                let direction=self.cluster_fetch(self.cluster_z.w+index*3.0+2.0)
+                var attenuation=pow(max(1.0-distance/pos.w,0.0),2.0)
+                var cone=1.0
+                if direction.w>=0.0 || (direction.w < -1.5 && direction.w > -2.5) {
+                    let ratio=distance/pos.w
+                    let cutoff=max(1.0-ratio*ratio*ratio*ratio,0.0)
+                    attenuation=cutoff*cutoff/max(distance*distance,0.0001)
+                }
+                if direction.w>=0.0 || direction.w < -2.5 {
+                    var inner=direction.w
+                    if direction.w < -2.5 { inner=-3.0-direction.w }
+                    let cosine=dot(direction.xyz,light*(-1.0))
+                    let angular=clamp((cosine-color.w)/max(inner-color.w,0.00001),0.0,1.0)
+                    cone=angular*angular
+                } else if direction.w > -1.5 && color.w>0.001 {
+                    let cosine=max(dot(direction.xyz,light*(-1.0)),0.0)
+                    cone=mix(1.0,cosine*cosine,color.w)
+                }
+                let ndl=max(dot(n,light),0.0)
+                // Every term below carries ndl and attenuation*cone: a
+                // light behind the surface or outside its cone adds
+                // exactly zero, so it skips the BRDF and, above all, the
+                // shadow lookup.
+                if ndl>0.0 && attenuation*cone>0.0 {
+                var response=vec3(ndl,ndl,ndl)
+                if pbr>0.5 {
+                    let view=normalize(eye-wp)
+                    let halfdir=normalize(light+view)
+                    let ndv=max(dot(n,view),0.0001)
+                    let ndh=max(dot(n,halfdir),0.0)
+                    let vdh=max(dot(view,halfdir),0.0)
+                    let rough=clamp(roughness,0.045,1.0)
+                    let metal=clamp(metallic,0.0,1.0)
+                    let f0=mix(vec3(0.04,0.04,0.04),albedo,metal)
+                    let f=f0+(vec3(1.0,1.0,1.0)-f0)*pow(1.0-vdh,5.0)
+                    let a2=rough*rough*rough*rough
+                    let den=ndh*ndh*(a2-1.0)+1.0
+                    let distribution=a2/max(3.14159265*den*den,0.000001)
+                    let k=(rough+1.0)*(rough+1.0)*0.125
+                    let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
+                    let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
+                    let diffuse=(vec3(1.0,1.0,1.0)-f)*albedo*((1.0-metal)/3.14159265)
+                    // Light colours are irradiance/pi units; the HDR
+                    // lane restores the pi the 1/pi BRDF divides out.
+                    response=(diffuse+spec)*(ndl*mix(1.0,3.14159265,self.lin_ctl.x))
+                }
+                return color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w))*response
+                }
+            }
+            return vec3(0.0,0.0,0.0)
+        }
         cluster_lights: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
             if self.cluster_on < 0.5 { return vec3(0.0,0.0,0.0) }
             let p=vec4(wp.x,wp.y,wp.z,1.0)
@@ -693,67 +780,23 @@ script_mod! {
             let x=min(floor(u*self.cluster_grid.x),self.cluster_grid.x-1.0)
             let y=min(floor(v*self.cluster_grid.y),self.cluster_grid.y-1.0)
             z=clamp(z,0.0,self.cluster_grid.z-1.0)
-            let header=self.cluster_fetch(x+self.cluster_grid.x*(y+self.cluster_grid.y*z))
             let n=normalize(normal)
             var total=vec3(0.0,0.0,0.0)
             var i=0.0
+            let header=self.cluster_fetch(x+self.cluster_grid.x*(y+self.cluster_grid.y*z))
+            // Four light indices per texel: fetched once per four lights.
+            var packed=vec4(0.0,0.0,0.0,0.0)
             while i<min(header.y,64.0) {
                 let address=header.x+i
-                let packed=self.cluster_fetch(self.cluster_tex.z+floor(address*0.25))
                 let lane=address-floor(address*0.25)*4.0
+                if i<0.5 || lane<0.5 {
+                    packed=self.cluster_fetch(self.cluster_tex.z+floor(address*0.25))
+                }
                 var index=packed.x
                 if lane>0.5 { index=packed.y }
                 if lane>1.5 { index=packed.z }
                 if lane>2.5 { index=packed.w }
-                let pos=self.cluster_fetch(self.cluster_z.w+index*3.0)
-                let color=self.cluster_fetch(self.cluster_z.w+index*3.0+1.0)
-                let delta=pos.xyz-wp
-                let distance=length(delta)
-                if distance<pos.w {
-                    let light=delta/max(distance,0.0001)
-                    let direction=self.cluster_fetch(self.cluster_z.w+index*3.0+2.0)
-                    var attenuation=pow(max(1.0-distance/pos.w,0.0),2.0)
-                    var cone=1.0
-                    if direction.w>=0.0 || (direction.w < -1.5 && direction.w > -2.5) {
-                        let ratio=distance/pos.w
-                        let cutoff=max(1.0-ratio*ratio*ratio*ratio,0.0)
-                        attenuation=cutoff*cutoff/max(distance*distance,0.0001)
-                    }
-                    if direction.w>=0.0 || direction.w < -2.5 {
-                        var inner=direction.w
-                        if direction.w < -2.5 { inner=-3.0-direction.w }
-                        let cosine=dot(direction.xyz,light*(-1.0))
-                        let angular=clamp((cosine-color.w)/max(inner-color.w,0.00001),0.0,1.0)
-                        cone=angular*angular
-                    } else if direction.w > -1.5 && color.w>0.001 {
-                        let cosine=max(dot(direction.xyz,light*(-1.0)),0.0)
-                        cone=mix(1.0,cosine*cosine,color.w)
-                    }
-                    let ndl=max(dot(n,light),0.0)
-                    var response=vec3(ndl,ndl,ndl)
-                    if pbr>0.5 {
-                        let view=normalize(eye-wp)
-                        let halfdir=normalize(light+view)
-                        let ndv=max(dot(n,view),0.0001)
-                        let ndh=max(dot(n,halfdir),0.0)
-                        let vdh=max(dot(view,halfdir),0.0)
-                        let rough=clamp(roughness,0.045,1.0)
-                        let metal=clamp(metallic,0.0,1.0)
-                        let f0=mix(vec3(0.04,0.04,0.04),albedo,metal)
-                        let f=f0+(vec3(1.0,1.0,1.0)-f0)*pow(1.0-vdh,5.0)
-                        let a2=rough*rough*rough*rough
-                        let den=ndh*ndh*(a2-1.0)+1.0
-                        let distribution=a2/max(3.14159265*den*den,0.000001)
-                        let k=(rough+1.0)*(rough+1.0)*0.125
-                        let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
-                        let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
-                        let diffuse=(vec3(1.0,1.0,1.0)-f)*albedo*((1.0-metal)/3.14159265)
-                        // Light colours are irradiance/pi units; the HDR
-                        // lane restores the pi the 1/pi BRDF divides out.
-                        response=(diffuse+spec)*(ndl*mix(1.0,3.14159265,self.lin_ctl.x))
-                    }
-                    total=total+color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w))*response
-                }
+                total=total+self.cluster_light(index,wp,n,eye,albedo,roughness,metallic,pbr)
                 i=i+1.0
             }
             return total
@@ -782,6 +825,19 @@ mod tests {
         };
         c.indices[i * c.config.lights_per_cluster..i * c.config.lights_per_cluster + c.counts[i]]
             .contains(&light)
+    }
+    #[test]
+    fn spot_cones_cull_clusters_behind_and_beside_them() {
+        let b = |c: Vec3f| Bounds { min: c - vec3f(0.5, 0.5, 0.5), max: c + vec3f(0.5, 0.5, 0.5) };
+        let (sin, cos) = 30.0f32.to_radians().sin_cos();
+        let down = vec3f(0.0, -1.0, 0.0);
+        let apex = vec3f(0.0, 10.0, 0.0);
+        assert!(!outside_cone(b(vec3f(0.0, 0.0, 0.0)), apex, down, sin, cos), "on the axis");
+        assert!(!outside_cone(b(vec3f(5.0, 0.0, 0.0)), apex, down, sin, cos), "inside the cone (26.6 deg)");
+        assert!(outside_cone(b(vec3f(12.0, 0.0, 0.0)), apex, down, sin, cos), "beside it (50 deg)");
+        assert!(outside_cone(b(vec3f(0.0, 14.0, 0.0)), apex, down, sin, cos), "behind the lamp");
+        // A box straddling the edge is kept.
+        assert!(!outside_cone(Bounds { min: vec3f(4.0, -1.0, -1.0), max: vec3f(8.0, 1.0, 1.0) }, apex, down, sin, cos));
     }
     #[test]
     fn more_than_eight_lights_reach_one_surface() {

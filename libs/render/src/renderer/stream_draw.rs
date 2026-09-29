@@ -82,10 +82,13 @@ fn prepared_from_stream(mut mesh: StreamMesh) -> Result<(PreparedStaticPreview, 
     let detail = solid(0xff80_8080, PixelSemantic::Color);
     let orm = solid(0xffff_ffff, PixelSemantic::Data);
     let triangles = mesh.triangles();
+    // The layer's surface kind rides the metallic slot (DrawSceneCity reads
+    // it); orm_on keeps upload from zeroing it as "not shiny".
     let mut layers = mesh.layers.into_iter().map(|l| PreparedStaticLayer {
         detail: l.detail.as_ref().map_or_else(|| detail.clone(), |(t, _)| t.clone()), detail_scale: l.detail.as_ref().map_or([0.0, 0.0], |(_, s)| *s),
-        vertices: l.vertices, indices: l.indices, texture: l.texture,
-        orm: orm.clone(), orm_on: false, surface: None, pbr: crate::model::PbrMaterial { metallic: 0.0, roughness: 1.0, orm_png: None, surface: None, mag_nearest: false },
+        cutout: l.texture.cutout(), vertices: l.vertices, indices: l.indices, texture: l.texture,
+        orm: l.material.orm.clone().unwrap_or_else(|| orm.clone()), orm_on: true, surface: None,
+        pbr: crate::model::PbrMaterial { metallic: l.material.kind.code(), roughness: 1.0, orm_png: None, surface: None, mag_nearest: false },
     });
     let main = layers.next().ok_or("streamed mesh has no triangles")?;
     let extra: Vec<_> = layers.collect();
@@ -162,6 +165,8 @@ pub(super) struct StreamState {
     extra_foci: Vec<Vec3f>,
     /// 0 by day, 1 at night: window glow and street lamps (from the sun).
     night: f32,
+    /// Headlight radius (metres), eased toward the ~24th-nearest car.
+    headlight_radius: f32,
     stats: StreamStats,
 }
 
@@ -240,7 +245,7 @@ impl Renderer {
             chunk_bounds, cells, props, occluders,
             inflight: 0, ready: Vec::new(), resident_bytes: 0, wanted: Vec::new(), selection: Selection::default(),
             raster: OcclusionRaster::default(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
-            last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, stats: StreamStats::default(),
+            last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, headlight_radius: 0.0, stats: StreamStats::default(),
         };
         // Drain results of a previous source (generation mismatch drops them).
         if let Some(w) = &state.workers { while w.done.try_recv().is_ok() {} }
@@ -267,7 +272,7 @@ impl Renderer {
                 cell: (0..src.cells.len()).map(|_| Slot::Absent).collect(), prop_models: (0..src.prop_models.len()).map(|_| Slot::Absent).collect(),
                 inflight: 0, ready: Vec::new(), resident_bytes: 0, wanted: Vec::new(), selection: Selection::default(),
                 raster: OcclusionRaster::default(), draw_list: Vec::new(), prop_list: Vec::new(), movers: Vec::new(),
-                last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, stats: StreamStats::default(),
+                last_eye: None, velocity: Vec3f::default(), time: 0.0, extra_foci: Vec::new(), night: 0.0, headlight_radius: 0.0, stats: StreamStats::default(),
             }));
         }
         let st = self.stream.as_mut().unwrap();
@@ -496,6 +501,47 @@ impl Renderer {
         let t = ((0.22 - sun_dir_y) / 0.3).clamp(0.0, 1.0);
         st.night = t * t * (3.0 - 2.0 * t);
         if st.night < 0.05 { return; }
+        // Headlights: forward spots on the movers that carry one (last
+        // frame's movers; a frame late is invisible). No hard cut by rank,
+        // which swapped lights between cars frame to frame: every lit car
+        // within a RADIUS draws, fading over the radius' last quarter, and
+        // the radius follows the ~24th-nearest car slowly (hysteresis), so a
+        // light only ever fades in or out as its car crosses the edge.
+        {
+            const TARGET: usize = 24;
+            const CAP: usize = 40;
+            const RANGE: f32 = 140.0;
+            let mut lights: Vec<Option<(Vec3f, Vec3f, Vec3f)>> = Vec::new();
+            let mut cars: Vec<(f32, usize)> = Vec::new();
+            for (i, m) in st.movers.iter().enumerate() {
+                let k = m.kind as usize;
+                if lights.len() <= k { lights.resize(k + 1, None); }
+                if lights[k].is_none() { lights[k] = st.source.mover_light(k); }
+                if lights[k].is_none() { continue; }
+                let d = (vec3f(m.transform.v[12], m.transform.v[13], m.transform.v[14]) - eye).length();
+                if d < RANGE { cars.push((d, i)); }
+            }
+            cars.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let target = cars.get(TARGET).map_or(RANGE, |c| c.0).clamp(30.0, RANGE);
+            st.headlight_radius = if st.headlight_radius <= 0.0 { target } else { st.headlight_radius + (target - st.headlight_radius) * 0.03 };
+            let r = st.headlight_radius;
+            for &(d, i) in cars.iter().take(CAP) {
+                let fade = ((r - d) / (r * 0.25)).clamp(0.0, 1.0);
+                if fade <= 0.0 { break; }
+                let m = &st.movers[i];
+                let Some((offset, dir, color)) = lights[m.kind as usize] else { continue };
+                let v = &m.transform.v;
+                let pos = vec3f(
+                    v[0] * offset.x + v[4] * offset.y + v[8] * offset.z + v[12],
+                    v[1] * offset.x + v[5] * offset.y + v[9] * offset.z + v[13],
+                    v[2] * offset.x + v[6] * offset.y + v[10] * offset.z + v[14],
+                );
+                let axis = vec3f(v[0] * dir.x + v[4] * dir.y + v[8] * dir.z, v[1] * dir.x + v[5] * dir.y + v[9] * dir.z, v[2] * dir.x + v[6] * dir.y + v[10] * dir.z).normalize();
+                self.host_asset_lights.push(crate::lightmap::LmLight {
+                    pos, color: color * (st.night * fade), radius: 26.0, dir: axis, spot: 1.0, cone: Some((10.0, 34.0)), shadows: false,
+                });
+            }
+        }
         let kinds: Vec<Option<(Vec3f, Vec3f, f32)>> = (0..st.prop_models.len()).map(|k| st.source.prop_light(k)).collect();
         if kinds.iter().all(Option::is_none) { return; }
         const RANGE: f32 = 220.0;
@@ -521,10 +567,36 @@ impl Renderer {
     /// Draw this frame's streamed pieces and props through the diffuse
     /// world-model shader (streamed materials are matte). Each piece is one
     /// draw per layer; each prop kind is one instanced draw per layer.
-    pub(super) fn draw_stream(&mut self, cx: &mut Cx3d, draw: &mut DrawSceneSkinned, eye: Vec3f, fog: (Vec3f, f32), sun: &SunLight) {
+    pub(super) fn draw_stream(&mut self, cx: &mut Cx3d, diffuse: &mut DrawSceneSkinned, eye: Vec3f, fog: (Vec3f, f32), sun: &SunLight) {
         if self.stream.as_ref().is_none_or(|s| s.draw_list.is_empty() && s.prop_list.is_empty()) { return; }
-        let mut draw = ModelDraw::Diffuse(draw);
-        self.bind_model_lane(cx, &mut draw, eye, fog, sun);
+        if self.city_draw.is_none() {
+            // Held VM: draw matte through the diffuse lane this frame.
+            self.city_draw = cx.cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneCity::script_new_with_default(vm)));
+        }
+        let mut city = self.city_draw.take();
+        let night = self.stream.as_ref().map_or(0.0, |s| s.night);
+        // Until the city pipeline can draw (Metal compiles it asynchronously
+        // after a shader change) or if it failed, the city draws matte
+        // rather than not at all.
+        let hdr = self.hdr_output;
+        let mut draw = match city.as_deref_mut().filter(|c| c.pbr.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr)) && city_shader_on()) {
+            Some(c) => { c.city = vec4(night, 0.0, 0.0, 0.0); ModelDraw::City(c) }
+            None => ModelDraw::Diffuse(diffuse),
+        };
+        self.draw_stream_with(cx, &mut draw, eye, fog, sun);
+        drop(draw);
+        self.city_draw = city;
+    }
+
+    fn draw_stream_with(&mut self, cx: &mut Cx3d, draw: &mut ModelDraw<'_>, eye: Vec3f, fog: (Vec3f, f32), sun: &SunLight) {
+        self.bind_model_lane(cx, draw, eye, fog, sun);
+        // The lane's no-discard variant for layers that cut no pixel
+        // (renderer/opaque.rs): not dithered, texture fully opaque.
+        let opaque = match draw {
+            ModelDraw::City(_) => self.opaque_shader(cx.cx, super::opaque::OpaqueLane::City),
+            ModelDraw::Diffuse(_) => self.opaque_shader(cx.cx, super::opaque::OpaqueLane::Diffuse),
+            _ => None,
+        };
         // Statics: one transient-only light block for the whole lane.
         {
             let empty_block = LightBlock::default();
@@ -559,7 +631,8 @@ impl Renderer {
                 draw.base().draw_vars.set_texture(5, d);
                 draw.base().detail_st = vec2f(s[0], s[1]);
                 draw.set_material(cx.cx, mat);
-                draw.submit(cx, 0.0, &mut fur_budget);
+                let cut = dither > 0.5 || mat.cutout;
+                draw.submit_as(cx, 0.0, &mut fur_budget, opaque.filter(|_| !cut));
             };
             layers(&m.geometry, &m.texture, &m.detail, m.detail_scale, &m.material, draw, cx);
             for (g, t, d, s, mat) in &m.extra_draws { layers(g, t, d, *s, mat, draw, cx); }
@@ -572,10 +645,10 @@ impl Renderer {
                 StreamPiece::Cell(i) => &st.cell[i as usize],
                 StreamPiece::Prop(_) => continue,
             };
-            if let Some(m) = slot.model() { submit(&mut draw, cx, m, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither); }
+            if let Some(m) = slot.model() { submit(draw, cx, m, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither); }
         }
         for (kind, transform, tint, dither) in &st.prop_list {
-            if let Some(m) = st.prop_models.get(*kind as usize).and_then(Slot::model) { submit(&mut draw, cx, m, *transform, *tint, *dither); }
+            if let Some(m) = st.prop_models.get(*kind as usize).and_then(Slot::model) { submit(draw, cx, m, *transform, *tint, *dither); }
         }
         drop(submit);
         draw.base().color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
@@ -586,12 +659,19 @@ impl Renderer {
     }
 }
 
+/// `MAKEPAD_CITY_SHADER=0` draws the streamed world through the matte
+/// diffuse lane (the A/B for the city shader's cost).
+fn city_shader_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_CITY_SHADER").map_or(true, |v| v != "0"))
+}
+
 /// The shadow-casting layers of a streamed model: its first `casting`
 /// layers (`prepared_from_stream` sorts them first).
 fn stream_casters_of(casters: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>, m: &LoadedModel, casting: usize) {
     for (k, g) in std::iter::once(&m.geometry).chain(m.extra_draws.iter().map(|(g, ..)| g)).enumerate() {
         if k >= casting { break; }
-        casters.push(crate::gpu_lightmap::GpuBakeMesh { geometry: g.geometry_id(), transform: Mat4f::identity(), min: m.min, max: m.max });
+        casters.push(crate::gpu_lightmap::GpuBakeMesh { geometry: g.geometry_id(), transform: Mat4f::identity(), min: m.min, max: m.max, cutout: None, band: Default::default() });
     }
 }
 

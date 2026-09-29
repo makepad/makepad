@@ -1480,6 +1480,11 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
         TexturePixel::VideoExternal => DXGI_FORMAT_B8G8R8A8_UNORM,
         TexturePixel::VideoGlMemoryRgba => DXGI_FORMAT_R8G8B8A8_UNORM,
         TexturePixel::VideoRgbaHardwareBuffer => DXGI_FORMAT_R8G8B8A8_UNORM,
+        // Compressed chains: not uploaded on D3D11 yet (GpuInfo flags stay
+        // off), so these are never allocated here.
+        TexturePixel::Bc7 => DXGI_FORMAT(98), // BC7_UNORM
+        TexturePixel::Bc5 => DXGI_FORMAT(83), // BC5_UNORM
+        TexturePixel::Astc4x4 => DXGI_FORMAT_R8G8B8A8_UNORM,
     }
 }
 

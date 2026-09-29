@@ -12,6 +12,9 @@ mod effects;
 mod sky_dome;
 mod skinned;
 mod pbr;
+mod city;
+mod grass;
+mod foliage;
 mod skinned_gpu;
 mod world;
 mod lm_depth;
@@ -30,6 +33,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     sky_dome::script_mod(vm);
     skinned::script_mod(vm);
     pbr::script_mod(vm);
+    city::script_mod(vm);
+    grass::script_mod(vm);
+    foliage::script_mod(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
     lm_depth::script_mod(vm);
@@ -124,6 +130,11 @@ pub struct DrawSceneTexture {
     /// the metered exposure, w = bloom level normalisation.
     #[live(vec4(0.0, 0.18, 0.5, 1.0))]
     pub post2: Vec4f,
+    /// The game's grade, from [`crate::Renderer::set_grade`]: x = contrast,
+    /// y = saturation, z = auto-exposure ceiling as a factor of the metered
+    /// exposure, w = exposure bias factor. The default is the stock look.
+    #[live(vec4(1.0, 1.0, 1.6, 1.0))]
+    pub grade: Vec4f,
 }
 
 /// DrawCube + per-instance emission (`glow`) and per-instance fog density.
@@ -402,6 +413,11 @@ pub struct DrawSceneSkinned {
     /// (the classic games' look); minified texels stay filtered. y unused
     /// (keeps the payload a multiple of eight bytes). Set per draw from the
     /// layer's material; 0 everywhere else draws exactly as before.
+    /// y = the PBR lane's race paint (`makepadShading`), packed as
+    /// clearcoat * 255 * 256 + flake * 255 (0 = plain). Packed into this
+    /// spare lane on purpose: the model lanes' instance stream is at the
+    /// vertex-attribute limit (31 on Metal, 32 on common Vulkan GPUs; one
+    /// more vec4 lost the Vulkan device in race).
     #[live(vec2(0.0, 0.0))]
     pub tex_mag: Vec2f,
 }
@@ -452,9 +468,49 @@ const _: () = {
     assert!(std::mem::offset_of!(DrawScenePbr, metallic) == end);
 };
 
-/// Minimal camera-space held-model shader. The transform is the only instance
-/// lane; daylight is uniform per view and material color comes from the same
-/// packed model vertex/texture format as ordinary stock props.
+/// The streamed world's surface shader (`renderer/stream_draw.rs`):
+/// [`DrawScenePbr`]'s lighting with the city's materials — curtain-wall and
+/// window glass with a sky-and-skyline reflection and a room behind each
+/// pane, clear-coated paint, emissive lamps, and the lit-window hours. A
+/// layer's `metallic` slot carries its [`crate::stream::StreamSurface`]
+/// code; the ORM map's channels are read per that kind.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneCity {
+    #[deref]
+    pub pbr: DrawScenePbr,
+    /// x = night factor (0 day .. 1 night: window hours, lamp emission).
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub city: Vec4f,
+}
+
+/// GPU grass blades (`crate::grass`): DrawScenePbr's lane with its own
+/// vertex stage (blades placed on the grass field) and pixel. One instance
+/// per patch. It adds NO instance lanes (the PBR stream is at the vertex-
+/// attribute limit) and no uniforms (the PBR block is full): the blades
+/// never morph, so the field rides the morph weight lanes, see
+/// `renderer/grass_draw.rs` for the layout.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneGrass {
+    #[deref]
+    pub pbr: DrawScenePbr,
+}
+
+/// The swaying-foliage lane (`shaders/foliage.rs`): DrawScenePbr's vertex
+/// stage and binding with a pixel made for leaves. No instance lanes of its
+/// own (the PBR stream is at the vertex-attribute limit).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneFoliageLit {
+    #[deref]
+    pub pbr: DrawScenePbr,
+}
+
+/// Camera-space held-model shader: per-pixel PBR (normal map, metallic-
+/// roughness, sun lobe, sky reflection) without any world-lighting state.
+/// The transform and the layer material are the instance lanes; daylight is
+/// uniform per view.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneViewModel {
@@ -470,6 +526,34 @@ pub struct DrawSceneViewModel {
     pub sun_sky: Vec3f,
     #[live(vec3(0.28, 0.28, 0.28))]
     pub sun_ground: Vec3f,
+    /// 1 in the HDR lane: texels and vertex colours are sRGB-encoded and
+    /// must be linearised like every world shader does (`to_scene`), or
+    /// the held model renders washed out next to the world.
+    #[live(0.0)]
+    pub lin: f32,
+    /// Sun reaching the camera (0 in shadow): the held model has no shadow
+    /// map, so the host tells it whether the eye stands in shade.
+    #[live(1.0)]
+    pub sun_vis: f32,
+    /// The horizon radiance the sky reflection fades to (the world's fog).
+    #[live(vec3(0.6, 0.65, 0.7))]
+    pub fog_color: Vec3f,
+    /// Per layer: the glTF metallic/roughness factors (x the ORM map when
+    /// `orm_on`), normal-map strength (0 = none), mask cutout, emission.
+    #[live(0.0)]
+    pub metallic: f32,
+    #[live(1.0)]
+    pub roughness: f32,
+    #[live(0.0)]
+    pub orm_on: f32,
+    #[live(0.0)]
+    pub normal_scale: f32,
+    #[live(0.0)]
+    pub alpha_mode: f32,
+    #[live(0.5)]
+    pub alpha_cutoff: f32,
+    #[live(vec3(0.0, 0.0, 0.0))]
+    pub emissive: Vec3f,
 }
 
 /// Old-school lamp lens flare: one additive billboard per visible light.
@@ -854,6 +938,17 @@ pub struct DrawLmSunDepth {
     #[live]
     pub morph_weights7: Vec4f,
 
+}
+
+/// [`DrawLmSunDepth`] for cut-out casters (leaf cards, fences): the same
+/// projection, plus the layer's base-colour alpha tested per fragment, so a
+/// card casts its leaves and not its rectangle. Only cut-out layers draw
+/// through it; every other caster keeps the discard-free-by-texture lane.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLmSunDepthCutout {
+    #[deref]
+    pub depth: DrawLmSunDepth,
 }
 
 /// Lamp-view depth pass: six 90-degree faces tiled 3x2. `face_r*` are the
@@ -1255,6 +1350,9 @@ mod shader_registration_tests {
                 ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
                 ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
                 ("custom", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCustom)})),
+                ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
+                ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
+                ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
                 ("local shadow skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLocalShadowSkinned)})),
                 ("sun depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepth)})),
                 ("sun skin depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepthSkinned)})),
@@ -1271,6 +1369,8 @@ mod shader_registration_tests {
                 ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
                 ("cube HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCube, "hlsl", false)})),
                 ("PBR HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "hlsl", false)})),
+                ("city GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCity, "glsl", false)})),
+                ("city HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCity, "hlsl", false)})),
                 ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
             ] {
                 let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
@@ -1284,6 +1384,9 @@ mod shader_registration_tests {
                 ("GI trace HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiTrace,"hlsl",false)})),
                 ("GI relight HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiRelight,"hlsl",false)})),
                 ("GI gather HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawGiGather,"hlsl",false)})),
+                // Grass reads GI ambient but no clustered lights (blades are sun-lit).
+                ("grass GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"glsl",false)})),
+                ("grass HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"hlsl",false)})),
             ] {
                 let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
@@ -1315,6 +1418,33 @@ mod shader_registration_tests {
             assert_eq!(textures[10].id, live_id!(local_shadow_map));
             assert!(textures.iter().any(|texture|texture.id==live_id!(orm_map)));
             assert!(textures.iter().any(|texture|texture.id==live_id!(morph_map)));
+            // The grass lane instantiates (its field rides the instance
+            // stream: the PBR uniform block has no room) and keeps the
+            // rasters on the PBR lane's slots 0 and 1.
+            let grass = DrawSceneGrass::script_new_with_default(vm);
+            let id = grass.pbr.skinned.draw_vars.draw_shader_id.expect("registered grass shader");
+            let cx = vm.cx();
+            let mapping = &cx.draw_shaders[id.index].mapping;
+            assert_eq!(mapping.textures[0].id, live_id!(tex));
+            assert_eq!(mapping.textures[1].id, live_id!(ao_map));
+            // Vertex attributes: every backend packs the geometry and the
+            // instance records into vec4 chunks, one attribute each. Metal
+            // allows 31, common Vulkan GPUs 32; one vec4 over it lost the
+            // Vulkan device in race (2026-09-29). New per-draw data must ride
+            // a spare lane, never a new instance field.
+            let lanes = [
+                ("model", DrawSceneSkinned::script_new_with_default(vm).draw_vars.draw_shader_id),
+                ("pbr", DrawScenePbr::script_new_with_default(vm).skinned.draw_vars.draw_shader_id),
+                ("custom", crate::custom_material::DrawSceneCustom::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("city", DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("grass", DrawSceneGrass::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("foliage", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+            ];
+            for (name, id) in lanes {
+                let m = &vm.cx().draw_shaders[id.expect("registered").index].mapping;
+                let n = m.geometries.total_slots.div_ceil(4) + m.instances.total_slots.div_ceil(4);
+                assert!(n <= 31, "{name}: {n} vertex attributes (Metal allows 31)");
+            }
         });
     }
 }

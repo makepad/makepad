@@ -196,11 +196,34 @@ impl Renderer {
     /// `depth`. Call right after the scene pass (and after the post chain
     /// has re-parented it): the pass slots itself between the scene and
     /// whatever consumed it. None when nothing was left for it.
+    /// The soft-particle pass draws into the scene target, so it must
+    /// resolve to exactly the scene pass's size. The host calls this after
+    /// it has placed its scene pass (`set_pass_area`), every frame: a pass
+    /// sized on its own (`set_size`) differed from an area-placed scene pass
+    /// whenever the render scale was below 1, and the shared target was
+    /// re-allocated between the two passes — the scene was lost and the
+    /// view drew black wherever particles were alive.
+    pub fn follow_scene_pass_rect(&self, cx: &mut Cx, scene_pass: &DrawPass) {
+        if let Some((pass, _)) = &self.vfx.pass {
+            let rect = cx.passes[scene_pass.draw_pass_id()].pass_rect.clone();
+            cx.passes[pass.draw_pass_id()].pass_rect = rect;
+        }
+    }
+
     pub fn run_vfx(&mut self, cx: &mut Cx2d, size: DVec2, color: &Texture, depth: &Texture, scene_pass: &DrawPass) -> Option<DrawPassId> {
-        let frame = self.vfx.pending.take()?;
-        if self.vfx.records.is_empty() {
+        let frame = self.vfx.pending.take();
+        if frame.is_none() || self.vfx.records.is_empty() {
+            // No particles this frame: the pass must not stay attached to
+            // the scene target. A detached pass still repaints on its own,
+            // at the size it last had — after a resize (a split pane, an
+            // adaptive render scale) that re-allocated the scene target at
+            // that stale size every frame and the scene drew black.
+            if let Some((pass, _)) = &self.vfx.pass {
+                pass.clear_color_textures(cx.cx);
+            }
             return None;
         }
+        let frame = frame?;
         if self.vfx.draw_pass.is_none() {
             self.vfx.draw_pass = cx.cx.try_with_vm(|vm| Box::new(DrawSceneVfx::script_new_with_default(vm)));
         }
@@ -226,8 +249,14 @@ impl Renderer {
             self.vfx.note_gpu_ms(*ms);
         }
         let p = frame.scene.projection.v;
-        // Metal keeps clip z/w as the stored depth; GL maps it to 0..1.
-        let unmapped = if cfg!(any(target_os = "macos", target_os = "ios", target_os = "tvos")) { 1.0 } else { 0.0 };
+        // Metal, Vulkan and D3D keep clip z/w as the stored depth; only GL
+        // maps it to 0..1. Read as GL, a Vulkan depth put the scene a few
+        // metres from the eye, so every particle with geometry behind it was
+        // discarded (a hearth's flames; only sparks against the sky showed).
+        let unmapped = match cx.cx.gpu_backend() {
+            GpuBackend::OpenGl | GpuBackend::WebGl => 0.0,
+            _ => 1.0,
+        };
         let depth_ctl = [1.0, p[10], p[14], unmapped];
         // The scene target's own density: a pass at any other dpi would
         // re-allocate the shared target and lose the scene in it.

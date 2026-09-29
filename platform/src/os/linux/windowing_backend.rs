@@ -82,6 +82,9 @@ impl Cx {
                         custom_window_chrome: false,
                     });
                     cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
+                    let (bc7, astc) = vulkan.texture_compression();
+                    cx.gpu_info.texture_bc7 = bc7;
+                    cx.gpu_info.texture_astc4x4 = astc;
                     cx.os.vulkan = Some(vulkan);
                     cx.os.gpu_backend = Some(crate::cx::GpuBackend::Vulkan);
                     cx.stdin_event_loop();

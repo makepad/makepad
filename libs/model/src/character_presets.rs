@@ -3,31 +3,35 @@
 use crate::json::{self, Value};
 
 const PRESETS: &[(&str, &str)] = &[
-    // Tactical counter-terrorist: navy, helmet + headset, plate carrier.
-    ("ct_operator", r##"{"name":"ct_operator","height":1.82,"stylize":0.18,"body":{"shoulders":1.2,"chest":1.18,"muscle":1.3,"waist":1.08,"jaw":1.45,"chin":1.3,"neck":1.35},
-      "skin":"#d6a283","face":{"eye_color":"#4d6a86","eye_size":0.85,"brows":1.6,"brow_angle":8,"nose":"straight","nose_size":1.15,"smile":-0.05,"blush":0.1,"lids":0.45},
-      "hair":{"style":"buzz","color":"#2f241c"},"facial_hair":"stubble",
-      "colors":{"primary":"#253a5e","secondary":"#1f2733","accent":"#9fb7d6"},
-      "outfit":[{"kind":"shirt","color":"#2a3f63"},{"kind":"cargo","color":"#26324a"},{"kind":"plate_carrier","color":"#1b1d22","color2":"#c9b48a"},{"kind":"armband","color":"#3aa0ff"},
-        {"kind":"helmet","style":"tactical","color":"#1d2a40"},{"kind":"headset","color":"#191c22"},{"kind":"gloves","color":"#15171b"},
-        {"kind":"boots","color":"#1b1b1d"},{"kind":"belt","color":"#15171b"},{"kind":"knee_pads","color":"#1a2233"},{"kind":"holster","color":"#15171b"}]}"##),
-    ("ct_medic", r##"{"preset":"ct_operator","name":"ct_medic","skin":"#8d5a3b","hair":{"style":"short","color":"#141010"},"facial_hair":"none",
-      "face":{"eye_color":"#3b2a1d","nose":"broad"},
-      "outfit":[{"kind":"shirt","color":"#2a3f63"},{"kind":"cargo","color":"#26324a"},{"kind":"plate_carrier","color":"#1f2d45","color2":"#e04848"},{"kind":"armband","color":"#3aa0ff"},
-        {"kind":"helmet","style":"tactical","color":"#1d2a40"},{"kind":"goggles","color":"#1d2a40","color2":"#e8c46a"},{"kind":"gloves","color":"#15171b"},
-        {"kind":"boots","color":"#1b1b1d"},{"kind":"belt","color":"#15171b"},{"kind":"backpack","color":"#22314b","color2":"#e04848"}]}"##),
-    // Terrorist: earth tones, balaclava, chest rig, field jacket.
-    ("t_raider", r##"{"name":"t_raider","height":1.78,"stylize":0.18,"body":{"shoulders":1.06,"muscle":1.08,"belly":1.05,"jaw":1.3,"neck":1.2},
-      "skin":"#c89272","face":{"eye_color":"#3a2a1c","brows":1.35,"brow_angle":14},
-      "hair":{"style":"short","color":"#1c140e"},
-      "colors":{"primary":"#6b5a3e","secondary":"#4a4234","accent":"#b0452f"},
-      "outfit":[{"kind":"shirt","color":"#5c5a4a"},{"kind":"cargo","color":"#5a4c36","material":"camo","color2":"#3b3526"},
-        {"kind":"jacket","color":"#b59a66","color2":"#40362a","style":"field","open":true},{"kind":"chest_rig","color":"#4a4630"},{"kind":"scarf","color":"#d23a2a"},{"kind":"armband","color":"#e8c22a"},
-        {"kind":"balaclava","color":"#23211d"},{"kind":"gloves","color":"#2d261e"},{"kind":"boots","color":"#3a2b1e"},{"kind":"belt","color":"#2b241c"}]}"##),
-    ("t_scout", r##"{"preset":"t_raider","name":"t_scout","height":1.74,"body":{"muscle":0.9,"shoulders":0.95},
-      "outfit":[{"kind":"hoodie","color":"#b89c6a"},{"kind":"armband","color":"#e8c22a"},{"kind":"cargo","color":"#4d4637"},{"kind":"chest_rig","color":"#5a5438"},
-        {"kind":"balaclava","color":"#3a3228"},{"kind":"goggles","color":"#2b2620","color2":"#d99a3a"},{"kind":"gloves","color":"#2d261e"},
-        {"kind":"boots","color":"#3a2b1e","style":"low"},{"kind":"scarf","color":"#9c3b2a"}]}"##),
+    // Sci-fi crews for team shooters: two rival starship crews in an
+    // exhibition war game. Sealed helmets with a glowing visor read at any
+    // distance; the halves differ in colour temperature and silhouette.
+    // Halcyon: clean white armour panels over a slate suit, cyan light.
+    ("halcyon_warden", r##"{"name":"halcyon_warden","height":1.83,"stylize":0.05,"heads":7.2,"body":{"shoulders":1.16,"chest":1.12,"muscle":1.18,"waist":1.02,"neck":1.3},
+      "skin":"#c8946f","face":{"eye_color":"#4d6a86","eye_size":0.8,"lids":0.45},"hair":{"style":"buzz","color":"#2f241c"},
+      "colors":{"primary":"#e6edf3","secondary":"#2a3442","accent":"#3ff2e8"},
+      "outfit":[{"kind":"suit","color":"#2a3442","color2":"#3ff2e8","material":"nylon"},{"kind":"armor","color":"#e8eef4","color2":"#8fa2b4","material":"glossy"},
+        {"kind":"shoulder_pads","color":"#eef3f7","material":"glossy"},{"kind":"bracers","color":"#d8e0e8","material":"glossy"},
+        {"kind":"gloves","color":"#1c232d","material":"nylon"},{"kind":"belt","color":"#1c232d"},{"kind":"knee_pads","color":"#e8eef4","material":"glossy"},
+        {"kind":"boots","color":"#1c232d"},{"kind":"helmet","style":"visor","color":"#eef3f7","color2":"#46f0ff"}]}"##),
+    ("halcyon_medic", r##"{"preset":"halcyon_warden","name":"halcyon_medic","height":1.78,"skin":"#7e5a44","body":{"muscle":1.0,"shoulders":1.05},
+      "outfit":[{"kind":"suit","color":"#34414f","color2":"#3ff2e8","material":"nylon"},{"kind":"armor","color":"#e8eef4","color2":"#3ff2e8","material":"glossy"},
+        {"kind":"shoulder_pads","color":"#bfd0de","material":"glossy"},{"kind":"elbow_pads","color":"#e8eef4","material":"glossy"},{"kind":"gloves","color":"#1c232d","material":"nylon"},
+        {"kind":"belt","color":"#1c232d"},{"kind":"knee_pads","color":"#e8eef4","material":"glossy"},{"kind":"boots","color":"#1c232d"},
+        {"kind":"backpack","color":"#e8eef4","color2":"#3ff2e8"},{"kind":"helmet","style":"visor","color":"#d8e2ea","color2":"#46f0ff"}]}"##),
+    // Kestrel: heavy copper plate over a graphite suit, amber light.
+    ("kestrel_striker", r##"{"name":"kestrel_striker","height":1.8,"stylize":0.05,"heads":7.2,"body":{"shoulders":1.2,"chest":1.15,"muscle":1.22,"waist":1.05,"neck":1.3},
+      "skin":"#c08a66","face":{"eye_color":"#3a2a1c","eye_size":0.8,"lids":0.45},"hair":{"style":"short","color":"#1c140e"},
+      "colors":{"primary":"#b86a2c","secondary":"#2b2622","accent":"#ffa33a"},
+      "outfit":[{"kind":"suit","color":"#2b2622","color2":"#ff9a2e","material":"nylon"},{"kind":"armor","color":"#b8692c","color2":"#f2b36a","material":"metal"},
+        {"kind":"shoulder_pads","color":"#c47a36","material":"metal"},{"kind":"bracers","color":"#8a4a22","material":"metal"},
+        {"kind":"gloves","color":"#241e1a","material":"leather"},{"kind":"belt","color":"#241e1a"},{"kind":"greaves","color":"#9a5626","material":"metal"},
+        {"kind":"boots","color":"#241e1a"},{"kind":"helmet","style":"visor","color":"#3a2e26","color2":"#ffae3a"}]}"##),
+    ("kestrel_runner", r##"{"preset":"kestrel_striker","name":"kestrel_runner","height":1.75,"body":{"muscle":0.98,"shoulders":1.02},
+      "outfit":[{"kind":"suit","color":"#33291f","color2":"#ff9a2e","material":"nylon"},{"kind":"vest","color":"#a85e28","color2":"#ffa33a"},
+        {"kind":"elbow_pads","color":"#c47a36"},{"kind":"gloves","color":"#241e1a","material":"leather"},{"kind":"belt","color":"#241e1a"},
+        {"kind":"knee_pads","color":"#c47a36"},{"kind":"boots","color":"#241e1a","style":"low"},{"kind":"backpack","color":"#6e3c1e","color2":"#ffa33a"},
+        {"kind":"helmet","style":"visor","color":"#c47a36","color2":"#ffc04a"}]}"##),
     // Platformer hero: a chibi explorer with a big grin.
     ("hero_pip", r##"{"name":"hero_pip","height":1.15,"stylize":0.85,"heads":2.9,"body":{"hands":1.1,"feet":1.1},
       "skin":"#ffd2b0","face":{"eye_color":"#2e7fd8","eye_size":1.15,"brows":1.2,"nose":"button","nose_size":0.8,"smile":0.75,"blush":0.7,"lids":0.12},

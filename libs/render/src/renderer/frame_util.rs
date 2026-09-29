@@ -683,11 +683,20 @@ pub(crate) fn apply_sun(cx: &Cx, draws: &mut SceneDraws, sun: &SunLight, fog_col
 /// (the village demo customises exactly that), and analytic mode derives
 /// its fog from the model instead.
 /// This world's analytic sky frame for `sun_dir`, when it draws one.
-pub(super) fn analytic_sky_frame(world: &World, sun_dir: Vec3f, shows_environment: bool) -> Option<crate::sky::SkyFrame> {
+///
+/// A world on a RUNNING clock (`clock`: its `time_of_day` has moved since
+/// the realm began) always takes the analytic dome: a painted gradient
+/// cannot set, dusk or go dark, and a game that painted its sky blue and
+/// then ran a day cycle got a day-blue midnight. Its authored colours
+/// become a TINT of the analytic day instead ([`authored_sky_tint`]): the
+/// top tints the dome, the horizon tints the fog, both fading out through
+/// twilight so every night is the same starry one. A painted sky under a
+/// fixed hour keeps its gradient.
+pub(super) fn analytic_sky_frame(world: &World, sun_dir: Vec3f, shows_environment: bool, hdr: bool, clock: bool) -> Option<crate::sky::SkyFrame> {
     world
         .sky
         .as_ref()
-        .filter(|s| shows_environment && sky_wants_analytic(s))
+        .filter(|s| shows_environment && (clock || sky_wants_analytic(s)))
         .map(|sky| {
             let turbidity = if sky.turbidity.is_finite() { sky.turbidity } else { sky_turbidity() };
             let compensation = if sky.exposure_ev.is_finite() {
@@ -695,8 +704,36 @@ pub(super) fn analytic_sky_frame(world: &World, sun_dir: Vec3f, shows_environmen
             } else {
                 1.0
             };
-            crate::sky::preetham_frame(sun_dir, turbidity, sky_exposure() * compensation)
+            let mut frame = crate::sky::preetham_frame(sun_dir, turbidity, sky_exposure() * compensation);
+            if !sky_wants_analytic(sky) {
+                let day = 1.0 - frame.zenith.w;
+                let d = makepad_scene::SkyConfig::default();
+                let top = authored_sky_tint(sky.top, d.top, day);
+                let horizon = authored_sky_tint(sky.horizon, d.horizon, day);
+                let gamma = |t: Vec3f| vec3f(t.x.powf(1.0 / 2.2), t.y.powf(1.0 / 2.2), t.z.powf(1.0 / 2.2));
+                frame.dome_tint = if hdr { top } else { gamma(top) };
+                frame.fog_linear = frame.fog_linear * horizon;
+                frame.fog_rgb = frame.fog_rgb * gamma(horizon);
+            }
+            frame
         })
+}
+
+/// A LINEAR-light tint that moves the analytic default toward an authored
+/// sky colour: the hue ratio of `authored` over the stock `default`, its
+/// brightness kept within half to one and a half times, faded to neutral
+/// by `day` (1 = full day, 0 = night). Bounded so an authored palette
+/// colours the sky without breaking the model's sunset.
+pub(super) fn authored_sky_tint(authored: Vec4f, default: Vec4f, day: f32) -> Vec3f {
+    let a = srgb_to_linear(vec3f(authored.x, authored.y, authored.z));
+    let b = srgb_to_linear(vec3f(default.x, default.y, default.z));
+    let ratio = vec3f(a.x / b.x.max(1.0e-4), a.y / b.y.max(1.0e-4), a.z / b.z.max(1.0e-4));
+    let lum = (ratio.x * 0.2126 + ratio.y * 0.7152 + ratio.z * 0.0722).max(1.0e-4);
+    let hue = |v: f32| (v / lum).clamp(0.3, 2.5);
+    let bright = lum.clamp(0.5, 1.5);
+    let tint = vec3f(hue(ratio.x), hue(ratio.y), hue(ratio.z)) * bright;
+    let day = day.clamp(0.0, 1.0);
+    vec3f(1.0, 1.0, 1.0) * (1.0 - day) + tint * day
 }
 
 pub(super) fn sky_wants_analytic(sky: &makepad_scene::SkyConfig) -> bool {

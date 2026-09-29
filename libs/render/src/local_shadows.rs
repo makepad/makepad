@@ -37,9 +37,11 @@ const ROOT_ROWS: usize = 2;
 /// Smallest tile: the maximum tile size >> MIN_TIER_SHIFT.
 const MIN_TIER_SHIFT: u32 = 3;
 /// Depth generations for face caching. Perspective depth crowds near 1, so
-/// each generation keeps a quarter of the range (about 3 float steps per
-/// centimetre at 20 m; the receiver's bias floor is 1.5 cm).
-const LOCAL_DEPTH_GENS: u32 = 4;
+/// each generation keeps an eighth of the range (about 1.5 float steps per
+/// centimetre at 20 m; the receiver's bias floor is 1.5 cm). Every
+/// LOCAL_DEPTH_GENS rendering frames the whole atlas is cleared and
+/// re-rendered, so more generations mean rarer full re-renders.
+const LOCAL_DEPTH_GENS: u32 = 8;
 /// Texels a cube face is widened by on every side (cross-face filtering).
 const CUBE_GUARD: f32 = 2.0;
 
@@ -852,6 +854,8 @@ impl LocalShadows {
             let pass = DrawPass::new(cx.cx);
             pass.set_pass_name(cx.cx, "local_shadows");
             pass.set_gpu_timing_enabled(cx.cx, true);
+            // Hardware maps sample the atlas DEPTH; the colour is then scratch.
+            pass.set_color_scratch(cx.cx, hardware_shadow_maps());
             pass
         });
         let list = self.list.get_or_insert_with(|| DrawList::new(cx.cx));
@@ -1348,7 +1352,7 @@ mod tests {
         assert!(frame(&mut s, vec![live], false) >= 1, "a live mover's face never caches");
         // Generations descend; running out clears the atlas.
         let mut fulls = 0;
-        for _ in 0..8 {
+        for _ in 0..2 * LOCAL_DEPTH_GENS {
             s.prepare(&lights, &active, Vec3f::default());
             s.movers = vec![MoverBox { live: true, ..rigid(crate_box, 1) }];
             let full = s.plan_cache(false);

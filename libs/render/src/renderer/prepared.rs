@@ -5,6 +5,13 @@ use super::*;
 /// Decode generated PNG pixels with limits enforced by the decoder before
 /// allocation. Animated PNGs are decoded as a single frame in this lane.
 pub fn decode_generated_png(bytes: &[u8], dimension: usize, byte_limit: usize) -> Result<ImageBuffer, String> {
+    // The load-ready form (KTX2/UASTC) stands in for the PNG.
+    if let Some(image) = crate::texture_pack::image_from_ktx2(bytes) {
+        let image = image?;
+        if image.width > dimension || image.height > dimension { return Err("generated PNG exceeds dimension limit".into()); }
+        if image.data.len() * 4 > byte_limit { return Err("generated PNG exceeds decoded pixel budget".into()); }
+        return Ok(image);
+    }
     use makepad_draw::makepad_zune_png::{PngDecoder, makepad_zune_core::{bytestream::ZCursor, options::DecoderOptions}};
     let options = DecoderOptions::default().set_max_width(dimension).set_max_height(dimension)
         .set_strict_mode(true).png_set_confirm_crc(true).png_set_strip_to_8bit(true).png_set_decode_animated(false);
@@ -143,33 +150,51 @@ impl PreparedStaticPreview {
         let image = |bytes:Option<&[u8]>,fallback:u32,semantic:crate::material_surface::PixelSemantic| -> Result<std::sync::Arc<crate::material_surface::PreparedTexture>,String> {
             // The same image as colour and as a masked cutout mips differently.
             let kind=semantic as u8;
+            // The load-ready form: pre-mipped UASTC (KTX2) in the GLB, keyed by
+            // its builder-assigned id and remapped to the device format (no
+            // decode, mips or hashing).
+            if let Some(bytes)=bytes.filter(|b|crate::texture_pack::is_ktx2(b)) {
+                let key=(crate::texture_pack::content_id(bytes).unwrap_or(0),bytes.len(),1,kind);
+                if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
+                let texture=crate::material_surface::remapped_ktx2(bytes).expect("KTX2 bytes")?;
+                remaining.set(remaining.get().saturating_sub(texture.bytes()));
+                shared.borrow_mut().insert(key,texture.clone());
+                return Ok(texture);
+            }
             let key=match bytes {
-                Some(bytes)=>(bytes.iter().fold(0xcbf2_9ce4_8422_2325u64,|h,b|(h^*b as u64).wrapping_mul(0x100_0000_01b3)),bytes.len(),0,kind),
+                Some(bytes)=>(crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||bytes.iter().fold(0xcbf2_9ce4_8422_2325u64,|h,b|(h^*b as u64).wrapping_mul(0x100_0000_01b3))),bytes.len(),0,kind),
                 None=>(0,0,fallback,kind),
             };
             if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
-            // A host cache of prepared textures skips the decode and the mips.
+            // PNG images (a level's material images, content published before
+            // the load-ready form) decode and mip here, once per load for all
+            // the models that use them.
+            let prepare=||{
             let store=crate::material_surface::prepared_texture_store();
+            // A host cache of prepared textures skips the decode and the mips.
             // Small images prepare faster than a cache round trip.
-            let store_key=bytes.filter(|b|b.len()>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES).map(|b|crate::material_surface::prepared_texture_key(b,semantic));
-            if let (Some(store),Some(store_key))=(store,store_key) {
-                if let Some(texture)=store.get(store_key) {
-                    if texture.data.len()*4<=remaining.get() {
-                        remaining.set(remaining.get()-texture.width*texture.height*4);
-                        let texture=std::sync::Arc::new(texture);
-                        shared.borrow_mut().insert(key,texture.clone());
-                        return Ok(texture);
+            let store_key=bytes.filter(|b|b.len()>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES).map(|b|crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||crate::material_surface::prepared_texture_key(b,semantic)));
+            let cached=match (store,store_key) {
+                (Some(store),Some(store_key))=>crate::material_surface::texture_work(crate::material_surface::TextureWork::Cache,||store.get(store_key)).filter(|t|t.data.len()*4<=remaining.get()),
+                _=>None,
+            };
+            let texture=match cached {
+                Some(texture)=>{ remaining.set(remaining.get()-texture.width*texture.height*4); texture }
+                None=>{
+                    let decoded=if let Some(bytes)=bytes {
+                        let image=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||decode_generated_png_within(bytes,4096,remaining.get()))?;
+                        remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
+                    } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
+                    let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::material_surface::PreparedTexture::prepare(decoded,semantic));
+                    if let (Some(store),Some(store_key))=(store,store_key) {
+                        if texture.width*texture.height>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_TEXELS { crate::material_surface::texture_work(crate::material_surface::TextureWork::Cache,||store.put(store_key,&texture)); }
                     }
+                    texture
                 }
-            }
-            let decoded=if let Some(bytes)=bytes {
-                let image=decode_generated_png_within(bytes,4096,remaining.get())?;
-                remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
-            } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
-            let texture=std::sync::Arc::new(crate::material_surface::PreparedTexture::prepare(decoded,semantic));
-            if let (Some(store),Some(store_key))=(store,store_key) {
-                if texture.width*texture.height>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_TEXELS { store.put(store_key,&texture); }
-            }
+            };
+            Ok(texture)
+            };
+            let texture=match bytes { Some(_)=>crate::material_surface::prepared_once((key.0,key.1,key.3),prepare)?, None=>std::sync::Arc::new(prepare()?) };
             shared.borrow_mut().insert(key,texture.clone());
             Ok(texture)
         };
@@ -182,7 +207,8 @@ impl PreparedStaticPreview {
             let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff,crate::material_surface::PixelSemantic::Data)?;
             let surface=pbr.surface.as_ref().map(|surface|{let mut budget=remaining.get();let prepared=crate::material_surface::PreparedSurface::prepare(surface.as_ref().clone(),&mut budget)?;remaining.set(budget);Ok::<_,String>(prepared)}).transpose()?;
             pbr.orm_png=None;
-            Ok(PreparedStaticLayer { vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr })
+            let cutout=texture.cutout();
+            Ok(PreparedStaticLayer { vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr,cutout })
         };
         let mut layers=std::mem::take(&mut model.draw_layers).into_iter();
         let main = if let Some(first)=layers.next(){ layer(first.vertices,first.indices,first.texture_png,first.detail_png,first.detail_scale,first.pbr)? }
@@ -223,6 +249,24 @@ impl PreparedStaticPreview {
             authored_collisions:Default::default(),collider_parts:std::sync::Arc::new(collider_parts),occluder_parts:std::sync::Arc::new(occluder_parts),anim_parts,driven_parts,sky,
             min:model.min,max:model.max,prelit:model.prelit})
     }
+    /// The GPU textures this asset uploads, as (content hash, bytes), each
+    /// once: identical images share one GPU texture across assets (see
+    /// `upload_static_preview`), so a host charging memory per asset can
+    /// charge a shared texture once.
+    pub fn texture_charges(&self)->Vec<(u64,usize)> {
+        let mut out=Vec::new();
+        self.collect_texture_charges(&mut out);
+        out
+    }
+    fn collect_texture_charges(&self,out:&mut Vec<(u64,usize)>) {
+        for (_,lod) in &self.lods { lod.collect_texture_charges(out); }
+        for l in std::iter::once(&self.main).chain(&self.extra).chain(self.anim_parts.iter().flat_map(|p|&p.draws)).chain(self.driven_parts.iter().flat_map(|p|&p.draws)) {
+            let surface=l.surface.iter().flat_map(|s|[&s.normal,&s.occlusion,&s.emissive]);
+            for t in [&*l.texture,&*l.detail,&*l.orm].into_iter().chain(surface) {
+                if !out.iter().any(|(h,_)|*h==t.hash) { out.push((t.hash,t.bytes())); }
+            }
+        }
+    }
     pub fn upload_bytes(&self)->usize {
         self.lods.iter().map(|(_,m)|m.upload_bytes()).sum::<usize>()+self.morph.as_ref().map_or(0,|m|m.pixels.len()*4)+self.ao.as_ref().map_or(0,|v|v.data.len()*4)+self.sdf.as_ref().map_or(0,|v|v.pixels.len())+self.bake_stream.as_ref().map_or(0,|(i,v)|(i.len()+v.len())*4)
             +{let mut seen=std::collections::HashSet::new();std::iter::once(&self.main).chain(&self.extra).chain(self.anim_parts.iter().flat_map(|p|&p.draws)).chain(self.driven_parts.iter().flat_map(|p|&p.draws)).map(|l|l.bytes_unique(&mut seen)).sum::<usize>()}
@@ -233,13 +277,15 @@ impl PreparedStaticPreview {
 pub(super) struct PreparedStaticLayer {
     pub(super) vertices:Vec<f32>,pub(super) indices:Vec<u32>,pub(super) texture:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) detail:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) detail_scale:[f32;2],
     pub(super) orm:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) orm_on:bool,pub(super) surface:Option<crate::material_surface::PreparedSurface>,pub(super) pbr:crate::model::PbrMaterial,
+    /// The base texture can fail the alpha test (found on the worker; opaque.rs).
+    pub(super) cutout:bool,
 }
 impl PreparedStaticLayer {
     /// Geometry and surface bytes, plus each image not already in `seen`
     /// (layers share images; a shared atlas is uploaded and counted once).
     pub(super) fn bytes_unique(&self,seen:&mut std::collections::HashSet<*const crate::material_surface::PreparedTexture>)->usize{
         let mut images=0;
-        for t in [&self.texture,&self.detail,&self.orm]{if seen.insert(std::sync::Arc::as_ptr(t)){images+=t.data.len()*4;}}
+        for t in [&self.texture,&self.detail,&self.orm]{if seen.insert(std::sync::Arc::as_ptr(t)){images+=t.bytes();}}
         (self.vertices.len()+self.indices.len())*4+images+self.surface.as_ref().map_or(0,|s|s.bytes())
     }
 }

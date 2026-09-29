@@ -352,6 +352,9 @@ pub(super) struct LayerMaterial {
     pub(super) orm_on: bool,
     /// Magnified texels draw nearest (the glTF sampler's `magFilter`).
     pub(super) mag_nearest: bool,
+    /// The layer's base texture can fail the alpha test, so the layer
+    /// needs the shader that can discard (opaque.rs).
+    pub(super) cutout: bool,
 }
 
 /// Which shader a model pass drives.
@@ -367,6 +370,12 @@ pub(super) enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
     Custom(&'a str, &'a mut DrawSceneCustom),
+    /// The streamed world's surfaces (stream_draw.rs).
+    City(&'a mut crate::shaders::DrawSceneCity),
+    /// Grass blades (grass_draw.rs): the lane binding only.
+    Grass(&'a mut crate::shaders::DrawSceneGrass),
+    /// Swaying trees and bushes (shaders/foliage.rs).
+    Foliage(&'a mut crate::shaders::DrawSceneFoliageLit),
 }
 
 impl ModelDraw<'_> {
@@ -374,12 +383,28 @@ impl ModelDraw<'_> {
         match self {
             ModelDraw::Diffuse(d) => d,
             ModelDraw::Pbr(d) => &mut d.skinned,
-            ModelDraw::Custom(_, d) => &mut d.skinned,
+            ModelDraw::Custom(_, d) => &mut d.pbr.skinned,
+            ModelDraw::City(d) => &mut d.pbr.skinned,
+            ModelDraw::Grass(d) => &mut d.pbr.skinned,
+            ModelDraw::Foliage(d) => &mut d.pbr.skinned,
         }
     }
 
+    /// The PBR shader and its game.material variant: both bind the eye and
+    /// each layer's metallic-roughness.
     pub(super) fn is_pbr(&self) -> bool {
-        matches!(self, ModelDraw::Pbr(_))
+        matches!(self, ModelDraw::Pbr(_) | ModelDraw::Custom(..) | ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Foliage(_))
+    }
+
+    fn pbr(&mut self) -> Option<&mut DrawScenePbr> {
+        match self {
+            ModelDraw::Diffuse(_) => None,
+            ModelDraw::Pbr(d) => Some(d),
+            ModelDraw::Custom(_, d) => Some(&mut d.pbr),
+            ModelDraw::City(d) => Some(&mut d.pbr),
+            ModelDraw::Grass(d) => Some(&mut d.pbr),
+            ModelDraw::Foliage(d) => Some(&mut d.pbr),
+        }
     }
 
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
@@ -388,8 +413,11 @@ impl ModelDraw<'_> {
     pub(super) fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) {
         self.base().fur = Default::default();
         self.base().fur_layer.x = 0.0;
+        // Wind rides the morph lanes (morph_ctl.w = -1, draw_models sets it
+        // after this call for foliage layers); every other draw sways nothing.
+        if self.base().morph_ctl.w < 0.0 { self.base().morph_ctl = Vec4f::default(); }
         self.base().tex_mag = vec2f(if m.mag_nearest { 1.0 } else { 0.0 }, 0.0);
-        if let ModelDraw::Pbr(d) = self {
+        if let Some(d) = self.pbr() {
             d.metallic = m.metallic;
             d.roughness = m.roughness;
             d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
@@ -400,7 +428,9 @@ impl ModelDraw<'_> {
                 let definition=&surface.definition;
                 d.skinned.fur = crate::material_surface::fur_params(definition.fur);
                 d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
-                d.triplanar=definition.triplanar;d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                d.triplanar=definition.triplanar;
+                // Race paint in the spare tex_mag lane (shaders.rs DrawSceneSkinned).
+                d.skinned.tex_mag.y=((definition.clearcoat*255.0).round()*256.0+(definition.flake*255.0).round()).max(0.0);d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {
@@ -422,15 +452,25 @@ impl ModelDraw<'_> {
     }
 
     pub(super) fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize) -> usize {
+        self.submit_as(cx, distance, fur_budget, None)
+    }
+
+    /// `submit`, with the base layer drawn through `opaque` (the lane's
+    /// no-discard variant, opaque.rs) when the caller knows it cuts no pixel.
+    /// Fur shells always keep the stock shader: they discard by design.
+    pub(super) fn submit_as(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize, opaque: Option<DrawShaderId>) -> usize {
         let draw = self.base();
         if !draw.draw_vars.can_instance() { return 0; }
         let triangles = draw.draw_vars.geometry_id.map_or(0, |id| cx.cx.geometries[id].indices.len() / 3);
         let shells = crate::material_surface::fur_shell_count(draw.fur.x, &draw.transform, distance, triangles, fur_budget);
+        let stock = draw.draw_vars.draw_shader_id;
         for layer in 0..=shells {
             draw.fur_layer.x = layer as f32 / shells.max(1) as f32;
+            draw.draw_vars.draw_shader_id = if layer == 0 { opaque.or(stock) } else { stock };
             let area = cx.add_instance(&draw.draw_vars);
             draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, area);
         }
+        draw.draw_vars.draw_shader_id = stock;
         draw.fur_layer.x = 0.0;
         shells * triangles
     }

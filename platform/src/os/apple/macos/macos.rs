@@ -90,6 +90,27 @@ fn fastest_display_interval() -> f64 {
     }
 }
 
+/// The virtual display link of a hidden (`MAKEPAD_HIDE_WINDOWS`) run: the
+/// next flip of a vsync grid at the fastest display's refresh after `wake`,
+/// never earlier than one period past the previous one. A late beat skips a
+/// flip, as a late display-link callback does. `None` for visible runs.
+fn hidden_vsync_flip(wake: f64) -> Option<f64> {
+    static PERIOD: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    let period = (*PERIOD.get_or_init(|| {
+        std::env::var_os("MAKEPAD_HIDE_WINDOWS").map(|_| fastest_display_interval() / 1.002)
+    }))?;
+    thread_local! {
+        static LAST: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NEG_INFINITY) };
+    }
+    Some(LAST.with(|last| {
+        let flip = ((wake / period).floor() + 1.0) * period;
+        // Two beats inside one period still land on distinct flips.
+        let flip = if flip - last.get() < period * 0.5 { last.get() + period } else { flip };
+        last.set(flip);
+        flip
+    }))
+}
+
 fn set_metal_layer_background_color(layer: ObjcId, alpha: f64) {
     unsafe {
         let color = CGColorCreateGenericRGB(0.0, 0.0, 0.0, alpha);
@@ -673,6 +694,12 @@ impl Cx {
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
         cx.borrow_mut().gpu_info.float16_blend_targets = true;
+        {
+            let (bc7, astc) = metal_cx.borrow().texture_compression();
+            let mut cx = cx.borrow_mut();
+            cx.gpu_info.texture_bc7 = bc7;
+            cx.gpu_info.texture_astc4x4 = astc;
+        }
         cx.borrow_mut().publish_metal_device_for_media();
 
         //let cx = Rc::new(RefCell::new(self));
@@ -1588,6 +1615,11 @@ impl Cx {
                 let link_flip_time = self.os.link_flip_time;
                 let time_now = with_macos_app(|app| {
                     let wake = app.time_now();
+                    // Hidden windows get no display link: their timer beat
+                    // is stamped on a virtual vsync grid instead, so hidden
+                    // runs step animation in whole refresh periods like a
+                    // visible window does, and their pacing can be measured.
+                    let link_flip_time = link_flip_time.or_else(|| hidden_vsync_flip(wake));
                     match link_flip_time {
                         Some(flip) => app.frame_trace.tick(TickSource::Link, wake, Some(flip)),
                         None => app.frame_trace.tick(TickSource::Timer, wake, None),

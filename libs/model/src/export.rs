@@ -436,6 +436,7 @@ fn export_surface(
             };
             let out = GlbPbrMaterial {
                 fur: source.fur,
+                shading: source.shading,
                 base_color: source.base_color,
                 metallic: source.metallic,
                 roughness: source.roughness,

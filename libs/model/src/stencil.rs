@@ -49,3 +49,96 @@ pub fn stencil_text(text: &str, cell: u32, ink: [u8; 4], background: [u8; 4]) ->
     }
     (w, h, px)
 }
+
+/// The smooth, badge-ready sibling of [`stencil_text`]: each glyph's dots
+/// are joined into round-capped strokes (neighbours across, down and on the
+/// diagonals), anti-aliased, so a race number or a sponsor name reads as
+/// lettering rather than as a grid of squares. `badge` puts it on a shape:
+/// "circle" (a roundel: the fill disc, an optional border ring, transparent
+/// outside), "plate" (a rounded rectangle) or "" (the text alone on the
+/// background). Returns (width, height, RGBA8 pixels, row 0 = top).
+pub fn stencil_badge(text: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border: Option<[u8; 4]>, badge: &str) -> (u32, u32, Vec<u8>) {
+    let chars: Vec<char> = text.chars().take(64).collect();
+    let n = chars.len().max(1) as f32;
+    let cell = cell.clamp(2, 64) as f32;
+    // Text box in dots: 6 per glyph (5 + gap), 7 tall, then the badge
+    // margin around it.
+    let (tw, th) = (n * 6.0 - 1.0, 7.0);
+    let (margin_x, margin_y) = match badge { "circle" => { let d = (tw.max(th) * 1.35).max(9.0); ((d - tw) * 0.5, (d - th) * 0.5) } "plate" => (2.0, 1.6), _ => (1.0, 1.0) };
+    let (w, h) = (((tw + margin_x * 2.0) * cell).round().min(2048.0) as u32, ((th + margin_y * 2.0) * cell).round().min(2048.0) as u32);
+    let cell = (w as f32 / (tw + margin_x * 2.0)).min(h as f32 / (th + margin_y * 2.0));
+    // Stroke segments in pixel space.
+    let mut segs: Vec<([f32; 2], [f32; 2])> = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        let g = glyph(*c);
+        let on = |r: i32, c: i32| r >= 0 && r < 7 && c >= 0 && c < 5 && g[r as usize] & (0x10 >> c) != 0;
+        let at = |r: i32, c: i32| [(margin_x + i as f32 * 6.0 + c as f32 + 0.5) * cell, (margin_y + r as f32 + 0.5) * cell];
+        for r in 0..7 { for c in 0..5 {
+            if !on(r, c) { continue; }
+            segs.push((at(r, c), at(r, c)));
+            for (dr, dc) in [(0, 1), (1, 0), (1, 1), (1, -1)] {
+                // Diagonals only where the square corner is open (no L joint).
+                if on(r + dr, c + dc) && (dr == 0 || dc == 0 || (!on(r + dr, c) && !on(r, c + dc))) { segs.push((at(r, c), at(r + dr, c + dc))); }
+            }
+        }}
+    }
+    let radius = cell * 0.58;
+    let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let blend = |dst: &mut [u8], src: [u8; 4], a: f32| {
+        let a = a.clamp(0.0, 1.0) * src[3] as f32 / 255.0;
+        let da = dst[3] as f32 / 255.0;
+        let out_a = a + da * (1.0 - a);
+        for k in 0..3 { dst[k] = if out_a > 0.0 { ((src[k] as f32 * a + dst[k] as f32 * da * (1.0 - a)) / out_a).round() as u8 } else { 0 }; }
+        dst[3] = (out_a * 255.0).round() as u8;
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let o = ((y * w + x) * 4) as usize;
+            // Background shape.
+            let (inside, edge) = match badge {
+                "circle" => { let r = cx.min(cy) - 0.5; let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt(); (r - d + 0.5, r - d) }
+                "plate" => {
+                    let rr = cell * 1.2;
+                    let qx = ((fx - cx).abs() - (cx - rr - 0.5)).max(0.0);
+                    let qy = ((fy - cy).abs() - (cy - rr - 0.5)).max(0.0);
+                    let d = (qx * qx + qy * qy).sqrt();
+                    (rr - d + 0.5, rr - d)
+                }
+                _ => (1.0, f32::MAX),
+            };
+            if inside > 0.0 {
+                blend(&mut px[o..o + 4], fill, inside);
+                if let Some(b) = border { if edge < cell * 0.9 { blend(&mut px[o..o + 4], b, (cell * 0.9 - edge).min(1.0) * inside.min(1.0)); } }
+            }
+            // Lettering.
+            let mut dmin = f32::MAX;
+            for (a, b) in &segs {
+                let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+                let l2 = ex * ex + ey * ey;
+                let t = if l2 > 0.0 { (((fx - a[0]) * ex + (fy - a[1]) * ey) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                let (dx, dy) = (fx - (a[0] + ex * t), fy - (a[1] + ey * t));
+                dmin = dmin.min((dx * dx + dy * dy).sqrt());
+            }
+            let cover = (radius - dmin + 0.5).clamp(0.0, 1.0);
+            if cover > 0.0 { blend(&mut px[o..o + 4], ink, cover); }
+        }
+    }
+    (w, h, px)
+}
+
+#[cfg(test)]
+mod badge_tests {
+    #[test]
+    fn a_roundel_is_round_and_carries_its_number() {
+        let (w, h, px) = super::stencil_badge("7", 16, [0, 0, 0, 255], [255, 255, 255, 255], Some([200, 0, 0, 255]), "circle");
+        assert_eq!(w, h, "a roundel is square");
+        let a = |x: u32, y: u32| px[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(a(0, 0), 0, "outside the disc is clear");
+        assert_eq!(a(w / 2, 2), 255, "the rim is opaque");
+        // Some ink in the middle: the glyph.
+        let dark = (0..w * h).filter(|i| px[(*i * 4) as usize] < 60 && px[(*i * 4 + 3) as usize] == 255).count();
+        assert!(dark > (w * h / 40) as usize, "{dark}");
+    }
+}

@@ -37,6 +37,11 @@ pub enum SurfaceKind {
     Hazard,
     /// Water and other non-damaging liquid: crossed without complaint.
     Liquid,
+    /// Drawn, never touched: a node an importer marks `kind: "passable"`
+    /// (Duke's police tape and other wall sprites without BUILD's blocking or
+    /// hitscan bits). [`LevelCollision::with_kinds`] drops these triangles
+    /// from the collision set, so bodies and shots pass through them.
+    Passable,
 }
 
 /// A level's collision geometry: its triangles, indexed for fast probes.
@@ -127,9 +132,19 @@ impl LevelCollision {
     /// order). Sources: the importer's `hazard_N` nodes, or a flat/material
     /// name heuristic. Without them every floor is plain [`SurfaceKind::Floor`].
     pub fn with_kinds(mut self, kinds: Vec<SurfaceKind>) -> LevelCollision {
-        if kinds.len() == self.caster.tri_count() {
-            self.kinds = kinds;
+        if kinds.len() != self.caster.tri_count() {
+            return self;
         }
+        if kinds.contains(&SurfaceKind::Passable) {
+            let (positions, indices) = (self.caster.positions().to_vec(), self.caster.indices().to_vec());
+            let keep: Vec<usize> = (0..kinds.len()).filter(|&t| kinds[t] != SurfaceKind::Passable).collect();
+            let indices: Vec<u32> = keep.iter().flat_map(|&t| indices[t * 3..t * 3 + 3].iter().copied()).collect();
+            let kinds: Vec<SurfaceKind> = keep.iter().map(|&t| kinds[t]).collect();
+            let mut level = LevelCollision::from_positions(positions, indices);
+            level.kinds = kinds;
+            return level;
+        }
+        self.kinds = kinds;
         self
     }
 
@@ -683,6 +698,9 @@ fn node_surface_kind(node: &crate::skin::Val) -> Option<SurfaceKind> {
         let damage = extras.get("damage").and_then(Val::f64).unwrap_or(0.0);
         let liquid = matches!(extras.get("liquid"), Some(Val::Bool(true)))
             || extras.get("liquid").and_then(Val::f64).unwrap_or(0.0) > 0.0;
+        if declared.eq_ignore_ascii_case("passable") {
+            return Some(SurfaceKind::Passable);
+        }
         if declared.eq_ignore_ascii_case("hazard") {
             // A declared hazard with no damage that calls itself a liquid is
             // just water: crossed, not avoided.
@@ -714,6 +732,16 @@ fn prim_material_kind(json: &crate::skin::Val, prim: &crate::skin::Val) -> Optio
     use crate::skin::Val;
     let mi = prim.get("material").and_then(Val::usize)?;
     let mat = json.get("materials").and_then(|m| m.idx(mi))?;
+    // An importer's drawn-but-never-touched surface (Quake III's light
+    // beams, flares and misc_model triangles), declared on the material.
+    if mat
+        .get("extras")
+        .and_then(|e| e.get("kind"))
+        .and_then(Val::str)
+        .is_some_and(|k| k.eq_ignore_ascii_case("passable"))
+    {
+        return Some(SurfaceKind::Passable);
+    }
     if let Some(k) = mat
         .get("extras")
         .and_then(|e| e.get("flat"))
@@ -837,6 +865,7 @@ pub struct NavCell {
 /// it (a room over a room is two cells), which is what makes multi-storey
 /// maps work. Edges are 8-neighbour, refused through walls by the same
 /// knee/chest probe the walker's own step uses.
+#[derive(Clone)]
 pub struct NavGrid {
     cell: f32,
     /// World position of column (0, 0)'s centre in x/z.

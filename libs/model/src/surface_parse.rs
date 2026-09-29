@@ -65,6 +65,9 @@ fn pattern(v: &Value) -> Result<SurfacePattern> {
         "vents" => PatternKind::Vents,
         "grille" => PatternKind::Grille,
         "knurl" => PatternKind::Knurl,
+        "camo" => PatternKind::Camo,
+        "leaves" => PatternKind::Leaves,
+        "needles" => PatternKind::Needles,
         _ => return Err(Error::Invalid("surface pattern kind")),
     };
     let p = SurfacePattern {
@@ -106,6 +109,7 @@ impl SurfaceOperation {
                         "alpha_cutoff",
                         "double_sided",
                         "fur",
+                        "shading",
                     ],
                 )?;
                 let mut value = SurfaceMaterial::default();
@@ -118,6 +122,18 @@ impl SurfaceOperation {
                             density: number(fur, "density", 0.65)?,
                             scale: number(fur, "scale", 180.0)?,
                             seed: count(fur, "seed", 0)?,
+                        })
+                    }
+                };
+                value.shading = match v.get("shading") {
+                    None | Some(Value::Null) => None,
+                    Some(s) => {
+                        fields(s, &["wind", "clearcoat", "flake", "impostor"])?;
+                        Some(makepad_gltf::GlbShading {
+                            wind: number(s, "wind", 0.0)?,
+                            clearcoat: number(s, "clearcoat", 0.0)?,
+                            flake: number(s, "flake", 0.0)?,
+                            impostor: number(s, "impostor", 0.0)?,
                         })
                     }
                 };

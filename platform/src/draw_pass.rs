@@ -406,6 +406,15 @@ impl DrawPass {
         cxpass.clear_depth = clear_depth;
     }
 
+    /// Nothing reads this pass's colour targets: it renders for its depth
+    /// (a shadow map whose pipeline still writes a colour). A tile GPU then
+    /// neither loads nor stores them (Metal: DontCare), which on a shadow
+    /// atlas is half of the pass's memory traffic. Their contents after the
+    /// pass are undefined.
+    pub fn set_color_scratch(&self, cx: &mut Cx, scratch: bool) {
+        cx.passes[self.draw_pass_id()].color_scratch = scratch;
+    }
+
     pub fn set_debug(&mut self, cx: &mut Cx, debug: bool) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.debug = debug;
@@ -546,6 +555,8 @@ pub struct CxDrawPass {
     pub depth_texture: Option<Texture>,
     pub clear_depth: DrawPassClearDepth,
     pub dont_clear: bool,
+    /// The colour targets are scratch (see `DrawPass::set_color_scratch`).
+    pub color_scratch: bool,
     pub keep_camera_matrix: bool,
     pub depth_init: f64,
     pub clear_color: Vec4f,
@@ -648,6 +659,7 @@ impl Default for CxDrawPass {
             display_dpi_factor: None,
             clear_depth: DrawPassClearDepth::ClearWith(1.0),
             clear_color: Vec4f::default(),
+            color_scratch: false,
             depth_init: 1.0,
             main_draw_list_id: None,
             view_shift: dvec2(0.0, 0.0),

@@ -517,6 +517,41 @@ script_mod! {
     // fragments that rasterize past their tile's frustum are discarded.
     // Near plane = LIGHT_CLEARANCE: geometry hugging the bulb (the lamp
     // fixture itself) clips out of the map instead of eclipsing the light.
+    // DrawLmSunDepth plus the layer's alpha: a leaf card casts leaves.
+    mod.draw.DrawLmSunDepthCutout = mod.std.set_type_default() do #(DrawLmSunDepthCutout::script_shader(vm)){
+        ..mod.draw.DrawLmSunDepth
+        tex: texture_2d(float)
+        v_uv: varying(vec2f)
+
+        vertex: fn() {
+            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            let wp = self.transform * vec4(pos, 1.0)
+            let nx = dot(self.sun_rx.xyz, wp.xyz) + self.sun_rx.w
+            let ny = dot(self.sun_ry.xyz, wp.xyz) + self.sun_ry.w
+            let nz = dot(self.sun_rz.xyz, wp.xyz) + self.sun_rz.w
+            self.v_d = nz
+            self.v_clip = vec2(nx, ny)
+            self.v_uv = unpack2f16(self.geom.uv)
+            let zq = nz + self.flip_a.x * (1.0 - 2.0 * nz)
+            self.vertex_pos = vec4(
+                nx * self.tile_a.x + self.tile_a.z,
+                ny * self.tile_a.y + self.tile_a.w,
+                zq * (1.0 - self.flip_a.y) + self.flip_a.z,
+                1.0
+            )
+        }
+
+        pixel: fn() {
+            if abs(self.v_clip.x) > 1.001 || abs(self.v_clip.y) > 1.001 {
+                discard()
+            }
+            if self.tex.sample_as_bgra_repeat(self.v_uv).w < 0.5 {
+                discard()
+            }
+            return vec4(self.v_d, 0.0, 0.0, 1.0)
+        }
+    }
+
     mod.draw.DrawLmLampDepth = mod.std.set_type_default() do #(DrawLmLampDepth::script_shader(vm)){
         alpha_blend: false
         backface_culling: false

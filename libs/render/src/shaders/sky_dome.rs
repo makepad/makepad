@@ -119,6 +119,7 @@ script_mod! {
                 vec3(0.4545454, 0.4545454, 0.4545454)
             )
             day = mix(day, vec3(r, gr, b), hdr) * mix(1.0, 0.35, clamp((0.0 - v.y) * 3.0, 0.0, 1.0))
+                * self.color.xyz
 
             // The visible disc, Mie glow and afterglow follow the true sun;
             // sun_e is clamped above the horizon only for Perez stability.

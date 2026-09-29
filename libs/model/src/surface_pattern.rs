@@ -77,12 +77,93 @@ pub(super) fn sample(kind: PatternKind, x: f64, y: f64, scale: [f64; 2], seed: u
             let b = (TAU * (x - y)).sin().abs();
             0.35 + 0.65 * (a.min(b) * 1.6).min(1.)
         }
+        PatternKind::Camo => {
+            // Two warped fields thresholded into blotches: the first lays the
+            // dark shapes, the second the mid-tone patches between them; the
+            // rest is the light ground. A narrow ramp keeps the edges crisp
+            // without aliasing in the mips.
+            let wx = x + 0.45 * fbm(x + 3.1, y, periods, seed ^ 0xca30);
+            let wy = y + 0.45 * fbm(x, y - 1.7, periods, seed ^ 0xca31);
+            let dark = 0.5 + fbm(wx, wy, periods, seed);
+            let mid = 0.5 + fbm(wx + 7.3, wy - 2.9, periods, seed ^ 0xca32);
+            let ramp = |v: f64, at: f64| ((v - at) / 0.025).clamp(0., 1.);
+            let d = ramp(dark, 0.56);
+            let m = ramp(mid, 0.52) * (1. - d);
+            // 0 = color_a (dark), 0.5 = the mean, 1 = color_b (light).
+            (1. - d) * (1. - m) + 0.5 * m
+        }
+        PatternKind::Leaves => return foliage(x, y, scale, periods, seed, false),
+        PatternKind::Needles => return foliage(x, y, scale, periods, seed, true),
         _ => unreachable!("legacy patterns retain their original sampler"),
     };
     value.clamp(0., 1.)
 }
 
 fn unit_hash(x: i64, y: i64, seed: u64) -> f64 { (hash(x, y, seed) >> 11) as f64 / ((1u64 << 53) - 1) as f64 }
+
+/// Foliage card texture: 0 between leaves (the mask cuts it), 0.55..1
+/// inside one — per-leaf tone, a darker midrib and a darker base, so the
+/// alpha test keeps every leaf whole at every tone. Each cell of the lattice
+/// carries three leaves (needles: a twig with a spray) whose centre, angle
+/// and size are hashed; neighbours overlap across cell borders and the
+/// lattice wraps with the tile. The cluster thins toward the tile's rim so a
+/// card reads as a round clump, never as a square.
+fn foliage(x: f64, y: f64, scale: [f64; 2], periods: [i64; 2], seed: u64, needles: bool) -> f64 {
+    let wrap = |n: i64, p: i64| if p > 0 { n.rem_euclid(p) } else { n };
+    let (ix, iy) = (x.floor() as i64, y.floor() as i64);
+    let mut best = (-1.0f64, 0.0f64);
+    let per_cell = if needles { 4 } else { 3 };
+    for oy in -1..=1 {
+        for ox in -1..=1 {
+            let (cx, cy) = (ix + ox, iy + oy);
+            for k in 0..per_cell {
+                let s = seed ^ (k as u64).wrapping_mul(0x51_7cc1_b727_220a);
+                let (hx, hy) = (wrap(cx, periods[0]), wrap(cy, periods[1]));
+                let r = |salt: i64| unit_hash(hx * 7 + salt, hy * 13 - salt, s);
+                let (px, py) = (cx as f64 + r(1), cy as f64 + r(2));
+                // Cluster density: full in the middle of the tile, none at its rim.
+                let (tu, tv) = ((px / scale[0]).rem_euclid(1.0), (py / scale[1]).rem_euclid(1.0));
+                let rim = ((tu - 0.5).powi(2) + (tv - 0.5).powi(2)).sqrt();
+                let keep = 1.0 - ((rim - 0.28) / 0.2).clamp(0.0, 1.0);
+                if r(3) > keep { continue; }
+                let angle = r(4) * TAU;
+                let (ca, sa) = (angle.cos(), angle.sin());
+                let (dx, dy) = (x - px, y - py);
+                // Leaf frame: u along the blade, v across it.
+                let u = dx * ca + dy * sa;
+                let v = -dx * sa + dy * ca;
+                let tone = r(5);
+                let hit = if needles {
+                    // A twig 1.1 cells long with needles every 0.06 along it.
+                    let len = 0.55 + 0.25 * r(6);
+                    if u.abs() > len { continue; }
+                    let along = (u / len).abs();
+                    let half = 0.3 * (1.0 - along * 0.6);
+                    let twig = v.abs() < 0.018;
+                    let phase = (u / 0.06).rem_euclid(1.0);
+                    let needle = v.abs() < half && (phase - 0.5).abs() < 0.14 + 0.22 * (v.abs() / half);
+                    if !(twig || needle) { continue; }
+                    0.55 + 0.45 * (0.35 + 0.65 * tone) * (0.7 + 0.3 * (v.abs() / half.max(1e-3)))
+                } else {
+                    let len = 0.42 + 0.22 * r(6);
+                    let t = u / len;
+                    if t.abs() >= 1.0 { continue; }
+                    // A pointed lens: widest a little behind the middle.
+                    let half = 0.36 * len * (1.0 - t * t) * (1.0 - 0.25 * t);
+                    if v.abs() >= half { continue; }
+                    let across = v.abs() / half;
+                    let rib = if across < 0.08 { 0.8 } else { 1.0 };
+                    let base = 0.75 + 0.25 * ((t + 1.0) * 0.5);
+                    0.55 + 0.45 * (0.3 + 0.7 * tone) * rib * base * (0.85 + 0.15 * across)
+                };
+                // The topmost leaf is the one with the highest draw order.
+                let order = r(7);
+                if order > best.0 { best = (order, hit); }
+            }
+        }
+    }
+    if best.0 < 0.0 { 0.0 } else { best.1.clamp(0.55, 1.0) }
+}
 /// Joint-and-unit surfaces. 0 is the joint (mortar, grout, gap); units get a
 /// seeded tone in 0.55..1 plus fine surface noise. Unit identities wrap with
 /// the integral scale, so tiles repeat exactly (use an even row count for
@@ -124,6 +205,24 @@ mod tests {
                 assert!((a - sample(kind, x + 8., y, [8., 6.], 918)).abs() < 1e-12);
                 assert!((a - sample(kind, x, y + 6., [8., 6.], 918)).abs() < 1e-12);
             }
+        }
+    }
+    #[test]
+    fn foliage_cards_cut_between_leaves_and_keep_every_leaf_above_the_mask() {
+        for kind in [PatternKind::Leaves, PatternKind::Needles] {
+            let (mut empty, mut leaf) = (0, 0);
+            for i in 0..64 {
+                for j in 0..64 {
+                    let (x, y) = (i as f64 / 64. * 4., j as f64 / 64. * 4.);
+                    let a = sample(kind, x, y, [4., 4.], 3);
+                    assert!(a == 0. || (0.55..=1.).contains(&a), "{kind:?} {a}");
+                    if a == 0. { empty += 1 } else { leaf += 1 }
+                    assert!((a - sample(kind, x + 4., y, [4., 4.], 3)).abs() < 1e-9);
+                }
+            }
+            // A clump: dense leaves with gaps, and an empty rim.
+            assert!(leaf > 64 * 64 / 4 && empty > 64 * 64 / 5, "{kind:?} {leaf} {empty}");
+            assert_eq!(sample(kind, 0.02, 0.02, [4., 4.], 3), 0.);
         }
     }
     #[test]

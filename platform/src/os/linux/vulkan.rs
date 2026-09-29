@@ -43,7 +43,7 @@ use crate::{
     geometry::GeometryId,
     makepad_live_id::*,
     makepad_script::shader::TextureType,
-    texture::{TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
+    texture::{CompressedTextureFormat, TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
 };
 #[cfg(target_os = "android")]
 use crate::os::linux::{
@@ -1879,6 +1879,20 @@ impl CxVulkan {
     /// (an HDR scene pass). Pipelines are already built per pass attachment
     /// format (`VulkanRenderPassKey`), so this is only the device's support
     /// for that format as a blendable, filterable attachment.
+    /// (BC7, ASTC 4x4) sampling: the device feature (enabled at device
+    /// creation when supported) plus filtered sampling of the format.
+    pub(crate) fn texture_compression(&self) -> (bool, bool) {
+        let features = unsafe { self.instance.get_physical_device_features(self.physical_device) };
+        let sampled = |format| {
+            let props = unsafe { self.instance.get_physical_device_format_properties(self.physical_device, format) };
+            props.optimal_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR)
+        };
+        (
+            cfg!(not(target_os = "android")) && features.texture_compression_bc == vk::TRUE && sampled(vk::Format::BC7_UNORM_BLOCK),
+            cfg!(not(target_os = "android")) && features.texture_compression_astc_ldr == vk::TRUE && sampled(vk::Format::ASTC_4X4_UNORM_BLOCK),
+        )
+    }
+
     pub(crate) fn float16_blend_targets(&self) -> bool {
         let props = unsafe {
             self.instance.get_physical_device_format_properties(
@@ -4584,6 +4598,10 @@ impl CxVulkan {
         width: u32,
         height: u32,
     ) -> u32 {
+        // A compressed chain brings its own levels.
+        if let TextureFormat::VecMipCompressed { max_level, .. } = format {
+            return max_level.unwrap_or(0) as u32 + 1;
+        }
         if !matches!(format, TextureFormat::VecMipBGRAu8_32 { .. }) {
             return 1;
         }
@@ -4611,6 +4629,17 @@ impl CxVulkan {
 
     fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, u32, bool, vk::Format)> {
         match format {
+            TextureFormat::VecMipCompressed { width, height, format, .. } => Some((
+                *width as u32,
+                *height as u32,
+                1,
+                false,
+                match format {
+                    CompressedTextureFormat::Bc7 => vk::Format::BC7_UNORM_BLOCK,
+                    CompressedTextureFormat::Bc5 => vk::Format::BC5_UNORM_BLOCK,
+                    CompressedTextureFormat::Astc4x4 => vk::Format::ASTC_4X4_UNORM_BLOCK,
+                },
+            )),
             TextureFormat::VecBGRAu8_32 { width, height, .. } => Some((
                 *width as u32,
                 *height as u32,
@@ -4857,6 +4886,18 @@ impl CxVulkan {
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
+                    layers: 1,
+                })
+            }
+            // The whole chain, always: blocks do not split by dirty rect.
+            TextureFormat::VecMipCompressed { width, height, data, .. } => {
+                Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                Some(VulkanTextureUpload {
+                    data: data.clone().unwrap_or_default(),
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: *width as u32,
+                    height: *height as u32,
                     layers: 1,
                 })
             }
@@ -6605,10 +6646,13 @@ impl CxVulkan {
         }
 
         let force_full_upload = needs_recreate;
-        let upload = {
+        let (upload, compressed) = {
             let cxtexture = &cx.textures[texture_id];
-            Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
-                .ok_or_else(|| format!("texture {} has unsupported upload format", texture_key))?
+            (
+                Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
+                    .ok_or_else(|| format!("texture {} has unsupported upload format", texture_key))?,
+                matches!(cxtexture.format, TextureFormat::VecMipCompressed { .. }),
+            )
         };
         if upload.data.is_empty() || upload.width == 0 || upload.height == 0 {
             return Ok(());
@@ -6697,15 +6741,49 @@ impl CxVulkan {
                 &[],
                 &[to_transfer],
             );
-            self.device.cmd_copy_buffer_to_image(
-                self.command_buffer,
-                staging.buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[copy_region],
-            );
-            if mip_levels > 1 {
-                self.record_mip_chain(image, width, height, layer_count, mip_levels);
+            if compressed {
+                // One region per level, blocks tightly packed, level 0 first.
+                let mut regions = Vec::with_capacity(mip_levels as usize);
+                let (mut offset, mut w, mut h) = (0u64, width.max(1), height.max(1));
+                for level in 0..mip_levels {
+                    let len = CompressedTextureFormat::level_bytes(w as usize, h as usize) as u64;
+                    if offset + len > upload.data.len() as u64 {
+                        break;
+                    }
+                    regions.push(
+                        vk::BufferImageCopy::default()
+                            .buffer_offset(offset)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(level)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            )
+                            .image_extent(vk::Extent3D { width: w, height: h, depth: 1 }),
+                    );
+                    offset += len;
+                    w = (w / 2).max(1);
+                    h = (h / 2).max(1);
+                }
+                self.device.cmd_copy_buffer_to_image(
+                    self.command_buffer,
+                    staging.buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            } else {
+                self.device.cmd_copy_buffer_to_image(
+                    self.command_buffer,
+                    staging.buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[copy_region],
+                );
+                if mip_levels > 1 {
+                    self.record_mip_chain(image, width, height, layer_count, mip_levels);
+                }
             }
             self.device.cmd_pipeline_barrier(
                 self.command_buffer,
@@ -8354,6 +8432,66 @@ impl CxVulkan {
 
     fn destroy_buffer(&self, buffer: VulkanBuffer) {
         Self::destroy_buffer_with(&self.device, buffer);
+    }
+
+    /// A colour render target read back to the CPU as packed BGRA8, top row
+    /// first (Metal's capture layout): `Cx::take_render_texture_captures` on
+    /// Linux. Called between repaints; it waits for the frame in flight, then
+    /// copies synchronously on the frame's own command buffer and fence.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn read_render_texture_bgra(&mut self, texture: TextureId) -> Result<(usize, usize, Vec<u8>), String> {
+        let resource = self.textures.get(&VulkanTextureKey(texture)).ok_or("render texture has no Vulkan image")?;
+        let (image, width, height, format, layout) = (resource.image, resource.width, resource.height, resource.format, resource.layout);
+        let swap = match format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => false,
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => true,
+            other => return Err(format!("render texture readback: unsupported format {other:?}")),
+        };
+        if width == 0 || height == 0 {
+            return Err("render texture readback: empty texture".into());
+        }
+        let byte_len = width as vk::DeviceSize * height as vk::DeviceSize * 4;
+        let staging = self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, byte_len)?;
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).base_mip_level(0).level_count(1).base_array_layer(0).layer_count(1);
+        let barrier = |old: vk::ImageLayout, new: vk::ImageLayout, src: vk::AccessFlags, dst: vk::AccessFlags| {
+            vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(src)
+                .dst_access_mask(dst)
+                .old_layout(old)
+                .new_layout(new)
+                .image(image)
+                .subresource_range(range)
+        };
+        let copy = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).mip_level(0).base_array_layer(0).layer_count(1))
+            .image_extent(vk::Extent3D { width, height, depth: 1 });
+        let result = (|| unsafe {
+            self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX).map_err(|e| format!("wait_for_fences(texture readback) failed: {e:?}"))?;
+            self.device.reset_fences(&[self.in_flight_fence]).map_err(|e| format!("reset_fences(texture readback) failed: {e:?}"))?;
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("reset_command_buffer(texture readback) failed: {e:?}"))?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .map_err(|e| format!("begin_command_buffer(texture readback) failed: {e:?}"))?;
+            self.device.cmd_pipeline_barrier(self.command_buffer, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
+                &[barrier(layout, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::SHADER_READ, vk::AccessFlags::TRANSFER_READ)]);
+            self.device.cmd_copy_image_to_buffer(self.command_buffer, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging.buffer, &[copy]);
+            self.device.cmd_pipeline_barrier(self.command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS | vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(), &[], &[],
+                &[barrier(vk::ImageLayout::TRANSFER_SRC_OPTIMAL, layout, vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)]);
+            self.device.end_command_buffer(self.command_buffer).map_err(|e| format!("end_command_buffer(texture readback) failed: {e:?}"))?;
+            self.device
+                .queue_submit(self.queue, &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])], self.in_flight_fence)
+                .map_err(|e| format!("queue_submit(texture readback) failed: {e:?}"))?;
+            self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX).map_err(|e| format!("wait_for_fences(texture readback submit) failed: {e:?}"))?;
+            let mapped = self.device.map_memory(staging.memory, 0, byte_len, vk::MemoryMapFlags::empty()).map_err(|e| format!("map_memory(texture readback) failed: {e:?}"))?;
+            let mut bytes = std::slice::from_raw_parts(mapped as *const u8, byte_len as usize).to_vec();
+            self.device.unmap_memory(staging.memory);
+            if swap { for px in bytes.chunks_exact_mut(4) { px.swap(0, 2); } }
+            Ok::<_, String>(bytes)
+        })();
+        self.destroy_buffer(staging);
+        result.map(|bytes| (width as usize, height as usize, bytes))
     }
 
     fn destroy_buffer_with(device: &ash::Device, buffer: VulkanBuffer) {

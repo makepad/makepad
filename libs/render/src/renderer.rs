@@ -117,6 +117,9 @@ pub struct ScreenInstance {
 pub struct RenderStats {
     /// Extra triangles actually submitted for material fur this frame.
     pub fur_triangles: usize,
+    /// Grass patches drawn (one instance each) and their blade budget.
+    pub grass_patches: usize,
+    pub grass_blades: usize,
     pub gi: crate::fast_gi::GiStats,
     /// Device-local clustered light assignment/upload cost and overflow.
     pub clustered: crate::clustered::ClusterStats,
@@ -313,6 +316,8 @@ pub struct Renderer {
     /// world so an FPS held model can never enter scene identity, lightmap or
     /// shadow-caster ownership. Drawn in a late, depth-overlay layer.
     view_models: Vec<ModelInstance>,
+    /// Eased sun visibility at the first-person camera (set_view_model_sun).
+    view_model_sun: f32,
     /// Deterministic identity of the placed scene relevant to static
     /// lighting. Unlike the old length-only check this includes every
     /// static model, transform, depth order, and list slot. Dynamic
@@ -375,6 +380,21 @@ pub struct Renderer {
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
     custom_draws: std::collections::BTreeMap<String, Box<DrawSceneCustom>>,
+    /// The streamed world's surface shader, created on first streamed draw.
+    city_draw: Option<Box<crate::shaders::DrawSceneCity>>,
+    /// The level's grass field (grass.rs), its shader and this frame's
+    /// visible patches per ring.
+    grass: Option<crate::grass::GrassGpu>,
+    grass_draw: Option<Box<crate::shaders::DrawSceneGrass>>,
+    /// The swaying-foliage lane's shader, and whether it can draw this
+    /// frame (else foliage stays on the PBR lane).
+    foliage_draw: Option<Box<crate::shaders::DrawSceneFoliageLit>>,
+    foliage_ready: bool,
+    grass_rings: [Vec<(f32, f32)>; 3],
+    /// The PBR pipeline can draw this frame (`draw_models_inner`).
+    pbr_ready: bool,
+    /// The diffuse and PBR lanes' no-discard variants (opaque.rs).
+    opaque_shaders: [opaque::OpaqueShader; 4],
     /// Whether shiny loaded models use the PBR material lane. Enabled by
     /// default so existing hosts keep their rendering unchanged; CAD-style
     /// views can temporarily request the diffuse textured lane instead.
@@ -384,6 +404,9 @@ pub struct Renderer {
     /// default, and what every game host leaves it at) writes the strength
     /// OFF, so the shaders never sample the slot.
     ssao: Option<(Texture, f32)>,
+    /// Follow-camera occluder fade (occluder_fade.rs); off unless a host
+    /// sets a focus each frame.
+    occluder: occluder_fade::OccluderFade,
     /// Per placed-model uv remap into the atlas, parallel to placed_models
     /// (zero = unmapped, the shader's disable signal). Rebuilt per delivery.
     lm_remaps: Vec<Vec4f>,
@@ -424,6 +447,8 @@ pub struct Renderer {
     /// See [`Renderer::set_bloom`] / [`Renderer::set_auto_exposure`].
     bloom: f32,
     auto_exposure: bool,
+    /// See [`Renderer::set_grade`].
+    grade: makepad_scene::ColorGrade,
     /// The baked lightmap's KILL SWITCH (F9 in the sandbox,
     /// `MAKEPAD_LIGHTMAP=off` at launch). Off binds the 1x1 "fully sunlit,
     /// no lamps" stand-in instead of the atlas, so every static falls back
@@ -516,6 +541,11 @@ pub struct Renderer {
     /// OnChange runs a pinned sun, and a caster whose sidecar disagrees
     /// with it falls to the blob tier rather than to a wrong-length shadow.
     sdf_baked_sun_len: f32,
+    /// The world's sun hour last frame, and whether it has MOVED since the
+    /// realm began: a running clock takes the analytic sky even under an
+    /// authored palette (`analytic_sky_frame`); a fixed hour keeps it.
+    sky_hour: Option<f32>,
+    sky_clock: bool,
     /// Last (render_rev, models_rev, daylight quantum) a GPU lightmap job
     /// was scheduled for: in Realtime mode a sun-only change must NOT
     /// re-kick the whole job — the baker follows the sun per frame on its
@@ -532,10 +562,6 @@ pub struct Renderer {
     /// Bumped when the placed-prop list changes, so it can join the settle
     /// cache key.
     models_rev: u64,
-    /// Unit box in the packed-mesh layout, position lanes only: Realtime's
-    /// stand-in caster geometry for primitive ENTITY bodies (crates), which
-    /// have no mesh of their own to rasterize into the bake's depth passes.
-    lm_box_geometry: Option<Geometry>,
     /// CPU-baked occlusion (bake.rs), folded into instance colours. Renderer
     /// state by construction: the sim has no field for it, so a device may
     /// bake at a different quality than its peers without diverging.
@@ -567,11 +593,14 @@ mod settings;
 mod bake_passes;
 mod model_query;
 mod draw_models;
+mod occluder_fade;
+mod opaque;
 mod skinned;
 mod frame;
 mod frame_layers;
 mod gi;
 mod stream_draw;
+mod grass_draw;
 mod vfx_draw;
 
 pub use draw_items::*;
@@ -618,6 +647,7 @@ impl Default for Renderer {
             stream_casters: Vec::new(),
             world_attachments: Vec::new(),
             view_models: Vec::new(),
+            view_model_sun: 1.0,
             placed_scene_signature: None,
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
@@ -640,8 +670,17 @@ impl Default for Renderer {
             orm_fallback: None,
             pbr_draw: None,
             custom_draws: Default::default(),
+            city_draw: None,
+            grass: None,
+            grass_draw: None,
+            foliage_draw: None,
+            foliage_ready: false,
+            grass_rings: Default::default(),
+            pbr_ready: false,
+            opaque_shaders: Default::default(),
             pbr_materials_enabled: true,
             ssao: None,
+            occluder: Default::default(),
             lm_remaps: Vec::new(),
             lm_ground: None,
             lm_top: None,
@@ -661,6 +700,7 @@ impl Default for Renderer {
             post: Default::default(),
             bloom: DEFAULT_BLOOM,
             auto_exposure: true,
+            grade: Default::default(),
             star_map: None,
             star_texture: None,
             gpu_baker: {
@@ -701,6 +741,8 @@ impl Default for Renderer {
             model_sdf_tex: std::collections::HashMap::new(),
             model_sdf_bytes: std::collections::HashMap::new(),
             sdf_baked_sun_len: 0.0,
+            sky_hour: None,
+            sky_clock: false,
             lm_kick_key: None,
             lm_kick_sun: None,
             shadow_geometry: None,
@@ -708,7 +750,6 @@ impl Default for Renderer {
             shadow_points: Vec::new(),
             shadow_gate: ShadowRebuildGate::default(),
             models_rev: 0,
-            lm_box_geometry: None,
             bake: LightBake::default(),
             csm_focus: None,
             csm_scene_bounds: None,

@@ -43,6 +43,44 @@ pub struct StreamLayer {
     /// Renders into the sun's shadow cascades (walls and roofs do; the
     /// ground a shadow falls on does not).
     pub casts: bool,
+    /// How the layer shades in the streamed lane (`DrawSceneCity`).
+    pub material: StreamMaterial,
+}
+
+/// The streamed lane's surface model. `orm` is a per-texel map sampled on
+/// the albedo's UVs; what its channels mean depends on `kind`:
+///
+/// | kind | R | G | B |
+/// |---|---|---|---|
+/// | `Plain` | instance-tint weight | roughness | metallic |
+/// | `Facade` / `Glass` | glass coverage | roughness | frame metallic, or on glass the reflectance (F0 = 0.04..0.5) |
+/// | `Paint` | instance-tint weight | base roughness | metallic flake (under a clear coat) |
+/// | `Emissive` | instance-tint weight | daytime emission | night emission |
+///
+/// `Facade` glass shows a room behind each window (interior mapping), plain
+/// `Glass` shows its albedo behind the reflection. `None` for `orm` is a
+/// white map.
+#[derive(Clone, Default)]
+pub struct StreamMaterial {
+    pub kind: StreamSurface,
+    pub orm: Option<Arc<crate::material_surface::PreparedTexture>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamSurface {
+    #[default]
+    Plain,
+    Facade,
+    Glass,
+    Paint,
+    Emissive,
+}
+
+impl StreamSurface {
+    /// The code `DrawSceneCity` reads (passed in the layer's metallic slot).
+    pub fn code(self) -> f32 {
+        match self { StreamSurface::Plain => 0.0, StreamSurface::Facade => 1.0, StreamSurface::Glass => 2.0, StreamSurface::Paint => 3.0, StreamSurface::Emissive => 4.0 }
+    }
 }
 
 #[derive(Clone)]
@@ -109,6 +147,9 @@ pub trait TileSource: Send + Sync {
     fn prop_light(&self, _kind: usize) -> Option<(Vec3f, Vec3f, f32)> { None }
     /// Per-frame moving instances (ambient traffic) near `eye` at `time`.
     fn movers(&self, _time: f64, _eye: Vec3f, _radius: f32, _out: &mut Vec<StreamProp>) {}
+    /// A forward light a MOVER kind carries after dark (headlights): offset
+    /// and direction in the mover's frame, and colour. None for most kinds.
+    fn mover_light(&self, _kind: usize) -> Option<(Vec3f, Vec3f, Vec3f)> { None }
     /// Build one piece (worker thread).
     fn build(&self, piece: StreamPiece) -> Result<StreamMesh, String>;
 }

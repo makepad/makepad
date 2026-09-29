@@ -127,14 +127,18 @@ impl Part {
         m.set_corner_normals_bulk(&values, &mut ctx)?;
         // Vertex IDs are assigned in input order starting at 1.
         let ids: Vec<u64> = m.vertices().iter().map(|v| v.id.0).collect();
-        let mut paint: std::collections::BTreeMap<[u16; 4], Vec<crate::json::Value>> = Default::default();
+        // One bulk colour op for every vertex, white ones included: a paint
+        // op per distinct colour cost ~25 ms each on the document, and a
+        // vertex without an entry is later filled in by a closest-point
+        // search at compile (seconds for a character).
+        let (mut vids, mut cols) = (Vec::new(), Vec::new());
         for (i, c) in colors.iter().enumerate() {
-            if c.iter().all(|v| *v >= 0.999) { continue; }
-            let key = c.map(|v| (v.clamp(0., 1.) * 255.).round() as u16);
-            paint.entry(key).or_default().push(crate::json::s(ids[i].to_string()));
+            vids.push(crate::json::s(ids[i].to_string()));
+            cols.push(crate::json::Value::Arr(c.iter().map(|v| crate::json::Value::F64(v.clamp(0., 1.))).collect()));
         }
-        let paint = paint.into_iter().map(|(k, ids)| crate::json::obj(vec![("op", crate::json::s("surface_vertex_paint")), ("object", crate::json::s(&self.name)), ("vertices", crate::json::Value::Arr(ids)),
-            ("color", crate::json::Value::Arr(k.iter().map(|v| crate::json::Value::F64(*v as f64 / 255.)).collect())), ("opacity", crate::json::Value::F64(1.))])).collect();
+        let paint = if vids.is_empty() { Vec::new() } else {
+            vec![crate::json::obj(vec![("op", crate::json::s("surface_vertex_colors")), ("object", crate::json::s(&self.name)), ("vertices", crate::json::Value::Arr(vids)), ("colors", crate::json::Value::Arr(cols))])]
+        };
         Ok((Operation::ImportMesh { object: self.name.clone(), source: m.to_bytes(&mut ctx)? }, paint))
     }
 }

@@ -28,10 +28,10 @@ impl Renderer {
         if world.sun.ambient.is_some() {
             return;
         }
-        let Some(frame) = analytic_sky_frame(world, hdr.dir, self.stage.shows_environment()) else {
+        let Some(frame) = analytic_sky_frame(world, hdr.dir, self.stage.shows_environment(), true, self.sky_clock) else {
             return;
         };
-        let sky = crate::sky::sky_fill_linear(&frame) * (HDR_SKY_GAIN * HDR_SKY_FILL_GAIN);
+        let sky = crate::sky::sky_fill_linear(&frame) * frame.dome_tint * (HDR_SKY_GAIN * HDR_SKY_FILL_GAIN);
         let bounce = (hdr.color * hdr.dir.y.max(0.0) + sky) * HDR_GROUND_ALBEDO;
         let floor = hdr.sky;
         let lum = |c: Vec3f| c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
@@ -91,6 +91,14 @@ impl Renderer {
         // draw gates below and the mover collection consume, so the
         // settings/F8 mode switch flips the complete contract atomically.
         let tiers = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode());
+        // A sun hour that moves makes this a clock-driven sky (`sky_clock`).
+        let hour = world.sun.time_of_day.filter(|_| world.sun.dir.is_none());
+        if hour.is_none() {
+            self.sky_clock = false;
+        } else if self.sky_hour.is_some() && self.sky_hour != hour {
+            self.sky_clock = true;
+        }
+        self.sky_hour = hour;
         let sun = crate::sun::resolve_sun(&world.sun);
         self.light_eye = camera_pos;
         self.stream_lights(camera_pos, sun.dir.y);
@@ -138,7 +146,7 @@ impl Renderer {
             None => self.skin_joint_bases.clear(),
         }
         let mut lm_movers = if tiers.csm || local_shadows {
-            self.ensure_lm_box_geometry(cx.cx);
+            self.ensure_entity_caster_geometries(cx.cx);
             self.collect_lm_movers(world, camera_pos, skinned.as_ref().map(|b| b.items.as_slice()))
         } else {
             Vec::new()
@@ -274,7 +282,7 @@ impl Renderer {
         // horizon colour stays customisable either way: it only ever tinted
         // the FOG, and in analytic mode the fog instead comes from the
         // model's own tone-mapped horizon so sky and haze agree.
-        let sky_frame = analytic_sky_frame(world, sun.dir, shows_environment);
+        let sky_frame = analytic_sky_frame(world, sun.dir, shows_environment, self.hdr_output, self.sky_clock);
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
@@ -393,8 +401,10 @@ impl Renderer {
         }
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn
-        // first). Default-sky worlds draw the ANALYTIC dome (Preetham +
-        // setting sun + stars); authored gradients keep DrawSceneSky.
+        // first). Default-sky worlds and worlds on a running clock draw
+        // the ANALYTIC dome (Preetham + setting sun + stars, tinted by an
+        // authored palette); authored gradients under a fixed hour keep
+        // DrawSceneSky.
         if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment) {
             let mut transform = Mat4f::identity();
             transform.v[12] = camera_pos.x;
@@ -405,7 +415,8 @@ impl Renderer {
                     sa.cube.transform = transform;
                     sa.cube.cube_pos = vec3(0.0, 0.0, 0.0);
                     sa.cube.cube_size = vec3(800.0, 800.0, 800.0);
-                    sa.cube.color = vec4(1.0, 1.0, 1.0, 1.0);
+                    // rgb: the authored palette's tint of the day dome.
+                    sa.cube.color = vec4(f.dome_tint.x, f.dome_tint.y, f.dome_tint.z, 1.0);
                     sa.cube.depth_clip = 1.0;
                     sa.pz_y = f.pz_y;
                     sa.pz_x = f.pz_x;
@@ -1238,6 +1249,7 @@ impl Renderer {
                 self.model_ground.push(receiver.sample(x, z).0);
             }
             let instances = std::mem::take(&mut self.placed_models);
+            self.prepare_foliage_lane(cx.cx);
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
@@ -1259,10 +1271,13 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_foliage_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
             self.draw_stream(cx, draw, camera_pos, (fog_color, fog_density), &sun);
+            self.draw_grass(cx, camera_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
 
             // Actor-attached props share the world material/depth pass, but
             // this is their ONLY renderer traversal. In particular they
@@ -1403,6 +1418,30 @@ impl Renderer {
                         }
                         continue;
                     }
+                    // Blob tier: the soft round contact blob in the shadow
+                    // mesh. The box-batch quad below is a hard dark SQUARE,
+                    // so every caster past the budget (or all of them once
+                    // the thermometer drops projected shadows) cast a cube —
+                    // a marble included. The quad stays only for a host
+                    // with no shadow-mesh draw.
+                    if draws.shadow.is_some() {
+                        let receiver = Receiver {
+                            base_y: ground,
+                            terrain: world.terrain.as_deref(),
+                            statics: &self.receiver_boxes,
+                        };
+                        if crate::shadow_mesh::build_blob_shadow(
+                            vec3f(e.pos.x, e.pos.y - half.y, e.pos.z),
+                            half.x * 1.1,
+                            half.z * 1.1,
+                            &sun,
+                            &receiver,
+                            &mut self.shadow_mesh,
+                        ) {
+                            stats.shadows += 1;
+                        }
+                        continue;
+                    }
                     let quad = crate::shadow::blob_shadow(e.pos, half, ground, &sun);
                     let Some(quad) = quad else { continue };
                     // No fog on a shadow. It lies ON ground that is already
@@ -1507,7 +1546,7 @@ impl Renderer {
         // shader maps them into a portable near-depth band, while their queue
         // never visited any world bake/caster path above.
         if let Some(draw) = draws.view_model.as_deref_mut() {
-            self.draw_view_models_inner(cx, draw, &sun, &mut stats);
+            self.draw_view_models_inner(cx, draw, &sun, fog_color, &mut stats);
         }
 
         if let Some(previous_world) = previous_world {

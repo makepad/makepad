@@ -29,7 +29,7 @@ script_mod! {
         chamfer: uniform(0.0)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            // Shapes by range (1 arc, 2/3 segment, 4 dart, 5 disc, else plate).
+            // Shapes by range (1 arc, 2/3 segment, 4 dart, 5 disc, 6 turned box, else plate).
             if self.shape > 0.5 && self.shape < 1.5 {
                 let c = self.rect_size * 0.5
                 let r = min(c.x, c.y) - self.thickness * 0.5 - 1.0
@@ -45,6 +45,22 @@ script_mod! {
             // Segments and the dart are plain distance math (no Sdf2d path):
             // coverage from the pixel's distance to the shape, premultiplied.
             let p = self.pos * self.rect_size
+            if self.shape > 5.5 && self.shape < 6.5 {
+                // A box turned by `from` radians about the quad's centre,
+                // `thickness` wide and `sweep` tall, corners rounded by
+                // `radius` (a map's floor plan under a heading-up radar).
+                let c = self.rect_size * 0.5
+                let sn = sin(self.from)
+                let cs = cos(self.from)
+                let q0 = p - c
+                let q = vec2(q0.x * cs + q0.y * sn, -q0.x * sn + q0.y * cs)
+                let hb = vec2(self.thickness, self.sweep) * 0.5
+                let r = min(self.radius, min(hb.x, hb.y))
+                let d2 = abs(q) - hb + vec2(r, r)
+                let dist = length(max(d2, vec2(0.0, 0.0))) + min(max(d2.x, d2.y), 0.0) - r
+                let cov = clamp(0.5 - dist, 0.0, 1.0) * self.fill.w
+                return vec4(self.fill.xyz * cov, cov)
+            }
             let i = self.thickness * 0.5 + 1.0
             if self.shape > 1.5 && self.shape < 3.5 {
                 // A segment corner to corner of its quad: 2 runs top-left to
@@ -85,8 +101,11 @@ script_mod! {
                 }
                 return vec4(col.xyz * col.w, col.w)
             }
-            let b = max(self.border, 0.0)
             let c = self.rect_size * 0.5
+            // A rim is a rim: a width past a quarter of the short side (a
+            // colour passed where the width goes reads as a huge number)
+            // would flood the plate with the stroke colour.
+            let b = clamp(self.border, 0.0, min(c.x, c.y) * 0.5)
             let disc = self.shape > 4.5 || self.radius >= min(c.x, c.y) - 0.5
             if disc {
                 // A round plate (a radar, a round badge): 5, or any plate

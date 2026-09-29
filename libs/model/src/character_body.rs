@@ -145,6 +145,16 @@ impl Body {
         Body { joints: self.joints.clone(), ..*self }
     }
     pub fn jp(&self, name: &str) -> [f64; 3] { self.joints[j(name) as usize] }
+    /// Arm girth factor: realistic builds get lean arms (a 1.25-muscle
+    /// operator's upper arm is ~11 cm across, not a padded tube); stylised
+    /// ones keep the chunky limb.
+    /// Where the arm sockets into the torso (x of the upper_arm joint): the
+    /// torso's shoulder rows hug it so the deltoid belongs to the arm and
+    /// the torso never shows a boxy corner above it.
+    pub fn shoulder_x(&self) -> f64 { self.arm[1][0][0].abs() }
+    /// Leg girth factor, leaner for realistic builds the same way.
+    pub fn leg_limb(&self) -> f64 { self.limb * mix(0.86, 1., smooth01(0., 0.45, self.s)) }
+    pub fn arm_limb(&self) -> f64 { self.limb * mix(0.8, 1., smooth01(0., 0.45, self.s)) }
 }
 
 /// Knuckle position, direction, length and radius of the fingers
@@ -153,12 +163,13 @@ pub(crate) fn hand_fingers(hand_len: f64, palm_w: f64, wrist: [f64; 3], f: [[f64
     let [d, n, t] = f;
     let knuck = add(wrist, mul(d, hand_len * 0.5));
     let fl = hand_len * 0.5 * mix(1., 0.72, s);
-    let r = palm_w * 0.105 * mix(1., 1.25, s);
+    // Realistic fingers are ~1.8 cm thick; stylised ones chunkier still.
+    let r = palm_w * 0.12 * mix(1., 1.1, s);
     let spread = |k: f64| norm(add(d, mul(t, k)));
     let finger = |off: f64, back: f64, len: f64, rr: f64, sp: f64| (add(add(knuck, mul(t, palm_w * off)), mul(d, -back)), spread(sp), fl * len, r * rr);
     let thumb_base = add(add(add(wrist, mul(d, hand_len * 0.12)), mul(t, palm_w * 0.3)), mul(n, palm_w * 0.12));
     let tdir = norm(add(add(mul(d, 0.55), mul(t, 0.75)), mul(n, 0.35)));
-    [finger(0.38, 0.0, 0.94, 0.92, 0.14), finger(0.13, -0.004, 1.0, 0.94, 0.03), finger(-0.12, 0.002, 0.95, 0.9, -0.08), finger(-0.36, 0.012, 0.78, 0.82, -0.2),
+    [finger(0.38, 0.0, 0.94, 0.92, 0.09), finger(0.13, -0.004, 1.0, 0.94, 0.02), finger(-0.12, 0.002, 0.95, 0.9, -0.05), finger(-0.36, 0.012, 0.78, 0.82, -0.13),
      (thumb_base, tdir, fl * 0.95, r * 1.18)]
 }
 
@@ -260,9 +271,11 @@ fn torso(part: &mut Part, b: &Body, wr: &Wardrobe) {
         (mix(b.waist_y, b.chest_y, 0.5), mix(ww[0], cw[0], 0.6), mix(ww[1], cw[1], 0.55), mix(ww[2], cw[2], 0.6), 2.3),
         (b.chest_y, cw[0], cw[1], cw[2], 2.4),
         (b.armpit, cw[0] * 1.03, cw[1] * 0.96, cw[2] * 1.02, 2.5),
-        (b.sh - 0.06 * u, b.sh_half - 0.03 * u, cw[1] * 0.8, cw[2] * 0.86, 2.4),
-        (b.sh - 0.03 * u, b.sh_half - 0.045 * u, cw[1] * 0.66, cw[2] * 0.74, 2.3),
-        (b.sh - 0.005 * u, mix(b.sh_half - 0.05 * u, b.neck_r * 1.6, 0.45), cw[1] * 0.55, cw[2] * 0.62, 2.3),
+        (b.sh - 0.06 * u, b.shoulder_x() + 0.012 * u, cw[1] * 0.8, cw[2] * 0.86, 2.4),
+        (b.sh - 0.03 * u, b.shoulder_x() + 0.004 * u, cw[1] * 0.66, cw[2] * 0.74, 2.3),
+        (b.sh - 0.005 * u, mix(b.shoulder_x(), b.neck_r * 1.6, 0.35), cw[1] * 0.55, cw[2] * 0.62, 2.3),
+        // Trapezius: a gentle slope from the neck to the shoulder.
+        (mix(b.sh, b.nb, 0.5), mix(b.shoulder_x(), b.neck_r * 1.32, 0.65), cw[1] * 0.5, cw[2] * 0.56, 2.2),
         (b.nb, b.neck_r * 1.32, b.neck_r * 1.12, b.neck_r * 1.18, 2.),
         (b.nb + 0.035 * u, b.neck_r * 0.95, b.neck_r * 0.9, b.neck_r * 0.95, 2.),
     ];
@@ -327,14 +340,14 @@ fn neck(part: &mut Part, b: &Body, wr: &Wardrobe) {
 
 /// Arm chain parameter of a point along the arm: 0 shoulder … 1 elbow … 2 wrist.
 fn arm(part: &mut Part, b: &Body, wr: &Wardrobe, side: usize) {
-    let u = b.u; let l = b.limb;
+    let u = b.u; let l = b.arm_limb();
     let x = sfx(side);
     let [p0, p1, p2, _] = b.arm[side];
     let (sh, ua, la, hd) = (w1(j(&format!("shoulder_{x}"))), w1(j(&format!("upper_arm_{x}"))), w1(j(&format!("lower_arm_{x}"))), w1(j(&format!("hand_{x}"))));
     let d1 = norm(sub(p1, p0)); let d2 = norm(sub(p2, p1));
     let l1 = length(sub(p1, p0)); let l2 = length(sub(p2, p1));
     // (chain t, radius, flatten)
-    let keys: [(f64, f64, f64); 13] = [(-0.16, 0.05, 1.0), (-0.02, 0.062, 1.0), (0.18, 0.061, 0.96), (0.45, 0.054, 0.94), (0.7, 0.048, 0.95), (0.9, 0.041, 0.95),
+    let keys: [(f64, f64, f64); 13] = [(-0.16, 0.04, 1.0), (-0.02, 0.055, 1.0), (0.18, 0.058, 0.96), (0.45, 0.054, 0.94), (0.7, 0.048, 0.95), (0.9, 0.041, 0.95),
         (1.0, 0.039, 0.93), (1.12, 0.045, 0.9), (1.3, 0.046, 0.86), (1.55, 0.041, 0.8), (1.8, 0.033, 0.74), (1.97, 0.029, 0.7), (2.04, 0.029, 0.72)];
     let pos = |t: f64| if t <= 1. { add(p0, mul(d1, t * l1)) } else { add(p1, mul(d2, (t - 1.) * l2)) };
     let side_hint = [0., 0., 1.];
@@ -345,7 +358,9 @@ fn arm(part: &mut Part, b: &Body, wr: &Wardrobe, side: usize) {
         let d_wr = (t - 2.) * l2;
         w = wmix(&w, &hd, smooth01(-0.02 * u, 0.02 * u, d_wr));
         let d_sh = t * l1;
-        w = wmix(&wmix(&sh, &ua, 0.55), &w, smooth01(-0.04 * u, 0.1 * u, d_sh));
+        // The cap inside the shoulder follows the clavicle more than the arm,
+        // so lowering the arm from the A-pose doesn't raise a hump.
+        w = wmix(&wmix(&sh, &ua, 0.3), &w, smooth01(-0.04 * u, 0.1 * u, d_sh));
         w
     };
     let rings: Vec<Ring> = keys.iter().map(|&(t, r, fl)| {
@@ -425,7 +440,7 @@ fn hand(part: &mut Part, b: &Body, wr: &Wardrobe, side: usize, mitten: bool) {
 }
 
 fn leg(part: &mut Part, b: &Body, wr: &Wardrobe, side: usize) {
-    let u = b.u; let l = b.limb;
+    let u = b.u; let l = b.leg_limb();
     let x = sfx(side);
     let [hip, kn, an, _, _, _] = b.leg[side];
     let (hips, ul, ll, ft) = (w1(j("hips")), w1(j(&format!("upper_leg_{x}"))), w1(j(&format!("lower_leg_{x}"))), w1(j(&format!("foot_{x}"))));

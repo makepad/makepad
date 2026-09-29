@@ -15,6 +15,24 @@
 //! Off, this is one `bool` check per tick.
 
 use crate::makepad_error_log::trace_enabled;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Window frames handed to the compositor since start, always counted (one
+/// relaxed add per present). An app's frame clock can run on beats whose
+/// repaint the GPU backpressure gate withheld: comparing this with its own
+/// drawn frames is how an app sees it is GPU-bound (and scales its render
+/// resolution) without a governor inside the platform.
+static PRESENTED: AtomicU64 = AtomicU64::new(0);
+
+/// A window frame was presented (backends call this at the present).
+pub fn note_presented() {
+    PRESENTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Window frames presented since start, all windows.
+pub fn presented_frames() -> u64 {
+    PRESENTED.load(Ordering::Relaxed)
+}
 
 /// What woke a paint tick.
 #[derive(Clone, Copy)]

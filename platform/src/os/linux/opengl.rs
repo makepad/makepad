@@ -308,11 +308,26 @@ impl DrawVars {
     }
 }
 
+#[cfg(use_vulkan)]
+thread_local! {
+    /// Captures requested on Vulkan, with the frame serial they wait past.
+    static VULKAN_TEXTURE_CAPTURES: std::cell::RefCell<Vec<(Texture, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Cx {
     /// Renderer-owned texture capture (see the metal backend): not
-    /// implemented here — callers fall back to `debug_read_render_texture`
+    /// implemented here for OpenGL — callers fall back to `debug_read_render_texture`
     /// (GL commands on one context are ordered, so the sync path is safe).
+    ///
+    /// Vulkan: the texture is read back once a frame has been submitted since
+    /// the request (the pass the caller repainted has then rendered).
     pub fn request_render_texture_capture(&mut self, _texture: &Texture) -> bool {
+        #[cfg(use_vulkan)]
+        if self.os.vulkan.is_some() {
+            let after = self.frame_submission_serial();
+            VULKAN_TEXTURE_CAPTURES.with(|pending| pending.borrow_mut().push((_texture.clone(), after)));
+            return true;
+        }
         false
     }
 
@@ -320,6 +335,21 @@ impl Cx {
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
+        #[cfg(use_vulkan)]
+        if self.os.vulkan.is_some() {
+            let submitted = self.frame_submission_serial();
+            let due: Vec<Texture> = VULKAN_TEXTURE_CAPTURES.with(|pending| {
+                let mut pending = pending.borrow_mut();
+                let (due, wait): (Vec<_>, Vec<_>) = pending.drain(..).partition(|(_, after)| submitted > *after);
+                *pending = wait;
+                due.into_iter().map(|(texture, _)| texture).collect()
+            });
+            let gpu = self.os.vulkan.as_mut().unwrap();
+            return due.into_iter().filter_map(|texture| match gpu.read_render_texture_bgra(texture.texture_id()) {
+                Ok((width, height, bytes)) => Some((texture.texture_id(), width, height, bytes)),
+                Err(error) => { crate::error!("render texture capture: {error}"); None }
+            }).collect();
+        }
         Vec::new()
     }
 

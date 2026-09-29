@@ -76,8 +76,12 @@ impl Face {
         if sockets { disp -= self.re * 0.55 * gauss((ax - self.eye_x) / 0.14) * gauss((fy - self.eye_y) / 0.12); }
         disp += c * self.ridge * gauss((fy - self.eye_y - 0.2) / 0.07) * gauss((ax - self.eye_x) / 0.3);
         disp += c * self.cheeks * gauss((ax - 0.42) / 0.2) * gauss((fy - self.eye_y + 0.27) / 0.14);
-        disp += c * 0.03 * gauss(fx / self.mouth_w) * gauss((fy - self.mouth_y - 0.04) / 0.03);
-        disp += c * 0.036 * gauss(fx / (self.mouth_w * 0.85)) * gauss((fy - self.mouth_y + 0.05) / 0.035);
+        // Lips: fuller on realistic faces (stylised ones keep the small mouth).
+        let lips = mix(1.35, 1., smooth01(0., 0.5, self.s));
+        disp += c * 0.03 * lips * gauss(fx / self.mouth_w) * gauss((fy - self.mouth_y - 0.04) / 0.03);
+        disp += c * 0.036 * lips * gauss(fx / (self.mouth_w * 0.85)) * gauss((fy - self.mouth_y + 0.05) / 0.035);
+        // Cheekbones: a ridge under the outer eye that catches the light.
+        disp += c * 0.025 * (1. - smooth01(0., 0.5, self.s)) * gauss((ax - 0.5) / 0.14) * gauss((fy - self.eye_y + 0.17) / 0.07);
         disp -= c * 0.01 * gauss(fx / self.mouth_w) * gauss((fy - self.mouth_y) / 0.02);
         // Chin ball.
         disp += c * 0.03 * self.chin * gauss(fx / 0.25) * gauss((fy + 0.88) / 0.1);
@@ -157,41 +161,60 @@ pub(crate) fn build(g: &mut Gen) {
         if !bal { return skin; }
         let phi = PI * (r as f64 + 0.5) / rings as f64;
         let d = [phi.sin() * theta.cos(), -phi.cos(), -phi.sin() * theta.sin()];
-        let eye_band = d[2] < -0.3 && (d[1] - f3.eye_y).abs() < f3.re / f3.r[1] * 1.9 && d[0].abs() < f3.eye_x + 0.34;
+        // The eye slot runs from under the eyes to above the brows.
+        let eye_band = d[2] < -0.3 && d[1] - f3.eye_y < f3.re / f3.r[1] * 3.4 && f3.eye_y - d[1] < f3.re / f3.r[1] * 1.5 && d[0].abs() < f3.eye_x + 0.34;
         if eye_band { skin } else { cover_mat.unwrap_or(skin) }
     };
     let f4 = face.clone();
     let grid = blob(&mut head, face.c, [0., 1., 0.], [1., 0., 0.], segs, rings, &|d| f4.point(d), &wf, &mat, 1.);
-    // Skin shading in vertex colour: lips, cheeks, a touch of socket shade.
+    // Skin shading in vertex colour: lips, cheeks, socket shade, and for
+    // realistic faces the warmth of thin, blood-filled skin (nose, ears,
+    // cheeks), a cooler under-eye, a lid crease, nasolabial folds and a
+    // faint low-frequency mottle, so the skin never reads as flat paint.
     let blush = sp.blush;
+    let real = 1. - smooth01(0., 0.5, sp.stylize);
     let beard_shadow = matches!(sp.facial_hair.as_str(), "stubble");
+    let f5 = face.clone();
+    let on_skin = move |d: [f64; 3]| !bal || (d[2] < -0.3 && d[1] - f5.eye_y < f5.re / f5.r[1] * 3.4 && f5.eye_y - d[1] < f5.re / f5.r[1] * 1.5 && d[0].abs() < f5.eye_x + 0.34);
     for row in &grid { for &v in row {
         let p = head.positions[v as usize];
         let d = norm(std::array::from_fn(|i| (p[i] - face.c[i]) / face.r[i]));
-        if d[2] > -0.1 { continue; }
         let (fx, fy) = (d[0], d[1]);
-        let lipk = gauss(fx / (face.mouth_w * 0.95)) * gauss((fy - face.mouth_y) / 0.06);
-        let corner = 0.25 * gauss((fx.abs() - face.mouth_w) / 0.04) * gauss((fy - face.mouth_y) / 0.035);
-        let cheek = blush * 0.5 * gauss((fx.abs() - 0.45) / 0.16) * gauss((fy - face.eye_y + 0.28) / 0.12)
-            + 0.18 * gauss(fx / 0.12) * gauss((fy - face.nose_y) / 0.08);
-        let socket = 0.12 * gauss((fx.abs() - face.eye_x) / 0.16) * gauss((fy - face.eye_y) / 0.14);
         let mut col = [1., 1., 1., 1.];
-        for i in 0..3 { let target = lip[i] / sp.skin[i].max(0.02); col[i] = mix(col[i], target.min(1.4), lipk * if bal { 0. } else { 1. }); }
-        col[1] *= 1. - cheek * 0.35; col[2] *= 1. - cheek * 0.3;
-        for c in col.iter_mut().take(3) { *c *= (1. - socket) * (1. - corner); }
-        if beard_shadow {
-            let beard = gear::beard_mask(&face, d);
-            let hc = sp.hair_color;
-            for i in 0..3 { col[i] = mix(col[i], (hc[i] / sp.skin[i].max(0.02)).min(1.), beard * 0.45); }
+        // Ears and the sides of the head: a warm, translucent flush.
+        let ear = real * 0.35 * smooth01(0.75, 0.95, fx.abs()) * gauss((fy - (face.eye_y + face.nose_y) * 0.5) / 0.3);
+        col[1] *= 1. - ear * 0.2; col[2] *= 1. - ear * 0.26;
+        if d[2] <= -0.1 && on_skin(d) {
+            let lipk = gauss(fx / (face.mouth_w * 0.95)) * gauss((fy - face.mouth_y) / 0.06);
+            let corner = 0.25 * gauss((fx.abs() - face.mouth_w) / 0.04) * gauss((fy - face.mouth_y) / 0.035);
+            let cheek = blush * 0.5 * gauss((fx.abs() - 0.45) / 0.16) * gauss((fy - face.eye_y + 0.28) / 0.12)
+                + (0.18 + 0.12 * real) * gauss(fx / 0.12) * gauss((fy - face.nose_y) / 0.08)
+                + real * 0.3 * gauss((fx.abs() - 0.42) / 0.14) * gauss((fy - face.eye_y + 0.3) / 0.1);
+            let socket = mix(0.4, 0.12, smooth01(0., 0.5, sp.stylize)) * gauss((fx.abs() - face.eye_x) / 0.16) * gauss((fy - face.eye_y) / 0.14);
+            let re_y = face.re / face.r[1];
+            let under_eye = real * 0.2 * gauss((fx.abs() - face.eye_x) / 0.13) * gauss((fy - face.eye_y + re_y * 1.6) / 0.08);
+            let crease = real * 0.3 * gauss((fx.abs() - face.eye_x) / 0.14) * gauss((fy - face.eye_y - re_y * 1.2) / 0.06);
+            let fold = real * 0.22 * gauss((fx.abs() - face.nose_w - 0.1 + (fy - face.nose_y) * 0.25) / 0.06) * smooth01(face.nose_y + 0.02, face.nose_y - 0.05, fy) * smooth01(face.mouth_y - 0.06, face.mouth_y + 0.02, fy);
+            let mottle = real * 0.06 * (p[0] * 83. + 1.3).sin() * (p[1] * 71. + 0.7).sin() * (p[2] * 97. + 2.1).sin();
+            for i in 0..3 { let target = lip[i] / sp.skin[i].max(0.02); col[i] = mix(col[i], target.min(1.4), lipk * if bal { 0. } else { 1. }); }
+            col[1] *= 1. - cheek * 0.35; col[2] *= 1. - cheek * 0.3;
+            col[0] *= 1. - under_eye * 0.9; col[1] *= 1. - under_eye; col[2] *= 1. - under_eye * 0.5;
+            for c in col.iter_mut().take(3) { *c *= (1. - socket) * (1. - corner) * (1. - crease) * (1. - fold) * (1. + mottle); }
+            if beard_shadow {
+                let beard = gear::beard_mask(&face, d);
+                let hc = sp.hair_color;
+                for i in 0..3 { col[i] = mix(col[i], (hc[i] / sp.skin[i].max(0.02)).min(1.), beard * 0.45); }
+            }
         }
-        head.colors[v as usize] = [col[0].min(1.), col[1].min(1.), col[2].min(1.), 1.];
+        head.colors[v as usize] = [col[0].clamp(0., 1.), col[1].clamp(0., 1.), col[2].clamp(0., 1.), 1.];
     } }
     g.parts.push(head);
     // ── eyes, lids, brows, mouth, ears ──
     eyes(g, &face);
     if covered.mouth_visible { mouth(g, &face, lip); }
     brows(g, &face);
-    if !covered.ears { ears(g, &face, skin); }
+    // Under a balaclava the ears still shape the knit.
+    if !covered.ears { ears(g, &face, skin); } else if let Some(m) = cover_mat { ears(g, &face, m); }
     if !covered.hair { hair(g, &face); }
     if !bal { gear::facial_hair(g, &face); }
 }
@@ -199,7 +222,8 @@ pub(crate) fn build(g: &mut Gen) {
 fn eyes(g: &mut Gen, face: &Face) {
     let sp = g.spec;
     let s = face.s;
-    let sclera = g.mats.id(MatDef::new([0.86, 0.84, 0.8], Tex::Plain).rough(0.22));
+    // Realistic sclera is a shaded off-white, never paper white.
+    let sclera = g.mats.id(MatDef::new(lerp3([0.52, 0.48, 0.44], [0.86, 0.84, 0.8], smooth01(0., 0.5, s)), Tex::Plain).rough(0.22));
     let iris = g.mats.id(MatDef::new(sp.eye_color, Tex::Plain).rough(0.12));
     let pupil = g.mats.id(MatDef::new([0.01, 0.01, 0.012], Tex::Plain).rough(0.06));
     let skin = g.mats.id(MatDef::new(sp.skin, Tex::Skin));
@@ -207,8 +231,8 @@ fn eyes(g: &mut Gen, face: &Face) {
     let lash_c = sp.brow_color.unwrap_or(sp.hair_color).map(|v| v * 0.35);
     let lash = g.mats.id(MatDef::new(lash_c, Tex::Plain).rough(0.6));
     let re = face.re;
-    let iris_a = mix(42., 50., s).to_radians();
-    let pupil_a = mix(17., 21., s).to_radians();
+    let iris_a = mix(30., 50., s).to_radians();
+    let pupil_a = mix(11., 21., s).to_radians();
     let rings = 28;
     for side in 0..2 {
         let x = sfx(side);
@@ -339,7 +363,8 @@ fn brows(g: &mut Gen, face: &Face) {
             let p = face.point(d);
             (add(p, mul(face.outward(d), 0.0025 * u)), mix(1.0, 0.45, t.powf(1.3)) * if t < 0.1 { 0.85 } else { 1. })
         }).collect();
-        let thick = face.re * 0.36 * sp.brow;
+        // Realistic faces get slimmer, softer brows.
+    let thick = face.re * mix(0.34, 0.36, face.s) * sp.brow;
         let rings: Vec<Ring> = pts.iter().enumerate().map(|(k, (p, s))| {
             let tan = norm(sub(pts[(k + 1).min(n - 1)].0, pts[k.saturating_sub(1)].0));
             let d = norm(sub(*p, face.c));
@@ -472,6 +497,14 @@ fn hair_shape(style: &str, a: f64) -> Option<HairShape> {
         "afro" => HairShape { thick: a * 0.42, top: a * 0.22, grooves: 0., edge: [50., 86., 110.], flare: a * 0.05, ..base },
         _ => base,
     })
+}
+
+/// How far visible hair stands off the scalp at the crown (shell, crown
+/// lift, quiff and the strand clumps on top), so hats and helmets sit over
+/// the hair instead of vanishing inside it.
+pub(crate) fn hair_clearance(sp: &CharacterSpec, a: f64) -> f64 {
+    if gear::head_cover(sp).hair { return 0.; }
+    hair_shape(&sp.hair, a).map_or(0., |h| (h.thick + h.top + h.quiff * 0.5) * sp.hair_volume + a * 0.03)
 }
 
 fn hair(g: &mut Gen, face: &Face) {

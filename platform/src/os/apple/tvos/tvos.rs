@@ -74,6 +74,12 @@ impl Cx {
         });
         let metal_cx: Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
         cx.borrow_mut().gpu_info.float16_blend_targets = true;
+        {
+            let (bc7, astc) = metal_cx.borrow().texture_compression();
+            let mut cx = cx.borrow_mut();
+            cx.gpu_info.texture_bc7 = bc7;
+            cx.gpu_info.texture_astc4x4 = astc;
+        }
         //let cx = Rc::new(RefCell::new(self));
         crate::log!("Makepad tvOS application started.");
         //let metal_windows = Rc::new(RefCell::new(Vec::new()));

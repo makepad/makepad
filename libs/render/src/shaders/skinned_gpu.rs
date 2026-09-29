@@ -332,7 +332,9 @@ script_mod! {
                     let orientation=sign(determinant)
                     let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
                     let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
-                    let mapped=self.normal_map.sample_as_bgra_repeat(self.v_uv).xyz*2.0-vec3(1.0,1.0,1.0)
+                    // Tangent-space X and Y; Z is rebuilt (BC5 normal maps store only XY).
+                    let xy=self.normal_map.sample_as_bgra_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
+                    let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
                     n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
                 }
                 let orm=self.orm_map.sample_as_bgra_repeat(self.v_uv)

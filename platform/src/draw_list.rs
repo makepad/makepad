@@ -20,7 +20,7 @@ use crate::{
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::Ordering,
     Arc,
 };
 
@@ -2436,19 +2436,31 @@ impl CxDrawList {
     }
 
     fn append_trace_enabled() -> bool {
-        false
+        crate::makepad_error_log::trace_enabled("draw.append")
     }
 
+    /// `MAKEPAD_TRACE=draw.append`: why draws did not batch. Tallied by
+    /// reason and shader (the message up to its `at_draw_item`/`items`
+    /// detail) and printed every two seconds, most frequent first.
     fn append_trace_log(message: impl FnOnce() -> String) {
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static TALLY: Mutex<Option<(std::time::Instant, HashMap<String, u64>)>> = Mutex::new(None);
         if !Self::append_trace_enabled() {
             return;
         }
-        let n = COUNT.fetch_add(1, Ordering::Relaxed);
-        if n < 200 {
-            log!("{}", message());
-        } else if n == 200 {
-            log!("append_trace: log limit reached, suppressing further output");
+        let message = message();
+        let key = message.split(" at_draw_item").next().unwrap_or(&message);
+        let key = key.split(" items_before").next().unwrap_or(key).to_string();
+        let Ok(mut guard) = TALLY.lock() else { return };
+        let (since, rows) = guard.get_or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
+        *rows.entry(key).or_default() += 1;
+        if since.elapsed().as_secs_f64() >= 2.0 {
+            let mut sorted: Vec<_> = rows.drain().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            let lines: Vec<String> = sorted.iter().take(12).map(|(k, n)| format!("  {n:>7} {k}")).collect();
+            log!("append_trace (2 s):\n{}", lines.join("\n"));
+            *since = std::time::Instant::now();
         }
     }
 

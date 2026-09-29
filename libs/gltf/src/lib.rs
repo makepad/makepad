@@ -1,5 +1,6 @@
 mod buffer;
 mod augment;
+pub use augment::{embed_ktx2_images, rewrite_glb_images};
 mod authoring;
 mod animation;
 mod document;

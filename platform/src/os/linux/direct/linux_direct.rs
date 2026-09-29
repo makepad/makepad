@@ -91,6 +91,9 @@ impl DirectApp {
                 .unwrap_or_else(|error| panic!("Direct Vulkan initialization failed: {error}"));
             let size = vulkan.size();
             cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
+            let (bc7, astc) = vulkan.texture_compression();
+            cx.gpu_info.texture_bc7 = bc7;
+            cx.gpu_info.texture_astc4x4 = astc;
             cx.os.vulkan = Some(vulkan);
             size
         };
@@ -132,6 +135,9 @@ impl Cx {
             let vulkan = crate::os::linux::vulkan::CxVulkan::new_offscreen()
                 .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}"));
             cx.gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
+            let (bc7, astc) = vulkan.texture_compression();
+            cx.gpu_info.texture_bc7 = bc7;
+            cx.gpu_info.texture_astc4x4 = astc;
             cx.os.vulkan = Some(vulkan);
             cx.stdin_event_loop();
             drop(cx.os.vulkan.take());

@@ -610,6 +610,26 @@ impl TextureSize {
     }
 }
 
+/// Block-compressed formats of [`TextureFormat::VecMipCompressed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompressedTextureFormat {
+    /// BC7 UNORM (desktop Metal on Apple silicon, Vulkan, D3D).
+    Bc7,
+    /// BC5 UNORM: two channels (red, green), e.g. a normal map's X and Y.
+    /// Sampled wherever BC7 is (both come with BC support), so it has no
+    /// `GpuInfo` flag of its own.
+    Bc5,
+    /// ASTC 4x4 LDR UNORM (Apple GPUs, mobile).
+    Astc4x4,
+}
+
+impl CompressedTextureFormat {
+    /// Bytes of one mip level of `width` x `height` texels.
+    pub fn level_bytes(width: usize, height: usize) -> usize {
+        width.max(1).div_ceil(4) * height.max(1).div_ceil(4) * 16
+    }
+}
+
 /// Wrap mode stored on vec textures. Metal/Vulkan/D3D take address from the
 /// shader sampler; OpenGL (and other per-texture wrap backends) read this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -648,6 +668,19 @@ pub enum TextureFormat {
         height: usize,
         data: Option<Vec<f32>>,
         max_level: Option<usize>,
+        updated: TextureUpdated,
+    },
+    /// A GPU block-compressed mip chain uploaded as is: levels concatenated,
+    /// level 0 first, each level's 16-byte 4x4 blocks in raster order
+    /// (`ceil(w/4) * ceil(h/4)` blocks). Only create one for a format the
+    /// backend reports in `GpuInfo` (`texture_bc7`, `texture_astc4x4`).
+    VecMipCompressed {
+        width: usize,
+        height: usize,
+        format: CompressedTextureFormat,
+        data: Option<Vec<u8>>,
+        max_level: Option<usize>,
+        wrap: TextureWrap,
         updated: TextureUpdated,
     },
     VecRGBAf32 {
@@ -753,6 +786,10 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::VecMipRGBAf32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecMipRGBAf32(width:{width},height:{height})"
+            ),
+            TextureFormat::VecMipCompressed { width, height, format, .. } => write!(
+                f,
+                "TextureFormat::VecMipCompressed({format:?},width:{width},height:{height})"
             ),
             TextureFormat::VecRGBAf32 { width, height, .. } => write!(
                 f,
@@ -969,6 +1006,10 @@ pub(crate) enum TexturePixel {
     VideoGlMemoryRgba,
     /// Android/Vulkan imported RGBA hardware buffer.
     VideoRgbaHardwareBuffer,
+    /// 4x4-texel, 16-byte blocks (BC7 / BC5 / ASTC 4x4 LDR, UNORM).
+    Bc7,
+    Bc5,
+    Astc4x4,
 }
 
 impl CxTexture {
@@ -991,6 +1032,7 @@ impl CxTexture {
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
+            TextureFormat::VecMipCompressed { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -1020,6 +1062,7 @@ impl CxTexture {
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
+            TextureFormat::VecMipCompressed { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -1146,6 +1189,7 @@ impl TextureFormat {
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
+            TextureFormat::VecMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
             _ => 0,
         }
     }
@@ -1162,6 +1206,7 @@ impl TextureFormat {
             Self::VecCubeBGRAu8_32 { .. } => true,
             Self::VecMipBGRAu8_32 { .. } => true,
             Self::VecMipRGBAf32 { .. } => true,
+            Self::VecMipCompressed { .. } => true,
             Self::VecRGBAf32 { .. } => true,
             Self::VecRu8 { .. } => true,
             Self::VecRGu8 { .. } => true,
@@ -1214,7 +1259,7 @@ impl TextureFormat {
     /// so OpenGL matches the shader's `sample_*_repeat` sampler.
     pub fn wrap(&self) -> TextureWrap {
         match self {
-            Self::VecMipBGRAu8_32 { wrap, .. } => *wrap,
+            Self::VecMipBGRAu8_32 { wrap, .. } | Self::VecMipCompressed { wrap, .. } => *wrap,
             _ => TextureWrap::ClampToEdge,
         }
     }
@@ -1225,6 +1270,7 @@ impl TextureFormat {
             Self::VecCubeBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipRGBAf32 { width, height, .. } => Some((*width, *height)),
+            Self::VecMipCompressed { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
@@ -1279,6 +1325,16 @@ impl TextureFormat {
                 height: *height,
                 pixel: TexturePixel::RGBAf32,
                 category: TextureCategory::Vec,
+            }),
+            Self::VecMipCompressed { width, height, format, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: match format {
+                    CompressedTextureFormat::Bc7 => TexturePixel::Bc7,
+                    CompressedTextureFormat::Bc5 => TexturePixel::Bc5,
+                    CompressedTextureFormat::Astc4x4 => TexturePixel::Astc4x4,
+                },
+                category: TextureCategory::VecMip,
             }),
             Self::VecRu8 { width, height, .. } => Some(TextureAlloc {
                 width: *width,

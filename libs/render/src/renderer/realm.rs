@@ -31,6 +31,7 @@ impl Renderer {
         self.skin_joint_bases.clear();
         self.placed_models.clear();
         self.csm_static_casters.clear();
+        self.grass = None;
         self.world_attachments.clear();
         self.view_models.clear();
         self.placed_scene_signature = None;
@@ -46,6 +47,8 @@ impl Renderer {
         self.last_dynamic_shadow_tris = 0;
         self.shadow_points.clear();
         self.shadow_gate = ShadowRebuildGate::default();
+        self.sky_hour = None;
+        self.sky_clock = false;
 
         self.lightmap = None;
         self.lm_remaps.clear();
@@ -351,17 +354,34 @@ impl Renderer {
                 continue;
             }
             if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
-            for geometry in std::iter::once(model.geometry.as_ref())
-                .chain(model.extra_draws.iter().map(|(geometry, ..)| geometry.as_ref()))
-            {
+            // A model with a far stand-in casts its own layers into the near
+            // cascade and the stand-in into the others
+            // (gpu_lightmap::CasterBand). A masked layer (leaf cards, the
+            // stand-in) casts through its texture's alpha.
+            let stand_in = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+            let masked = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.alpha_mode == 1);
+            let layers = || std::iter::once((model.geometry.as_ref(), &model.texture, &model.material))
+                .chain(model.extra_draws.iter().map(|(geometry, texture, _, _, m)| (geometry.as_ref(), texture, m)));
+            let has_stand_in = layers().any(|(_, _, m)| stand_in(m));
+            for (geometry, texture, material) in layers() {
+                use crate::gpu_lightmap::CasterBand;
+                let band = if !has_stand_in { CasterBand::All } else if stand_in(material) { CasterBand::Far } else { CasterBand::Near };
                 self.csm_static_casters.push(crate::gpu_lightmap::GpuBakeMesh {
                     geometry: geometry.geometry_id(),
                     transform: inst.transform,
                     min,
                     max,
+                    cutout: masked(material).then(|| texture.clone()),
+                    band,
                 });
             }
         }
+        // Equal geometry adjacent, opaque first: a cascade then appends a
+        // forest's copies of one layer into ONE instanced draw instead of
+        // alternating trunk, crown, trunk, crown (a draw each).
+        let mut first: std::collections::HashMap<GeometryId, usize> = std::collections::HashMap::new();
+        for (i, m) in self.csm_static_casters.iter().enumerate() { first.entry(m.geometry).or_insert(i); }
+        self.csm_static_casters.sort_by_key(|m| (m.cutout.is_some(), first[&m.geometry]));
     }
 
     /// Hand this frame's stock props to the renderer. Draw submission is
@@ -475,6 +495,32 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// The swaying-foliage pass (shaders/foliage.rs): the same instance
+    /// list, taking only the models with a wind layer. Until its pipeline
+    /// exists (Metal compiles asynchronously) they stay on the PBR lane.
+    pub(super) fn draw_foliage_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        if !self.foliage_ready { return; }
+        let Some(mut draw) = self.foliage_draw.take() else { return };
+        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.foliage_draw = Some(draw);
+    }
+
+    /// Decide once per frame, before any model pass, whether foliage takes
+    /// its own lane this frame.
+    pub(super) fn prepare_foliage_lane(&mut self, cx: &mut Cx) {
+        if self.foliage_draw.is_none() {
+            self.foliage_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm)));
+        }
+        let hdr = self.hdr_output;
+        self.foliage_ready = self.pbr_materials_enabled
+            && std::env::var_os("MAKEPAD_FOLIAGE_LANE").is_none_or(|v| v != "0")
+            && self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id).is_some_and(|id| cx.draw_shader_ready(id, hdr));
+    }
+
     pub(super) fn draw_custom_models(
         &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
@@ -509,6 +555,13 @@ impl Renderer {
     /// These are visible geometry only: unlike [`Self::set_models`], this
     /// list never participates in scene revision, baking, CSM mover capture,
     /// blob/SDF shadows, collision, or replication.
+    /// Whether the sun reaches the first-person camera. The held model has
+    /// no shadow map, so the host ray-tests the eye; eased over a few frames
+    /// so stepping into shade does not pop.
+    pub fn set_view_model_sun(&mut self, lit: bool) {
+        let target = if lit { 1.0 } else { 0.0 };
+        self.view_model_sun += (target - self.view_model_sun) * 0.25;
+    }
     pub fn set_view_models(&mut self, instances: Vec<ModelInstance>) {
         self.view_models = instances;
     }

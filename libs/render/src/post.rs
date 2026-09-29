@@ -139,19 +139,29 @@ script_mod! {
                 while x < 8.0 {
                     let uv = vec2((x + 0.5) / 8.0, (y + 0.5) / 8.0)
                     let c = self.level.sample(uv).xyz
-                    let l = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0001)
-                    let d = length(uv - vec2(0.5, 0.5))
-                    let w = 1.0 - d * 0.9
-                    sum = sum + log2(l) * w
-                    weight = weight + w
+                    let raw = dot(c, vec3(0.2126, 0.7152, 0.0722))
+                    // A non-finite texel (NaN from one bad shade, or an
+                    // f16 overflow to Inf) is skipped: folded in, it made
+                    // the mean — and so the whole frame, sky included —
+                    // black. Both comparisons are false for NaN.
+                    if raw >= 0.0 && raw < 60000.0 {
+                        let l = max(raw, 0.0001)
+                        let d = length(uv - vec2(0.5, 0.5))
+                        let w = 1.0 - d * 0.9
+                        sum = sum + log2(l) * w
+                        weight = weight + w
+                    }
                     x = x + 1.0
                 }
                 y = y + 1.0
             }
-            let current = exp2(sum / weight)
+            var current = 0.18
+            if weight > 0.0 {
+                current = exp2(sum / weight)
+            }
             let prev = self.previous.sample_nearest(vec2(0.5, 0.5)).x
             var adapted = current
-            if self.u_adapt.y > 0.5 && prev > 0.0 {
+            if self.u_adapt.y > 0.5 && prev > 0.0 && prev < 60000.0 {
                 adapted = exp2(mix(log2(prev), log2(current), self.u_adapt.x))
             }
             return vec4(adapted, current, 0.0, 1.0)

@@ -67,7 +67,11 @@ pub fn scene_state(
             // No per-frame test pin: test start pins the orbit once and
             // the mouse is inert during tests, so script camera writes
             // render (and stay deterministic).
-            let (yaw, pitch) = (rig.yaw, rig.pitch.clamp(-1.2, 0.25));
+            // A non-finite angle or boom (a NaN written by a script or a
+            // degenerate follow) would poison every matrix and draw the
+            // whole scene black; hold a sane shot instead.
+            let yaw = if rig.yaw.is_finite() { rig.yaw } else { 0.0 };
+            let pitch = if rig.pitch.is_finite() { rig.pitch.clamp(-1.2, 0.25) } else { -0.3 };
             let forward = vec3f(
                 yaw.sin() * pitch.cos(),
                 pitch.sin(),
@@ -76,6 +80,7 @@ pub fn scene_state(
             .normalize();
             // The filmed body is never its own obstruction.
             let boom = rig.effects.boom_limit.unwrap_or(world.camera.boom);
+            let boom = if boom.is_finite() { boom.max(0.0) } else { 4.0 };
             let mut camera_pos = pivot - forward * boom;
             camera_pos = camera_pos + rig.effects.shake_offset;
             let view = Mat4f::look_at(camera_pos, pivot, vec3f(0.0, 1.0, 0.0));
@@ -172,6 +177,21 @@ pub fn vehicle_cockpit_scene_state(
     let eye = entity.pos
         + vec3f(0.0, entity.half.y + 0.52, 0.0)
         + body_forward * (entity.half.z * 0.18);
+    Some(cockpit_scene_state_at(world, rect, time, rig, eye))
+}
+
+/// The in-car shot from an exact eye point: the vehicle model's own
+/// `cockpit` socket (in front of the driver's visor), when it authors one.
+/// The exterior then stays drawn and the modelled interior (dash, wheel and
+/// hands, pillars, mirrors) frames the view. Same look limits and lens as
+/// [`vehicle_cockpit_scene_state`].
+pub fn cockpit_scene_state_at(
+    world: &World,
+    rect: Rect,
+    time: f64,
+    rig: &CameraRig,
+    eye: Vec3f,
+) -> SceneState3D {
     let yaw = rig.yaw;
     // A cockpit can glance up/down, but not pitch far enough that the road
     // fills the entire near plane (or the sky becomes the whole windshield).
@@ -188,14 +208,14 @@ pub fn vehicle_cockpit_scene_state(
     // The slightly wider floor sells speed and preserves peripheral track
     // markers in a narrow split pane.  Authored wider FOVs still win.
     let far = world_far(world, 0.0);
-    let projection = Mat4f::perspective(world.camera.fov.clamp(64.0, 120.0), aspect, 0.08_f32.max(far * 2.0e-5), far);
-    Some(SceneState3D {
+    let projection = Mat4f::perspective(world.camera.fov.clamp(64.0, 120.0), aspect, 0.05_f32.max(far * 2.0e-5), far);
+    SceneState3D {
         time,
         camera_pos: eye,
         view,
         projection,
         viewport_rect: rect,
-    })
+    }
 }
 
 /// Camera-relative rendering: the render origin for a camera. Zero inside

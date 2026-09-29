@@ -21,7 +21,7 @@ use {
             shared_framebuf::PresentableDraw,
         },
         script::vm::*,
-        texture::{CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel, TextureUpdated},
+        texture::{CompressedTextureFormat, CxTexture, Texture, TextureAlloc, TextureFormat, TexturePixel, TextureUpdated},
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_studio_protocol::{AppToStudio, GPUSample},
@@ -1093,7 +1093,12 @@ impl Cx {
                         if crate::makepad_error_log::trace_enabled("gpu.shaders") {
                             gpu_shader_tally(
                                 self.repaint_id,
-                                draw_call.draw_shader_id.index,
+                                (draw_call.draw_shader_id.index, {
+                                    // Name, else its textures: enough to tell shaders apart.
+                                    let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
+                                    let tex: Vec<String> = sh.mapping.textures.iter().take(3).map(|t| format!("{}", t.id)).collect();
+                                    format!("{} v{} [{}]", sh.debug_id, sh.mapping.varying_total_slots, tex.join(","))
+                                }),
                                 list_debug_id,
                                 geometry.index_count as u64,
                                 count,
@@ -1403,6 +1408,13 @@ impl Cx {
                         }];
                     },
                 }
+                // Scratch colour (`DrawPass::set_color_scratch`): tile memory only.
+                if self.passes[draw_pass_id].color_scratch {
+                    unsafe {
+                        let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::DontCare];
+                        let () = msg_send![color_attachment, setStoreAction: MTLStoreAction::DontCare];
+                    }
+                }
             }
         }
         // attach depth texture
@@ -1615,6 +1627,29 @@ impl Cx {
                 ]
             };
         }
+        // Whole-frame GPU time (`gpu_frame_timer`): every pass of a window
+        // frame reports its span; the presenting pass closes the frame.
+        if let Some(frame) = gpu_frame_group_key.filter(|_| crate::gpu_frame_timer::enabled()) {
+            let name = match self.passes[draw_pass_id].debug_name.as_str() {
+                "" if matches!(self.passes[draw_pass_id].parent, crate::draw_pass::CxDrawPassParent::Window(_)) => "window".to_string(),
+                "" => "unnamed".to_string(),
+                name => name.to_string(),
+            };
+            let closes = !matches!(mode, DrawPassMode::Texture | DrawPassMode::StdinTexture);
+            let () = unsafe {
+                msg_send![
+                    command_buffer,
+                    addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
+                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                        crate::gpu_frame_timer::record_pass(frame, &name, start, end);
+                        if closes {
+                            crate::gpu_frame_timer::finish_frame(frame);
+                        }
+                    })
+                ]
+            };
+        }
         if let Some(query) = gpu_time_query.filter(|_| !diagnostic_frame) {
             // The tag identifies what was ENCODED into this buffer; capture
             // it now — by completion time the owner may have retagged the
@@ -1763,6 +1798,7 @@ impl Cx {
                     Some((drawable, target_presentation_time))
                 };
                 if present.is_some() {
+                    crate::frame_trace::note_presented();
                     present_pulse();
                     #[cfg(target_os = "macos")]
                     crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
@@ -2050,29 +2086,49 @@ impl Cx {
                         // Preserve the RGBA contract for Studio, probes and recorders.
                         // Remote-only grabs convert just the downsampled pixels on
                         // the worker and do no PNG work on this completion thread.
-                        if sf.wants_capture || !request_ids.is_empty() {
+                        // A recorder takes its frames in order, here.
+                        if sf.wants_capture {
                             for px in Arc::make_mut(&mut bgra).chunks_exact_mut(4) {
                                 px.swap(0, 2);
                             }
                             crate::screen_capture::deliver_capture_frame(
                                 sf.window_id, sf.width as u32, sf.height as u32, &bgra,
                             );
-                            crate::pixel_probe::answer_pixel_probes(&mut request_ids, sf.width, sf.height, &bgra);
                         }
+                        // Probes, file captures (the app's thumbnails) and Studio:
+                        // on a worker. Completion handlers run one at a time, in
+                        // order, so a whole-window PNG encode here (a retina
+                        // window: well over 100 ms) held back every later command
+                        // buffer's completion, and the frame gate stalled the app
+                        // for as long as the encode took. MAKEPAD_CAPTURE_INLINE=1
+                        // keeps the old in-handler encode, for A/B timing.
                         if !request_ids.is_empty() {
-                            let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
-                                Ok(png) => png,
-                                Err(err) => {
-                                    crate::error!("{}", err);
-                                    Vec::new()
+                            let (width, height, rgba_ready) = (sf.width, sf.height, sf.wants_capture);
+                            let encode = move || {
+                                if !rgba_ready {
+                                    for px in Arc::make_mut(&mut bgra).chunks_exact_mut(4) {
+                                        px.swap(0, 2);
+                                    }
                                 }
+                                crate::pixel_probe::answer_pixel_probes(&mut request_ids, width, height, &bgra);
+                                if request_ids.is_empty() {
+                                    return;
+                                }
+                                let png = match encode_png_rgba(width as u32, height as u32, &bgra) {
+                                    Ok(png) => png,
+                                    Err(err) => {
+                                        crate::error!("{}", err);
+                                        Vec::new()
+                                    }
+                                };
+                                Cx::send_studio_screenshot_response(request_ids, width as _, height as _, png);
                             };
-                            Cx::send_studio_screenshot_response(
-                                request_ids,
-                                sf.width as _,
-                                sf.height as _,
-                                png,
-                            );
+                            static INLINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            if *INLINE.get_or_init(|| std::env::var_os("MAKEPAD_CAPTURE_INLINE").is_some_and(|v| v == "1")) {
+                                encode();
+                            } else {
+                                std::thread::spawn(encode);
+                            }
                         }
                     }
 
@@ -2181,8 +2237,25 @@ impl Cx {
         self.draw_shaders.os_shaders.iter().filter(|s| s.pipelines.solid.get().is_none() || s.pipelines.blend.get().is_none()).count()
     }
 
+    /// See [`Cx::draw_shader_ready`].
+    pub fn metal_draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
+        let Some(os) = self.draw_shaders.shaders.get(shader.index).and_then(|s| s.os_shader_id) else { return false };
+        let shp = &self.draw_shaders.os_shaders[os];
+        if !matches!(shp.pipelines.solid.get(), Some(Ok(_))) { return false; }
+        if !float16 || !matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm) { return true; }
+        // The HDR pair is built on first use; asking counts as a use.
+        shp.pipelines.float16_wanted.store(true, Ordering::Relaxed);
+        matches!(shp.pipelines.float16_solid.get(), Some(Ok(_)))
+    }
+
     fn retry_metal_pipelines(&mut self, metal_cx: &MetalCx) {
         for shader in &mut self.draw_shaders.os_shaders {
+            if shader.pipelines.float16_wanted.load(Ordering::Relaxed)
+                && !shader.pipelines.float16_queued.load(Ordering::Relaxed)
+                && MetalPipelines::enqueue_float16(metal_cx.allocator(), metal_cx.device, &shader.pipelines)
+            {
+                shader.pipelines.float16_queued.store(true, Ordering::Relaxed);
+            }
             if !shader.compile_queued {
                 shader.compile_queued = MetalPipelines::enqueue(
                     metal_cx.allocator(),
@@ -2606,6 +2679,22 @@ fn spawn_submitter(
 }
 
 impl MetalCx {
+    /// (BC7, ASTC 4x4) sampling support of this device, for
+    /// `GpuInfo::texture_bc7` / `texture_astc4x4`.
+    pub fn texture_compression(&self) -> (bool, bool) {
+        let device = self.device;
+        unsafe {
+            let bc: bool = if msg_send![device, respondsToSelector: sel!(supportsBCTextureCompression)] {
+                msg_send![device, supportsBCTextureCompression]
+            } else { false };
+            // MTLGPUFamilyApple2 (1002): every Apple GPU samples ASTC LDR.
+            let astc: bool = if msg_send![device, respondsToSelector: sel!(supportsFamily:)] {
+                msg_send![device, supportsFamily: 1002i64]
+            } else { false };
+            (bc, astc)
+        }
+    }
+
     fn submitter(&self) -> &crate::makepad_network::mpsc::SyncSender<MetalSubmission> {
         self.submitter.as_ref().expect("the submit thread lives as long as the context")
     }
@@ -3668,6 +3757,9 @@ struct MetalPipelines {
     /// the same premultiplied-over blend state.
     functions: std::sync::OnceLock<(RcObjcId, RcObjcId)>,
     float16_queued: std::sync::atomic::AtomicBool,
+    /// Set by `metal_draw_shader_ready`: build the float16 pair before the
+    /// first draw asks for it.
+    float16_wanted: std::sync::atomic::AtomicBool,
     float16_blend: std::sync::OnceLock<Result<RcObjcId, String>>,
     float16_solid: std::sync::OnceLock<Result<RcObjcId, String>>,
 }
@@ -5706,6 +5798,9 @@ fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
         TexturePixel::VideoExternal => MTLPixelFormat::BGRA8Unorm,
         TexturePixel::VideoGlMemoryRgba => MTLPixelFormat::RGBA8Unorm,
         TexturePixel::VideoRgbaHardwareBuffer => MTLPixelFormat::BGRA8Unorm,
+        TexturePixel::Bc7 => MTLPixelFormat::BC7_RGBAUnorm,
+        TexturePixel::Bc5 => MTLPixelFormat::BC5_RGUnorm,
+        TexturePixel::Astc4x4 => MTLPixelFormat::ASTC_4x4_LDR,
     }
 }
 impl CxTexture {
@@ -5766,7 +5861,8 @@ impl CxTexture {
             let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
             let mip_level_count = match &self.format {
                 TextureFormat::VecMipBGRAu8_32 { max_level, .. }
-                | TextureFormat::VecMipRGBAf32 { max_level, .. } => {
+                | TextureFormat::VecMipRGBAf32 { max_level, .. }
+                | TextureFormat::VecMipCompressed { max_level, .. } => {
                     max_level.map(|level| level.saturating_add(1)).unwrap_or(1)
                 }
                 _ => 1,
@@ -5812,6 +5908,7 @@ impl CxTexture {
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.is_some()
             }
+            TextureFormat::VecMipCompressed { data, .. } => data.is_some(),
             _ => false,
         };
         if !has_data {
@@ -5827,6 +5924,57 @@ impl CxTexture {
         };
         if update.is_empty() {
             return 0;
+        }
+        // A block-compressed chain always goes up whole: rows are 4x4 blocks.
+        if let TextureFormat::VecMipCompressed { width, height, data, max_level, .. } = &self.format {
+            let (width, height) = ((*width).max(1), (*height).max(1));
+            let bytes = data.as_ref().unwrap().as_slice();
+            let base = CompressedTextureFormat::level_bytes(width, height);
+            if bytes.len() < base {
+                crate::error!("compressed texture upload: {} bytes for a {}x{} level 0 needing {}", bytes.len(), width, height, base);
+                return 0;
+            }
+            let Some(staging) = metal_cx.take_staging(bytes.len()) else {
+                crate::error!("compressed texture upload: staging buffer allocation failed");
+                return 0;
+            };
+            let dst: *mut u8 = unsafe { msg_send![staging.buffer, contents] };
+            if dst.is_null() {
+                crate::error!("compressed texture upload: staging buffer has no contents");
+                return 0;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
+            let blit = enc.blit();
+            let (mut offset, mut w, mut h) = (0usize, width, height);
+            for level in 0..=max_level.unwrap_or(0) {
+                let level_len = CompressedTextureFormat::level_bytes(w, h);
+                if offset + level_len > bytes.len() {
+                    break;
+                }
+                let bytes_per_row = (w.div_ceil(4) * 16) as u64;
+                let () = unsafe {
+                    msg_send![
+                        blit,
+                        copyFromBuffer: staging.buffer
+                        sourceOffset: offset as u64
+                        sourceBytesPerRow: bytes_per_row
+                        sourceBytesPerImage: bytes_per_row * h.div_ceil(4) as u64
+                        sourceSize: MTLSize { width: w as u64, height: h as u64, depth: 1 }
+                        toTexture: texture
+                        destinationSlice: 0u64
+                        destinationLevel: level as u64
+                        destinationOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                    ]
+                };
+                offset += level_len;
+                w = (w / 2).max(1);
+                h = (h / 2).max(1);
+            }
+            self.os.vec_fresh = false;
+            let len = bytes.len();
+            enc.used.push(staging);
+            enc.bytes = enc.bytes.saturating_add(len as u64);
+            return len as u64;
         }
         let (width, height, bpp, layout, bytes): (usize, usize, usize, VecLayout, &[u8]) =
             match &self.format {
@@ -6815,14 +6963,14 @@ impl EaglRenderBridge {
 /// The `gpu.shaders` topic tallies every indexed draw by (shader, draw list)
 /// debug id on the UI thread and prints a per-frame average table every two
 /// seconds: draws, vertices submitted (index count x instances), instances.
-fn gpu_shader_tally(repaint_id: u64, shader: usize, list: LiveId, index_count: u64, instances: u64) {
+fn gpu_shader_tally(repaint_id: u64, shader: (usize, String), list: LiveId, index_count: u64, instances: u64) {
     use std::collections::HashMap;
     #[derive(Default)]
     struct Tally {
         started: Option<std::time::Instant>,
         frames: u64,
         last_repaint: u64,
-        rows: HashMap<(usize, LiveId), (u64, u64, u64)>,
+        rows: HashMap<((usize, String), LiveId), (u64, u64, u64)>,
     }
     thread_local! {
         static TALLY: std::cell::RefCell<Tally> = std::cell::RefCell::new(Tally::default());
@@ -6840,7 +6988,7 @@ fn gpu_shader_tally(repaint_id: u64, shader: usize, list: LiveId, index_count: u
         row.2 = row.2.saturating_add(instances);
         if started.elapsed().as_secs_f64() >= 2.0 {
             let frames = tally.frames.max(1);
-            let mut rows: Vec<_> = tally.rows.iter().map(|(k, v)| (*k, *v)).collect();
+            let mut rows: Vec<_> = tally.rows.iter().map(|(k, v)| (k.clone(), *v)).collect();
             rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
             let (draws, verts, inst) = rows.iter().fold((0, 0, 0), |acc, (_, v)| {
                 (acc.0 + v.0, acc.1 + v.1, acc.2 + v.2)
@@ -6854,8 +7002,9 @@ fn gpu_shader_tally(repaint_id: u64, shader: usize, list: LiveId, index_count: u
             );
             for ((shader, list), (d, v, i)) in rows.iter().take(40) {
                 out.push_str(&format!(
-                    "  shader:{:<5} list:{:<22} draws:{:<6} verts:{:<10} inst:{}\n",
-                    shader,
+                    "  shader:{:<5} {:<28} list:{:<22} draws:{:<6} verts:{:<10} inst:{}\n",
+                    shader.0,
+                    shader.1,
                     format!("{:?}", list),
                     d / frames,
                     v / frames,

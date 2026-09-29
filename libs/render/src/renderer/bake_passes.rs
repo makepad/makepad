@@ -15,7 +15,7 @@ impl Renderer {
             if model.morph.is_some(){continue;}
             let (min,max) = crate::lightmap::world_bounds(&inst.transform,(model.min,model.max));
             for geometry in std::iter::once(model.geometry.as_ref()).chain(model.extra_draws.iter().map(|(g,..)|g.as_ref())) {
-                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max});
+                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, cutout: None, band: Default::default() });
             }
         }
         fn shadow_geometry(cx:&mut Cx,source:&Geometry,cached:&mut Option<Geometry>)->Option<GeometryId> {
@@ -37,14 +37,14 @@ impl Renderer {
                 self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());
                 for tile in &mut self.terrain_tiles {
                     if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max});
+                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, band: Default::default() });
                     }
                 }
             }
             self.ensure_voxel_tiles(cx,world.voxel.as_deref());
             for tile in &mut self.voxel_tiles {
                 if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max});
+                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, band: Default::default() });
                 }
             }
         }
@@ -75,6 +75,18 @@ impl Renderer {
         &mut self,cx:&mut Cx,shape:Shape,mut transform:Mat4f,size:Vec3f,
         out:&mut Vec<crate::gpu_lightmap::GpuLmMover>,
     ) {
+        let geometry=self.ensure_shadow_shape_geometry(cx,shape);
+        for j in 0..3 { transform.v[j]*=size.x; transform.v[4+j]*=size.y; transform.v[8+j]*=size.z; }
+        out.push(crate::gpu_lightmap::GpuLmMover {
+            geometry,
+            transform,min:vec3f(-0.5,-0.5,-0.5),max:vec3f(0.5,0.5,0.5),skin:None,morph:None,
+        });
+    }
+
+    /// The depth passes' unit caster for one primitive shape, in the packed
+    /// model layout (position lanes only — the depth shaders read nothing
+    /// else), built once per shape.
+    pub(super) fn ensure_shadow_shape_geometry(&mut self,cx:&mut Cx,shape:Shape)->GeometryId {
         let slot=shape.index();
         if self.shadow_shape_geometries[slot].is_none() {
             let (source,indices)=shape_geometry_data(shape);
@@ -87,59 +99,22 @@ impl Renderer {
             geometry.update(cx,indices,vertices);
             self.shadow_shape_geometries[slot]=Some(geometry);
         }
-        for j in 0..3 { transform.v[j]*=size.x; transform.v[4+j]*=size.y; transform.v[8+j]*=size.z; }
-        out.push(crate::gpu_lightmap::GpuLmMover {
-            geometry:self.shadow_shape_geometries[slot].as_ref().unwrap().geometry_id(),
-            transform,min:vec3f(-0.5,-0.5,-0.5),max:vec3f(0.5,0.5,0.5),skin:None,morph:None,
-        });
+        self.shadow_shape_geometries[slot].as_ref().unwrap().geometry_id()
     }
 
-    /// The bake's stand-in geometry for primitive ENTITY casters: one unit
-    /// box in the packed-mesh layout (position lanes only — the depth
-    /// shaders read nothing else), built once.
-    pub(super) fn ensure_lm_box_geometry(&mut self, cx: &mut Cx) {
-        if self.lm_box_geometry.is_some() {
-            return;
+    /// Every primitive shape's caster geometry, so [`Self::collect_lm_movers`]
+    /// (which has no `Cx`) can cast each entity in its OWN shape.
+    pub(super) fn ensure_entity_caster_geometries(&mut self, cx: &mut Cx) {
+        for shape in Shape::ALL {
+            self.ensure_shadow_shape_geometry(cx, shape);
         }
-        let stride = crate::skin::SKIN_VERTEX_FLOATS;
-        let mut vertices = Vec::with_capacity(8 * stride);
-        for i in 0..8 {
-            vertices.extend_from_slice(&[
-                if i & 1 == 0 { -0.5 } else { 0.5 },
-                if i & 2 == 0 { -0.5 } else { 0.5 },
-                if i & 4 == 0 { -0.5 } else { 0.5 },
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            ]);
-        }
-        // 12 triangles over the corner lattice; winding irrelevant, the
-        // depth passes are double-sided (gpu_lightmap's box-soup layout).
-        const QUADS: [[u32; 4]; 6] = [
-            [0, 2, 6, 4],
-            [1, 3, 7, 5],
-            [0, 1, 5, 4],
-            [2, 3, 7, 6],
-            [0, 1, 3, 2],
-            [4, 5, 7, 6],
-        ];
-        let mut indices: Vec<u32> = Vec::with_capacity(36);
-        for q in QUADS {
-            indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
-        }
-        let g = Geometry::new(cx);
-        g.update(cx, indices, vertices);
-        self.lm_box_geometry = Some(g);
     }
 
     /// Every dynamic caster for the Realtime bake's depth passes: dynamic
     /// placed models (driven cars), skinned CHARACTERS (rest mesh + this
     /// frame's palette — [`Self::pack_skin_palettes`] must already have
-    /// run), and Rigid/Mover primitive entities (crates) as their box
-    /// approximation — box IS the dominant entity shape, and the bake's
-    /// soft shadow forgives a sphere's corners far better than a missing
-    /// shadow reads.
+    /// run), and Rigid/Mover primitive entities in their own shape (a
+    /// marble casts a round shadow, a crate a square one).
     pub(super) fn collect_lm_movers(
         &self,
         world: &World,
@@ -250,7 +225,7 @@ impl Renderer {
                 });
             }
         }
-        if let Some(box_geom) = &self.lm_box_geometry {
+        {
             for e in world.entities.iter() {
                 if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid | BodyKind::Kinematic)
                     || e.alpha_primitive
@@ -261,8 +236,8 @@ impl Renderer {
                 }
                 if std::env::var_os("MAKEPAD_CSM_CASTER_LOG").is_some() {
                     log!(
-                        "csm caster box: id {} kind {:?} pos ({:.1},{:.1},{:.1}) half ({:.2},{:.2},{:.2}) scale ({:.2},{:.2},{:.2}) alpha {:.2}",
-                        e.id, e.kind, e.pos.x, e.pos.y, e.pos.z,
+                        "csm caster {:?}: id {} kind {:?} pos ({:.1},{:.1},{:.1}) half ({:.2},{:.2},{:.2}) scale ({:.2},{:.2},{:.2}) alpha {:.2}",
+                        e.shape, e.id, e.kind, e.pos.x, e.pos.y, e.pos.z,
                         e.half.x, e.half.y, e.half.z,
                         e.scale.x, e.scale.y, e.scale.z, e.color.w
                     );
@@ -281,8 +256,11 @@ impl Renderer {
                 t.v[12] = e.pos.x;
                 t.v[13] = e.pos.y;
                 t.v[14] = e.pos.z;
+                // Built by ensure_entity_caster_geometries before this runs;
+                // a shape not yet resident skips one frame's shadow.
+                let Some(geometry) = self.shadow_shape_geometries[e.shape.index()].as_ref() else { continue };
                 out.push(crate::gpu_lightmap::GpuLmMover {
-                    geometry: box_geom.geometry_id(),
+                    geometry: geometry.geometry_id(),
                     transform: t,
                     min: vec3f(-0.5, -0.5, -0.5),
                     max: vec3f(0.5, 0.5, 0.5),
@@ -588,7 +566,7 @@ impl Renderer {
         if scale[0].abs() <= 1e-4 || png.is_none() {
             return (self.detail_neutral(cx), [0.0, 0.0]);
         }
-        match ImageBuffer::from_png(png.unwrap()) {
+        match crate::texture_pack::image_buffer(png.unwrap()) {
             Ok(buf) => (buf.into_new_mip_repeat_texture(cx), scale),
             Err(_) => (self.detail_neutral(cx), [0.0, 0.0]),
         }
@@ -616,12 +594,14 @@ impl Renderer {
                 orm: self.orm_neutral(cx),
                 orm_on: false,
                 mag_nearest: pbr.mag_nearest,
+                // Base texture unknown here: keep the discarding shader.
+                cutout: true,
             };
         }
         let orm = pbr
             .orm_png
             .as_deref()
-            .and_then(|bytes| ImageBuffer::from_png(bytes).ok())
+            .and_then(|bytes| crate::texture_pack::image_buffer(bytes).ok())
             .map(|buf| buf.into_new_mip_repeat_texture(cx));
         match orm {
             Some(tex) => LayerMaterial {
@@ -631,6 +611,8 @@ impl Renderer {
                 orm: tex,
                 orm_on: true,
                 mag_nearest: pbr.mag_nearest,
+                // Base texture unknown here: keep the discarding shader.
+                cutout: true,
             },
             None => LayerMaterial {
                 surface: None,
@@ -639,6 +621,8 @@ impl Renderer {
                 orm: self.orm_neutral(cx),
                 orm_on: false,
                 mag_nearest: pbr.mag_nearest,
+                // Base texture unknown here: keep the discarding shader.
+                cutout: true,
             },
         }
     }

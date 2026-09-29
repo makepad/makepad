@@ -805,7 +805,7 @@ fn build_library() -> Vec<(&'static str, Arc<VfxPreset>)> {
         ], light(0x60c0ff, 3.0, 5.0, 0.15))),
         ("fire", looping(vec![
             VfxLayer { sprite: VfxSprite::Fire, count: 4.0, rate: 34.0, life: (0.45, 0.85), speed: (0.4, 1.2),
-                size: (0.7, 0.25), color: rgb(0xffc060, 1.0), color_end: rgb(0xff3808, 0.0), intensity: 3.5,
+                size: (0.7, 0.25), color: rgb(0xff9020, 1.0), color_end: rgb(0xd02004, 0.0), intensity: 1.1,
                 spread: 0.3, gravity: -2.8, drag: 1.5, spin: 0.4, radius: 0.18, soft: 0.3, fade_in: 0.1,
                 wobble: 0.04, ..VfxLayer::default() },
             VfxLayer { count: 1.0, rate: 7.0, life: (0.8, 1.8), gravity: -1.6, drag: 0.8, spread: 0.5, size: (0.03, 0.01),

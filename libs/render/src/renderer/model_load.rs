@@ -128,8 +128,12 @@ impl Renderer {
         let mut upload=|layer:PreparedStaticLayer| {
             let geometry=Geometry::new(cx);geometry.update(cx,layer.indices,layer.vertices);
             let shiny=layer.orm_on||layer.pbr.is_shiny();
-            let material=LayerMaterial{surface:layer.surface.map(|surface|surface.upload(cx)),metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
-                orm:shared(cx,layer.orm),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest};
+            // Surface maps (normal, occlusion, emissive) share by content too:
+            // terrain tiles carry the same material maps.
+            let surface=layer.surface.map(|s|crate::material_surface::UploadedSurface{definition:std::sync::Arc::new(s.definition),
+                normal:shared(cx,std::sync::Arc::new(s.normal)),occlusion:shared(cx,std::sync::Arc::new(s.occlusion)),emissive:shared(cx,std::sync::Arc::new(s.emissive))});
+            let material=LayerMaterial{surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
+                orm:shared(cx,layer.orm),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
             (std::rc::Rc::new(geometry),shared(cx,layer.texture),shared(cx,layer.detail),layer.detail_scale,material)
         };
         let wants_pbr=!prepared.prelit&&(prepared.main.orm_on||prepared.main.pbr.is_shiny()||prepared.extra.iter().any(|l|l.orm_on||l.pbr.is_shiny())||prepared.anim_parts.iter().flat_map(|p|&p.draws).chain(prepared.driven_parts.iter().flat_map(|p|&p.draws)).any(|l|l.orm_on||l.pbr.is_shiny()));
@@ -367,7 +371,7 @@ impl Renderer {
             png.or(model.texture_png.as_deref())
         };
         let texture = match (main_png, model.texture_uri.as_deref()) {
-            (Some(bytes), _) => ImageBuffer::from_png(bytes)
+            (Some(bytes), _) => crate::texture_pack::image_buffer(bytes)
                 .map_err(|e| format!("{id}: atlas decode failed: {e:?}"))?
                 .into_new_mip_repeat_texture(cx),
             (None, None) => {
@@ -398,7 +402,7 @@ impl Renderer {
                 }
                 let mat = self.upload_material(cx, &layer.pbr);
                 let tex = match layer.texture_png.as_deref() {
-                    Some(bytes) => ImageBuffer::from_png(bytes)
+                    Some(bytes) => crate::texture_pack::image_buffer(bytes)
                         .map_err(|e| format!("{id}: layer {i} atlas decode failed: {e:?}"))?
                         .into_new_mip_repeat_texture(cx),
                     None => {
@@ -463,7 +467,7 @@ impl Renderer {
                     let tex = match resident {
                         Some(t) => t,
                         None => match layer.texture_png.as_deref() {
-                            Some(bytes) => ImageBuffer::from_png(bytes)
+                            Some(bytes) => crate::texture_pack::image_buffer(bytes)
                                 .map_err(|e| {
                                     format!(
                                         "{id}: part {} layer {li} atlas decode failed: {e:?}",
@@ -520,7 +524,7 @@ impl Renderer {
                     let tex = match resident {
                         Some(t) => t,
                         None => match layer.texture_png.as_deref() {
-                            Some(bytes) => ImageBuffer::from_png(bytes)
+                            Some(bytes) => crate::texture_pack::image_buffer(bytes)
                                 .map_err(|e| {
                                     format!(
                                         "{id}: driven part {} layer {li} atlas decode failed: {e:?}",
@@ -578,7 +582,7 @@ impl Renderer {
                         flat.data = vec![fallback];
                         return (flat.into_new_texture(cx), "absent (1x1 fallback)".into());
                     };
-                    let img = match ImageBuffer::from_png(png) {
+                    let img = match crate::texture_pack::image_buffer(png) {
                         Ok(img) => img,
                         Err(error) => {
                             let mut flat = ImageBuffer::default();

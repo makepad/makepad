@@ -32,6 +32,8 @@ pub(super) struct VulkanProfile {
     composition_busy: u32,
     composition_skipped: u32,
     last_report: Option<Instant>,
+    /// The repaint the frame timer is collecting passes for.
+    timer_repaint: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,6 +109,7 @@ impl VulkanProfile {
             composition_busy: 0,
             composition_skipped: 0,
             last_report: None,
+            timer_repaint: None,
         }
     }
 
@@ -115,20 +118,15 @@ impl VulkanProfile {
         self.enabled
     }
 
+    /// Timestamps are also written while the whole-frame GPU timer
+    /// (`gpu_frame_timer`) is on; the log report stays `enabled` only.
+    #[inline]
+    fn active(&self) -> bool {
+        self.enabled || crate::gpu_frame_timer::enabled()
+    }
+
     pub(super) fn collect_pending(&mut self, device: &ash::Device) {
-        if !self.enabled {
-            return;
-        }
-        let Some(sample) = self.pending.take() else {
-            return;
-        };
-        let gpu_ms = if sample.wrote_timestamps {
-            self.read_gpu_ms(device)
-        } else {
-            None
-        };
-        self.aggregate(sample, 0.0, gpu_ms);
-        self.maybe_report();
+        self.complete_after_fence(device, 0.0);
     }
 
     pub(super) fn begin_sample(
@@ -140,7 +138,7 @@ impl VulkanProfile {
         height: u32,
         prewait_ms: f64,
     ) -> Option<ProfileSample> {
-        if !self.enabled {
+        if !self.active() {
             return None;
         }
         let window = cx.get_pass_window_id(draw_pass_id).map(|w| w.id());
@@ -175,7 +173,7 @@ impl VulkanProfile {
         queue_family_index: u32,
         command_buffer: vk::CommandBuffer,
     ) -> bool {
-        if !self.enabled {
+        if !self.active() {
             return false;
         }
         self.ensure_query_pool(device, instance, physical_device, queue_family_index);
@@ -199,7 +197,7 @@ impl VulkanProfile {
         device: &ash::Device,
         command_buffer: vk::CommandBuffer,
     ) {
-        if !self.enabled || self.query_pool == vk::QueryPool::null() {
+        if !self.active() || self.query_pool == vk::QueryPool::null() {
             return;
         }
         unsafe {
@@ -213,7 +211,7 @@ impl VulkanProfile {
     }
 
     pub(super) fn admit_pending(&mut self, sample: ProfileSample) {
-        if !self.enabled {
+        if !self.active() {
             return;
         }
         if sample.key.composition {
@@ -230,19 +228,43 @@ impl VulkanProfile {
     }
 
     pub(super) fn complete_after_fence(&mut self, device: &ash::Device, postwait_ms: f64) {
-        if !self.enabled {
-            return;
-        }
         let Some(sample) = self.pending.take() else {
             return;
         };
-        let gpu_ms = if sample.wrote_timestamps {
-            self.read_gpu_ms(device)
+        let span = if sample.wrote_timestamps {
+            self.read_gpu_span(device)
         } else {
             None
         };
-        self.aggregate(sample, postwait_ms, gpu_ms);
-        self.maybe_report();
+        if crate::gpu_frame_timer::enabled() {
+            // Passes run one after another here (a fence per submission),
+            // so their timestamp spans never overlap, and every pass of a
+            // repaint completes before the next repaint's first one. A frame
+            // is one repaint; it closes at its composition pass, or when the
+            // next repaint starts (a hidden window composes nothing).
+            let frame = sample.repaint_id;
+            if let Some(previous) = self.timer_repaint.filter(|r| *r != frame) {
+                crate::gpu_frame_timer::finish_frame(previous);
+            }
+            self.timer_repaint = Some(frame);
+            if let Some((start, end)) = span {
+                let name = match sample.debug_name.as_str() {
+                    "" if sample.key.composition => "window",
+                    "" => "unnamed",
+                    name => name,
+                };
+                crate::gpu_frame_timer::record_pass(frame, name, start, end);
+            }
+            if sample.key.composition {
+                crate::gpu_frame_timer::finish_frame(frame);
+                self.timer_repaint = None;
+            }
+        }
+        if self.enabled {
+            let gpu_ms = span.map(|(start, end)| (end - start) * 1000.0);
+            self.aggregate(sample, postwait_ms, gpu_ms);
+            self.maybe_report();
+        }
     }
 
     #[cfg(linux_direct)]
@@ -330,7 +352,8 @@ impl VulkanProfile {
         }
     }
 
-    fn read_gpu_ms(&self, device: &ash::Device) -> Option<f64> {
+    /// The pass's (start, end) GPU timestamps in seconds.
+    fn read_gpu_span(&self, device: &ash::Device) -> Option<(f64, f64)> {
         if self.query_pool == vk::QueryPool::null() {
             return None;
         }
@@ -349,7 +372,11 @@ impl VulkanProfile {
                 timestamps[1],
                 self.timestamp_valid_bits,
                 self.timestamp_period,
-            ),
+            )
+            .map(|ms| {
+                let start = timestamps[0] as f64 * self.timestamp_period as f64 * 1e-9;
+                (start, start + ms * 1e-3)
+            }),
             Err(vk::Result::NOT_READY) => None,
             Err(_) => None,
         }

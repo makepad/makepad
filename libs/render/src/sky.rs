@@ -181,6 +181,10 @@ pub struct SkyFrame {
     /// The same compass-averaged horizon as LINEAR, scene-referred radiance
     /// (no tone map, no display gamma) — the fog colour of the HDR lane.
     pub fog_linear: Vec3f,
+    /// Multiplier on the day dome: neutral for the stock sky, the authored
+    /// palette's tint for a world that painted its own colours and runs a
+    /// clock (renderer `analytic_sky_frame`).
+    pub dome_tint: Vec3f,
 }
 
 /// One Perez channel's five coefficients from turbidity `t`.
@@ -367,6 +371,7 @@ pub fn preetham_frame(sun_dir: Vec3f, turbidity: f32, exposure: f32) -> SkyFrame
         },
         fog_rgb: fog,
         fog_linear,
+        dome_tint: vec3f(1.0, 1.0, 1.0),
     }
 }
 

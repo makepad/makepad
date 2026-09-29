@@ -96,6 +96,25 @@ impl Cx {
         }
     }
 
+    /// Whether a draw shader can draw now. Metal builds pipelines
+    /// asynchronously and leaves a draw out of the frame until they exist;
+    /// a caller with a fallback (another shader for the same geometry) asks
+    /// this and keeps drawing the fallback until the new one is ready, so
+    /// content never vanishes while a shader compiles. `float16` asks for
+    /// the RGBA16Float (HDR target) pipeline too, and starts building it.
+    /// True where the backend compiles synchronously.
+    pub fn draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
+        #[cfg(all(target_vendor = "apple", not(gpusim)))]
+        {
+            self.metal_draw_shader_ready(shader, float16)
+        }
+        #[cfg(any(not(target_vendor = "apple"), gpusim))]
+        {
+            let _ = (shader, float16);
+            true
+        }
+    }
+
     /// Draws left out of frames so far because they were not ready (their
     /// pipeline compiling, their instances not yet on the GPU).
     pub fn pipeline_skips(&self) -> u64 {

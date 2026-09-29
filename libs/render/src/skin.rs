@@ -1551,8 +1551,11 @@ impl SkinnedModel {
                 .and_then(|index|json.get("textures")?.idx(index)?.get("source")?.usize())
                 .and_then(|index|crate::model::gltf_embedded_png(&json,bin,index));
             let mut image=|bytes:Option<Vec<u8>>,semantic|->Result<PreparedTexture,String>{
-                let image=if let Some(bytes)=bytes{crate::renderer::decode_generated_png(&bytes,4096,budget)?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
-                let texture=PreparedTexture::prepare(image,semantic);budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
+                if let Some(texture)=bytes.as_deref().filter(|b|crate::texture_pack::is_ktx2(b)).and_then(|b|crate::material_surface::texture_work(crate::material_surface::TextureWork::Remap,||crate::texture_pack::texture_from_ktx2(b))) {
+                    let texture=texture?;budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;return Ok(texture);
+                }
+                let image=if let Some(bytes)=bytes{crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
+                let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||PreparedTexture::prepare(image,semantic));budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
             };
             let base=image(texture("baseColorTexture"),PixelSemantic::Color)?;
             let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
@@ -2821,8 +2824,12 @@ impl SkinnedModel {
                     .unwrap_or_default()
             })
             .collect();
-        let min_y = origins.iter().map(|o| o.y).fold(f32::MAX, f32::min);
-        let max_y = origins.iter().map(|o| o.y).fold(f32::MIN, f32::max);
+        // The skeleton's own extent: a model whose rigid parts are separate
+        // nodes (antennae, hats) must not stretch the "lower body" band up
+        // to the hips, whose bob then won the support test.
+        let skeleton: Vec<usize> = if self.joint_nodes.is_empty() { (0..origins.len()).collect() } else { self.joint_nodes.clone() };
+        let min_y = skeleton.iter().map(|&i| origins[i].y).fold(f32::MAX, f32::min);
+        let max_y = skeleton.iter().map(|&i| origins[i].y).fold(f32::MIN, f32::max);
         let height = max_y - min_y;
         if !(height > 1.0e-3) {
             return None;
@@ -2830,12 +2837,22 @@ impl SkinnedModel {
         let animated: std::collections::HashSet<usize> =
             clip.channels.iter().map(|c| c.node).collect();
         // (node, rest ground reach below its origin)
-        let candidates: Vec<(usize, f32)> = origins
-            .iter()
-            .enumerate()
-            .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * 0.45)
-            .map(|(i, o)| (i, o.y - min_y))
-            .collect();
+        // Feet first: the bottom fifth of the skeleton. The wider band is
+        // the fallback for rigs without animated nodes that low; with it,
+        // an A-pose rest let the hanging hands (far below their rest) win
+        // the support test and the measured stride came out near zero.
+        let band = |f: f32| -> Vec<(usize, f32)> {
+            origins
+                .iter()
+                .enumerate()
+                .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * f)
+                .map(|(i, o)| (i, o.y - min_y))
+                .collect()
+        };
+        let mut candidates = band(0.2);
+        if candidates.len() < 2 {
+            candidates = band(0.45);
+        }
         if candidates.is_empty() {
             return None;
         }
@@ -2843,7 +2860,7 @@ impl SkinnedModel {
         let dt = clip.duration / STEPS as f32;
         let mut pose = self.rest_pose();
         let mut prev: Option<(usize, Vec3f)> = None;
-        let mut speeds: Vec<f32> = Vec::new();
+        let mut speeds: Vec<(f32, f32)> = Vec::new();
         for s in 0..=STEPS {
             self.sample_clip(clip_index, s as f32 * dt, &mut pose);
             let mut support: Option<(usize, Vec3f)> = None;
@@ -2860,7 +2877,7 @@ impl SkinnedModel {
             if let Some((prev_node, pp)) = prev {
                 if prev_node == node {
                     let (dx, dz) = (p.x - pp.x, p.z - pp.z);
-                    speeds.push((dx * dx + dz * dz).sqrt() / dt);
+                    speeds.push(((dx * dx + dz * dz).sqrt() / dt, p.y.max(pp.y)));
                 }
             }
             prev = Some((node, p));
@@ -2868,8 +2885,14 @@ impl SkinnedModel {
         if speeds.len() < STEPS / 4 {
             return None;
         }
-        speeds.sort_by(|a, b| a.total_cmp(b));
-        let v = speeds[speeds.len() / 2];
+        // Only a foot on the ground carries the body: a bounding sprint's
+        // flight phase (both feet up, the lower one swinging forward) must
+        // not count as support.
+        let floor = speeds.iter().map(|s| s.1).fold(f32::MAX, f32::min);
+        let planted: Vec<f32> = speeds.iter().filter(|s| s.1 <= floor + height * 0.03).map(|s| s.0).collect();
+        let median = |mut v: Vec<f32>| { v.sort_by(|a, b| a.total_cmp(b)); v[v.len() / 2] };
+        let all = median(speeds.iter().map(|s| s.0).collect());
+        let v = if planted.len() >= STEPS / 8 { all.max(median(planted)) } else { all };
         (v > 1.0e-3).then_some(v)
     }
 

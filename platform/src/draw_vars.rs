@@ -1255,11 +1255,13 @@ impl DrawVars {
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
+            // The shader's type name, for GPU diagnostics (`gpu.shaders`).
+            let debug_id = vm.bx.heap.object_type_name_in_chain(io_self).unwrap_or(LiveId(0));
             let cx = vm.host.cx_mut();
             mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
-                debug_id: LiveId(0),
+                debug_id,
                 os_shader_id: None,
                 mapping,
             });

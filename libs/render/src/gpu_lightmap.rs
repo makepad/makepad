@@ -53,11 +53,12 @@
 //! the player. What differs between modes is how DYNAMIC
 //! casters shadow and where SUN visibility comes from at shade time:
 //!
-//! [`GpuLightmapMode::OnChange`] (default everywhere, the slow-GPU tier):
+//! [`GpuLightmapMode::OnChange`] (the type's default, the slow-GPU tier):
 //! sun visibility from the atlas A channel; dynamics cast through the
 //! prebaked SDF silhouette quads ([`dynamic_shadow_tiers`]).
 //!
-//! [`GpuLightmapMode::Realtime`] (opt-in, fast GPUs): classic CASCADED
+//! [`GpuLightmapMode::Realtime`] (fast GPUs; [`GpuLightmapMode::for_gpu`]
+//! picks it for desktop-class HDR GPUs): classic CASCADED
 //! SHADOW MAPS — per frame, [`crate::shadow_csm`] fits ortho cascades to
 //! the view frustum and ONE depth pass renders every caster (statics,
 //! entity boxes, movers, skinned characters) into them, chained ahead of
@@ -102,6 +103,33 @@ pub enum GpuLightmapMode {
     /// `csm_vis` returns 1 and materials see full sun. Preview / debug
     /// toggle — does not kick an OnChange atlas bake.
     Off,
+}
+
+impl GpuLightmapMode {
+    /// The tier a device should boot in, by one explicit rule: Realtime
+    /// cascades on a GPU that runs the HDR scene lane (float16 blend
+    /// targets: every Metal device, desktop Vulkan on discrete and
+    /// integrated parts) unless it is a mobile or XR part (a phone or Quest
+    /// target, or an Adreno / Mali / PowerVR GPU); OnChange everywhere else
+    /// (Quest, phones, the web, GL fallbacks). `vendor` and `renderer` are
+    /// the lower-cased GpuInfo strings.
+    pub fn for_gpu(float16_blend_targets: bool, vendor: &str, renderer: &str) -> Self {
+        let mobile_target = cfg!(any(
+            target_os = "android",
+            target_os = "ios",
+            target_env = "ohos",
+            target_arch = "wasm32"
+        ));
+        let mobile_gpu = vendor == "arm"
+            || ["qualcomm", "adreno", "mali", "powervr", "imagination"]
+                .iter()
+                .any(|part| vendor.contains(part) || renderer.contains(part));
+        if float16_blend_targets && !mobile_target && !mobile_gpu {
+            Self::Realtime
+        } else {
+            Self::OnChange
+        }
+    }
 }
 
 /// Device-local budget for the Realtime cascaded-shadow tier.
@@ -268,13 +296,42 @@ fn schedule_regions(
 }
 
 /// One caster the depth passes rasterize.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct GpuBakeMesh {
     pub geometry: GeometryId,
     pub transform: Mat4f,
     /// World AABB (transformed model bounds).
     pub min: Vec3f,
     pub max: Vec3f,
+    /// A cut-out layer (leaf cards): its base-colour texture, alpha-tested
+    /// in the cascades (DrawLmSunDepthCutout).
+    pub cutout: Option<Texture>,
+    /// Which cascades draw it (foliage LOD for shadows).
+    pub band: CasterBand,
+}
+
+/// A model with a far stand-in (impostor.rs) casts its own layers into the
+/// near cascade and only its stand-in's cards into the others: a hillside
+/// of trees there is a few thousand alpha-cut quads, not millions of
+/// triangles. (An opaque ~100-triangle crown proxy for the outer cascades
+/// was measured slower on the M4 than the cards: the cost there is per
+/// instance and vertex, not the alpha test.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CasterBand {
+    #[default]
+    All,
+    Near,
+    Far,
+}
+
+impl CasterBand {
+    /// Cascade 0 (the first ~10 m) takes the tree's own layers, every
+    /// outer one (to ~320 m) its stand-in: a tree casts in every cascade
+    /// that covers it, so its shadow never cuts in as it nears, and the
+    /// receivers cross-fade each seam between two of them.
+    pub fn draws_in(self, cascade: usize) -> bool {
+        match self { CasterBand::All => true, CasterBand::Near => cascade == 0, CasterBand::Far => cascade >= 1 }
+    }
 }
 
 /// A dynamic caster for Realtime mode's depth passes. No identity, no
@@ -464,6 +521,7 @@ struct BakeState {
 struct LmDraws {
     zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
+    sun_depth_cutout: DrawLmSunDepthCutout,
     sun_depth_skinned: DrawLmSunDepthSkinned,
     lamp_depth: DrawLmLampDepth,
     gather_mesh: DrawLmSunGatherMesh,
@@ -503,12 +561,24 @@ fn zero_rect(cx: &mut CxDraw, d: &mut DrawLmZero, rect: LmRect, size: usize, fil
     }
 }
 
+/// Whether cascade tiles may be kept across frames (depth generations).
+/// Off on Apple GPUs (see the plan call in `run_frame`);
+/// `MAKEPAD_CSM_INCREMENTAL=1` / `=0` forces it for A/B.
+fn csm_incremental() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("MAKEPAD_CSM_INCREMENTAL").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => !cfg!(any(target_os = "macos", target_os = "ios")),
+    })
+}
+
 /// Grow `pool` to `n` reusable passes. A free function rather than a method
 /// so the atlas chain and the cascade chain can each own a pool while the
 /// baker keeps the rest of its state borrowable.
 fn ensure_pool(pool: &mut Vec<BakePass>, cx: &mut Cx, n: usize) {
     while pool.len() < n {
-        let pass = DrawPass::new(cx);
+        let pass = DrawPass::new_with_name(cx, "lightmap");
         // Recover the pool index of this pass id: pass ids are small
         // (one per pass ever alive), so a linear probe terminates fast.
         let probe = (0..1_000_000)
@@ -1463,8 +1533,7 @@ impl GpuLightmapBaker {
                 geometry: job.mesh_geometry[i],
                 transform: m.transform,
                 min: lo,
-                max: hi,
-            });
+                max: hi, cutout: None, band: Default::default() });
         }
         // Caster-only statics come AFTER the regioned meshes, so the
         // `RegionKind::Mesh(i)` indices above stay valid; every depth loop
@@ -1476,8 +1545,7 @@ impl GpuLightmapBaker {
                 geometry: m.geometry,
                 transform: m.transform,
                 min: m.min,
-                max: m.max,
-            });
+                max: m.max, cutout: None, band: Default::default() });
         }
         for (bmin, bmax) in &job.scene.boxes {
             scene_min = min3(scene_min, *bmin);
@@ -1661,6 +1729,7 @@ impl GpuLightmapBaker {
             Box::new(LmDraws {
                 zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
+                sun_depth_cutout: DrawLmSunDepthCutout::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
                 gather_mesh: DrawLmSunGatherMesh::script_new_with_default(vm),
@@ -1802,7 +1871,16 @@ impl GpuLightmapBaker {
             passes += self.encode_batch(cx, sun_dir, &batch);
         }
         if let Some(frame) = &csm {
-            let (full, due) = self.csm_schedule.plan(self.csm_frame_no, self.csm_stagger);
+            // Tiles kept across frames (depth generations) read back fully
+            // shadowed on some frames under Metal: a sunless flash on about
+            // half the frames (gpuperf lane, 2026-09-29). Until that is found,
+            // Apple GPUs re-render every cascade from a clear each frame.
+            let (full, due) = if csm_incremental() {
+                self.csm_schedule.plan(self.csm_frame_no, self.csm_stagger)
+            } else {
+                self.csm_schedule.invalidate();
+                self.csm_schedule.plan(self.csm_frame_no, false)
+            };
             self.csm_frame_no += 1;
             passes += self.encode_cascades(cx, static_casters, movers, frame, full, due);
         } else {
@@ -2656,6 +2734,9 @@ impl GpuLightmapBaker {
             let pass = &self.csm_pool[0].pass;
             pass.set_pass_name(cx.cx, "csm");
             pass.set_gpu_timing_enabled(cx.cx, true);
+            // Receivers sample the cascade DEPTH; the R32F colour is only
+            // the attachment the depth pipeline writes.
+            pass.set_color_scratch(cx.cx, true);
         }
         let order = pass_order(&self.csm_pool, 1);
         let mut seq = PassSeq {
@@ -2756,7 +2837,13 @@ impl GpuLightmapBaker {
                     }
                 }
             }
-            for m in static_casters {
+            // MAKEPAD_FOLIAGE_SHADOWS, the A/B switch for foliage casters:
+            // far (no leaf cards in cascade 0), none (no cut-out casters),
+            // near (stand-ins in cascade 1 only: the old cut-in at ~27 m).
+            thread_local! { static MODE: u8 = match std::env::var("MAKEPAD_FOLIAGE_SHADOWS").as_deref() { Ok("far") => 1, Ok("none") => 2, Ok("near") => 3, _ => 0 }; }
+            let mode = MODE.with(|m| *m);
+            let draws_in = |band: CasterBand| if mode == 3 && band == CasterBand::Far { ci == 1 } else { band.draws_in(ci) };
+            for m in static_casters.iter().filter(|m| m.cutout.is_none() && draws_in(m.band)) {
                 if !cascade_overlaps(casc, m.min, m.max) {
                     continue;
                 }
@@ -2767,6 +2854,30 @@ impl GpuLightmapBaker {
                     cx.add_instance(&d.draw_vars);
                 }
             }
+            // Cut-out layers after every opaque caster: their pipeline
+            // discards, the opaque one above never does. A tree's leaf cards
+            // in the first cascade, its stand-in's cards in the next (CasterBand);
+            // a masked model without a stand-in in every one.
+            let cutouts = static_casters;
+            let dc = &mut draws.sun_depth_cutout;
+            dc.depth.flip_a = gen;
+            dc.depth.tile_a = tile;
+            dc.depth.sun_rx = casc.rx;
+            dc.depth.sun_ry = casc.ry;
+            dc.depth.sun_rz = casc.rz;
+            for m in cutouts.iter().filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
+                if !cascade_overlaps(casc, m.min, m.max) {
+                    continue;
+                }
+                draws_n += 1;
+                dc.depth.transform = m.transform;
+                dc.depth.draw_vars.geometry_id = Some(m.geometry);
+                if let Some(t) = &m.cutout { dc.depth.draw_vars.set_texture(0, t); }
+                if dc.depth.draw_vars.can_instance() {
+                    cx.add_instance(&dc.depth.draw_vars);
+                }
+            }
+            let d = &mut draws.sun_depth;
             for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
                 // Rigid movers cull by their posed AABB. Skinned and morphed
                 // casters are never culled by a rest AABB (a posed limb can
@@ -2939,6 +3050,19 @@ mod tests {
     fn registered_static_layers_do_not_need_an_atlas_state() {
         assert_eq!(csm_caster_counts(None, 9, 0), (9, 0));
         assert_eq!(csm_caster_counts(None, 9, 3), (9, 3));
+    }
+
+    /// The boot tier rule: desktop-class HDR GPUs get cascades, mobile and
+    /// XR parts (and anything without float16 blend) keep the baked tier.
+    #[test]
+    fn boot_tier_follows_the_gpu() {
+        use GpuLightmapMode::*;
+        assert_eq!(GpuLightmapMode::for_gpu(true, "apple", "apple m4 max"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "nvidia", "nvidia geforce rtx 4090"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "intel", "intel(r) arc(tm) graphics"), Realtime);
+        assert_eq!(GpuLightmapMode::for_gpu(false, "intel", "intel(r) uhd graphics 620"), OnChange);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "qualcomm", "adreno (tm) 740"), OnChange);
+        assert_eq!(GpuLightmapMode::for_gpu(true, "arm", "mali-g78"), OnChange);
     }
 
     /// The mode split is airtight by construction: exactly ONE tier serves

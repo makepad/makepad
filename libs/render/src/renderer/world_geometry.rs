@@ -298,7 +298,11 @@ impl Renderer {
         local.v[12] = part.offset.x * owner.scale.x;
         local.v[13] = part.offset.y * owner.scale.y;
         local.v[14] = part.offset.z * owner.scale.z;
-        Mat4f::mul(&owner_frame, &local)
+        let placed = Mat4f::mul(&owner_frame, &local);
+        match &part.follow {
+            Some(follow) => Mat4f::mul(follow, &placed),
+            None => placed,
+        }
     }
 
     /// PERF: pack one instance in the exact slice layout `DrawCube::draw`

@@ -128,6 +128,13 @@ script_mod! {
         // sample, so a scene that does not opt in shades exactly as before.
         ssao_map: texture_2d(float)
         ssao_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // ---- follow-camera occluder fade (occluder_fade.rs), OFF by default ----
+        // occ_eye = the TRUE world eye; occ_focus = the filmed body's chest,
+        // w = the clear length before it (0 = off, every other host).
+        // Pixels near the eye→focus line, or right at the lens, draw
+        // screen-door dithered so nothing hides the player.
+        occ_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        occ_focus: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // The fragment's own clip position, for the screen-space AO lookup.
         v_spos: varying(vec4f)
         // Which SPACE this lane shades in. 0 (the default) is the game's:
@@ -250,9 +257,38 @@ script_mod! {
             return normalize(vec3(e.x - t * sx, e.y - t * sy, nz))
         }
 
+        // Foliage wind (a layer with makepadShading.wind). A swaying layer
+        // never morphs, so it rides the morph lanes: morph_ctl.w = -1 turns
+        // it on (morph_delta only reads w > 0.5) and morph_weights0 = (sway
+        // metres at the top, 1 / model height, wind clock s, leaf flutter).
+        // No new instance lane: the model stream is at the vertex-attribute
+        // limit. One world-space breeze for the whole forest: a slow sway
+        // plus a faster gust, both phased by the copy's position so
+        // neighbours never move in lockstep, bending more toward the top
+        // (flex = height^2), and a flutter on the leaves. The bend is taken
+        // into model space through the copy's own axes, so a yawed or
+        // scaled tree leans the same way as its neighbours.
+        wind_bend: fn(pos: vec3) -> vec3 {
+            let ax = (self.transform * vec4(1.0, 0.0, 0.0, 0.0)).xyz
+            let ay = (self.transform * vec4(0.0, 1.0, 0.0, 0.0)).xyz
+            let az = (self.transform * vec4(0.0, 0.0, 1.0, 0.0)).xyz
+            let origin = (self.transform * vec4(0.0, 0.0, 0.0, 1.0)).xyz
+            let phase = origin.x * 0.11 + origin.z * 0.07
+            let w = self.morph_weights0
+            let t = w.z
+            let h = clamp(pos.y * w.y, 0.0, 1.4)
+            let sway = (sin(t * 0.83 + phase) * 0.7 + sin(t * 2.1 + phase * 1.9) * 0.3 + 0.35) * h * h
+            let flutter = sin(t * 6.3 + dot(pos, vec3(3.7, 2.3, 4.1)) + phase) * w.w * h
+            let wd = vec3(0.8, 0.0, 0.6) * (sway * w.x)
+            let s2 = max(dot(ax, ax), 0.000001)
+            let bend = vec3(dot(ax, wd), dot(ay, wd), dot(az, wd)) / s2
+            return pos + bend + vec3(flutter * 0.6, flutter * 0.4, flutter * 0.5) - vec3(0.0, abs(sway * w.x) * 0.12, 0.0)
+        }
+
         vertex: fn() {
             var pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
             if self.morph_ctl.w>0.5{pos=pos+self.morph_delta(self.geom.ao_uv,0.0)}
+            if self.morph_ctl.w < -0.5 { pos = self.wind_bend(pos) }
             // ao_uv is unorm16x2 (model.rs pack_ao_uv), NOT an f16 pair — f16
             // spacing near 1.0 is a full texel of a 1024 atlas. Each axis is
             // (lo + 256*hi)/257 of the two unpacked bytes: 255*257 = 65535.
@@ -353,6 +389,14 @@ script_mod! {
             self.vertex_pos = clip_out
         }
 
+        // Every discard of the model lanes goes through here. A discard
+        // anywhere in a pipeline costs a tile GPU its hidden-surface removal
+        // for everything that pipeline draws (Apple GPUs shade every covered
+        // layer), so a draw that can never cut a pixel (opaque texture, no
+        // dither, no occluder fade) goes through the same shader with this
+        // emptied (`Renderer::opaque_shader`).
+        clip: fn() { discard() }
+
         // The base-colour texel. With `tex_mag.x` set (the material's glTF
         // sampler says magFilter NEAREST) a MAGNIFIED texel — larger than a
         // pixel on screen — is read at its centre, so it draws as a hard
@@ -385,7 +429,20 @@ script_mod! {
                 let dv = self.color_adjust_ctl.w - 1.0
                 let dlo = floor(dv / 256.0)
                 let dhi = dv - dlo * 256.0
-                if dn < dlo / 255.0 || dn >= dhi / 255.0 { discard() }
+                if dn < dlo / 255.0 || dn >= dhi / 255.0 { self.clip() }
+            }
+            if self.occ_focus.w > 0.0 {
+                let oe = self.occ_eye.xyz
+                let of = self.occ_focus.xyz - oe
+                let ol = max(length(of), 0.001)
+                let op = self.v_csm.xyz - oe
+                let ot = clamp(dot(op, of) / ol, 0.0, ol - self.occ_focus.w)
+                let orad = length(op - of * (ot / ol))
+                let ocone = 0.55 + 0.22 * (ol - ot)
+                let ofade = max((1.0 - smoothstep(ocone, ocone + 0.5, orad)) * step(0.0, ol - self.occ_focus.w - dot(op, of) / ol), 1.0 - clamp(length(op) / 1.2, 0.0, 1.0))
+                let osp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
+                let opx = floor(vec2(osp.x * 0.5 + 0.5, 0.5 - osp.y * 0.5) * vec2(1920.0, 1080.0))
+                if fract(52.9829189 * fract(dot(opx, vec2(0.06711056, 0.00583715)))) < ofade * 0.8 { self.clip() }
             }
             // Atlas x vertex tint. Kenney ships both conventions — most packs
             // UV-map into one colormap (tint = white), nature-kit and friends
@@ -398,7 +455,7 @@ script_mod! {
             // BUILD punch-through: palette 255 / magenta is the overlay key.
             let magenta = (tex.x > 0.75) && (tex.z > 0.75) && (tex.y < 0.22)
             if tex.w < 0.5 || magenta {
-                discard()
+                self.clip()
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
             var albedo = self.color_adjust(

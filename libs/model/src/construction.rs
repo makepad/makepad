@@ -155,7 +155,7 @@ fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,ctx:&
 #[derive(Clone)]
 struct SourceTriangle {points:[[f64;3];3],uv:[[f64;2];3],normals:[[f64;3];3],weights:[Vec<JointWeight>;3],material:u32}
 fn source_triangles(mesh:&Mesh,ctx:&mut Context<'_>)->Result<Vec<SourceTriangle>>{
-    let tri=mesh.triangulate(ctx)?;if tri.triangles.len()>2048{return Err(Error::Budget("derived construction input triangles"));}
+    let tri=mesh.triangulate(ctx)?;if tri.triangles.len()>16384{return Err(Error::Budget("derived construction input triangles"));}
     tri.triangles.iter().map(|t|{ctx.checkpoint(1)?;Ok(SourceTriangle{points:t.indices.map(|i|tri.vertices[i as usize].position),uv:t.indices.map(|i|tri.vertices[i as usize].uv),normals:t.indices.map(|i|tri.vertices[i as usize].normal),weights:t.indices.map(|i|tri.vertices[i as usize].weights.clone()),material:t.material})}).collect()
 }
 fn derived_source(mesh:&Mesh,ctx:&mut Context<'_>)->Result<()> {
@@ -195,11 +195,22 @@ fn voxel_mesh(source:&Mesh,resolution:u32,ctx:&mut Context<'_>)->Result<Mesh>{
 fn transfer_surface(positions:&[[f64;3]],faces:&[[u32;3]],sources:&[SourceTriangle],exact:bool,ctx:&mut Context<'_>)->Result<Mesh>{
     admit(positions.len(),faces.len(),faces.len()*3,ctx)?;if faces.is_empty(){return Ok(Mesh::new());}
     let scale=positions.iter().map(|p|length(*p)).fold(1f64,f64::max);let epsilon=scale*1e-7;
-    let mut weights=Vec::with_capacity(positions.len());for &p in positions{ctx.checkpoint(1)?;let(i,bary,_)=nearest_source(p,sources,ctx)?;weights.push(interpolate_weights(&sources[i],bary,ctx)?);}
+    // Unskinned sources (every boolean: it refuses weights) reproject no
+    // weights, so the per-vertex nearest-source scan is skipped outright.
+    let skinned=sources.iter().any(|s|s.weights.iter().any(|w|!w.is_empty()));
+    let mut weights=Vec::with_capacity(positions.len());for &p in positions{ctx.checkpoint(1)?;if !skinned{weights.push(Vec::new());continue;}let(i,bary,_)=nearest_source(p,sources,ctx)?;weights.push(interpolate_weights(&sources[i],bary,ctx)?);}
+    // Source bounds grown by the mapping tolerances (plane distance and
+    // barycentric slack): a source can only map a triangle whose bounds meet
+    // its own, so the per-face scans below test six floats before any
+    // barycentric (a car shell with two arch cuts spent ~0.9 s here, 95% of
+    // its booleans).
+    let bounds=sources.iter().map(|s|{let t=s.points;let margin=epsilon*16.+1e-6*length(sub(t[1],t[0])).max(length(sub(t[2],t[0])));let mut b=[[f64::INFINITY;3],[f64::NEG_INFINITY;3]];for q in t{for d in 0..3{b[0][d]=b[0][d].min(q[d]-margin);b[1][d]=b[1][d].max(q[d]+margin);}}b}).collect::<Vec<_>>();
     let mut polygons=Vec::new();let mut normals=Vec::new();
     for &face in faces {ctx.checkpoint(1)?;let p=face.map(|i|positions.get(i as usize).copied().ok_or(Error::Invalid("derived triangle index"))).into_iter().collect::<Result<Vec<_>>>()?;
         let points=[p[0],p[1],p[2]];let centroid=mul(add(add(p[0],p[1]),p[2]),1./3.);let mut mapped=None;
-        if exact {for source in sources{ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
+        let lo:[f64;3]=std::array::from_fn(|d|points.iter().map(|q|q[d]).fold(f64::INFINITY,f64::min));let hi:[f64;3]=std::array::from_fn(|d|points.iter().map(|q|q[d]).fold(f64::NEG_INFINITY,f64::max));
+        let contains=|b:&[[f64;3];2]|(0..3).all(|d|lo[d]>=b[0][d]&&hi[d]<=b[1][d]);let meets=|b:&[[f64;3];2]|(0..3).all(|d|lo[d]<=b[1][d]&&hi[d]>=b[0][d]);
+        if exact {for (source,_) in sources.iter().zip(&bounds).filter(|(_,b)|contains(b)){ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
             if mapping.iter().all(|(b,d)|*d<=epsilon&&b.iter().all(|v|*v>=-1e-7&&*v<=1.+1e-7)){mapped=Some((source,mapping.map(|(b,_)|b)));break;}
         }
             // The kernel may retriangulate a planar region across the
@@ -207,11 +218,30 @@ fn transfer_surface(positions:&[[f64;3]],faces:&[[u32;3]],sources:&[SourceTriang
             // source triangle the output triangle overhangs least; affine
             // UVs/normals of a planar face are exact under extrapolation.
             if mapped.is_none(){let mut best:Option<(f64,&SourceTriangle,[[f64;3];3])>=None;
-                for source in sources{ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
+                // Coplanar sources the triangle overlaps first; the whole set
+                // only when none of those is coplanar.
+                for near in [true,false]{if best.is_some(){break;}
+                for (source,_) in sources.iter().zip(&bounds).filter(|(_,b)|!near||meets(b)){ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
                     if mapping.iter().all(|(_,d)|*d<=epsilon*16.){let outside=mapping.iter().flat_map(|(b,_)|b.iter()).map(|v|(-v).max(v-1.).max(0.)).fold(0f64,f64::max);
-                        if best.as_ref().is_none_or(|(o,_,_)|outside<*o){best=Some((outside,source,mapping.map(|(b,_)|b)));}}}
+                        if best.as_ref().is_none_or(|(o,_,_)|outside<*o){best=Some((outside,source,mapping.map(|(b,_)|b)));}}}}
                 mapped=best.map(|(_,source,bary)|(source,bary));}
         }else{let(i,_,_)=nearest_source(centroid,sources,ctx)?;mapped=Some((&sources[i],points.map(|p|closest_barycentric(p,sources[i].points).0)));}
+            // A smooth loft's neighbouring faces are coplanar only to within
+            // the kernel's snapping (1e-5 of the model's size), and a cut may
+            // retriangulate across them: a triangle then lies on NO source
+            // plane within the strict tolerance. Take the source the triangle
+            // sits closest to (plane distance, then overhang) and extrapolate
+            // its attributes; on a smooth surface that is what the author
+            // drew. Only a triangle overlapping no source at all falls back
+            // to the source nearest its centroid.
+            if mapped.is_none(){let mut best:Option<(f64,&SourceTriangle,[[f64;3];3])>=None;
+                for (source,_) in sources.iter().zip(&bounds).filter(|(_,b)|meets(b)){ctx.checkpoint(1)?;let mapping=points.map(|p|barycentric(p,source.points));
+                    if mapping.iter().any(|(_,d)|!d.is_finite()){continue;}
+                    let plane=mapping.iter().map(|(_,d)|*d).fold(0f64,f64::max);let outside=mapping.iter().flat_map(|(b,_)|b.iter()).map(|v|(-v).max(v-1.).max(0.)).fold(0f64,f64::max);
+                    let cost=plane/scale+outside*1e-3;if best.as_ref().is_none_or(|(c,_,_)|cost<*c){best=Some((cost,source,mapping.map(|(b,_)|b)));}}
+                mapped=best.map(|(_,source,bary)|(source,bary));
+                if mapped.is_none(){let(i,_,_)=nearest_source(centroid,sources,ctx)?;mapped=Some((&sources[i],points.map(|p|closest_barycentric(p,sources[i].points).0)));}
+            }
         let (source,bary)=mapped.ok_or(Error::Invalid("boolean retessellation crosses an ambiguous authored UV/material triangle"))?;
         let uvs=bary.map(|b|std::array::from_fn(|d|(0..3).map(|i|source.uv[i][d]*b[i]).sum())).to_vec();
         let geometric=unit(cross(sub(p[1],p[0]),sub(p[2],p[0])))?;

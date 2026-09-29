@@ -339,4 +339,13 @@ impl Renderer {
             .find(|(k, _)| k == id)
             .map(|(_, m)| m.triangles)
     }
+
+    /// Distance LOD levels below full detail a loaded prop switches to
+    /// (authored or the builder's automatic ones); a reporting path.
+    pub fn model_lod_levels(&self, id: &str) -> Option<usize> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.lods.len())
+    }
 }

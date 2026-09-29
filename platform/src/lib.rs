@@ -91,6 +91,7 @@ mod macos_menu;
 mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
+pub mod gpu_frame_timer;
 pub mod sploded;
 pub mod permission;
 mod screen;
@@ -331,7 +332,7 @@ pub use {
         },
         texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, TEXTURE_READBACK_MAX_BYTES,
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
-            TextureSize, TextureUpdated, TextureWrap,
+            TextureSize, TextureUpdated, TextureWrap, CompressedTextureFormat,
         },
         thread::*,
         ui_runner::*,

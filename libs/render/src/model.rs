@@ -1495,6 +1495,7 @@ impl StaticModel {
             .and_then(|i| i.idx(0))
             .and_then(|i| i.get("uri"))
             .and_then(Val::str)
+            .filter(|uri| !uri.starts_with(SHARED_IMAGE_SCHEME))
             .map(str::to_string);
         // Embedded base color (image stored in the BIN chunk via bufferView):
         // the self-contained convention of generated/baked GLBs. Resolved
@@ -1604,7 +1605,11 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         };
         fur.valid().then_some(fur)
     });
+    let shading=material.get("extras").and_then(|e|e.get("makepadShading"));
+    let term=|key:&str|value(shading,key,0.0).clamp(0.0,1.0);
     Some(crate::material_surface::MaterialSurface {
+        wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),
+        impostor:value(shading,"impostor",0.0).max(0.0),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
@@ -1612,7 +1617,10 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         alpha_mode:match material.get("alphaMode").and_then(Val::str){Some("MASK")=>1,Some("BLEND")=>2,_=>0},
         alpha_cutoff:value(Some(material),"alphaCutoff",0.5),base_alpha:alpha,
         double_sided:matches!(material.get("doubleSided"),Some(Val::Bool(true))),
-        triplanar:material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32,
+        // Negative marks an up-facing part (`makepadTriplanarFlat`): the
+        // shader reads only the top projection there.
+        triplanar:(material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32)
+            *if material.get("extras").and_then(|e|e.get("makepadTriplanarFlat")).is_some_and(|v|matches!(v,Val::Bool(true))){-1.0}else{1.0},
     })
 }
 
@@ -2653,8 +2661,21 @@ fn gltf_used_material_image(json: &Val) -> usize {
     }
 }
 
+/// The `uri` scheme of an image stored once outside the GLB and shared by
+/// every model that names it (level products' material images). The host
+/// resolves the key ([`set_shared_image_resolver`]).
+pub const SHARED_IMAGE_SCHEME: &str = "makepad-image:";
+static SHARED_IMAGE_RESOLVER: std::sync::OnceLock<fn(&str) -> Option<std::sync::Arc<[u8]>>> = std::sync::OnceLock::new();
+/// How this process finds a shared image's bytes by key (worker threads call it).
+pub fn set_shared_image_resolver(resolve: fn(&str) -> Option<std::sync::Arc<[u8]>>) {
+    let _ = SHARED_IMAGE_RESOLVER.set(resolve);
+}
+
 pub(crate) fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
     let image = json.get("images").and_then(|i| i.idx(image_index))?;
+    if let Some(key) = image.get("uri").and_then(Val::str).and_then(|u| u.strip_prefix(SHARED_IMAGE_SCHEME)) {
+        return SHARED_IMAGE_RESOLVER.get().and_then(|resolve| resolve(key)).map(|bytes| bytes.to_vec());
+    }
     let bv = image.get("bufferView").and_then(Val::usize)?;
     let view = json.get("bufferViews").and_then(|v| v.idx(bv))?;
     let offset = view.get("byteOffset").and_then(Val::usize).unwrap_or(0);

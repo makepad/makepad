@@ -146,6 +146,12 @@ impl WaylandCx {
                     Ok(vulkan) => {
                         let fifo_presents_queue = vulkan.fifo_presents_queue();
                         cx.borrow_mut().gpu_info.float16_blend_targets = vulkan.float16_blend_targets();
+                        {
+                            let (bc7, astc) = vulkan.texture_compression();
+                            let mut cx = cx.borrow_mut();
+                            cx.gpu_info.texture_bc7 = bc7;
+                            cx.gpu_info.texture_astc4x4 = astc;
+                        }
                         cx.borrow_mut().os.vulkan = Some(vulkan);
                         Some(fifo_presents_queue)
                     }
