@@ -45,7 +45,7 @@ pub enum Region {
     Frame,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Un {
     NegF,
     AbsF,
@@ -67,7 +67,7 @@ pub enum Un {
     NotB,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Bin {
     AddF,
     SubF,
@@ -95,7 +95,7 @@ pub enum Bin {
     OrB,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Cmp {
     Lt,
     Le,

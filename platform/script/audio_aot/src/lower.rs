@@ -47,7 +47,7 @@ pub const LOOP_CAP: u32 = 1024;
 /// `for` loops over constant ranges up to this many iterations (with no
 /// break/continue of their own) are unrolled.
 pub const UNROLL_MAX: u32 = 16;
-pub const MAX_STATE_WORDS: u32 = 1 << 18;
+pub const MAX_STATE_WORDS: u32 = 1 << 20;
 pub const MAX_SHARED_WORDS: u32 = 1 << 22;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
 /// Worst-case AIR ops per frame.
@@ -172,27 +172,106 @@ fn err<X>(span: Span, msg: impl Into<String>) -> LResult<X> {
 // The builder: emits AIR with constant folding
 // =========================================================================
 
+/// Value-numbering key of a pure op (loads and gets are "memory" keys:
+/// dropped when a store or set may change them, and never reused across a
+/// loop boundary).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    Const(Ty, u32),
+    Un(Un, Val),
+    Bin(Bin, Val, Val),
+    CmpF(Cmp, Val, Val),
+    CmpI(Cmp, Val, Val),
+    Sel(Val, Val, Val),
+    Wrap(Val, u32),
+    Load(Region, u32, u32, Option<Val>),
+    Get(Var),
+    In(u8, Val),
+    FrameCount,
+}
+
+impl Key {
+    fn of(op: &Op, ty: Ty) -> Key {
+        match *op {
+            Op::ConstF(x) => Key::Const(ty, x.to_bits()),
+            Op::ConstI(x) => Key::Const(ty, x as u32),
+            Op::ConstB(x) => Key::Const(ty, x as u32),
+            Op::Get(v) => Key::Get(v),
+            Op::Un(u, a) => Key::Un(u, a),
+            Op::Bin(b, x, y) => Key::Bin(b, x, y),
+            Op::CmpF(c, x, y) => Key::CmpF(c, x, y),
+            Op::CmpI(c, x, y) => Key::CmpI(c, x, y),
+            Op::Sel(c, x, y) => Key::Sel(c, x, y),
+            Op::Wrap(x, n) => Key::Wrap(x, n),
+            Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off),
+            Op::In { ch, idx } => Key::In(ch, idx),
+            Op::FrameCount => Key::FrameCount,
+        }
+    }
+
+    fn memory(&self) -> bool {
+        matches!(self, Key::Load(..) | Key::Get(_))
+    }
+}
+
 #[derive(Default)]
 struct Builder {
     prog: Program,
     blocks: Vec<Block>,
     consts: Vec<Option<u32>>,
+    /// Per open block: values by key, and whether the block is a loop body
+    /// (memory keys from outside it are not reused inside).
+    cse: Vec<(HashMap<Key, Val>, bool)>,
 }
 
 impl Builder {
     fn new() -> Self {
-        Builder { prog: Program::default(), blocks: vec![Vec::new()], consts: Vec::new() }
+        Builder { prog: Program::default(), blocks: vec![Vec::new()], consts: Vec::new(), cse: vec![(HashMap::new(), false)] }
+    }
+
+    fn lookup(&self, key: &Key) -> Option<Val> {
+        for (map, is_loop) in self.cse.iter().rev() {
+            if let Some(v) = map.get(key) {
+                return Some(*v);
+            }
+            if *is_loop && key.memory() {
+                return None;
+            }
+        }
+        None
     }
 
     fn push(&mut self, s: IS) {
+        match &s {
+            IS::Set(var, _) => {
+                let var = *var;
+                for (map, _) in &mut self.cse {
+                    map.remove(&Key::Get(var));
+                }
+            }
+            IS::Store { region, .. } => {
+                let region = *region;
+                for (map, _) in &mut self.cse {
+                    map.retain(|k, _| !matches!(k, Key::Load(r, ..) if *r == region));
+                }
+            }
+            _ => {}
+        }
         self.blocks.last_mut().unwrap().push(s);
     }
 
+    fn open_loop(&mut self) {
+        self.blocks.push(Vec::new());
+        self.cse.push((HashMap::new(), true));
+    }
+
     fn open(&mut self) {
+        self.cse.push((HashMap::new(), false));
         self.blocks.push(Vec::new());
     }
 
     fn close(&mut self) -> Block {
+        self.cse.pop();
         self.blocks.pop().unwrap()
     }
 
@@ -206,6 +285,11 @@ impl Builder {
     }
 
     fn raw(&mut self, ty: Ty, op: Op, c: Option<u32>) -> Val {
+        let key = Key::of(&op, ty);
+        if let Some(v) = self.lookup(&key) {
+            return v;
+        }
+        self.cse.last_mut().unwrap().0.insert(key, Val(self.prog.vals.len() as u32));
         let v = Val(self.prog.vals.len() as u32);
         self.prog.vals.push(ty);
         self.consts.push(c);
@@ -517,6 +601,60 @@ impl Builder {
         self.sel(is_big, big, small)
     }
 
+    /// atan: reduce |x| to [0, tan(pi/8)] (x > 2.414 -> pi/2 - atan(1/x),
+    /// x > 0.414 -> pi/4 + atan((x-1)/(x+1))), then a degree-9 polynomial.
+    fn atan(&mut self, x: Val) -> Val {
+        let ax = self.fabs(x);
+        let hi = self.cf(2.414_213_6);
+        let mid = self.cf(0.414_213_57);
+        let is_hi = self.cmpf(Cmp::Gt, ax, hi);
+        let is_mid = self.cmpf(Cmp::Gt, ax, mid);
+        let one = self.cf(1.0);
+        let m1 = self.cf(-1.0);
+        let inv = self.div(m1, ax);
+        let num = self.sub(ax, one);
+        let den = self.add(ax, one);
+        let q = self.div(num, den);
+        let r = self.sel(is_mid, q, ax);
+        let r = self.sel(is_hi, inv, r);
+        let zero = self.cf(0.0);
+        let pi4 = self.cf(std::f32::consts::FRAC_PI_4);
+        let pi2 = self.cf(std::f32::consts::FRAC_PI_2);
+        let y0 = self.sel(is_mid, pi4, zero);
+        let y0 = self.sel(is_hi, pi2, y0);
+        let z = self.mul(r, r);
+        let p = self.poly(z, &[8.053_744_5e-2, -1.387_768_6e-1, 1.997_771_1e-1, -3.333_295e-1]);
+        let p = self.mul(p, z);
+        let p = self.mul(p, r);
+        let p = self.add(p, r);
+        let y = self.add(y0, p);
+        let xneg = self.cmpf(Cmp::Lt, x, zero);
+        let ny = self.fneg(y);
+        self.sel(xneg, ny, y)
+    }
+
+    /// atan2(y, x) in -pi..pi (atan2(0, 0) = 0).
+    fn atan2(&mut self, y: Val, x: Val) -> Val {
+        let q = self.div(y, x);
+        let a = self.atan(q);
+        let zero = self.cf(0.0);
+        let pi = self.cf(std::f32::consts::PI);
+        let npi = self.cf(-std::f32::consts::PI);
+        let xneg = self.cmpf(Cmp::Lt, x, zero);
+        let yneg = self.cmpf(Cmp::Lt, y, zero);
+        let fix = self.sel(yneg, npi, pi);
+        let a2 = self.add(a, fix);
+        let a = self.sel(xneg, a2, a);
+        // x == 0: +-pi/2 by the sign of y (0 when y is 0 too).
+        let xz = self.cmpf(Cmp::Eq, x, zero);
+        let h = self.cf(std::f32::consts::FRAC_PI_2);
+        let nh = self.cf(-std::f32::consts::FRAC_PI_2);
+        let yz = self.cmpf(Cmp::Eq, y, zero);
+        let v = self.sel(yneg, nh, h);
+        let v = self.sel(yz, zero, v);
+        self.sel(xz, v, a)
+    }
+
     fn pow(&mut self, a: Val, b: Val) -> Val {
         let l = self.log(a);
         let m = self.mul(b, l);
@@ -626,6 +764,8 @@ struct Lowerer {
     entry: Option<EntryCtx>,
     /// Lowering `init()`: shared tables are writable, inputs absent.
     in_init: bool,
+    /// Spans at or past this lie in the prelude.
+    prelude_base: usize,
 }
 
 fn ty_of(t: &T) -> Ty {
@@ -788,14 +928,16 @@ impl Lowerer {
         match p.off {
             None => (p.root + p.stat + k, 1, None),
             Some(o) => {
+                // The static part goes into the base (the dynamic offset of
+                // an element never exceeds the object minus that part).
                 let s = p.stat + k;
-                let off = if s == 0 {
-                    o
+                if s < p.extent {
+                    (p.root + s, p.extent - s, Some(o))
                 } else {
                     let c = self.b.ci(s as i32);
-                    self.b.ib(Bin::AddI, o, c)
-                };
-                (p.root, p.extent, Some(off))
+                    let off = self.b.ib(Bin::AddI, o, c);
+                    (p.root, p.extent, Some(off))
+                }
             }
         }
     }
@@ -1024,7 +1166,7 @@ impl Lowerer {
             let j = self.b.var(Ty::I32);
             let zero = self.b.ci(0);
             self.b.set(j, zero);
-            self.b.open();
+            self.b.open_loop();
             let jv = self.b.get(j);
             let end = self.b.ci(n as i32);
             let done = self.b.cmpi(Cmp::Ge, jv, end);
@@ -1138,7 +1280,7 @@ impl Lowerer {
                     let offset = self.state_init.len() as u32;
                     Self::flatten(&c, &mut self.state_init);
                     if self.state_init.len() as u32 > MAX_STATE_WORDS {
-                        return err(*span, format!("state exceeds {} words (1 MiB) per instance", MAX_STATE_WORDS));
+                        return err(*span, format!("state exceeds {} words (4 MiB) per instance", MAX_STATE_WORDS));
                     }
                     let words = self.words(&t);
                     self.state_vars.push(StateVar { name: name.clone(), sig: self.sig(&t), offset, words });
@@ -1280,7 +1422,7 @@ impl Lowerer {
         let is_fresh = self.b.cmpi(Cmp::Ne, fr, zero);
         let run_block = self.b.def(Ty::Bool, Op::Bin(Bin::OrB, at_start, is_fresh));
         // Control block start: params ramp toward their targets; block().
-        self.b.open();
+        self.b.open_loop();
         for (k, (base, step)) in params.iter().enumerate() {
             let target = self.b.load(Ty::F32, Region::Ctx, CTX_PARAMS + k as u32, 1, None);
             let bv = self.b.get(*base);
@@ -1409,7 +1551,14 @@ impl Lowerer {
         let ret = self.rets.pop().unwrap();
         self.frames.pop();
         self.call_stack.pop();
-        let v = r?;
+        let v = match r {
+            Ok(v) => v,
+            // An error inside a prelude helper is reported at the user's call.
+            Err(e) if e.start >= self.prelude_base && span.start < self.prelude_base => {
+                return err(span, format!("in `{}`: {}", f.name, e.message));
+            }
+            Err(e) => return Err(e),
+        };
         if !ret.used {
             self.b.splice(body);
             return Ok(v);
@@ -1544,7 +1693,7 @@ impl Lowerer {
                 }
                 Stmt::For { var, from, to, body, span } => self.for_loop(var, from, to, body, *span)?,
                 Stmt::While { cond, body, .. } => {
-                    self.b.open();
+                    self.b.open_loop();
                     self.loops.push(LoopKind::User);
                     let r = (|| {
                         let c = self.expr(cond)?;
@@ -1559,7 +1708,7 @@ impl Lowerer {
                     self.b.push(IS::Loop { cap: LOOP_CAP, body: b });
                 }
                 Stmt::Loop { body, .. } => {
-                    self.b.open();
+                    self.b.open_loop();
                     self.loops.push(LoopKind::User);
                     let r = self.scoped(|l| l.stmts(body));
                     self.loops.pop();
@@ -1711,7 +1860,8 @@ impl Lowerer {
             T::Struct(s) => {
                 let d = &self.structs[*s];
                 let Some((_, ft, off, _)) = d.fields.iter().find(|f| f.0 == field) else {
-                    return err(span, format!("`{}` has no field `{}`", d.name, field));
+                    let fields: Vec<&str> = d.fields.iter().map(|f| f.0.as_str()).collect();
+                    return err(span, format!("`{}` has no field `{}` (it has {})", d.name, field, fields.join(", ")));
                 };
                 Ok(Place { ty: ft.clone(), stat: p.stat + off, ..p.clone() })
             }
@@ -1741,26 +1891,13 @@ impl Lowerer {
             let s = self.b.ci(stride as i32);
             self.b.ib(Bin::MulI, w, s)
         };
+        // The static part (field offsets) stays static; it folds into the
+        // access's base.
         let off = match p.off {
-            None => {
-                if p.stat == 0 {
-                    w
-                } else {
-                    let s = self.b.ci(p.stat as i32);
-                    self.b.ib(Bin::AddI, w, s)
-                }
-            }
-            Some(o) => {
-                let t = if p.stat == 0 {
-                    o
-                } else {
-                    let s = self.b.ci(p.stat as i32);
-                    self.b.ib(Bin::AddI, o, s)
-                };
-                self.b.ib(Bin::AddI, t, w)
-            }
+            None => w,
+            Some(o) => self.b.ib(Bin::AddI, o, w),
         };
-        Ok(Place { ty: el, stat: 0, off: Some(off), ..p.clone() })
+        Ok(Place { ty: el, off: Some(off), ..p.clone() })
     }
 
     fn for_loop(&mut self, var: &str, from: &Expr, to: &Expr, body: &[Stmt], span: Span) -> LResult<()> {
@@ -1769,7 +1906,10 @@ impl Lowerer {
         if let (V::Lit(a), V::Lit(z)) = (&a, &z) {
             let (a, z) = (a.floor() as i64, z.floor() as i64);
             let count = (z - a).max(0) as u64;
-            if count <= UNROLL_MAX as u64 && !has_own_break(body) {
+            // Small loops unroll; so do up to 64 iterations of a one-line
+            // body (FIR taps, sums), where the loop overhead would dominate.
+            let unroll = count <= UNROLL_MAX as u64 || (count <= 64 && body.len() == 1);
+            if unroll && !has_own_break(body) {
                 for k in a..z {
                     self.scoped(|l| {
                         l.bind(var, Bind::Const(V::Lit(k as f64)));
@@ -1790,7 +1930,7 @@ impl Lowerer {
         let zv = self.to_i(&z, to.span)?;
         let iv = self.b.var(Ty::I32);
         self.b.set(iv, av);
-        self.b.open();
+        self.b.open_loop();
         self.loops.push(LoopKind::User);
         let cur = self.b.get(iv);
         let done = self.b.cmpi(Cmp::Ge, cur, zv);
@@ -2049,7 +2189,37 @@ impl Lowerer {
                 _ => unreachable!(),
             });
         }
-        err(span, format!("unknown name `{}`", name))
+        let hint = self.suggest(name, false);
+        err(span, format!("unknown name `{}`{}", name, hint))
+    }
+
+    /// ", did you mean `x`?" for a near miss among the names in scope (or
+    /// the functions, for a call).
+    fn suggest(&self, name: &str, call: bool) -> String {
+        let mut cands: Vec<String> = Vec::new();
+        if call {
+            cands.extend(self.fns.keys().cloned());
+            cands.extend(BUILTIN_FNS.iter().map(|s| s.to_string()));
+        } else {
+            if let Some(frame) = self.frames.last() {
+                for scope in frame {
+                    cands.extend(scope.keys().cloned());
+                }
+            }
+            cands.extend(self.globals.keys().cloned());
+            cands.extend(INPUT_NAMES.iter().map(|s| s.to_string()));
+            cands.extend(["PI", "TAU", "E"].iter().map(|s| s.to_string()));
+        }
+        let best = cands
+            .iter()
+            .filter(|c| !c.contains("fuse_"))
+            .map(|c| (edit_distance(name, c), c))
+            .filter(|(d, c)| *d <= 2.max(name.len() / 4) && *d < c.len())
+            .min();
+        match best {
+            Some((_, c)) => format!(", did you mean `{}`?", c),
+            None => String::new(),
+        }
     }
 
     fn if_expr(&mut self, arms: &[(Expr, Vec<crate::parse::Stmt>)], else_: Option<&Vec<crate::parse::Stmt>>, span: Span) -> LResult<V> {
@@ -2129,7 +2299,9 @@ impl Lowerer {
             return Ok(V::Unit);
         };
         // Both branches only compute: evaluate both, select.
-        if Builder::pure_block(&tb) && Builder::pure_block(&eb) && tt.is_some() && et.is_some() {
+        // Small branches that only compute: evaluate both and select (no
+        // branch). Big ones branch, so only the taken side costs.
+        if Builder::pure_block(&tb) && Builder::pure_block(&eb) && tb.len() + eb.len() <= 24 && tt.is_some() && et.is_some() {
             self.b.splice(tb);
             self.b.splice(eb);
             return self.select_v(c, &rt, &tv, &ev, span);
@@ -2336,6 +2508,7 @@ impl Lowerer {
                 b.div(s, c)
             }),
             "tanh" | "fast_tanh" => Some(|b, x| b.tanh(x)),
+            "atan" => Some(|b, x| b.atan(x)),
             "exp" => Some(|b, x| b.exp(x)),
             "exp2" => Some(|b, x| {
                 let y = b.mulc(x, std::f32::consts::LN_2);
@@ -2467,7 +2640,11 @@ impl Lowerer {
                 let v = f_args(self, &vals)?;
                 Ok(V::F(self.b.pow(v[0], v[1])))
             }
-            "atan2" => err(span, "atan2 is not available in audio shaders"),
+            "atan2" => {
+                want(2)?;
+                let v = f_args(self, &vals)?;
+                Ok(V::F(self.b.atan2(v[0], v[1])))
+            }
             "step" => {
                 want(2)?;
                 let v = f_args(self, &vals)?;
@@ -2623,7 +2800,10 @@ impl Lowerer {
                 Ok(V::Unit)
             }
             "param" => err(span, "param(...) is declared at the top level: `let cutoff = param(1200, 20, 20000)`"),
-            _ => err(span, format!("unknown function `{}`", name)),
+            _ => {
+                let hint = self.suggest(name, true);
+                err(span, format!("unknown function `{}`{}", name, hint))
+            }
         }
     }
 }
@@ -2665,13 +2845,34 @@ fn has_own_break(body: &[Stmt]) -> bool {
     stmts(body)
 }
 
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut prev = row[0];
+        row[0] = i;
+        for j in 1..=b.len() {
+            let cur = row[j];
+            row[j] = (row[j] + 1).min(row[j - 1] + 1).min(prev + (a[i - 1] != b[j - 1]) as usize);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+const BUILTIN_FNS: &[&str] = &[
+    "sin", "cos", "tan", "tanh", "atan", "atan2", "exp", "exp2", "log", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
+    "sign", "midi_to_hz", "db_to_gain", "min", "max", "clamp", "mix", "pow", "step", "smoothstep", "vec2", "int", "float", "len",
+    "read", "read_cubic", "rand", "stop",
+];
+
 const INPUT_NAMES: &[&str] = &["sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger"];
 const BUILTIN_NAMES: &[&str] = &[
     "sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger", "PI", "TAU", "E", "voice", "effect", "block", "init",
 ];
 
 /// Lowers a parsed shader into its render (and optional init) programs.
-pub fn lower(items: &[Item]) -> Result<Lowered, ShaderError> {
+pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError> {
     let mut l = Lowerer {
         b: Builder::new(),
         structs: Vec::new(),
@@ -2689,6 +2890,7 @@ pub fn lower(items: &[Item]) -> Result<Lowered, ShaderError> {
         frame_words: 0,
         entry: None,
         in_init: false,
+        prelude_base,
     };
     l.top(items)?;
     let kind = match (l.fns.get("voice"), l.fns.get("effect")) {

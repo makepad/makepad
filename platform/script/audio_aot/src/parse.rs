@@ -62,7 +62,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShaderError> {
             continue;
         }
         let start = i;
-        let tk = if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+        let tk = if c == b'0' && matches!(b.get(i + 1), Some(b'x') | Some(b'X')) {
+            i += 2;
+            while i < b.len() && (b[i].is_ascii_hexdigit() || b[i] == b'_') {
+                i += 1;
+            }
+            let text: String = src[start + 2..i].chars().filter(|c| *c != '_').collect();
+            match u32::from_str_radix(&text, 16) {
+                Ok(v) => Tk::Num(v as i32 as f64, true),
+                Err(_) => return Err(ShaderError::new(start, i, format!("bad hex number `{}`", &src[start..i]))),
+            }
+        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
             let mut int = true;
             while i < b.len() {
                 let d = b[i];
@@ -143,6 +153,15 @@ pub enum Item {
     Var { name: String, ann: Option<TypeAnn>, value: Expr, span: Span },
     Struct { name: String, fields: Vec<(String, Expr)>, span: Span },
     Fn(FnDecl),
+}
+
+impl Item {
+    pub fn name(&self) -> &str {
+        match self {
+            Item::Let { name, .. } | Item::Var { name, .. } | Item::Struct { name, .. } => name,
+            Item::Fn(f) => &f.name,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -451,6 +451,51 @@ struct Emit<'a> {
     /// (continue label, break label) per enclosing loop.
     loop_labels: Vec<(usize, usize)>,
     loop_id: u32,
+    /// Proven upper bound of each integer value (wraps, masks, and small
+    /// constant scalings of them), when there is one: an offset proven
+    /// below its extent needs no clamp.
+    bounds: Vec<Option<u32>>,
+}
+
+/// Upper bounds of offsets built from `Wrap`/mask/const arithmetic.
+fn bounds(p: &Program) -> Vec<Option<u32>> {
+    let mut out = vec![None; p.vals.len()];
+    let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
+    fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, op) => {
+                    let pos = |c: Option<i32>| c.filter(|c| *c >= 0).map(|c| c as u32);
+                    let r = match *op {
+                        Op::ConstI(c) => {
+                            consts[v.0 as usize] = Some(c);
+                            pos(Some(c))
+                        }
+                        Op::Wrap(_, len) => Some(len - 1),
+                        Op::Bin(Bin::AddI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
+                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_add(c),
+                            _ => None,
+                        },
+                        Op::Bin(Bin::MulI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
+                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_mul(c),
+                            _ => None,
+                        },
+                        Op::Bin(Bin::AndI, a, b) => pos(consts[b.0 as usize]).or(pos(consts[a.0 as usize])),
+                        _ => None,
+                    };
+                    out[v.0 as usize] = r;
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, out, consts);
+                    walk(e, out, consts);
+                }
+                Stmt::Loop { body, .. } => walk(body, out, consts),
+                _ => {}
+            }
+        }
+    }
+    walk(&p.body, &mut out, &mut consts);
+    out
 }
 
 impl<'a> Emit<'a> {
@@ -564,6 +609,21 @@ impl<'a> Emit<'a> {
                     self.mov_imm(XS0, base);
                     (rb, None)
                 }
+            }
+            Some(o) if self.bounds[o.0 as usize].is_some_and(|b| b < extent) => {
+                // Proven in range: no clamp.
+                let ro = self.gsrc(Ent::Val(o.0), XS0);
+                if base == 0 {
+                    if ro != XS0 {
+                        self.e(mov(XS0, ro));
+                    }
+                } else if base < 4096 {
+                    self.e(add_imm(XS0, ro, base));
+                } else {
+                    self.mov_imm(XS1, base);
+                    self.e(ADD | (XS1 as u32) << 16 | (ro as u32) << 5 | XS0 as u32);
+                }
+                (rb, None)
             }
             Some(o) => {
                 let ro = self.gsrc(Ent::Val(o.0), XS0);
@@ -997,6 +1057,7 @@ pub fn compile(p: &Program) -> Option<Code> {
         fixups: Vec::new(),
         loop_labels: Vec::new(),
         loop_id: 0,
+        bounds: bounds(p),
     };
     // Prologue: frame record, callee-saved x19..x28 and d8..d15.
     em.e(0xA9BF_7BFD); // stp x29, x30, [sp, #-16]!

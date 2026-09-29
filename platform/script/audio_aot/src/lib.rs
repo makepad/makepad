@@ -16,6 +16,7 @@
 //! every machine, offline or live.
 
 pub mod fuse;
+mod guide;
 pub mod ir;
 pub mod lower;
 pub mod parse;
@@ -23,6 +24,7 @@ pub mod parse;
 #[cfg(target_arch = "aarch64")]
 pub mod arm64;
 
+pub use guide::GUIDE;
 pub use fuse::{fuse, FuseError, FuseNode, Port};
 pub use lower::{header, Kind, ParamInfo, StateVar, CONTROL_BLOCK, CTX_FRAME, CTX_PARAMS, CTX_RATE, MAX_FRAMES};
 
@@ -90,12 +92,31 @@ pub fn compile(code: &str) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
 pub fn compile_with(code: &str, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
     let toks = parse::lex(code).map_err(|e| vec![e])?;
     let items = parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
-    compile_items(&items, backend)
+    compile_items(&items, code.len(), backend)
+}
+
+/// The prelude: DSP building blocks every shader sees (see prelude.splash).
+pub const PRELUDE: &str = include_str!("prelude.splash");
+
+/// The prelude's items, parsed with spans placed after `user_len` bytes of
+/// user code (so a span tells which side an error is on).
+fn prelude_items(user_len: usize) -> Vec<parse::Item> {
+    let mut toks = parse::lex(PRELUDE).expect("the prelude lexes");
+    for t in &mut toks {
+        t.start += user_len + 1;
+        t.end += user_len + 1;
+    }
+    parse::Parser::new(&toks).items().expect("the prelude parses")
 }
 
 /// Compiles a parsed shader (also the back half of [`fuse::fuse`]).
-pub(crate) fn compile_items(items: &[parse::Item], backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
-    let lowered = lower::lower(items).map_err(|e| vec![e])?;
+pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
+    // Prelude items the shader does not redefine come first (a shader's
+    // state may be a prelude struct), then the shader's own.
+    let names: std::collections::HashSet<String> = items.iter().map(|i| i.name().to_string()).collect();
+    let mut all: Vec<parse::Item> = prelude_items(user_len).into_iter().filter(|i| !names.contains(i.name())).collect();
+    all.extend(items.iter().cloned());
+    let lowered = lower::lower(&all, user_len + 1).map_err(|e| vec![e])?;
     let ctx_words = CTX_PARAMS as usize + lowered.params.len();
     let state_words = lowered.state_init.len();
     let shared_words = lowered.shared_init.len().max(1);
@@ -297,6 +318,14 @@ impl AudioShader {
         all
     }
 
+    /// A legato note change: new pitch and velocity without a retrigger
+    /// (state, envelopes and `trigger` untouched; slides are the shader's).
+    pub fn legato(&self, state: &mut [u32], note: f32, velocity: f32) {
+        state[header::NOTE as usize] = note.to_bits();
+        state[header::VELOCITY as usize] = velocity.to_bits();
+        state[header::GATE as usize] = 1f32.to_bits();
+    }
+
     pub fn note_off(&self, state: &mut [u32]) {
         state[header::GATE as usize] = 0f32.to_bits();
     }
@@ -419,4 +448,154 @@ impl Instance {
             done += k;
         }
     }
+}
+
+/// What [`check`] found: a compile plus an offline audition of a test
+/// phrase, for the editor and the AI composer's shader tools.
+#[derive(Clone, Debug)]
+pub struct CheckReport {
+    pub kind: Kind,
+    pub params: Vec<ParamInfo>,
+    pub state_words: usize,
+    pub backend: Backend,
+    /// Largest absolute sample.
+    pub peak: f32,
+    pub rms: f32,
+    /// Mean of the output (a DC offset shows here).
+    pub dc: f32,
+    /// NaN or infinite samples.
+    pub nonfinite: usize,
+    /// Share of samples at or above full scale.
+    pub clipped: f32,
+    /// Native cost of one instance, ns per frame (48 kHz: 20833 = one core).
+    pub ns_per_frame: f64,
+    /// Instruments: seconds from the last release until the voice stopped
+    /// or went quiet (-80 dB); None if it never did within 8 s.
+    pub tail_secs: Option<f32>,
+    /// Plain-language problems found (empty when it looks healthy).
+    pub warnings: Vec<String>,
+}
+
+/// Compiles `code` and auditions it at 48 kHz: an instrument plays a short
+/// phrase (C3 E3 G3, held, then released), an effect processes a test
+/// signal (a saw chord with clicks). Off the audio thread.
+pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
+    const RATE: f32 = 48000.0;
+    let shader = compile(code)?;
+    let secs = 3.0;
+    let n = (secs * RATE) as usize;
+    let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+    let mut tail_secs = None;
+    let t0 = std::time::Instant::now();
+    let mut instance_frames = 0usize;
+    match shader.kind {
+        Kind::Instrument => {
+            let notes = [48.0f32, 52.0, 55.0];
+            let release_at = (1.0 * RATE) as usize;
+            let mut voices: Vec<Instance> = notes.iter().map(|_| Instance::new(shader.clone(), RATE)).collect();
+            let mut last_loud = 0usize;
+            let mut stopped_at = None;
+            let (mut vl, mut vr) = (vec![0.0f32; 128], vec![0.0f32; 128]);
+            let mut at = 0;
+            while at < n {
+                let k = 128.min(n - at);
+                let mut block_peak = 0.0f32;
+                let mut all_stopped = at >= release_at;
+                for (i, v) in voices.iter_mut().enumerate() {
+                    let start = (i as f32 * 0.25 * RATE) as usize;
+                    if at == start {
+                        v.note_on(notes[i], 0.8, i as u32 + 1);
+                    }
+                    if at == release_at {
+                        v.note_off();
+                    }
+                    if at < start || shader.stopped(&v.state) {
+                        continue;
+                    }
+                    all_stopped = false;
+                    vl[..k].fill(0.0);
+                    vr[..k].fill(0.0);
+                    v.render(&mut vl[..k], &mut vr[..k]);
+                    instance_frames += k;
+                    for j in 0..k {
+                        l[at + j] += vl[j];
+                        r[at + j] += vr[j];
+                        block_peak = block_peak.max(vl[j].abs()).max(vr[j].abs());
+                    }
+                }
+                if block_peak > 1e-4 {
+                    last_loud = at + k;
+                }
+                if all_stopped && stopped_at.is_none() {
+                    stopped_at = Some(at);
+                }
+                at += k;
+            }
+            let end = stopped_at.unwrap_or(last_loud).max(release_at);
+            if end < n - 128 {
+                tail_secs = Some((end - release_at) as f32 / RATE);
+            }
+        }
+        Kind::Effect => {
+            let mut inst = Instance::new(shader.clone(), RATE);
+            let mut phases = [0.0f32; 3];
+            let (mut il, mut ir) = (vec![0.0f32; n], vec![0.0f32; n]);
+            for i in 0..n {
+                let mut x = 0.0;
+                for (k, f) in [130.8f32, 164.8, 196.0].iter().enumerate() {
+                    phases[k] = (phases[k] + f / RATE).fract();
+                    x += (2.0 * phases[k] - 1.0) * 0.15;
+                }
+                if i % 12000 == 0 {
+                    x += 0.5;
+                }
+                il[i] = x;
+                ir[i] = x * 0.9;
+            }
+            inst.process(&il, &ir, &mut l, &mut r);
+            instance_frames = n;
+        }
+    }
+    let ns_per_frame = t0.elapsed().as_secs_f64() * 1e9 / instance_frames.max(1) as f64;
+    let all = l.iter().chain(r.iter());
+    let nonfinite = all.clone().filter(|x| !x.is_finite()).count();
+    let finite: Vec<f32> = all.filter(|x| x.is_finite()).copied().collect();
+    let peak = finite.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let rms = (finite.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / finite.len().max(1) as f64).sqrt() as f32;
+    let dc = (finite.iter().map(|x| *x as f64).sum::<f64>() / finite.len().max(1) as f64) as f32;
+    let clipped = finite.iter().filter(|x| x.abs() >= 1.0).count() as f32 / finite.len().max(1) as f32;
+    let mut warnings = Vec::new();
+    if nonfinite > 0 {
+        warnings.push(format!("{} NaN/infinite samples: look for a division by zero, log of 0 or an unstable filter", nonfinite));
+    }
+    if peak < 1e-4 {
+        warnings.push("silent: nothing reaches the output (check the return value and the envelope)".into());
+    } else if clipped > 0.001 {
+        warnings.push(format!("{:.1}% of samples at or above full scale: lower the gain", clipped * 100.0));
+    } else if peak > 1.0 {
+        warnings.push(format!("peaks at {:.2}: lower the gain", peak));
+    }
+    if dc.abs() > 0.05 * rms.max(1e-6) && dc.abs() > 0.01 {
+        warnings.push(format!("DC offset {:.3}: add a dc_block() (asymmetric shapers make DC)", dc));
+    }
+    if shader.kind == Kind::Instrument && tail_secs.is_none() {
+        warnings.push("voices never end after release: fade out on `gate == 0.0` (an adsr() does), or call stop()".into());
+    }
+    if ns_per_frame > 2000.0 {
+        warnings.push(format!("expensive: {:.0} ns per frame per voice ({:.1}% of a core at 48 kHz)", ns_per_frame, ns_per_frame * 48000.0 / 1e7));
+    }
+    Ok(CheckReport {
+        kind: shader.kind,
+        params: shader.params.clone(),
+        state_words: shader.state_words(),
+        backend: shader.backend(),
+        peak,
+        rms,
+        dc,
+        nonfinite,
+        clipped,
+        ns_per_frame,
+        tail_secs,
+        warnings,
+    })
 }

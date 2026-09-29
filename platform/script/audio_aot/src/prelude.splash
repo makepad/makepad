@@ -1,0 +1,300 @@
+// The prelude: DSP building blocks every audio shader can use without
+// declaring them. A shader's own item with the same name wins. Only what a
+// shader calls is compiled into it (helpers are inlined), so an unused
+// block costs nothing.
+//
+// Conventions: phases run 0..1 and advance by dt = freq / sample_rate;
+// filters and envelopes are structs you keep as state (`var f = Svf{}`)
+// and pass to their functions, which update them in place.
+
+// ---- Oscillators -----------------------------------------------------------
+
+// Advances a phase by dt, wrapping into 0..1.
+fn advance(p, dt) { fract(p + dt) }
+
+// The polyBLEP residual for a unit step at phase 0 (dt = phase increment).
+fn blep(t, dt) {
+    if t < dt {
+        let x = t / dt
+        return x + x - x * x - 1.0
+    }
+    if t > 1.0 - dt {
+        let x = (t - 1.0) / dt
+        return x * x + x + x + 1.0
+    }
+    0.0
+}
+
+// Band-limited saw, -1..1.
+fn saw_blep(p, dt) { 2.0 * p - 1.0 - blep(p, dt) }
+
+// Band-limited pulse of width w (0.5 = square), -1..1.
+fn pulse_blep(p, dt, w) {
+    let v = if p < w { 1.0 } else { -1.0 }
+    v + blep(p, dt) - blep(fract(p + 1.0 - w), dt)
+}
+
+// Alias-free triangle: a leaky-integrated band-limited square.
+struct Tri { z: 0.0 }
+fn tri_blep(o, p, dt) {
+    let sq = pulse_blep(p, dt, 0.5)
+    o.z = dt * 4.0 * sq + (1.0 - dt * 0.5) * o.z
+    o.z
+}
+
+// A saw with a brightness knob: the parabola window rounds the edge, so
+// `bright` (about cutoff / freq) sweeps like a filter. -1..1.
+fn varsaw(p, bright) { (p - 0.5) * 2.0 * soft_clip(bright * p * (1.0 - p)) }
+
+// ---- Filters ---------------------------------------------------------------
+
+// Zero-delay (TPT) state-variable filter. svf_set at control rate (in
+// block()), then one of svf_lp/bp/hp/notch/peak/ap per sample.
+struct Svf {
+    ic1: 0.0
+    ic2: 0.0
+    a1: 0.0
+    a2: 0.0
+    a3: 0.0
+    k: 1.0
+}
+fn svf_set(f, cutoff, q) {
+    let g = tan(PI * clamp(cutoff, 10.0, sample_rate * 0.45) / sample_rate)
+    f.k = 1.0 / max(q, 0.1)
+    f.a1 = 1.0 / (1.0 + g * (g + f.k))
+    f.a2 = g * f.a1
+    f.a3 = g * f.a2
+}
+// One step; returns vec2(low, band) (band normalised to unity at the peak).
+fn svf_step(f, x) {
+    let v3 = x - f.ic2
+    let v1 = f.a1 * f.ic1 + f.a2 * v3
+    let v2 = f.ic2 + f.a2 * f.ic1 + f.a3 * v3
+    f.ic1 = 2.0 * v1 - f.ic1
+    f.ic2 = 2.0 * v2 - f.ic2
+    vec2(v2, f.k * v1)
+}
+fn svf_lp(f, x) { svf_step(f, x).x }
+fn svf_bp(f, x) { svf_step(f, x).y }
+fn svf_hp(f, x) {
+    let o = svf_step(f, x)
+    x - o.y - o.x
+}
+fn svf_notch(f, x) { x - svf_step(f, x).y }
+fn svf_ap(f, x) { x - 2.0 * svf_step(f, x).y }
+
+// Four-pole transistor-ladder low-pass with a saturating input: the acid
+// squelch. res 0..1 (self-oscillates near 1).
+struct Ladder {
+    s0: 0.0
+    s1: 0.0
+    s2: 0.0
+    s3: 0.0
+    g: 0.0
+    res: 0.0
+}
+fn ladder_set(f, cutoff, res) {
+    let t = tan(PI * clamp(cutoff / sample_rate, 0.0001, 0.45))
+    f.g = t / (1.0 + t)
+    f.res = clamp(res, 0.0, 1.05) * 4.0
+}
+fn ladder(f, x) {
+    let u = soft_clip(x - f.res * f.s3)
+    let v0 = (u - f.s0) * f.g
+    let y0 = v0 + f.s0
+    f.s0 = y0 + v0
+    let v1 = (soft_clip(y0) - f.s1) * f.g
+    let y1 = v1 + f.s1
+    f.s1 = y1 + v1
+    let v2 = (y1 - f.s2) * f.g
+    let y2 = v2 + f.s2
+    f.s2 = y2 + v2
+    let v3 = (y2 - f.s3) * f.g
+    let y3 = v3 + f.s3
+    f.s3 = y3 + v3
+    y3 * (1.0 + f.res * 0.25)
+}
+
+// One-pole low/high-pass.
+struct OnePole {
+    z: 0.0
+    a: 1.0
+}
+fn onepole_set(f, cutoff) { f.a = 1.0 - exp(-TAU * clamp(cutoff, 1.0, sample_rate * 0.49) / sample_rate) }
+fn onepole_lp(f, x) {
+    f.z = f.z + (x - f.z) * f.a
+    f.z
+}
+fn onepole_hp(f, x) { x - onepole_lp(f, x) }
+
+// DC blocker (about 10 Hz).
+struct DcBlock {
+    x1: 0.0
+    y1: 0.0
+}
+fn dc_block(d, x) {
+    let y = x - d.x1 + 0.9987 * d.y1
+    d.x1 = x
+    d.y1 = y
+    y
+}
+
+// First-order allpass with coefficient c (phasers, fractional delays).
+struct Allpass1 {
+    x1: 0.0
+    y1: 0.0
+}
+fn allpass1(a, x, c) {
+    let y = c * (x - a.y1) + a.x1
+    a.x1 = x
+    a.y1 = y
+    y
+}
+
+// ---- Envelopes -------------------------------------------------------------
+
+// ADSR driven by the note (trigger and gate): linear attack, exponential
+// decay and release. Times in seconds, sustain 0..1.
+struct Adsr {
+    level: 0.0
+    stage: int(0)
+    // Cached per-sample coefficients for the last decay/release times.
+    d: -1.0
+    r: -1.0
+    kd: 0.0
+    kr: 0.0
+}
+fn adsr(e, a, d, s, r) {
+    if trigger {
+        e.stage = 1
+    }
+    if gate == 0.0 && e.stage != 0 {
+        e.stage = 3
+    }
+    if e.stage == 1 {
+        e.level = e.level + 1.0 / max(a * sample_rate, 1.0)
+        if e.level >= 1.0 {
+            e.level = 1.0
+            e.stage = 2
+        }
+    } elif e.stage == 2 {
+        if d != e.d {
+            e.d = d
+            e.kd = exp(-5.0 / (max(d, 0.0005) * sample_rate))
+        }
+        e.level = s + (e.level - s) * e.kd
+    } elif e.stage == 3 {
+        if r != e.r {
+            e.r = r
+            e.kr = exp(-5.0 / (max(r, 0.0005) * sample_rate))
+        }
+        e.level = e.level * e.kr
+        if e.level < 0.00001 {
+            e.level = 0.0
+            e.stage = 0
+        }
+    }
+    e.level
+}
+
+// A percussive decay from the trigger: 1 at the hit, -60 dB after `d` s.
+struct Decay {
+    level: 0.0
+    d: -1.0
+    k: 0.0
+}
+fn decay_env(e, d) {
+    if trigger {
+        e.level = 1.0
+    }
+    if d != e.d {
+        e.d = d
+        e.k = exp(-6.9078 / (max(d, 0.0005) * sample_rate))
+    }
+    e.level = e.level * e.k
+    e.level
+}
+
+// ---- Delay lines (any f32 array is a ring buffer) --------------------------
+
+// Reads `d` samples (fractional) behind write index `w`.
+fn tap(buf, w, d) { read(buf, float(w) - d) }
+fn tap_cubic(buf, w, d) { read_cubic(buf, float(w) - d) }
+
+// ---- Shaping ---------------------------------------------------------------
+
+// Rational tanh-like saturation: smooth, odd, reaches +-1 at +-3.
+fn soft_clip(x) {
+    let y = clamp(x, -3.0, 3.0)
+    y * (27.0 + y * y) / (27.0 + 9.0 * y * y)
+}
+fn hard_clip(x) { clamp(x, -1.0, 1.0) }
+// Triangle wavefolder: x within -1..1 passes, beyond it folds back.
+fn fold(x) { 4.0 * abs(fract(x * 0.25 + 0.25) - 0.5) - 1.0 }
+// Asymmetric saturation (even harmonics), zero at rest.
+fn asym_clip(x, bias) { soft_clip(x + bias) - soft_clip(bias) }
+
+// ---- Stereo ------------------------------------------------------------------
+
+// Equal-power pan, p in -1..1.
+fn pan(x, p) {
+    let a = (clamp(p, -1.0, 1.0) + 1.0) * PI * 0.25
+    vec2(x * cos(a), x * sin(a))
+}
+// Mid/side width: 0 = mono, 1 = as is, 2 = twice as wide.
+fn width(v, w) {
+    let m = (v.x + v.y) * 0.5
+    let s = (v.x - v.y) * 0.5 * w
+    vec2(m + s, m - s)
+}
+
+// ---- 4x oversampling -------------------------------------------------------
+//
+//     for k in 0..4 {
+//         os4_push(o, shape(os4_up(o, x, k)))
+//     }
+//     let y = os4_out(o)
+//
+// A 64-tap weighted-least-squares low-pass at 4x the rate: flat to 18 kHz,
+// images and aliases 58 dB down (48 kHz). Latency: about 8 samples.
+let OS4_TAPS = [
+    4.54109714e-05, 0.000254704495, 0.00060465543, 0.000930314923, 0.00093203865, 0.000338821264, -0.0008442829, -0.00216390554,
+    -0.00280132488, -0.00197667701, 0.000475579944, 0.00370374771, 0.00597045199, 0.00544479408, 0.00136977675, -0.00503920881,
+    -0.0106524806, -0.0117292876, -0.00604482805, 0.00522996961, 0.017128393, 0.0226483209, 0.0162531968, -0.00242181263,
+    -0.0266736884, -0.0441041262, -0.0412534376, -0.00977462385, 0.0486412124, 0.121145034, 0.187415828, 0.226947433,
+    0.226947433, 0.187415828, 0.121145034, 0.0486412124, -0.00977462385, -0.0412534376, -0.0441041262, -0.0266736884,
+    -0.00242181263, 0.0162531968, 0.0226483209, 0.017128393, 0.00522996961, -0.00604482805, -0.0117292876, -0.0106524806,
+    -0.00503920881, 0.00136977675, 0.00544479408, 0.00597045199, 0.00370374771, 0.000475579944, -0.00197667701, -0.00280132488,
+    -0.00216390554, -0.0008442829, 0.000338821264, 0.00093203865, 0.000930314923, 0.00060465543, 0.000254704495, 4.54109714e-05,
+]
+struct Os4 {
+    up: [0.0; 16]
+    dn: [0.0; 64]
+    w: int(0)
+    dw: int(0)
+}
+// The k-th (0..3) of four upsampled values for input x.
+fn os4_up(o, x, k) {
+    if k == 0 {
+        o.up[o.w] = x
+        o.w = o.w + 1
+    }
+    let s = 0.0
+    for j in 0..16 {
+        s = s + OS4_TAPS[4 * j + k] * o.up[o.w - 1 - j]
+    }
+    s * 4.0
+}
+// Feeds one processed 4x value to the decimator.
+fn os4_push(o, y) {
+    o.dn[o.dw] = y
+    o.dw = o.dw + 1
+}
+// The decimated output (after the 4th push of a frame).
+fn os4_out(o) {
+    let s = 0.0
+    for i in 0..64 {
+        s = s + OS4_TAPS[i] * o.dn[o.dw - 1 - i]
+    }
+    s
+}

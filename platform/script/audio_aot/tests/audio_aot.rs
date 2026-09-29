@@ -573,3 +573,85 @@ fn fusion_errors_name_the_node() {
     let e = fuse(&[FuseNode { name: "a", code: good, inputs: vec![Port::Node(0)] }], &[Port::Node(0)], Backend::Interp).unwrap_err();
     assert!(e.error.message.contains("not before it"));
 }
+
+// -- the prelude, diagnostics and check() ---------------------------------------
+
+#[test]
+fn the_prelude_works_and_backends_agree() {
+    let src = r#"
+        var f = Svf{}
+        var lad = Ladder{}
+        var op = OnePole{}
+        var dc = DcBlock{}
+        var ap = Allpass1{}
+        var tri = Tri{}
+        var env = Adsr{}
+        var dec = Decay{}
+        var os = Os4{}
+        var buf = [0.0; 256]
+        var w = int(0)
+        var p = 0.0
+        fn block() {
+            svf_set(f, 1200.0, 2.0)
+            ladder_set(lad, 800.0, 0.7)
+            onepole_set(op, 3000.0)
+        }
+        fn voice() {
+            let dt = freq / sample_rate
+            p = advance(p, dt)
+            let x = saw_blep(p, dt) + pulse_blep(p, dt, 0.3) * 0.5 + tri_blep(tri, p, dt) + varsaw(p, 4.0)
+            let y = svf_lp(f, x) + svf_bp(f, x) + svf_hp(f, x) + svf_notch(f, x) + svf_ap(f, x)
+            let z = ladder(lad, y) + onepole_lp(op, y) + onepole_hp(op, y) + dc_block(dc, y) + allpass1(ap, y, 0.3)
+            buf[w] = z
+            w = w + 1
+            let d = tap(buf, w, 17.5) + tap_cubic(buf, w, 33.25)
+            let s = soft_clip(d) + hard_clip(d) + fold(d * 2.0) + asym_clip(d, 0.2)
+            for k in 0..4 {
+                os4_push(os, soft_clip(os4_up(os, s, k)))
+            }
+            let e = adsr(env, 0.01, 0.1, 0.5, 0.1) * decay_env(dec, 0.5)
+            width(pan(os4_out(os), 0.3), 1.5) * e * 0.05 + vec2(atan(x) * 0.001, atan2(x, 0.5) * 0.001)
+        }
+    "#;
+    let s = build(src, Backend::Native);
+    let (nl, nr) = perform(&s, false, &[128], 30000);
+    let (il, ir) = perform(&s, true, &[128], 30000);
+    assert_eq!(bits(&nl), bits(&il));
+    assert_eq!(bits(&nr), bits(&ir));
+    assert!(nl.iter().all(|x| x.is_finite()) && nl.iter().any(|x| x.abs() > 1e-3));
+}
+
+#[test]
+fn a_shader_item_overrides_the_prelude() {
+    let s = build("fn soft_clip(x) { 0.25 }\nfn effect(l, r) { vec2(soft_clip(l), 0.0) }", Backend::Native);
+    let mut i = Instance::new(s, RATE);
+    let (mut a, mut b) = (vec![0.0; 4], vec![0.0; 4]);
+    i.process(&[0.9; 4], &[0.0; 4], &mut a, &mut b);
+    assert_eq!(a, vec![0.25; 4]);
+}
+
+#[test]
+fn near_misses_get_suggestions_and_prelude_errors_point_at_the_call() {
+    let e = compile_err("var phase = 0.0\nfn voice() { phse + 1.0 }");
+    assert!(e.message.contains("did you mean `phase`"), "{}", e.message);
+    let e = compile_err("fn voice() { saw_blp(0.5, 0.01) }");
+    assert!(e.message.contains("did you mean `saw_blep`"), "{}", e.message);
+    let e = compile_err("var f = Svf{}\nfn voice() { f.cutof }");
+    assert!(e.message.contains("it has"), "{}", e.message);
+    // A wrong argument to a prelude helper is reported where it is called.
+    let src = "fn voice() { svf_lp(1.0, 0.5) }";
+    let e = compile_err(src);
+    assert!(e.message.starts_with("in `svf_lp`"), "{}", e.message);
+    assert_eq!(&src[e.start..e.end], "svf_lp(1.0, 0.5)");
+}
+
+#[test]
+fn check_reports_health() {
+    let good = makepad_script_audio_aot::check(&shader_src("saw_svf")).unwrap();
+    assert!(good.warnings.is_empty(), "{:?}", good.warnings);
+    assert!(good.tail_secs.is_some() && good.peak > 0.05);
+    let endless = makepad_script_audio_aot::check("var p = 0.0\nfn voice() { p = fract(p + freq / sample_rate)\n sin(TAU * p) * 0.3 }").unwrap();
+    assert!(endless.warnings.iter().any(|w| w.contains("never end")), "{:?}", endless.warnings);
+    let broken = makepad_script_audio_aot::check("fn effect(l, r) { vec2(log(0.0 * l) * 0.0, l * 3.0) }").unwrap();
+    assert!(broken.nonfinite > 0 && broken.warnings.len() >= 2, "{:?}", broken.warnings);
+}
