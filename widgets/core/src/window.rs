@@ -1050,8 +1050,9 @@ impl Window {
     /// The rectangles of the controls an app hangs in its caption bar: a
     /// press there is a click, the rest of the bar drags the window. Plain
     /// views (a toolbar group, a spacer that fills the bar) are looked into,
-    /// not counted whole, and text is not a control: the gaps between buttons,
-    /// the title and status text all drag like the empty bar.
+    /// not counted whole, and text and icons are not controls: the gaps
+    /// between buttons, the title, a logo and status text all drag like the
+    /// empty bar.
     fn caption_app_rects(&mut self, cx: &mut Cx) -> Vec<Rect> {
         fn collect(cx: &mut Cx, children: Vec<WidgetRef>, rects: &mut Vec<Rect>) {
             for child in children {
@@ -1063,7 +1064,8 @@ impl Window {
                     collect(cx, inner, rects);
                     continue;
                 }
-                if child.borrow::<Label>().is_some() {
+                // Text and icons take no input: a logo or a title drags.
+                if child.borrow::<Label>().is_some() || child.borrow::<crate::icon::Icon>().is_some() {
                     continue;
                 }
                 let rect = child.area().rect(cx);

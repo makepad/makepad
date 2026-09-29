@@ -12,7 +12,7 @@ use {
             apple_classes::get_apple_class_global,
             apple_util::{
                 get_event_key_modifier, get_event_mouse_button, load_mouse_cursor,
-                nsstring_to_string, nsurl_to_app_open_item, superclass,
+                nsstring_to_string, nsurl_to_app_open_item, str_to_nsstring, superclass,
             },
             cx_native::EventFlow,
             macos::{
@@ -564,6 +564,20 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         unsafe {
             if cw.mouse_down_can_drag_window() {
+                // A double-click on the caption does what the user set in
+                // System Settings > Desktop & Dock (zoom by default).
+                let clicks: i64 = msg_send![event, clickCount];
+                if clicks == 2 {
+                    let defaults: ObjcId = msg_send![class!(NSUserDefaults), standardUserDefaults];
+                    let action: ObjcId = msg_send![defaults, stringForKey: str_to_nsstring("AppleActionOnDoubleClick")];
+                    let action = if action == nil { String::new() } else { nsstring_to_string(action) };
+                    match action.as_str() {
+                        "Minimize" => { let () = msg_send![cw.window, miniaturize: nil]; }
+                        "None" => {}
+                        _ => { let () = msg_send![cw.window, zoom: nil]; }
+                    }
+                    return;
+                }
                 let () = msg_send![cw.window, performWindowDragWithEvent: event];
                 return;
             }
