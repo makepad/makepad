@@ -743,7 +743,7 @@ pub fn lexical_provider(language: LanguageId) -> &'static dyn LexicalProvider {
         &MARKDOWN
     } else if language == LanguageId::Sql {
         &SQL
-    } else if language == LanguageId::Toml {
+    } else if language == LanguageId::Toml || language == LanguageId::Ini {
         &TOML
     } else if language == LanguageId::Json {
         &JSON
@@ -797,7 +797,7 @@ pub fn lexer_schema(language: LanguageId) -> u32 {
         MARKDOWN_LEXER_VERSION
     } else if language == LanguageId::Sql {
         SQL_LEXER_VERSION
-    } else if language == LanguageId::Toml {
+    } else if language == LanguageId::Toml || language == LanguageId::Ini {
         TOML_LEXER_VERSION
     } else if language == LanguageId::Json {
         JSON_LEXER_VERSION

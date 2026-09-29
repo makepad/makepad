@@ -12,7 +12,8 @@ pub fn inventory_extensions() -> &'static [&'static str] {
         "svg", "md", "markdown", "sql", "ddl", "pgsql", "psql", "mysql", "tsql", "plsql", "pks",
         "pkb", "json", "jsonl", "geojson", "jsonc", "json5", "sh", "ksh", "mksh", "bash", "bats",
         "zsh", "go", "php", "phtml", "kt", "kts", "dart", "swift", "rb", "rake", "gemspec", "ru",
-        "fs", "fsi", "fsx", "zig", "zon", "hs", "lhs",
+        "fs", "fsi", "fsx", "zig", "zon", "hs", "lhs", "uasset", "umap", "uproject", "uplugin",
+        "ini",
     ]
 }
 
@@ -544,6 +545,29 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
             note: "haskell source",
         };
     }
+    for (unreal_ext, name, note) in [
+        ("uasset", "asset", "unreal asset package"),
+        ("umap", "map", "unreal map package"),
+        ("uproject", "project", "unreal project descriptor"),
+        ("uplugin", "plugin", "unreal plugin descriptor"),
+    ] {
+        if eq_ignore(ext, unreal_ext) {
+            return Detection {
+                language: LanguageId::Unreal,
+                dialect: dialect(LanguageId::Unreal, name),
+                source: DetectionSource::Extension,
+                note,
+            };
+        }
+    }
+    if eq_ignore(ext, "ini") {
+        return Detection {
+            language: LanguageId::Ini,
+            dialect: Dialect::default_for(LanguageId::Ini),
+            source: DetectionSource::Extension,
+            note: "ini configuration",
+        };
+    }
     if eq_ignore(ext, "lhs") {
         return Detection {
             language: LanguageId::Haskell,
@@ -766,6 +790,7 @@ pub fn has_compiled_frontend(language: LanguageId) -> bool {
             | LanguageId::FSharp
             | LanguageId::Zig
             | LanguageId::Haskell
+            | LanguageId::Unreal
     )
 }
 
@@ -781,5 +806,6 @@ pub fn is_text_format(language: LanguageId) -> bool {
             | LanguageId::Markdown
             | LanguageId::Json
             | LanguageId::Shell
+            | LanguageId::Ini
     )
 }
