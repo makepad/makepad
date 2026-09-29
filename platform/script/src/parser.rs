@@ -1352,6 +1352,19 @@ impl ScriptParser {
         false
     }
 
+    /// Whether the nearest enclosing container is an array literal's `[ ]`.
+    fn inside_array_literal(&self) -> bool {
+        for state in self.state.iter().rev() {
+            if matches!(state, State::EndBareSquare) {
+                return true;
+            }
+            if state.is_round_square_container() || state.is_statement_container() {
+                return false;
+            }
+        }
+        false
+    }
+
     /// Inserts one opcode with its source-map entry, keeping both vectors in
     /// lockstep. A malformed field chain can reach a rewrite with the
     /// source-map sidecar shorter than the opcode stream; missing entries are
@@ -4398,6 +4411,15 @@ impl ScriptParser {
                 if tokenizer.token_preceded_by_newline(self.index)
                     && (tok.is_open_round() || tok.is_open_square() || tok.is_open_curly())
                     && !self.inside_round_square_bracket()
+                {
+                    return 0;
+                }
+                // Array literal elements may be space separated, so there a
+                // `[` after whitespace starts the next element: `[[1 2] [3 4]]`
+                // is two rows, not a row indexed by `[3 4]`. `a[i]` indexes.
+                if tok.is_open_square()
+                    && tokenizer.token_preceded_by_space(self.index)
+                    && self.inside_array_literal()
                 {
                     return 0;
                 }

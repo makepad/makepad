@@ -224,6 +224,9 @@ pub struct ScriptTokenPos {
     /// previous one. Lets the parser keep statements newline-delimited (a
     /// continuation token on a new line begins a new statement, Go/Swift-style).
     pub preceded_by_newline: bool,
+    /// True if any whitespace separated this token from the previous one.
+    /// Inside an array literal `[a] [b]` is two elements, `a[b]` an index.
+    pub preceded_by_space: bool,
 }
 
 /// One captured `/** ... */` doc annotation (see `ScriptTokenizer::docs`).
@@ -268,6 +271,8 @@ pub struct ScriptTokenizer {
     /// Set when a newline is consumed; stamped onto (and cleared by) the next
     /// emitted token as `preceded_by_newline`.
     newline_pending: bool,
+    /// Same for any whitespace (`preceded_by_space`).
+    space_pending: bool,
     pub tokens: Vec<ScriptTokenPos>,
     /// Captured `/** ... */` doc annotations, keyed by the index the NEXT
     /// token gets (`tokens.len()` at capture end). ONE form; position
@@ -292,6 +297,7 @@ impl ScriptTokenizer {
     pub fn clear(&mut self) {
         self.pos = 0;
         self.newline_pending = false;
+        self.space_pending = false;
         self.tokens.clear();
         self.docs.clear();
         self.original.clear();
@@ -336,8 +342,20 @@ impl ScriptTokenizer {
     /// pending flag). All token emission funnels through here.
     fn push_tok(&mut self, pos: usize, token: ScriptToken) {
         let preceded_by_newline = self.newline_pending;
+        let preceded_by_space = self.space_pending;
         self.newline_pending = false;
-        self.tokens.push(ScriptTokenPos { token, pos, preceded_by_newline });
+        self.space_pending = false;
+        self.tokens.push(ScriptTokenPos {
+            token,
+            pos,
+            preceded_by_newline,
+            preceded_by_space,
+        });
+    }
+
+    /// Whether token `i` was preceded by whitespace (see `preceded_by_space`).
+    pub fn token_preceded_by_space(&self, i: u32) -> bool {
+        self.tokens.get(i as usize).is_some_and(|t| t.preceded_by_space)
     }
 
     /// Whether token `i` was preceded by a newline (see `preceded_by_newline`).
@@ -1110,6 +1128,9 @@ impl ScriptTokenizer {
             // attaches to the NEXT token instead.
             if c == '\n' {
                 self.newline_pending = true;
+            }
+            if c.is_whitespace() {
+                self.space_pending = true;
             }
         }
         &self.tokens[start..self.tokens.len()]
