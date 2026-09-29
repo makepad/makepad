@@ -5,6 +5,7 @@ use crate::{
     splitter::{Splitter, SplitterAction, SplitterAlign, SplitterAxis},
     tab::Tab,
     tab_bar::{TabBar, TabBarAction},
+    tip::TipAction,
     widget::*,
     widget_tree::CxWidgetExt,
 };
@@ -2321,6 +2322,10 @@ impl Dock {
                     TabBarAction::TabCloseWasPressed(tab_id) => {
                         cx.widget_action(uid, DockAction::TabCloseWasPressed(tab_id));
                         self.needs_save = true;
+                    }
+                    // A compact tab's name, for the window's tip layer.
+                    TabBarAction::None if !matches!(action.as_widget_action().cast(), TipAction::None) => {
+                        cx.extend_actions(vec![action])
                     }
                     TabBarAction::None => (),
                 }

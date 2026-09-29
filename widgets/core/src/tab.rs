@@ -3,9 +3,10 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     tab_close_button::{TabCloseButton, TabCloseButtonAction},
+    tip::TipAction,
 };
 
-use crate::makepad_draw::DrawSvgGlyph;
+use crate::makepad_draw::DrawSvg;
 use crate::widget::*;
 
 script_mod! {
@@ -287,7 +288,7 @@ pub struct Tab {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_icon: DrawSvgGlyph,
+    draw_icon: DrawSvg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -301,6 +302,11 @@ pub struct Tab {
 
     #[live]
     closeable: bool,
+    /// Icon only while inactive: the name shows on the active tab and as
+    /// a hover tip on the others, so a bar of icon tabs holds more tabs.
+    /// Give the template a `draw_icon` svg.
+    #[live]
+    compact: bool,
     #[live]
     hover: f32,
     #[live]
@@ -357,9 +363,16 @@ impl Tab {
         }
 
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, Walk::fit(), Align::default(), name);
+        if !self.hides_name() {
+            self.draw_text
+                .draw_walk(cx, Walk::fit(), Align::default(), name);
+        }
         self.draw_bg.end(cx);
+    }
+
+    /// A compact tab that is not active shows its icon alone.
+    fn hides_name(&self) -> bool {
+        self.compact && !self.is_active
     }
 
     pub fn area(&self) -> Area {
@@ -369,6 +382,7 @@ impl Tab {
     /// Sets the draw depth on all draw primitives of this tab.
     pub fn set_draw_depth(&mut self, depth: f32) {
         self.draw_bg.draw_depth = depth;
+        self.draw_icon.draw_depth = depth;
         self.draw_text.draw_depth = depth;
         self.close_button.set_draw_depth(depth);
     }
@@ -394,10 +408,17 @@ impl Tab {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
+                if self.hides_name() {
+                    let rect = self.draw_bg.area().rect(cx);
+                    cx.widget_action(self.uid, TipAction::HoverIn(self.name.clone(), rect));
+                }
             }
             Hit::FingerHoverOut(_) => {
                 if !block_hover_out {
                     self.animator_play(cx, ids!(hover.off));
+                }
+                if self.compact {
+                    cx.widget_action(self.uid, TipAction::HoverOut);
                 }
             }
             Hit::FingerMove(e) => {
