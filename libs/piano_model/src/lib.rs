@@ -140,7 +140,13 @@ pub trait Instrument {
 /// 0.37 after the per-partial normal-mode reduction: the aftersound now
 /// sits at its measured level (~-16 dB re the prompt) instead of the old
 /// half-drive slow members, which lowered sustained RMS ~1.3 dB further.
-const MASTER_GAIN: f32 = 0.37;
+/// 0.26 (2026-09-29): the calibration now carries the reference's played
+/// touch (its SFZ velocity tracking: pianissimo ~4 dB softer and
+/// fortissimo ~5 dB louder re mezzo than before), and at 0.37 a single
+/// fortissimo note peaked at 0.9-1.3 FS, so the limiter (ceiling 0.72) took
+/// 2-5 dB off every forte: the top of the dynamic range flattened exactly
+/// where the touch had been restored. Mezzo material lands ~3 dB lower.
+const MASTER_GAIN: f32 = 0.26;
 
 /// A voice whose 64-sample bridge-force energy stays below this for ~16 ms
 /// is put to sleep (and its state zeroed, keeping wake-ups deterministic).
@@ -151,6 +157,15 @@ const MASTER_GAIN: f32 = 0.37;
 /// -64 dBFS-ish point — at 1e-5 the first-resonance lift made a
 /// pianissimo A0 audibly vanish at ~200 ms.
 const VOICE_SILENCE_POWER: f32 = 1e-7;
+/// ... and it is never gated before it has fallen this far below its own
+/// loudest chunk (-90 dB; that chunk carries the strike transient, which
+/// sits well above the ringing string). The absolute gate alone sat only
+/// ~37 dB under a mezzo C7's bridge power and ABOVE a pianissimo C8's (the
+/// top keys' small strings put little force on the bridge): soft treble
+/// notes were cut off within 16 ms of their strike and mezzo ones at ~2 s,
+/// mid-ring (C6's level at 1-2 s re its attack measured 12.5 dB under the
+/// recording's; 5.9 with this gate).
+const VOICE_SILENCE_REL: f32 = 1e-9;
 /// Minimum ringing energy for a damper landing to make contact noise.
 const DAMPER_NOISE_POWER: f32 = 0.1;
 const DAMPER_NOISE_AMP: f32 = 0.25;
@@ -969,7 +984,7 @@ impl EngineCore {
                 }
             }
             if v.active && !v.hammer.active {
-                if v.power < VOICE_SILENCE_POWER {
+                if v.power < VOICE_SILENCE_POWER.min(v.peak_power * VOICE_SILENCE_REL) {
                     v.quiet_ticks += 1;
                     if v.quiet_ticks > 12 {
                         v.silence();
@@ -1051,6 +1066,7 @@ impl EngineCore {
                 p += a * a;
             }
             v.power = p;
+            v.peak_power = v.peak_power.max(p);
         }
         let mut bus_pow = 0.0f32;
         for k in 0..n {

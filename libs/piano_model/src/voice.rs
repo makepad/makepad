@@ -219,6 +219,9 @@ pub struct Voice {
     pub case_buf: [f32; MAX_CHUNK],
     force: [f32; MAX_CHUNK],
     pub power: f32,
+    /// loudest control-tick power since the last strike (the relative
+    /// silence gate in lib.rs)
+    pub peak_power: f32,
     pub quiet_ticks: u32,
     pub hammer: Hammer,
     pub osc_gain: [f32; 3],
@@ -278,6 +281,7 @@ impl Voice {
             case_buf: [0.0; MAX_CHUNK],
             force: [0.0; MAX_CHUNK],
             power: 0.0,
+            peak_power: 0.0,
             quiet_ticks: 0,
             hammer: Hammer::new(),
             osc_gain: [1.0; 3],
@@ -331,6 +335,7 @@ impl Voice {
         self.held = true;
         self.strike_count = self.strike_count.wrapping_add(1);
         self.quiet_ticks = 0;
+        self.peak_power = 0.0;
         self.vel_norm = vel.min(127) as f32 / 127.0;
         // Una corda: the action shifts so the hammer misses one string of a
         // triple and meets the rest on softer, less-grooved felt. The softer
@@ -617,6 +622,7 @@ impl Voice {
         self.ph_mi.fill(0.0);
         self.knock_lp = 0.0;
         self.power = 0.0;
+        self.peak_power = 0.0;
         self.quiet_ticks = 0;
         self.hammer.active = false;
     }
@@ -647,7 +653,7 @@ mod calibration_tests {
             let mut voice = Voice::new((midi - 21) as usize, &key, Some(note(midi)));
             // Endpoints, exact knots and halfway between knots, including
             // velocities outside MIDI's range (the existing event path allows them).
-            for (vel, db) in [(1, -12.0), (28, -12.0), (48, -6.0), (68, 0.0), (90, 6.0), (112, 12.0), (127, 12.0), (255, 12.0)] {
+            for (vel, db) in [(1, -12.0), (28, -12.0), (48, -6.0), (68, 0.0), (90, 6.0), (112, 12.0), (127, 12.0 + 12.0 * (15.0 / 44.0)), (255, 12.0 + 12.0 * (15.0 / 44.0))] {
                 voice.note_on(&key, vel, false, 48000.0, &Voicing::default());
                 for osc in 0..key.n_osc {
                     for m in 0..key.modes_padded {

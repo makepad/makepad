@@ -8,7 +8,7 @@
 mod common;
 
 use common::{ev, fft, render, FS};
-use makepad_piano_model::{Piano, PianoEvent};
+use makepad_piano_model::{Piano, PianoEvent, PIANO_PRESETS};
 use std::sync::OnceLock;
 
 const FIXTURE: &str = include_str!("data/salamander_v3.tsv");
@@ -172,6 +172,28 @@ fn stock_rows() -> &'static [(Reference, Measurement)] {
     })
 }
 
+/// The same rows through the path the apps play: `Piano::new_with_preset`
+/// with the default preset's voicing and room (reverb, early reflections,
+/// limiter) left on.
+fn preset_rows() -> &'static [(Reference, Measurement)] {
+    static ROWS: OnceLock<Vec<(Reference, Measurement)>> = OnceLock::new();
+    ROWS.get_or_init(|| {
+        let preset = PIANO_PRESETS.iter().find(|p| p.is_default).unwrap();
+        let mut rows = fixture().0.into_iter().filter(|r| r.note <= 60).map(|reference| {
+            let mut piano = Piano::new_with_preset(FS, preset);
+            let event = ev(0.0, PianoEvent::NoteOn { key: reference.note, velocity: reference.velocity });
+            let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
+            let m = measure(&l, &r, reference.note);
+            (reference, m)
+        }).collect::<Vec<_>>();
+        for i in 0..rows.len() {
+            let c4 = rows.iter().position(|r| r.0.note == 60 && r.0.velocity == rows[i].0.velocity).unwrap();
+            rows[i].1.metrics[6] = 20.0 * (rows[i].1.rms / rows[c4].1.rms).log10();
+        }
+        rows
+    })
+}
+
 fn stock_row(note: u8, velocity: u8) -> &'static (Reference, Measurement) {
     stock_rows().iter().find(|r| r.0.note == note && r.0.velocity == velocity)
         .unwrap_or_else(|| panic!("missing measurement: MIDI {note} v{velocity}"))
@@ -183,12 +205,17 @@ fn stock_row(note: u8, velocity: u8) -> &'static (Reference, Measurement) {
 #[track_caller]
 fn assert_matches_reference(notes: &[u8], mean_limit: [Option<f64>; 11], row_limit: [Option<f64>; 11]) {
     let rows = notes.iter().flat_map(|&n| [28, 68, 112].map(|v| stock_row(n, v))).collect::<Vec<_>>();
+    assert_rows_match(&rows, mean_limit, row_limit);
+}
+
+#[track_caller]
+fn assert_rows_match(rows: &[&(Reference, Measurement)], mean_limit: [Option<f64>; 11], row_limit: [Option<f64>; 11]) {
     let mut report = vec!["metric\tnote\tvelocity\tmodel\treference\tabs_error\trow_limit\tstatus".to_string()];
     let mut passed = true;
     for (i, name) in METRICS.iter().enumerate() {
         let Some(mean_lim) = mean_limit[i] else { continue };
         let mut sum = 0.0;
-        for (reference, model) in &rows {
+        for (reference, model) in rows.iter().copied() {
             let (m, r) = (model.metrics[i], reference.metrics[i]);
             let err = (m - r).abs();
             let ok = err.is_finite() && row_limit[i].map_or(true, |l| err <= l);
@@ -225,39 +252,66 @@ fn bass_register_matches_native_reference() {
 }
 
 #[test]
-fn mid_and_treble_hold_the_native_reference() {
-    // C4, A4, C5, C6, C7: limits are the previous instrument's mean errors
-    // plus ~0.5 dB, so the bass work cannot trade the upper compass away.
-    // The 20-500 Hz decay is skipped: above C5 that band holds no partial.
-    assert_matches_reference(
-        &[60, 69, 72, 84, 96],
-        [Some(5.5), Some(3.0), Some(6.3), Some(8.6), Some(3.9), Some(8.8), Some(1.9), Some(0.07), None, Some(12.0), Some(6.3)],
+fn preset_path_keeps_the_bass() {
+    // What Stage and the score apps play (audio_synth's PianoInstrument and
+    // score_ui build Piano::new_with_preset): the room and the output stage
+    // must not undo the bass voicing, so the dry bass gate's means hold
+    // with the default room on (the late windows carry its reverb).
+    let rows = preset_rows().iter().filter(|r| r.0.note < 60).collect::<Vec<_>>();
+    assert_rows_match(
+        &rows,
+        [Some(2.5), Some(5.0), Some(2.5), Some(4.5), Some(4.5), Some(7.5), Some(2.0), Some(0.05), Some(3.0), Some(3.5), Some(3.0)],
         [None; 11],
     );
 }
 
 #[test]
-fn default_preserves_c4_velocity_dynamics() {
-    // The reference WAVs deliberately omit SFZ amp_veltrack=73 during timbre
-    // fitting (tools/VOICING.md). Their amplitudes are context only: the
-    // calibrated touch must follow the RAW model's.
-    let anchor = stock_row(60, 68);
-    let raw_level = |velocity| {
-        let mut piano = Piano::new_uncalibrated(FS);
-        piano.set_reverb_mix(0.0);
-        piano.set_early_reflection_level(0.0);
-        piano.set_soft_clip(false);
-        let event = ev(0.0, PianoEvent::NoteOn { key: 60, velocity });
-        let (l, r) = render(&mut piano, &[event], (2.5 * FS as f64) as usize, 256);
-        measure(&l, &r, 60).rms
-    };
-    let raw_anchor = raw_level(68);
-    for velocity in [28, 112] {
-        let model = 20.0 * (stock_row(60, velocity).1.rms / anchor.1.rms).log10();
-        let raw = 20.0 * (raw_level(velocity) / raw_anchor).log10();
-        println!("C4 v{velocity} re v68: default {model:.2} dB, raw {raw:.2} dB");
-        assert!((model - raw).abs() <= 3.0, "C4 v{velocity} touch {model:.2} dB vs raw {raw:.2} dB");
+fn mid_and_treble_hold_the_native_reference() {
+    // C4, A4, C5, C6: limits are the previous instrument's mean errors plus
+    // ~0.5 dB (the 20-500 Hz decay is skipped: above C5 that band holds no
+    // partial, only the recordings' 50 Hz mains harmonics).
+    assert_matches_reference(
+        &[60, 69, 72, 84],
+        [Some(1.4), Some(3.0), Some(3.2), Some(7.5), Some(1.4), Some(7.2), Some(1.3), Some(0.05), None, Some(12.4), Some(6.5)],
+        [None; 11],
+    );
+    // C7: early metrics only. Its 1-2 s window sits ~5 dB above the
+    // recording's own noise floor, and below 2 kHz that window is mostly
+    // mains hum (50/100/150 Hz), so the late shares and the late
+    // fundamental/cluster ratio measure the room, not the string.
+    assert_matches_reference(
+        &[96],
+        [Some(21.7), Some(1.2), None, None, Some(8.2), None, Some(4.6), Some(0.22), None, Some(8.4), Some(4.7)],
+        [None; 11],
+    );
+}
+
+#[test]
+fn default_follows_the_reference_touch() {
+    // The fixture's layer levels carry no SFZ amp_veltrack (73); played
+    // through its SFZ the reference instrument's level at v28 and v112 re
+    // v68 is the layer ratio times (0.27 + 0.73 (v/127)^2). The previous
+    // table followed the raw model's touch instead: pianissimo 1-3 dB and
+    // fortissimo up to 6 dB too soft re mezzo (mean error 2.2 dB).
+    let gain = |v: f64| 0.27 + 0.73 * (v / 127.0).powi(2);
+    let mut report = Vec::new();
+    let mut sum = 0.0;
+    let mut worst: f64 = 0.0;
+    for &note in &NOTES {
+        let anchor = stock_row(note, 68);
+        for velocity in [28u8, 112] {
+            let row = stock_row(note, velocity);
+            let model = 20.0 * (row.1.rms / anchor.1.rms).log10();
+            let reference = 20.0 * (row.0.rms / anchor.0.rms).log10() + 20.0 * (gain(velocity as f64) / gain(68.0)).log10();
+            let err = (model - reference).abs();
+            sum += err;
+            worst = worst.max(err);
+            report.push(format!("MIDI {note} v{velocity} re v68: model {model:+.2} dB, reference {reference:+.2} dB"));
+        }
     }
+    let mean = sum / (2 * NOTES.len()) as f64;
+    println!("{}\nmean abs error {mean:.2} dB, worst {worst:.2} dB", report.join("\n"));
+    assert!(mean <= 0.5 && worst <= 2.0, "touch off the reference:\n{}", report.join("\n"));
 }
 
 #[test]

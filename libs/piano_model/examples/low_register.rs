@@ -5,7 +5,9 @@
 //! from the start (`--pedal`). Files `note_021_vel_068.wav` (stereo float32)
 //! plus `keys.tsv` with each key's design f0 and B for the analysis.
 //! Passage: `--passage FILE.wav` renders a chromatic descent C3..A0 and a few
-//! low chords into one file.
+//! low chords into one file; `--events EVENTS.txt --passage FILE.wav` renders
+//! an event list instead (lines `seconds on key velocity`, `seconds off key`,
+//! `seconds pedal value`, e.g. converted from a MIDI performance).
 //!
 //! The instrument is `Piano::new` (stock calibration) unless `--raw`;
 //! `--design name=value,...` overrides DesignParams in either mode (stock
@@ -148,10 +150,29 @@ fn passage() -> (Vec<(f64, PianoEvent)>, f64) {
     (s, t + 2.0)
 }
 
+/// Parses an event list (see the header); the render runs 3 s past the last event.
+fn events(text: &str) -> Result<(Vec<(f64, PianoEvent)>, f64), Box<dyn Error>> {
+    let mut s = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let t: f64 = f[0].parse()?;
+        let ev = match (f[1], f.len()) {
+            ("on", 4) => PianoEvent::NoteOn { key: f[2].parse()?, velocity: f[3].parse()? },
+            ("off", 3) => PianoEvent::NoteOff { key: f[2].parse()? },
+            ("pedal", 3) => PianoEvent::Sustain { value: f[2].parse()? },
+            _ => return Err(format!("bad event line: {line}").into()),
+        };
+        s.push((t, ev));
+    }
+    let end = s.iter().map(|e| e.0).fold(0.0, f64::max);
+    Ok((s, end + 3.0))
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let mut out = None;
     let mut passage_out = None;
+    let mut events_in: Option<PathBuf> = None;
     let mut notes = list("21-48")?;
     let mut velocities = vec![28u8, 68, 112];
     let mut seconds = 4.0;
@@ -163,6 +184,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         match arg.as_str() {
             "--out" => out = Some(PathBuf::from(value()?)),
             "--passage" => passage_out = Some(PathBuf::from(value()?)),
+            "--events" => events_in = Some(PathBuf::from(value()?)),
             "--notes" => notes = list(&value()?)?,
             "--velocities" => velocities = list(&value()?)?,
             "--seconds" => seconds = value()?.parse()?,
@@ -200,7 +222,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let rate = setup.rate;
     if let Some(path) = passage_out {
-        let (script, secs) = passage();
+        let (script, secs) = match &events_in {
+            Some(path) => events(&fs::read_to_string(path)?)?,
+            None => passage(),
+        };
         let mut p = setup.piano();
         let (l, r) = render(&mut p, rate, &script, secs);
         let peak = l.iter().chain(&r).fold(0.0f32, |m, &x| m.max(x.abs()));

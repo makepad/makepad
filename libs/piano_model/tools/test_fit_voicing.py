@@ -522,7 +522,7 @@ class VelocityAndOutputTests(unittest.TestCase):
 
     def test_velocity_weights_and_all_layers_used(self):
         weights = fit.velocity_weights([1, 28, 48, 68, 90, 112, 127])
-        np.testing.assert_allclose(weights, [[1, 0, 0], [1, 0, 0], [.5, .5, 0], [0, 1, 0], [0, .5, .5], [0, 0, 1], [0, 0, 1]])
+        np.testing.assert_allclose(weights, [[1, 0, 0], [1, 0, 0], [.5, .5, 0], [0, 1, 0], [0, .5, .5], [0, 0, 1], [0, -15 / 44, 1 + 15 / 44]])
         velocities = fit.REPRESENTATIVE_VELOCITIES
         truth = np.array([-4, 2, 7])
         target = fit.velocity_weights(velocities) @ truth

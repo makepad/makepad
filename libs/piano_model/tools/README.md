@@ -18,16 +18,20 @@ excitation and decay while retaining the hammer, soundboard, pedals and room.
 `acoustic_reference.rs` gates the stock instrument ABSOLUTELY against the
 Salamander Grand Piano V3 metrics (Alexander Holm, CC BY 3.0) in
 `tests/data/salamander_v3.tsv`: per-metric mean and per-row error limits over
-A0..C3, the previous instrument's mean errors (plus ~0.5 dB) over C4..C7, and
-C4's touch against the raw model. (The older gates asked only that the
+A0..C3 (dry, and again through `Piano::new_with_preset` with its room on,
+the path Stage plays), the previous instrument's mean errors (plus ~0.5 dB)
+over C4..C6 and C7's early metrics, and every fixture note's touch. (The older gates asked only that the
 calibrated model beat the raw one; they passed while the bottom octave still
 decayed like a plucked bass.) `sound.rs` additionally checks C7's early
 second-partial balance against the native recording.
 
 The 2026-09-29 table (keys 21..72; 75..108 keep the earlier fit) was made
-with five `fit_voicing.py` passes from raw renders, then
-`preserve_touch.py` (three rounds) so each key's level against velocity
-follows the raw model's touch. `examples/low_register.rs` renders dry
+with five `fit_voicing.py` passes from raw renders; then, over all 30 keys,
+`preserve_touch.py` (three rounds) shifted each key's pp and ff gains so
+its level against velocity follows the reference as its SFZ plays it (layer
+level times the amp_veltrack 73 gain), which the gate
+`default_follows_the_reference_touch` holds. Above velocity 112 the runtime
+continues each partial's mf->ff gain slope to 127. `examples/low_register.rs` renders dry
 low-register sets (held, released, pedalled; design and voicing overrides on
 the calibrated instrument) and a listening passage. The corpus is read from
 a directory outside the repository (`--corpus` / `PIANO_REFERENCE_DIR` in
