@@ -12,10 +12,10 @@ pub struct StyleTween {
 impl Default for StyleTween {
     fn default() -> Self {
         Self {
-            target: DesktopStyle::Omarchy,
+            target: DesktopStyle::Macos,
             dark: false,
-            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            weights: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            from: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             elapsed: 1.0,
         }
     }
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn interrupted_switch_starts_from_the_visible_mix_and_lands_exactly() {
         let mut t = StyleTween::default();
-        t.select(DesktopStyle::Macos);
+        t.select(DesktopStyle::Omarchy);
         t.step(0.2);
         let old = t.weights;
         t.select(DesktopStyle::Windows2000);

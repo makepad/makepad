@@ -35,13 +35,13 @@ pub struct WmBuild {
 
 impl Default for WmBuild {
     /// The desktop window manager: processes, no linked modules, the
-    /// Omarchy desk, the assistant as a child process.
+    /// macOS desk, the assistant as a child process.
     fn default() -> Self {
         WmBuild {
             modules: Vec::new(),
             modules_only: false,
             dynamic_dylibs: false,
-            style: DesktopStyle::Omarchy,
+            style: DesktopStyle::Macos,
             assistant: None,
             title: "makepad-wm".to_string(),
         }
@@ -76,7 +76,7 @@ mod tests {
     fn the_default_build_is_the_desktop_and_cx_carries_a_binary_s_choice() {
         let d = WmBuild::default();
         assert!(d.modules.is_empty() && !d.modules_only && d.assistant.is_none());
-        assert_eq!(d.style, DesktopStyle::Omarchy);
+        assert_eq!(d.style, DesktopStyle::Macos);
         let mut cx = Cx::new(Box::new(|_, _| {}));
         assert_eq!(WmBuild::from_cx(&mut cx).title, "makepad-wm");
         cx.set_global(WmBuild { modules_only: true, style: DesktopStyle::Ios, title: "all".into(), ..Default::default() });
