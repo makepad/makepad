@@ -915,9 +915,10 @@ pub struct ParserCheckpoint {
     /// The last opcode before the checkpoint, saved because auto-close's
     /// set_pop_to_me() mutates it in place. Must be restored on continuation.
     last_opcode: Option<ScriptValue>,
-    /// Auto-close patches pending logical jumps in place, not just the tail;
-    /// the original TEST opcodes are restored on continuation.
-    short_circuit_opcodes: Vec<(u32, ScriptValue)>,
+    /// Auto-close patches pending jumps in place (logical TESTs, and the
+    /// IF_TEST/IF_ELSE of an if still open), not just the tail; the
+    /// original opcodes are restored on continuation.
+    patched_opcodes: Vec<(u32, ScriptValue)>,
     /// Open slot contexts at checkpoint time; restored wholesale so slot
     /// candidates logged after the checkpoint die with the restore.
     slot_ctxs: Vec<SlotCtx>,
@@ -5100,6 +5101,22 @@ impl ScriptParser {
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                     self.last_jump_target = self.code_len();
                 }
+                // An if still open at end of source (`if c { 1 } else`): a
+                // zero jump offset loops forever, so jump to the end. The
+                // arms may not agree on a value; streamed runs are silenced.
+                State::IfTrueExpr { if_start, .. }
+                | State::IfTrueBlock { if_start, .. }
+                | State::IfMaybeElse { if_start, .. } => {
+                    let args = OpcodeArgs::from_u32(self.code_len() - if_start).set_need_nil();
+                    self.set_opcode_args(if_start, args);
+                    self.last_jump_target = self.code_len();
+                }
+                State::IfElse { else_start, .. }
+                | State::IfElseExpr { else_start, .. }
+                | State::IfElseBlock { else_start, .. } => {
+                    self.set_opcode_args(else_start, OpcodeArgs::from_u32(self.code_len() - else_start));
+                    self.last_jump_target = self.code_len();
+                }
                 // A fn/lambda body still open at end of source: close it the
                 // same way the live states do — without this, the body's
                 // jump-over stays 0 (FN_BODY_DYN re-runs, finds its me gone,
@@ -5188,15 +5205,21 @@ impl ScriptParser {
             destruct_defaults_len: self.destruct_defaults.len(),
             nested_patterns_len: self.nested_patterns.len(),
             last_opcode: self.opcodes.last().copied(),
-            short_circuit_opcodes: self
+            patched_opcodes: self
                 .state
                 .iter()
                 .filter_map(|state| {
-                    if let State::ShortCircuitEnd { test_slot, .. } = state {
-                        Some((*test_slot, self.opcodes[*test_slot as usize]))
-                    } else {
-                        None
-                    }
+                    let slot = match state {
+                        State::ShortCircuitEnd { test_slot, .. } => *test_slot,
+                        State::IfTrueExpr { if_start, .. }
+                        | State::IfTrueBlock { if_start, .. }
+                        | State::IfMaybeElse { if_start, .. } => *if_start,
+                        State::IfElse { else_start, .. }
+                        | State::IfElseExpr { else_start, .. }
+                        | State::IfElseBlock { else_start, .. } => *else_start,
+                        _ => return None,
+                    };
+                    Some((slot, self.opcodes[slot as usize]))
                 })
                 .collect(),
             slot_ctxs: self.slot_ctxs.clone(),
@@ -5217,7 +5240,7 @@ impl ScriptParser {
         }
         // Auto-close patched the pending short-circuit jumps in place; put
         // the original TEST opcodes back so continuation re-patches them.
-        for (slot, opcode) in cp.short_circuit_opcodes {
+        for (slot, opcode) in cp.patched_opcodes {
             self.opcodes[slot as usize] = opcode;
         }
         self.index = cp.token_index;
@@ -5242,6 +5265,7 @@ impl ScriptParser {
         offsets: (usize, usize),
         values: &[ScriptValue],
         unfinished_string: Option<ScriptValue>,
+        provisional_last: bool,
     ) -> ParserCheckpoint {
         self.file = file.to_string();
         self.line_offset = offsets.0;
@@ -5259,11 +5283,14 @@ impl ScriptParser {
             } else {
                 ScriptToken::StreamEnd
             };
-            // When we hit StringUnfinished: save checkpoint BEFORE it so the
-            // parser re-processes this token next time (with updated content).
-            // Substitute the interned value for the current execution, then
-            // consume remaining tokens and auto-close.
-            if let ScriptToken::StringUnfinished = &tok {
+            // When we hit StringUnfinished, or the provisional last token
+            // (ScriptTokenizer::pending_token, which more source may still
+            // extend): save checkpoint BEFORE it so the parser re-processes
+            // this token next time (with updated content). Substitute the
+            // interned value for the current execution, then consume
+            // remaining tokens and auto-close.
+            let provisional = provisional_last && self.index as usize + 1 == tokens.len();
+            if matches!(tok, ScriptToken::StringUnfinished) || provisional {
                 let checkpoint_before = self.save_checkpoint();
                 let tok = if let Some(v) = unfinished_string {
                     ScriptToken::String(v)
@@ -5273,6 +5300,7 @@ impl ScriptParser {
                 let step = self.parse_step(tokenizer, tok, values);
                 self.index += step;
                 // Continue parsing any remaining tokens after the string
+                let mut steps_zero = 0;
                 while self.index < tokens.len() as u32 && self.state.len() > 0 {
                     let tok2 = if let Some(tok2) = tokens.get(self.index as usize) {
                         tok2.token.clone()
@@ -5280,6 +5308,11 @@ impl ScriptParser {
                         ScriptToken::StreamEnd
                     };
                     let step2 = self.parse_step(tokenizer, tok2, values);
+                    // same stuck guard as the main loop
+                    steps_zero = if step2 == 0 { steps_zero + 1 } else { 0 };
+                    if steps_zero > 1000 {
+                        break;
+                    }
                     self.index += step2;
                 }
                 return self.auto_close(checkpoint_before, max_token_index);
@@ -5385,6 +5418,22 @@ impl ScriptParser {
                     // A short-circuit op at end of source: patch its jump so a
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_jump_target = self.code_len();
+                }
+                // An if still open at end of source (`if c { 1 } else`): a
+                // zero jump offset loops forever, so jump to the end. The
+                // arms may not agree on a value; streamed runs are silenced.
+                State::IfTrueExpr { if_start, .. }
+                | State::IfTrueBlock { if_start, .. }
+                | State::IfMaybeElse { if_start, .. } => {
+                    let args = OpcodeArgs::from_u32(self.code_len() - if_start).set_need_nil();
+                    self.set_opcode_args(if_start, args);
+                    self.last_jump_target = self.code_len();
+                }
+                State::IfElse { else_start, .. }
+                | State::IfElseExpr { else_start, .. }
+                | State::IfElseBlock { else_start, .. } => {
+                    self.set_opcode_args(else_start, OpcodeArgs::from_u32(self.code_len() - else_start));
                     self.last_jump_target = self.code_len();
                 }
                 // A fn/lambda body still open at end of source: close it the
@@ -5586,7 +5635,7 @@ mod tests {
         // char arrives, and the separator must be consumed in this pass.
         tokenizer.tokenize("let catch = 1\ntry { 2 } catch ", &mut heap);
         let mut parser = ScriptParser::default();
-        let cp = parser.parse_streaming(&tokenizer, "checkpoint.octoscript", (0, 0), &[], None);
+        let cp = parser.parse_streaming(&tokenizer, "checkpoint.octoscript", (0, 0), &[], None, false);
         parser.restore_checkpoint(cp);
 
         assert!(

@@ -1607,6 +1607,7 @@ impl<'a> ScriptVm<'a> {
                 body.parser = ScriptParser::default();
                 body.tokenizer
                     .tokenize(&body.effective_code, &mut self.bx.heap);
+                body.tokenizer.finish(&mut self.bx.heap);
                 body.parser.parse(
                     &body.tokenizer,
                     &script_mod.file,
@@ -1723,6 +1724,10 @@ impl<'a> ScriptVm<'a> {
             // If we stopped mid-string, intern the partial content so the parser
             // can emit the real string value into opcodes for incremental rendering.
             let unfinished = body.tokenizer.intern_unfinished_string(&mut self.bx.heap);
+            // A number/identifier/operator the source stops on is still in
+            // the tokenizer: parse it provisionally (the parser checkpoints
+            // before it), the next append re-lexes it.
+            let provisional = body.tokenizer.push_pending_token(&mut self.bx.heap);
 
             // Incremental parse: continue from checkpoint, auto-close for execution
             let errors_before = body.parser.parse_errors.len();
@@ -1732,6 +1737,7 @@ impl<'a> ScriptVm<'a> {
                 (existing_mod.line, existing_mod.column),
                 &existing_mod.values,
                 unfinished,
+                provisional,
             );
 
             body.checkpoint = Some(cp);

@@ -312,6 +312,7 @@ impl Cx {
             let mut tokenizer = ScriptTokenizer::default();
             let mut parser = ScriptParser::default();
             tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
+            tokenizer.finish(&mut script_vm.heap);
             parser.parse(
                 &tokenizer,
                 &site.file_name,
@@ -569,6 +570,7 @@ fn validate_extracted_script_mod(
     let mut tokenizer = ScriptTokenizer::default();
     let mut parser = ScriptParser::default();
     tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
+    tokenizer.finish(&mut script_vm.heap);
     parser.parse(
         &tokenizer,
         &site.file_name,

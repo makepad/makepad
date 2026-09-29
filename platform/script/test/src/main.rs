@@ -5397,13 +5397,13 @@ View{
                 prev_len = end;
 
                 let unfinished = inc_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
-                let cp = inc_parser.parse_streaming(&inc_tokenizer, "", (0, 0), &[], unfinished);
+                let cp = inc_parser.parse_streaming(&inc_tokenizer, "", (0, 0), &[], unfinished, false);
 
                 let mut ref_tokenizer = ScriptTokenizer::default();
                 let mut ref_parser = ScriptParser::default();
                 ref_tokenizer.tokenize(code_so_far, &mut vm.heap_mut());
                 let ref_unfinished = ref_tokenizer.intern_unfinished_string(&mut vm.heap_mut());
-                ref_parser.parse_streaming(&ref_tokenizer, "", (0, 0), &[], ref_unfinished);
+                ref_parser.parse_streaming(&ref_tokenizer, "", (0, 0), &[], ref_unfinished, false);
 
                 let tok_match = ref_tokenizer.tokens.len() == inc_tokenizer.tokens.len();
                 let op_match = ref_parser.opcodes == inc_parser.opcodes;

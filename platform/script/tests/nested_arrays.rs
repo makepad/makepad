@@ -24,9 +24,7 @@ fn number(name: &str, code: &str) -> f64 {
             file: format!("nested_arrays_{name}"),
             line: 0,
             column: 0,
-            // A number ending the source without a newline is still in the
-            // tokenizer when eval parses (a separate, pre-existing issue).
-            code: format!("{code}\n"),
+            code: code.to_string(),
             values: vec![],
         })
     });

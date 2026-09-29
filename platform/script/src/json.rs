@@ -388,6 +388,7 @@ impl JsonParserThread {
         self.tokenizer.clear();
         self.parser.clear();
         self.tokenizer.tokenize(json, heap);
+        self.tokenizer.finish(heap);
         self.parser.parse(&self.tokenizer.tokens, heap);
         return self.parser.root;
     }
