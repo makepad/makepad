@@ -1524,7 +1524,7 @@ impl CodeEditor {
 
     fn draw_gutter(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.line_start;
-        let mut origin_y = session.layout().line(self.line_start).y();
+        let mut origin_y = session.layout().block_y(self.line_start);
         let mut buf = String::new();
         for element in session
             .layout()
@@ -1591,7 +1591,7 @@ impl CodeEditor {
     fn draw_text_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
-        let mut origin_y = session.layout().line(self.line_start).y();
+        let mut origin_y = session.layout().block_y(self.line_start);
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
@@ -1722,7 +1722,7 @@ impl CodeEditor {
     }
 
     fn draw_indent_guide_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
-        let mut origin_y = session.layout().line(self.line_start).y();
+        let mut origin_y = session.layout().block_y(self.line_start);
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
@@ -1853,7 +1853,7 @@ impl CodeEditor {
             );
         }
         let mut line_index = layout.find_first_line_ending_after_y(position.y);
-        let mut origin_y = layout.line(line_index).y();
+        let mut origin_y = layout.block_y(line_index);
         for block in layout.block_elements(line_index, line_index + 1) {
             match block {
                 BlockElement::Line {
@@ -2107,7 +2107,7 @@ struct DrawDecorationLayer<'a> {
 impl<'a> DrawDecorationLayer<'a> {
     fn draw_decoration_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
-        let mut origin_y = session.layout().line(line_index).y();
+        let mut origin_y = session.layout().block_y(line_index);
         for block in session
             .layout()
             .block_elements(self.code_editor.line_start, self.code_editor.line_end)
@@ -2303,7 +2303,7 @@ struct DrawSelectionLayer<'a> {
 impl<'a> DrawSelectionLayer<'a> {
     fn draw_selection_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let mut line_index = self.code_editor.line_start;
-        let mut origin_y = session.layout().line(line_index).y();
+        let mut origin_y = session.layout().block_y(line_index);
         for block in session
             .layout()
             .block_elements(self.code_editor.line_start, self.code_editor.line_end)

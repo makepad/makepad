@@ -201,6 +201,16 @@ impl<'a> Layout<'a> {
         }
     }
 
+    /// Where `block_elements(line, ..)` starts: the top of the block
+    /// inlays reserved above `line` (its first elements), not the line's
+    /// own text top.
+    pub fn block_y(&self, line: usize) -> f64 {
+        let above: f64 = self.document_layout.block_inlays.iter().filter(|(at, _)| *at == line).map(|(_, inlay)| match inlay {
+            crate::inlays::BlockInlay::Widget(widget) => widget.height,
+        }).sum();
+        self.line(line).y() - above
+    }
+
     pub fn block_elements(&self, line_start: usize, line_end: usize) -> BlockElements<'_> {
         let mut block_inlays = self.document_layout.block_inlays.iter();
         while block_inlays

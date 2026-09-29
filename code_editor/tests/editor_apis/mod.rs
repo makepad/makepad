@@ -839,3 +839,34 @@ fn diff_admission_twenty_thousand_rows_off_thread() {
     assert_eq!(session.document().decorations().as_ptr(), decorations_ptr);
     assert_eq!(session.layout().height(), row_count as f64);
 }
+
+/// Drawing from any first visible line lands every line where the layout
+/// (and `position_rect`) puts it, block inlays included: the walk starts at
+/// the top of the blocks reserved above that line, never below them.
+#[test]
+fn block_walk_from_any_start_line_agrees_with_line_y() {
+    use crate::inlays::BlockInlay;
+    use crate::widgets::BlockWidget;
+    use crate::layout::BlockElement;
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let document = doc(&text);
+    document.set_block_inlays(vec![(1, BlockInlay::Widget(BlockWidget { height: 3.5 })), (7, BlockInlay::Widget(BlockWidget { height: 1.25 })), (20, BlockInlay::Widget(BlockWidget { height: 6.0 }))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout();
+    let layout = session.layout();
+    let lines = layout.as_text().as_lines().len();
+    for start in 0..lines {
+        let mut y = layout.block_y(start);
+        let mut index = start;
+        for element in layout.block_elements(start, lines) {
+            match element {
+                BlockElement::Line { line, .. } => {
+                    assert!((y - layout.line(index).y()).abs() < 1e-9, "from line {start}: line {index} walks to {y}, is at {}", layout.line(index).y());
+                    y += line.height();
+                    index += 1;
+                }
+                BlockElement::Widget(widget) => y += widget.height,
+            }
+        }
+    }
+}
