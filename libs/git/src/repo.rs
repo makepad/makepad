@@ -482,6 +482,43 @@ impl Repository {
         parse_commit(&obj.data)
     }
 
+    /// The size in bytes of an object's content, as `git cat-file -s`
+    /// reports it, read from headers instead of the content: a packed base
+    /// object's entry header, a packed delta's result size (its delta
+    /// payload is inflated, never its base chain), or a loose object's
+    /// `<kind> <size>` header (the loose object is inflated to find it).
+    /// Pack data is never loaded whole for this.
+    pub fn object_size(&mut self, oid: &ObjectId) -> Result<u64, GitError> {
+        match read_loose_object(&self.common_dir, oid) {
+            Ok(obj) => return Ok(obj.data.len() as u64),
+            Err(GitError::ObjectNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+        self.ensure_packs()?;
+        for pack in self.packs.iter().chain(self.alternate_packs.iter()).flatten() {
+            if let Some(offset) = pack.find_offset(oid) {
+                return pack.object_size(offset);
+            }
+        }
+        if let Some(alt_dirs) = &self.alternates {
+            for alt_dir in alt_dirs {
+                match read_loose_object_from_objects_dir(alt_dir, oid) {
+                    Ok(obj) => return Ok(obj.data.len() as u64),
+                    Err(GitError::ObjectNotFound(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Err(GitError::ObjectNotFound(oid.to_hex()))
+    }
+
+    /// Walk the first-parent chain from `start` (inclusive), newest first:
+    /// each commit, then its first parent, until a root commit or a shallow
+    /// boundary. A missing parent object is an error item, never a gap.
+    pub fn first_parents(&mut self, start: ObjectId) -> FirstParents<'_> {
+        FirstParents { repo: self, next: Some(start), shallow: None }
+    }
+
     /// Write a commit object. Returns its OID.
     pub fn write_commit(&self, commit: &Commit) -> Result<ObjectId, GitError> {
         let data = serialize_commit(commit);
@@ -1660,5 +1697,33 @@ fn make_index_entry(path: &str, oid: ObjectId, mode: u32) -> IndexEntry {
         oid,
         flags: (path.len().min(0xFFF)) as u16,
         path: path.to_string(),
+    }
+}
+
+/// The iterator `Repository::first_parents` returns.
+pub struct FirstParents<'a> {
+    repo: &'a mut Repository,
+    next: Option<ObjectId>,
+    shallow: Option<std::collections::HashSet<ObjectId>>,
+}
+
+impl Iterator for FirstParents<'_> {
+    type Item = Result<(ObjectId, Commit), GitError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let oid = self.next.take()?;
+        if self.shallow.is_none() {
+            match self.repo.shallow_boundary() {
+                Ok(set) => self.shallow = Some(set),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let commit = match self.repo.read_commit(&oid) {
+            Ok(commit) => commit,
+            Err(e) => return Some(Err(e)),
+        };
+        if !self.shallow.as_ref().is_some_and(|s| s.contains(&oid)) {
+            self.next = commit.first_parent();
+        }
+        Some(Ok((oid, commit)))
     }
 }

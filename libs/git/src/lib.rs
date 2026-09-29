@@ -42,7 +42,7 @@ pub use merge::{find_merge_base, merge3_text, merge_trees, MergeResult, TreeMerg
 pub use object::{Object, ObjectKind};
 pub use oid::ObjectId;
 pub use refs::{Ref, RefTarget};
-pub use repo::{repository_paths, resolve_commondir, resolve_gitfile, Repository, RepositoryPaths};
+pub use repo::{repository_paths, resolve_commondir, resolve_gitfile, FirstParents, Repository, RepositoryPaths};
 pub use tree::{Tree, TreeEntry};
 pub use worktree::{
     checkout_tree, compute_status, compute_status_for_path_with_options,
