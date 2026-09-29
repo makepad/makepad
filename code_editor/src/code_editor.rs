@@ -2051,11 +2051,38 @@ impl CodeEditor {
                     origin_y += line.height();
                 }
                 BlockElement::Widget(widget) => {
+                    // A point on a block widget (a host's inline row, e.g.
+                    // a visualisation above a line) picks the start of the
+                    // line it sits above.
+                    if (origin_y..=origin_y + widget.height).contains(&position.y) {
+                        return (
+                            (
+                                Position {
+                                    line_index,
+                                    byte_index: 0,
+                                },
+                                Affinity::Before,
+                            ),
+                            false,
+                        );
+                    }
                     origin_y += widget.height;
                 }
             }
         }
-        panic!()
+        // Past every element (rounding at the bottom edge): the end.
+        let line_count = session.document().as_text().as_lines().len();
+        let last = line_count.saturating_sub(1);
+        (
+            (
+                Position {
+                    line_index: last,
+                    byte_index: usize::MAX,
+                },
+                Affinity::After,
+            ),
+            false,
+        )
     }
 }
 
