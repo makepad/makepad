@@ -2,9 +2,11 @@
 // tools/ci adds this script once per entry of apps/commercial/slices.json
 // (`slice:<app>` tiles) with that entry's app and roots. The slice of the
 // tested commercial commit is what the server packs for that license: the
-// Cargo path-dependency closure of the roots, their declared includes and a
-// generated members Cargo.toml. It goes into a clean checkout of the tested
-// Makepad commit at apps/commercial, as a customer's Builder has it.
+// Cargo path-dependency closure of the roots as a release builds them (no
+// default features, so a root's optional crates behind them stay out), their
+// declared includes and a generated members Cargo.toml. It goes into a clean
+// checkout of the tested Makepad commit at apps/commercial, as a customer's
+// Builder has it, and is checked there with --no-default-features.
 
 use mod.std.*
 use mod.ci;

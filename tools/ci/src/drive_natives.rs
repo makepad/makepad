@@ -419,7 +419,7 @@ fn slice_checkout(vm: &mut ScriptVm) -> Result<Value> {
     rt(vm).worked = true;
     let root = rt(vm).run.root.clone();
     let commercial = root.join(crate::smoke::COMMERCIAL);
-    let slice = makepad_source_slice::slice(&commercial, "HEAD", &app, &roots)?;
+    let slice = makepad_source_slice::slice(&commercial, "HEAD", &app, &roots, crate::smoke::SLICE_FEATURES)?;
     let dir = slice_dir(&root, &app);
     let tip = slice_git(vm, &["rev-parse", "HEAD"], &root)?;
     if dir.join(".git").exists() {
@@ -443,8 +443,13 @@ fn slice_checkout(vm: &mut ScriptVm) -> Result<Value> {
     slice_git(vm, &["checkout", "-q", "-f", "--detach", &slice.commit], &sliced)?;
     slice_git(vm, &["clean", "-q", "-ffdx"], &sliced)?;
     let crates = slice.crates.iter().map(|(name, dir)| format!("{name} ({dir})")).collect::<Vec<_>>().join(", ");
+    let placeholders = if slice.placeholders.is_empty() {
+        String::new()
+    } else {
+        format!("; placeholders: {}", slice.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", "))
+    };
     let summary = format!(
-        "slice {} of commercial {} for {app}: {} crates, {} files, {} bytes: {crates}",
+        "slice {} of commercial {} for {app}: {} crates, {} files, {} bytes: {crates}{placeholders}",
         &slice.commit[..12],
         &slice.source[..12],
         slice.crates.len(),
@@ -472,7 +477,7 @@ fn slice_lint(vm: &mut ScriptVm) -> Result<Value> {
     }
     rt(vm).worked = true;
     let commercial = rt(vm).run.root.join(crate::smoke::COMMERCIAL);
-    let findings = makepad_source_slice::lint(&commercial, "HEAD", &roots)?;
+    let findings = makepad_source_slice::lint(&commercial, "HEAD", &roots, crate::smoke::SLICE_FEATURES)?;
     if findings.is_empty() {
         return Ok(Value::Null);
     }
@@ -484,8 +489,10 @@ fn slice_lint(vm: &mut ScriptVm) -> Result<Value> {
         shown.join("\n")
     ))
 }
-/// `cargo check --release` of the root packages in the slice checkout: the
-/// slice ships everything they compile from.
+/// `cargo check --release --no-default-features` of the root packages in
+/// the slice checkout, as the Builder builds a release (with the slice's
+/// features, `SLICE_FEATURES`): the slice ships everything they compile
+/// from.
 fn slice_check(vm: &mut ScriptVm) -> Result<Value> {
     let (app, roots) = slice_spec(vm)?;
     if rt(vm).validate {
@@ -493,16 +500,19 @@ fn slice_check(vm: &mut ScriptVm) -> Result<Value> {
     }
     rt(vm).worked = true;
     let root = rt(vm).run.root.clone();
-    let expected = makepad_source_slice::slice(&root.join(crate::smoke::COMMERCIAL), "HEAD", &app, &roots)?;
+    let expected = makepad_source_slice::slice(&root.join(crate::smoke::COMMERCIAL), "HEAD", &app, &roots, crate::smoke::SLICE_FEATURES)?;
     let dir = slice_dir(&root, &app);
     let sliced = dir.join(crate::smoke::COMMERCIAL);
     if !sliced.join(".git").exists() || slice_git(vm, &["rev-parse", "HEAD"], &sliced)? != expected.commit {
         return Err(format!("{} does not hold the slice {}; the slice step failed", sliced.display(), expected.commit));
     }
     let opts = Options { target: None, timeout: 3600, env: Vec::new(), allow_fail: false, deny: Vec::new(), toolchain: None };
-    let mut args = vec!["check".to_string(), "--release".into()];
+    let mut args = vec!["check".to_string(), "--release".into(), "--no-default-features".into()];
     for package in &roots {
         args.extend(["-p".to_string(), package.clone()]);
+    }
+    if !crate::smoke::SLICE_FEATURES.is_empty() {
+        args.extend(["--features".to_string(), crate::smoke::SLICE_FEATURES.join(",")]);
     }
     let host = rt(vm).host.target.clone();
     let args = cargo::command_args(&args, &opts, &host)?;

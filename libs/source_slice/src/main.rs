@@ -1,11 +1,12 @@
-//! makepad-source-slice slice --repo R --commit C --roots makepad-amp [--app amp] [--out DIR]
-//! makepad-source-slice lint  --repo R --commit C --roots makepad-amp
+//! makepad-source-slice slice --repo R --commit C --roots makepad-amp [--features F] [--app amp] [--out DIR]
+//! makepad-source-slice lint  --repo R --commit C --roots makepad-amp [--features F]
 //!
 //! `slice` writes the slice commit into R and prints it with its crates;
 //! `--out` also writes its files into DIR (`git archive`). `lint` prints the
 //! references the slice's crates make outside their directory that their
 //! `include` does not cover, and fails when there are any. `--roots` takes
-//! package names, comma separated or repeated. `--app` names the app in the
+//! package names, `--features` the features the app is built with (with no
+//! default features), both comma separated or repeated. `--app` names the app in the
 //! commit message (default: the first root without its `makepad-` prefix);
 //! the server and the Builder's publish pass their app ID, so the same
 //! source, roots and app give the same commit everywhere.
@@ -24,6 +25,7 @@ fn run() -> Result<(), String> {
     let command = args.next().ok_or("Expected slice or lint")?;
     let (mut repo, mut commit, mut app, mut out) = (None, None, None, None);
     let mut roots = Vec::new();
+    let mut features = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -32,6 +34,7 @@ fn run() -> Result<(), String> {
             "--app" => app = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--roots" => roots.extend(value()?.split(',').filter(|s| !s.is_empty()).map(str::to_owned)),
+            "--features" => features.extend(value()?.split(',').filter(|s| !s.is_empty()).map(str::to_owned)),
             _ => return Err(format!("Unknown argument {arg}")),
         }
     }
@@ -42,10 +45,13 @@ fn run() -> Result<(), String> {
         "slice" => {
             let first = roots.first().ok_or("--roots is required")?;
             let app = app.unwrap_or_else(|| first.strip_prefix("makepad-").unwrap_or(first).to_owned());
-            let slice = source.slice(&repo, &app, &roots)?;
+            let slice = source.slice(&repo, &app, &roots, &features)?;
             println!("slice {} of {} for {app}: {} crates, {} files, {} bytes", slice.commit, slice.source, slice.crates.len(), slice.files, slice.bytes);
             for (name, dir) in &slice.crates {
                 println!("  {name}  {dir}");
+            }
+            for (name, dir) in &slice.placeholders {
+                println!("  {name}  {dir}  (placeholder: an optional dependency the features leave off)");
             }
             if let Some(out) = out {
                 slicer::materialize(&repo, &slice.commit, &out)?;
@@ -54,12 +60,12 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "lint" => {
-            let findings = source.lint(&repo, &roots)?;
+            let findings = source.lint(&repo, &roots, &features)?;
             for finding in &findings {
                 println!("{finding}");
             }
             if findings.is_empty() {
-                println!("lint: no uncovered references in {} crates", source.closure(&roots)?.len());
+                println!("lint: no uncovered references in {} crates", source.closure(&roots, &features)?.len());
                 Ok(())
             } else {
                 Err(format!("{} uncovered references", findings.len()))

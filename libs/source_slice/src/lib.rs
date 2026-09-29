@@ -10,9 +10,20 @@
 //!
 //! - every crate the app's root packages reach through `path` dependencies
 //!   (`dependencies`, `build-dependencies` and each `target.*` variant of
-//!   both, optional ones included; never `dev-dependencies`) that resolve
-//!   inside the repository; paths that leave it point into Makepad, which
-//!   the public repository provides;
+//!   both; never `dev-dependencies`) that resolve inside the repository;
+//!   paths that leave it point into Makepad, which the public repository
+//!   provides. A root's optional dependencies count only when the slice's
+//!   features turn them on, as the Builder builds the app: `cargo build -p
+//!   <root> --no-default-features --features <features>` (see
+//!   [`Crate::enabled_deps`]); every other crate's optional dependencies
+//!   count, since which of their features the build enables is not
+//!   followed;
+//! - for each optional dependency of a root that the features leave off and
+//!   that lies in the repository, a placeholder package in its directory
+//!   instead of its source: Cargo reads the manifest of every path
+//!   dependency, optional or not, to load the workspace. The placeholder has
+//!   the package's name, version and feature names, no dependencies and an
+//!   empty library, and is never built;
 //! - each such crate's whole directory, less the directories of other
 //!   packages nested in it that are not part of the closure;
 //! - the paths a crate declares it needs outside its directory, in
@@ -149,13 +160,24 @@ struct Entry {
 pub struct Crate {
     /// The package name.
     pub name: String,
+    /// Its version (`0.0.0` when the manifest does not state one).
+    pub version: String,
     /// Its directory, relative to the repository root.
     pub dir: String,
     /// Its library target's name (what `crate_resource("<lib>:…")` names).
     pub lib: String,
     /// Directories of its path dependencies that lie inside the repository:
-    /// normal, build and every target's, never dev-dependencies.
+    /// normal, build and every target's, never dev-dependencies, optional
+    /// ones included.
     pub deps: Vec<String>,
+    /// Its optional dependencies (normal, build and every target's) by the
+    /// name its features use, each with the directories it resolves to
+    /// inside the repository (none for a dependency from elsewhere).
+    pub optional: BTreeMap<String, Vec<String>>,
+    /// Directories of its path dependencies no feature is needed for.
+    pub required: Vec<String>,
+    /// Its `[features]` table.
+    pub features: BTreeMap<String, Vec<String>>,
     /// `[package.metadata.commercial] include`, as written.
     pub include: Vec<String>,
     /// Paths the manifest itself names (`build`, `[lib] path`, `[[bin]] path`, ...).
@@ -171,6 +193,8 @@ impl Crate {
             return Ok(None);
         };
         let mut deps = BTreeSet::new();
+        let mut required = BTreeSet::new();
+        let mut optional: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut tables: Vec<&TomlTable> = Vec::new();
         for key in ["dependencies", "build-dependencies"] {
             if let Some(table) = doc.root.get(key).and_then(Toml::as_table) {
@@ -187,12 +211,32 @@ impl Crate {
             }
         }
         for table in tables {
-            for spec in table.values() {
-                if let Some(path) = spec.as_table().and_then(|t| t.get("path")).and_then(Toml::as_str) {
-                    if let Some(resolved) = resolve(dir, path) {
-                        deps.insert(resolved);
+            for (key, spec) in table.iter() {
+                let spec = spec.as_table();
+                let is_optional = spec.and_then(|t| t.get("optional")).and_then(Toml::as_bool).unwrap_or(false);
+                let resolved = spec.and_then(|t| t.get("path")).and_then(Toml::as_str).and_then(|path| resolve(dir, path));
+                if is_optional {
+                    let dirs = optional.entry(key.clone()).or_default();
+                    dirs.extend(resolved.clone());
+                }
+                if let Some(resolved) = resolved {
+                    deps.insert(resolved.clone());
+                    if !is_optional {
+                        required.insert(resolved);
                     }
                 }
+            }
+        }
+        let mut features = BTreeMap::new();
+        if let Some(table) = doc.root.get("features").and_then(Toml::as_table) {
+            for (feature, list) in table.iter() {
+                let list = list
+                    .as_array()
+                    .ok_or_else(|| format!("features.{feature} must be an array"))?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| format!("features.{feature} must be an array of strings")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                features.insert(feature.clone(), list);
             }
         }
         let include = match doc.get_path(&["package", "metadata", "commercial", "include"]) {
@@ -228,7 +272,80 @@ impl Crate {
             .and_then(Toml::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| name.replace('-', "_"));
-        Ok(Some(Crate { name: name.to_owned(), dir: dir.to_owned(), lib, deps: deps.into_iter().collect(), include, targets, build }))
+        let version = doc.get_path(&["package", "version"]).and_then(Toml::as_str).unwrap_or("0.0.0").to_owned();
+        Ok(Some(Crate {
+            name: name.to_owned(),
+            version,
+            dir: dir.to_owned(),
+            lib,
+            deps: deps.into_iter().collect(),
+            optional,
+            required: required.into_iter().collect(),
+            features,
+            include,
+            targets,
+            build,
+        }))
+    }
+
+    /// Whether `name` is a feature of this crate: a `[features]` entry, or
+    /// the implicit feature of an optional dependency that no feature names
+    /// as `dep:<name>`.
+    pub fn has_feature(&self, name: &str) -> bool {
+        self.features.contains_key(name) || self.implicit_feature(name)
+    }
+
+    fn implicit_feature(&self, name: &str) -> bool {
+        self.optional.contains_key(name) && !self.features.values().flatten().any(|entry| entry.strip_prefix("dep:") == Some(name))
+    }
+
+    /// The optional dependencies `features` turn on, with no default
+    /// features (`--no-default-features --features <features>`), followed
+    /// through this crate's `[features]`: `dep:x` and `x/f` turn on the
+    /// optional dependency `x`, `x?/f` does not, and a name is a feature of
+    /// the table or the implicit feature of an optional dependency. What
+    /// the enabled dependencies' own features do is not followed here.
+    pub fn enabled_optional(&self, features: &[String]) -> Result<BTreeSet<String>, String> {
+        let mut enabled = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut todo: Vec<String> = features.to_vec();
+        while let Some(feature) = todo.pop() {
+            if !seen.insert(feature.clone()) {
+                continue;
+            }
+            if let Some(list) = self.features.get(&feature) {
+                for entry in list {
+                    if let Some(dep) = entry.strip_prefix("dep:") {
+                        enabled.insert(dep.to_owned());
+                    } else if let Some((dep, _)) = entry.split_once('/') {
+                        // `x?/f` only reaches into `x` when something else
+                        // turned it on; `x/f` turns on an optional `x`.
+                        if !dep.ends_with('?') && self.optional.contains_key(dep) {
+                            enabled.insert(dep.to_owned());
+                        }
+                    } else {
+                        todo.push(entry.clone());
+                    }
+                }
+            } else if self.implicit_feature(&feature) {
+                enabled.insert(feature);
+            } else {
+                return Err(format!("{} has no feature {feature}", self.name));
+            }
+        }
+        Ok(enabled)
+    }
+
+    /// The directories of the path dependencies inside the repository that
+    /// a build with `features` (and no default features) compiles: every
+    /// required one, and the optional ones those features turn on.
+    pub fn enabled_deps(&self, features: &[String]) -> Result<Vec<String>, String> {
+        let enabled = self.enabled_optional(features)?;
+        let mut dirs: BTreeSet<String> = self.required.iter().cloned().collect();
+        for dep in &enabled {
+            dirs.extend(self.optional.get(dep).into_iter().flatten().cloned());
+        }
+        Ok(dirs.into_iter().collect())
     }
 }
 
@@ -341,12 +458,36 @@ impl Source {
         }
     }
 
+    /// The root packages' dependency directories with `features`: each
+    /// root's required ones and the optional ones the features turn on. A
+    /// feature applies to every root that has it; one no root has is an
+    /// error.
+    fn root_deps(&self, roots: &[String], features: &[String]) -> Result<BTreeMap<String, Vec<String>>, String> {
+        let mut out = BTreeMap::new();
+        let mut used = BTreeSet::new();
+        for root in roots {
+            let krate = self.named(root)?;
+            let own: Vec<String> = features.iter().filter(|f| krate.has_feature(f)).cloned().collect();
+            used.extend(own.iter().cloned());
+            out.insert(krate.dir.clone(), krate.enabled_deps(&own)?);
+        }
+        if let Some(feature) = features.iter().find(|f| !used.contains(*f)) {
+            return Err(format!("No root package ({}) has the feature {feature}", roots.join(", ")));
+        }
+        Ok(out)
+    }
+
     /// The crates `roots` (package names) reach through path dependencies
-    /// inside the repository, sorted by directory.
-    pub fn closure(&self, roots: &[String]) -> Result<Vec<&Crate>, String> {
+    /// inside the repository when built with `features` and no default
+    /// features, sorted by directory. The roots' optional dependencies are
+    /// followed only as far as the features turn them on; every other
+    /// crate's are all followed (which features a build enables in them is
+    /// not tracked, so the slice errs on the side of shipping them).
+    pub fn closure(&self, roots: &[String], features: &[String]) -> Result<Vec<&Crate>, String> {
         if roots.is_empty() {
             return Err("A slice needs at least one root package".into());
         }
+        let root_deps = self.root_deps(roots, features)?;
         let mut todo = Vec::new();
         for root in roots {
             todo.push(self.named(root)?.dir.clone());
@@ -360,7 +501,7 @@ impl Source {
             if krate.dir.is_empty() {
                 return Err(format!("{} is the repository's root package and cannot be part of a slice", krate.name));
             }
-            for dep in &krate.deps {
+            for dep in root_deps.get(&dir).unwrap_or(&krate.deps) {
                 if self.crates.contains_key(dep) {
                     todo.push(dep.clone());
                 } else if let Some(error) = self.broken.get(dep) {
@@ -437,13 +578,18 @@ impl Source {
         Ok(selection)
     }
 
-    /// Build the slice of `roots` for `app` as a parentless commit in `repo`.
-    pub fn slice(&self, repo: &Path, app: &str, roots: &[String]) -> Result<Slice, String> {
+    /// Build the slice of `roots` with `features` for `app` as a parentless
+    /// commit in `repo`.
+    pub fn slice(&self, repo: &Path, app: &str, roots: &[String], features: &[String]) -> Result<Slice, String> {
         if app.is_empty() || !app.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return Err(format!("Invalid app name {app:?}"));
         }
-        let closure = self.closure(roots)?;
-        let selection = self.selection(&closure)?;
+        let closure = self.closure(roots, features)?;
+        let mut selection = self.selection(&closure)?;
+        let placeholders = self.placeholders(roots, &closure)?;
+        for krate in &placeholders {
+            selection.cut(&krate.dir);
+        }
         let mut files = 0;
         let mut bytes = 0;
         for entry in &self.entries {
@@ -463,8 +609,16 @@ impl Source {
         let manifest_oid = text(git(repo, &["hash-object", "-w", "--stdin"], Some(manifest.as_bytes()), &[])?)?;
         let lib_oid = text(git(repo, &["hash-object", "-w", "--stdin"], Some(b""), &[])?)?;
         let src = mktree(repo, &[("100644", "blob", &lib_oid, "lib.rs")])?;
+        let mut stubs = HashMap::new();
+        for krate in &placeholders {
+            let text = placeholder_manifest(krate);
+            let oid = text_oid(repo, &text)?;
+            stubs.insert(krate.dir.clone(), mktree(repo, &[("100644", "blob", &oid, "Cargo.toml"), ("040000", "tree", &src, "src")])?);
+            files += 2;
+            bytes += text.len() as u64;
+        }
         let tree = self
-            .tree(repo, "", false, &selection, &[("100644", "blob", &manifest_oid, "Cargo.toml"), ("040000", "tree", &src, "src")])?
+            .tree(repo, "", false, &selection, &stubs, &[("100644", "blob", &manifest_oid, "Cargo.toml"), ("040000", "tree", &src, "src")])?
             .ok_or("The slice is empty")?;
         let message = format!("commercial {} {app}", &self.commit[..12]);
         let (name, email) = AUTHOR;
@@ -486,19 +640,44 @@ impl Source {
             commit,
             app: app.to_owned(),
             crates: closure.iter().map(|c| (c.name.clone(), c.dir.clone())).collect(),
+            placeholders: placeholders.iter().map(|c| (c.name.clone(), c.dir.clone())).collect(),
             files: files + 2,
             bytes: bytes + manifest.len() as u64,
         })
     }
 
+    /// The optional dependencies of `roots` inside the repository that the
+    /// slice leaves out (not in `closure`), by directory: each ships as a
+    /// placeholder package.
+    fn placeholders(&self, roots: &[String], closure: &[&Crate]) -> Result<Vec<&Crate>, String> {
+        let shipped: BTreeSet<&str> = closure.iter().map(|c| c.dir.as_str()).collect();
+        let mut out = BTreeMap::new();
+        for root in roots {
+            let root = self.named(root)?;
+            for dir in root.optional.values().flatten() {
+                if shipped.contains(dir.as_str()) {
+                    continue;
+                }
+                let krate = self
+                    .crates
+                    .get(dir)
+                    .ok_or_else(|| format!("{} depends on {dir}, which has no readable package Cargo.toml", root.name))?;
+                out.insert(dir.clone(), krate);
+            }
+        }
+        Ok(out.into_values().collect())
+    }
+
     /// The slice's tree for `dir`: whole subtrees where nothing is cut below,
-    /// new trees along the paths that lead to selected or cut entries.
+    /// new trees along the paths that lead to selected or cut entries, and
+    /// the placeholder packages' trees (`stubs`, by directory).
     fn tree(
         &self,
         repo: &Path,
         dir: &str,
         inherited: bool,
         selection: &Selection,
+        stubs: &HashMap<String, String>,
         extra: &[(&str, &str, &str, &str)],
     ) -> Result<Option<String>, String> {
         let mut rows: Vec<(String, String, String, String)> =
@@ -507,9 +686,11 @@ impl Source {
             let entry = &self.entries[*i];
             let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
             let selected = selection.marks.get(&entry.path).copied().unwrap_or(inherited);
-            if entry.kind == "tree" {
+            if let Some(oid) = stubs.get(&entry.path) {
+                rows.push(("040000".into(), "tree".into(), oid.clone(), name.into()));
+            } else if entry.kind == "tree" {
                 if selection.below.contains(&entry.path) {
-                    if let Some(oid) = self.tree(repo, &entry.path, selected, selection, &[])? {
+                    if let Some(oid) = self.tree(repo, &entry.path, selected, selection, stubs, &[])? {
                         rows.push(("040000".into(), "tree".into(), oid, name.into()));
                     }
                 } else if selected {
@@ -528,8 +709,8 @@ impl Source {
 
     /// References the closure's crates make to files outside their own
     /// directory that the slice does not cover (see [`lint`]).
-    pub fn lint(&self, repo: &Path, roots: &[String]) -> Result<Vec<Finding>, String> {
-        let closure = self.closure(roots)?;
+    pub fn lint(&self, repo: &Path, roots: &[String], features: &[String]) -> Result<Vec<Finding>, String> {
+        let closure = self.closure(roots, features)?;
         let selection = self.selection(&closure)?;
         let in_closure: BTreeSet<&str> = closure.iter().map(|c| c.dir.as_str()).collect();
         let libs: HashMap<&str, &Crate> = self.crates.values().map(|c| (c.lib.as_str(), c)).collect();
@@ -678,6 +859,15 @@ impl Selection {
     fn selected(&self, path: &str) -> bool {
         self.deepest(path).is_some_and(|(_, selected)| selected)
     }
+    /// Leave `dir` out, walking the directories above it.
+    fn cut(&mut self, dir: &str) {
+        self.marks.insert(dir.to_owned(), false);
+        let mut at = parent(dir);
+        while let Some(up) = at {
+            self.below.insert(up.to_owned());
+            at = parent(up);
+        }
+    }
 }
 
 fn mktree(repo: &Path, rows: &[(&str, &str, &str, &str)]) -> Result<String, String> {
@@ -713,6 +903,43 @@ pub fn members_manifest(crates: &[(String, String)]) -> String {
     out
 }
 
+/// A placeholder for `krate`, an optional dependency of a root that the
+/// slice leaves out: its name, version and feature names (so the features
+/// that name it still resolve), no dependencies, an empty library.
+pub fn placeholder_manifest(krate: &Crate) -> String {
+    let mut out = format!(
+        "# Generated by makepad-source-slice: {} is not part of this slice (an\n\
+         # optional dependency its features leave off). Cargo reads the manifest\n\
+         # of every path dependency to load the workspace; this one is never built.\n\
+         [package]\n\
+         name = \"{}\"\n\
+         version = \"{}\"\n\
+         edition = \"2021\"\n\
+         publish = false\n\
+         \n\
+         [lib]\n\
+         path = \"src/lib.rs\"\n",
+        krate.name, krate.name, krate.version
+    );
+    let names: BTreeSet<&str> = krate
+        .features
+        .keys()
+        .map(String::as_str)
+        .chain(krate.optional.keys().map(String::as_str).filter(|name| krate.implicit_feature(name)))
+        .collect();
+    if !names.is_empty() {
+        out.push_str("\n[features]\n");
+        for name in names {
+            out.push_str(&format!("\"{name}\" = []\n"));
+        }
+    }
+    out
+}
+
+fn text_oid(repo: &Path, content: &str) -> Result<String, String> {
+    text(git(repo, &["hash-object", "-w", "--stdin"], Some(content.as_bytes()), &[])?)
+}
+
 /// A slice commit and what it holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
@@ -723,16 +950,20 @@ pub struct Slice {
     pub app: String,
     /// Its crates: (package name, directory), sorted by directory.
     pub crates: Vec<(String, String)>,
-    /// Files in the slice, the generated two included.
+    /// The roots' optional dependencies it holds only as placeholder
+    /// packages: (package name, directory), sorted by directory.
+    pub placeholders: Vec<(String, String)>,
+    /// Files in the slice, the generated ones included.
     pub files: u64,
     /// Their size in bytes.
     pub bytes: u64,
 }
 
-/// Cut the slice of `roots` (package names) at `commit` for `app`. The
-/// commit is written into `repo` and its hash returned in [`Slice::commit`].
-pub fn slice(repo: &Path, commit: &str, app: &str, roots: &[String]) -> Result<Slice, String> {
-    Source::load(repo, commit)?.slice(repo, app, roots)
+/// Cut the slice of `roots` (package names) built with `features` at
+/// `commit` for `app`. The commit is written into `repo` and its hash
+/// returned in [`Slice::commit`].
+pub fn slice(repo: &Path, commit: &str, app: &str, roots: &[String], features: &[String]) -> Result<Slice, String> {
+    Source::load(repo, commit)?.slice(repo, app, roots, features)
 }
 
 /// References the crates of the slice of `roots` at `commit` make to files
@@ -743,8 +974,8 @@ pub fn slice(repo: &Path, commit: &str, app: &str, roots: &[String]) -> Result<S
 /// of a repository crate outside the slice, `"../…"` literals in build
 /// scripts, and manifest target paths. Paths that leave the repository are
 /// Makepad's and are not reported.
-pub fn lint(repo: &Path, commit: &str, roots: &[String]) -> Result<Vec<Finding>, String> {
-    Source::load(repo, commit)?.lint(repo, roots)
+pub fn lint(repo: &Path, commit: &str, roots: &[String], features: &[String]) -> Result<Vec<Finding>, String> {
+    Source::load(repo, commit)?.lint(repo, roots, features)
 }
 
 /// Write the tree of `commit` into `out` (which must be empty or absent)

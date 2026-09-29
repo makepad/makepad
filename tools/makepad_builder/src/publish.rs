@@ -187,7 +187,9 @@ pub fn main() -> Result<(), String> {
     // server would cut from the same source commit.
     let commercial_repo = PathBuf::from(get("--commercial")?);
     let source = source_commit(&commercial_repo, "commercial", &dest, snapshot)?;
-    let slice = slicer::slice(&commercial_repo, &source, &app, &roots)?;
+    // Built with --no-default-features and no features of its own (a
+    // release names none), so the slice leaves out a root's optional crates.
+    let slice = slicer::slice(&commercial_repo, &source, &app, &roots, &[])?;
     println!(
         "commercial: slice {} of {source}: {} crates, {} files, {} bytes",
         slice.commit,
