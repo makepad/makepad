@@ -4257,7 +4257,7 @@ for ag in 'claude|Claude Code' 'codex|Codex' 'grok|Grok'; do
     if command -v "${ag%%|*}" >/dev/null 2>&1; then agents="$agents${agents:+
 }$ag"; fi
 done
-lic_state=none lic_error= licensed_ids= checked= tools_problem= m_rust_ok=0 m_license_rows= m_free_rows= m_free_total=0 m_free_ready=0
+lic_state=none lic_error= licensed_ids= checked= tools_problem= m_rust_ok=0 m_license_rows= m_send=' ' m_reports= m_free_rows= m_free_total=0 m_free_ready=0
 m_free_todo= m_public_ready=0 m_public_mb=0
 screen=main sel=0 top=0
 
