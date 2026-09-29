@@ -667,11 +667,6 @@ fn menu_keys(item: Option<&Item>) -> Text {
         spans.push(Span("c".into(), KEY));
         spans.push(Span(" cancel   ".into(), DIM));
     }
-    // Not while the app compiles or waits in the queue.
-    if item.is_some_and(|item| item.send) && open.is_none() {
-        spans.push(Span("e".into(), KEY));
-        spans.push(Span(" send my changes   ".into(), DIM));
-    }
     spans.push(Span("q quit".into(), DIM));
     spans
 }
@@ -861,9 +856,8 @@ pub(super) fn menu(view: View, selected: &mut usize, changed: &dyn Fn() -> bool)
             Key::Enter => return Ok(Nav::Select(ids[sel].clone())),
             Key::Back => return Ok(Nav::Back),
             Key::Quit | Key::Char('q') | Key::Char('Q') => return Ok(Nav::Quit),
-            // Background work: s (start when done) and c (cancel); e sends
-            // the changes made to an app.
-            Key::Char(c @ ('c' | 's' | 'e')) if main => return Ok(Nav::Key(c, ids[sel].clone())),
+            // Background work: s (start when done) and c (cancel).
+            Key::Char(c @ ('c' | 's')) if main => return Ok(Nav::Key(c, ids[sel].clone())),
             Key::Other => {
                 // Background builds report on every tick, each tick redraws.
                 let exited = super::reap_apps();

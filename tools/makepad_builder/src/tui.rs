@@ -149,11 +149,6 @@ fn show_menu(setup: &mut Setup) -> Result<(), String> {
                 Err(error) => setup.report(error),
                 Ok(()) => {}
             },
-            Nav::Key('e', id) => match id.strip_prefix("app:").map(|app| setup.send_changes(app)) {
-                Some(Err(error)) if error == QUIT => break,
-                Some(Err(error)) => setup.report(error),
-                _ => {}
-            },
             Nav::Key(key, id) => setup.background_key(key, &id),
         }
     }
@@ -469,6 +464,8 @@ impl Setup {
             rows.push(info(item(format!("agent-{command}"), *title, "", Vec::new(), "open"), "Ask it to change an app (it rebuilds them here), or to \"send what I changed\" to Makepad."));
         }
         rows.push(info(item("agent-shell", "Shell", "", text("with this folder's Rust on PATH", DIM), "open"), "A shell in this folder; type exit to come back."));
+        let send_status = if self.sendable_apps(&rows).iter().any(|(id, _)| changes::waiting(&self.root, id).is_some()) { text("report ready", OK) } else { text("to Makepad", DIM) };
+        rows.push(info(item("send", "Send my changes", "", send_status, "open"), "Your coding agent describes what you changed; you read it before anything is sent."));
         rows.push(Row::Head("SETUP".into()));
         rows.push(info(self.account_row(), "Log in, switch or log out."));
         if cfg!(windows) {
@@ -705,6 +702,7 @@ impl Setup {
             }
             "all" => self.compile_all(),
             "agent-shell" => self.shell(),
+            "send" => self.send_page(),
             agent if agent.starts_with("agent-") => self.launch_agent(&agent["agent-".len()..], None, None),
             app => self.open_app(app.trim_start_matches("app:")),
         }
@@ -1980,12 +1978,99 @@ impl Setup {
     }
 }
 
-/// Send my changes: e on an app's row.
+/// Send my changes: a row under CODING AGENTS.
 impl Setup {
+    /// The apps whose changes can be sent (downloaded, not compiling or
+    /// queued), as (id, title), from the rows the menu shows.
+    fn sendable_apps(&self, rows: &[Row]) -> Vec<(String, String)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Item(item) if item.send => item.id.strip_prefix("app:").map(|id| (id.to_owned(), item.name.trim().to_owned())),
+                _ => None,
+            })
+            .filter(|(id, _)| !JOBS.with(|j| j.borrow().involves(id)))
+            .collect()
+    }
+    /// The page: what sending does, then the app, the coding agent and an
+    /// optional note, and Describe my changes (or, when a report waits,
+    /// Read and send the report).
+    fn send_page(&mut self) -> Result<(), String> {
+        let apps = self.sendable_apps(&self.main_view().rows);
+        let agents: Vec<(&'static str, &'static str)> = self.agents.iter().filter(|a| a.0 != "grok").copied().collect();
+        let (mut app, mut agent, mut note) = (0usize, 0usize, String::new());
+        let mut selected = 0;
+        loop {
+            let mut rows = vec![Row::Note(Vec::new())];
+            rows.extend(wrap("Your coding agent reads what you changed in an app's source and describes each change as an idea, not code: what is different and why. It takes out names, emails, paths and secrets and shows you the list first.", 74).into_iter().map(|line| Row::Note(text(line, PLAIN))));
+            rows.push(Row::Note(Vec::new()));
+            rows.extend(wrap("Then you read the report here and choose Send, anonymously or with your email. Nothing goes to Makepad before that.", 74).into_iter().map(|line| Row::Note(text(line, DIM))));
+            rows.push(Row::Note(Vec::new()));
+            let waiting = apps.get(app).is_some_and(|(id, _)| changes::waiting(&self.root, id).is_some());
+            if apps.is_empty() {
+                rows.push(Row::Note(text("Download an app and change it first.", WARN)));
+                rows.push(Row::Note(Vec::new()));
+            } else {
+                rows.push(item("app", format!("{:<16}", "App"), "", text(apps[app].1.clone(), PLAIN), if apps.len() > 1 { "change" } else { "" }));
+                if agents.is_empty() && !waiting {
+                    rows.push(Row::Note(Vec::new()));
+                    rows.push(Row::Note(text("Install Claude Code or Codex to describe your changes.", WARN)));
+                    rows.push(Row::Note(Vec::new()));
+                } else {
+                    if let Some((_, title)) = agents.get(agent) {
+                        rows.push(item("agent", format!("{:<16}", "Coding agent"), "", text(*title, PLAIN), if agents.len() > 1 { "change" } else { "" }));
+                    }
+                    let shown = if note.is_empty() { text("optional", DIM) } else { text(note.clone(), PLAIN) };
+                    rows.push(item("note", format!("{:<16}", "Note"), "", shown, "write"));
+                    rows.push(Row::Note(Vec::new()));
+                    if waiting {
+                        rows.push(item("start", format!("{:<34}", "Read and send the report"), "", Vec::new(), "report ready"));
+                    } else {
+                        rows.push(item("start", format!("{:<34}", "Describe my changes"), "", Vec::new(), format!("starts {}", agents[agent].1)));
+                    }
+                }
+            }
+            rows.push(item("back", format!("{:<34}", "Back"), "", Vec::new(), ""));
+            let view = View {
+                crumb: " › Send my changes".into(),
+                subtitle: "Your coding agent describes your changes; nothing is sent until you choose Send.".into(),
+                email: self.shown_email(),
+                rows,
+                back: true,
+                footer: Some("↑↓ move   ⏎ select   esc back"),
+                ..View::default()
+            };
+            match view::menu(view, &mut selected, &|| false)? {
+                Nav::Select(id) if id == "app" && apps.len() > 1 => {
+                    let names: Vec<&str> = apps.iter().map(|a| a.1.as_str()).collect();
+                    if let Some(chosen) = view::choose("Send the changes to which app?", "", &names, app)? {
+                        app = names.iter().position(|n| *n == chosen).unwrap_or(app);
+                    }
+                }
+                Nav::Select(id) if id == "agent" && agents.len() > 1 => {
+                    let names: Vec<&str> = agents.iter().map(|a| a.1).collect();
+                    if let Some(chosen) = view::choose("Describe your changes with which agent?", "It writes the report; you read it here before anything is sent.", &names, agent)? {
+                        agent = names.iter().position(|n| *n == chosen).unwrap_or(agent);
+                    }
+                }
+                Nav::Select(id) if id == "note" => {
+                    let hint = text("It becomes the report's summary; your agent takes out names and paths.", DIM);
+                    if let Some(value) = view::edit("A short note for Makepad (optional):", &note, hint, "⏎ keep   esc cancel")? {
+                        note = value;
+                    }
+                }
+                Nav::Select(id) if id == "start" => {
+                    let chosen = agents.get(agent).map(|a| a.0);
+                    return self.send_changes(&apps[app].0, chosen, &note);
+                }
+                Nav::Select(_) | Nav::Back | Nav::Quit => return Ok(()),
+                Nav::Refresh | Nav::Key(..) => {}
+            }
+        }
+    }
     /// Review and send the change report a coding agent left for `app` in
     /// changes/, or, when there is none yet, ask an agent to write it.
     /// Nothing is sent without "Send" chosen on the review page.
-    fn send_changes(&mut self, app: &str) -> Result<(), String> {
+    fn send_changes(&mut self, app: &str, agent: Option<&str>, note: &str) -> Result<(), String> {
         if JOBS.with(|j| j.borrow().involves(app)) {
             view::message(text("Wait until it is compiled, then send your changes.", DIM));
             return Ok(());
@@ -1997,7 +2082,8 @@ impl Setup {
         let path = match changes::waiting(&self.root, app) {
             Some(path) => path,
             None => {
-                self.write_report(&release)?;
+                let Some(agent) = agent else { return Ok(()) };
+                self.write_report(&release, agent, note)?;
                 match changes::waiting(&self.root, app) {
                     Some(path) => path,
                     None => return Ok(()),
@@ -2034,25 +2120,16 @@ impl Setup {
     }
     /// No report yet: a coding agent writes one, as AGENTS.md describes
     /// ("Sending your changes to Makepad"), and leaves it in changes/.
-    fn write_report(&self, release: &Release) -> Result<(), String> {
+    fn write_report(&self, release: &Release, agent: &str, note: &str) -> Result<(), String> {
         let app = release.id.as_str();
-        let agent = match self.agents.iter().filter(|a| a.0 != "grok").collect::<Vec<_>>().as_slice() {
-            [] => {
-                view::message(text(format!("Ask your coding agent to \"send what I changed\" in {}; it leaves the report in changes/ for you to read here.", release.title), DIM));
-                return Ok(());
-            }
-            [one] => **one,
-            several => {
-                let names: Vec<&str> = several.iter().map(|a| a.0).collect();
-                let Some(chosen) = view::choose("Describe your changes with which agent?", "It writes the report; you read it here before anything is sent.", &names, 0)? else { return Ok(()) };
-                **several.iter().find(|a| a.0 == chosen).ok_or("Unknown agent")?
-            }
-        };
-        let task = format!(
+        let mut task = format!(
             "Send what I changed in {} to Makepad. Follow \"Sending your changes to Makepad\" in the Makepad AGENTS.md: describe my changes as concepts, anonymise them, show me the list and wait for my approval, then write the report folder changes/{app}-report in the builder folder of the installation root. I read and send it from the Builder.",
             release.title
         );
-        self.launch_agent(agent.0, Some(app), Some(&task))
+        if !note.is_empty() {
+            task.push_str(&format!(" The person's note for Makepad, to use as the report's summary (anonymised like the rest): \"{note}\""));
+        }
+        self.launch_agent(agent, Some(app), Some(&task))
     }
     /// The review: every change by title, what else goes with it, then
     /// Send, Send with my email (when logged in), Read it all, or Don't send.
@@ -2301,13 +2378,13 @@ impl Setup {
 fn item(id: impl Into<String>, name: impl Into<String>, license: &'static str, status: view::Text, action: impl Into<String>) -> Row {
     Row::Item(Item { id: id.into(), name: name.into(), license, status, action: action.into(), child: false, info: String::new(), send: false })
 }
-/// An app row whose source is downloaded: e sends the changes made to it,
-/// and when a coding agent left a change report the row says so.
+/// An app row whose source is downloaded: its changes can be sent (Send my
+/// changes), and when a coding agent left a change report the row says so.
 fn sendable(mut row: Row, root: &Path, app: &str, state: State) -> Row {
     if let Row::Item(item) = &mut row {
         item.send = matches!(state, State::Ready | State::Compile | State::Merge) && !stopped(app);
         if item.send && changes::waiting(root, app).is_some() {
-            item.info = "Your change report is ready: press e to read it and send it to Makepad.".into();
+            item.info = "Your change report is ready: open Send my changes under Coding agents.".into();
         }
     }
     row
