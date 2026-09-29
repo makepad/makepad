@@ -212,6 +212,7 @@ impl Splash {
 
         let vm_id = self.vm_id;
         let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
+        let loader=if sheet.is_some() {crate::widget_async::isolate_loader(cx,vm_id)} else {None};
         self.style_pending=false;
         // A style reapply runs the body's top-level statements again: only the
         // body defines the widget tree, and that tree has to be rebuilt on the
@@ -232,14 +233,22 @@ impl Splash {
         let mut new_view = None;
         let mut body_modules_out = Vec::new();
         crate::widget_async::contain_isolate_panic("app source eval", || {
-            let (view, body_modules) = cx.with_script_vm_id(vm_id, |vm| {
-                if let Some(sheet)=sheet {
+            // A restyle is the host registering its own library into the
+            // isolate, not app script, so it runs outside the script budget:
+            // under a heavy sheet it takes longer than one budget slice and
+            // would stop half way, leaving the body half a library.
+            if let Some(sheet)=sheet {
+                cx.with_script_vm_id_trusted(vm_id, |vm| {
                     if crate::desktop_style::current(vm).as_ref()!=Some(&sheet) {
                         crate::desktop_style::install(vm,sheet);
                         // Keep the isolate's existing prelude/resource handles and jail.
-                        vm.with_reload(|vm| {crate::widgets_mod(vm);crate::desktop_style::apply_widgets(vm);});
+                        // The sheet's fonts load through the resource loader the
+                        // isolate was stripped of, so the restyle has it while it runs.
+                        vm.with_reload(|vm| crate::widget_async::with_loader(vm,loader.as_ref(),|vm| {let host_io_only=vm.cx().script_data.std.host_io_only();crate::widgets_mod_with_host_io(vm,host_io_only);crate::desktop_style::apply_widgets(vm);}));
                     }
-                }
+                });
+            }
+            let (view, body_modules) = cx.with_script_vm_id(vm_id, |vm| {
                 // Everything on `mod` that is not the body's own; whatever the run
                 // adds beyond this is the body's.
                 let mut known = module_keys(vm);
@@ -910,7 +919,7 @@ mod style_tests {
         let uid=field.widget_uid();
         field.clone().set_text(&mut cx,"edited document");
         cx.with_vm(|vm| {
-            desktop_style::install(vm,StyleSheet::load_with_appearance(DesktopStyle::Macos,true));
+            desktop_style::install(vm,StyleSheet::load(DesktopStyle::Macos.sheet(true)));
             let source=splash.script_source();
             splash.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
         });
@@ -937,11 +946,34 @@ mod style_tests {
     /// Splash (which notices the new sheet), then let it restyle its isolate.
     fn restyle(cx: &mut Cx, splash: &mut Splash, style: DesktopStyle, dark: bool) {
         cx.with_vm(|vm| {
-            desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark));
+            desktop_style::install(vm, StyleSheet::load(style.sheet(dark)));
             let source = splash.script_source();
             splash.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
         });
         splash.eval_styled_body(cx, true);
+    }
+
+    /// A sheet's theme half loads its fonts through `crate_resource`, and an
+    /// isolate is stripped of the resource loader before its body first runs.
+    /// Without the loader the font member is left without a file and the
+    /// isolate's text falls through to the next member of the family.
+    #[test]
+    fn a_restyle_loads_the_fonts_its_sheet_names_and_leaves_the_body_no_loader() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(&mut cx, "label := Label{text: \"under a sheet\"}");
+        restyle(&mut cx, &mut splash, DesktopStyle::Ios, false);
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            let theme = vm.module(id!(theme));
+            let font = vm.bx.heap.value(theme, id!(font_regular).into(), NoTrap).as_object().unwrap();
+            let family = vm.bx.heap.value(font, id!(font_family).into(), NoTrap).as_object().unwrap();
+            let member = vm.bx.heap.value(family, id!(latin).into(), NoTrap).as_object().unwrap();
+            let res = vm.bx.heap.value(member, id!(res).into(), NoTrap);
+            assert!(res.as_handle().is_some(), "the sheet's font member has no file: {:?}", res);
+            let modules = vm.bx.heap.modules;
+            assert!(vm.bx.heap.value(modules, id!(res).into(), NoTrap).is_nil(), "the body can reach the resource loader");
+        });
+        splash.stop(&mut cx);
     }
 
     #[test]

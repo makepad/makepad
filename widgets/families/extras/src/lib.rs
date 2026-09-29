@@ -84,7 +84,7 @@ pub(crate) fn checkout_test_cx() -> PooledCx {
 
 #[cfg(test)]
 mod field_row_tests {
-    use makepad_widgets_core::desktop_style::{install, DesktopStyle, StyleSheet};
+    use makepad_widgets_core::desktop_style::{catalogue, install, StyleSheet};
     use makepad_widgets_core::makepad_script::trap::NoTrap;
     use makepad_widgets_core::*;
 
@@ -109,17 +109,14 @@ mod field_row_tests {
     /// off the box: the core holds its own fields to the same row.
     #[test]
     fn the_date_fields_stand_at_the_height_their_sheet_gives_the_text_box() {
-        for (style, dark) in DesktopStyle::ALL
-            .into_iter()
-            .flat_map(|style| if style.supports_dark() { vec![(style, false), (style, true)] } else { vec![(style, false)] })
-        {
+        for entry in catalogue() {
             let mut cx = Cx::new(Box::new(|_, _| {}));
             cx.with_vm(|vm| {
                 crate::script_mod(vm);
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(entry));
                 vm.bx.captured_errors = Some(Vec::new());
                 vm.with_reload(crate::script_mod);
-                let sheet = if dark { format!("{}-dark", style.id()) } else { style.id().to_string() };
+                let sheet = entry.id;
                 assert!(vm.take_errors().is_empty(), "{sheet} does not evaluate");
                 let row = field_metrics(vm, "TextInput");
                 for name in ["DateField", "TimeField", "DatePicker", "DateRangePicker"] {

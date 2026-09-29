@@ -202,8 +202,8 @@ impl AppMain for App {
             && std::env::var_os("MAKEPAD_WM_THEME_SPLASH").is_none()
         {
             let dark = native_mail_dark_appearance();
-            desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(
-                desktop_style::DesktopStyle::Macos, dark,
+            desktop_style::install(vm, desktop_style::StyleSheet::load(
+                desktop_style::DesktopStyle::Macos.sheet(dark),
             ));
             log!("mail: using macOS {} appearance", if dark { "dark" } else { "light" });
         }

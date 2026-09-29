@@ -164,6 +164,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         state.heap_to_vm.retain(|_, v| *v != vm_id);
         state.ui_handle_types.remove(&vm_id);
         state.vm_root_uids.remove(&vm_id);
+        state.loaders.remove(&vm_id);
         state.done.retain(|d| d.vm_id != vm_id);
         state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
         state.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
@@ -286,6 +287,11 @@ struct CxWidgetAsync {
     /// Each isolate's own view-root uid (set by [`inject_splash_ui_handle`]). Isolate `ui`
     /// handles are confined to this subtree so a mini-app can't reach host/sibling widgets.
     vm_root_uids: HashMap<SplashVmId, WidgetUid>,
+    /// Each isolate's resource loader (`mod.res`), held here because the
+    /// isolate's own namespace is stripped of it before a body first runs.
+    /// Only the host's restyle hands it back, while it runs: a sheet's theme
+    /// half loads its fonts through `crate_resource` (see [`with_loader`]).
+    loaders: HashMap<SplashVmId, ScriptObjectRef>,
     isolated_vms: IsolatedScriptVms,
     current_vm_id: SplashVmId,
     /// Round-robin cursor for the per-pump isolate GC pass (last vm id serviced).
@@ -360,6 +366,28 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
         .vms
         .insert(vm_id, isolated);
 
+    match out {
+        Ok(out) => out,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// The resource loader the isolate `vm_id` was stripped of, if it had one.
+pub(crate) fn isolate_loader(cx: &mut Cx, vm_id: SplashVmId) -> Option<ScriptObjectRef> {
+    cx.global::<CxWidgetAsync>().loaders.get(&vm_id).cloned()
+}
+
+/// Runs `f`, the host's own work in an isolate, with the isolate's resource
+/// loader back on `mod.res`, and strips it again after, a panic included, so
+/// no body code runs while it is there.
+pub(crate) fn with_loader<R>(vm: &mut ScriptVm, loader: Option<&ScriptObjectRef>, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+    let Some(loader) = loader else {
+        return f(vm);
+    };
+    let modules = vm.bx.heap.modules;
+    vm.bx.heap.set_value_def(modules, id!(res).into(), loader.as_object().into());
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(vm)));
+    vm.bx.heap.set_value_def(modules, id!(res).into(), NIL.into());
     match out {
         Ok(out) => out,
         Err(payload) => std::panic::resume_unwind(payload),
@@ -553,7 +581,7 @@ impl CxSplashVmExt for Cx {
         // stock widgets match the window they sit in.
         let inherited = outer_vm.as_ref().and_then(|outer| crate::desktop_style::sheet_of_heap(self, outer.heap.heap_key()));
         self.script_vm = Some(Box::new(ScriptVmBase::new()));
-        let bx = {
+        let (bx, loader) = {
             let bx = self.script_vm.take().unwrap();
             let mut vm = ScriptVm {
                 host: self,
@@ -589,6 +617,10 @@ impl CxSplashVmExt for Cx {
                 mod.res = nil
                 mod.cx.quit = nil
             };
+            // The loader itself is kept where no script can name it, for the
+            // host's own restyle: see `CxWidgetAsync::loaders`.
+            let loader = vm.bx.heap.module(id!(res));
+            let loader = (loader != ScriptObject::ZERO).then(|| vm.bx.heap.new_object_ref(loader));
             vm.eval(strip);
             // Re-register `fs` as the JAILED per-app storage module: inside an
             // isolate, "the filesystem" is the app's private sandbox directory
@@ -609,7 +641,7 @@ impl CxSplashVmExt for Cx {
             for install in host_mods {
                 install(&mut vm);
             }
-            vm.bx
+            (vm.bx, loader)
         };
         let mut std = std::mem::replace(&mut self.script_data.std, outer_std);
         if host_io_only {
@@ -626,6 +658,9 @@ impl CxSplashVmExt for Cx {
         // the dead one.
         state.dead_heaps.remove(&heap_key);
         state.heap_to_vm.insert(heap_key, id);
+        if let Some(loader) = loader {
+            state.loaders.insert(id, loader);
+        }
         state.isolated_vms.vms.insert(
             id,
             IsolatedSplashVm {

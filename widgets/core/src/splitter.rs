@@ -1548,7 +1548,7 @@ mod style_reapply_tests {
             splitter.set_align(SplitterAlign::FromA(120.0));
             splitter.set_axis(SplitterAxis::Vertical);
             for (style, dark) in [(DesktopStyle::Windows, false), (DesktopStyle::Macos, true), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
+                install(vm, StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(crate::script_mod);
                 splitter.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
                 assert!(

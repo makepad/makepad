@@ -80,7 +80,7 @@ impl Options {
                     result.model = Some(args.get(i).ok_or("--model needs an ID")?.clone());
                 }
                 "--help" | "-h" => {
-                    println!("ci [--run [ci.splash] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--deep] [--remote]\nci --preflight [--base origin/work] [--package NAME]... [--dependents] [--report file.json]\nci --serve-status   (only GET /ci/v1/status from local/ci, as status_listen in local/ci/ci.toml says)");
+                    println!("ci [--run [ci.splash | slice:<app>] | --once [branch] | --install --accept-license] [--model ID] [--no-vision] [--deep] [--remote]\nci --preflight [--base origin/work] [--package NAME]... [--dependents] [--report file.json]\nci --serve-status   (only GET /ci/v1/status from local/ci, as status_listen in local/ci/ci.toml says)");
                     std::process::exit(0);
                 }
                 s if s == "--remote"

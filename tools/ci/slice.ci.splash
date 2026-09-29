@@ -1,0 +1,26 @@
+// One licensed app's slice of the commercial repository ships complete.
+// tools/ci adds this script once per entry of apps/commercial/slices.json
+// (`slice:<app>` tiles) with that entry's app and roots. The slice of the
+// tested commercial commit is what the server packs for that license: the
+// Cargo path-dependency closure of the roots, their declared includes and a
+// generated members Cargo.toml. It goes into a clean checkout of the tested
+// Makepad commit at apps/commercial, as a customer's Builder has it.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("slice", fn(){
+    ci.slice_checkout()
+})
+
+// References outside a crate (include_str!, crate_resource, build scripts)
+// must be in its [package.metadata.commercial] include.
+ci.step("lint", fn(){
+    ci.slice_lint()
+})
+
+ci.step("cargo check", fn(){
+    ci.slice_check()
+})
+
+nil

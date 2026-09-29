@@ -20,6 +20,7 @@ makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-strict-json = { path = "../../libs/strict_json" }
 makepad-toml-parser = { path = "../../libs/toml_parser" }
+makepad-source-slice = { path = "../../libs/source_slice" }
 makepad-script = { path = "../../platform/script" }
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["local", "llm"] }
 makepad-ai-llm = { path = "../../libs/ai/llm" }

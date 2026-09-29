@@ -342,6 +342,7 @@ mod tests {
                 manifest: format!("{dir}/Cargo.toml").into(),
                 name: dir.into(),
             }),
+            slice: None,
         }
     }
     fn fixture() -> (Vec<Member>, BTreeMap<String, BTreeSet<String>>, Vec<Script>) {
@@ -363,7 +364,7 @@ mod tests {
             reverse.entry(used.into()).or_default().insert(user.into());
         }
         let scripts = vec![
-            Script { path: "ci.splash".into(), name: ".".into(), target: None },
+            Script { path: "ci.splash".into(), name: ".".into(), target: None, slice: None },
             app_script("apps/calculator", "makepad-app-calculator"),
             app_script("apps/clock", "makepad-app-clock"),
         ];

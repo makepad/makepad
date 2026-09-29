@@ -267,7 +267,7 @@ mod tests {
         let vm_id = cx.alloc_splash_vm_with_network(false);
         let isolate = cx.with_script_vm_id_trusted(vm_id, |vm| {
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
-            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios));
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(false)));
             vm.with_reload(makepad_widgets::widgets_mod);
             vm.bx.heap.heap_key()
         });

@@ -324,7 +324,7 @@ mod tests {
         let mut cx=Cx::new(Box::new(|_,_|{}));
         cx.with_vm(|vm| {
             makepad_widgets_core::script_mod(vm);
-            desktop_style::install(vm,desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
+            desktop_style::install(vm,desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(false)));
             vm.with_reload(makepad_widgets_core::widgets_mod);
             let p=current_for_vm(vm).unwrap();
             assert_eq!(p.get("background"),Some("#ececec"),"{:?}",p);
@@ -337,20 +337,20 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_widgets_core::script_mod(vm);
-            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(false)));
             vm.with_reload(makepad_widgets_core::widgets_mod);
             assert_eq!(current_for_vm(vm).unwrap().get("background"), Some("#ececec"));
             // Same inputs: served from the cache, same answer.
             assert_eq!(current_for_vm(vm).unwrap().get("background"), Some("#ececec"));
             assert_eq!(vm.cx_mut().global::<PaletteCache>().heaps.len(), 1);
             // A dark toggle changes the style name, so the entry misses.
-            desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Macos, true));
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(true)));
             vm.with_reload(makepad_widgets_core::widgets_mod);
             let p = current_for_vm(vm).unwrap();
             assert_eq!(p.get("background"), Some("#28282a"), "{:?}", p);
             assert!(!p.light_mode);
             // `apply` (re-run by every style reload) drops the entry and re-resolves.
-            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Windows));
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Windows.sheet(false)));
             vm.with_reload(makepad_widgets_core::widgets_mod);
             apply(vm);
             assert!(vm.cx_mut().global::<PaletteCache>().heaps.is_empty());
@@ -372,7 +372,7 @@ mod tests {
                 (desktop_style::DesktopStyle::Android, true, "#141218", Some("#000000")),
                 (desktop_style::DesktopStyle::Macos, false, "#ececec", Some("#ececec")),
             ] {
-                desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(style, dark));
+                desktop_style::install(vm, desktop_style::StyleSheet::load(style.sheet(dark)));
                 vm.with_reload(makepad_widgets_core::widgets_mod);
                 apply(vm);
                 let p = current_for_vm(vm).unwrap();
@@ -402,7 +402,7 @@ mod tests {
         cx.with_vm(|vm| {
             makepad_widgets_core::script_mod(vm);
             // The WM installs Omarchy in every hosted app: the palette is the exported file.
-            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Omarchy));
+            desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             let p = current_for_vm(vm).unwrap();
             assert_eq!(p.get("accent"), Some("#7aa2f7"));
             assert_eq!(p.get("term.color1"), Some("#f7768e"));

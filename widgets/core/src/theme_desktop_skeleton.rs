@@ -178,6 +178,7 @@ script_mod! {
         color_cursor_border: #FFFFFF
 
         color_highlight: #f00
+        color_ctrl_selected: theme.color_highlight
         color_text_cursor: #FFFFFF
         color_bg_highlight_inline: #00000011
 
@@ -458,6 +459,13 @@ script_mod! {
         color_material_light: #xFFFFFFFF
         color_material_shadow: #x404040FF
         color_material_glow: #x00A0A0FF
+        // INSTRUMENTS
+        color_screen: #xC8C8C8FF
+        color_screen_ink: #x202020FF
+        screen_ghost: 0.1
+        color_lamp_off: #x3C3C3CFF
+        color_lamp_plain: #x8C8C8CFF
+        lamp_halo: 0.0
         // Surface and outline roles, the light mapping over the ladder above.
         color_surface: #xDDDDDDFF
         color_surface_container: #xEEEEEEFF

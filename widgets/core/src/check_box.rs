@@ -686,6 +686,206 @@ script_mod! {
         }
     }
 
+    /** The rocker switch: the toggle's state drawn as a housing with two
+     * halves, the one pressed in darker and lower. On presses the "I" half
+     * at the end of the travel, off the "O" half. It flips on a click and
+     * does not drag: a rocker has no knob to carry. */
+    mod.widgets.ToggleRocker = mod.widgets.ToggleFlat{
+        label_walk +: {
+            margin: theme.mspace_h_1{left: 38.}
+        }
+        draggable: false
+
+        draw_bg +: {
+            /** housing width as a multiple of its height 1.2..3 step 0.05 */
+            pill_aspect: 2.0
+            /** the rocker's inset from the housing edge in points 0..4 step 0.25 */
+            knob_inset: 1.5
+            /** the raised half */
+            rocker_color: uniform(theme.color_surface_bright)
+            /** the half pressed in */
+            rocker_color_pressed: uniform(theme.color_surface_dim)
+            /** the legends: an "O" on the off half and an "I" on the on half */
+            legend_color: uniform(theme.color_label_outer)
+            /** the "I" legend while on */
+            legend_on_color: uniform(theme.color_primary)
+
+            pixel: fn() {
+                let p = self.pos * self.rect_size
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let sz = vec2(self.size * self.pill_aspect, self.size)
+                // The housing's edges on whole device pixels, so its outline
+                // is one pixel wide wherever the row put the switch.
+                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 - sz.y * 0.5)
+                let lo = vec2(Finish.snap(self.rect_pos.x + o0.x, px), Finish.snap(self.rect_pos.y + o0.y, px)) - self.rect_pos
+                let hi = vec2(Finish.snap(self.rect_pos.x + o0.x + sz.x, px), Finish.snap(self.rect_pos.y + o0.y + sz.y, px)) - self.rect_pos
+                let o = lo
+                let c = (lo + hi) * 0.5
+                let h = (hi - lo) * 0.5
+                let k = min(self.border_radius * 0.5, h.y)
+                let housing = Material.sd_box(p, c, h, k)
+
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_disabled, self.disabled)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_error, self.error)
+                    .mix(self.border_color_disabled, self.disabled)
+
+                // The rocker inside the housing, split at the pivot. How far
+                // each half is pressed in follows `active`, so the two trade
+                // places as the state animates.
+                // The inset on whole device pixels, so the rocker's edges
+                // and the light line along its top land on pixel rows.
+                let ins = Finish.snap(self.border_size + self.knob_inset, px)
+                let hr = max(h - vec2(ins, ins), vec2(0.5, 0.5))
+                let rocker = Material.sd_box(p, c, hr, max(k - ins, 0.0))
+                let on_side = step(c.x, p.x)
+                let pressed = mix(1.0 - on_side, on_side, self.active)
+                // Each half is its colour laid over the housing's fill.
+                let raised_col = vec4(mix(fill.rgb, self.rocker_color.rgb, self.rocker_color.a), max(fill.a, self.rocker_color.a))
+                let pressed_col = vec4(mix(fill.rgb, self.rocker_color_pressed.rgb, self.rocker_color_pressed.a), max(fill.a, self.rocker_color_pressed.a))
+                var cap = mix(raised_col, pressed_col, pressed)
+                // The raised half tilts toward its outer end, so it is a
+                // shade lighter there than at the pivot.
+                let tilt = clamp(abs(p.x - c.x) / max(hr.x, 0.5), 0.0, 1.0)
+                cap = vec4(cap.rgb * mix(1.0, 0.9 + 0.14 * tilt, 1.0 - pressed), cap.a)
+                // The raised half catches the light along its top, the
+                // pressed half has the housing's shadow across its top and
+                // sits a device pixel lower.
+                let top_edge = Finish.band(p.y - (c.y - hr.y), -px, 0.0, px)
+                cap = vec4(mix(cap.rgb, Finish.lift(cap.rgb, 0.18), top_edge * (1.0 - pressed)), cap.a)
+                let shade = 1.0 - smoothstep(0.0, hr.y * 0.9, p.y - (c.y - hr.y))
+                cap = vec4(cap.rgb * (1.0 - 0.28 * shade * pressed), cap.a)
+                // The break where the rocker pivots.
+                let pivot = Finish.cover(abs(p.x - c.x) - px * 0.5, px)
+                cap = vec4(mix(cap.rgb, cap.rgb * 0.45, pivot), cap.a)
+
+                // The legends, a device pixel lower on the pressed half.
+                let drop = px * pressed
+                let at_o = vec2(c.x - hr.x * 0.5, c.y + drop)
+                let at_i = vec2(c.x + hr.x * 0.5, c.y + drop)
+                let ring = Finish.cover(abs(length(p - at_o) - hr.y * 0.34) - px * 0.6, px) * (1.0 - on_side)
+                // The "I" is one device pixel wide, centred on a pixel column.
+                let ix = Finish.snap(self.rect_pos.x + at_i.x, px) - self.rect_pos.x + px * 0.5
+                let bar = Finish.cover(max(abs(p.x - ix) - px * 0.5, abs(p.y - at_i.y) - hr.y * 0.38), px) * on_side
+                let legend = self.legend_color.mix(self.legend_on_color, self.active * on_side)
+                cap = vec4(mix(cap.rgb, legend.rgb, (ring + bar) * legend.a), cap.a)
+
+                var col = vec4(fill.rgb * fill.a, fill.a)
+                col = mix(col, vec4(stroke.rgb * stroke.a, stroke.a), Finish.band(housing, 0.0, max(self.border_size, px), px))
+                col = mix(col, vec4(cap.rgb * cap.a, cap.a), Finish.cover(rocker, px))
+                // Disabled fades the whole switch rather than recolouring it.
+                return col * Finish.cover(housing, px) * (1.0 - 0.55 * self.disabled)
+            }
+        }
+    }
+
+    /** The slide switch: a short slot with a knob that carries grip lines,
+     * and a small mark in the free end of the slot, filled while on. The
+     * knob follows a drag, as the toggle's does. */
+    mod.widgets.ToggleSlide = mod.widgets.ToggleFlat{
+        label_walk +: {
+            margin: theme.mspace_h_1{left: 38.}
+        }
+
+        draw_bg +: {
+            /** slot width as a multiple of its height 1.5..3 step 0.05 */
+            pill_aspect: 2.0
+            /** the knob's inset from the slot edge in points 0..4 step 0.25 */
+            knob_inset: 1.0
+            /** the knob */
+            knob_color: uniform(theme.color_surface_bright)
+            /** the mark in the free end of the slot while on */
+            mark_on_color: uniform(theme.color_primary)
+            /** the knob's grip lines, pitch in points 1..4 step 0.25 */
+            grip_pitch: uniform(2.0)
+            // The knob stands centred in the slot's height at both ends of
+            // its travel; the drag and the knob icons read this to agree.
+            knob_centred: uniform(1.0)
+
+            pixel: fn() {
+                let p = self.pos * self.rect_size
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                let sz = vec2(self.size * self.pill_aspect, self.size)
+                // The housing's edges on whole device pixels, so its outline
+                // is one pixel wide wherever the row put the switch.
+                let o0 = vec2((self.rect_size.x - sz.x) * self.mark_at_end, self.rect_size.y * 0.5 - sz.y * 0.5)
+                let lo = vec2(Finish.snap(self.rect_pos.x + o0.x, px), Finish.snap(self.rect_pos.y + o0.y, px)) - self.rect_pos
+                let hi = vec2(Finish.snap(self.rect_pos.x + o0.x + sz.x, px), Finish.snap(self.rect_pos.y + o0.y + sz.y, px)) - self.rect_pos
+                let o = lo
+                let c = (lo + hi) * 0.5
+                let h = (hi - lo) * 0.5
+                let k = min(self.border_radius * 0.5, h.y)
+                let slot = Material.sd_box(p, c, h, k)
+
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                    .mix(self.color_disabled, self.disabled)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_error, self.error)
+                    .mix(self.border_color_disabled, self.disabled)
+
+                // The knob's place. A square knob stands as far clear of
+                // the slot on every side at both ends, so it travels the
+                // slot's length less its height; `knob_centred` tells the
+                // drag and the knob icons to work it out the same way. Its
+                // top and bottom sit on whole device pixels, so its rim and
+                // the light line under it are one row each.
+                let knob_t = mix(self.active, self.drag_pos, self.drag)
+                // A whole number of device pixels, and as many fewer than
+                // the slot as leaves the same clearance above and below.
+                let slot_px = floor((hi.y - lo.y) / px + 0.5)
+                var knob_px = max(floor(2.0 * (h.y - self.border_size - self.knob_inset) / px), 2.0)
+                knob_px = knob_px - (slot_px - knob_px - 2.0 * floor((slot_px - knob_px) * 0.5))
+                let ks = knob_px * 0.5 * px
+                let k_top = lo.y + (slot_px - knob_px) * 0.5 * px
+                let kc = vec2(lo.x + h.y + 2.0 * (h.x - h.y) * knob_t, k_top + ks)
+                let kh = vec2(ks, ks)
+
+                // The mark in the free end of the slot: a filled dot while
+                // on, an open ring while off, on the side the knob left.
+                let free = vec2(mix(lo.x + 2.0 * h.x - h.y, lo.x + h.y, knob_t), c.y)
+                let mr = sz.y * 0.16
+                let dot = Finish.cover(length(p - free) - mr, px)
+                let ring = Finish.cover(abs(length(p - free) - mr) - px * 0.6, px)
+                let on_ink = self.mark_on_color
+                let off_ink = self.mark_color
+                let mark = mix(ring, dot, self.active)
+                let mark_ink = off_ink.mix(on_ink, self.active)
+
+                var col = vec4(fill.rgb * fill.a, fill.a)
+                col = Finish.over(col, vec4(mark_ink.rgb * mark_ink.a * mark, mark_ink.a * mark))
+                col = mix(col, vec4(stroke.rgb * stroke.a, stroke.a), Finish.band(slot, 0.0, max(self.border_size, px), px))
+
+                // The knob: a square block with rounded corners, a light
+                // line along its top under the rim, and grip lines across
+                // it, each line on a whole device pixel column.
+                let kd = Material.sd_box(p, kc, kh, min(k, ks * 0.35))
+                var knob = self.knob_color.rgb
+                knob = mix(knob, Finish.lift(knob, 0.25), Finish.band(p.y - k_top, -px * 2.0, -px, px))
+                let pitch = max(self.grip_pitch, px * 2.0)
+                let gi = floor((p.x - kc.x) / pitch + 0.5)
+                let gx = Finish.snap(self.rect_pos.x + kc.x + gi * pitch, px) - self.rect_pos.x
+                let in_grip = step(abs(gi), 1.0) * step(abs(p.y - kc.y), ks * 0.5)
+                let dark = Finish.cover(abs(p.x - (gx - px * 0.5)) - px * 0.5, px)
+                let light = Finish.cover(abs(p.x - (gx + px * 0.5)) - px * 0.5, px)
+                knob = mix(knob, knob * 0.55, dark * in_grip)
+                knob = mix(knob, Finish.lift(knob, 0.3), light * in_grip)
+                knob = mix(knob, knob * 0.6, Finish.band(kd, 0.0, px, px))
+                col = mix(col, vec4(knob, 1.0), Finish.cover(kd, px))
+                return col * Finish.cover(slot, px) * (1.0 - 0.55 * self.disabled)
+            }
+        }
+    }
+
     /** The custom checkbox: no mark box drawn, for a caller-supplied icon. */
     mod.widgets.CheckBoxCustom = mod.widgets.CheckBox{
         width: Fit
@@ -1075,8 +1275,12 @@ impl CheckBox {
         let (size, border, inset) = (size[0] as f64, border[0] as f64, inset[0] as f64);
         let pill = dvec2(size * aspect[0] as f64, size);
         let radius = pill.y * 0.5 - border - inset;
-        let travel = pill.y - pill.x + border + inset;
-        let along = pill.y * 0.5 + border - travel * knob_t as f64;
+        let along = if self.knob_centred(cx) {
+            pill.y * 0.5 + (pill.x - pill.y) * knob_t as f64
+        } else {
+            let travel = pill.y - pill.x + border + inset;
+            pill.y * 0.5 + border - travel * knob_t as f64
+        };
         let offset_x = if self.label_before { rect.size.x - pill.x } else { 0.0 };
         let center = dvec2(rect.pos.x + offset_x + along, rect.pos.y + rect.size.y * 0.5);
         Some((center, radius * 2.0, knob_t))
@@ -1093,7 +1297,20 @@ impl CheckBox {
         let mut inset = [0.0f32];
         self.draw_bg.get_uniform(cx, live_id!(knob_inset), &mut inset);
         let size = size[0] as f64;
+        if self.knob_centred(cx) {
+            return (size * aspect[0] as f64 - size).max(1.0);
+        }
         (size * aspect[0] as f64 - size - border[0] as f64 - inset[0] as f64).max(1.0)
+    }
+
+    /// Whether the face centres its knob in the slot's height at both ends
+    /// (`knob_centred`, a uniform that reads back zero through a face that
+    /// never declared it), so its travel is the slot's length less its
+    /// height rather than the round toggle's.
+    fn knob_centred(&mut self, cx: &mut Cx) -> bool {
+        let mut centred = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(knob_centred), &mut centred);
+        centred[0] > 0.5
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<bool> {

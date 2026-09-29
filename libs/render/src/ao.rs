@@ -1230,7 +1230,7 @@ mod post_face_forensics {
     #[test]
     fn isolated_post_face_hits() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
@@ -1369,7 +1369,7 @@ mod edge_graze_probe {
     #[test]
     fn rafter_side_edge_vs_centre() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");

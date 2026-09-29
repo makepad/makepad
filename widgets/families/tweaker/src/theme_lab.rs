@@ -69,7 +69,7 @@
 //! every widget was built from, and leaves the panel re-scanning every draw
 //! slot after every draw for as long as the app runs.
 
-use crate::desktop_style::{self, DesktopStyle, StyleSheet};
+use crate::desktop_style::{self, StyleSheet};
 use crate::makepad_platform::{ScriptVm, ScriptVmCx};
 use crate::theme_tokens::{
     held_pairs, random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend,
@@ -242,7 +242,7 @@ impl PinnedTheme {
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     base: BaseTheme,
-    sheet: Option<(DesktopStyle, bool)>,
+    sheet: Option<&'static str>,
     theme: BlendTheme,
     /// The tokens the entry theme pins over its base and its sheet, and
     /// `None` for a theme that is just those two: every built-in, and every
@@ -412,11 +412,9 @@ impl ThemeLab {
             return;
         }
         let base = crate::base_theme(vm.cx_mut());
-        let sheet = desktop_style::current_name(vm).and_then(|name| {
-            DesktopStyle::parse(&name).map(|style| (style, name.ends_with("-dark")))
-        });
+        let sheet = desktop_style::current_name(vm).and_then(|name| desktop_style::find(&name).map(|entry| entry.id));
         let theme = match sheet {
-            Some((style, dark)) => BlendTheme::Sheet(style, dark),
+            Some(id) => BlendTheme::Sheet(id),
             None => BlendTheme::Base(match base {
                 BaseTheme::Dark => Scheme::Dark,
                 BaseTheme::Light => Scheme::Light,
@@ -933,9 +931,10 @@ impl ThemeLab {
         self.rebuilds = self.rebuilds.saturating_add(1);
         crate::set_base_theme(vm.cx_mut(), entry.base);
         match entry.sheet {
-            Some((style, dark)) => {
-                desktop_style::install(vm, StyleSheet::load_with_appearance(style, dark))
-            }
+            Some(id) => match StyleSheet::named(id) {
+                Some(sheet) => desktop_style::install(vm, sheet),
+                None => desktop_style::uninstall(vm),
+            },
             None => desktop_style::uninstall(vm),
         }
         let pinned = entry.pinned.as_ref().map(|pinned| pinned.script.clone());
@@ -1022,7 +1021,7 @@ mod theme_lab_tests {
     /// name: what a caller outside the crate would have to name, and what
     /// `index_of` is for.
     const DARK: BlendTheme = BlendTheme::Base(Scheme::Dark);
-    const OMARCHY: BlendTheme = BlendTheme::Sheet(DesktopStyle::Omarchy, false);
+    const OMARCHY: BlendTheme = BlendTheme::Sheet("omarchy");
 
     /// A theme whose inks do not stand off its grounds, with the misses in a
     /// deliberate order: the first pair the table finds anything for here is a
@@ -1261,7 +1260,7 @@ mod theme_lab_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
+            desktop_style::install(vm, StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
             lab.enter(vm);
             assert_eq!(lab.entry.as_ref().unwrap().theme, OMARCHY);
@@ -1540,7 +1539,7 @@ mod theme_lab_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
+            desktop_style::install(vm, StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
             lab.enter(vm);
             let dark = lab.index_of(DARK).unwrap();

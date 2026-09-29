@@ -336,8 +336,8 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
         let mut host = ModuleHost::default();
-        let light = desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Ios, false);
-        let dark = desktop_style::StyleSheet::load_with_appearance(desktop_style::DesktopStyle::Ios, true);
+        let light = desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(false));
+        let dark = desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(true));
         host.apply_style(&mut cx, &light);
         let module: &'static dyn AppModule = &makepad_app_clock::CLOCK_MODULE;
         let open = module.open_schema().validate("{}", &[]).unwrap();
@@ -369,7 +369,7 @@ mod tests {
         let open = module.open_schema().validate("{}", &[]).unwrap();
         host.create(&mut cx, 1, module, open, dvec2(900.0, 700.0)).unwrap();
         let uid = host.get(1).unwrap().root.widget_uid();
-        host.apply_style(&mut cx, &desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos));
+        host.apply_style(&mut cx, &desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(false)));
         let instance = host.get(1).unwrap();
         assert_eq!(instance.root.widget_uid(), uid);
         cx.with_script_vm_id_trusted(instance.vm_id, |vm| {

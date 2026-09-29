@@ -52,7 +52,7 @@
 //! the one thing that does, and `export_sheet_source`, which writes one, says
 //! what makes it the exception.
 
-use crate::desktop_style::DesktopStyle;
+use crate::desktop_style::SheetEntry;
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
 use crate::script_eval;
 use std::collections::{BTreeMap, BTreeSet};
@@ -289,6 +289,13 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
     color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
     color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
+    // Instruments: the readout, the display window, the lamp and the meter.
+    color("color_screen", TokenGroup::ColorSurface, "The face of a display: the glass behind a readout and the dial of a needle meter.", ALL),
+    color("color_screen_ink", TokenGroup::ColorSurface, "What a display lights: segment digits, a meter's scale and its needle.", ALL),
+    spec("screen_ghost", TokenGroup::State, TokenKind::Opacity, "How much of an unlit segment shows behind the lit ones, as a share of the lit ink.", 0.0, 0.3, 0.01, ALL),
+    color("color_lamp_off", TokenGroup::ColorStatus, "An indicator lamp that is out: the dark lens it shows instead of a hole.", ALL),
+    color("color_lamp_plain", TokenGroup::ColorStatus, "An indicator lamp with no intent of its own, lit.", ALL),
+    spec("lamp_halo", TokenGroup::Material, TokenKind::Opacity, "The halo one device pixel outside a lit lamp, as a share of the lamp's own light; a lamp holds it at 0.45 or under.", 0.0, 0.45, 0.01, ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -2136,44 +2143,34 @@ impl Appearance {
     }
 }
 
-/// Which base theme each style sheet is written against. A sheet says so in
-/// its own first line -- `mod.theme = mod.themes.dark` -- and that line is
-/// also the only honest source for its appearance: two of the sheets are dark
-/// and carry no `-dark` in their name. `the_sheet_table_is_what_the_sheets_say`
-/// holds this copy to the sheets themselves.
-const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
-    (DesktopStyle::Omarchy, false, Scheme::Dark),
-    (DesktopStyle::BlackOrange, false, Scheme::Dark),
-    (DesktopStyle::Neumorphic, false, Scheme::Light),
-    (DesktopStyle::Molded, false, Scheme::Light),
-    (DesktopStyle::Glossy, false, Scheme::Dark),
-    (DesktopStyle::Milled, false, Scheme::Dark),
-    (DesktopStyle::Cyberpunk, false, Scheme::Dark),
-    (DesktopStyle::Macos, false, Scheme::Light),
-    (DesktopStyle::Macos, true, Scheme::Dark),
-    (DesktopStyle::Windows, false, Scheme::Light),
-    (DesktopStyle::Windows, true, Scheme::Dark),
-    (DesktopStyle::Windows2000, false, Scheme::Light),
-    (DesktopStyle::NextStep, false, Scheme::Light),
-    (DesktopStyle::Ios, false, Scheme::Light),
-    (DesktopStyle::Ios, true, Scheme::Dark),
-    (DesktopStyle::Android, false, Scheme::Light),
-    (DesktopStyle::Android, true, Scheme::Dark),
-];
+/// Which base theme a sheet is written against. A sheet says so in its own
+/// first line -- `mod.theme = mod.themes.dark` -- and that line is also the
+/// only honest source for its appearance: a sheet can be dark and carry no
+/// `-dark` in its name. `None` for a sheet that names no base.
+pub fn sheet_base(entry: &SheetEntry) -> Option<Scheme> {
+    entry.theme.lines().find_map(|line| {
+        let name = line.trim().strip_prefix("mod.theme = mod.themes.")?;
+        Scheme::ALL.into_iter().find(|scheme| scheme.theme_name() == name.trim())
+    })
+}
 
-/// One ingredient of a mix: a base theme, or a style sheet in one of the
-/// appearances it offers.
+/// One ingredient of a mix: a base theme, or a sheet of the catalogue, by id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendTheme {
     Base(Scheme),
-    Sheet(DesktopStyle, bool),
+    Sheet(&'static str),
 }
 
 impl BlendTheme {
     /// Every theme the equalizer can mix, the three base themes first.
     pub fn all() -> Vec<BlendTheme> {
         let mut out: Vec<BlendTheme> = Scheme::ALL.iter().map(|s| BlendTheme::Base(*s)).collect();
-        out.extend(SHEET_BASE.iter().map(|(style, dark, _)| BlendTheme::Sheet(*style, *dark)));
+        out.extend(
+            crate::desktop_style::catalogue()
+                .into_iter()
+                .filter(|entry| sheet_base(entry).is_some())
+                .map(|entry| BlendTheme::Sheet(entry.id)),
+        );
         out
     }
 
@@ -2188,11 +2185,7 @@ impl BlendTheme {
     pub fn base(self) -> Scheme {
         match self {
             BlendTheme::Base(scheme) => scheme,
-            BlendTheme::Sheet(style, dark) => SHEET_BASE
-                .iter()
-                .find(|(s, d, _)| *s == style && *d == dark)
-                .map(|(_, _, base)| *base)
-                .unwrap_or(Scheme::Light),
+            BlendTheme::Sheet(id) => crate::desktop_style::find(id).and_then(sheet_base).unwrap_or(Scheme::Light),
         }
     }
 
@@ -2219,13 +2212,7 @@ impl BlendTheme {
     pub fn name(self) -> String {
         match self {
             BlendTheme::Base(scheme) => scheme.theme_name().to_string(),
-            BlendTheme::Sheet(style, dark) => {
-                if dark && style.supports_dark() {
-                    format!("{}-dark", style.id())
-                } else {
-                    style.id().to_string()
-                }
-            }
+            BlendTheme::Sheet(id) => id.to_string(),
         }
     }
 
@@ -2235,13 +2222,7 @@ impl BlendTheme {
             BlendTheme::Base(Scheme::Dark) => "Dark".to_string(),
             BlendTheme::Base(Scheme::Light) => "Light".to_string(),
             BlendTheme::Base(Scheme::Skeleton) => "Skeleton".to_string(),
-            BlendTheme::Sheet(style, dark) => {
-                if dark && style.supports_dark() {
-                    format!("{} dark", style.label())
-                } else {
-                    style.label().to_string()
-                }
-            }
+            BlendTheme::Sheet(id) => crate::desktop_style::find(id).map_or(id, |entry| entry.label).to_string(),
         }
     }
 }
@@ -2449,7 +2430,10 @@ pub fn random_weights(seed: u64, n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for (rank, theme) in order.iter().enumerate() {
         let k = rank as f64 / sigma;
-        out[*theme] = (-(k * k)).exp();
+        // Held above exp(-700), about 1e-304: past twenty themes at the
+        // narrowest spread the tail would otherwise underflow to nought, and
+        // a random mix drops no theme.
+        out[*theme] = (-(k * k).min(700.0)).exp();
     }
     let total: f64 = out.iter().sum();
     for w in out.iter_mut() {
@@ -2588,7 +2572,7 @@ impl std::fmt::Display for BlendError {
 /// ```ignore
 /// let blend = cache.blend(&mix)?;                  // one per slider move
 /// match blend.argmax_sheet() {                     // whose fonts the mix wears
-///     Some((style, dark)) => install(vm, StyleSheet::load_with_appearance(style, dark)),
+///     Some(id) => install(vm, StyleSheet::named(id).unwrap()),
 ///     None => uninstall(vm),
 /// }
 /// vm.eval(/* a ScriptMod carrying */ blend.script("equalized"));
@@ -2616,9 +2600,9 @@ impl ThemeBlend {
 
     /// The sheet to have installed when the script runs, if the argmax theme
     /// is a sheet at all.
-    pub fn argmax_sheet(&self) -> Option<(DesktopStyle, bool)> {
+    pub fn argmax_sheet(&self) -> Option<&'static str> {
         match self.argmax {
-            BlendTheme::Sheet(style, dark) => Some((style, dark)),
+            BlendTheme::Sheet(id) => Some(id),
             BlendTheme::Base(_) => None,
         }
     }
@@ -2928,10 +2912,12 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
             crate::desktop_style::uninstall(vm);
             None
         }
-        BlendTheme::Sheet(style, dark) => {
-            let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
-            crate::desktop_style::install(vm, sheet.clone());
-            Some(sheet)
+        BlendTheme::Sheet(id) => {
+            let sheet = crate::desktop_style::StyleSheet::named(id);
+            if let Some(sheet) = &sheet {
+                crate::desktop_style::install(vm, sheet.clone());
+            }
+            sheet
         }
     };
     // With the app's families: the heap this leaves behind is the one the
@@ -3465,30 +3451,9 @@ mod.theme.color_surface=#123456
 #[cfg(test)]
 mod sheet_contrast_tests {
     use super::*;
-    use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+    use crate::desktop_style::{install, uninstall, StyleSheet};
     use crate::makepad_platform::*;
     use crate::script_eval;
-
-    /// Every sheet the library ships, in both appearances it offers.
-    pub(super) const SHEETS: &[(DesktopStyle, bool)] = &[
-        (DesktopStyle::Omarchy, false),
-        (DesktopStyle::BlackOrange, false),
-        (DesktopStyle::Neumorphic, false),
-        (DesktopStyle::Molded, false),
-        (DesktopStyle::Glossy, false),
-        (DesktopStyle::Milled, false),
-        (DesktopStyle::Cyberpunk, false),
-        (DesktopStyle::Macos, false),
-        (DesktopStyle::Macos, true),
-        (DesktopStyle::Windows, false),
-        (DesktopStyle::Windows, true),
-        (DesktopStyle::Windows2000, false),
-        (DesktopStyle::NextStep, false),
-        (DesktopStyle::Ios, false),
-        (DesktopStyle::Ios, true),
-        (DesktopStyle::Android, false),
-        (DesktopStyle::Android, true),
-    ];
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(id!(theme));
@@ -3571,14 +3536,13 @@ mod sheet_contrast_tests {
                 mod.theme = mod.themes.skeleton
             });
             check(vm, "skeleton");
-            for (style, dark) in SHEETS {
-                install(vm, StyleSheet::load_with_appearance(*style, *dark));
+            for entry in crate::desktop_style::catalogue() {
+                install(vm, StyleSheet::load(entry));
                 vm.bx.captured_errors = Some(Vec::new());
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(*style, *dark).name;
-                assert!(errors.is_empty(), "{label}: {errors:?}");
-                check(vm, &label);
+                assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
+                check(vm, entry.id);
             }
             uninstall(vm);
         });
@@ -3607,9 +3571,12 @@ mod sheet_contrast_tests {
         let script = sheet_roles_script("mod.theme = mod.themes.light
 ", &mut |_| Some(0x808080FF));
         assert_eq!(script.lines().last(), Some("true"), "{script}");
-        for (style, dark) in SHEETS {
-            let sheet = StyleSheet::load_with_appearance(*style, *dark);
-            assert_eq!(sheet.theme.lines().last().map(str::trim), Some("true"), "{}", sheet.name);
+        for entry in crate::desktop_style::catalogue() {
+            // The widget half as well: two sheets once put their panel frame
+            // after the `true`, and the last of those lines never ran.
+            for (half, text) in [("theme", entry.theme), ("widgets", entry.widgets)] {
+                assert_eq!(text.lines().last().map(str::trim), Some("true"), "{} {half}", entry.id);
+            }
         }
     }
 
@@ -3709,7 +3676,7 @@ mod equalizer_tests {
     }
 
     const NEAR_BLACK: BlendTheme = BlendTheme::Base(Scheme::Dark);
-    const CHARCOAL: BlendTheme = BlendTheme::Sheet(DesktopStyle::Omarchy, false);
+    const CHARCOAL: BlendTheme = BlendTheme::Sheet("omarchy");
 
     /// Two dark themes far enough apart that a midpoint is obvious, and one
     /// light theme to be refused.
@@ -3831,7 +3798,7 @@ mod equalizer_tests {
         assert_eq!(theirs.argmax, CHARCOAL);
         assert_eq!(theirs.color("color_map_1"), Some(0x900000FF));
         assert_eq!(theirs.color("color_syntax_string"), Some(0x0000FFFF));
-        assert_eq!(theirs.argmax_sheet(), Some((DesktopStyle::Omarchy, false)));
+        assert_eq!(theirs.argmax_sheet(), Some("omarchy"));
         // The rest of the mix is still a mix, and barely moved by the swap.
         assert_eq!(mine.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.3)));
         assert_eq!(theirs.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.51)));
@@ -3863,7 +3830,7 @@ mod equalizer_tests {
         let cache = bench();
         assert_eq!(cache.blend(&[]), Err(BlendError::NoWeight));
         assert_eq!(cache.blend(&[(NEAR_BLACK, 0.0)]), Err(BlendError::NoWeight));
-        let absent = BlendTheme::Sheet(DesktopStyle::NextStep, false);
+        let absent = BlendTheme::Sheet("nextstep");
         assert_eq!(cache.blend(&[(absent, 1.0)]), Err(BlendError::NotResolved(absent)));
     }
 
@@ -3884,8 +3851,8 @@ mod equalizer_tests {
         let pale = BlendTheme::group(Appearance::Light);
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
-        assert_eq!(dark.len(), 10, "{dark:?}");
-        assert_eq!(pale.len(), 10, "{pale:?}");
+        assert_eq!(dark.len(), 7, "{dark:?}");
+        assert_eq!(pale.len(), 8, "{pale:?}");
     }
 
     /// The weights of a relative mix are a hundred parts shared out, so
@@ -3963,36 +3930,17 @@ mod equalizer_tests {
         assert_eq!(firsts.len(), 7, "the shuffle never reached {:?}", firsts);
     }
 
-    /// The table of which base theme each sheet is written against is a second
-    /// copy of the sheets' own first line, and a second copy is only safe
-    /// while something fails when the first one moves.
+    /// Every sheet in the catalogue names the base theme it writes into, and
+    /// the equalizer files it in the group of that base.
     #[test]
-    fn the_sheet_table_is_what_the_sheets_say() {
-        let mut expected: Vec<(DesktopStyle, bool)> = Vec::new();
-        for style in DesktopStyle::ALL {
-            expected.push((style, false));
-            if style.supports_dark() {
-                expected.push((style, true));
-            }
-        }
-        let listed: Vec<(DesktopStyle, bool)> = SHEET_BASE.iter().map(|(s, d, _)| (*s, *d)).collect();
-        assert_eq!(listed.len(), expected.len(), "{listed:?}");
-        for entry in &expected {
-            assert!(listed.contains(entry), "{entry:?} is not in the table");
-        }
-        for (style, dark, base) in SHEET_BASE {
-            let theme = BlendTheme::Sheet(*style, *dark);
-            let sheet = StyleSheet::load_with_appearance(*style, *dark);
-            assert_eq!(sheet.name, theme.name(), "the name a sheet loads under");
-            let line = format!("mod.theme = mod.themes.{}", base.theme_name());
-            assert!(
-                sheet.theme.lines().any(|l| l.trim() == line),
-                "{}: expected the line `{line}`",
-                sheet.name
-            );
-            assert_eq!(theme.base(), *base);
-            let wanted = if *base == Scheme::Dark { Appearance::Dark } else { Appearance::Light };
-            assert_eq!(theme.appearance(), wanted, "{}", sheet.name);
+    fn every_sheet_names_its_base() {
+        for entry in crate::desktop_style::catalogue() {
+            let base = sheet_base(entry).unwrap_or_else(|| panic!("{} names no base theme", entry.id));
+            let theme = BlendTheme::Sheet(entry.id);
+            assert_eq!(StyleSheet::load(entry).name, theme.name(), "the name a sheet loads under");
+            assert_eq!(theme.base(), base);
+            let wanted = if base == Scheme::Dark { Appearance::Dark } else { Appearance::Light };
+            assert_eq!(theme.appearance(), wanted, "{}", entry.id);
         }
     }
 
@@ -4009,7 +3957,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 592, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 598, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
@@ -4019,7 +3967,7 @@ mod equalizer_tests {
     fn a_sheets_own_keys_are_read_as_well() {
         let sheet = "mod.theme = mod.themes.light\nmod.theme.color_label = #f00\n  mod.theme.color_terminal_bg=#0f0\nmod.theme.color_x.y = #00f\nlet color_no = 1\n";
         assert_eq!(assigned_keys(sheet), vec!["color_label", "color_terminal_bg"]);
-        let real = StyleSheet::load_with_appearance(DesktopStyle::Windows2000, false);
+        let real = StyleSheet::named("windows-2000").unwrap();
         let keys = assigned_keys(&real.theme);
         assert!(keys.contains(&"color_bg_app"), "{keys:?}");
         assert!(keys.iter().any(|k| !base_theme_keys().contains(k)), "windows-2000 sets a key of its own");
@@ -4147,7 +4095,7 @@ mod equalizer_tests {
     fn two_readable_themes_can_blend_into_an_unreadable_one() {
         let cache = resolved();
         let light = BlendTheme::Base(Scheme::Light);
-        let macos = BlendTheme::Sheet(DesktopStyle::Macos, false);
+        let macos = BlendTheme::Sheet("macos");
         for theme in [light, macos] {
             let values = cache.get(theme).unwrap();
             let (ground, ink) = (values.color("color_success").unwrap(), values.color("color_on_success").unwrap());

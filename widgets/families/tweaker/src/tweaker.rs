@@ -8560,7 +8560,8 @@ enum PanelTab {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ThemePreset {
     Base(crate::BaseTheme),
-    Sheet(crate::desktop_style::DesktopStyle, bool),
+    /// A sheet of the catalogue, by id.
+    Sheet(&'static str),
 }
 
 impl ThemePreset {
@@ -8568,8 +8569,7 @@ impl ThemePreset {
     fn label(self) -> String {
         match self {
             Self::Base(base) => base.label().to_string(),
-            Self::Sheet(style, false) => style.label().to_string(),
-            Self::Sheet(style, true) => format!("{} dark", style.label()),
+            Self::Sheet(id) => crate::desktop_style::find(id).map_or(id, |entry| entry.label).to_string(),
         }
     }
 }
@@ -8586,12 +8586,7 @@ fn theme_presets() -> Vec<ThemePreset> {
         .into_iter()
         .map(ThemePreset::Base)
         .collect();
-    for style in crate::desktop_style::DesktopStyle::ALL {
-        out.push(ThemePreset::Sheet(style, false));
-        if style.supports_dark() {
-            out.push(ThemePreset::Sheet(style, true));
-        }
-    }
+    out.extend(crate::desktop_style::catalogue().into_iter().map(|entry| ThemePreset::Sheet(entry.id)));
     out
 }
 
@@ -8700,13 +8695,8 @@ fn theme_choices(saved: &[String]) -> Vec<ThemeChoice> {
 fn current_theme_preset(cx: &mut Cx) -> usize {
     let sheet = cx.with_vm(|vm| crate::desktop_style::current_name(vm));
     let base = crate::base_theme(cx);
-    let wanted = match sheet
-        .as_deref()
-        .and_then(|name| {
-            crate::desktop_style::DesktopStyle::parse(name)
-                .map(|style| (style, name.ends_with("-dark")))
-        }) {
-        Some((style, dark)) => ThemePreset::Sheet(style, dark),
+    let wanted = match sheet.as_deref().and_then(crate::desktop_style::find) {
+        Some(entry) => ThemePreset::Sheet(entry.id),
         None => ThemePreset::Base(base),
     };
     theme_presets()
@@ -8717,12 +8707,13 @@ fn current_theme_preset(cx: &mut Cx) -> usize {
 
 /// The mix's weight rows, in the order the lab lists them.
 ///
-/// Twelve, because the longest appearance group the library ships is ten
-/// themes (the light one, since the material sheets joined it) and the
-/// sidebar is one chunk evaluated once -- there is no making a row at the
-/// moment a group turns out to want it. A shorter group hides the tail and
-/// zeroes its uids, which shuts the route as well as the row.
-const EQ_ROW_IDS: [LiveId; 12] = [
+/// Twenty-two, because the longest appearance group the library ships is
+/// twenty-one themes (the dark one, since the second set of reference sheets
+/// joined it) and the sidebar is one chunk evaluated once -- there is no
+/// making a row at the moment a group turns out to want it. A shorter group
+/// hides the tail and zeroes its uids, which shuts the route as well as the
+/// row.
+const EQ_ROW_IDS: [LiveId; 22] = [
     live_id!(eq_row_0),
     live_id!(eq_row_1),
     live_id!(eq_row_2),
@@ -8735,6 +8726,16 @@ const EQ_ROW_IDS: [LiveId; 12] = [
     live_id!(eq_row_9),
     live_id!(eq_row_10),
     live_id!(eq_row_11),
+    live_id!(eq_row_12),
+    live_id!(eq_row_13),
+    live_id!(eq_row_14),
+    live_id!(eq_row_15),
+    live_id!(eq_row_16),
+    live_id!(eq_row_17),
+    live_id!(eq_row_18),
+    live_id!(eq_row_19),
+    live_id!(eq_row_20),
+    live_id!(eq_row_21),
 ];
 
 //// One setting of the theme builder, as a row on the screen.
@@ -9994,7 +9995,7 @@ pub struct Tweaker {
     eq_random_uid: u64,
     /// One per weight row on show, in the group's own order; the rest 0.
     #[rust]
-    eq_row_uids: [u64; 12],
+    eq_row_uids: [u64; 22],
     /// The builder: a whole theme grown from one favourite colour, and the
     /// part of that a panel would otherwise have to remember. Held here
     /// beside the lab and for the same reason -- the sidebar is dropped and
@@ -10601,62 +10602,20 @@ impl Tweaker {
         }
     }
 
-    /// Build the sidebar widget from a runtime splash chunk, once (every
-    /// widget type — the fab controls included — is registered by then).
-    fn ensure_sidebar(&mut self, cx: &mut Cx) {
-        let palette = fab_palette_stamp(cx);
-        if self.sidebar.is_some() {
-            if self.sidebar_palette == palette {
-                return;
-            }
-            // The chrome moved underneath it: something re-pointed one of
-            // the panel's own palette entries. The chunk below is where
-            // every fab colour lands, and it is evaluated
-            // here and nowhere else, so the only way to repaint the panel is
-            // to build it again. Everything the panel REMEMBERS is on this
-            // struct rather than in those widgets, so what is lost is what
-            // was typed into the panel's own boxes, which is the price of
-            // changing its skin on purpose.
-            //
-            // Two of those boxes are MIRRORED on this struct, though, and a
-            // box that comes back empty beside a mirror that did not would
-            // leave the panel filtering by a word nobody can see and
-            // offering to save under a name nobody typed. The name is
-            // re-seeded through the channel that already exists for it; the
-            // filter is dropped, because its mirror is lower-cased and
-            // putting that back would change what the person wrote.
-            if !self.theme_name.is_empty() {
-                self.theme_name_seed = Some(self.theme_name.clone());
-            }
-            self.filter.clear();
-            // The property list is a NEW, empty list; the rows are refilled
-            // only when this says they are stale. The reload that changed
-            // the palette bumps the apply generation and would do it anyway,
-            // but a rebuild asked for any other way would leave the panel
-            // showing an empty tab.
-            self.rows_uid = 0;
-            self.sidebar = None;
-        }
-        if self.theme_colors.is_empty() {
-            self.theme_colors = theme_palette(cx);
-            self.palette_gen = session().lock().unwrap().apply_gen;
-            log!("TWEAK theme palette: {} colours", self.theme_colors.len());
-        }
-        self.sidebar_palette = palette;
-        // What the app is already running under, before the picker offers
-        // to change it: a sheet installed at startup is the selected row.
-        self.theme_preset = current_theme_preset(cx);
-        self.refresh_saved_themes();
-        // The shader source view is a plain multiline TextInput, on purpose:
-        // the real code editor as a sidebar child would put a CodeView in
-        // the main window's widget tree for every app the tweaker rides in.
-        // Live-coding needs only text-in/text-out — Ctrl+Enter and the
-        // settle timer read `.text()` by path, whatever widget holds it.
-        let sidebar = cx.with_vm(|vm| {
-            let value = script_eval!(vm, {
+    /// The sidebar's whole splash, evaluated: every template the panel is
+    /// built from and the tree of controls made of them. Its own function
+    /// so a test can walk what it resolves to under a sheet.
+    fn sidebar_value(vm: &mut ScriptVm) -> ScriptValue {
+            script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.prelude.fab_internal.*
-                use mod.widgets.*
+                // Every template the panel is built from, and the theme, as
+                // the library stands without a sheet
+                // (`desktop_style::keep_stock`): a sheet's tokens and its
+                // writes onto `mod.widgets` reach none of the panel
+                // (`nothing_a_sheet_sets_reaches_the_panel`).
+                use mod.prelude.stock_internal.*
+                use mod.stock_widgets.*
 
                 // The panel's own ink. Its chrome is the fab palette whatever
                 // the app's theme, so every word on it has to be too: a stock
@@ -10665,6 +10624,8 @@ impl Tweaker {
                 // The dim grades are the panel's, not fab's: see
                 // `mod.tweak_panel`.
                 let panel = mod.tweak_panel
+                // The panel's plates, chips and grips.
+                let PanelRoundedView = RoundedView {}
                 // The panel's command button, and the same trap
                 // `PanelDropDown` below exists to dodge -- these three now
                 // sit in the Theme tab beside it, where the control that
@@ -10910,6 +10871,8 @@ impl Tweaker {
                 // (43,43,43) box on the panel's (48,48,48) ground.
                 let PanelCheckBox = CheckBox {
                     draw_bg +: {
+                        // Flat, whatever material the app's theme raises.
+                        material: 0.0
                         color: fab.color_input
                         color_hover: fab.color_input_hover
                         color_down: fab.color_input_active
@@ -11173,7 +11136,7 @@ impl Tweaker {
                         ic_native := View { width: Fit height: Fit visible: false
                             i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("makepad_widgets:resources/icons/icon_layout.svg") } }
                         }
-                        chip := RoundedView {
+                        chip := PanelRoundedView {
                             width: Fit height: Fit
                             padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
                             draw_bg +: { color: #x555555 radius: 3. }
@@ -12185,6 +12148,16 @@ impl Tweaker {
                                 eq_row_9 := EqRowT {}
                                 eq_row_10 := EqRowT {}
                                 eq_row_11 := EqRowT {}
+                                eq_row_12 := EqRowT {}
+                                eq_row_13 := EqRowT {}
+                                eq_row_14 := EqRowT {}
+                                eq_row_15 := EqRowT {}
+                                eq_row_16 := EqRowT {}
+                                eq_row_17 := EqRowT {}
+                                eq_row_18 := EqRowT {}
+                                eq_row_19 := EqRowT {}
+                                eq_row_20 := EqRowT {}
+                                eq_row_21 := EqRowT {}
                             }
                             // How the mix reads. Two themes that were each
                             // readable can average into one that is not: both
@@ -12798,7 +12771,7 @@ impl Tweaker {
                             height: 0
                             clip_x: false
                             clip_y: false
-                            content := RoundedView {
+                            content := PanelRoundedView {
                                 width: Fit
                                 height: Fit
                                 padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
@@ -12876,7 +12849,7 @@ impl Tweaker {
                                 width: Fill
                                 text: "rules"
                             }
-                            grip := RoundedView {
+                            grip := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
@@ -12909,7 +12882,7 @@ impl Tweaker {
                                 width: Fill
                                 text: "app rules"
                             }
-                            grip := RoundedView {
+                            grip := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
@@ -13162,7 +13135,7 @@ impl Tweaker {
                             // A plain View's draw_bg is a bare DrawQuad whose
                             // default pixel fn returns #0000, so show_bg plus a
                             // colour paints nothing. RoundedView has a pixel fn.
-                            bar := RoundedView {
+                            bar := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 draw_bg +: { color: #x5c5c68 radius: 1.5 }
@@ -13288,7 +13261,7 @@ impl Tweaker {
                                 height: 0
                                 clip_x: false
                                 clip_y: false
-                                content := RoundedView {
+                                content := PanelRoundedView {
                                     width: Fit
                                     height: Fit
                                     padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
@@ -13318,7 +13291,62 @@ impl Tweaker {
                         }
                     }
                 }
-            });
+            })
+    }
+
+    /// Build the sidebar widget from a runtime splash chunk, once (every
+    /// widget type — the fab controls included — is registered by then).
+    fn ensure_sidebar(&mut self, cx: &mut Cx) {
+        let palette = fab_palette_stamp(cx);
+        if self.sidebar.is_some() {
+            if self.sidebar_palette == palette {
+                return;
+            }
+            // The chrome moved underneath it: something re-pointed one of
+            // the panel's own palette entries. The chunk below is where
+            // every fab colour lands, and it is evaluated
+            // here and nowhere else, so the only way to repaint the panel is
+            // to build it again. Everything the panel REMEMBERS is on this
+            // struct rather than in those widgets, so what is lost is what
+            // was typed into the panel's own boxes, which is the price of
+            // changing its skin on purpose.
+            //
+            // Two of those boxes are MIRRORED on this struct, though, and a
+            // box that comes back empty beside a mirror that did not would
+            // leave the panel filtering by a word nobody can see and
+            // offering to save under a name nobody typed. The name is
+            // re-seeded through the channel that already exists for it; the
+            // filter is dropped, because its mirror is lower-cased and
+            // putting that back would change what the person wrote.
+            if !self.theme_name.is_empty() {
+                self.theme_name_seed = Some(self.theme_name.clone());
+            }
+            self.filter.clear();
+            // The property list is a NEW, empty list; the rows are refilled
+            // only when this says they are stale. The reload that changed
+            // the palette bumps the apply generation and would do it anyway,
+            // but a rebuild asked for any other way would leave the panel
+            // showing an empty tab.
+            self.rows_uid = 0;
+            self.sidebar = None;
+        }
+        if self.theme_colors.is_empty() {
+            self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
+            log!("TWEAK theme palette: {} colours", self.theme_colors.len());
+        }
+        self.sidebar_palette = palette;
+        // What the app is already running under, before the picker offers
+        // to change it: a sheet installed at startup is the selected row.
+        self.theme_preset = current_theme_preset(cx);
+        self.refresh_saved_themes();
+        // The shader source view is a plain multiline TextInput, on purpose:
+        // the real code editor as a sidebar child would put a CodeView in
+        // the main window's widget tree for every app the tweaker rides in.
+        // Live-coding needs only text-in/text-out — Ctrl+Enter and the
+        // settle timer read `.text()` by path, whatever widget holds it.
+        let sidebar = cx.with_vm(|vm| {
+            let value = Self::sidebar_value(vm);
             WidgetRef::script_from_value(vm, value)
         });
         // Make the sidebar part of the widget tree (under this tweaker):
@@ -19295,13 +19323,13 @@ impl Tweaker {
                 crate::set_base_theme(cx, base);
                 cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
             }
-            ThemePreset::Sheet(style, dark) => {
+            ThemePreset::Sheet(id) => {
                 // A sheet is laid over the dark base, exactly as it is when
                 // one arrives from the window manager.
                 crate::set_base_theme(cx, crate::BaseTheme::Dark);
-                let sheet =
-                    crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
-                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                if let Some(sheet) = crate::desktop_style::StyleSheet::named(id) {
+                    cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                }
             }
         }
         log!("TWEAK theme preset: {}", preset.label());
@@ -19521,9 +19549,10 @@ impl Tweaker {
         let building = self.theme_choice_takes_the_build_off(cx);
         crate::set_base_theme(cx, base);
         match theme.sheet {
-            Some((style, dark)) => {
-                let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
-                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            Some(id) => {
+                if let Some(sheet) = crate::desktop_style::StyleSheet::named(id) {
+                    cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+                }
             }
             // A theme saved over a bare base theme must take the last sheet
             // OFF, or it wears whatever was tried before it.
@@ -19897,7 +19926,7 @@ impl Tweaker {
             self.eq_absolute_uid = 0;
             self.eq_relative_uid = 0;
             self.eq_random_uid = 0;
-            self.eq_row_uids = [0; 12];
+            self.eq_row_uids = [0; 22];
             return;
         }
         // Only where something is waiting on it. The settle is an interval
@@ -23795,15 +23824,10 @@ mod tests {
         for (slot, base) in crate::BaseTheme::ALL.into_iter().enumerate() {
             assert_eq!(presets[slot], ThemePreset::Base(base));
         }
-        // Then every sheet, each followed by its dark appearance where it
-        // has one -- read off `DesktopStyle::ALL`, never written out here.
-        let mut expect = Vec::new();
-        for style in crate::desktop_style::DesktopStyle::ALL {
-            expect.push(ThemePreset::Sheet(style, false));
-            if style.supports_dark() {
-                expect.push(ThemePreset::Sheet(style, true));
-            }
-        }
+        // Then every sheet of the catalogue, in its order -- read off the
+        // catalogue, never written out here.
+        let expect: Vec<ThemePreset> =
+            crate::desktop_style::catalogue().into_iter().map(|entry| ThemePreset::Sheet(entry.id)).collect();
         assert_eq!(&presets[crate::BaseTheme::ALL.len()..], &expect[..]);
         // And every label says something.
         for preset in presets {
@@ -23845,8 +23869,7 @@ mod tests {
         for preset in theme_presets() {
             let name = match preset {
                 ThemePreset::Base(base) => base.id().to_string(),
-                ThemePreset::Sheet(style, false) => style.id().to_string(),
-                ThemePreset::Sheet(style, true) => format!("{}-dark", style.id()),
+                ThemePreset::Sheet(id) => id.to_string(),
             };
             assert!(
                 crate::theme_store::is_builtin(&name),
@@ -24145,6 +24168,16 @@ mod tests {
             ("eq_row_9", "EqRowT"),
             ("eq_row_10", "EqRowT"),
             ("eq_row_11", "EqRowT"),
+            ("eq_row_12", "EqRowT"),
+            ("eq_row_13", "EqRowT"),
+            ("eq_row_14", "EqRowT"),
+            ("eq_row_15", "EqRowT"),
+            ("eq_row_16", "EqRowT"),
+            ("eq_row_17", "EqRowT"),
+            ("eq_row_18", "EqRowT"),
+            ("eq_row_19", "EqRowT"),
+            ("eq_row_20", "EqRowT"),
+            ("eq_row_21", "EqRowT"),
             ("eq_weight", "FabSlider"),
             ("eq_absolute", "PanelButton"),
             ("eq_relative", "PanelButton"),
@@ -24291,135 +24324,6 @@ mod tests {
         );
     }
 
-    /// The one property a style sheet is known to take off a `DropDown` is
-    /// its shader, and the panel's own dropdown must therefore carry one.
-    /// Read off the shipped sheets rather than named here, so a sheet that
-    /// starts overriding `DropDown` later is caught by this test rather than
-    /// by somebody finding an unreadable picker.
-    #[test]
-    fn the_panels_dropdown_answers_what_the_sheets_override() {
-        let kit = panel_source()
-            .split("let PanelDropDown = DropDown {")
-            .nth(1)
-            .expect("the panel declares its own dropdown");
-        for sheet in ["windows-2000", "nextstep"] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(crate::widgets_dir())
-                    .join("themes")
-                    .join(sheet)
-                    .join("widgets.splash"),
-            )
-            .expect("the sheet is in the tree");
-            for line in text.lines() {
-                let Some(prop) = line
-                    .trim()
-                    .strip_prefix("mod.widgets.DropDown.")
-                    .and_then(|rest| rest.split([' ', '=']).next())
-                else {
-                    continue;
-                };
-                // `draw_bg.pixel` is answered by declaring `pixel:` inside
-                // this template's own `draw_bg`.
-                let leaf = prop.rsplit('.').next().unwrap_or(prop);
-                assert!(
-                    declares(kit, leaf),
-                    "the sheets override `{prop}` on a DropDown and the panel's own does not declare `{leaf}`"
-                );
-            }
-        }
-    }
-
-    /// The same question of the other two templates the Theme tab is built
-    /// from, and of EVERY sheet rather than the two that replace a shader.
-    ///
-    /// `PanelButton` and `PanelInput` were left open when `PanelDropDown`
-    /// was hardened: `windows-2000` and `nextstep` replace
-    /// `Button.draw_bg.pixel` and `TextInput.draw_bg.pixel` outright with a
-    /// hard-coded Win95 palette, and `android` and `ios` set a 44-48px
-    /// `min_height` and their own padding, which a walk applies whatever
-    /// height the instance asked for. Read off the sheets, so a sheet that
-    /// starts overriding something else is caught here rather than by
-    /// somebody finding the save row twice its height with a white slab on it.
-    #[test]
-    fn the_panels_button_and_input_answer_what_the_sheets_override() {
-        let src = panel_source();
-        // The template's own text, and not the next one's: every `let
-        // Panel...` after it is a different widget.
-        let slice = |open: &str, next: &str| -> &'static str {
-            let rest = src.split(open).nth(1).unwrap_or_else(|| panic!("the panel declares `{open}`"));
-            let end = rest.find(next).unwrap_or_else(|| panic!("`{open}` is not followed by `{next}`"));
-            &rest[..end]
-        };
-        let button = slice("let PanelButton = Button {", "let PanelInput = TextInput {");
-        let input = slice("let PanelInput = TextInput {", "let PanelTreeNode = FileTreeNode {");
-        let themes = std::path::Path::new(crate::widgets_dir()).join("themes");
-        let mut seen = 0usize;
-        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
-            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
-            let Ok(text) = std::fs::read_to_string(&sheet) else {
-                continue;
-            };
-            for line in text.lines() {
-                for (widget, kit) in [("Button", button), ("TextInput", input)] {
-                    let Some(prop) = line
-                        .trim()
-                        .strip_prefix(&format!("mod.widgets.{widget}."))
-                        .and_then(|rest| rest.split([' ', '=']).next())
-                    else {
-                        continue;
-                    };
-                    // `draw_bg.pixel` is answered by declaring `pixel:`
-                    // inside this template's own `draw_bg`, and so on down.
-                    let leaf = prop.rsplit('.').next().unwrap_or(prop);
-                    assert!(
-                        declares(kit, leaf),
-                        "{} overrides `{prop}` on a {widget} and PanelButton/PanelInput does not declare `{leaf}`",
-                        sheet.display()
-                    );
-                    seen += 1;
-                }
-            }
-        }
-        assert!(seen > 20, "only {seen} overrides were read -- the sheets did not load");
-        // The two that a sheet reaches through a THEME token rather than
-        // through `widgets.splash`: the stock templates take them from
-        // `theme.mspace_1` and `theme.mspace_v_1`, which every sheet moves.
-        for kit in [button, input] {
-            assert!(declares(kit, "padding"), "the padding is not written out");
-            assert!(declares(kit, "margin"), "the margin is not written out");
-            assert!(declares(kit, "min_height"), "the min height is not written out");
-        }
-        // The matcher itself, because the hole this guard had was in the
-        // matcher and not in the templates: an unanchored search finds
-        // `color:` inside `border_color:` and passes a template that declares
-        // no colour at all.
-        assert!(declares("draw_bg +: { color: #x161616 }", "color"));
-        assert!(!declares("draw_bg +: { border_color: #x161616 }", "color"));
-        assert!(!declares("margin: Inset{left: 0}", "in"));
-        assert!(declares("padding: Inset{left: 0}", "left"));
-    }
-
-    /// Whether a template declares a property of its own under this name.
-    ///
-    /// Anchored at the front, because an unanchored search is answered by the
-    /// wrong property: `"color:"` is found inside `border_color:`, and a
-    /// template declaring nothing but a border colour would pass for a sheet
-    /// that overrides `draw_bg.color`. A name begins where the character
-    /// before it is not one a name can be made of.
-    fn declares(kit: &str, leaf: &str) -> bool {
-        let needle = format!("{leaf}:");
-        let mut from = 0;
-        while let Some(found) = kit[from..].find(&needle) {
-            let at = from + found;
-            let before = kit[..at].chars().next_back();
-            if !before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                return true;
-            }
-            from = at + 1;
-        }
-        false
-    }
-
     /// Everything about the mix's weight row that a sheet could move if the
     /// kit ever took one of its tokens off `theme.` instead of off `fab.`:
     /// the colour of each of its two words, and the height of the row they
@@ -24451,6 +24355,48 @@ mod tests {
         })
     }
 
+    /// Nothing a sheet sets reaches the panel.
+    ///
+    /// The panel is built from stock templates -- buttons, fields, check
+    /// boxes, the picker and its list, scroll bars, lists and trees -- and a
+    /// sheet moves every one of those: its token half before they register
+    /// (the spacing rungs, the fonts, the corners), its widget half onto them
+    /// afterwards (a face, a padding, an animator state). So the panel is
+    /// built from the library as it stands without a sheet
+    /// (`desktop_style::keep_stock`), and this holds it there: under a sheet
+    /// that sets everything a sheet may on every stock template
+    /// (`desktop_style::everything_sheet`), the whole sidebar as it resolves
+    /// -- every template, control, draw object and nested part it holds or
+    /// inherits, the lists' row templates and the pickers' popups with them
+    /// -- reads line for line as it does with no sheet.
+    ///
+    /// It stands where three narrower guards stood, which read the leaves the
+    /// shipped sheets set on `Button`, `TextInput` and `DropDown` and asked
+    /// `PanelButton`, `PanelInput` and `PanelDropDown` to declare each, and a
+    /// fourth that walked the faces alone. None of them said anything about
+    /// the next sheet.
+    #[test]
+    fn nothing_a_sheet_sets_reaches_the_panel() {
+        use crate::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let sidebar = Tweaker::sidebar_value(vm);
+            let plain = resolution(vm, sidebar, "sidebar");
+            assert!(plain.len() > 10_000, "only {} lines were read off the sidebar", plain.len());
+            let sheet = everything_sheet(vm, &|_| false);
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let sidebar = Tweaker::sidebar_value(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sidebar does not evaluate under the sheet: {errors:?}");
+            let moved = resolution_diff(&plain, &resolution(vm, sidebar, "sidebar"), 20);
+            assert!(moved.is_empty(), "a sheet reaches the panel at:\n{}", moved.join("\n"));
+            uninstall(vm);
+        });
+    }
+
     /// The mix's weight row is the one control in the Theme tab that is not
     /// one of the panel's own hardened templates, and the splash CLAIMS its
     /// immunity rather than showing it: "its face is drawn from `mod.fab`
@@ -24463,7 +24409,7 @@ mod tests {
     /// the value moving, however it is spelled.
     #[test]
     fn no_sheet_moves_the_mixs_weight_row() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
         let own = fab_slider_stamp(&mut cx);
@@ -24472,34 +24418,17 @@ mod tests {
             "the weight row did not resolve, so nothing below compares anything: {own:?}"
         );
         let bare = theme_color(&mut cx, "color_bg_app");
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load_with_appearance(style, dark));
-                    vm.with_reload(crate::script_mod);
-                });
-                // The sheet is really on and really reached the module -- the
-                // app's own ground moved -- so the row standing still below
-                // is a row that was asked and answered, not a reading taken
-                // off a module nothing happened to.
-                assert_ne!(
-                    theme_color(&mut cx, "color_bg_app"),
-                    bare,
-                    "`{}`{} did not reach the theme at all",
-                    style.id(),
-                    if dark { " dark" } else { "" }
-                );
-                assert_eq!(
-                    fab_slider_stamp(&mut cx),
-                    own,
-                    "`{}`{} moved the mix's weight row",
-                    style.id(),
-                    if dark { " dark" } else { "" }
-                );
-            }
+        for entry in catalogue() {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(entry));
+                vm.with_reload(crate::script_mod);
+            });
+            // The sheet is really on and really reached the module -- the
+            // app's own ground moved -- so the row standing still below
+            // is a row that was asked and answered, not a reading taken
+            // off a module nothing happened to.
+            assert_ne!(theme_color(&mut cx, "color_bg_app"), bare, "`{}` did not reach the theme at all", entry.id);
+            assert_eq!(fab_slider_stamp(&mut cx), own, "`{}` moved the mix's weight row", entry.id);
         }
         // ...and taking the last sheet off leaves it where it started, which
         // is what says the readings above were being taken at all.
@@ -24534,7 +24463,7 @@ mod tests {
         let own = fab_palette_stamp(&mut cx);
         for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
             cx.with_vm(|vm| {
-                install(vm, StyleSheet::load(style));
+                install(vm, StyleSheet::load(style.sheet(false)));
                 vm.with_reload(crate::script_mod);
             });
             assert_eq!(
@@ -25684,7 +25613,7 @@ line two");
     /// it calls. `is_open` is the assertion that says which kind this is.
     fn open_the_mix_on(cx: &mut Cx, panel: &mut Tweaker, sheet: crate::desktop_style::DesktopStyle) {
         use crate::desktop_style::{install, StyleSheet};
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(sheet, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(sheet.sheet(false))));
         crate::set_base_theme(cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.toggle_equalizer(cx);
@@ -26213,7 +26142,7 @@ line two");
         assert_eq!(sheet_in_force(&mut cx), None, "the mix never came on over the sheet");
 
         // macOS dark, off the picker, with the blend still standing.
-        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
         let index = panel
             .theme_entry_list()
             .iter()
@@ -26554,7 +26483,7 @@ line two");
         let mut cx = Cx::new(Box::new(|_, _| {}));
         // A theme to open the section ON, so that raising a second one is a
         // blend of two rather than a switch to one.
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(DesktopStyle::Omarchy.sheet(false))));
         crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
 
         // Startup: the app's module, the app value captured, and a widget
@@ -26803,7 +26732,7 @@ line two");
         // pinned tokens and all, and not the sheet the section was opened on.
         let row = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         panel.eq_set_mode(WeightMode::Absolute);
         // A quarter and not a half: the mix that was saved was half of each,
@@ -26848,7 +26777,7 @@ line two");
     /// no-op, and a test of no-ops asserts nothing whatever it calls.
     fn open_the_build_on(cx: &mut Cx, panel: &mut Tweaker, sheet: crate::desktop_style::DesktopStyle) {
         use crate::desktop_style::{install, StyleSheet};
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(sheet, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(sheet.sheet(false))));
         crate::set_base_theme(cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.toggle_theme_builder(cx);
@@ -31545,7 +31474,7 @@ line two");
         cx.pending_style_reload = false;
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         panel.land_the_pending_pins(&mut cx);
-        let macos = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let macos = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
         let entries = panel.theme_entry_list();
         let index = entries
             .iter()
@@ -31640,8 +31569,8 @@ line two");
         let preset = panel.theme_preset;
 
         let entries = panel.theme_entry_list();
-        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
-        let plain = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, false));
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet("macos-dark"));
+        let plain = ThemeChoice::Builtin(ThemePreset::Sheet("macos"));
         let macos = entries
             .iter()
             .position(|entry| *entry == wanted)
@@ -31722,7 +31651,7 @@ line two");
         panel.eq_lab.reset();
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let others: Vec<usize> = (0..panel.eq_lab.rows().len())
             .filter(|index| *index != anchor)
@@ -31839,7 +31768,7 @@ line two");
 
         // A sheet on, which is the whole point: it is `apply_theme` running
         // after the seam that used to eat what follows.
-        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        cx.with_vm(|vm| install(vm, StyleSheet::load(DesktopStyle::Omarchy.sheet(false))));
         crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
         cx.with_vm(|vm| vm.with_reload(crate::script_mod));
         let sheets_own = theme_color(&mut cx, GROUND).expect("the sheet has a page colour");
@@ -31913,7 +31842,6 @@ line two");
     /// is read off the app.
     #[test]
     fn a_save_as_carries_the_pins_of_what_it_saved() {
-        use crate::desktop_style::DesktopStyle;
         use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
         // Two colours nobody arrives at by accident, so that what is on the
         // app at the end names the theme it came from.
@@ -31965,7 +31893,7 @@ line two");
         panel.eq_settle(&mut cx, 0.0);
         let row = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the dark group offers a sheet to mix in");
         panel.eq_set_mode(WeightMode::Absolute);
         panel.eq_gesture_ended(row, RELATIVE_TOTAL);
@@ -32118,7 +32046,7 @@ line two");
         panel.eq_lab.reset();
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let others: Vec<usize> = (0..panel.eq_lab.rows().len())
             .filter(|index| *index != anchor)
@@ -32230,7 +32158,7 @@ line two");
         open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
         let anchor = panel
             .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .index_of(BlendTheme::Sheet("omarchy"))
             .expect("the theme the section was opened on is one of the rows");
         let count = panel.eq_lab.rows().len();
         assert!(count >= 4, "the dark group is too short to have a tail at all");
@@ -32351,7 +32279,7 @@ line two");
         assert!(
             panel
                 .eq_lab
-                .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+                .index_of(BlendTheme::Sheet("omarchy"))
                 .is_some(),
             "the theme the section was opened on is not one of the rows"
         );
@@ -34780,7 +34708,7 @@ mod flat_tree_tests {
 
 #[cfg(test)]
 mod panel_ink_tests {
-    use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+    use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
     use crate::makepad_draw::*;
     use crate::makepad_script::trap::NoTrap;
     use crate::theme_tokens::{reads_on, LEGIBLE};
@@ -34805,15 +34733,15 @@ mod panel_ink_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for entry in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
-                match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                match entry {
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = entry.map(|entry| entry.id).unwrap_or("no sheet");
             for (ground, ink) in [("color_area", "text_dim"), ("color_input", "text_muted")] {
                 let g = table_color(&mut cx, id!(fab), ground);
                 let i = table_color(&mut cx, id!(tweak_panel), ink);

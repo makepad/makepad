@@ -69,9 +69,12 @@ use crate::scroll_motion::{
 
 pub fn script_mod(vm: &mut ScriptVm) {
     // Phase 1: the token table and a prelude carrying the `fab` alias, so
-    // the ported DSL below reads exactly like it does in the fab app.
+    // the ported DSL below reads exactly like it does in the fab app. The
+    // table reads the theme as it stands without a sheet
+    // (`desktop_style::keep_stock`): the kit's face is built on the app's
+    // font family, and a sheet's own family must not come through it.
     let block = script! {
-        use mod.prelude.widgets_internal.*
+        use mod.prelude.stock_internal.*
 
         mod.fab = {
             // ---- surfaces (fab default-dark grade) ----
@@ -189,10 +192,19 @@ pub fn script_mod(vm: &mut ScriptVm) {
     };
     vm.eval(block);
 
-    // Phase 2: the controls, in the fab visual language.
+    // Phase 2: the controls, in the fab visual language. Every stock
+    // template they nest, and the theme, are the library's as it stands
+    // without a sheet (`desktop_style::keep_stock`): a sheet's tokens and its
+    // writes onto `mod.widgets` reach none of them
+    // (`nothing_a_sheet_sets_reaches_a_fab_control`). The prelude comes
+    // after the templates: the kit registers halfway through the library,
+    // and a name several enums spread into `mod.widgets` (`Right`, `Linear`)
+    // is bound by whichever registered last, which is not the same half way
+    // through a run and after it; the prelude's own are the ones meant here.
     let block = script! {
         use mod.prelude.fab_internal.*
-        use mod.widgets.*
+        use mod.stock_widgets.*
+        use mod.prelude.stock_internal.*
 
         set_type_default() do #(DrawDragNum::script_shader(vm)){
             ..mod.draw.DrawQuad
@@ -1038,7 +1050,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     align: Align{x: 0.0 y: 0.5}
                     spacing: 6
                     mod.widgets.FabLabelDim{ width: 30 text: "Hex" }
-                    pick := mod.widgets.Button{
+                    pick := Button{
                         width: Fit
                         height: Fill
                         // `android` and `ios` set `mod.widgets.Button.min_height`
@@ -7014,36 +7026,25 @@ mod tests {
     /// own content box (`TextInput::scroll_to_cursor`), which put the word
     /// "Filter" a dozen pixels below the well's floor, straddling its border.
     ///
-    /// Read off `DesktopStyle::ALL` rather than written out, so a sheet added
+    /// Read off the sheet catalogue rather than written out, so a sheet added
     /// later -- or an existing one that starts overriding `max_height`, the
     /// margin or the padding -- fails HERE and not on somebody's screen.
     #[test]
     fn the_fab_controls_resolve_the_same_box_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
         let plain = fab_geometry(&mut cx);
         assert_eq!(plain.len(), 8, "a control was dropped from the reading");
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load_with_appearance(style, dark));
-                    vm.with_reload(crate::script_mod);
-                });
-                let under = fab_geometry(&mut cx);
-                for ((name, want), (_, got)) in plain.iter().zip(under.iter()) {
-                    assert_eq!(
-                        want,
-                        got,
-                        "`{name}` resolves to a different box under `{}`{}",
-                        style.id(),
-                        if dark { " dark" } else { "" }
-                    );
-                }
+        for entry in catalogue() {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(entry));
+                vm.with_reload(crate::script_mod);
+            });
+            let under = fab_geometry(&mut cx);
+            for ((name, want), (_, got)) in plain.iter().zip(under.iter()) {
+                assert_eq!(want, got, "`{name}` resolves to a different box under `{}`", entry.id);
             }
         }
         // ...and taking the sheet off puts the panel back where it started.
@@ -7054,137 +7055,67 @@ mod tests {
         assert_eq!(fab_geometry(&mut cx), plain);
     }
 
-    /// The same question about the PAINT rather than the box, for the field
-    /// the panel's filter is.
+    /// Nothing a sheet sets reaches a fab control.
     ///
-    /// `windows-2000` and `nextstep` REPLACE
-    /// `mod.widgets.TextInput.draw_bg.pixel` outright with a hard-coded
-    /// opaque white Win95 field. That ignores every colour the filter field
-    /// declares, paints over the well FabSearch draws around it and leaves
-    /// the panel's own light grey placeholder on white. Answering an
-    /// override means declaring the same leaf in this template, so the
-    /// sheet's value lands on something the panel does not use.
+    /// The kit nests stock fields, buttons and scroll bars, and builds its
+    /// face on the app's font family, and a sheet moves every one of those:
+    /// its token half before the kit registers (a spacing rung reaches the
+    /// margin of a nested field, a font the kit's words), its widget half
+    /// onto the templates the kit nests (a face, a padding, an animator
+    /// state's timing). So the kit is built from the library as it stands
+    /// without a sheet (`desktop_style::keep_stock`), and this holds it
+    /// there: under a sheet that sets everything a sheet may on every stock
+    /// template (`desktop_style::everything_sheet`), the kit's table and every
+    /// `mod.widgets.Fab*` the file registers -- read off the source, so a
+    /// control added later is read too -- resolve line for line as they do
+    /// with no sheet: every box, face, colour, font and timing. The sheet
+    /// leaves the kit's own templates alone; no sheet writes to them by name.
     ///
-    /// Read off the sheets in the tree, so a sheet that starts overriding
-    /// something else is caught here rather than by somebody finding the
-    /// filter unreadable.
-    ///
-    /// Every property a sheet sets on `target`, whether it says so in a line
-    /// of its own or through one of the sheet's own helpers. A sheet states
-    /// its field metrics ONCE and hands them to each field in turn -- `let
-    /// field_room = fn(w) { w.min_height = .. }`, then
-    /// `field_room(mod.widgets.TextInput)` -- so a scan that reads only
-    /// `mod.widgets.TextInput.x = y` lines goes blind the moment a sheet
-    /// stops repeating itself, and says the sheets did not load. The helper
-    /// bodies are read here too, so both spellings count.
-    fn sheet_overrides(text: &str, target: &str) -> Vec<String> {
-        let mut helpers: Vec<(String, String, Vec<String>)> = Vec::new();
-        let mut open: Option<(String, String, Vec<String>)> = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some((name, arg)) = line
-                .strip_prefix("let ")
-                .and_then(|rest| rest.split_once(" = fn("))
-                .and_then(|(name, rest)| rest.split_once(')').map(|(arg, _)| (name, arg)))
-            {
-                open = Some((name.trim().to_string(), arg.trim().to_string(), Vec::new()));
-                continue;
-            }
-            let Some((_, arg, props)) = open.as_mut() else { continue };
-            if line == "}" {
-                helpers.push(open.take().expect("the block is open"));
-                continue;
-            }
-            if let Some(prop) = line
-                .strip_prefix(&format!("{arg}."))
-                .and_then(|rest| rest.split_once('='))
-                .map(|(prop, _)| prop.trim().to_string())
-            {
-                props.push(prop);
-            }
-        }
-        let mut found = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix(&format!("{target}.")) {
-                if let Some(prop) = rest.split([' ', '=']).next() {
-                    found.push(prop.to_string());
-                }
-                continue;
-            }
-            for (name, _, props) in &helpers {
-                // `field_face(mod.widgets.TextInput.draw_bg)` reaches the
-                // same place as `mod.widgets.TextInput.draw_bg.border_radius
-                // = ..`, so whatever the call named is put back in front.
-                let Some(arg) = line
-                    .strip_prefix(&format!("{name}("))
-                    .and_then(|rest| rest.strip_suffix(')'))
-                else {
-                    continue;
-                };
-                let under = match arg.strip_prefix(target) {
-                    Some("") => String::new(),
-                    Some(rest) => format!("{}.", rest.trim_start_matches('.')),
-                    None => continue,
-                };
-                found.extend(props.iter().map(|prop| format!("{under}{prop}")));
-            }
-        }
-        found
-    }
-
+    /// It stands where two narrower guards stood: one read the leaves the
+    /// shipped sheets set on a `TextInput` and asked the filter field to
+    /// declare each of them, the other walked the faces alone. Neither said
+    /// anything about the next sheet.
     #[test]
-    fn the_filter_field_answers_what_the_sheets_override_on_a_text_input() {
-        // Everything before `#[cfg(test)]`: the controls, without the tests
-        // that talk about them -- a test looking for a spelling in the whole
-        // file finds its own words and passes on them.
+    fn nothing_a_sheet_sets_reaches_a_fab_control() {
+        use crate::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
         let src = include_str!("fab_controls.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("the file has a first half");
-        let search = src
-            .split("mod.widgets.FabSearch = View{")
-            .nth(1)
-            .expect("the file declares `mod.widgets.FabSearch`");
-        // The FIELD's own text, not the well's: the View around it declares a
-        // `pixel` of its own, and that must not answer for the field.
-        let field = search
-            .split("input := TextInput{")
-            .nth(1)
-            .expect("FabSearch declares `input := TextInput`");
-        let kit = &field[..field
-            .find("mod.widgets.FabPropRow")
-            .expect("FabSearch is followed by FabPropRow")];
-        let themes = std::path::Path::new(crate::widgets_dir()).join("themes");
-        let mut seen = 0usize;
-        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
-            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
-            let Ok(text) = std::fs::read_to_string(&sheet) else {
-                continue;
-            };
-            for prop in sheet_overrides(&text, "mod.widgets.TextInput") {
-                // `draw_bg.pixel` is answered by declaring `pixel:` inside
-                // this field's own `draw_bg`, and so on down.
-                let leaf = prop.rsplit('.').next().unwrap_or(&prop).to_string();
-                assert!(
-                    kit.contains(&format!("{leaf}:")),
-                    "{} overrides `{prop}` on a TextInput and the filter field does not declare `{leaf}`",
-                    sheet.display()
-                );
-                seen += 1;
+        let mut names: Vec<&str> = src
+            .split("mod.widgets.")
+            .skip(1)
+            .filter_map(|rest| rest.split_once(" = ").map(|(name, _)| name))
+            .filter(|name| name.starts_with("Fab") && name.chars().all(|c| c.is_ascii_alphanumeric()))
+            .collect();
+        names.sort();
+        names.dedup();
+        assert!(names.len() > 10, "only {} fab controls were read off the file", names.len());
+        let read = |vm: &mut ScriptVm| -> Vec<String> {
+            let fab = vm.module(id!(fab));
+            let mut out = resolution(vm, fab.into(), "fab");
+            let widgets = vm.module(id!(widgets));
+            for name in &names {
+                let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                assert!(value.as_object().is_some(), "`{name}` did not resolve");
+                out.extend(resolution(vm, value, name));
             }
-        }
-        assert!(
-            seen > 8,
-            "only {seen} overrides were read -- the sheets did not load"
-        );
-        // The two a sheet reaches through a THEME token rather than through
-        // `widgets.splash`: the stock field takes its padding from
-        // `theme.mspace_1` and its margin from `theme.mspace_v_1`, and every
-        // sheet moves the space factor those are built from.
-        assert!(kit.contains("padding: Inset{"), "the padding is not written out");
-        assert!(kit.contains("margin: Inset{"), "the margin is not written out");
-        assert!(kit.contains("min_height: 0"), "the min height is not written out");
+            out
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let plain = read(vm);
+            let sheet = everything_sheet(vm, &|name| names.contains(&name));
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sheet does not evaluate: {errors:?}");
+            let moved = resolution_diff(&plain, &read(vm), 20);
+            assert!(moved.is_empty(), "a sheet reaches the fab controls at:\n{}", moved.join("\n"));
+            uninstall(vm);
+        });
     }
 
     /// One entry of a runtime table, as the VM has it right now.
@@ -7245,15 +7176,15 @@ mod tests {
     /// other side, and this is the reading that keeps it that way.
     #[test]
     fn the_panels_palette_is_untouched_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         let declared = declared_fab_colors();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
@@ -7263,7 +7194,7 @@ mod tests {
                     table_color(&mut cx, id!(fab), name),
                     *want,
                     "`fab.{name}` moved under `{}`",
-                    style.map(|s| s.id()).unwrap_or("no sheet")
+                    style.map(|s| s.id).unwrap_or("no sheet")
                 );
             }
         }
@@ -7281,7 +7212,7 @@ mod tests {
     /// reading the test above takes.
     #[test]
     fn the_panels_palette_reads_against_itself_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         use crate::theme_tokens::{reads_on, LEGIBLE, READABLE};
         // (ground, ink, how far apart they have to stand)
         const PAIRS: &[(&str, &str, f64)] = &[
@@ -7307,15 +7238,15 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = style.map(|s| s.id).unwrap_or("no sheet");
             for (ground, ink, need) in PAIRS {
                 let g = table_color(&mut cx, id!(fab), ground);
                 let i = table_color(&mut cx, id!(fab), ink);
@@ -7414,7 +7345,7 @@ mod tests {
 
     #[test]
     fn the_kits_words_keep_one_face_under_every_sheet() {
-        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
         // (where it is written, the size that template asks for)
         const SITES: &[(&str, f32)] = &[
             ("FabValueInput.draw_text", 8.5),
@@ -7434,15 +7365,15 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+        for style in [None].into_iter().chain(catalogue().into_iter().map(Some)) {
             cx.with_vm(|vm| {
                 match style {
-                    Some(style) => install(vm, StyleSheet::load(style)),
+                    Some(entry) => install(vm, StyleSheet::load(entry)),
                     None => uninstall(vm),
                 }
                 vm.with_reload(crate::script_mod);
             });
-            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let where_ = style.map(|s| s.id).unwrap_or("no sheet");
             let read = kit_text_styles(&mut cx);
             assert_eq!(read.len(), SITES.len());
             for (style, (site, size)) in read.into_iter().zip(SITES) {
@@ -7483,7 +7414,7 @@ mod tests {
     /// door -- the very thing the sunken filter field was.
     #[test]
     fn the_panels_density_and_type_never_move_under_a_sheet() {
-        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+        use crate::desktop_style::{catalogue, install, StyleSheet};
         const NUMBERS: &[(&str, f64)] = &[
             ("row_height", 24.0),
             ("row_height_sm", 20.0),
@@ -7496,9 +7427,9 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for style in DesktopStyle::ALL {
+        for entry in catalogue() {
             cx.with_vm(|vm| {
-                install(vm, StyleSheet::load(style));
+                install(vm, StyleSheet::load(entry));
                 vm.with_reload(crate::script_mod);
             });
             for (name, want) in NUMBERS {
@@ -7509,7 +7440,7 @@ mod tests {
                         .value(fab, LiveId::from_str(name).into(), NoTrap)
                         .as_f64()
                 });
-                assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", style.id());
+                assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", entry.id);
             }
         }
     }

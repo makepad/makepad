@@ -106,7 +106,7 @@
   },
   {
     "id": "scope", "label": "Scope", "package": "makepad-scope",
-    "dir": "apps/scope", "bin": "scope", "manifest": null, "args": [],
+    "dir": "apps/commercial/scope", "bin": "scope", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": []
   },
   {
@@ -152,7 +152,12 @@
   },
   {
     "id": "stage", "label": "Stage", "package": "makepad-stage",
-    "dir": "apps/stage/app", "bin": "makepad-stage", "manifest": null, "args": [],
+    "dir": "apps/commercial/stage/app", "bin": "makepad-stage", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": []
+  },
+  {
+    "id": "amp", "label": "Amp", "package": "makepad-amp",
+    "dir": "apps/commercial/stage/apps/amp", "bin": "makepad-amp", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": false, "wm_launchable": false, "features": []
   }
 ]

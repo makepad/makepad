@@ -1,7 +1,7 @@
 //! Themes the person saved, and the rule that a shipped one is permanent.
 //!
 //! The library ships three base themes ([`Scheme`]) and a style sheet per
-//! desktop ([`DesktopStyle`]). Those are BUILT-IN: they live in the binary,
+//! desktop (the sheet catalogue, [`crate::desktop_style::catalogue`]). Those are BUILT-IN: they live in the binary,
 //! the picker always offers them, and nothing here can remove or overwrite
 //! one. Everything else is a SAVED theme -- a snapshot of whatever was in
 //! force when the person pressed "save as", written to a file under
@@ -64,7 +64,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::desktop_style::DesktopStyle;
 use crate::makepad_platform::home::makepad_home;
 use crate::theme_tokens::{theme_module_script, Scheme, TokenValue};
 use crate::Cx;
@@ -254,9 +253,9 @@ fn fold(name: &str) -> String {
 /// theme the person already saved into a collision.
 pub fn builtin_names() -> Vec<String> {
     let mut out: Vec<String> = Scheme::ALL.iter().map(|s| s.theme_name().to_string()).collect();
-    for style in DesktopStyle::ALL {
-        out.push(style.id().to_string());
-        out.push(format!("{}-dark", style.id()));
+    for entry in crate::desktop_style::catalogue() {
+        out.push(entry.id.to_string());
+        out.push(format!("{}-dark", entry.id));
     }
     out.extend(RESERVED_NAMES.iter().map(|s| s.to_string()));
     out.extend(RESERVED_KEYWORDS.iter().map(|s| s.to_string()));
@@ -299,7 +298,7 @@ pub struct SavedTheme {
     /// its appearance, or `None` for a bare base theme. Install this before
     /// running [`SavedTheme::script`]: the sheet brings the fonts and the
     /// widget re-skins, and the script then pins the tokens over it.
-    pub sheet: Option<(DesktopStyle, bool)>,
+    pub sheet: Option<&'static str>,
     /// Every token the theme pins, sorted by name.
     pub overrides: Vec<(String, TokenValue)>,
 }
@@ -336,16 +335,10 @@ impl SavedTheme {
     }
 
     /// The sheet's name as [`crate::desktop_style::current_name`] reports it
-    /// and [`crate::desktop_style::DesktopStyle::parse`] reads it back:
-    /// `macos`, `macos-dark`.
+    /// and [`crate::desktop_style::find`] reads it back: `macos`,
+    /// `macos-dark`.
     pub fn sheet_name(&self) -> Option<String> {
-        self.sheet.map(|(style, dark)| {
-            if dark {
-                format!("{}-dark", style.id())
-            } else {
-                style.id().to_string()
-            }
-        })
+        self.sheet.map(str::to_string)
     }
 
     /// The file's whole text, as [`SavedTheme::parse`] reads it: the header,
@@ -393,7 +386,7 @@ impl SavedTheme {
         }
         let mut name: Option<String> = None;
         let mut base: Option<Scheme> = None;
-        let mut sheet: Option<(DesktopStyle, bool)> = None;
+        let mut sheet: Option<&'static str> = None;
         let mut overrides: Vec<(String, TokenValue)> = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
@@ -415,7 +408,7 @@ impl SavedTheme {
                     // A sheet this build does not know is not an error: the
                     // theme's own tokens are all still there, and dropping
                     // the sheet loses only the re-skin.
-                    sheet = DesktopStyle::parse(id).map(|style| (style, id.ends_with("-dark")));
+                    sheet = crate::desktop_style::find(id).map(|entry| entry.id);
                 }
                 "token" => {
                     let Some((token, value)) = rest.split_once('\t') else {
@@ -917,9 +910,9 @@ fn parse_hex_color(word: &str) -> Option<u32> {
 /// sheets' own first lines by `the_sheet_table_is_what_the_sheets_say`. With
 /// no sheet installed, `mod.theme` is whatever `theme_mod` last emitted, so
 /// the app's base theme is the honest answer and is the one taken.
-pub fn snapshot_base(sheet: Option<(DesktopStyle, bool)>, app_base: Scheme) -> Scheme {
+pub fn snapshot_base(sheet: Option<&'static str>, app_base: Scheme) -> Scheme {
     match sheet {
-        Some((style, dark)) => crate::theme_tokens::BlendTheme::Sheet(style, dark).base(),
+        Some(id) => crate::theme_tokens::BlendTheme::Sheet(id).base(),
         None => app_base,
     }
 }
@@ -947,7 +940,7 @@ pub fn snapshot(cx: &mut Cx, name: &str) -> Result<SavedTheme, StoreError> {
     }
     let sheet = cx
         .with_vm(|vm| crate::desktop_style::current_name(vm))
-        .and_then(|id| DesktopStyle::parse(&id).map(|style| (style, id.ends_with("-dark"))));
+        .and_then(|id| crate::desktop_style::find(&id).map(|entry| entry.id));
     let app_base = match crate::base_theme(cx) {
         crate::BaseTheme::Dark => Scheme::Dark,
         crate::BaseTheme::Light => Scheme::Light,
@@ -992,7 +985,7 @@ mod tests {
         SavedTheme {
             name: name.to_string(),
             base: Scheme::Dark,
-            sheet: Some((DesktopStyle::Macos, true)),
+            sheet: Some("macos-dark"),
             overrides: vec![
                 ("color_text".to_string(), TokenValue::Color(0xFF_EE_DD_CC)),
                 ("space_factor".to_string(), TokenValue::Num(1.25)),
@@ -1048,9 +1041,9 @@ mod tests {
         for scheme in Scheme::ALL {
             assert!(is_builtin(scheme.theme_name()), "{:?}", scheme);
         }
-        for style in DesktopStyle::ALL {
-            assert!(is_builtin(style.id()), "{:?}", style);
-            assert!(is_builtin(&format!("{}-dark", style.id())), "{:?} dark", style);
+        for entry in crate::desktop_style::catalogue() {
+            assert!(is_builtin(entry.id), "{}", entry.id);
+            assert!(is_builtin(&format!("{}-dark", entry.id)), "{} dark", entry.id);
         }
         for reserved in RESERVED_NAMES {
             assert!(is_builtin(reserved), "{reserved:?}");
@@ -1374,7 +1367,7 @@ mod tests {
         let theme = SavedTheme::parse(&text).unwrap();
         assert_eq!(theme.name, "sunset");
         assert_eq!(theme.base, Scheme::Dark);
-        assert_eq!(theme.sheet, Some((DesktopStyle::Macos, true)));
+        assert_eq!(theme.sheet, Some("macos-dark"));
         assert_eq!(theme.overrides, vec![("color_text".to_string(), TokenValue::Color(0xFF_EE_DD_CC))]);
     }
 
@@ -1500,7 +1493,7 @@ mod tests {
         let dir = scratch("light-sheet");
         // macOS in its light appearance, while the panel has the app on the
         // dark base -- which is exactly what `apply_theme_preset` leaves.
-        let sheet = Some((DesktopStyle::Macos, false));
+        let sheet = Some("macos");
         let base = snapshot_base(sheet, Scheme::Dark);
         assert_eq!(base, Scheme::Light, "a light sheet derives from light");
         let theme = SavedTheme {
@@ -1526,23 +1519,11 @@ mod tests {
     /// from, so a sheet that changes its first line moves both together.
     #[test]
     fn a_snapshot_takes_the_sheets_base_and_not_the_apps() {
-        for style in DesktopStyle::ALL {
-            for dark in [false, true] {
-                if dark && !style.supports_dark() {
-                    continue;
-                }
-                let sheet = Some((style, dark));
-                let wanted = crate::theme_tokens::BlendTheme::Sheet(style, dark).base();
-                // Whatever the app's own base is, the sheet's wins.
-                for app in Scheme::ALL {
-                    assert_eq!(
-                        snapshot_base(sheet, app),
-                        wanted,
-                        "{}{}",
-                        style.id(),
-                        if dark { "-dark" } else { "" }
-                    );
-                }
+        for entry in crate::desktop_style::catalogue() {
+            let wanted = crate::theme_tokens::BlendTheme::Sheet(entry.id).base();
+            // Whatever the app's own base is, the sheet's wins.
+            for app in Scheme::ALL {
+                assert_eq!(snapshot_base(Some(entry.id), app), wanted, "{}", entry.id);
             }
         }
         // ...and with no sheet on, the app's base is the only answer there

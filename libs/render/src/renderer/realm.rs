@@ -106,7 +106,7 @@ impl Renderer {
     }
 
     /// How many casters may use the projected-silhouette tier. Lower it on
-    /// mobile/standalone XR; see apps/sandbox/BUDGETS.md.
+    /// mobile/standalone XR; see apps/commercial/sandbox/BUDGETS.md.
     pub fn shadow_budget(&self) -> usize {
         self.shadow_budget
     }
@@ -236,7 +236,7 @@ impl Renderer {
     pub(super) fn models_root() -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/sandbox/resources/models"
+            "/../../../apps/commercial/sandbox/resources/models"
         ))
     }
 
@@ -567,7 +567,7 @@ impl Renderer {
     }
 
     /// How much CPU the light bake may spend (bake.rs). Lower `ao_rays` and
-    /// `max_probes` on standalone XR; see apps/sandbox/BUDGETS.md. Setting
+    /// `max_probes` on standalone XR; see apps/commercial/sandbox/BUDGETS.md. Setting
     /// `ao_strength` and `shadow_strength` to 0 turns the bake off visually
     /// while leaving the rest of the pipeline untouched.
     pub fn bake_settings(&self) -> BakeSettings {

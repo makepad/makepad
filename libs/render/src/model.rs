@@ -4244,7 +4244,7 @@ mod real_asset_tests {
 
     fn kit_model(name: &str) -> Option<StaticModel> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit")
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit")
             .join(name);
         let bytes = std::fs::read(path).ok()?;
         StaticModel::parse_glb(&bytes).ok()
@@ -4282,7 +4282,7 @@ mod real_asset_tests {
     #[test]
     fn eye_height_silhouette_gap_report() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             eprintln!("asset pack absent — skipped");
             return;
@@ -4447,7 +4447,7 @@ mod ao_invariant_tests {
 
     fn kit_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit")
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit")
             .join(name)
     }
 
@@ -4552,7 +4552,7 @@ mod ao_fix_check {
     #[test]
     fn corridor_bakes_right_side_out() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/corridor.glb");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/corridor.glb");
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
             return;
@@ -4605,7 +4605,7 @@ mod sidecar_pair_check {
     #[test]
     fn corridor_sidecar_top_is_bright() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Some(m) = std::fs::read(root.join("corridor.aomesh"))
             .ok()
             .and_then(|b| StaticModel::from_aomesh(&b))
@@ -4683,7 +4683,7 @@ mod chart_border_forensics {
     #[test]
     fn corner_texel_neighbourhood() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit");
+            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
         let Some(m) = std::fs::read(root.join("corridor.aomesh"))
             .ok()
             .and_then(|b| StaticModel::from_aomesh(&b))
@@ -4765,7 +4765,7 @@ mod double_sided_probe {
     #[test]
     fn pergola_double_sidedness() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");
@@ -4812,7 +4812,7 @@ mod normal_authoring_probe {
     #[test]
     fn pergola_edge_normals() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
+            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
         );
         let Ok(bytes) = std::fs::read(&path) else {
             eprintln!("asset absent — skipped");

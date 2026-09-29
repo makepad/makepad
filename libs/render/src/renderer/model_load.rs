@@ -383,7 +383,7 @@ impl Renderer {
             }
             (None, Some(uri)) => {
                 return Err(format!(
-                    "{id}: atlas {uri} missing — run apps/sandbox/download_assets.sh"
+                    "{id}: atlas {uri} missing — run apps/commercial/sandbox/download_assets.sh"
                 ))
             }
         };

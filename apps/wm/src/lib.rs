@@ -3290,10 +3290,10 @@ impl App {
         if target=="start.documents" {self.launch_app(cx,"files");return;}
         if target=="start.power" {self.toggle_shell_panel(cx,BarModule::Power);return;}
         if let Some(name) = target.strip_prefix("desktop.") {
-            if let Some(style) = desktop::DesktopStyle::parse(name) {
+            if let Some(entry) = desktop_style::find(name) {
                 // The appearance toggle owns dark or light; a style pick
                 // leaves it where it is.
-                self.set_desktop_style(cx, style);
+                self.set_desktop_sheet(cx, entry);
                 return;
             }
         }
@@ -4578,7 +4578,7 @@ impl MatchEvent for App {
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(&theme_name).as_os_str());
         let wallpaper = self.ui.widget(cx, ids!(wallpaper));
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.wallpaper = wallpaper; }
-        let sheet = desktop_style::StyleSheet::load(self.build.style);
+        let sheet = desktop_style::StyleSheet::load(self.build.style.sheet(false));
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet.name));
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
@@ -4934,7 +4934,7 @@ impl AppMain for App {
         // The build the binary set on Cx (build.rs): the style the widgets
         // come up in, and whether the assistant's families are linked.
         let build = WmBuild::from_cx(vm.cx_mut());
-        desktop_style::install(vm,desktop_style::StyleSheet::load(build.style));
+        desktop_style::install(vm,desktop_style::StyleSheet::load(build.style.sheet(false)));
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);

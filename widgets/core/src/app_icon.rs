@@ -278,27 +278,25 @@ impl ScriptHook for AppIcon {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        let selected = desktop_style::current_name(vm);
-        let name = if self.style.as_ref() == "auto" {
-            selected.as_deref().unwrap_or(if cfg!(target_os = "ios") {
-                "ios"
+        // `auto` draws the installed sheet's family, or this platform's
+        // with none; a name draws the family of that sheet.
+        self.resolved = if self.style.as_ref() == "auto" {
+            if desktop_style::current_name(vm).is_some() {
+                desktop_style::current_style(vm)
+            } else if cfg!(target_os = "ios") {
+                DesktopStyle::Ios
             } else if cfg!(target_os = "android") {
-                "android"
+                DesktopStyle::Android
             } else if cfg!(target_os = "macos") {
-                "macos"
+                DesktopStyle::Macos
             } else if cfg!(target_os = "windows") {
-                "windows"
+                DesktopStyle::Windows
             } else {
-                "omarchy"
-            })
+                DesktopStyle::Omarchy
+            }
         } else {
-            self.style.as_ref()
+            desktop_style::find(self.style.as_ref()).map(|entry| entry.family).unwrap_or_default()
         };
-        self.resolved = DesktopStyle::parse(name).unwrap_or(if name == "macos-dark" {
-            DesktopStyle::Macos
-        } else {
-            DesktopStyle::Omarchy
-        });
     }
 }
 impl AppIcon {

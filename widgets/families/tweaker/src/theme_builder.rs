@@ -189,7 +189,7 @@
 //! a test holds that list to the installer. A theme that only moved its
 //! palette skips all of this and derives straight from the base object.
 
-use crate::desktop_style::{self, DesktopStyle, StyleSheet};
+use crate::desktop_style::{self, StyleSheet};
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
 use crate::theme_combinations::{COMBINATIONS, PAIRS};
 use crate::theme_tokens::{
@@ -5388,12 +5388,10 @@ impl ThemeBuilder {
             return;
         }
         let sheet = desktop_style::current(vm);
-        let dark = match sheet.as_ref().and_then(|sheet| {
-            DesktopStyle::parse(&sheet.name).map(|style| (style, sheet.name.ends_with("-dark")))
-        }) {
+        let dark = match sheet.as_ref().and_then(|sheet| desktop_style::find(&sheet.name)) {
             // A sheet's appearance is its base theme's, which two of the dark
             // ones do not say in their name; the equalizer's table knows.
-            Some((style, dark)) => BlendTheme::Sheet(style, dark).appearance() == Appearance::Dark,
+            Some(entry) => BlendTheme::Sheet(entry.id).appearance() == Appearance::Dark,
             None => crate::base_theme(vm.cx_mut()) == BaseTheme::Dark,
         };
         let params = BuilderParams::house(dark);
@@ -7538,7 +7536,7 @@ mod theme_builder_tests {
             // Under a sheet the base object is the one the sheet wrote its
             // fonts and its skins into, so it stays the thing derived from.
             let mut sheeted = saved.clone();
-            sheeted.sheet = Some((crate::desktop_style::DesktopStyle::Omarchy, false));
+            sheeted.sheet = Some("omarchy");
             assert!(!sheeted.script().contains("roomy_saved_source"));
         });
     }
@@ -7654,7 +7652,7 @@ mod theme_builder_tests {
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             vm.bx.captured_errors = Some(Vec::new());
-            desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
+            desktop_style::install(vm, StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             crate::set_theme_mix(vm.cx_mut(), Some(standing.clone()));
 
             let mut looked = ThemeBuilder::new();
@@ -7757,7 +7755,7 @@ mod theme_builder_tests {
             desktop_style::uninstall(vm);
             let mut lab = ThemeLab::with_cache(made_up_cache());
             lab.enter(vm);
-            let omarchy = lab.index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false)).unwrap();
+            let omarchy = lab.index_of(BlendTheme::Sheet("omarchy")).unwrap();
             lab.set_weight(omarchy, 100.0);
             assert!(lab.apply(vm).unwrap().rebuilt());
             the_reload_lands(vm);
@@ -7908,7 +7906,14 @@ mod theme_builder_tests {
 
                 desktop_style::install(
                     vm,
-                    StyleSheet { name: "built".to_string(), theme: sheet, widgets: String::new(), icons: Vec::new() },
+                    StyleSheet {
+                        name: "built".to_string(),
+                        family: desktop_style::DesktopStyle::Omarchy,
+                        resources: crate::widgets_dir().into(),
+                        theme: sheet,
+                        widgets: String::new(),
+                        icons: Vec::new(),
+                    },
                 );
                 vm.with_reload(crate::script_mod);
                 let theme = widget_theme(vm);

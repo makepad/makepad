@@ -5074,10 +5074,10 @@ mod tests {
         // Real-asset smoke: skips (with a hint) when the download hasn't run.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/sandbox/resources/characters/knight.glb"
+            "/../../../apps/commercial/sandbox/resources/characters/knight.glb"
         );
         let Ok(bytes) = std::fs::read(path) else {
-            println!("SKIP: knight.glb absent — run apps/sandbox/download_assets.sh");
+            println!("SKIP: knight.glb absent — run apps/commercial/sandbox/download_assets.sh");
             return;
         };
         let model = SkinnedModel::parse_glb(&bytes).expect("knight.glb must parse");

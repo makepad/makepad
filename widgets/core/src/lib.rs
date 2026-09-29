@@ -20,6 +20,9 @@ pub mod tween_inspect;
 pub mod tween_script;
 pub mod font_policy;
 pub mod desktop_style;
+#[cfg(any(test, feature = "sheet-checks"))]
+#[doc(hidden)]
+pub mod sheet_checks;
 pub mod app_icon;
 pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
@@ -96,6 +99,10 @@ pub mod fold_header;
 
 pub mod loading_spinner;
 pub mod progress;
+pub mod readout;
+pub mod lamp;
+pub mod needle_meter;
+pub mod screen_view;
 pub mod bare_step;
 pub mod turtle_step;
 pub mod kbd;
@@ -211,6 +218,10 @@ pub use crate::{
     scroll_fade::*,
     portal_list::*,
     progress::*,
+    readout::*,
+    lamp::*,
+    needle_meter::*,
+    screen_view::*,
     reorder_list::*,
     radio_button::*,
     root::*,
@@ -450,18 +461,11 @@ fn register_widgets_resource_crate(vm: &mut ScriptVm) {
         .insert("makepad_widgets".to_string(), widgets_dir().to_string());
 }
 
-pub fn theme_mod(vm: &mut ScriptVm) {
-    register_widgets_resource_crate(vm);
-    makepad_draw::script_mod(vm);
-    if !vm.is_reload() {
-        makepad_platform::ime::script_mod(vm);
-    }
-
-    vm.bx.heap.new_module(id!(prelude));
-    vm.bx.heap.new_module(id!(themes));
-    crate::animator::script_mod(vm);
-    // `mod.tween` (GSAP-style tweens from script), once per VM.
-    crate::tween_script::script_mod(vm);
+/// The three base themes, built fresh from their own source: every key of
+/// `mod.themes.dark`, `.light` and `.skeleton`, a person's edit to a global
+/// re-derived into its base, and the platform's fonts. `mod.theme` is not
+/// pointed anywhere here; `theme_mod` does that, and a sheet's first line.
+fn build_base_themes(vm: &mut ScriptVm) {
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
@@ -493,6 +497,22 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             values: vec![],
         });
     }
+    crate::font_policy::install_theme_fonts(vm);
+}
+
+pub fn theme_mod(vm: &mut ScriptVm) {
+    register_widgets_resource_crate(vm);
+    makepad_draw::script_mod(vm);
+    if !vm.is_reload() {
+        makepad_platform::ime::script_mod(vm);
+    }
+
+    vm.bx.heap.new_module(id!(prelude));
+    vm.bx.heap.new_module(id!(themes));
+    crate::animator::script_mod(vm);
+    // `mod.tween` (GSAP-style tweens from script), once per VM.
+    crate::tween_script::script_mod(vm);
+    build_base_themes(vm);
     #[cfg(not(target_arch = "wasm32"))]
     script_eval!(vm, {
         mod.helper = {
@@ -513,7 +533,6 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             }
         }
     });
-    crate::font_policy::install_theme_fonts(vm);
     script_eval!(vm, {
         mod.prelude.widgets_header = {
             ..mod.res,
@@ -586,7 +605,7 @@ pub fn widgets_mod_with(
 ) {
     *vm.cx_mut().global::<Registration>() = Registration { window, families: families.to_vec() };
     let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_io(vm, window, families, host_io_only);
+    widgets_mod_with_io(vm, window, families, host_io_only, true);
 }
 
 /// The families the last `widgets_mod_with` registered. A module rebuild the
@@ -610,20 +629,58 @@ pub(crate) fn script_mod_as_registered(vm: &mut ScriptVm) {
 /// The core's widgets for a Splash isolate being built: `host_io_only` is
 /// the restriction it will run under (its std is restricted only after this).
 pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
-    widgets_mod_with_io(vm, WindowFamilies::default(), &[], host_io_only);
+    widgets_mod_with_io(vm, WindowFamilies::default(), &[], host_io_only, false);
 }
 
 /// With `host_io_only` (a guest held to the host service bridge) the modules
 /// that reach past it stay out: the window and its menu bar (a guest must not
 /// replace the app's), screen capture, and cached widgets (their singletons
 /// would reach widgets the host or other isolates cached).
+///
+/// `stock_apart` keeps the stock library apart from the sheet's; an isolate
+/// passes false, see below.
 fn widgets_mod_with_io(
     vm: &mut ScriptVm,
     window: WindowFamilies,
     families: &[fn(&mut ScriptVm)],
     host_io_only: bool,
+    stock_apart: bool,
 ) {
-    crate::desktop_style::apply_theme(vm);
+    // With a sheet installed the library is registered twice. First as it
+    // stands without the sheet, which is kept (`desktop_style::keep_stock`)
+    // for the chrome that must look and measure the same under every sheet;
+    // then the base themes are built again, because the sheet's token half
+    // writes into them and the kept library's theme must not change under
+    // it; then with the sheet, which is the library everything else gets.
+    //
+    // A Splash isolate registers once: it carries none of the host's chrome,
+    // and it is built inside the isolate's time budget, which a second pass
+    // would spend. Its stock names are the sheet's library.
+    let sheet = crate::desktop_style::current_name(vm).is_some();
+    if sheet && stock_apart {
+        register_widgets(vm, window, families, host_io_only, false, true);
+        build_base_themes(vm);
+        register_widgets(vm, window, families, host_io_only, true, false);
+    } else {
+        register_widgets(vm, window, families, host_io_only, sheet, true);
+    }
+}
+
+/// One registration of every widget template, `window`'s families and then
+/// `families`, with the installed sheet's token half first when
+/// `with_sheet`, and kept as the stock library the chrome is built from when
+/// `keep`.
+fn register_widgets(
+    vm: &mut ScriptVm,
+    window: WindowFamilies,
+    families: &[fn(&mut ScriptVm)],
+    host_io_only: bool,
+    with_sheet: bool,
+    keep: bool,
+) {
+    if with_sheet {
+        crate::desktop_style::apply_theme(vm);
+    }
     // ...and the person's own edits over everything -- base, sheet or mix.
     // (A global has already rebuilt the base in `theme_mod`; its pin here
     // is the same value again, and the belt for a base that never named it.)
@@ -664,6 +721,12 @@ true
     });
 
     vm.bx.heap.new_module(id!(widgets));
+    // The registration kept as the stock library is kept before anything is
+    // registered into it, so the chrome registered below already names its
+    // templates from it.
+    if keep {
+        crate::desktop_style::keep_stock(vm);
+    }
 
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
@@ -753,6 +816,12 @@ true
     crate::fold_header::script_mod(vm);
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    // The instruments: the readout and the meter draw on a screen, and
+    // the screen holds them, so the view kit is all it needs above it.
+    crate::readout::script_mod(vm);
+    crate::lamp::script_mod(vm);
+    crate::needle_meter::script_mod(vm);
+    crate::screen_view::script_mod(vm);
     crate::nav_list::script_mod(vm);
     crate::chip::script_mod(vm);
     // The menu first: the group's split and menu buttons carry a
