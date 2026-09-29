@@ -1790,7 +1790,7 @@ pub const kAudioObjectSystemObject: AudioDeviceID = 1;
 pub type AudioObjectID = u32;
 pub type AudioDeviceID = u32;
 
-#[link(name = "CoreMidi", kind = "framework")]
+#[link(name = "CoreMIDI", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;
     pub static kMIDIPropertyDisplayName: CFStringRef;
