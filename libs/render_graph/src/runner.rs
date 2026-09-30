@@ -98,6 +98,8 @@ pub struct GraphRunner {
     color: Option<ColorPipeline>,
     /// Per stage: the passes the last run recorded, in order.
     last: [Vec<DrawPassId>; 4],
+    /// All zeros: a cold history's stand-in when it has no other input.
+    zero: Option<Texture>,
     /// Errors to show the author (compile errors, refused plans), taken by
     /// the host.
     pub errors: Vec<String>,
@@ -348,11 +350,24 @@ impl GraphRunner {
                     Source::History => prev.clone(),
                 })
                 .collect();
-            // A cold history reads the pass's first input instead.
+            // A cold history reads the pass's first input instead (zeros
+            // when that is the history itself).
             let mut history_ready = 1.0;
             if let Some(i) = p.inputs.iter().position(|s| *s == Source::History) {
                 if textures[i].is_none() {
-                    textures[i] = textures[0].clone();
+                    textures[i] = match textures[0].clone() {
+                        Some(t) => Some(t),
+                        None => Some(
+                            self.zero
+                                .get_or_insert_with(|| {
+                                    Texture::new_with_format(
+                                        cx.cx,
+                                        TextureFormat::VecRGBAf32 { width: 1, height: 1, data: Some(vec![0.0; 4]), updated: TextureUpdated::Full },
+                                    )
+                                })
+                                .clone(),
+                        ),
+                    };
                     history_ready = 0.0;
                 }
             }

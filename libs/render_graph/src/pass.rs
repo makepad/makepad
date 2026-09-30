@@ -24,7 +24,8 @@
 //! first frame after the passes change, or after the host resets it, has no
 //! history, and the slot reads the pass's first input instead while
 //! `self.history_ready()` is 0 (a pass never samples a texture it has not
-//! written itself). Locked time refuses history (see [`crate::locked`]).
+//! written itself); a pass whose first read is `@history` itself (state
+//! with no other input) reads zeros then. Locked time refuses history (see [`crate::locked`]).
 //!
 //! and the host turns it into a [`PassDecl`]. [`PassDecl::source`] makes
 //! the Splash shader text: a subclass of `DrawGraphPass` (the standard
@@ -148,8 +149,8 @@ impl PassDecl {
         if !self.history && self.reads.iter().any(|r| r == "history") {
             return Err("reads @history but is not a history pass (add `history: true`)".into());
         }
-        if self.history && self.reads.first().is_none_or(|r| r == "history") {
-            return Err("a history pass reads something before @history (its cold start reads that instead)".into());
+        if self.history && self.reads.is_empty() {
+            return Err("a history pass reads something (@history, its own last output; its first read stands in on a cold start)".into());
         }
         if !self.pixel.trim_start().starts_with("fn") {
             return Err("`pixel` must be a shader function: \"fn() -> vec4 { ... }\"".into());
@@ -280,6 +281,8 @@ mod tests {
         d.history = true;
         assert!(d.validate().is_ok());
         d.reads = vec!["history".into()];
+        assert!(d.validate().is_ok());
+        d.reads = vec![];
         assert!(d.validate().is_err());
         assert!(decl().validate().is_ok());
     }
