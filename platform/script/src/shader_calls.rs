@@ -1932,6 +1932,41 @@ impl ShaderFnCompiler {
                     );
                 }
             }
+            id!(sample_grad) => {
+                // sample_grad(coord, dx, dy): a 2D texture sampled with explicit
+                // derivatives of `coord` (analytic-derivative sampling: a
+                // Droste or lens warp picks the right mip where the warped
+                // coordinate's screen derivatives would be wrong).
+                if args.len() != 3 || !matches!(tex_type, TextureType::Texture2d) {
+                    script_err_invalid_args!(self.trap, "texture.sample_grad(coord, dx, dy) takes 3 args, on a 2D texture");
+                    let empty = self.stack.new_string();
+                    self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_vec4f), empty);
+                } else {
+                    let (coord, dx, dy) = (&args[0], &args[1], &args[2]);
+                    let mut s = self.stack.new_string();
+                    let sampler_idx = output.get_or_create_sampler(ShaderSampler::default());
+                    match output.backend {
+                        ShaderBackend::Metal => {
+                            write!(s, "{}.sample(_s{}, {}, gradient2d({}, {}))", texture_expr, sampler_idx, coord, dx, dy).ok();
+                        }
+                        ShaderBackend::Wgsl => {
+                            write!(s, "textureSampleGrad({}, _s{}, {}, {}, {})", texture_expr, sampler_idx, coord, dx, dy).ok();
+                        }
+                        ShaderBackend::Hlsl => {
+                            write!(s, "{}.SampleGrad(_s{}, {}, {}, {})", texture_expr, sampler_idx, coord, dx, dy).ok();
+                        }
+                        ShaderBackend::Glsl => {
+                            output.bind_texture_sampler(&texture_expr, sampler_idx);
+                            write!(s, "textureGrad({}, {}, {}, {})", texture_expr, coord, dx, dy).ok();
+                        }
+                        ShaderBackend::Rust => {
+                            // gpusim samples one level: the gradients choose nothing.
+                            write!(s, "{}.sample({})", texture_expr, coord).ok();
+                        }
+                    }
+                    self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_vec4f), s);
+                }
+            }
             id!(sample_video) => {
                 // sample_video(coord) samples a video texture (platform external texture).
                 // In GLSL this calls sample2dOES() which is provided by the runtime preamble.
@@ -2012,6 +2047,7 @@ impl ShaderFnCompiler {
                             id!(sample_repeat),
                             id!(sample_as_bgra_repeat),
                             id!(sample_lod),
+                            id!(sample_grad),
                             id!(sample_video),
                             id!(size)
                         ]

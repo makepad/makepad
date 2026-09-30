@@ -105,6 +105,16 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         };
         mrt.validate().unwrap();
         compile_pass(vm, &mrt);
+        // Analytic-derivative sampling (PDOOM-PARITY R9): a warped lookup
+        // with the derivatives of the unwarped coordinate.
+        let grad = pass::PassDecl {
+            name: None,
+            outputs: Vec::new(),
+            pixel: "fn() -> vec4 { let q = fract(self.uv() * 3.0) return self.color.sample_grad(q, dFdx(self.uv() * 3.0), dFdy(self.uv() * 3.0)) }".into(),
+            label: "grad".into(),
+            ..mrt.clone()
+        };
+        compile_pass(vm, &grad);
         // And the check has teeth: a pass reading what it does not declare
         // is refused.
         let bad = pass::PassDecl {
