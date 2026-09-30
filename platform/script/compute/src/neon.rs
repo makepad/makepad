@@ -1478,11 +1478,19 @@ impl Em {
                         return;
                     }
                     Bin::ShlI | Bin::ShrI | Bin::ShrUI => {
-                        // Amount mod 32; right shifts are negative left shifts.
-                        self.splat(VS2, 31);
-                        self.e(v::r3(v::AND, VS2, ry, VS2));
+                        // Amount mod 32 (unless proven below 32); right
+                        // shifts are negative left shifts.
+                        let amt = if self.bounds[y.0 as usize].is_some_and(|m| m < 32) {
+                            ry
+                        } else {
+                            self.splat(VS2, 31);
+                            self.e(v::r3(v::AND, VS2, ry, VS2));
+                            VS2
+                        };
                         if b != Bin::ShlI {
-                            self.e(v::r2(v::NEG, VS2, VS2));
+                            self.e(v::r2(v::NEG, VS2, amt));
+                        } else if amt != VS2 {
+                            self.e(v::mov(VS2, amt));
                         }
                         let d = self.dst(dst);
                         self.e(v::r3(if b == Bin::ShrUI { v::USHL } else { v::SSHL }, d, rx, VS2));
@@ -1787,6 +1795,7 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
             Ent::Counter(_) => 4,
             _ => 16,
         },
+        true,
     );
     let spill = (alloc.spill_bytes + 15) & !15;
     // The mask slots, then one slot for gather groups.

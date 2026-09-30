@@ -335,13 +335,16 @@ fn allocate(p: &Program) -> Alloc {
     };
     let class = |e: Ent| matches!(ty(e), Some(Ty::F32 | Ty::F64)) as usize;
     let slot = |e: Ent| if ty(e) == Some(Ty::F64) { 8 } else { 4 };
-    allocate_with(p, class, &[GPR_POOL, FP_POOL], slot)
+    allocate_with(p, class, &[GPR_POOL, FP_POOL], slot, false)
 }
 
 /// Linear-scan allocation of every entity into register class
 /// `class(e)` (an index into `pools`), spilling to stack slots of
 /// `slot(e)` bytes (aligned to their size).
-pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32) -> Alloc {
+/// `reuse_at_def`: a definition may take the register of an operand whose
+/// last use it is (the backend reads every operand before writing the
+/// result).
+pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32, reuse_at_def: bool) -> Alloc {
     let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0, depth: 0 };
     lv.walk(&p.body);
     let mut ivs: Vec<(u32, u32, Ent)> = lv.refs.iter().map(|(e, r)| {
@@ -369,7 +372,7 @@ pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[
         let mut active: Vec<(u32, Ent, u8)> = Vec::new();
         for &(s, e, ent) in ivs.iter().filter(|iv| class(iv.2) == ci) {
             active.retain(|(end, _, reg)| {
-                if *end < s {
+                if *end < s || (reuse_at_def && *end == s) {
                     free.push(*reg);
                     false
                 } else {
@@ -546,45 +549,9 @@ struct Emit<'a> {
 const CALL_SAVE: u32 = 36 * 8;
 const CALL_AREA: u32 = CALL_SAVE + 64 * 4;
 
-/// Upper bounds of offsets built from `Wrap`/mask/const arithmetic.
+/// Upper bounds of offsets (see [`crate::ir::bounds`]).
 pub(crate) fn bounds(p: &Program) -> Vec<Option<u32>> {
-    let mut out = vec![None; p.vals.len()];
-    let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
-    fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>) {
-        for s in b {
-            match s {
-                Stmt::Def(v, op) => {
-                    let pos = |c: Option<i32>| c.filter(|c| *c >= 0).map(|c| c as u32);
-                    let r = match *op {
-                        Op::ConstI(c) => {
-                            consts[v.0 as usize] = Some(c);
-                            pos(Some(c))
-                        }
-                        Op::Wrap(_, len) => Some(len - 1),
-                        Op::Bin(Bin::AddI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
-                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_add(c),
-                            _ => None,
-                        },
-                        Op::Bin(Bin::MulI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
-                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_mul(c),
-                            _ => None,
-                        },
-                        Op::Bin(Bin::AndI, a, b) => pos(consts[b.0 as usize]).or(pos(consts[a.0 as usize])),
-                        _ => None,
-                    };
-                    out[v.0 as usize] = r;
-                }
-                Stmt::If(_, t, e) => {
-                    walk(t, out, consts);
-                    walk(e, out, consts);
-                }
-                Stmt::Loop { body, .. } => walk(body, out, consts),
-                _ => {}
-            }
-        }
-    }
-    walk(&p.body, &mut out, &mut consts);
-    out
+    crate::ir::bounds(p)
 }
 
 impl<'a> Emit<'a> {

@@ -30,8 +30,32 @@ pub fn optimize(p: &mut Program) {
     dce(p);
     dead_frame_stores(p);
     dead_loops(p);
+    drop_wraps(p);
     dce(p);
     cluster_stores(p);
+}
+
+/// `Wrap(x, n)` of an x proven in `0..n` ([`ir::bounds`]) is x.
+pub fn drop_wraps(p: &mut Program) {
+    let b = ir::bounds(p);
+    let mut map = HashMap::new();
+    fn walk(blk: &Block, b: &[Option<u32>], map: &mut HashMap<u32, Val>) {
+        for s in blk {
+            match s {
+                Stmt::Def(v, Op::Wrap(x, n)) if b[x.0 as usize].is_some_and(|m| m < *n) => {
+                    map.insert(v.0, *x);
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, b, map);
+                    walk(e, b, map);
+                }
+                Stmt::Loop { body, .. } => walk(body, b, map),
+                _ => {}
+            }
+        }
+    }
+    walk(&p.body, &b, &mut map);
+    rename(&mut p.body, &map);
 }
 
 // ---------------------------------------------------------------------------

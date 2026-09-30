@@ -570,6 +570,54 @@ pub fn clamp_off(off: u32, extent: u32) -> u32 {
     off.min(extent.saturating_sub(1))
 }
 
+/// Upper bounds (as u32) of i32 values built from `Wrap`, masks, unsigned
+/// shifts and constant arithmetic: `Some(b)` means the value, read as
+/// u32, is at most b (so it is also a non-negative i32 when b < 2^31).
+pub fn bounds(p: &Program) -> Vec<Option<u32>> {
+    let mut out = vec![None; p.vals.len()];
+    let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
+    fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, op) => {
+                    let pos = |c: Option<i32>| c.filter(|c| *c >= 0).map(|c| c as u32);
+                    let r = match *op {
+                        Op::ConstI(c) => {
+                            consts[v.0 as usize] = Some(c);
+                            pos(Some(c))
+                        }
+                        Op::Wrap(_, len) => Some(len - 1),
+                        Op::Bin(Bin::AddI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
+                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_add(c),
+                            _ => None,
+                        },
+                        Op::Bin(Bin::MulI, a, b) => match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
+                            (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => x.checked_mul(c),
+                            _ => None,
+                        },
+                        Op::Bin(Bin::AndI, a, b) => pos(consts[b.0 as usize]).or(pos(consts[a.0 as usize])).or(out[a.0 as usize]).or(out[b.0 as usize]),
+                        Op::Bin(Bin::ShrUI, a, b) => consts[b.0 as usize].map(|k| out[a.0 as usize].unwrap_or(u32::MAX) >> (k as u32 & 31)),
+                        Op::Sel(_, a, b) => match (out[a.0 as usize], out[b.0 as usize]) {
+                            (Some(x), Some(y)) => Some(x.max(y)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    out[v.0 as usize] = r;
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, out, consts);
+                    walk(e, out, consts);
+                }
+                Stmt::Loop { body, .. } => walk(body, out, consts),
+                _ => {}
+            }
+        }
+    }
+    walk(&p.body, &mut out, &mut consts);
+    out
+}
+
 // =========================================================================
 // The reference interpreter
 // =========================================================================
