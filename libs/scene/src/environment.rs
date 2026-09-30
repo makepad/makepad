@@ -135,8 +135,9 @@ pub enum Background {
     Color(Vec4f),
     /// Vertical gradient, zenith to nadir.
     Gradient { top: Vec4f, bottom: Vec4f },
-    /// The IBL source image itself.
-    Environment { blur: f32 },
+    /// The IBL source image itself, blurred by `blur` (0..1, the
+    /// prefilter's roughness) and scaled by `intensity`.
+    Environment { blur: f32, intensity: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

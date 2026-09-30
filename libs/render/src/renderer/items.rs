@@ -105,6 +105,8 @@ pub(super) struct ItemState {
     failed: Vec<Builtin>,
     /// How many item instances this frame appended to `placed_models`.
     pub(super) appended: usize,
+    /// The custom materials this frame's items draw through.
+    used_custom: Vec<String>,
     /// Items this frame the model lanes do not draw (lines, points, cards,
     /// models, unresolved buffers), for a host's diagnostics.
     pub(super) skipped: usize,
@@ -172,6 +174,13 @@ impl Renderer {
 
     pub fn has_geometry(&self, id: GeometryId) -> bool {
         self.items.geometries.contains_key(&id)
+    }
+
+    /// Whether every custom material the last frame's items used has its
+    /// pipeline: until then those items draw through the stock lane, so a
+    /// locked-time host waits for this before it takes the frame.
+    pub fn items_ready(&self, cx: &Cx) -> bool {
+        self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)))
     }
 
     /// Items the model lanes skipped last frame (lines, points, cards,
@@ -295,6 +304,7 @@ impl Renderer {
     pub(super) fn push_item_instances(&mut self, cx: &mut Cx, world: &World) {
         self.items.appended = 0;
         self.items.skipped = 0;
+        self.items.used_custom.clear();
         if world.items.is_empty() {
             return;
         }
@@ -334,6 +344,11 @@ impl Renderer {
                 continue;
             };
             let custom = self.item_custom(cx, material, ibl);
+            if let Some(name) = &custom {
+                if !self.items.used_custom.contains(name) {
+                    self.items.used_custom.push(name.clone());
+                }
+            }
             let params = match &material.kind {
                 MaterialKind::Unlit(u) => vec4(0.0, 0.0, 0.0, u.intensity.max(1.0e-6).log2()),
                 MaterialKind::Splash(s) => s.uniforms[0],

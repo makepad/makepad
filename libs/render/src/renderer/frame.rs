@@ -64,7 +64,10 @@ impl Renderer {
         skinned: Option<SkinnedBatch>,
         models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
-        // The world's generic items ride the placed models for this frame.
+        // Image-based lighting for the materials that ask for it (before
+        // the items choose their materials), then the world's generic items
+        // ride the placed models for this frame.
+        self.resolve_ibl(cx.cx, &world.environment);
         self.push_item_instances(cx.cx, world);
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
         self.pop_item_instances();
@@ -117,17 +120,13 @@ impl Renderer {
             self.sky_clock = true;
         }
         self.sky_hour = hour;
-        let sun = crate::world_lights::apply_world_sun(world, crate::sun::resolve_sun(&world.sun));
+        let sun = crate::sun::resolve_sun(&world.sun);
         self.light_eye = camera_pos;
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
         crate::entity_lights::append_entity_lights_with_model_headlights(
             world, &mut self.frame_lights, &self.model_headlight_owners,
         );
-        // The world's generic lights (documents, kits): none in a game world.
-        crate::world_lights::append_world_lights(world, &mut self.frame_lights);
-        // Image-based lighting for the materials that ask for it.
-        self.resolve_ibl(cx.cx, &world.environment);
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
@@ -159,6 +158,11 @@ impl Renderer {
         } else {
             sun
         };
+        // The world's own lights (documents, kits; none in a game world) are
+        // in the lane's units already: they join after the rig's HDR gains,
+        // and its Sun and Sky replace the rig's key and fill.
+        let sun = crate::world_lights::apply_world_sun(world, sun);
+        crate::world_lights::append_world_lights(world, &mut self.frame_lights);
         self.clustered.lin_ctl = self.lin_ctl();
         let local_shadows = self.clustered_enabled && self.frame_lights.iter().any(|l| l.shadows);
         // Character palettes pack BEFORE the cascades encode: the skinned
@@ -242,6 +246,8 @@ impl Renderer {
         }
         draw_list.begin_always(cx);
         cx.begin_scene_3d(scene_state);
+        // The environment as the background, first (a world that asks).
+        self.draw_environment_background(cx, &world.environment, &scene_state.projection);
         // Camera-relative rendering: world geometry shifts by the render
         // origin on the GPU (the pass view was rebuilt around it by the
         // host's `Renderer::set_pass_camera`); CPU-side culling, cascades
@@ -274,14 +280,15 @@ impl Renderer {
         // batch begins, because instance fields are snapshotted per draw and
         // uniforms are captured when the draw item opens.
         let sun = {
-            let sun = crate::world_lights::apply_world_sun(world, crate::sun::resolve_sun(&world.sun));
-            if self.hdr_output {
+            let sun = crate::sun::resolve_sun(&world.sun);
+            let sun = if self.hdr_output {
                 let mut hdr = sun.to_hdr();
                 self.hdr_fill_from_sky(world, &mut hdr);
                 hdr
             } else {
                 sun
-            }
+            };
+            crate::world_lights::apply_world_sun(world, sun)
         };
 
         // SDF-atlas sun era: the sidecars bake against one sun elevation.
