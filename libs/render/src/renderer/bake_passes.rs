@@ -374,7 +374,9 @@ impl Renderer {
                 }
             }
         }
-        let sun = crate::sun::resolve_sun(&world.sun);
+        let mut sun = crate::sun::resolve_sun(&world.sun);
+        // A world's own Sun steers the cascades and the bake too.
+        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
         // The re-bake idempotence probe (macOS readback): with
         // MAKEPAD_GPU_LM_REBAKE set, every settled bake reports its atlas
         // signature, and each bake after the first reports its DIFF against
@@ -506,6 +508,13 @@ impl Renderer {
     pub fn set_lightmap_enabled(&mut self, on: bool) -> bool {
         self.lightmap_enabled = on;
         on
+    }
+
+    /// Refresh every shadow cascade every frame (false) instead of on
+    /// staggered frames (true, the realtime default): a locked-time host
+    /// renders frames that must each be whole.
+    pub fn set_csm_stagger(&mut self, stagger: bool) {
+        self.gpu_baker.set_csm_stagger(stagger);
     }
 
     /// Which SPACE the model lanes shade in.

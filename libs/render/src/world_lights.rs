@@ -69,7 +69,7 @@ mod tests {
     }
 }
 
-/// The rig with a world's own Sun (key light) and Sky (hemisphere fill)
+/// The rig with a world's own Sun (key light) and Sky (hemisphere fill), in the lane's units (linear under HDR output),
 /// in place of the host's, when the world has them.
 pub fn apply_world_sun(world: &World, mut sun: crate::sun::SunLight) -> crate::sun::SunLight {
     for light in world.lights.iter().filter(|l| l.validate().is_ok()) {
@@ -102,4 +102,14 @@ pub fn world_fog(world: &World) -> Option<(makepad_draw::Vec3f, f32)> {
         Fog::Linear { color, start, end } => Some((color, 2.0 / (start + end).max(1.0e-3))),
         Fog::Height { color, density, .. } => Some((color, density)),
     }
+}
+
+/// The direction of a world's own Sun, if it has one: every sun-driven
+/// system (cascades, bakes, sky) follows it, before the rig's colours are
+/// replaced by [`apply_world_sun`].
+pub fn world_sun_dir(world: &World) -> Option<makepad_draw::Vec3f> {
+    world.lights.iter().filter(|l| l.validate().is_ok()).find_map(|l| match *l {
+        Light::Sun { dir, .. } => Some(dir.normalize()),
+        _ => None,
+    })
 }

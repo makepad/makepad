@@ -1299,6 +1299,12 @@ impl GpuLightmapBaker {
     /// Returns the effective configuration after environment overrides.
     /// Stretch the far cascade to `metres` (0 = the default reach of
     /// `far_range * FAR_REACH`). The detail cascades are unchanged.
+    /// Whether the cascades refresh on staggered frames (realtime) or all
+    /// every frame (locked time: each frame must be whole on its own).
+    pub fn set_csm_stagger(&mut self, stagger: bool) {
+        self.csm_stagger = stagger;
+    }
+
     pub fn set_csm_far_reach(&mut self, metres: f32) {
         let metres = if metres.is_finite() { metres.clamp(0.0, 16384.0) } else { 0.0 };
         if metres != self.csm_far_reach { self.csm_far_reach = metres; self.csm_last = None; }

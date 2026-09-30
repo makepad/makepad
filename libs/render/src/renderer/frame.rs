@@ -120,7 +120,8 @@ impl Renderer {
             self.sky_clock = true;
         }
         self.sky_hour = hour;
-        let sun = crate::sun::resolve_sun(&world.sun);
+        let mut sun = crate::sun::resolve_sun(&world.sun);
+        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
         self.light_eye = camera_pos;
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
@@ -280,7 +281,8 @@ impl Renderer {
         // batch begins, because instance fields are snapshotted per draw and
         // uniforms are captured when the draw item opens.
         let sun = {
-            let sun = crate::sun::resolve_sun(&world.sun);
+            let mut sun = crate::sun::resolve_sun(&world.sun);
+        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
             let sun = if self.hdr_output {
                 let mut hdr = sun.to_hdr();
                 self.hdr_fill_from_sky(world, &mut hdr);
