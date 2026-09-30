@@ -867,10 +867,12 @@ pub struct CxDrawShaderMapping {
     /// pass with several color attachments (MRT) an attachment the shader
     /// does not write keeps its contents: its write mask is off.
     pub fragment_outputs: u8,
+    /// The typed instance and vertex fields, for `layout_of`.
+    pub reflection: crate::draw_shader_layout::DrawShaderReflection,
 }
 
 impl CxDrawShaderMapping {
-    fn attr_format_from_pod_type(ty: &ScriptPodTy) -> DrawShaderAttrFormat {
+    pub(crate) fn attr_format_from_pod_type(ty: &ScriptPodTy) -> DrawShaderAttrFormat {
         match ty {
             ScriptPodTy::Packed(p) => match p {
                 crate::makepad_script::pod::ScriptPodPacked::F16x2 => DrawShaderAttrFormat::F16x2,
@@ -912,7 +914,7 @@ impl CxDrawShaderMapping {
         }
     }
 
-    fn push_pod_fields(
+    pub(crate) fn push_pod_fields(
         inputs: &mut DrawShaderInputs,
         ty: &ScriptPodTy,
         fallback_id: LiveId,
@@ -1403,6 +1405,7 @@ impl CxDrawShaderMapping {
             varying_total_slots: 0,
             color_format,
             fragment_outputs,
+            reflection: crate::draw_shader_layout::DrawShaderReflection::from_output(output, heap),
         }
     }
 

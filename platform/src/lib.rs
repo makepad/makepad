@@ -56,6 +56,7 @@ pub mod shared_instances;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
+pub mod draw_shader_layout;
 mod draw_vars;
 
 // Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
