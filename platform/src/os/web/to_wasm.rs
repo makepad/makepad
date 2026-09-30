@@ -221,7 +221,7 @@ pub struct ToWasmFileDialogResult {
 #[derive(ToWasm, Clone, Debug)]
 pub struct WTouchPoint {
     pub time: f64,
-    pub state: u32, // 0 stable, 1 start, 2 end, 3 move
+    pub state: u32, // 0 stable, 1 start, 2 move, 3 end, 4 cancel
     pub x: f64,
     pub y: f64,
     pub radius_x: f64,

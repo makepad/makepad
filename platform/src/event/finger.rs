@@ -15,6 +15,7 @@ use {
     std::{
         cell::{Cell, RefCell},
         ops::Deref,
+        rc::{Rc, Weak},
     },
 };
 
@@ -366,6 +367,36 @@ pub struct CxDigitHover {
     area: Area,
 }
 
+/// Keeps a scoped sweep lock alive until its widget closes or is dropped.
+#[must_use]
+pub struct SweepLock {
+    owner: Rc<Cell<bool>>,
+}
+
+impl SweepLock {
+    pub fn is_active(&self) -> bool {
+        self.owner.get()
+    }
+}
+
+#[derive(Clone)]
+struct CxSweepLock {
+    area: Area,
+    owner: Weak<Cell<bool>>,
+}
+
+impl CxSweepLock {
+    fn is_active(&self) -> bool {
+        self.owner.upgrade().is_some_and(|owner| owner.get())
+    }
+
+    fn release(&self) {
+        if let Some(owner) = self.owner.upgrade() {
+            owner.set(false);
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct CxFingers {
     pub first_mouse_button: Option<(MouseButton, WindowId)>,
@@ -394,6 +425,9 @@ pub struct CxFingers {
     /// turn and has to hand it back to the one beneath it when it closes.
     /// With one owner this behaves exactly as a single slot does.
     sweep_locks: Vec<Area>,
+    // Kept apart from stack order: modals temporarily lift and restore legacy locks.
+    scoped_sweep_locks: Vec<CxSweepLock>,
+    sweep_lock_validation_event: Option<u64>,
     /// Owners of the scroll block, outermost first; only the LAST entry is
     /// live. It nests for the reason the sweep lock does: a modal over a
     /// modal blocks scrolling in turn, and the one that closes has to leave
@@ -450,6 +484,12 @@ impl CxFingers {
         for lock in &mut self.sweep_locks {
             if *lock == old_area {
                 *lock = new_area;
+            }
+        }
+        for lock in &mut self.scoped_sweep_locks {
+            if lock.area == old_area {
+                lock.area = new_area;
+                self.sweep_lock_validation_event = None;
             }
         }
         for block in &mut self.scroll_blocks {
@@ -924,8 +964,9 @@ impl CxFingers {
     }
 
     pub(crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
-        if let Some(lock) = self.sweep_locks.last() {
-            if *lock != sweep_area {
+        self.clear_expired_sweep_locks();
+        if let Some(lock) = self.sweep_lock_area() {
+            if lock != sweep_area {
                 return true;
             }
         }
@@ -936,9 +977,31 @@ impl CxFingers {
     /// owner already in the stack keeps its one entry and its level, so
     /// taking the lock twice is not two owners.
     pub fn sweep_lock(&mut self, area: Area) {
+        self.clear_expired_sweep_locks();
         if !self.sweep_locks.contains(&area) {
             self.sweep_locks.push(area);
         }
+    }
+
+    /// Take a scoped lock above existing owners, unless this area already owns one.
+    pub fn acquire_sweep_lock(&mut self, area: Area) -> Option<SweepLock> {
+        self.clear_expired_sweep_locks();
+        if self.sweep_locks.contains(&area)
+            || self.scoped_sweep_locks.iter().any(|lock| lock.area == area)
+        {
+            return None;
+        }
+        let owner = Rc::new(Cell::new(true));
+        self.sweep_locks.push(area);
+        self.scoped_sweep_locks.push(CxSweepLock { area, owner: Rc::downgrade(&owner) });
+        self.sweep_lock_validation_event = None;
+        Some(SweepLock { owner })
+    }
+
+    fn clear_expired_sweep_locks(&mut self) {
+        self.sweep_locks.retain(|area| !self.scoped_sweep_locks.iter()
+            .any(|lock| lock.area == *area && !lock.is_active()));
+        self.scoped_sweep_locks.retain(CxSweepLock::is_active);
     }
 
     /// The area holding the sweep lock right now — the innermost of the
@@ -948,7 +1011,8 @@ impl CxFingers {
     /// this to tell "I hold it" from "somebody above me holds it", so it
     /// releases only its own grab.
     pub fn sweep_lock_area(&self) -> Option<Area> {
-        self.sweep_locks.last().copied()
+        self.sweep_locks.iter().rev().find(|area| !self.scoped_sweep_locks.iter()
+            .any(|lock| lock.area == **area && !lock.is_active())).copied()
     }
 
     /// Release `area`'s sweep lock wherever it sits in the stack. Letting go
@@ -1304,6 +1368,36 @@ impl HitOptions {
     }
 }
 
+impl Cx {
+    pub(crate) fn validate_scoped_sweep_locks_after_draw(&mut self) {
+        self.fingers.sweep_lock_validation_event = None;
+        self.validate_scoped_sweep_locks();
+    }
+
+    fn validate_scoped_sweep_locks(&mut self) {
+        self.fingers.clear_expired_sweep_locks();
+        let event_id = self.event_id();
+        if self.fingers.scoped_sweep_locks.is_empty()
+            || self.fingers.sweep_lock_validation_event == Some(event_id)
+        {
+            return;
+        }
+        self.fingers.sweep_lock_validation_event = Some(event_id);
+        for lock in &self.fingers.scoped_sweep_locks {
+            let area = lock.area;
+            let attached = area.is_valid(self)
+                && area.draw_list_id()
+                    .and_then(|list| self.draw_lists[list].draw_pass_id)
+                    .is_some_and(|pass| !self.pass_attachment_is_stale(pass)
+                        && area.is_attached(self, &self.attached_draw_lists(pass)));
+            if !attached {
+                lock.release();
+            }
+        }
+        self.fingers.clear_expired_sweep_locks();
+    }
+}
+
 impl Event {
     /// `area`'s answer for a pointer event that meets one of its CANCELLED
     /// captures: the terminal `FingerUp { cancelled: true }` for the one
@@ -1441,6 +1535,10 @@ impl Event {
     where
         F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     {
+        // Draw lists attach when they end, so validate only between draws.
+        if !matches!(self, Event::Draw(_)) {
+            cx.validate_scoped_sweep_locks();
+        }
         // A cancelled press ends before anything else — even for an area
         // that is no longer drawn: its terminal FingerUp is owed to it
         // whatever became of its drawable.

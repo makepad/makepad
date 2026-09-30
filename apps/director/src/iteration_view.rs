@@ -4668,6 +4668,16 @@ impl Widget for StudioIterationView {
                 self.body_touch_capture = None;
             }
         }
+        if let Event::FingerCancel(cancel) = event {
+            if cx.fingers.press_taken_away(cancel.digit_id)
+                && self.body_touch_capture.as_ref().is_some_and(|(uid, _)| {
+                    let digit_id: makepad_widgets::event::DigitId = live_id_num!(touch, *uid).into();
+                    digit_id == cancel.digit_id
+                })
+            {
+                self.body_touch_capture = None;
+            }
+        }
         let scroll_handled =
             matches!(event, Event::Scroll(event) if event.handled_x.get() || event.handled_y.get());
         match event.hits(cx, self.area) {
