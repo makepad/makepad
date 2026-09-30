@@ -802,7 +802,9 @@ fn to_i16(sample: f32) -> i16 {
 }
 
 /// `<makepad>/local/screencap` for any app run inside a Makepad checkout
-/// (nested repos like apps/commercial/* included); elsewhere
+/// (nested repos like apps/commercial/* included, and a linked git worktree
+/// of the checkout records into its main checkout's folder, so an agent's
+/// scratch worktree never keeps a recording of its own); elsewhere
 /// `<repo>/local/screencap`, where `<repo>` is the nearest ancestor of the
 /// working directory that has a `.git` entry or a `local/` directory. Apps
 /// are launched from their crate directories as often as from the repo root;
@@ -815,7 +817,7 @@ pub fn repo_screencap_dir() -> PathBuf {
     let mut dir = cwd.clone();
     for _ in 0..8 {
         if dir.join("platform/Cargo.toml").is_file() && dir.join("widgets/Cargo.toml").is_file() {
-            return dir.join("local").join("screencap");
+            return main_checkout(&dir).join("local").join("screencap");
         }
         if !dir.pop() {
             break;
@@ -831,6 +833,20 @@ pub fn repo_screencap_dir() -> PathBuf {
         }
     }
     cwd.join("local").join("screencap")
+}
+
+/// The main checkout of `dir` when it is a linked git worktree (its `.git`
+/// is a file naming `<main>/.git/worktrees/<name>`, whose `commondir` leads
+/// to `<main>/.git`); otherwise `dir` itself.
+fn main_checkout(dir: &Path) -> PathBuf {
+    let linked = std::fs::read_to_string(dir.join(".git")).ok().and_then(|text| {
+        let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        let gitdir = if gitdir.is_absolute() { gitdir } else { dir.join(gitdir) };
+        let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+        let common = gitdir.join(common.trim());
+        std::fs::canonicalize(common).ok()?.parent().map(Path::to_path_buf)
+    });
+    linked.unwrap_or_else(|| dir.to_path_buf())
 }
 
 fn capture_path(dir: &Path, window: Option<usize>) -> PathBuf {
@@ -1399,6 +1415,24 @@ fn blit_into(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_linked_worktree_records_into_its_main_checkout() {
+        let base = std::env::temp_dir().join(format!("screencap-worktree-{}", std::process::id()));
+        let main = base.join("main");
+        let gitdir = main.join(".git/worktrees/wt");
+        let worktree = base.join("wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        let main = std::fs::canonicalize(&main).unwrap();
+        assert_eq!(super::main_checkout(&worktree), main);
+        // The main checkout and a directory without git are their own.
+        assert_eq!(super::main_checkout(&main), main);
+        assert_eq!(super::main_checkout(&base), base);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     use super::*;
 
     #[test]
