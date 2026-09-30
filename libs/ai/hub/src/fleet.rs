@@ -1487,6 +1487,38 @@ pub fn pick_for_domain_eta_request_label(
     })
 }
 
+/// The readiness filter: a job goes only to nodes that already have its
+/// model ready or loaded, so it never makes a node download weights.
+/// Returns the model to run and the nodes that do not have it. `wanted`
+/// empty takes the domain's model loaded on most nodes, else ready on most
+/// (ties by id); a pinned model is taken whatever its domain.
+pub fn installed_model(snapshots: &[BoxSnapshot], domain: &str, wanted: &str) -> Option<(String, Vec<String>)> {
+    let offers: Vec<(&str, Vec<(&str, bool)>)> = snapshots.iter().map(|snapshot| {
+        (snapshot.base_url.as_str(), snapshot.models.iter()
+            .filter(|info| info.available && (info.domain == domain || (!wanted.is_empty() && info.id == wanted))
+                && matches!(info.state.as_str(), "ready" | "loaded"))
+            .map(|info| (info.id.as_str(), info.state == "loaded")).collect())
+    }).collect();
+    let model = if wanted.is_empty() {
+        let mut counts: Vec<(&str, usize, usize)> = Vec::new();
+        for (_, models) in &offers {
+            for (id, loaded) in models {
+                match counts.iter_mut().find(|(known, _, _)| known == id) {
+                    Some(entry) => { entry.1 += *loaded as usize; entry.2 += 1; }
+                    None => counts.push((id, *loaded as usize, 1)),
+                }
+            }
+        }
+        counts.sort_by(|a, b| (b.1, b.2).cmp(&(a.1, a.2)).then_with(|| a.0.cmp(b.0)));
+        counts.first()?.0.to_string()
+    } else {
+        wanted.to_string()
+    };
+    let without: Vec<String> = offers.iter().filter(|(_, models)| !models.iter().any(|(id, _)| *id == model))
+        .map(|(url, _)| url.to_string()).collect();
+    (without.len() < offers.len()).then_some((model, without))
+}
+
 /// Explain why no request-aware ETA route exists without echoing prompts,
 /// binary inputs, credentials, URL paths, or query strings.
 pub fn unroutable_request_error(

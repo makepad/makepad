@@ -5,16 +5,16 @@
 
 use super::SpeechReach;
 use crate::client::{ContentProvider, LocalService};
+use crate::job::{process_origin, GenJob, GenOutput, GenPick, GenRouter, JobPoll, Want};
 use crate::protocol::{
-    ArtifactRefJson, GenerateRequestJson, SpeechTimingsJson, TranscriptJson, JOB_STATE_CANCELLED,
-    JOB_STATE_DONE, JOB_STATE_ERROR, MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED, MODEL_STATE_READY,
-    SPEECH_TIMINGS_FORMAT,
+    GenerateRequestJson, SpeechTimingsJson, TranscriptJson, MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED,
+    MODEL_STATE_READY, SPEECH_TIMINGS_FORMAT,
 };
 use crate::registry::Domain;
 use crate::wav;
 use makepad_micro_serde::DeJson;
 use makepad_system_speech::{Segment, SpeechAudio, Transcript};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Poll cadence for speech jobs: an utterance transcribes in well under a
@@ -30,7 +30,6 @@ const FIRST_BEACON_WAIT: Duration = Duration::from_millis(2500);
 pub(crate) struct RemotePipe {
     pub base_url: String,
     pub model: String,
-    service: LocalService,
 }
 
 impl RemotePipe {
@@ -74,7 +73,7 @@ impl RemotePipe {
             }
         }
         let (rank, model) = best?;
-        Some((rank, RemotePipe { base_url: base_url.to_string(), model, service }))
+        Some((rank, RemotePipe { base_url: base_url.to_string(), model }))
     }
 
     pub(crate) fn transcribe(&self, samples_16k: &[f32], language: &str, timestamps: bool) -> Result<Transcript, String> {
@@ -89,7 +88,8 @@ impl RemotePipe {
             ..Default::default()
         };
         let _ = timestamps;
-        let bytes = self.run_job(Domain::Stt, &request)?;
+        let output = self.run_job(Domain::Stt, request, Want::Outputs { media: 1, text: 0 })?;
+        let bytes = output.artifacts.into_iter().next().ok_or_else(|| "job finished without an artifact".to_string())?.bytes;
         let text = std::str::from_utf8(&bytes).map_err(|_| "transcript is not utf-8".to_string())?;
         let json = TranscriptJson::deserialize_json(text).map_err(|e| format!("transcript json: {e:?}"))?;
         Ok(Transcript {
@@ -116,19 +116,17 @@ impl RemotePipe {
             speed: Some(speed as f64),
             ..Default::default()
         };
-        let artifacts = self.run_job_artifacts(Domain::Speech, &request)?;
+        let artifacts = self.run_job(Domain::Speech, request, Want::All)?.artifacts;
         let first = artifacts.first().ok_or_else(|| "job finished without an artifact".to_string())?;
-        let bytes = self.fetch(&first.id)?;
-        let (samples, sample_rate) = wav::decode_wav_to_mono_f32(&bytes)?;
+        let (samples, sample_rate) = wav::decode_wav_to_mono_f32(&first.bytes)?;
         // Timings are a nicety: an unreadable sidecar costs the timings, not
         // the take.
         let timings = artifacts
             .iter()
             .skip(1)
             .find(|artifact| artifact.content_type.starts_with("application/json"))
-            .and_then(|artifact| self.fetch(&artifact.id).ok())
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| SpeechTimingsJson::deserialize_json(&text).ok())
+            .and_then(|artifact| std::str::from_utf8(&artifact.bytes).ok())
+            .and_then(|text| SpeechTimingsJson::deserialize_json(text).ok())
             .filter(|json| json.format == SPEECH_TIMINGS_FORMAT)
             .map(|json| {
                 json.words
@@ -139,46 +137,36 @@ impl RemotePipe {
         Ok((SpeechAudio { samples, sample_rate }, timings))
     }
 
-    fn fetch(&self, artifact_id: &str) -> Result<Vec<u8>, String> {
-        self.service
-            .fetch_artifact(artifact_id)
-            .map(|a| a.bytes)
-            .map_err(|e| format!("{}: {e}", self.base_url))
-    }
-
-    /// The first artifact's bytes.
-    fn run_job(&self, domain: Domain, request: &GenerateRequestJson) -> Result<Vec<u8>, String> {
-        let artifacts = self.run_job_artifacts(domain, request)?;
-        let artifact = artifacts.first().ok_or_else(|| "job finished without an artifact".to_string())?;
-        self.fetch(&artifact.id)
-    }
-
-    /// Run one job to completion; its artifacts, in order.
-    fn run_job_artifacts(&self, domain: Domain, request: &GenerateRequestJson) -> Result<Vec<ArtifactRefJson>, String> {
-        let job_id = self
-            .service
-            .request(domain, request)
-            .map_err(|e| format!("{}: {e}", self.base_url))?;
+    /// Run one job on this node to completion.
+    fn run_job(&self, domain: Domain, request: GenerateRequestJson, want: Want) -> Result<GenOutput, String> {
         let deadline = Instant::now() + JOB_TIMEOUT;
+        let router = Arc::new(PipeRouter(self.base_url.clone()));
+        let mut job = GenJob::new(router, process_origin("speech"));
+        job.start(domain, request, want).map_err(|e| format!("{}: {e}", self.base_url))?;
         loop {
-            let status = self
-                .service
-                .poll(&job_id)
-                .map_err(|e| format!("{}: {e}", self.base_url))?;
-            match status.state.as_str() {
-                JOB_STATE_DONE => return Ok(status.artifacts),
-                JOB_STATE_ERROR => {
-                    return Err(status.error.unwrap_or_else(|| "job failed".to_string()));
-                }
-                JOB_STATE_CANCELLED => return Err("job cancelled".to_string()),
-                _ => {}
+            match job.poll() {
+                JobPoll::Done(output) => return Ok(output),
+                JobPoll::Failed(error) => return Err(format!("{}: {error}", self.base_url)),
+                JobPoll::Pending | JobPoll::Progress { .. } | JobPoll::Delta(_) => {}
             }
             if Instant::now() > deadline {
-                let _ = self.service.cancel(&job_id);
-                return Err(format!("{}: job {job_id} timed out", self.base_url));
+                job.cancel();
+                return Err(format!("{}: speech job timed out", self.base_url));
             }
             std::thread::sleep(POLL);
         }
+    }
+}
+
+/// This pipe's node and nothing else: it was chosen for its model already.
+struct PipeRouter(String);
+
+impl GenRouter for PipeRouter {
+    fn route(&self, _domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
+        if excluded.contains(&self.0) {
+            return Err(format!("{} refused the job", self.0));
+        }
+        Ok(GenPick { provider: Box::new(LocalService::new(&self.0)), base_url: self.0.clone(), model: request.model.clone(), model_state: None })
     }
 }
 

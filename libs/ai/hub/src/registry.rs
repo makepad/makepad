@@ -279,6 +279,194 @@ impl Domain {
             Domain::Garment => "garment",
         }
     }
+
+    pub const ALL: [Domain; 29] = [
+        Domain::Image, Domain::Mesh, Domain::Video, Domain::Audio, Domain::Text, Domain::Speech,
+        Domain::World, Domain::Matte, Domain::Depth, Domain::Body, Domain::Segment, Domain::Rig,
+        Domain::Motion, Domain::Music, Domain::Paint, Domain::Edit, Domain::Upscale, Domain::Control,
+        Domain::Inpaint, Domain::Enhance, Domain::Splat, Domain::Vision, Domain::Ocr, Domain::Stt,
+        Domain::Beats, Domain::Stems, Domain::Notes, Domain::Sections, Domain::Garment,
+    ];
+
+    /// What a job of this domain takes and what it answers with: the one
+    /// table every client reads (the Flow Gen node's input routing, the
+    /// request check before a job leaves, a product table's rows).
+    pub fn io(self) -> &'static DomainIo {
+        use InputMedia::*;
+        use Wire::*;
+        const fn port(name: &'static str, media: InputMedia, wire: Wire, required: bool) -> InputPort {
+            InputPort { name, media, wire, required, also_primary: false }
+        }
+        const fn io(kind: &'static str, inputs: &'static [InputPort], needs_text: bool, answer: Answer) -> DomainIo {
+            DomainIo { kind, inputs, needs_text, answer }
+        }
+        const IMAGE_IN: &[InputPort] = &[port("image", Image, Primary, true)];
+        const AUDIO_IN: &[InputPort] = &[port("audio", Audio, Primary, true)];
+        const MESH_IN: &[InputPort] = &[port("mesh", Mesh, Primary, true)];
+        static IMAGE: DomainIo = io("text→image (a reference image is optional)", &[port("image", Image, Primary, false)], false, Answer::Image);
+        static EDIT: DomainIo = io("image→image edit", &[port("image", Image, Primary, true),
+            port("reference_1", Image, Named("reference_1"), false), port("reference_2", Image, Named("reference_2"), false),
+            port("reference_3", Image, Named("reference_3"), false)], false, Answer::Image);
+        static INPAINT: DomainIo = io("inpaint", &[InputPort { name: "image", media: Image, wire: Named("image"), required: true, also_primary: true },
+            port("mask", Image, Named("mask"), true)], false, Answer::Image);
+        static CONTROL: DomainIo = io("structure-guided image", &[port("control", Image, Primary, true)], false, Answer::Image);
+        static UPSCALE: DomainIo = io("image upscale", IMAGE_IN, false, Answer::Image);
+        static MATTE: DomainIo = io("background removal", IMAGE_IN, false, Answer::Image);
+        static DEPTH: DomainIo = io("image→depth", IMAGE_IN, false, Answer::Image);
+        static SEGMENT: DomainIo = io("image segmentation", IMAGE_IN, false, Answer::Image);
+        static BODY: DomainIo = io("body pose", IMAGE_IN, false, Answer::Json);
+        static VISION: DomainIo = io("image question", IMAGE_IN, false, Answer::Text);
+        static OCR: DomainIo = io("text recognition", IMAGE_IN, false, Answer::Text);
+        static GARMENT: DomainIo = io("sewing pattern", IMAGE_IN, false, Answer::Json);
+        static VIDEO: DomainIo = io("text→video or image→video", &[port("image", Image, Primary, false),
+            port("last_frame", Image, Named("last_frame"), false)], false, Answer::Video);
+        static ENHANCE: DomainIo = io("video→video", &[port("video", Video, Primary, true)], false, Answer::Video);
+        static AUDIO: DomainIo = io("text→sound", &[], false, Answer::Audio);
+        static MUSIC: DomainIo = io("text→music", &[port("audio", Audio, Primary, false)], false, Answer::Audio);
+        static SPEECH: DomainIo = io("text→speech", &[port("audio", Audio, Primary, false)], true, Answer::Audio);
+        static STT: DomainIo = io("speech→text", AUDIO_IN, false, Answer::Text);
+        static BEATS: DomainIo = io("audio analysis", AUDIO_IN, false, Answer::Json);
+        static STEMS: DomainIo = io("audio analysis", AUDIO_IN, false, Answer::Audio);
+        static NOTES: DomainIo = io("audio analysis", AUDIO_IN, false, Answer::Json);
+        static SECTIONS: DomainIo = io("audio analysis", AUDIO_IN, false, Answer::Json);
+        static MESH: DomainIo = io("image→mesh", IMAGE_IN, false, Answer::Mesh);
+        static PAINT: DomainIo = io("mesh texturing", &[port("mesh", Mesh, Named("mesh"), true),
+            port("reference_image", Image, Named("reference_image"), true)], false, Answer::Mesh);
+        static RIG: DomainIo = io("mesh rigging", MESH_IN, false, Answer::Mesh);
+        static MOTION: DomainIo = io("mesh motion", MESH_IN, false, Answer::Mesh);
+        static SPLAT: DomainIo = io("image→splat", IMAGE_IN, false, Answer::Splat);
+        static WORLD: DomainIo = io("text/image→world", &[port("image", Image, Primary, false)], false, Answer::Splat);
+        static TEXT: DomainIo = io("text", &[], false, Answer::Text);
+        match self {
+            Domain::Image => &IMAGE, Domain::Edit => &EDIT, Domain::Inpaint => &INPAINT,
+            Domain::Control => &CONTROL, Domain::Upscale => &UPSCALE, Domain::Matte => &MATTE,
+            Domain::Depth => &DEPTH, Domain::Segment => &SEGMENT, Domain::Body => &BODY,
+            Domain::Vision => &VISION, Domain::Ocr => &OCR, Domain::Garment => &GARMENT,
+            Domain::Video => &VIDEO, Domain::Enhance => &ENHANCE, Domain::Audio => &AUDIO,
+            Domain::Music => &MUSIC, Domain::Speech => &SPEECH, Domain::Stt => &STT,
+            Domain::Beats => &BEATS, Domain::Stems => &STEMS, Domain::Notes => &NOTES,
+            Domain::Sections => &SECTIONS, Domain::Mesh => &MESH, Domain::Paint => &PAINT,
+            Domain::Rig => &RIG, Domain::Motion => &MOTION, Domain::Splat => &SPLAT,
+            Domain::World => &WORLD, Domain::Text => &TEXT,
+        }
+    }
+
+    /// The input port a media value of this name travels as.
+    pub fn input(self, port: &str) -> Option<&'static InputPort> {
+        self.io().inputs.iter().find(|input| input.name == port)
+    }
+}
+
+/// The media class of a job input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMedia {
+    Image,
+    Mesh,
+    Video,
+    Audio,
+}
+
+/// Where an input port's bytes travel on `GenerateRequestJson`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wire {
+    /// `input_b64` / `input_content_type`.
+    Primary,
+    /// An entry of `inputs` with this name.
+    Named(&'static str),
+}
+
+/// One media input of a domain.
+#[derive(Clone, Copy, Debug)]
+pub struct InputPort {
+    pub name: &'static str,
+    pub media: InputMedia,
+    pub wire: Wire,
+    /// A job without it is refused before it is sent.
+    pub required: bool,
+    /// A named input the primary input may also carry.
+    pub also_primary: bool,
+}
+
+/// What a finished job hands back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Image,
+    Video,
+    Audio,
+    /// A GLB.
+    Mesh,
+    /// A gaussian-splat PLY.
+    Splat,
+    Text,
+    Json,
+}
+
+impl Answer {
+    /// The artifact content types a job may return for this answer; the
+    /// first is the expected one. Text answers come back as the job's text.
+    pub fn content_types(self) -> &'static [&'static str] {
+        match self {
+            Answer::Image => &["image/png"],
+            Answer::Video => &["video/mp4"],
+            Answer::Audio => &["audio/wav"],
+            Answer::Mesh => &["model/gltf-binary"],
+            Answer::Splat => &["application/x-ply", "application/octet-stream"],
+            Answer::Text => &["text/plain"],
+            Answer::Json => &["application/json"],
+        }
+    }
+}
+
+/// A domain's inputs and answer (see [`Domain::io`]).
+#[derive(Debug)]
+pub struct DomainIo {
+    /// What the domain does, for messages.
+    pub kind: &'static str,
+    pub inputs: &'static [InputPort],
+    /// The job must carry text to work on (`text`, or else `prompt`).
+    pub needs_text: bool,
+    pub answer: Answer,
+}
+
+/// The embedded registry, parsed once.
+pub fn embedded_registry() -> &'static Registry {
+    static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Registry::embedded().unwrap_or_default())
+}
+
+/// A pinned model of the `flux2` backend takes reference images, so it
+/// serves image edits as well as its own domain.
+pub fn also_serves(model: &str, domain: Domain) -> bool {
+    domain == Domain::Edit && embedded_registry().find(model).is_some_and(|spec| spec.backend == "flux2")
+}
+
+/// Why a request cannot be sent: the media its domain needs, and what a
+/// pinned model's own domain needs. A hub that gets a job its model cannot
+/// take refuses it and may leave the model in an error state, so such a job
+/// never leaves. `None` when it can be sent.
+pub fn request_problem(domain: Domain, request: &crate::protocol::GenerateRequestJson) -> Option<String> {
+    if let Some(problem) = domain_request_problem(domain, request) {
+        return Some(problem);
+    }
+    let serves = embedded_registry().find(&request.model).map(|spec| spec.domain)?;
+    if serves == domain || also_serves(&request.model, domain) {
+        return None;
+    }
+    domain_request_problem(serves, request).map(|problem| format!("{problem} ({} is that kind of model)", request.model))
+}
+
+fn domain_request_problem(domain: Domain, request: &crate::protocol::GenerateRequestJson) -> Option<String> {
+    let named = |name: &str| request.inputs.as_ref().is_some_and(|inputs| inputs.iter().any(|input| input.name == name && !input.data_b64.is_empty()));
+    let primary = request.input_b64.as_ref().is_some_and(|data| !data.is_empty());
+    let io = domain.io();
+    let mut missing: Vec<String> = io.inputs.iter().filter(|port| port.required && !match port.wire {
+        Wire::Primary => primary || named(port.name),
+        Wire::Named(wire) => named(wire) || (port.also_primary && primary),
+    }).map(|port| port.name.replace('_', " ")).collect();
+    if io.needs_text && request.text.as_deref().or(request.prompt.as_deref()).is_none_or(|text| text.trim().is_empty()) {
+        missing.push("text to speak".into());
+    }
+    (!missing.is_empty()).then(|| format!("refused before sending: a {} job needs {}", io.kind, missing.join(" and ")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
