@@ -119,3 +119,25 @@ fn decode_budgets_refuse_before_allocating() {
     assert!(budget.charge(1000, "all").is_ok());
     assert!(budget.charge(1, "one more").is_err());
 }
+
+#[test]
+fn absolute_paths_are_read_only_inside_trusted_roots() {
+    let (base, r) = fixture("trusted");
+    let roots = [r.clone()];
+    // Inside the root, spelled with `..` through the root itself: fine.
+    let spelled = base.join("doc/sub/../a.txt");
+    assert_eq!(ResourceResolver::read_within(&roots, &spelled, 100).unwrap(), b"alpha");
+    assert_eq!(ResourceResolver::read_within(&roots, &base.join("doc/sub/b.txt"), 100).unwrap(), b"beta");
+    // Outside every root, or relative: refused.
+    let err = ResourceResolver::read_within(&roots, &base.join("secret.txt"), 100).unwrap_err();
+    assert!(matches!(err, ResourceError::Escape(_)), "{err}");
+    assert!(ResourceResolver::read_within(&roots, &base.join("doc/../secret.txt"), 100).is_err());
+    assert!(ResourceResolver::read_within(&roots, std::path::Path::new("a.txt"), 100).is_err());
+    assert!(ResourceResolver::read_within(&[], &base.join("doc/a.txt"), 100).is_err());
+    #[cfg(unix)]
+    {
+        // A link inside the root pointing out resolves outside: refused.
+        std::os::unix::fs::symlink(base.join("secret.txt"), r.root().join("out.txt")).unwrap();
+        assert!(ResourceResolver::read_within(&roots, &r.root().join("out.txt"), 100).is_err());
+    }
+}

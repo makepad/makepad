@@ -170,6 +170,28 @@ impl ResourceResolver {
         Ok(canonical)
     }
 
+    /// Read an absolute `path` that must lie inside one of the host's
+    /// trusted resource roots (the engine's bundled fonts, say): the path is
+    /// canonicalised, the root it falls under is stripped, and the rest is
+    /// read through that root like any relative name (so no symlink below
+    /// the root is followed). A path under no root is an escape.
+    pub fn read_within(roots: &[ResourceResolver], path: &Path, max_bytes: u64) -> Result<Vec<u8>, ResourceError> {
+        let shown = path.display().to_string();
+        if !path.is_absolute() {
+            return Err(ResourceError::InvalidPath(format!("{:?}: not absolute", truncate(&shown))));
+        }
+        let canonical = path.canonicalize().map_err(|e| ResourceError::Io(format!("{shown}: {e}")))?;
+        for root in roots {
+            if let Ok(rest) = canonical.strip_prefix(&root.root) {
+                let rest = rest
+                    .to_str()
+                    .ok_or_else(|| ResourceError::InvalidPath(format!("{:?}: not UTF-8", truncate(&shown))))?;
+                return root.read(rest, max_bytes);
+            }
+        }
+        Err(ResourceError::Escape(shown))
+    }
+
     /// Read the file `name` names, refusing one larger than `max_bytes`
     /// (checked on the metadata and again while reading, so a file that
     /// grows underneath cannot exceed it).
