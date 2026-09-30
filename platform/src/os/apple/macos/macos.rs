@@ -569,6 +569,7 @@ impl Cx {
         }
         self.request_remote_window_present(window_id);
         self.handle_repaint(metal_windows, metal_cx);
+        metal_cx.submit_frame();
         self.os.remote_present_window = None;
         crate::trace!(
             "remote.grab",
@@ -1659,6 +1660,7 @@ impl Cx {
 
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_windows, metal_cx);
+                metal_cx.submit_frame();
             }
             MacosEvent::MouseDown(mut e) => {
                 if !self.windows.is_valid(e.window_id) || !self.windows[e.window_id].is_created {

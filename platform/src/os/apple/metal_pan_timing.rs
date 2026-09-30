@@ -236,12 +236,18 @@ pub(super) struct PanEncoder {
     pub(super) encoder:ObjcId,
     command:ObjcId,descriptor:ObjcId,viewport:MTLViewport,
     pub(super) frame:Option<PanFrame>,
+    /// The pass clock's timestamps (`PassClock`): sample buffer, index of
+    /// the pass's first of four (vertex start/end, fragment start/end at
+    /// stage boundaries; else the encoder samples the first and last
+    /// itself), stage boundaries. Never together with a sampled frame.
+    clock:Option<(ObjcId,usize,bool)>,
     /// The scissor last set and the encoder it was set on (a new encoder
     /// starts with the whole target).
     scissor:(ObjcId,Option<[u32;4]>),
 }
 impl PanEncoder {
-    pub(super) fn new(command:ObjcId,descriptor:ObjcId,viewport:MTLViewport,frame:Option<PanFrame>)->Self {
+    pub(super) fn new(command:ObjcId,descriptor:ObjcId,viewport:MTLViewport,frame:Option<PanFrame>,clock:Option<(ObjcId,usize,bool)>)->Self {
+        let clock=if frame.is_some() {None} else {clock};
         unsafe {
             // The descriptor is reused: never leave a previous frame's buffer attached.
             let available:bool=msg_send![descriptor,respondsToSelector:sel!(sampleBufferAttachments)];
@@ -249,12 +255,22 @@ impl PanEncoder {
                 let attachments:ObjcId=msg_send![descriptor,sampleBufferAttachments];
                 let a:ObjcId=msg_send![attachments,objectAtIndexedSubscript:0u64];
                 let _:()=msg_send![a,setSampleBuffer:nil];
+                if let Some((buffer,index,true))=clock {
+                    let _:()=msg_send![a,setSampleBuffer:buffer];
+                    let _:()=msg_send![a,setStartOfVertexSampleIndex:index as u64];
+                    let _:()=msg_send![a,setEndOfVertexSampleIndex:(index+1) as u64];
+                    let _:()=msg_send![a,setStartOfFragmentSampleIndex:(index+2) as u64];
+                    let _:()=msg_send![a,setEndOfFragmentSampleIndex:(index+3) as u64];
+                }
             }
         }
         if let Some(f)=&frame {if f.stage(){f.attach(descriptor,0);}}
         let encoder:ObjcId=unsafe {msg_send![command,renderCommandEncoderWithDescriptor:descriptor]};
         unsafe {let _:()=msg_send![encoder,setViewport:viewport];}
-        Self {encoder,command,descriptor,viewport,frame,scissor:(encoder,None)}
+        if let Some((buffer,index,false))=clock {
+            unsafe {let _:()=msg_send![encoder,sampleCountersInBuffer:buffer atSampleIndex:index as u64 withBarrier:true];}
+        }
+        Self {encoder,command,descriptor,viewport,frame,clock,scissor:(encoder,None)}
     }
     /// A draw call's scissor (CxDrawShaderOptions::scissor), set only when
     /// it changes; clamped to the target, as Metal requires.
@@ -302,6 +318,9 @@ impl PanEncoder {
     }
     pub(super) fn end(self) {
         if let Some(f)=&self.frame {if !f.stage() && f.len>0 {f.sample(self.encoder,3+(f.len-1)*2);}}
+        if let Some((buffer,index,false))=self.clock {
+            unsafe {let _:()=msg_send![self.encoder,sampleCountersInBuffer:buffer atSampleIndex:(index+3) as u64 withBarrier:true];}
+        }
         unsafe {let _:()=msg_send![self.encoder,endEncoding];}
         if let Some(f)=self.frame {f.complete(self.command);}
     }

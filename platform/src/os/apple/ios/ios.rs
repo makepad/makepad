@@ -963,6 +963,7 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
+                metal_cx.submit_frame();
 
                 // Run script-VM garbage collection at a safe point after paint, matching
                 // the macOS backend, so the script object heap doesn't grow without bound:

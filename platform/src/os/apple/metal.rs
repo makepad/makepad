@@ -1509,7 +1509,15 @@ impl Cx {
 
         // Reserve this pass's queue position before relocating retained
         // instances. Copies precede its draws and follow earlier readers.
-        let command_buffer: ObjcId = metal_cx.new_command_buffer();
+        // The pass joins the frame's command buffer (`FrameBatch`); a pass
+        // the atlas diagnostics sample, or one timed on a device without
+        // timestamp sampling, gets a buffer of its own.
+        let pan_diagnostics = std::env::var_os("MAKEPAD_ATLAS_DIAGNOSTICS").is_some();
+        let timed = self.passes[draw_pass_id].gpu_time_query.is_some()
+            || Self::gpu_profile_enabled()
+            || crate::makepad_error_log::trace_enabled("gpu.pass")
+            || (crate::gpu_frame_timer::enabled() && self.get_pass_window_id(draw_pass_id).is_some());
+        let (command_buffer, alone, pass_time) = metal_cx.frame_buffer(pan_diagnostics, timed);
         let upload_cpu_start = Instant::now();
         if self.upload_instance_buffers(draw_list_id, metal_cx, command_buffer) {
             // Continue copying retained buffers without invalidating every
@@ -1539,9 +1547,6 @@ impl Cx {
         if let Some(trace) = &metal_cx.present_trace {
             self.trace_unresident_draws(draw_list_id, trace, metal_cx);
         }
-        let pan_diagnostics = std::env::var_os("MAKEPAD_ATLAS_DIAGNOSTICS").is_some();
-        // One command buffer per pass (frame batching was an opt-in that
-        // regressed at large window sizes and was never measured: gone, L-F).
         if mode.is_drawable().is_some() {
             if let Some(trace) = &metal_cx.present_trace {
                 trace.command(metal_cx.current_cb_seq);
@@ -1578,7 +1583,11 @@ impl Cx {
         let pass_width = dpi_factor * pass_rect.size.x;
         let pass_height = dpi_factor * pass_rect.size.y;
         let viewport = MTLViewport {originX:0.0,originY:0.0,width:dpi_factor*pass_rect.size.x,height:dpi_factor*pass_rect.size.y,znear:0.0,zfar:1.0};
-        let mut encoders = PanEncoder::new(command_buffer, render_pass_descriptor, viewport, pan_frame);
+        let clock = match &pass_time {
+            Some(PassTime::Counters(samples, index)) => samples.buffer.as_ref().map(|b| (b.as_id(), *index, samples.clock.stage)),
+            _ => None,
+        };
+        let mut encoders = PanEncoder::new(command_buffer, render_pass_descriptor, viewport, pan_frame, clock);
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
@@ -1654,13 +1663,14 @@ impl Cx {
             } else {
                 self.passes[draw_pass_id].debug_name.clone()
             };
+            let time = pass_time.clone();
             let () = unsafe {
                 msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
-                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
-                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                        crate::trace!("gpu.pass", "{} {:.3}ms", name, (end - start) * 1000.0);
+                        if let Some((start, end)) = time.as_ref().and_then(|t| t.span(command_buffer)) {
+                            crate::trace!("gpu.pass", "{} {:.3}ms", name, (end - start) * 1000.0);
+                        }
                     })
                 ]
             };
@@ -1674,13 +1684,14 @@ impl Cx {
                 name => name.to_string(),
             };
             let closes = !matches!(mode, DrawPassMode::Texture | DrawPassMode::StdinTexture);
+            let time = pass_time.clone();
             let () = unsafe {
                 msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
-                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
-                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                        crate::gpu_frame_timer::record_pass(frame, &name, start, end);
+                        if let Some((start, end)) = time.as_ref().and_then(|t| t.span(command_buffer)) {
+                            crate::gpu_frame_timer::record_pass(frame, &name, start, end);
+                        }
                         if closes {
                             crate::gpu_frame_timer::finish_frame(frame);
                         }
@@ -1693,14 +1704,15 @@ impl Cx {
             // it now — by completion time the owner may have retagged the
             // pass for a later frame.
             let tag = query.current_tag();
+            let time = pass_time.clone();
             let () = unsafe {
                 msg_send![
                     command_buffer,
                     addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
-                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
-                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                        present_gpu_time(end - start);
-                        query.record_seconds_tagged(tag, end - start);
+                        if let Some((start, end)) = time.as_ref().and_then(|t| t.span(command_buffer)) {
+                            present_gpu_time(end - start);
+                            query.record_seconds_tagged(tag, end - start);
+                        }
                     })
                 ]
             };
@@ -1726,43 +1738,46 @@ impl Cx {
                     None,
                     pass_window_id,
                 );
-                metal_cx.submit_encoded_receipts();
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     screenshot,
                     None,
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     Some((drawable, None)),
                 );
             }
             DrawPassMode::Texture => {
-                metal_cx.submit_encoded_receipts();
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     None,
                     None,
                     gpu_frame_group_key,
                     false,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     None,
                 );
             }
             DrawPassMode::StdinTexture => {
-                metal_cx.submit_encoded_receipts();
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     None,
                     None,
                     gpu_frame_group_key,
                     false,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     None,
                 );
@@ -1786,12 +1801,14 @@ impl Cx {
                 };
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     screenshot,
                     Some(stdin_frame),
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     None,
                 );
@@ -1845,12 +1862,14 @@ impl Cx {
                 }
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     screenshot,
                     None,
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     present,
                 );
@@ -1881,12 +1900,14 @@ impl Cx {
                 ) };
                 self.commit_command_buffer(
                     metal_cx,
+                    alone,
                     screenshot,
                     None,
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
                     gpu_profile_label.clone(),
+                    pass_time.clone(),
                     command_buffer,
                     (metal_cx.aborted_repaint != Some(self.repaint_id) && !withheld).then_some((drawable, None)),
                 );
@@ -2073,15 +2094,19 @@ impl Cx {
         crate::makepad_error_log::trace_enabled("gpu.profile")
     }
 
+    /// The pass's completion work on its command buffer, then `end_pass`:
+    /// a presenting pass (`flush_gpu_frame_group`) or a lone one submits it.
     fn commit_command_buffer(
         &self,
-        metal_cx: &MetalCx,
+        metal_cx: &mut MetalCx,
+        alone: bool,
         screenshot_info: Option<ScreenshotInfo>,
         stdin_frame: Option<PresentableDraw>,
         gpu_frame_group_key: Option<u64>,
         flush_gpu_frame_group: bool,
         gpu_counters: GpuSampleCounters,
         gpu_profile_label: Option<String>,
+        pass_time: Option<PassTime>,
         command_buffer: ObjcId,
         drawable: Option<(ObjcId, Option<f64>)>,
     ) {
@@ -2170,11 +2195,15 @@ impl Cx {
                         }
                     }
 
-                    let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
-                    let raw_end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                    if let Some(label) = &gpu_profile_label {
-                        gpu_profile_accumulate(label, raw_end - raw_start, &gpu_counters);
+                    // The pass's own span; the buffer's when it is not timed
+                    // (the frame's range below is the same either way).
+                    let pass_span = pass_time.as_ref().and_then(|t| t.span(command_buffer));
+                    if let (Some(label), Some((start, end))) = (&gpu_profile_label, pass_span) {
+                        gpu_profile_accumulate(label, end - start, &gpu_counters);
                     }
+                    let (raw_start, raw_end) = pass_span.unwrap_or_else(|| unsafe {
+                        (msg_send![command_buffer, GPUStartTime], msg_send![command_buffer, GPUEndTime])
+                    });
                     if let Some(_stdin_frame) = stdin_frame {
                         #[cfg(target_os = "macos")]
                         Self::stdin_send_draw_complete(_stdin_frame);
@@ -2266,7 +2295,7 @@ impl Cx {
                 })
             ]
         };
-        metal_cx.submit_command_buffer(command_buffer, drawable);
+        metal_cx.end_pass(drawable, alone || flush_gpu_frame_group);
     }
 
     /// Shaders whose GPU pipelines are still being compiled (their draws
@@ -2500,6 +2529,11 @@ pub struct MetalCx {
     encoding: RefCell<HashMap<usize, InFlightCb>>,
     /// Encoded work the saturated submitter could not take yet, in order.
     submit_retry: RefCell<VecDeque<MetalSubmission>>,
+    /// The command buffer this repaint's passes are encoding into.
+    frame: Option<FrameBatch>,
+    /// Per-pass timestamps in a shared buffer; probed at the first timed
+    /// pass (`Some(None)`: the device has no timestamp sampling).
+    pass_clock: Option<Option<Arc<PassClock>>>,
     /// The submit thread's channel and handle; `None` only while dropping.
     submitter: Option<crate::makepad_network::mpsc::SyncSender<MetalSubmission>>,
     submitter_thread: Option<std::thread::JoinHandle<()>>,
@@ -2671,7 +2705,8 @@ fn describe_passes(passes: &[InFlightPass]) -> String {
 
 struct MetalSubmission {
     buffer: RcObjcId,
-    drawable: Option<(RcObjcId, Option<f64>)>,
+    /// Every drawable the buffer's passes present (one per window pass).
+    drawables: Vec<(RcObjcId, Option<f64>)>,
     entry: Option<InFlightCb>,
 }
 
@@ -2698,7 +2733,7 @@ fn spawn_submitter(
                 }
                 let buffer = submission.buffer.as_id();
                 if let Some(trace) = &trace { trace.mark(PresentStage::Commit); }
-                if let Some((drawable, time)) = &submission.drawable {
+                for (drawable, time) in &submission.drawables {
                     if let Some(time) = time {
                         let _: () = unsafe {
                             msg_send![buffer, presentDrawable: drawable.as_id() atTime: *time]
@@ -2758,21 +2793,298 @@ impl MetalCx {
         }
         true
     }
-    pub(crate) fn submit_command_buffer(&self, buffer: ObjcId, drawable: Option<(ObjcId, Option<f64>)>) {
-        let entry = self.encoding.borrow_mut().remove(&(buffer as usize));
+    fn submit_command_buffer(&self, buffer: RcObjcId, drawables: Vec<(RcObjcId, Option<f64>)>) {
+        let entry = self.encoding.borrow_mut().remove(&(buffer.as_id() as usize));
         if let Some(trace) = entry.as_ref().and_then(|e| e.present_trace.as_ref()) { trace.mark(PresentStage::Queued); }
-        let submission = MetalSubmission {
-            buffer: RcObjcId::from_unowned(NonNull::new(buffer).unwrap()),
-            drawable: drawable.map(|(drawable, time)| {
-                (
-                    RcObjcId::from_unowned(NonNull::new(drawable).unwrap()),
-                    time,
-                )
-            }),
-            entry,
-        };
+        let submission = MetalSubmission { buffer, drawables, entry };
         self.submit_retry.borrow_mut().push_back(submission);
         self.flush_submissions();
+    }
+}
+
+/// A repaint's passes share one command buffer. Metal pays a fixed cost per
+/// command buffer (scheduling, commit, completion: about 0.26 ms on an idle
+/// Apple GPU, around 1 ms under load) whatever the pass's size, so a 1/128
+/// bloom level cost as much as a whole frame when every pass had its own.
+/// Passes encode into it in dependency order; one queue and Metal's hazard
+/// tracking order each read after the writes encoded before it, as separate
+/// buffers did. It is submitted, with every drawable its window passes
+/// present, when a pass presents, when a pass must be timed alone, once the
+/// CPU has encoded into it for `FRAME_ENCODE_SLICE`, and at the end of every
+/// repaint (`MetalCx::submit_frame`): an enqueued buffer never outlives the
+/// repaint that opened it, so no later buffer (a readback) waits on it.
+struct FrameBatch {
+    buffer: RcObjcId,
+    opened: Instant,
+    presents: Vec<(RcObjcId, Option<f64>)>,
+    samples: Option<Arc<PassSamples>>,
+}
+
+/// heuristic: how long the CPU encodes into one frame buffer before the
+/// next pass submits it and starts another, so the GPU never waits longer
+/// than this behind the encoder: at most one extra buffer per 2 ms encoded.
+const FRAME_ENCODE_SLICE: Duration = Duration::from_millis(2);
+
+extern "C" {
+    static MTLCommonCounterSetTimestamp: ObjcId;
+}
+
+/// Per-pass GPU time inside a shared command buffer: a timestamp where the
+/// pass's render encoder starts and one where it ends, in a counter sample
+/// buffer (stage boundaries on Apple GPUs, encoder samples elsewhere). A
+/// device with neither times each timed pass in a buffer of its own.
+struct PassClock {
+    device: RcObjcId,
+    descriptor: RcObjcId,
+    stage: bool,
+    pool: Mutex<Vec<RcObjcId>>,
+    /// (host seconds, GPU timestamp) sampled together at creation: with a
+    /// second pair at resolve time, the GPU clock's rate and offset.
+    anchor: (f64, u64),
+}
+
+/// hardware: timestamps in one frame's sample buffer; a frame with more
+/// timed passes starts another command buffer.
+const PASS_CLOCK_SAMPLES: usize = 1024;
+/// Timestamps per pass: vertex start and end, fragment start and end.
+const PASS_CLOCK_STRIDE: usize = 4;
+
+impl PassClock {
+    fn new(device: ObjcId) -> Option<Arc<Self>> {
+        unsafe {
+            let available: bool = msg_send![device, respondsToSelector: sel!(supportsCounterSampling:)];
+            if !available {
+                return None;
+            }
+            // MTLCounterSamplingPointAtStageBoundary = 0, AtDrawBoundary = 1
+            let stage: bool = msg_send![device, supportsCounterSampling: 0u64];
+            let draw: bool = msg_send![device, supportsCounterSampling: 1u64];
+            if !stage && !draw {
+                return None;
+            }
+            let sets: ObjcId = msg_send![device, counterSets];
+            let count: u64 = if sets == nil { 0 } else { msg_send![sets, count] };
+            let set = (0..count)
+                .map(|i| -> ObjcId { msg_send![sets, objectAtIndex: i] })
+                .find(|set| {
+                    let name: ObjcId = msg_send![*set, name];
+                    msg_send![name, isEqualToString: MTLCommonCounterSetTimestamp]
+                })?;
+            let descriptor = RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLCounterSampleBufferDescriptor), new])?);
+            let () = msg_send![descriptor.as_id(), setCounterSet: set];
+            let () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
+            let () = msg_send![descriptor.as_id(), setSampleCount: PASS_CLOCK_SAMPLES as u64];
+            Some(Arc::new(Self {
+                device: RcObjcId::from_unowned(NonNull::new(device)?),
+                descriptor,
+                stage,
+                pool: Mutex::new(Vec::new()),
+                anchor: Self::now(device),
+            }))
+        }
+    }
+
+    fn now(device: ObjcId) -> (f64, u64) {
+        let (mut cpu, mut gpu) = (0u64, 0u64);
+        unsafe {
+            let () = msg_send![device, sampleTimestamps: &mut cpu gpuTimestamp: &mut gpu];
+            (CACurrentMediaTime(), gpu)
+        }
+    }
+
+    fn take(&self) -> Option<RcObjcId> {
+        if let Some(buffer) = self.pool.lock().ok().and_then(|mut pool| pool.pop()) {
+            return Some(buffer);
+        }
+        let mut error: ObjcId = nil;
+        let buffer: ObjcId = unsafe {
+            msg_send![self.device.as_id(), newCounterSampleBufferWithDescriptor: self.descriptor.as_id() error: &mut error]
+        };
+        NonNull::new(buffer).map(RcObjcId::from_owned)
+    }
+}
+
+/// One frame buffer's timestamps. Its passes' completion handlers read them
+/// (resolved once, by the first); the sample buffer goes back to the pool
+/// when the last handler lets go.
+struct PassSamples {
+    clock: Arc<PassClock>,
+    buffer: Option<RcObjcId>,
+    /// Samples reserved (UI thread only; atomic to share with handlers).
+    used: AtomicUsize,
+    spans: std::sync::OnceLock<Vec<Option<(f64, f64)>>>,
+}
+
+impl PassSamples {
+    fn reserve(&self) -> Option<usize> {
+        let at = self.used.load(Ordering::Relaxed);
+        (at + PASS_CLOCK_STRIDE <= PASS_CLOCK_SAMPLES).then(|| {
+            self.used.store(at + PASS_CLOCK_STRIDE, Ordering::Relaxed);
+            at
+        })
+    }
+
+    fn full(&self) -> bool {
+        self.used.load(Ordering::Relaxed) + PASS_CLOCK_STRIDE > PASS_CLOCK_SAMPLES
+    }
+
+    fn span(&self, command_buffer: ObjcId, index: usize) -> Option<(f64, f64)> {
+        self.spans.get_or_init(|| self.resolve(command_buffer)).get(index / PASS_CLOCK_STRIDE).copied().flatten()
+    }
+
+    /// Every pass's (start, end) in host seconds, the clock of the buffer's
+    /// own `GPUStartTime`; `None` for a pass whose fragment stage left no
+    /// time inside the buffer's span.
+    fn resolve(&self, command_buffer: ObjcId) -> Vec<Option<(f64, f64)>> {
+        let used = self.used.load(Ordering::Acquire);
+        let Some(buffer) = &self.buffer else { return Vec::new() };
+        let (host0, gpu0) = self.clock.anchor;
+        let (host1, gpu1) = PassClock::now(self.clock.device.as_id());
+        if gpu1 <= gpu0 || host1 <= host0 {
+            return Vec::new();
+        }
+        let rate = (host1 - host0) / (gpu1 - gpu0) as f64;
+        let (start, end): (f64, f64) = unsafe {
+            (msg_send![command_buffer, GPUStartTime], msg_send![command_buffer, GPUEndTime])
+        };
+        // the buffer's own span, widened by the calibration's error
+        let (lo, hi) = (start - 1e-4, end + 1e-4);
+        let data: ObjcId = unsafe {
+            msg_send![buffer.as_id(), resolveCounterRange: NSRange { location: 0, length: used as _ }]
+        };
+        if data == nil {
+            return Vec::new();
+        }
+        let bytes: u64 = unsafe { msg_send![data, length] };
+        let ptr: *const u64 = unsafe { msg_send![data, bytes] };
+        let count = if ptr.is_null() { 0 } else { (bytes as usize / 8).min(used) };
+        // A stage that never ran leaves its slot as it was: zero, the
+        // "not sampled" marker, or a stale time from an earlier frame.
+        let host = |tick: u64| {
+            let t = host1 - (gpu1 as f64 - tick as f64) * rate;
+            (tick != 0 && tick != u64::MAX && t >= lo && t <= hi).then_some(t)
+        };
+        (0..count / PASS_CLOCK_STRIDE)
+            .map(|pass| {
+                let [v0, v1, f0, f1] = std::array::from_fn(|i| host(unsafe { *ptr.add(pass * PASS_CLOCK_STRIDE + i) }));
+                if !self.clock.stage {
+                    // encoder samples: first and last
+                    return v0.zip(f1).filter(|(a, b)| b >= a);
+                }
+                // Apple GPUs run a pass's vertex stage early, alongside the
+                // fragment work of passes before it (its tiles wait for
+                // them): start..end would count that wait. The pass's own
+                // time is its vertex stage plus its fragment stage, ending
+                // where its fragment stage ends.
+                // A pass that shades no pixel has its vertex stage alone.
+                let vertex = v0.zip(v1).filter(|(a, b)| b >= a);
+                match f0.zip(f1).filter(|(a, b)| b >= a) {
+                    Some((f0, f1)) => Some((f0 - vertex.map_or(0.0, |(a, b)| b - a), f1)),
+                    None => vertex,
+                }
+            })
+            .collect()
+    }
+}
+
+impl Drop for PassSamples {
+    fn drop(&mut self) {
+        if let (Some(buffer), Ok(mut pool)) = (self.buffer.take(), self.clock.pool.lock()) {
+            pool.push(buffer);
+        }
+    }
+}
+
+/// Where a pass's GPU start and end come from.
+#[derive(Clone)]
+enum PassTime {
+    /// The pass has its command buffer to itself.
+    Buffer,
+    /// Its timestamps in the frame buffer's samples (start index).
+    Counters(Arc<PassSamples>, usize),
+}
+
+impl PassTime {
+    /// The pass's GPU (start, end) in host seconds; `None` when the
+    /// timestamps did not resolve.
+    fn span(&self, command_buffer: ObjcId) -> Option<(f64, f64)> {
+        match self {
+            Self::Buffer => {
+                let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                Some((start, end))
+            }
+            Self::Counters(samples, index) => samples.span(command_buffer, *index),
+        }
+    }
+}
+
+impl MetalCx {
+    /// The command buffer the next pass encodes into (`FrameBatch`), and
+    /// where its GPU time comes from when `timed`. `alone`: the pass gets a
+    /// buffer of its own (`end_pass` submits it).
+    fn frame_buffer(&mut self, alone: bool, timed: bool) -> (ObjcId, bool, Option<PassTime>) {
+        let clock = if timed && !alone {
+            if self.pass_clock.is_none() {
+                self.pass_clock = Some(PassClock::new(self.device));
+            }
+            self.pass_clock.clone().flatten()
+        } else {
+            None
+        };
+        let alone = alone || (timed && clock.is_none());
+        let full = clock.is_some()
+            && self.frame.as_ref().and_then(|f| f.samples.as_ref()).is_some_and(|s| s.full());
+        if alone || full || self.frame.as_ref().is_some_and(|f| f.opened.elapsed() >= FRAME_ENCODE_SLICE) {
+            self.submit_frame();
+        }
+        if self.frame.is_none() {
+            let buffer = self.new_command_buffer();
+            self.frame = Some(FrameBatch {
+                buffer: RcObjcId::from_unowned(NonNull::new(buffer).unwrap()),
+                opened: Instant::now(),
+                presents: Vec::new(),
+                samples: None,
+            });
+        }
+        let frame = self.frame.as_mut().unwrap();
+        let time = match clock {
+            _ if !timed => None,
+            None => Some(PassTime::Buffer),
+            Some(clock) => {
+                if frame.samples.is_none() {
+                    frame.samples = clock.take().map(|buffer| Arc::new(PassSamples {
+                        clock: clock.clone(),
+                        buffer: Some(buffer),
+                        used: AtomicUsize::new(0),
+                        spans: std::sync::OnceLock::new(),
+                    }));
+                }
+                frame.samples.as_ref().and_then(|samples| {
+                    samples.reserve().map(|index| PassTime::Counters(samples.clone(), index))
+                })
+            }
+        };
+        (frame.buffer.as_id(), alone, time)
+    }
+
+    /// A pass is encoded: its drawable (if it presents) joins the buffer's,
+    /// and a presenting or lone pass submits the buffer.
+    fn end_pass(&mut self, present: Option<(ObjcId, Option<f64>)>, submit: bool) {
+        if let (Some(frame), Some((drawable, time))) = (self.frame.as_mut(), present) {
+            frame.presents.push((RcObjcId::from_unowned(NonNull::new(drawable).unwrap()), time));
+        }
+        if submit {
+            self.submit_frame();
+        }
+    }
+
+    /// Commit the open frame buffer, if any, with its presents. Called at
+    /// the end of every repaint (and at its start, in case one was left).
+    pub(crate) fn submit_frame(&mut self) {
+        let Some(frame) = self.frame.take() else { return };
+        self.submit_encoded_receipts();
+        self.submit_command_buffer(frame.buffer, frame.presents);
     }
 }
 
@@ -3181,6 +3493,7 @@ impl MetalCx {
     /// has not finished.
     #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn begin_repaint(&mut self) {
+        self.submit_frame();
         self.flush_submissions();
         // a chunk whose allocation failed leaves once per repaint, not on
         // every uniform bind (thousands per frame during a bake)
@@ -3465,6 +3778,8 @@ impl MetalCx {
             in_flight,
             encoding: RefCell::new(HashMap::new()),
             submit_retry: RefCell::new(VecDeque::new()),
+            frame: None,
+            pass_clock: None,
             submitter: Some(submitter),
             submitter_thread: Some(submitter_thread),
             allocator: Some(allocator),
@@ -3522,7 +3837,11 @@ impl Drop for MetalCx {
     fn drop(&mut self) {
         // The threads this context owns end with it: the channels close
         // (their loops end at the next receive), the watchdog is told to
-        // stop, and all three are joined.
+        // stop, and all three are joined. An open frame buffer is enqueued:
+        // it is committed, or the queue would wait on it forever.
+        if let Some(frame) = self.frame.take() {
+            let () = unsafe { msg_send![frame.buffer.as_id(), commit] };
+        }
         self.submit_retry.borrow_mut().clear();
         drop(self.submitter.take());
         if let Some(thread) = self.submitter_thread.take() {

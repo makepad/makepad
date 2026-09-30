@@ -410,6 +410,7 @@ impl Cx {
                     stdin_windows,
                     self.os.stdin_timers.time_now() as f32,
                 );
+                metal_cx.submit_frame();
                 if drew {
                     stdin_trace(&format!(
                         "repaint {:.1}",

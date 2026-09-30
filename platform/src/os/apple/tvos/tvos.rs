@@ -198,6 +198,7 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
+                metal_cx.submit_frame();
             }
             TvosEvent::Timer(e) => {
                 if e.timer_id != 0 {
