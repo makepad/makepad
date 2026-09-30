@@ -215,6 +215,9 @@ enum State {
         what_op: LiveId,
         index: u32,
         slot_assign: Option<LiveId>,
+        /// Where the right operand's code starts: an operand that is one
+        /// constant push (and only that) folds into the op's immediate.
+        rhs_start: u32,
     },
     EmitFieldAssign {
         what_op: LiveId,
@@ -1161,6 +1164,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 }) if self.unary_pending_under_tight_ops() => {
                     let (what_op, index, slot_assign) = (*what_op, *index, *slot_assign);
                     self.state.pop();
@@ -3410,8 +3414,15 @@ impl ScriptParser {
                 what_op,
                 index,
                 slot_assign,
+                rhs_start,
             } => {
-                if State::operator_supports_inline_number(what_op) {
+                // Only a right operand that is exactly one constant folds: the
+                // last code can also be the tail of an if, match or `||` whose
+                // jumps land after it (`z * (if c { x } else { 2.0 })`), and
+                // popping it moved those targets.
+                if State::operator_supports_inline_number(what_op)
+                    && self.code_len() == rhs_start + 1
+                {
                     if let Some(code) = self.code_last() {
                         if let Some(vf64) = code.as_f64() {
                             let num = vf64 as u64;
@@ -4364,6 +4375,7 @@ impl ScriptParser {
                         what_op: id!(me.),
                         index: self.index,
                         slot_assign: None,
+                        rhs_start: self.code_len(),
                     });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -4464,6 +4476,7 @@ impl ScriptParser {
                             what_op,
                             index,
                             slot_assign,
+                            ..
                         } = last
                         {
                             if State::operator_order(*what_op) <= op_order {
@@ -4582,6 +4595,7 @@ impl ScriptParser {
                         what_op: op,
                         index: self.index,
                         slot_assign,
+                        rhs_start: self.code_len(),
                     };
                     // check if we have a ..[] =
                     if Some(&Opcode::ARRAY_INDEX.into()) == self.code_last() {
@@ -4719,6 +4733,7 @@ impl ScriptParser {
                                     what_op: op,
                                     index: self.index,
                                     slot_assign,
+                                    rhs_start: self.code_len(),
                                 },
                             );
                             return 1;
@@ -4730,6 +4745,7 @@ impl ScriptParser {
                         what_op: op,
                         index: self.index,
                         slot_assign,
+                        rhs_start: self.code_len(),
                     });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -5076,6 +5092,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 } => {
                     if let Some(name) = slot_assign {
                         self.slot_poison(name);
@@ -5394,6 +5411,7 @@ impl ScriptParser {
                     what_op,
                     index,
                     slot_assign,
+                    ..
                 } => {
                     if let Some(name) = slot_assign {
                         self.slot_poison(name);
