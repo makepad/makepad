@@ -130,8 +130,11 @@ fn material_key(m: &MaterialFrame) -> u64 {
         }
     }
     (m.side == Side::Double).hash(&mut h);
-    if let Blend::Mask { cutoff } = m.blend {
-        f(&mut h, cutoff);
+    match m.blend {
+        Blend::Mask { cutoff } => f(&mut h, cutoff),
+        // A blended material's alpha is the layer's (the lanes blend by it).
+        Blend::Over | Blend::Add | Blend::Multiply | Blend::Screen => f(&mut h, base_color(m).w),
+        Blend::Opaque => {}
     }
     h.finish()
 }
@@ -203,9 +206,18 @@ impl Renderer {
             surface.flake = p.flake;
             surface.rim = p.rim;
         }
-        if let Blend::Mask { cutoff } = material.blend {
-            surface.alpha_mode = 1;
-            surface.alpha_cutoff = cutoff;
+        match material.blend {
+            Blend::Mask { cutoff } => {
+                surface.alpha_mode = 1;
+                surface.alpha_cutoff = cutoff;
+            }
+            // The lanes take a layer's opacity from its material, not the
+            // instance tint.
+            Blend::Over | Blend::Add | Blend::Multiply | Blend::Screen => {
+                surface.alpha_mode = 2;
+                surface.base_alpha = base_color(material).w.clamp(0.0, 1.0);
+            }
+            Blend::Opaque => {}
         }
         pbr.surface = Some(Arc::new(surface));
         let model = crate::model::StaticModel {

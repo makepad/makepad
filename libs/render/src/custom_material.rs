@@ -43,6 +43,8 @@ script_mod! {
         // What a hook may read besides its arguments: the clock, the true
         // world position, the mesh uv and the geometric normal.
         mat_time: fn() -> float { return self.draw_pass.time }
+        // The same clock for the vertex hook: a helper binds to one stage.
+        mat_vtime: fn() -> float { return self.draw_pass.time }
         mat_pos: fn() -> vec3 { return self.v_csm.xyz }
         mat_uv: fn() -> vec2 { return self.v_uv }
         mat_geo_normal: fn() -> vec3 { return normalize(self.v_csm_n) }
@@ -62,6 +64,8 @@ script_mod! {
         mat_vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p }
         surface: fn(base: vec4) -> vec4 { return base }
         mat_time: fn() -> float { return self.draw_pass.time }
+        // The same clock for the vertex hook: a helper binds to one stage.
+        mat_vtime: fn() -> float { return self.draw_pass.time }
         mat_pos: fn() -> vec3 { return self.v_csm.xyz }
         mat_uv: fn() -> vec2 { return self.v_uv }
         mat_geo_normal: fn() -> vec3 { return normalize(self.v_csm_n) }
@@ -367,7 +371,7 @@ mod tests {
     }
 
     const EVERY_HOOK: &str = r#"
-        vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p + n * (0.05 * sin(p.y * 8.0 + self.mat_time())) }
+        vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p + n * (0.05 * sin(p.y * 8.0 + self.mat_vtime())) }
         surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * vec3(1.0, 0.5, 0.2), base.w) }
         emission: fn(e: vec3) -> vec3 { return e + vec3(self.params.x, 0.0, 0.0) }
         normal: fn(n: vec3) -> vec3 { return normalize(n + vec3(0.0, 0.1, 0.0)) }
