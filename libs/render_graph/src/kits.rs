@@ -463,7 +463,11 @@ $M.kit_outline = fn(p) {
                             hit = 1.0
                         }
                     }
-                    return vec4(mix(c.xyz, self.ink.xyz, hit * self.ink.w), c.w)
+                    // Mixed in linear light; the ink raises coverage, so
+                    // an outline over nothing (an alpha export) shows.
+                    let e = hit * self.ink.w
+                    let rgb = self.to_srgb(self.from_srgb(c.xyz) * (1.0 - e) + self.ink.xyz * e)
+                    return vec4(rgb, c.w * (1.0 - e) + e)
                 }"}
         ]
     }
