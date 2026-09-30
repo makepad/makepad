@@ -18,7 +18,7 @@ fn st() -> makepad_ai_cuda::cudaStream_t {
 }
 
 fn dev_out(rows: usize, cols: usize, buf: DevBuf, like: &Tensor) -> Tensor {
-    let mut t = Tensor { rows, cols, data: Vec::new(), dev: Some(buf), seg: rows.max(1), lens: None };
+    let mut t = Tensor { rows, cols, data: Vec::new(), dev: Some(buf), seg: rows.max(1), lens: None, key: 0 };
     if rows == like.rows {
         t.seg = like.seg;
         t.lens = like.lens.clone();
@@ -216,7 +216,7 @@ pub fn gather_rows(g: &mut Graph, x: Id, idx: &[usize], seg: usize, lens: Option
     let di = Arc::new(DevU32::from_host(&idx.iter().map(|i| *i as u32).collect::<Vec<_>>()));
     let y = DevBuf::new(rows * c);
     ck("gather", unsafe { mkt_gather_rows(dp(&xv), di.ptr(), y.mptr(), rows, c, st()) });
-    let mut out = Tensor { rows, cols: c, data: Vec::new(), dev: Some(y), seg, lens: lens.map(Arc::new) };
+    let mut out = Tensor { rows, cols: c, data: Vec::new(), dev: Some(y), seg, lens: lens.map(Arc::new), key: 0 };
     out.seg = seg.max(1);
     let back: Back = Box::new(move |d, gr| {
         if let Some(dx) = gr.acc(x) {
@@ -380,7 +380,7 @@ pub fn masked_loss(g: &mut Graph, x: Id, target: Id, mask: Option<&[f32]>, col_l
             seg, coef.mptr(), out.mptr(), rows, cols, 1.0 / denom, sq as i32, st(),
         )
     });
-    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None };
+    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None, key: 0 };
     let back: Back = Box::new(move |d, gr| {
         if let Some(dx) = gr.acc(x) {
             ck("loss_bwd", unsafe { mkt_scaled_acc(coef.ptr(), d.dev().ptr(), dx.mptr(), n, st()) });
@@ -395,7 +395,7 @@ pub fn bce(g: &mut Graph, x: Id, target: Id) -> Id {
     let coef = Arc::new(DevBuf::new(n));
     let out = DevBuf::zeros(1);
     ck("bce", unsafe { mkt_bce(dp(&xv), dp(&tv), coef.mptr(), out.mptr(), n, st()) });
-    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None };
+    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None, key: 0 };
     let back: Back = Box::new(move |d, gr| {
         if let Some(dx) = gr.acc(x) {
             ck("bce_bwd", unsafe { mkt_scaled_acc(coef.ptr(), d.dev().ptr(), dx.mptr(), n, st()) });
@@ -409,7 +409,7 @@ pub fn sum_scalars(g: &mut Graph, terms: &[(Id, f32)]) -> Id {
     for (id, w) in terms {
         ck("sum_scalars", unsafe { mkt_axpy_scalar(dp(&g.vals[*id]), out.mptr(), *w, st()) });
     }
-    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None };
+    let t = Tensor { rows: 1, cols: 1, data: Vec::new(), dev: Some(out), seg: 1, lens: None, key: 0 };
     let terms_v = terms.to_vec();
     let ids: Vec<Id> = terms.iter().map(|t| t.0).collect();
     let back: Back = Box::new(move |d, gr| {
@@ -458,7 +458,7 @@ pub fn istft(g: &mut Graph, y: Id, s: Stft, len: usize) -> Id {
     ck("ifft", unsafe { mkt_fft(fr.mptr(), fi.mptr(), rows, n as i32, 1, st()) });
     let w = DevBuf::new(b * len);
     ck("ola", unsafe { mkt_overlap_add(fr.ptr(), win.ptr(), norm.ptr(), w.mptr(), b, len, t, n as i32, s.hop as i32, 1.0 / n as f32, 0, st()) });
-    let out = Tensor { rows: b * len, cols: 1, data: Vec::new(), dev: Some(w), seg: len, lens: None };
+    let out = Tensor { rows: b * len, cols: 1, data: Vec::new(), dev: Some(w), seg: len, lens: None, key: 0 };
     let back: Back = Box::new(move |d, gr| {
         if let Some(dy) = gr.acc(y) {
             let (fr, fi) = (DevBuf::new(rows * n), DevBuf::new(rows * n));
@@ -489,7 +489,7 @@ pub fn stft_mag(g: &mut Graph, x: Id, s: Stft) -> Id {
     let m = DevBuf::new(rows * bins);
     ck("mag", unsafe { mkt_mag(re.ptr(), im.ptr(), m.mptr(), rows * bins, st()) });
     let mp = m.ptr();
-    let out = Tensor { rows, cols: bins, data: Vec::new(), dev: Some(m), seg: frames, lens: None };
+    let out = Tensor { rows, cols: bins, data: Vec::new(), dev: Some(m), seg: frames, lens: None, key: 0 };
     let back: Back = Box::new(move |d, gr| {
         if let Some(dx) = gr.acc(x) {
             let (dre, dim) = (DevBuf::new(rows * bins), DevBuf::new(rows * bins));
@@ -514,7 +514,7 @@ pub fn stft_complex(waves: &Tensor, s: Stft, frames: usize) -> (Tensor, Tensor) 
     ck("fft", unsafe { mkt_fft(fr.mptr(), fi.mptr(), rows, n as i32, 0, st()) });
     let (re, im) = (DevBuf::new(rows * bins), DevBuf::new(rows * bins));
     ck("half", unsafe { mkt_half(fr.ptr(), fi.ptr(), re.mptr(), im.mptr(), rows, n as i32, 1.0, st()) });
-    let mk = |d: DevBuf| Tensor { rows, cols: bins, data: Vec::new(), dev: Some(d), seg: frames, lens: None };
+    let mk = |d: DevBuf| Tensor { rows, cols: bins, data: Vec::new(), dev: Some(d), seg: frames, lens: None, key: 0 };
     (mk(re), mk(im))
 }
 
@@ -542,7 +542,7 @@ pub fn gather_rows_dev(g: &mut Graph, x: Id, di: Arc<DevU32>, rows: usize, seg: 
     let c = xv.cols;
     let y = DevBuf::new(rows * c);
     ck("gather", unsafe { mkt_gather_rows(dp(&xv), di.ptr(), y.mptr(), rows, c, st()) });
-    let out = Tensor { rows, cols: c, data: Vec::new(), dev: Some(y), seg: seg.max(1), lens: lens.map(Arc::new) };
+    let out = Tensor { rows, cols: c, data: Vec::new(), dev: Some(y), seg: seg.max(1), lens: lens.map(Arc::new), key: 0 };
     let back: Back = Box::new(move |d, gr| {
         if let Some(dx) = gr.acc(x) {
             ck("scatter", unsafe { mkt_scatter_rows_acc(d.dev().ptr(), di.ptr(), dx.mptr(), rows, c, st()) });
@@ -569,7 +569,7 @@ pub fn mas_align(g: &mut Graph, mu: Id, mel: Id, tok_lens: &[u32], frame_lens: &
     let idx = Arc::new(DevU32::zeros(b * t));
     let ld = DevBuf::new(b * n);
     ck("dur_to_idx", unsafe { mkt_dur_to_idx(dur.ptr(), idx.mptr(), ld.mptr(), b, n as i32, t as i32, st()) });
-    let ldt = Tensor { rows: b * n, cols: 1, data: Vec::new(), dev: Some(ld), seg: n, lens: None };
+    let ldt = Tensor { rows: b * n, cols: 1, data: Vec::new(), dev: Some(ld), seg: n, lens: None, key: 0 };
     let id = g.input(ldt);
     (crate::nn::RowIndex::Dev(idx, b * t), id)
 }
@@ -582,7 +582,7 @@ pub fn source_waves(src: &crate::vocoder::SourceCtl) -> (Tensor, Tensor) {
     let z = DevBuf::new(n);
     ck("randn", unsafe { mkt_randn(z.mptr(), n, src.seed, st()) });
     ck("scale", unsafe { mkt_scale(z.ptr(), z.mptr(), crate::dsp::SOURCE_LEVEL, n, st()) });
-    let mk = |d: DevBuf| Tensor { rows: n, cols: 1, data: Vec::new(), dev: Some(d), seg: src.len, lens: None };
+    let mk = |d: DevBuf| Tensor { rows: n, cols: 1, data: Vec::new(), dev: Some(d), seg: src.len, lens: None, key: 0 };
     (mk(h), mk(z))
 }
 
@@ -590,5 +590,5 @@ pub fn randn(rows: usize, cols: usize, seg: usize, lens: Option<Vec<u32>>, seed:
     let n = rows * cols;
     let z = DevBuf::new(n);
     ck("randn", unsafe { mkt_randn(z.mptr(), n, seed, st()) });
-    Tensor { rows, cols, data: Vec::new(), dev: Some(z), seg: seg.max(1), lens: lens.map(Arc::new) }
+    Tensor { rows, cols, data: Vec::new(), dev: Some(z), seg: seg.max(1), lens: lens.map(Arc::new), key: 0 }
 }

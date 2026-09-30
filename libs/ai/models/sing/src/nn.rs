@@ -99,6 +99,9 @@ pub struct Tensor {
     pub seg: usize,
     /// Valid rows per item (attention keys past it are masked).
     pub lens: Option<Arc<Vec<u32>>>,
+    /// A parameter's identity (0 = none): lets an inference matmul keep the
+    /// weight resident on the GPU under this key.
+    pub key: u64,
 }
 
 impl Clone for Tensor {
@@ -119,6 +122,7 @@ impl Clone for Tensor {
             }),
             seg: self.seg,
             lens: self.lens.clone(),
+            key: self.key,
         }
     }
 }
@@ -138,7 +142,7 @@ impl PartialEq for Tensor {
 impl Tensor {
     pub fn new(rows: usize, cols: usize, data: Vec<f32>) -> Tensor {
         assert_eq!(rows * cols, data.len(), "tensor shape {rows}x{cols} vs {} values", data.len());
-        Tensor { rows, cols, data, dev: None, seg: rows.max(1), lens: None }
+        Tensor { rows, cols, data, dev: None, seg: rows.max(1), lens: None, key: 0 }
     }
     /// `rows / seg` items of `seg` rows each; `lens` = valid rows per item.
     pub fn batched(rows: usize, cols: usize, data: Vec<f32>, seg: usize, lens: Option<Vec<u32>>) -> Tensor {
@@ -311,7 +315,9 @@ impl Params {
         self.insert(name, Tensor::new(rows, cols, data));
     }
 
-    pub fn insert(&mut self, name: &str, t: Tensor) {
+    pub fn insert(&mut self, name: &str, mut t: Tensor) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        t.key = NEXT.fetch_add(1, Ordering::Relaxed);
         if let Some(&i) = self.index.get(name) {
             self.vals[i] = Arc::new(t);
             return;
@@ -886,7 +892,7 @@ impl<'p> Graph<'p> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.gpu {
             let d = crate::nn_gpu::copy(xv.dev.as_ref().unwrap());
-            let t = Tensor { rows, cols, data: Vec::new(), dev: Some(d), seg, lens: None };
+            let t = Tensor { rows, cols, data: Vec::new(), dev: Some(d), seg, lens: None, key: 0 };
             let back: Back = Box::new(move |d, g| {
                 if let Some(dx) = g.acc(x) {
                     crate::nn_gpu::axpy(d.dev(), dx, 1.0);
@@ -906,7 +912,15 @@ impl<'p> Graph<'p> {
         let (xv, wv) = (self.vals[x].clone(), self.vals[w].clone());
         let (t, k, n) = (xv.rows, xv.cols, wv.rows);
         assert_eq!(wv.cols, k, "linear: input width {k} vs weight {}x{}", wv.rows, wv.cols);
-        let y = mm_nt(&xv.data, &wv.data, t, k, n);
+        let y = if !self.record && wv.key != 0 && gpu_ok(t, k, n) {
+            // Inference with a parameter: keep the weight resident on the GPU.
+            let key = format!("w{}", wv.key);
+            let bytes = || Ok(wv.data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, "makepad-ai-sing", &key, bytes)
+                .unwrap_or_else(|| mm_nt(&xv.data, &wv.data, t, k, n))
+        } else {
+            mm_nt(&xv.data, &wv.data, t, k, n)
+        };
         let back: Back = Box::new(move |d, g| {
             let d = d.host();
             if g.needs(x) {
