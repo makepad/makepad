@@ -29,8 +29,8 @@
 //!   a running Far or Cosmetic job: it is cancelled through its cancel
 //!   word (polled every element) and re-queued, keeping its place.
 //! - **Admission** ([`crate::admission`]) happens before a job is queued;
-//!   its ticket (the ledger share, the work limit, the deadline) is held
-//!   until the job ends.
+//!   its ticket (the ledger share, the work limit, the per-call host
+//!   component limit, the deadline) is held until the job ends.
 //! - **The watchdog** (one thread per scheduler, parked while nothing
 //!   runs) cancels a running job at its deadline; the job fails with
 //!   [`JobError::TimedOut`].
@@ -795,6 +795,7 @@ impl Scheduler {
             }
         };
         job.work_limit = ticket.work_limit();
+        job.set_host_call_limit(ticket.host_call_limit());
         let slot = job.slot.clone();
         if slot.state.load(Ordering::Acquire) != IDLE {
             // Still owned by an earlier handle (not taken back).
@@ -862,6 +863,7 @@ impl Scheduler {
             JobError::Refused(r)
         })?;
         job.work_limit = ticket.work_limit();
+        job.set_host_call_limit(ticket.host_call_limit());
         let slot = job.slot.clone();
         slot.cancel.store(0, Ordering::Release);
         slot.reason.store(NO_REASON, Ordering::Release);

@@ -200,3 +200,25 @@ fn a_stream_keeps_the_last_result_and_counts_dropped_frames() {
     eprintln!("200 requests: {} dropped, {} frames read", stream.dropped, frames);
     assert!(frames > 100 && stream.dropped < 100, "{} frames, {} dropped", frames, stream.dropped);
 }
+
+#[test]
+fn untrusted_jobs_get_the_host_call_limit_from_admission() {
+    // A run-time-sized triangulation: an untrusted job's per-call limit
+    // refuses a large polygon before it runs; a small one fits.
+    let k = compile("let pts = input(f32)\nlet tris = output(i32, 1, 0, tris)\nlet o = output(i32)\nlet words = param(8.0)\nfn element(i) { o[i] = poly.triangulate(pts, 0, int(words), tris, 0, 3 * int(words)) }").unwrap();
+    let s = sched(Arc::new(ThreadExecutor::new(1)), 1);
+    let square: Vec<f32> = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let big: Vec<f32> = (0..40_000).map(|i| { let a = i as f32 * 0.000314; if i % 2 == 0 { a.cos() * 100.0 } else { a.sin() * 100.0 } }).collect();
+    for (pts, words, fits) in [(square, 8.0, true), (big, 40_000.0, false)] {
+        let mut j = Job::new(k.clone(), 1);
+        j.set_param("words", words);
+        j.input("pts", pts.into()).unwrap();
+        j.output_u32("tris", vec![0; 3 * words as usize]).unwrap();
+        j.output_u32("o", vec![0; 1]).unwrap();
+        let j = s.submit(j, Priority::Near, Origin::Ai, budget(1000)).map_err(|(_, e)| e).unwrap().wait().map_err(|(_, e)| e).unwrap();
+        assert_eq!(!j.stats().host_error, fits, "{} words", words);
+        if fits {
+            assert_eq!(j.out_u32("o").unwrap(), &[2]);
+        }
+    }
+}
