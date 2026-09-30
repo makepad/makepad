@@ -3488,6 +3488,14 @@ impl FontFamily {
         (self.id.0).into()
     }
 
+    /// The first member's ascender adjustment (`asc`, in ems; negative
+    /// raises the glyphs): where the layout puts the baseline against the
+    /// font's own ascender, for drawing the same text another way (glyph
+    /// outlines) in the same place.
+    pub fn ascender_fudge_in_ems(&self) -> f32 {
+        self.members.first().map_or(0.0, |member| member.asc)
+    }
+
     /// This family read at other variable-axis values: every member takes
     /// `axes` (`(tag, value)`, e.g. `wdth` 125.0; a `wght` value is the
     /// member's weight), on top of its own. A font without an axis ignores
