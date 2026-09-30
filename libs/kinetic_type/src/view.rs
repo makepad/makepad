@@ -280,6 +280,31 @@ impl KineticView {
         self.set = Some(set);
     }
 
+    /// Read the font at other variable-axis values (`wdth`, `slnt`, any
+    /// tag; `wght` is the weight): the text is rebuilt on the next
+    /// `set_text` when they differ from the current ones.
+    pub fn set_axes(&mut self, weight: Option<f32>, axes: &[(u32, f32)]) {
+        let weight = weight.or(self.values.shape.weight);
+        let mut merged = self.values.shape.axes.clone();
+        for (tag, v) in axes {
+            match merged.iter_mut().find(|(t, _)| t == tag) {
+                Some(a) => a.1 = *v,
+                None => merged.push((*tag, *v)),
+            }
+        }
+        if weight != self.values.shape.weight || merged != self.values.shape.axes {
+            self.values.shape.weight = weight;
+            self.values.shape.axes = merged;
+            self.text = None;
+        }
+    }
+
+    /// The pass this view renders its scene in (the first of its passes;
+    /// the kit's post passes follow it).
+    pub fn scene_pass(&self) -> DrawPassId {
+        self.pass.draw_pass_id()
+    }
+
     pub fn has_text(&self) -> bool {
         self.set.is_some()
     }

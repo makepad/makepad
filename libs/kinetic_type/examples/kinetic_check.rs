@@ -8,7 +8,9 @@
 //! ```
 //!
 //! `--sing` sweeps the karaoke progress 0..1 across the strip. Frame k is
-//! at beat `from + k * step`; time = beat * 60 / bpm.
+//! at beat `from + k * step`; time = beat * 60 / bpm. `--texts "A|B|C"
+//! --every 1` shows the texts in turn, one every `every` beats (a feed:
+//! lyric words, a clock), each change stamped at its beat.
 
 use makepad_kinetic_type::*;
 use makepad_widgets::makepad_zune_png::makepad_zune_core::bit_depth::BitDepth;
@@ -102,6 +104,8 @@ struct Job {
     sing: bool,
     dials: [Option<f32>; 4],
     bench: usize,
+    texts: Vec<String>,
+    every: f32,
 }
 
 enum State {
@@ -168,6 +172,8 @@ impl KineticHost {
             sing: args.iter().any(|a| a == "--sing"),
             dials,
             bench: if mode == "bench" { argf(args, "--frames", 240.0) as usize } else { 0 },
+            texts: arg(args, "--texts").map(|t| t.split('|').map(|s| s.replace("\\n", "\n")).collect()).unwrap_or_default(),
+            every: argf(args, "--every", 1.0).max(0.01),
         });
         self.state = Some(State::Load);
         self.next_frame = cx.new_next_frame();
@@ -192,6 +198,13 @@ impl KineticHost {
     fn record(&mut self, cx: &mut Cx2d, k: usize) {
         let size = self.job.as_ref().unwrap().size;
         let frame = self.frame_of(k);
+        let job = self.job.as_ref().unwrap();
+        if !job.texts.is_empty() {
+            let slot = (frame.beat / job.every).floor().max(0.0);
+            let text = job.texts[slot as usize % job.texts.len()].clone();
+            let at = slot * job.every * 60.0 / job.bpm;
+            self.view.as_mut().unwrap().set_text(cx.cx, &text, at);
+        }
         if self.pass.is_none() {
             let tex = Texture::new_with_format(cx.cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: size.0 as usize, height: size.1 as usize }, initial: true });
             self.pass = Some((DrawPass::new_with_name(cx, "encode"), DrawList2d::new(cx), tex));
