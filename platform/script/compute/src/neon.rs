@@ -112,6 +112,15 @@ mod v {
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
     pub const UMINV: u32 = 0x6EB1_A800;
+    /// By-element multiplies: vd = vn * vm.s[lane] (and accumulating).
+    pub const FMUL_E: u32 = 0x4F80_9000;
+    pub const FMLA_E: u32 = 0x4F80_1000;
+    pub const FMLS_E: u32 = 0x4F80_5000;
+    pub const MUL_E: u32 = 0x4F80_8000;
+    pub const MLA_E: u32 = 0x6F80_0000;
+    pub fn by_elem(base: u32, d: u8, n: u8, m: u8, lane: u32) -> u32 {
+        base | (lane & 1) << 21 | (m as u32) << 16 | (lane >> 1) << 11 | (n as u32) << 5 | d as u32
+    }
     /// zip1/zip2 of 32-bit lanes and of 64-bit halves.
     pub const ZIP1S: u32 = 0x4E80_3800;
     pub const ZIP2S: u32 = 0x4E80_7800;
@@ -434,6 +443,76 @@ fn small_table(body: &Block, info: &Info, bounds: &[Option<u32>]) -> Option<(u32
     n.into_iter().filter(|(_, c)| *c >= 2).max_by_key(|((b, e), c)| (*c, std::cmp::Reverse(*b), *e)).map(|(k, _)| k)
 }
 
+/// Picks constants read only as multiplicands (either side of MulF/MulI,
+/// a or b of a fused multiply-add), most used first, up to four packed
+/// registers taken from the end of `pool`: value -> (register, lane), and
+/// each register's four words for the prologue.
+fn pack_constants(p: &Program, pool: &mut Vec<u8>) -> (HashMap<u32, (u8, u32, u32)>, Vec<(u8, [u32; 4])>) {
+    let mut konst: HashMap<u32, u32> = HashMap::new();
+    let mut ok: HashMap<u32, u32> = HashMap::new();
+    let mut bad: HashSet<u32> = HashSet::new();
+    fn walk(b: &Block, konst: &mut HashMap<u32, u32>, ok: &mut HashMap<u32, u32>, bad: &mut HashSet<u32>) {
+        for s in b {
+            let (mults, others): (Vec<Val>, Vec<Val>) = match s {
+                Stmt::Def(v, op) => {
+                    match *op {
+                        Op::ConstF(x) => {
+                            konst.insert(v.0, x.to_bits());
+                        }
+                        Op::ConstI(x) => {
+                            konst.insert(v.0, x as u32);
+                        }
+                        _ => {}
+                    }
+                    match *op {
+                        Op::Bin(Bin::MulF | Bin::MulI, a, b) => (vec![a, b], vec![]),
+                        Op::Fma(_, a, b, c) => (vec![a, b], vec![c]),
+                        _ => (vec![], crate::ir::op_uses(op)),
+                    }
+                }
+                Stmt::Set(_, x) => (vec![], vec![*x]),
+                Stmt::Store { off, val, .. } => (vec![], off.iter().copied().chain([*val]).collect()),
+                Stmt::Out { idx, val, .. } => (vec![], vec![*idx, *val]),
+                Stmt::If(c, t, e) => {
+                    walk(t, konst, ok, bad);
+                    walk(e, konst, ok, bad);
+                    (vec![], vec![*c])
+                }
+                Stmt::Loop { body, .. } => {
+                    walk(body, konst, ok, bad);
+                    (vec![], vec![])
+                }
+                Stmt::CallHost { args, slices, .. } => (vec![], args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect()),
+                _ => (vec![], vec![]),
+            };
+            for m in mults {
+                *ok.entry(m.0).or_default() += 1;
+            }
+            for o in others {
+                bad.insert(o.0);
+            }
+        }
+    }
+    walk(&p.body, &mut konst, &mut ok, &mut bad);
+    let mut cands: Vec<(u32, u32)> = ok.into_iter().filter(|(v, _)| konst.contains_key(v) && !bad.contains(v)).collect();
+    // A register saves three when it holds four; pack in fours only.
+    cands.sort_by_key(|(v, n)| (std::cmp::Reverse(*n), *v));
+    let regs = (cands.len() / 4).min(4);
+    let mut packed = HashMap::new();
+    let mut packs = Vec::new();
+    for r in 0..regs {
+        let Some(reg) = pool.pop() else { break };
+        let mut words = [0u32; 4];
+        for l in 0..4 {
+            let (v, _) = cands[r * 4 + l];
+            words[l] = konst[&v];
+            packed.insert(v, (reg, l as u32, konst[&v]));
+        }
+        packs.push((reg, words));
+    }
+    (packed, packs)
+}
+
 /// What the vector code cannot express (the scalar code runs instead).
 fn supported(p: &Program, body: &Block) -> bool {
     if p.uses_f64() || p.frame_words > MAX_FRAME_WORDS {
@@ -553,6 +632,9 @@ struct Em {
     table: Option<(u32, u32)>,
     /// Elements per iteration (4, or 8 for a widened program).
     lanes: u32,
+    /// Constants used only as multiplicands, packed four to a register:
+    /// value -> (register, lane), read with by-element FMUL/FMLA/MUL/MLA.
+    packed: HashMap<u32, (u8, u32, u32)>,
     /// The execution mask is statically all lanes.
     full: bool,
     i: Var,
@@ -628,6 +710,11 @@ impl Em {
     }
 
     fn vsrc(&mut self, v: Val, scratch: u8) -> u8 {
+        if let Some(&(_, _, bits)) = self.packed.get(&v.0) {
+            // A packed constant read other than as a multiplicand.
+            self.splat(scratch, bits);
+            return scratch;
+        }
         self.src(Ent::Val(v.0), scratch)
     }
 
@@ -1402,6 +1489,10 @@ impl Em {
     // -- ops ------------------------------------------------------------------------
 
     fn def(&mut self, v: Val, op: &Op) {
+        if self.packed.contains_key(&v.0) {
+            // Lives in a lane of a packed register (loaded in the prologue).
+            return;
+        }
         let dst = Ent::Val(v.0);
         match *op {
             Op::ConstF(x) => self.konst(dst, x.to_bits()),
@@ -1445,6 +1536,15 @@ impl Em {
                         self.e(v::r2(base, d, ra));
                     }
                 }
+                self.done(dst, d);
+            }
+            Op::Bin(b @ (Bin::MulF | Bin::MulI), x, y) if self.packed.contains_key(&x.0) != self.packed.contains_key(&y.0) => {
+                let (x, y) = if self.packed.contains_key(&y.0) { (x, y) } else { (y, x) };
+                let (pr, pl, _) = self.packed[&y.0];
+                let rx = self.vsrc(x, VS0);
+                let d = self.dst(dst);
+                let base = if b == Bin::MulF { v::FMUL_E } else { v::MUL_E };
+                self.e(v::by_elem(base, d, rx, pr, pl));
                 self.done(dst, d);
             }
             Op::Bin(b, x, y) => {
@@ -1647,23 +1747,38 @@ impl Em {
                 self.done(dst, d);
             }
             Op::Fma(k, a, b, c) => {
-                // acc = c (negated for a*b - c), then fmla/fmls acc, a, b.
+                // acc = c (negated for a*b - c), then fmla/fmls acc, a, b
+                // (by element when a multiplicand is a packed constant).
+                let (a, b) = if self.packed.contains_key(&a.0) { (b, a) } else { (a, b) };
+                let pk = self.packed.get(&b.0).map(|&(r, l, _)| (r, l)).filter(|_| !self.packed.contains_key(&a.0));
                 let ra = self.vsrc(a, VS0);
-                let rb = self.vsrc(b, VS1);
+                let rb = if pk.is_some() { 0 } else { self.vsrc(b, VS1) };
                 let rc = self.vsrc(c, VS2);
                 let d = self.dst(dst);
-                let acc = if d != ra && d != rb && d != VS0 { d } else { VS2 };
+                let acc = if d != ra && (pk.is_some() || d != rb) && d != VS0 { d } else { VS2 };
                 if k == crate::ir::Fma::Sub {
                     self.e(v::r2(v::FNEG, acc, rc));
                 } else if acc != rc {
                     self.e(v::mov(acc, rc));
                 }
-                let op = match k {
-                    crate::ir::Fma::SubFrom => v::FMLS,
-                    crate::ir::Fma::MulAddI => v::MLA,
-                    _ => v::FMLA,
-                };
-                self.e(v::r3(op, acc, ra, rb));
+                match pk {
+                    Some((pr, pl)) => {
+                        let op = match k {
+                            crate::ir::Fma::SubFrom => v::FMLS_E,
+                            crate::ir::Fma::MulAddI => v::MLA_E,
+                            _ => v::FMLA_E,
+                        };
+                        self.e(v::by_elem(op, acc, ra, pr, pl));
+                    }
+                    None => {
+                        let op = match k {
+                            crate::ir::Fma::SubFrom => v::FMLS,
+                            crate::ir::Fma::MulAddI => v::MLA,
+                            _ => v::FMLA,
+                        };
+                        self.e(v::r3(op, acc, ra, rb));
+                    }
+                }
                 if acc != d {
                     self.e(v::mov(d, acc));
                 }
@@ -1849,6 +1964,9 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     // A resident table takes v24.. and keeps its byte-index constants in
     // v22 (0x04040404) and v23 (0x03020100).
     let mut pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(22..24 + w / 4).contains(&(*r as u32)))).collect();
+    // Constants used only as multiplicands, four to a register (taken from
+    // the pool's end): each saves three registers.
+    let (packed, packs) = pack_constants(p, &mut pool);
     // No divergent branch or masked loop: the mask register is never read
     // (every lane always runs), so it holds values too. (A four-register
     // row load saves and restores v28 whatever it holds.)
@@ -1859,6 +1977,8 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         p,
         |e| match e {
             Ent::Counter(_) => 0,
+            // Packed constants take no register or slot of their own.
+            Ent::Val(v) if packed.contains_key(&v) => 2,
             _ => 1,
         },
         &[G_POOL, &pool],
@@ -1894,6 +2014,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         group_slot: spill + masks - 16,
         table,
         lanes,
+        packed,
         full: true,
         i,
         bounds,
@@ -1933,6 +2054,9 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         }
         em.splat(22, 0x0404_0404);
         em.splat(23, 0x0302_0100);
+    }
+    for (r, words) in &packs {
+        em.vconst(*r, *words);
     }
     // The execution mask: every lane.
     em.e(v::movi0(VM));
