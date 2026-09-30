@@ -730,7 +730,7 @@ impl<'a> Call<'a> {
     fn run_on(&mut self, count: usize, interp: bool, exec: &dyn crate::sched::Executor, threads: usize) -> Result<RunStats, KernelError> {
         let t0 = std::time::Instant::now();
         let (table, lens) = self.table()?;
-        let split = threads > 1 && self.kernel.parallel_safe && count > CHUNK;
+        let split = splits(self.kernel, threads, count);
         self.admit(count, split)?;
         let mode = if interp { Mode::Interp } else { self.native_mode(count) };
         self.ctx[K_COUNT as usize] = count as u32;
