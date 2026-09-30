@@ -7062,6 +7062,12 @@ fn single_prop_chunk(chunk: &str) -> Option<(String, String)> {
     Some((name.to_string(), value.trim().to_string()))
 }
 
+/// The apply chunk for a vector row: components comma-separated, as Splash
+/// reads `vec2f(0.5 -1)` as one subtraction.
+fn vec_chunk(prop: &str, pfx: &str, vals: &[String]) -> String {
+    format!("{prop}: {pfx}({})", vals.join(", "))
+}
+
 fn fmt_f64(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1.0e15 {
         format!("{}", value as i64)
@@ -17776,7 +17782,7 @@ impl Tweaker {
                     .take(n)
                     .map(|x| fmt_f64(*x))
                     .collect();
-                Some(format!("{prop}: {pfx}({})", vals.join(" ")))
+                Some(vec_chunk(&prop, pfx, &vals))
             }
             StructKind::Inset => {
                 let key = ["left", "top", "right", "bottom"].get(comp)?;
@@ -25100,6 +25106,12 @@ line two");
         assert_eq!(single_prop_chunk("{a: 1, b: 2}"), None);
         assert_eq!(single_prop_chunk("padding: Inset{left: 4}"), None);
         assert_eq!(single_prop_chunk("draw_bg +: {color: #f00}"), None);
+    }
+
+    #[test]
+    fn a_vector_chunk_keeps_its_negative_components() {
+        let vals: Vec<String> = [0.5, -1.0, 2.0].iter().map(|x| fmt_f64(*x)).collect();
+        assert_eq!(vec_chunk("size", "vec3f", &vals), "size: vec3f(0.5, -1, 2)");
     }
 
     #[test]
