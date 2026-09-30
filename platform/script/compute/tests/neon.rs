@@ -668,6 +668,14 @@ fn kernels_from_source_agree_with_neon() {
         "o",
         4,
     );
+    // Table rows (vec2, vec3, vec4) read at consecutive and scattered
+    // rows, under full and partial masks, near the table's ends: the
+    // de-interleaving row loads and their fallback.
+    same_everywhere(
+        "let T4 = [vec4(1.0, 2.0, 3.0, 4.0), vec4(5.0, 6.0, 7.0, 8.0), vec4(9.0, 10.0, 11.0, 12.0), vec4(13.0, 14.0, 15.0, 16.0), vec4(17.0, 18.0, 19.0, 20.0), vec4(-1.0, -2.0, -3.0, -4.0), vec4(0.5, 0.25, 0.125, 2.0)]\nlet T3 = [vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0), vec3(7.0, 8.0, 9.0), vec3(10.0, 11.0, 12.0), vec3(13.0, 14.0, 15.0)]\nlet T2 = [vec2(1.5, 2.5), vec2(3.5, 4.5), vec2(5.5, 6.5)]\nlet o = output(vec4)\nfn element(i) {\n let a = T4[i]\n let b = T3[i % 5]\n let c = T2[(i * 7) % 3]\n var d = vec4(0.0, 0.0, 0.0, 0.0)\n if i % 3 == 1 { d = T4[i / 2 + 3] }\n o[i] = vec4(a.x + b.y, a.w * c.x + d.y, b.z - c.y + d.x, a.y + a.z + b.x + d.w) }",
+        "o",
+        4,
+    );
     // Early return from a helper under divergence; integer division and shifts.
     same_everywhere(
         "let o = output(vec2)\nfn f(i) { if i % 5 == 2 { return float(i / 3) }\n let x = i * 7919\n return float((x >> 3) ^ (x << 5) % 11) }\nfn element(i) { o[i] = vec2(f(i), f(i + 1)) }",

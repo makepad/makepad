@@ -105,6 +105,15 @@ mod v {
         0x4F00_5400 | (32 + sh) << 16 | (n as u32) << 5 | d as u32
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
+    pub const UMINV: u32 = 0x6EB1_A800;
+    /// ld2/ld3/ld4 {vt.4s ..}, [xn] (de-interleaving).
+    pub const LD2: u32 = 0x4C40_8800;
+    pub const LD3: u32 = 0x4C40_4800;
+    pub const LD4: u32 = 0x4C40_0800;
+    /// dup vd.4s, vn.s[0]
+    pub fn dup_lane0(d: u8, n: u8) -> u32 {
+        0x4E04_0400 | (n as u32) << 5 | d as u32
+    }
     /// smull vd.2d, vn.2s, vm.2s / smull2 (upper halves).
     pub const SMULL: u32 = 0x0EA0_C000;
     pub const SMULL2: u32 = 0x4EA0_C000;
@@ -498,6 +507,8 @@ struct Em {
     frame_base: u32,
     /// Construct depth, for mask slots.
     depth: u32,
+    /// A 16-byte slot saving the mask around a four-register load.
+    group_slot: u32,
     /// The execution mask is statically all lanes.
     full: bool,
     i: Var,
@@ -507,8 +518,8 @@ struct Em {
     step: Vec<Option<i64>>,
     /// ConstI values.
     consts: Vec<Option<i32>>,
-    /// The constant pool: splatted words, and the label of each entry.
-    pool: Vec<(u32, usize)>,
+    /// The constant pool: four words per entry, and the label of each entry.
+    pool: Vec<([u32; 4], usize)>,
 }
 
 impl Em {
@@ -935,12 +946,93 @@ impl Em {
     // -- statements -------------------------------------------------------------
 
     fn block(&mut self, b: &Block) {
-        for s in b {
+        let mut k = 0;
+        while k < b.len() {
+            let n = self.gather_group(&b[k..]);
+            if n > 0 {
+                k += n;
+                continue;
+            }
+            let s = &b[k];
             self.stmt(s);
             if self.info.escapes.contains(&id(s)) {
                 self.full = false;
             }
+            k += 1;
         }
+    }
+
+    /// Consecutive loads of words `base .. base + n` (n = 2..4) of a table
+    /// at one varying offset (a vec2, vec3 or vec4 row read per lane): when
+    /// the lanes read consecutive rows (offsets o, o + n, o + 2n, o + 3n,
+    /// checked at run time), one de-interleaving ld2/ld3/ld4 of the 4n
+    /// words; otherwise the loads one by one. Only offsets proven inside
+    /// the table (no clamp) take it. Returns the loads handled (0: none).
+    fn gather_group(&mut self, b: &[Stmt]) -> usize {
+        let Some(Stmt::Def(_, Op::Load { region: Region::Shared, base, extent, off: Some(o) })) = b.first() else { return 0 };
+        let (base, extent, o) = (*base, *extent, *o);
+        if self.uniform(o) || !self.proven(o, extent) {
+            return 0;
+        }
+        let mut n = 1;
+        while n < 4 && n < b.len() {
+            match &b[n] {
+                Stmt::Def(_, Op::Load { region: Region::Shared, base: bn, extent: en, off: Some(on) }) if *bn == base + n as u32 && *on == o && self.proven(o, *en) => n += 1,
+                _ => break,
+            }
+        }
+        if n < 2 {
+            return 0;
+        }
+        let (slow, end) = (self.label(), self.label());
+        let ro = self.vsrc(o, VS1);
+        // Lanes o0 + l * n?
+        self.e(v::dup_lane0(VS2, ro));
+        self.e(v::r3(v::SUB, VS2, ro, VS2));
+        let nn = n as u32;
+        self.vconst(VS0, [0, nn, 2 * nn, 3 * nn]);
+        self.e(v::r3(v::CMEQ, VS2, VS2, VS0));
+        self.e(v::r2(v::UMINV, VS2, VS2));
+        self.e(fp2(FMOV_WS, 15, VS2));
+        self.jump(Fix::Cbz, 0x3400_0000 | 15, slow);
+        // x9 = shared + (base + o0) * 4
+        self.e(v::umov_w(12, ro, 0));
+        if base * 4 < 4096 {
+            self.e(add_xi(9, 2, base * 4));
+        } else {
+            self.mov_imm(9, base * 4);
+            self.e(add_x(9, 2, 9));
+        }
+        self.e(add_x_lsl(9, 9, 12, 2));
+        let first = 32 - nn as u8;
+        if n == 4 {
+            // v28 (the mask) is the first register of the four.
+            self.ldst_sp_q(false, VM, self.group_slot);
+        }
+        self.e(match n {
+            2 => v::LD2,
+            3 => v::LD3,
+            _ => v::LD4,
+        } | 9 << 5 | first as u32);
+        for (m, s) in b[..n].iter().enumerate() {
+            let Stmt::Def(v, _) = s else { unreachable!() };
+            let t = first + m as u8;
+            let e = Ent::Val(v.0);
+            match self.loc(e) {
+                Loc::Reg(d) => self.e(v::mov(d, t)),
+                Loc::Stack(_) => self.done(e, t),
+            }
+        }
+        if n == 4 {
+            self.ldst_sp_q(true, VM, self.group_slot);
+        }
+        self.jump(Fix::B, 0x1400_0000, end);
+        self.bind(slow);
+        for s in &b[..n] {
+            self.stmt(s);
+        }
+        self.bind(end);
+        n
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1414,11 +1506,16 @@ impl Em {
             self.e(v::movi0(d));
             return;
         }
-        let l = match self.pool.iter().find(|(b, _)| *b == bits) {
+        self.vconst(d, [bits; 4]);
+    }
+
+    /// v(d) = four words (lane 0 first): one load from the constant pool.
+    fn vconst(&mut self, d: u8, words: [u32; 4]) {
+        let l = match self.pool.iter().find(|(b, _)| *b == words) {
             Some((_, l)) => *l,
             None => {
                 let l = self.label();
-                self.pool.push((bits, l));
+                self.pool.push((words, l));
                 l
             }
         };
@@ -1431,10 +1528,10 @@ impl Em {
         while self.code.len() % 4 != 0 {
             self.e(0xD503_201F); // nop
         }
-        for (bits, l) in std::mem::take(&mut self.pool) {
+        for (words, l) in std::mem::take(&mut self.pool) {
             self.bind(l);
-            for _ in 0..4 {
-                self.e(bits);
+            for w in words {
+                self.e(w);
             }
         }
     }
@@ -1555,7 +1652,8 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         },
     );
     let spill = (alloc.spill_bytes + 15) & !15;
-    let masks = (mask_depth(&info, &p.body) + 1) * 2 * 16;
+    // The mask slots, then one slot for gather groups.
+    let masks = (mask_depth(&info, &p.body) + 1) * 2 * 16 + 16;
     let frame = p.frame_words * 16;
     let total = spill + masks + frame;
     // Spill slots and mask slots use scaled 12-bit q offsets.
@@ -1577,6 +1675,7 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         mask_base: spill,
         frame_base: spill + masks,
         depth: 0,
+        group_slot: spill + masks - 16,
         full: true,
         i,
         bounds,
