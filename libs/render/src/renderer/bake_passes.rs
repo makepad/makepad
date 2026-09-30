@@ -133,7 +133,12 @@ impl Renderer {
             .map(|(k, _)| k.as_str()).collect();
         // A placed copy in a static block has no parts and no morph: it
         // pushes nothing here, so only the loose ones are walked.
-        for (target,inst) in self.placed_blocks.loose.iter().map(|&i|(ModelTarget::Instance(i as usize),&self.placed_models[i as usize]))
+        let all: Vec<u32>;
+        let loose = match self.placed_blocks.loose_for(self.placed_models.len(), self.placed_scene_signature) {
+            Some(loose) => loose,
+            None => { all = (0..self.placed_models.len() as u32).collect(); &all }
+        };
+        for (target,inst) in loose.iter().map(|&i|(ModelTarget::Instance(i as usize),&self.placed_models[i as usize]))
             .chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))) {
             if !inst.dynamic && matches!(target, ModelTarget::Instance(_)) && (static_movers.is_empty() || !static_movers.contains(inst.model.as_str())) {
                 continue;

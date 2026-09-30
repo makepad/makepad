@@ -48,10 +48,16 @@ pub(super) struct PlacedBlocks {
     blocks: Vec<(Vec3f, Vec3f, Vec<(u32, u32)>)>,
     /// Copies no block holds (dynamic, Splash material, parts or a morph,
     /// model not loaded): tested one by one every frame. Ascending.
-    pub(super) loose: Vec<u32>,
+    loose: Vec<u32>,
 }
 
 impl PlacedBlocks {
+    /// The loose copies, when the blocks were built for this very list (a
+    /// list of `len` copies with this signature); None otherwise.
+    pub(super) fn loose_for(&self, len: usize, signature: Option<u64>) -> Option<&[u32]> {
+        self.key.filter(|k| Some(k.0) == signature && k.3 == len).map(|_| self.loose.as_slice())
+    }
+
     pub(super) fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], signature: Option<u64>) {
         let fingerprint = {
             use std::hash::{Hash, Hasher};
