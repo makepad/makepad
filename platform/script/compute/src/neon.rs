@@ -952,7 +952,10 @@ impl Em {
     fn block(&mut self, b: &Block) {
         let mut k = 0;
         while k < b.len() {
-            let n = self.gather_group(&b[k..]);
+            let n = match self.gather_group(&b[k..]) {
+                0 => self.store_group(&b[k..]),
+                n => n,
+            };
             if n > 0 {
                 k += n;
                 continue;
@@ -964,6 +967,73 @@ impl Em {
             }
             k += 1;
         }
+    }
+
+    /// Consecutive stores of words `base .. base + n` (n >= 2) of a host
+    /// buffer at one varying offset (a record's fields, an emitted record):
+    /// when every lane's words lie inside the buffer (checked at run time
+    /// on the largest lane offset), each running lane writes its n words
+    /// with post-indexed lane stores, lane after lane; lanes' records never
+    /// overlap without clamping, so the words end as in statement order.
+    /// Otherwise the stores one by one. Returns the stores handled.
+    fn store_group(&mut self, b: &[Stmt]) -> usize {
+        let Some(Stmt::Store { region: Region::Buf(kb), base, off: Some(o), .. }) = b.first() else { return 0 };
+        let (kb, base, o) = (*kb, *base, *o);
+        if self.uniform(o) {
+            return 0;
+        }
+        let mut n = 1;
+        while n < b.len() {
+            match &b[n] {
+                Stmt::Store { region: Region::Buf(r), base: bn, off: Some(on), .. } if *r == kb && *on == o && *bn == base + n as u32 => n += 1,
+                _ => break,
+            }
+        }
+        let last = base as u64 + n as u64 - 1;
+        if n < 2 || last >= 1 << 31 {
+            return 0;
+        }
+        let (slow, end) = (self.label(), self.label());
+        self.buf_regs(kb);
+        let ro = self.vsrc(o, VS1);
+        // Every lane inside: max(offset) + last <= len - 1 (64 bits).
+        self.e(v::r2(v::UMAXV, VS2, ro));
+        self.e(fp2(FMOV_WS, 12, VS2));
+        if last < 4096 {
+            self.e(add_xi(13, 12, last as u32));
+        } else {
+            self.mov_imm(13, last as u32);
+            self.e(add_x(13, 12, 13));
+        }
+        self.e(cmp_x(13, 11));
+        self.jump(Fix::BCond, 0x5400_0000 | 8, slow);
+        for l in 0..4 {
+            let skip = self.label();
+            self.lane_guard(l, skip);
+            self.e(v::umov_w(12, ro, l));
+            if base > 0 {
+                if base < 4096 {
+                    self.e(add_xi(12, 12, base));
+                } else {
+                    self.mov_imm(13, base);
+                    self.e(add_x(12, 12, 13));
+                }
+            }
+            self.e(add_x_lsl(9, 10, 12, 2));
+            for s in &b[..n] {
+                let Stmt::Store { val, .. } = s else { unreachable!() };
+                let rv = self.vsrc(*val, VS0);
+                self.e(v::st1_lane_post(rv, l, 9, 31));
+            }
+            self.bind(skip);
+        }
+        self.jump(Fix::B, 0x1400_0000, end);
+        self.bind(slow);
+        for s in &b[..n] {
+            self.stmt(s);
+        }
+        self.bind(end);
+        n
     }
 
     /// Consecutive loads of words `base .. base + n` (n = 2..4) of a table

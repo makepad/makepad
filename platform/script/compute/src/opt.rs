@@ -28,6 +28,180 @@ pub fn optimize(p: &mut Program) {
     forward_sets(p);
     cse(p);
     dce(p);
+    dead_frame_stores(p);
+    dead_loops(p);
+    dce(p);
+    cluster_stores(p);
+}
+
+// ---------------------------------------------------------------------------
+// Dead frame stores and dead loops
+// ---------------------------------------------------------------------------
+
+/// Frame (per-call scratch) stores no load can read are removed: when
+/// every frame load has a static address, a store whose words no load
+/// names is dead. (A struct literal emitted or read field by field leaves
+/// only such stores once its loads are forwarded.)
+pub fn dead_frame_stores(p: &mut Program) {
+    let mut read: HashSet<u32> = HashSet::new();
+    let mut dynamic = false;
+    fn loads(b: &Block, read: &mut HashSet<u32>, dynamic: &mut bool) {
+        for s in b {
+            match s {
+                Stmt::Def(_, Op::Load { region: Region::Frame, base, off, .. }) => {
+                    if off.is_some() {
+                        *dynamic = true;
+                    } else {
+                        read.insert(*base);
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    loads(t, read, dynamic);
+                    loads(e, read, dynamic);
+                }
+                Stmt::Loop { body, .. } => loads(body, read, dynamic),
+                _ => {}
+            }
+        }
+    }
+    loads(&p.body, &mut read, &mut dynamic);
+    if dynamic {
+        return;
+    }
+    fn sweep(b: &mut Block, read: &HashSet<u32>) {
+        b.retain(|s| match s {
+            Stmt::Store { region: Region::Frame, base, extent, off, .. } => {
+                let len = if off.is_some() { *extent } else { 1 };
+                (*base..base.saturating_add(len)).any(|w| read.contains(&w))
+            }
+            _ => true,
+        });
+        for s in b.iter_mut() {
+            match s {
+                Stmt::If(_, t, e) => {
+                    sweep(t, read);
+                    sweep(e, read);
+                }
+                Stmt::Loop { body, .. } => sweep(body, read),
+                _ => {}
+            }
+        }
+    }
+    sweep(&mut p.body, &read);
+}
+
+/// A loop with no effect is removed: nothing in it stores, outputs or
+/// calls out, no break or continue in it leaves it, and no variable it
+/// sets is read outside it. Loops always end (their cap), so skipping one
+/// changes nothing.
+pub fn dead_loops(p: &mut Program) {
+    fn effects(b: &Block, depth: u32) -> bool {
+        b.iter().any(|s| match s {
+            Stmt::Store { .. } | Stmt::Out { .. } | Stmt::CallHost { .. } => true,
+            Stmt::Break(d) | Stmt::Continue(d) => *d >= depth,
+            Stmt::If(_, t, e) => effects(t, depth) || effects(e, depth),
+            Stmt::Loop { body, .. } => effects(body, depth + 1),
+            _ => false,
+        })
+    }
+    fn gets(b: &Block, out: &mut HashMap<u32, u32>) {
+        for s in b {
+            match s {
+                Stmt::Def(_, Op::Get(v)) => *out.entry(v.0).or_default() += 1,
+                Stmt::If(_, t, e) => {
+                    gets(t, out);
+                    gets(e, out);
+                }
+                Stmt::Loop { body, .. } => gets(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut all = HashMap::new();
+    gets(&p.body, &mut all);
+    fn sweep(b: &mut Block, all: &HashMap<u32, u32>) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::If(_, t, e) => {
+                    sweep(t, all);
+                    sweep(e, all);
+                }
+                Stmt::Loop { body, .. } => sweep(body, all),
+                _ => {}
+            }
+        }
+        b.retain(|s| {
+            let Stmt::Loop { body, .. } = s else { return true };
+            if effects(body, 1) {
+                return true;
+            }
+            let mut set = HashSet::new();
+            sets_in(body, &mut set);
+            let mut inside = HashMap::new();
+            gets(body, &mut inside);
+            // Some get of a variable the loop sets lies outside it.
+            set.iter().any(|v| all.get(v).copied().unwrap_or(0) > inside.get(v).copied().unwrap_or(0))
+        });
+    }
+    sweep(&mut p.body, &all);
+}
+
+// ---------------------------------------------------------------------------
+// Store clustering
+// ---------------------------------------------------------------------------
+
+/// A store to a host buffer at a dynamic offset moves down its block to
+/// just before the next store of the same record (same buffer, same offset
+/// value, the next word), across definitions that do not read that buffer:
+/// the words of `out[i].a = ..; out[i].b = ..` end up adjacent, which the
+/// vector code writes per element in one go. No load of the buffer, no
+/// other store to it and no control flow is crossed, so every word gets
+/// the same value in the same order.
+pub fn cluster_stores(p: &mut Program) {
+    fn block(b: &mut Block) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::If(_, t, e) => {
+                    block(t);
+                    block(e);
+                }
+                Stmt::Loop { body, .. } => block(body),
+                _ => {}
+            }
+        }
+        // Stores only move down, so this ends.
+        while cluster_pass(b) {}
+    }
+    fn cluster_pass(b: &mut Block) -> bool {
+        let mut moved = false;
+        let mut i = 0;
+        while i < b.len() {
+            let Stmt::Store { region: Region::Buf(k), base, off: Some(o), .. } = b[i] else {
+                i += 1;
+                continue;
+            };
+            // The next statement that is not a definition free of buffer k.
+            let mut j = i + 1;
+            while j < b.len() {
+                match &b[j] {
+                    Stmt::Def(_, Op::Load { region: Region::Buf(r), .. }) if *r == k => break,
+                    Stmt::Def(..) => j += 1,
+                    _ => break,
+                }
+            }
+            let joins = j > i + 1 && matches!(b.get(j), Some(Stmt::Store { region: Region::Buf(r), base: bn, off: Some(on), .. }) if *r == k && *on == o && *bn == base + 1);
+            if joins {
+                let st = b.remove(i);
+                b.insert(j - 1, st);
+                moved = true;
+                // The statement that moved into position i is a definition.
+                continue;
+            }
+            i += 1;
+        }
+        moved
+    }
+    block(&mut p.body);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,9 +855,40 @@ pub fn fuse_fma(p: &mut Program) {
 // Dead code
 // ---------------------------------------------------------------------------
 
-/// Removes definitions nobody reads (every op is pure), to a fixpoint.
+/// Removes definitions nobody reads (every op is pure) and sets of
+/// variables nobody gets, to a fixpoint.
 pub fn dce(p: &mut Program) {
     loop {
+        // Variables some Get reads.
+        let mut read = vec![false; p.vars.len()];
+        fn gets(b: &Block, read: &mut Vec<bool>) {
+            for s in b {
+                match s {
+                    Stmt::Def(_, Op::Get(v)) => read[v.0 as usize] = true,
+                    Stmt::If(_, t, e) => {
+                        gets(t, read);
+                        gets(e, read);
+                    }
+                    Stmt::Loop { body, .. } => gets(body, read),
+                    _ => {}
+                }
+            }
+        }
+        gets(&p.body, &mut read);
+        fn drop_sets(b: &mut Block, read: &[bool]) {
+            b.retain(|s| !matches!(s, Stmt::Set(v, _) if !read[v.0 as usize]));
+            for s in b.iter_mut() {
+                match s {
+                    Stmt::If(_, t, e) => {
+                        drop_sets(t, read);
+                        drop_sets(e, read);
+                    }
+                    Stmt::Loop { body, .. } => drop_sets(body, read),
+                    _ => {}
+                }
+            }
+        }
+        drop_sets(&mut p.body, &read);
         let mut used = vec![false; p.vals.len()];
         fn mark(b: &Block, used: &mut Vec<bool>) {
             for s in b {

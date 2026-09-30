@@ -253,7 +253,9 @@ enum Key {
     Sel(Val, Val, Val),
     Fma(ir::Fma, Val, Val, Val),
     Wrap(Val, u32),
-    Load(Region, u32, u32, Option<Val>),
+    /// A load's type is part of it: a word stored as i32 and read as f32
+    /// is not the stored value.
+    Load(Region, u32, u32, Option<Val>, Ty),
     Get(Var),
     In(u8, Val),
     FrameCount,
@@ -276,7 +278,8 @@ impl Key {
             Op::Sel(c, x, y) => Key::Sel(c, x, y),
             Op::Fma(k, a, b, c) => Key::Fma(k, a, b, c),
             Op::Wrap(x, n) => Key::Wrap(x, n),
-            Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off),
+            // Without an offset the extent does not matter: word `base`.
+            Op::Load { region, base, extent, off } => Key::Load(region, base, if off.is_some() { extent } else { 1 }, off, ty),
             Op::In { ch, idx } => Key::In(ch, idx),
             Op::FrameCount => Key::FrameCount,
             Op::BufLen(k) => Key::BufLen(k),
@@ -324,17 +327,24 @@ impl Builder {
                     map.remove(&Key::Get(var));
                 }
             }
-            IS::Store { region, .. } => {
+            IS::Store { region, base, off, val, .. } => {
                 let region = *region;
                 for (map, _) in &mut self.cse {
                     map.retain(|k, _| !matches!(k, Key::Load(r, ..) if *r == region));
                 }
+                // A later load of that word (same type) in this block reads
+                // the stored value. Not host buffers: two words past a
+                // buffer's end clamp to the same word.
+                if off.is_none() && !matches!(region, Region::Buf(_)) {
+                    let ty = self.prog.vals[val.0 as usize];
+                    self.cse.last_mut().unwrap().0.insert(Key::Load(region, *base, 1, None, ty), *val);
+                }
             }
-            // A host call may write its slices' buffers.
+            // A host call may write its slices' buffers (and ctx words).
             IS::CallHost { slices, .. } => {
                 let bufs: Vec<u8> = slices.iter().map(|x| x.buf).collect();
                 for (map, _) in &mut self.cse {
-                    map.retain(|k, _| !matches!(k, Key::Load(Region::Buf(b), ..) if bufs.contains(b)));
+                    map.retain(|k, _| !matches!(k, Key::Load(Region::Buf(b), ..) if bufs.contains(b)) && !matches!(k, Key::Load(Region::Ctx, ..)));
                 }
             }
             _ => {}
@@ -1419,7 +1429,7 @@ impl Lowerer {
         let t = self.cinit_ty(c);
         let n = words.len() as u32;
         let uniform = words.iter().all(|w| *w == words[0]);
-        if n > 8 && uniform {
+        if n > 32 && uniform {
             // A fill loop instead of n stores.
             let leaf = self.leaf_ty(&t, 0);
             let j = self.b.var(Ty::I32);
