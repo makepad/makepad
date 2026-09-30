@@ -1805,7 +1805,7 @@ impl GpuLightmapBaker {
         &mut self,
         cx: &mut CxDraw,
         sun_dir: Vec3f,
-        static_casters: &[GpuBakeMesh],
+        static_casters: &[&[GpuBakeMesh]],
         movers: &[GpuLmMover],
         csm_view: Option<&CsmView>,
         eye: Vec3f,
@@ -1939,12 +1939,12 @@ impl GpuLightmapBaker {
                 self.csm_tex.as_ref().map(|t| t.texture_id()),
                 c.rx.w, c.ry.w, c.rz.w, c.bias01,
                 sun_dir.x, sun_dir.y, sun_dir.z,
-                static_casters.len(), movers.len(),
+                static_casters.iter().map(|s| s.len()).sum::<usize>(), movers.len(),
                 self.state.is_some()
             );
         }
         self.csm_frame_stats = if csm.is_some() {
-            (static_casters.len(), movers.len(), us)
+            (static_casters.iter().map(|s| s.len()).sum::<usize>(), movers.len(), us)
         } else {
             (0, 0, 0)
         };
@@ -2757,7 +2757,7 @@ impl GpuLightmapBaker {
     fn encode_cascades(
         &mut self,
         cx: &mut CxDraw,
-        static_casters: &[GpuBakeMesh],
+        static_casters: &[&[GpuBakeMesh]],
         movers: &[GpuLmMover],
         frame: &CsmFrame,
         full_clear: bool,
@@ -2844,7 +2844,7 @@ impl GpuLightmapBaker {
         let all_due = due.iter().all(|d| *d);
         // Casters that reach past their cascade's tile (drawn after the rest
         // through the discarding pipeline), by index.
-        let mut straddle: Vec<usize> = Vec::new();
+        let mut straddle: Vec<&GpuBakeMesh> = Vec::new();
         // Where the backend applies the tile scissor, nothing reaches past
         // the tile at all and every caster takes the discard-free pipeline.
         let scissored = cx.cx.gpu_backend().honors_scissor();
@@ -2944,13 +2944,13 @@ impl GpuLightmapBaker {
             di.sun_ry = casc.ry;
             di.sun_rz = casc.rz;
             straddle.clear();
-            for (i, m) in static_casters.iter().enumerate().filter(|(_, m)| m.cutout.is_none() && draws_in(m.band)) {
+            for m in static_casters.iter().flat_map(|s| s.iter()).filter(|m| m.cutout.is_none() && draws_in(m.band)) {
                 if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
                 if !scissored && !crate::shadow_csm::cascade_contains_xy(casc, m.min, m.max) {
-                    straddle.push(i);
+                    straddle.push(m);
                     continue;
                 }
                 di.transform = m.transform;
@@ -2960,8 +2960,7 @@ impl GpuLightmapBaker {
                 }
             }
             let d = &mut draws.sun_depth;
-            for &i in &straddle {
-                let m = &static_casters[i];
+            for m in &straddle {
                 d.transform = m.transform;
                 d.draw_vars.geometry_id = Some(m.geometry);
                 if d.draw_vars.can_instance() {
@@ -2981,7 +2980,7 @@ impl GpuLightmapBaker {
             dc.depth.sun_rx = casc.rx;
             dc.depth.sun_ry = casc.ry;
             dc.depth.sun_rz = casc.rz;
-            for m in cutouts.iter().filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
+            for m in cutouts.iter().flat_map(|s| s.iter()).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
                 if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
@@ -3089,7 +3088,7 @@ impl GpuLightmapBaker {
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(
             state.as_ref(),
-            static_casters.len(),
+            static_casters.iter().map(|s| s.len()).sum::<usize>(),
             movers.len(),
         );
         let statics = caster_counts.0;

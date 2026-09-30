@@ -449,19 +449,13 @@ impl Renderer {
             }
             Some((min, max))
         });
-        // Streamed casters ride along with the placed ones (a scratch
-        // concatenation only while a streamed world is installed).
-        let combined;
-        let static_casters: &[crate::gpu_lightmap::GpuBakeMesh] = if self.stream_casters.is_empty() {
-            &self.csm_static_casters
-        } else {
-            combined = [self.csm_static_casters.as_slice(), self.stream_casters.as_slice()].concat();
-            &combined
-        };
+        // Streamed casters ride along with the placed ones, in that order
+        // (the two lists as they are: a city's 20k placed casters were
+        // copied into a scratch list every frame).
         if let Some(d) = self.gpu_baker.run_frame(
             cx,
             sun.dir,
-            static_casters,
+            &[self.csm_static_casters.as_slice(), self.stream_casters.as_slice()],
             movers,
             csm_view,
             eye,
