@@ -196,17 +196,33 @@ impl DrawSceneCustom {
     /// description names, with every variant its plan derives. Errors carry
     /// the author's source lines.
     pub fn build(vm: &mut ScriptVm, desc: &MaterialDesc, hooks: &HookSet, mask: HookMask, params: Vec4f) -> Result<CustomMaterial, MaterialError> {
+        Self::build_with(vm, desc, hooks, mask, params, &[])
+    }
+
+    /// [`Self::build`] plus the author's own helper functions (called by the
+    /// hooks). A helper may add a name, never replace one the lane has:
+    /// that would reach past the hook set.
+    pub fn build_with(vm: &mut ScriptVm, desc: &MaterialDesc, hooks: &HookSet, mask: HookMask, params: Vec4f, helpers: &[(LiveId, ScriptObject)]) -> Result<CustomMaterial, MaterialError> {
         if !matches!(desc.blend, Blend::Opaque | Blend::Mask { .. } | Blend::Over) {
             return Err(MaterialError::new("the model lane draws Opaque, Mask and Over materials; Add, Multiply and Screen blend on the line and point lanes"));
         }
         register(vm);
         let plan = material::plan(desc, hooks)?;
+        let base = vm.bx.heap.type_default_for_id(Self::script_type_id_static())
+            .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
         let mut overrides = Vec::new();
+        for (name, f) in helpers {
+            let existing = vm.bx.heap.object_method(base, (*name).into(), NoTrap);
+            let taken = !(existing.is_nil() || existing.is_err())
+                || material::HOOKS.iter().any(|h| LiveId::from_str(h.method) == *name);
+            if taken || !vm.bx.heap.is_fn(*f) {
+                return Err(MaterialError::new(format!("helper `{name}` would replace a function the lane owns; give it another name")));
+            }
+            overrides.push((*name, *f));
+        }
         for b in &plan.builtins {
             overrides.extend(builtin::overrides(vm, *b));
         }
-        let base = vm.bx.heap.type_default_for_id(Self::script_type_id_static())
-            .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
         let obj = material::install_program(vm, &material::ProgramRequest { base, kind: desc.kind, hooks, mask, overrides: &overrides })?;
         // Compiled once; the front end is asked for located errors only
         // when that fails.
@@ -239,7 +255,7 @@ impl DrawSceneCustom {
             with_override(vm, obj, id!(clip), clip).and_then(|v| instance_custom(vm, v).ok()).and_then(|d| d.draw_vars.draw_shader_id)
         };
         let shadow = match plan.shadow {
-            ShadowVariant::Derived { vertex, mask } => match Self::build_shadow(vm, hooks, vertex, mask) {
+            ShadowVariant::Derived { vertex, mask } => match Self::build_shadow(vm, hooks, vertex, mask, &overrides[..helpers.len()]) {
                 Ok(id) => Some(id),
                 Err(e) => {
                     warnings.extend(e.diagnostics.into_iter().map(|mut d| {
@@ -263,11 +279,15 @@ impl DrawSceneCustom {
         })
     }
 
-    fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool) -> Result<DrawShaderId, MaterialError> {
+    fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
         let base = vm.bx.heap.type_default_for_id(DrawMaterialShadow::script_type_id_static())
             .ok_or_else(|| MaterialError::new("material shadow shader registration failed"))?;
         let mut caster_hooks = HookSet::new();
-        let mut overrides = Vec::new();
+        // The author's helpers, where the caster has no function of that name.
+        let mut overrides: Vec<(LiveId, ScriptObject)> = helpers.iter().copied().filter(|(name, _)| {
+            let v = vm.bx.heap.object_method(base, (*name).into(), NoTrap);
+            v.is_nil() || v.is_err()
+        }).collect();
         if vertex {
             if let Some(f) = hooks.get(material::Hook::Vertex) { caster_hooks.set(material::Hook::Vertex, f); }
         }
