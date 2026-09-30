@@ -42,6 +42,81 @@ pub fn optimize(p: &mut Program) {
     cluster_loads(p);
     dce(p);
     fuse_mla(p);
+    int_reassoc(p);
+}
+
+/// Integer constants fold through wrapping arithmetic (exact in 32-bit
+/// two's complement): (x + c1) + c2 is x + (c1 + c2), and (x + c1) * m + k
+/// (a hash of a shifted key) is x * m + (c1 * m + k).
+pub fn int_reassoc(p: &mut Program) {
+    let mut consts: HashMap<u32, i32> = HashMap::new();
+    let mut adds: HashMap<u32, (Val, i32)> = HashMap::new();
+    fn find(b: &Block, consts: &mut HashMap<u32, i32>, adds: &mut HashMap<u32, (Val, i32)>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c);
+                }
+                Stmt::Def(v, Op::Bin(ir::Bin::AddI, x, y)) => {
+                    if let Some(c) = consts.get(&y.0) {
+                        adds.insert(v.0, (*x, *c));
+                    } else if let Some(c) = consts.get(&x.0) {
+                        adds.insert(v.0, (*y, *c));
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    find(t, consts, adds);
+                    find(e, consts, adds);
+                }
+                Stmt::Loop { body, .. } => find(body, consts, adds),
+                _ => {}
+            }
+        }
+    }
+    find(&p.body, &mut consts, &mut adds);
+    let mut new_consts: HashMap<i32, Val> = HashMap::new();
+    let mut defs = Vec::new();
+    let mut konst = |c: i32, vals: &mut Vec<ir::Ty>| -> Val {
+        *new_consts.entry(c).or_insert_with(|| {
+            vals.push(ir::Ty::I32);
+            let v = Val(vals.len() as u32 - 1);
+            defs.push(Stmt::Def(v, Op::ConstI(c)));
+            v
+        })
+    };
+    fn walk(b: &mut Block, consts: &HashMap<u32, i32>, adds: &HashMap<u32, (Val, i32)>, konst: &mut dyn FnMut(i32, &mut Vec<ir::Ty>) -> Val, vals: &mut Vec<ir::Ty>) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::Def(_, op) => match *op {
+                    Op::Bin(ir::Bin::AddI, x, y) => {
+                        let (inner, c2) = match (adds.get(&x.0), consts.get(&y.0), adds.get(&y.0), consts.get(&x.0)) {
+                            (Some(a), Some(c), _, _) | (_, _, Some(a), Some(c)) => (*a, *c),
+                            _ => continue,
+                        };
+                        let k = konst(inner.1.wrapping_add(c2), vals);
+                        *op = Op::Bin(ir::Bin::AddI, inner.0, k);
+                    }
+                    Op::Fma(ir::Fma::MulAddI, a, m, k) => {
+                        let (Some(&(x, c1)), Some(&mv), Some(&kv)) = (adds.get(&a.0), consts.get(&m.0), consts.get(&k.0)) else { continue };
+                        let nk = konst(c1.wrapping_mul(mv).wrapping_add(kv), vals);
+                        *op = Op::Fma(ir::Fma::MulAddI, x, m, nk);
+                    }
+                    _ => {}
+                },
+                Stmt::If(_, t, e) => {
+                    walk(t, consts, adds, konst, vals);
+                    walk(e, consts, adds, konst, vals);
+                }
+                Stmt::Loop { body, .. } => walk(body, consts, adds, konst, vals),
+                _ => {}
+            }
+        }
+    }
+    let mut vals = std::mem::take(&mut p.vals);
+    walk(&mut p.body, &consts, &adds, &mut konst, &mut vals);
+    p.vals = vals;
+    p.body.splice(0..0, defs);
+    dce(p);
 }
 
 /// A table read at `h + k` (k a constant, h proven with h + k inside the
