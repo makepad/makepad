@@ -57,7 +57,8 @@ pub fn kit_source(module: &str, only: Option<&[&str]>) -> String {
 const SOURCES: &[(&str, &str)] = &[
     ("glow", r##"
 // ---------------------------------------------------------------- Glow
-// Bloom of what glows: a threshold (soft knee) of `source` (@color, or
+// Bloom of what glows: a threshold (a soft knee on the brightest channel)
+// of `source` (@color, or
 // @glow where the renderer has an emission attachment: then only emissive
 // things glow, whatever their brightness), a dual-filter pyramid down to
 // 1/32 and back, added to the frame. `radius` 0..1 weights the wide
@@ -86,10 +87,13 @@ $M.kit_glow = fn(p) {
                     let o = vec2((float(k % 2) * 2.0 - 1.0) * t.x, (float(k / 2) * 2.0 - 1.0) * t.y)
                     let s = max(self.source.sample(self.uv() + o).xyz, vec3(0.0, 0.0, 0.0))
                     let l = self.luma(s)
-                    // soft knee over [threshold / 2, threshold]; Karis
-                    // weight so one hot texel cannot flicker as a blob
+                    // a soft knee on the brightest channel, from the
+                    // threshold to 1.5x it (nothing at or below the
+                    // threshold glows, a saturated emissive colour does);
+                    // Karis weight so one hot texel cannot flicker as a blob
                     let knee = max(self.threshold, 0.0001)
-                    let over = clamp((l - knee * 0.5) / (knee * 0.5), 0.0, 1.0)
+                    let m = max(s.x, max(s.y, s.z))
+                    let over = clamp((m - knee) / (knee * 0.5), 0.0, 1.0)
                     let kw = 1.0 / (1.0 + l)
                     c = c + s * over * over * kw
                     w = w + kw

@@ -56,8 +56,24 @@ script_mod! {
         }
         // The tone curve, linear in and out (tone.x picks the standard
         // one). A document's `curve: fn(c: vec3) -> vec3` replaces this.
+        // The shoulder (PDOOM R5) for a 2D frame: identity up to 1, so its
+        // ordinary colours show exactly as authored; above, the hue is kept
+        // (the brightest channel held at 1) and very bright light
+        // desaturates toward white.
+        shoulder: fn(c: vec3) -> vec3 {
+            let x = max(c, vec3(0.0, 0.0, 0.0))
+            let m = max(x.x, max(x.y, x.z))
+            if m <= 1.0 {
+                return x
+            }
+            let white = clamp((m - 1.0) / 8.0, 0.0, 1.0)
+            return mix(x / m, vec3(1.0, 1.0, 1.0), white * white)
+        }
         curve: fn(c: vec3) -> vec3 {
             let m = self.tone.x
+            if m > 5.5 {
+                return self.shoulder(c)
+            }
             if m < 1.5 {
                 return clamp(c, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
             }
@@ -138,6 +154,9 @@ pub enum ToneCurve {
     Aces,
     Agx,
     Filmic,
+    /// Identity up to 1, then hue-keeping with a roll to white (the HDR
+    /// Motion frame's default: its ordinary colours show unchanged).
+    Shoulder,
 }
 
 impl ToneCurve {
@@ -149,6 +168,7 @@ impl ToneCurve {
             ToneCurve::Aces => 3.0,
             ToneCurve::Agx => 4.0,
             ToneCurve::Filmic => 5.0,
+            ToneCurve::Shoulder => 6.0,
         }
     }
 }

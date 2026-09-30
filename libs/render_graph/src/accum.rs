@@ -457,6 +457,17 @@ impl Accumulator {
         self.last_chain.iter().map(|&i| self.slots[i].pass.draw_pass_id()).collect()
     }
 
+    /// Every pass object the accumulator records with (for a host that
+    /// re-attaches by id).
+    pub fn pass_ids(&self) -> Vec<DrawPassId> {
+        self.slots.iter().map(|s| s.pass.draw_pass_id()).collect()
+    }
+
+    /// One of the accumulator's passes by id.
+    pub fn draw_pass(&self, id: DrawPassId) -> Option<&DrawPass> {
+        self.slots.iter().map(|s| &s.pass).find(|p| p.draw_pass_id() == id)
+    }
+
     /// The last pass of the last recorded chain (the host keeps it
     /// attached while it paints).
     pub fn last_pass(&self) -> Option<&DrawPass> {

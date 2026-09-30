@@ -68,13 +68,13 @@ pub type PassValues = Vec<[f32; 4]>;
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     bloom::script_mod(vm);
     script_mod_passes(vm);
-    tonemap::script_mod(vm);
     composite::script_mod(vm)
 }
 
 #[cfg(feature = "gpu")]
-/// Register the pass and accumulator shaders only (a host without the
-/// Sandbox lane's bloom and composite), once per VM however many hosts ask.
+/// Register the pass, accumulator and tone-map shaders only (a host without
+/// the Sandbox lane's bloom and composite), once per VM however many hosts
+/// ask. Call after `makepad_widgets::script_mod`.
 pub fn script_mod_passes(vm: &mut ScriptVm) {
     let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
     let have = draw.is_some_and(|d| {
@@ -84,5 +84,6 @@ pub fn script_mod_passes(vm: &mut ScriptVm) {
     if !have {
         program::script_mod(vm);
         accum::script_mod(vm);
+        tonemap::script_mod(vm);
     }
 }
