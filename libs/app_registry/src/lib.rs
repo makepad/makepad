@@ -466,9 +466,9 @@ mod tests {
         assert_eq!(find_by_bin("makepad-app-mixer").unwrap().id, "mixer");
         assert!(find("nonesuch").is_none() && find_by_bin("nonesuch").is_none());
         let stage = find("stage").unwrap();
-        assert!(!stage.menu_visible && !stage.wm_launchable);
+        assert!(stage.menu_visible && stage.wm_launchable);
         let amp = find("amp").unwrap();
-        assert!(!amp.menu_visible && !amp.wm_launchable);
+        assert!(amp.menu_visible && amp.wm_launchable);
         assert_eq!(find_by_bin("makepad-amp").unwrap().id, "amp");
         // The commercial repository's apps sit in its checkout inside Makepad.
         for id in ["scope", "stage", "amp"] {

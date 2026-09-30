@@ -658,6 +658,8 @@ pub struct ClientSlot {
     pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
+    /// Registered through wm-start; its launcher owns the process.
+    pub external: bool,
 }
 
 impl ClientSlot {
@@ -689,6 +691,7 @@ impl ClientSlot {
             linked_at: None,
             closing: None,
             pane: false,
+            external: false,
         }
     }
 }
@@ -1059,6 +1062,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         linked_at: None,
         closing: None,
         pane: false,
+        external: false,
     }
 }
 
@@ -1308,6 +1312,8 @@ mod tests {
                 "Fab",
                 "Studio",
                 "Scope",
+                "Stage",
+                "Amp",
             ]
             .map(str::to_string)
         );
@@ -1329,7 +1335,7 @@ mod tests {
         }
         // Builder-only registry rows are not WM clients, and hidden entries
         // resolve by id only, never by binary.
-        for id in ["wm", "wm-all", "ai-hub", "stage"] {
+        for id in ["wm", "wm-all", "ai-hub"] {
             assert!(find_app(id).is_none(), "{} must not be launchable by the WM", id);
         }
         assert!(find_app("splash").is_some());
