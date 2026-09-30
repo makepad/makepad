@@ -105,6 +105,17 @@ impl TextLayout {
     }
 }
 
+/// An outline sink that keeps nothing (the outliner's box is the answer).
+struct NoOutline;
+
+impl rustybuzz::ttf_parser::OutlineBuilder for NoOutline {
+    fn move_to(&mut self, _: f32, _: f32) {}
+    fn line_to(&mut self, _: f32, _: f32) {}
+    fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {}
+    fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+    fn close(&mut self) {}
+}
+
 fn features(style: &TextStyle) -> Vec<rustybuzz::Feature> {
     style.features.iter().filter_map(|f| f.parse::<rustybuzz::Feature>().ok()).collect()
 }
@@ -151,7 +162,10 @@ pub fn layout(font: &OutlineFont, text: &str, style: &TextStyle) -> TextLayout {
                 let gx = pen + pos.x_offset as f32 * k;
                 let gy = y + pos.y_offset as f32 * k;
                 let id = rustybuzz::ttf_parser::GlyphId(info.glyph_id as u16);
-                let ink = face.glyph_bounding_box(id).map_or([gx, gy, gx, gy], |r| [gx + r.x_min as f32 * k, gy + r.y_min as f32 * k, gx + r.x_max as f32 * k, gy + r.y_max as f32 * k]);
+                // The ink box as outlined at the font's axis values (the
+                // stored box is the default instance's, or absent in a
+                // variable font).
+                let ink = face.outline_glyph(id, &mut NoOutline).or_else(|| face.glyph_bounding_box(id)).map_or([gx, gy, gx, gy], |r| [gx + r.x_min as f32 * k, gy + r.y_min as f32 * k, gx + r.x_max as f32 * k, gy + r.y_max as f32 * k]);
                 let mut advance = pos.x_advance as f32 * k;
                 if i + 1 < n {
                     advance += tracking;
@@ -198,6 +212,9 @@ mod tests {
     #[test]
     fn variable_width_changes_layout_and_features_apply() {
         let f = test_font("RobotoFlex.ttf");
+        let wide_ink = layout(&f.with_axes(&[("wdth", 151.0), ("wght", 900.0)]), "FOOM", &TextStyle { size: 100.0, ..TextStyle::default() });
+        assert!(wide_ink.glyphs.iter().all(|g| g.has_ink()), "variable glyphs have ink boxes at any axis values");
+        assert!(wide_ink.ink().unwrap()[2] > layout(&f.with_axes(&[("wdth", 25.0), ("wght", 900.0)]), "FOOM", &TextStyle { size: 100.0, ..TextStyle::default() }).ink().unwrap()[2]);
         let style = TextStyle { size: 100.0, ..TextStyle::default() };
         let narrow = layout(&f.with_axes(&[("wdth", 25.0)]), "UPPING", &style).width();
         let wide = layout(&f.with_axes(&[("wdth", 151.0)]), "UPPING", &style).width();
