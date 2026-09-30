@@ -244,11 +244,20 @@ fn check_generation<R: GenRef>(
     type_name: &str,
 ) {
     if slots_gen != ref_gen {
-        panic!(
-            "GenVec<{}> use-after-free detected! index={} ref_gen={} slot_gen={}",
-            type_name, index, ref_gen, slots_gen
-        );
+        use_after_free_panic(slots_gen, ref_gen, index, type_name);
     }
+}
+
+/// The panic itself stays out of line: every heap access inlines only the
+/// generation compare.
+#[cfg(feature = "check_gen")]
+#[cold]
+#[inline(never)]
+fn use_after_free_panic(slots_gen: Generation, ref_gen: Generation, index: u32, type_name: &str) -> ! {
+    panic!(
+        "GenVec<{}> use-after-free detected! index={} ref_gen={} slot_gen={}",
+        type_name, index, ref_gen, slots_gen
+    );
 }
 
 /// An index past len can't come from this GenVec (len never shrinks), so it is

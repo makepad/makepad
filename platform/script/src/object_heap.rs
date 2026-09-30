@@ -804,7 +804,12 @@ impl ScriptHeap {
                 break;
             }
         }
-        // alright nothing found
+        self.scope_value_not_found(root_ptr, key, trap)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scope_value_not_found(&self, root_ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
         script_err_not_found!(
             trap,
             "variable {} not found in scope{}",

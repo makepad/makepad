@@ -224,7 +224,7 @@ impl ScriptThread {
         if let Some(v) = self.slots.get(self.slot_base + index as usize) {
             return *v;
         }
-        script_err_stack!(self.trap, "slot {} out of frame", index)
+        self.slot_out_of_frame(index)
     }
 
     #[inline]
@@ -233,8 +233,22 @@ impl ScriptThread {
         if let Some(v) = self.slots.get_mut(at) {
             *v = value;
         } else {
-            script_err_stack!(self.trap, "slot {} out of frame", index);
+            self.slot_out_of_frame(index);
         }
+    }
+
+    // The error paths of the operand and slot accessors stay out of line,
+    // so the accessors themselves inline into every opcode handler.
+    #[cold]
+    #[inline(never)]
+    fn slot_out_of_frame(&mut self, index: u32) -> ScriptValue {
+        script_err_stack!(self.trap, "slot {} out of frame", index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_empty_stack(&mut self, what: &'static str) -> ScriptValue {
+        script_err_stack!(self.trap, "{} on empty stack", what)
     }
 
     #[inline]
@@ -261,7 +275,7 @@ impl ScriptThread {
             }
             return val;
         } else {
-            script_err_stack!(self.trap, "pop_stack_resolved on empty stack")
+            self.pop_empty_stack("pop_stack_resolved")
         }
     }
 
@@ -309,7 +323,7 @@ impl ScriptThread {
         if let Some(value) = self.stack.pop() {
             return value;
         } else {
-            script_err_stack!(self.trap, "pop_stack_value on empty stack")
+            self.pop_empty_stack("pop_stack_value")
         }
     }
 
