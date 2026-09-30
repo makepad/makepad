@@ -185,17 +185,30 @@ pub fn split_phrases(notes: &[Note], gap: f32) -> Vec<Vec<Note>> {
     out
 }
 
-/// Pitch accuracy of rendered audio against its f0 curve: mean |cents| over
-/// frames both call voiced (steady parts), and how many frames were compared.
-pub fn f0_error_cents(audio: &[f32], f0: &[f32]) -> (f32, usize) {
+/// Pitch accuracy of rendered audio against its f0 curve, by YIN on the
+/// output, over frames both call voiced (steady parts): (mean |cents| of the
+/// frames within 50 cents, the fraction of gross errors (> 50 cents: YIN
+/// octave or subharmonic picks, or real errors), frames compared).
+pub fn f0_error_stats(audio: &[f32], f0: &[f32]) -> (f32, f32, usize) {
     let est = dsp::f0_yin(audio, 55.0, 1400.0);
-    let mut sum = 0.0;
-    let mut n = 0;
+    let (mut sum, mut fine, mut n) = (0.0, 0, 0);
     for t in 2..f0.len().min(est.len()).saturating_sub(2) {
         if f0[t] > 0.0 && est[t] > 0.0 && f0[t - 2] > 0.0 && f0[t + 2] > 0.0 {
-            sum += (1200.0 * (est[t] / f0[t]).log2()).abs();
+            let c = (1200.0 * (est[t] / f0[t]).log2()).abs();
             n += 1;
+            if c <= 50.0 {
+                sum += c;
+                fine += 1;
+            }
         }
     }
-    (if n > 0 { sum / n as f32 } else { f32::NAN }, n)
+    let mean = if fine > 0 { sum / fine as f32 } else { f32::NAN };
+    let gross = if n > 0 { (n - fine) as f32 / n as f32 } else { f32::NAN };
+    (mean, gross, n)
+}
+
+/// Mean |cents| over the non-gross frames and how many frames were compared.
+pub fn f0_error_cents(audio: &[f32], f0: &[f32]) -> (f32, usize) {
+    let (m, _, n) = f0_error_stats(audio, f0);
+    (m, n)
 }

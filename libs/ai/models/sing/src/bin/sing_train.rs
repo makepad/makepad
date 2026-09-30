@@ -112,6 +112,22 @@ mod gpu {
 
 /// One training loop over batches from `next`, with `loss` building the graph.
 #[allow(clippy::too_many_arguments)]
+/// Add the discriminators (fresh) to a checkpoint that has none.
+fn add_disc(opt: &mut Optimizer) {
+    if opt.params.has("disc.r0.post.w") {
+        return;
+    }
+    let mut rng = Rng::new(11);
+    let mut dp = Params::new();
+    makepad_ai_sing::disc::declare(&mut dp, &mut rng);
+    for (n, t) in dp.names.iter().zip(&dp.vals) {
+        opt.params.insert(n, (**t).clone());
+        opt.m.push(vec![0.0; t.len()]);
+        opt.v.push(vec![0.0; t.len()]);
+        opt.ema.push(t.data.clone());
+    }
+}
+
 fn fresh_schedule(opt: &mut Optimizer) {
     opt.cfg.start = opt.step;
 }
@@ -232,9 +248,10 @@ fn run<B>(
 /// adversarial + feature matching; discriminator gradients dropped) and a
 /// discriminator update on the detached output.
 #[allow(clippy::too_many_arguments)]
-fn run_gan(
+fn run_gan<B>(
     opt: &mut Optimizer, use_gpu: bool, steps: usize, log_every: usize, save_every: usize, out: &Path,
-    config: &[(String, String)], rx: &Receiver<VocBatch>, voc: &VocoderConfig, on_save: &dyn Fn(&Optimizer, usize),
+    config: &[(String, String)], rx: &Receiver<B>, g_loss: &dyn Fn(&mut Graph, &B, &mut Rng) -> train::GanLosses,
+    on_save: &dyn Fn(&Optimizer, usize),
 ) {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if use_gpu {
@@ -244,6 +261,9 @@ fn run_gan(
     let _ = use_gpu;
     fresh_schedule(opt);
     let is_d: Vec<bool> = opt.params.names.iter().map(|n| n.starts_with("disc.")).collect();
+    // A frozen acoustic model (V2) is in the graph but never updated.
+    let frozen: Vec<bool> = opt.params.names.iter().map(|n| n.starts_with("ac.")).collect();
+    let mut rng = Rng::new(opt.step as u64 + 29);
     let mut t_log = Instant::now();
     let start_step = opt.step;
     while opt.step < start_step + steps {
@@ -261,10 +281,10 @@ fn run_gan(
             };
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             let mut g = Graph::new(&opt.params, true);
-            let l = train::vocoder_gan_loss(&mut g, voc, &batch);
+            let l = g_loss(&mut g, &batch, &mut rng);
             let mut grads = g.backward(l.total);
             for (i, d) in is_d.iter().enumerate() {
-                if *d {
+                if *d || frozen[i] {
                     grads[i] = None;
                 }
             }
@@ -314,52 +334,6 @@ fn run_gan(
             opt.save(&out.join("voc"), config).expect("checkpoint");
             on_save(opt, opt.step);
         }
-    }
-}
-
-fn load_items(dirs: &[String]) -> Vec<data::Item> {
-    let mut shards = Vec::new();
-    for d in dirs {
-        for e in std::fs::read_dir(d).unwrap_or_else(|e| panic!("{d}: {e}")).flatten() {
-            if e.path().extension().map(|x| x == "mksdat").unwrap_or(false) {
-                shards.push(e.path());
-            }
-        }
-    }
-    shards.sort();
-    let items = std::sync::Mutex::new(Vec::new());
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..16 {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= shards.len() {
-                    return;
-                }
-                let v = data::read_shard(&shards[i]).unwrap();
-                items.lock().unwrap().extend(v);
-            });
-        }
-    });
-    let mut v = items.into_inner().unwrap();
-    v.sort_by_key(|it| (it.speaker, it.audio.len()));
-    v
-}
-
-/// A vocoder crop: `t` frames from a random item (skipping mostly silent crops).
-fn voc_crop(items: &[data::Item], t: usize, rng: &mut Rng) -> (Vec<f32>, Vec<f32>, f32) {
-    loop {
-        let it = &items[rng.below(items.len())];
-        if it.frames() < t + 2 {
-            continue;
-        }
-        let s = rng.below(it.frames() - t);
-        let audio: Vec<f32> = it.audio[s * HOP..(s + t) * HOP].iter().map(|v| *v as f32 / 32768.0).collect();
-        let rms = (audio.iter().map(|v| v * v).sum::<f32>() / audio.len() as f32).sqrt();
-        if rms < 1e-3 {
-            continue;
-        }
-        return (audio, it.f0[s..s + t].to_vec(), it.band_hz);
     }
 }
 
@@ -497,7 +471,7 @@ fn sample_render(dir: &Path, step: usize, ac_p: Option<&Params>, voc_p: Option<&
         let src = vocoder::SourceCtl::new(&r.f0, t, 3);
         let w = vocoder::forward(&mut g, &c.voc, m, &r.f0, t, &src);
         let audio = g.host(w);
-        let (cents, frames) = makepad_ai_sing::cantor::f0_error_cents(&audio, &r.f0);
+        let (cents, gross, frames) = makepad_ai_sing::cantor::f0_error_stats(&audio, &r.f0);
         // Mel L1 of the copy against the reference.
         let mut g2 = Graph::new(&c.params, false);
         let a = train::target_mel(&mut g2, &audio, 1, t);
@@ -506,7 +480,7 @@ fn sample_render(dir: &Path, step: usize, ac_p: Option<&Params>, voc_p: Option<&
         let mel_l1 = g2.host(l)[0] * acoustic::MEL_STD;
         write_wav(&dir.join(format!("copy-{step:07}.wav")), &audio);
         write_wav(&dir.join("reference.wav"), &r.audio);
-        eprintln!("[sample] step {step}: vocoder copy-synthesis f0 error {cents:.2} cents over {frames} frames, log-mel L1 {mel_l1:.3}");
+        eprintln!("[sample] step {step}: vocoder copy-synthesis f0 error {cents:.2} cents ({:.1}% gross) over {frames} frames, log-mel L1 {mel_l1:.3}", gross * 100.0);
     }
     if ac_p.is_some() {
         c.durations_trained = true;
@@ -516,8 +490,8 @@ fn sample_render(dir: &Path, step: usize, ac_p: Option<&Params>, voc_p: Option<&
         );
         let (audio, phrases) = c.render(&line, &makepad_ai_sing::RenderOpts::default());
         for p in &phrases {
-            let (cents, n) = makepad_ai_sing::cantor::f0_error_cents(&p.audio, &p.frames.f0);
-            eprintln!("[sample] step {step}: sung line f0 error {cents:.2} cents over {n} frames");
+            let (cents, gross, n) = makepad_ai_sing::cantor::f0_error_stats(&p.audio, &p.frames.f0);
+            eprintln!("[sample] step {step}: sung line f0 error {cents:.2} cents ({:.1}% gross) over {n} frames", gross * 100.0);
         }
         write_wav(&dir.join(format!("line-{step:07}.wav")), &audio);
     }
@@ -631,16 +605,25 @@ fn main() {
             }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), Some(&voc_params), &acc, &vc, None));
         }
         "voc" => {
-            let items = Arc::new(load_items(&a.all("--data")));
-            let hours: f64 = items.iter().map(|i| i.audio.len() as f64).sum::<f64>() / SR as f64 / 3600.0;
-            eprintln!("{} items, {hours:.1} h", items.len());
-            let reference = items.iter().find(|i| i.kind == Kind::Sung && i.frames() > 400).or(items.first()).map(|i| {
-                let t = i.frames().min(600);
-                Aligned { tokens: vec![], dur: vec![], notes: vec![], f0: i.f0[..t].to_vec(), vel: vec![], audio: i.audio_f32()[..t * HOP].to_vec(), singer: 0, band: i.band_hz }
+            let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
+            eprintln!("{} items, {:.1} h", store.items.len(), store.hours());
+            let reference = store.items.iter().find(|r| r.kind == Kind::Sung && r.frames > 400).or(store.items.first()).map(|r| {
+                let t = (r.frames as usize).min(600);
+                Aligned { tokens: vec![], dur: vec![], notes: vec![], f0: store.f0(r, 0, t), vel: vec![], audio: store.audio(r, 0, t), singer: 0, band: r.band_hz }
             });
-            let it2 = items.clone();
+            let long: Vec<usize> = (0..store.items.len()).filter(|i| store.items[*i].frames as usize >= frames + 2).collect();
+            let st2 = store.clone();
             let rx = prefetch(workers, 8, 1, Arc::new(move |rng: &mut Rng| {
-                let crops: Vec<_> = (0..batch).map(|_| voc_crop(&it2, frames, rng)).collect();
+                let crops: Vec<_> = (0..batch).map(|_| loop {
+                    let r = &st2.items[long[rng.below(long.len())]];
+                    let s = rng.below(r.frames as usize - frames);
+                    let audio = st2.audio(r, s, frames);
+                    let rms = (audio.iter().map(|v| v * v).sum::<f32>() / audio.len().max(1) as f32).sqrt();
+                    if rms < 1e-3 || audio.len() < frames * HOP {
+                        continue;
+                    }
+                    break (audio, st2.f0(r, s, frames), r.band_hz);
+                }).collect();
                 train::voc_batch(&crops, frames, rng.next_u64())
             }));
             let mut opt = if a.flag("--resume") && out.join("voc.mksing").exists() {
@@ -663,29 +646,12 @@ fn main() {
                 sample_render(&outc, step, None, Some(&p), &acc, &vc, reference.as_ref())
             };
             if a.flag("--gan") {
-                // Add the discriminators to a reconstruction-only checkpoint.
-                if !opt.params.has("disc.r0.post.w") {
-                    let mut rng = Rng::new(11);
-                    let mut dp = Params::new();
-                    makepad_ai_sing::disc::declare(&mut dp, &mut rng);
-                    let mut o2 = Optimizer::new(opt.params.clone(), opt.cfg.clone());
-                    o2.step = opt.step;
-                    o2.m = opt.m.clone();
-                    o2.v = opt.v.clone();
-                    o2.ema = opt.ema.clone();
-                    for (n, t) in dp.names.iter().zip(&dp.vals) {
-                        o2.params.insert(n, (**t).clone());
-                        o2.m.push(vec![0.0; t.len()]);
-                        o2.v.push(vec![0.0; t.len()]);
-                        o2.ema.push(t.data.clone());
-                    }
-                    opt = o2;
-                }
+                add_disc(&mut opt);
                 opt.cfg.b1 = 0.8;
                 opt.cfg.b2 = 0.99;
                 opt.cfg.lr = a.num("--lr", 2e-4);
                 opt.cfg.start = opt.step;
-                run_gan(&mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &voc_c, &save);
+                run_gan(&mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| train::vocoder_gan_loss(g, &voc_c, b), &save);
             } else {
                 run("voc", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| {
                     let l = train::vocoder_loss(g, &voc_c, b);
@@ -693,19 +659,77 @@ fn main() {
                 }, &save);
             }
         }
+        "gta" => {
+            // V2: sing_train gta --data DIR --acoustic A.ema.mksing --resume-from VOC_STEM
+            let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
+            let max_frames = a.num("--ac-frames", 400usize);
+            let sung: Vec<Aligned> = store.items.iter().filter(|r| r.kind == Kind::Sung).filter_map(|r| Aligned::from_vowel_item(&store.item(r))).collect();
+            eprintln!("{} sung items for GTA", sung.len());
+            let sung = Arc::new(sung);
+            let rx = prefetch(workers, 8, 3, Arc::new(move |rng: &mut Rng| {
+                let v: Vec<Aligned> = (0..batch).map(|_| sung[rng.below(sung.len())].crop(max_frames, rng)).collect();
+                train::ac_batch(&v)
+            }));
+            let from = PathBuf::from(a.get("--resume-from").expect("--resume-from <vocoder checkpoint stem>"));
+            let mut opt = Optimizer::load(&from, oc.clone()).expect("vocoder checkpoint");
+            add_disc(&mut opt);
+            let acw = makepad_ai_sing::weights::read(Path::new(&a.get("--acoustic").expect("--acoustic"))).unwrap();
+            for (n, t) in acw.params.names.iter().zip(&acw.params.vals) {
+                if n.starts_with("ac.") && !opt.params.has(n) {
+                    opt.params.insert(n, (**t).clone());
+                    opt.m.push(vec![0.0; t.len()]);
+                    opt.v.push(vec![0.0; t.len()]);
+                    opt.ema.push(t.data.clone());
+                }
+            }
+            opt.cfg.b1 = 0.8;
+            opt.cfg.b2 = 0.99;
+            opt.cfg.lr = a.num("--lr", 1e-4);
+            let (acc, vc) = (ac.clone(), voc.clone());
+            let outc = out.clone();
+            let save = |o: &Optimizer, step: usize| {
+                let p = o.ema_params();
+                let mut q = Params::new();
+                for (n, t) in p.names.iter().zip(&p.vals) {
+                    if n.starts_with("voc.") {
+                        q.insert(n, (**t).clone());
+                    }
+                }
+                let mut ap = Params::new();
+                for (n, t) in p.names.iter().zip(&p.vals) {
+                    if n.starts_with("ac.") {
+                        ap.insert(n, (**t).clone());
+                    }
+                }
+                sample_render(&outc, step, Some(&ap), Some(&q), &acc, &vc, None)
+            };
+            run_gan(&mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &AcBatch, r| train::vocoder_gta_loss(g, &ac, &voc, b, r), &save);
+        }
         "ac" => {
-            let items = load_items(&a.all("--data"));
+            let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
             let max_frames = a.num("--ac-frames", 600usize);
-            let sung: Vec<Aligned> = items.iter().filter_map(Aligned::from_vowel_item).collect();
-            let speech: Vec<Aligned> = items.iter().filter_map(|i| Aligned::from_speech_item(i, a.num("--speech-frames", 1000usize))).collect();
-            drop(items);
+            let speech_frames = a.num("--speech-frames", 1000usize);
+            let sung: Vec<Aligned> = store.items.iter().filter(|r| r.kind == Kind::Sung).filter_map(|r| Aligned::from_vowel_item(&store.item(r))).collect();
+            let speech: Vec<usize> = (0..store.items.len())
+                .filter(|i| {
+                    let r = &store.items[*i];
+                    r.kind == Kind::Speech && r.frames as usize <= speech_frames && r.frames >= 2 * r.tokens
+                })
+                .collect();
             let speech_frac: f32 = a.num("--speech-frac", if sung.is_empty() { 1.0 } else if speech.is_empty() { 0.0 } else { 0.7 });
-            eprintln!("{} sung items, {} speech items; speech batches {:.0}%", sung.len(), speech.len(), speech_frac * 100.0);
-            let (sung, speech) = (Arc::new(sung), Arc::new(speech));
+            eprintln!("{} sung items, {} speech items ({:.1} h in the store); speech batches {:.0}%", sung.len(), speech.len(), store.hours(), speech_frac * 100.0);
+            let sung = Arc::new(sung);
+            let st2 = store.clone();
             let rx = prefetch(workers, 8, 2, Arc::new(move |rng: &mut Rng| {
                 // Batches are all speech (aligned on the fly) or all sung.
-                let pool = if !speech.is_empty() && (sung.is_empty() || rng.unit() < speech_frac) { &speech } else { &sung };
-                let v: Vec<Aligned> = (0..batch).map(|_| pool[rng.below(pool.len())].crop(max_frames, rng)).collect();
+                let v: Vec<Aligned> = if !speech.is_empty() && (sung.is_empty() || rng.unit() < speech_frac) {
+                    (0..batch).map(|_| {
+                        let r = &st2.items[speech[rng.below(speech.len())]];
+                        Aligned::from_speech_item(&st2.item(r), speech_frames).unwrap()
+                    }).collect()
+                } else {
+                    (0..batch).map(|_| sung[rng.below(sung.len())].crop(max_frames, rng)).collect()
+                };
                 train::ac_batch(&v)
             }));
             let mut opt = if a.flag("--resume") && out.join("ac.mksing").exists() {

@@ -197,3 +197,152 @@ mod tests {
         assert_eq!(n[45], 62.0);
     }
 }
+
+/// Where one item sits in its shard, and its sizes.
+#[derive(Clone, Copy, Debug)]
+pub struct ItemRef {
+    pub shard: u32,
+    pub offset: u64,
+    pub kind: Kind,
+    pub speaker: u32,
+    pub band_hz: f32,
+    pub samples: u32,
+    pub frames: u32,
+    pub tokens: u32,
+    pub notes: u32,
+}
+
+impl ItemRef {
+    fn tokens_at(&self) -> u64 {
+        self.offset + 28
+    }
+    fn notes_at(&self) -> u64 {
+        self.tokens_at() + self.tokens as u64
+    }
+    fn f0_at(&self) -> u64 {
+        self.notes_at() + 4 * self.notes as u64
+    }
+    fn audio_at(&self) -> u64 {
+        self.f0_at() + 4 * self.frames as u64
+    }
+}
+
+/// Shards indexed, items read on demand (positioned reads; the page cache
+/// keeps what is hot), so a corpus larger than memory streams.
+pub struct Store {
+    files: Vec<std::fs::File>,
+    pub items: Vec<ItemRef>,
+}
+
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], at: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.read_exact_at(buf, at)
+}
+
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], mut at: u64) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut done = 0;
+    while done < buf.len() {
+        let n = f.seek_read(&mut buf[done..], at)?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));
+        }
+        done += n;
+        at += n as u64;
+    }
+    Ok(())
+}
+
+impl Store {
+    /// Index every `.mksdat` shard in `dirs` (reads only the item headers).
+    pub fn open(dirs: &[String]) -> io::Result<Store> {
+        let mut paths = Vec::new();
+        for d in dirs {
+            for e in std::fs::read_dir(d)?.flatten() {
+                if e.path().extension().map(|x| x == "mksdat").unwrap_or(false) {
+                    paths.push(e.path());
+                }
+            }
+        }
+        paths.sort();
+        let mut files = Vec::new();
+        let mut items = Vec::new();
+        for (si, p) in paths.iter().enumerate() {
+            let f = std::fs::File::open(p)?;
+            let len = f.metadata()?.len();
+            let mut m = [0u8; 8];
+            read_at(&f, &mut m, 0)?;
+            if &m != MAGIC {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: not an MKSDAT01 shard", p.display())));
+            }
+            let mut at = 8u64;
+            let mut h = [0u8; 28];
+            while at + 28 <= len {
+                read_at(&f, &mut h, at)?;
+                let u = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
+                let kind = match u(0) {
+                    0 => Kind::Speech,
+                    1 => Kind::Sung,
+                    _ => Kind::Audio,
+                };
+                let r = ItemRef {
+                    shard: si as u32,
+                    offset: at,
+                    kind,
+                    speaker: u(1),
+                    samples: u(2),
+                    frames: u(3),
+                    tokens: u(4),
+                    notes: u(5),
+                    band_hz: f32::from_le_bytes(h[24..28].try_into().unwrap()),
+                };
+                at = r.audio_at() + 2 * r.samples as u64;
+                items.push(r);
+            }
+            files.push(f);
+        }
+        Ok(Store { files, items })
+    }
+
+    fn bytes(&self, r: &ItemRef, at: u64, n: usize) -> Vec<u8> {
+        let mut b = vec![0u8; n];
+        read_at(&self.files[r.shard as usize], &mut b, at).expect("shard read");
+        b
+    }
+
+    fn f32s(&self, r: &ItemRef, at: u64, n: usize) -> Vec<f32> {
+        self.bytes(r, at, n * 4).chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    }
+
+    pub fn tokens(&self, r: &ItemRef) -> Vec<Ph> {
+        self.bytes(r, r.tokens_at(), r.tokens as usize)
+    }
+
+    pub fn notes(&self, r: &ItemRef) -> Vec<f32> {
+        self.f32s(r, r.notes_at(), r.notes as usize)
+    }
+
+    /// f0 of frames `from..from + n`.
+    pub fn f0(&self, r: &ItemRef, from: usize, n: usize) -> Vec<f32> {
+        self.f32s(r, r.f0_at() + 4 * from as u64, n)
+    }
+
+    /// Audio of frames `from..from + n` (n * HOP samples, as f32).
+    pub fn audio(&self, r: &ItemRef, from: usize, n: usize) -> Vec<f32> {
+        let s0 = from * HOP;
+        let cnt = (n * HOP).min(r.samples as usize - s0);
+        self.bytes(r, r.audio_at() + 2 * s0 as u64, cnt * 2).chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).collect()
+    }
+
+    /// The whole item.
+    pub fn item(&self, r: &ItemRef) -> Item {
+        let audio = self.bytes(r, r.audio_at(), 2 * r.samples as usize).chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        Item { kind: r.kind, speaker: r.speaker, band_hz: r.band_hz, tokens: self.tokens(r), notes: self.notes(r), f0: self.f0(r, 0, r.frames as usize), audio }
+    }
+
+    pub fn hours(&self) -> f64 {
+        self.items.iter().map(|r| r.samples as f64).sum::<f64>() / SR as f64 / 3600.0
+    }
+}

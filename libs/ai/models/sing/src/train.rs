@@ -344,6 +344,57 @@ pub fn vocoder_gan_loss(g: &mut Graph, cfg: &VocoderConfig, batch: &VocBatch) ->
     GanLosses { total, stft: r.stft, mel: r.mel, adv, fm, wave: r.wave, real }
 }
 
+/// V2: the vocoder on the acoustic model's own (teacher-forced, refined)
+/// mels for aligned sung items, against the real audio. The acoustic model
+/// is frozen (its parameters are in the graph; the caller drops their grads).
+pub fn vocoder_gta_loss(g: &mut Graph, ac: &AcousticConfig, voc: &VocoderConfig, batch: &AcBatch, rng: &mut Rng) -> GanLosses {
+    let (b, n, t) = (batch.b, batch.n, batch.t);
+    let rows = b * t;
+    let enc = acoustic::encode(g, ac, &batch.tokens, &batch.singers, n, Some(batch.tok_lens.clone()));
+    let mut f0f = vec![0.0; rows * FEATS];
+    for r in 0..rows {
+        if batch.f0[r] > 0.0 {
+            f0f[r * FEATS + 5] = (batch.f0[r] / dsp::F0_REF).ln();
+            f0f[r * FEATS + 6] = 1.0;
+            if batch.notes[r] > 0.0 {
+                f0f[r * FEATS + 7] = ((hz_to_midi(batch.f0[r]) - batch.notes[r]) / 2.0).clamp(-3.0, 3.0);
+            }
+        }
+    }
+    let idx = RowIndex::Host(batch.frame_idx.clone());
+    let dec = acoustic::decode(g, ac, enc.enc, &idx, t, Some(batch.frame_lens.clone()), &batch.note_feats, &f0f);
+    // One refiner step from t0 = 0.6 (the render's shallow start, one step).
+    let coarse = g.detach(dec.mel);
+    let cond = g.detach(dec.cond);
+    let z = g.randn(rows, N_MEL, t, None, rng.next_u64());
+    let z = g.scale(z, 0.4);
+    let c6 = g.scale(coarse, 0.6);
+    let x = g.add(z, c6);
+    let v = acoustic::velocity(g, ac, x, &vec![0.6; b], cond);
+    let v = g.scale(v, 0.4);
+    let mel = g.add(x, v);
+    let mel = g.detach(mel);
+    let len = t * HOP;
+    let src = vocoder::SourceCtl::new(&batch.f0, t, rng.next_u64());
+    let wave = vocoder::forward(g, voc, mel, &batch.f0, t, &src);
+    let real = g.input(Tensor::batched(b * len, 1, batch.audio.clone(), len, None));
+    let mut terms = Vec::new();
+    for st in MR {
+        let mo = g.stft_mag(wave, st);
+        let mt = g.stft_mag(real, st);
+        let lo = g.log_eps(mo, 1e-5);
+        let lt = g.log_eps(mt, 1e-5);
+        terms.push((g.l1_loss(lo, lt, None, None), 1.0 / MR.len() as f32));
+    }
+    let stft = g.sum_scalars(&terms);
+    let mo = log_mel(g, wave);
+    let mt = log_mel(g, real);
+    let mel_l = g.l1_loss(mo, mt, None, None);
+    let (adv, fm) = crate::disc::g_losses(g, real, wave);
+    let total = g.sum_scalars(&[(stft, 20.0), (mel_l, 20.0), (adv, 1.0), (fm, 2.0)]);
+    GanLosses { total, stft, mel: mel_l, adv, fm, wave, real }
+}
+
 pub struct AcLosses {
     pub total: Id,
     pub mel: Id,

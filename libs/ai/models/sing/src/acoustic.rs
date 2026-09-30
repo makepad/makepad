@@ -31,7 +31,7 @@ pub struct AcousticConfig {
 impl AcousticConfig {
     /// The shipping size (~12.7 M parameters).
     pub fn base() -> Self {
-        AcousticConfig { d: 256, heads: 4, enc_layers: 4, dec_layers: 6, ffn: 1024, conv_k: 31, refine_layers: 8, refine_hidden: 768, singers: 64 }
+        AcousticConfig { d: 256, heads: 4, enc_layers: 4, dec_layers: 6, ffn: 1024, conv_k: 31, refine_layers: 8, refine_hidden: 768, singers: 2048 }
     }
 
     /// A tiny model for tests and first runs.

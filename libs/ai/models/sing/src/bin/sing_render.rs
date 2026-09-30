@@ -7,7 +7,7 @@
 //! which proves the pipeline end to end (the sound is noise-like until trained).
 
 use makepad_ai_sing::acoustic::AcousticConfig;
-use makepad_ai_sing::cantor::f0_error_cents;
+use makepad_ai_sing::cantor::f0_error_stats;
 use makepad_ai_sing::dsp::{wav_bytes, SR};
 use makepad_ai_sing::score::simple_line;
 use makepad_ai_sing::vocoder::VocoderConfig;
@@ -53,8 +53,8 @@ fn main() {
     let took = t.elapsed().as_secs_f32();
     eprintln!("rendered {secs:.2} s of audio in {:.0} ms ({:.1}x real time)", took * 1000.0, secs / took);
     for p in &phrases {
-        let (c, n) = f0_error_cents(&p.audio, &p.frames.f0);
-        eprintln!("phrase at {:.2} s: {} frames, {} tokens, f0 error {c:.1} cents over {n} frames", p.start, p.frames.len(), p.frames.tokens.len());
+        let (c, gross, n) = f0_error_stats(&p.audio, &p.frames.f0);
+        eprintln!("phrase at {:.2} s: {} frames, {} tokens, f0 error {c:.1} cents ({:.1}% gross) over {n} frames", p.start, p.frames.len(), p.frames.tokens.len(), gross * 100.0);
     }
     let peak = audio.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     let gain = if peak > 0.0 { 0.9 / peak } else { 1.0 };
