@@ -178,6 +178,12 @@ impl Residency for Res<'_> {
 }
 
 impl StreamState {
+    /// This frame's occlusion raster (the streamed city's big boxes); it
+    /// hides nothing when occlusion is off or nothing was rasterized.
+    pub(super) fn occluders(&self) -> &OcclusionRaster {
+        &self.raster
+    }
+
     fn slot(&mut self, piece: StreamPiece) -> &mut Slot {
         match piece {
             StreamPiece::Near(i) => &mut self.near[i as usize],
@@ -418,6 +424,10 @@ impl Renderer {
             for (_, lo, hi) in &candidates { raster.add_box(*lo, *hi); }
             raster.finish();
             stats.occluders = raster.occluders;
+        } else {
+            // No raster this frame: last frame's (another camera) must not
+            // hide anything the placed models test against it.
+            raster.occluders = 0;
         }
         stats.occlusion_us = ((Cx::monotonic_now() - t_occ) * 1e6) as u64;
         st.draw_list.clear();

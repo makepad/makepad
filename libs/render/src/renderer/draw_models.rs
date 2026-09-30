@@ -38,7 +38,7 @@ pub(super) struct ModelOrder {
 }
 
 impl ModelOrder {
-    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>) -> u64 {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>) -> u64 {
         // Model slot per instance, resolved once through a map: a linear
         // search per instance is O(instances x models), which a streamed or
         // prop-heavy world turns into milliseconds.
@@ -95,7 +95,21 @@ impl ModelOrder {
                 let root = &models[at].1;
                 let loaded = if lod == 0 { root } else { &root.lods[lod - 1].1 };
                 let m = vec3f(0.05, 0.05, 0.05);
-                let shown = !loaded.anim_parts.is_empty() || frustum.intersects_obb(root.min - m, root.max + m, &instances[i].transform);
+                let t = &instances[i].transform;
+                let shown = !loaded.anim_parts.is_empty() || frustum.intersects_obb(root.min - m, root.max + m, t) && !occluders.is_some_and(|r| {
+                    // Hidden behind the streamed city's occluders (the
+                    // raster its own chunks and props are tested against):
+                    // the copy's world box, tested the same way.
+                    let (mid, half) = ((root.min + root.max) * 0.5, (root.max - root.min) * 0.5 + m);
+                    let t = &t.v;
+                    let c = vec3f(t[0] * mid.x + t[4] * mid.y + t[8] * mid.z + t[12], t[1] * mid.x + t[5] * mid.y + t[9] * mid.z + t[13], t[2] * mid.x + t[6] * mid.y + t[10] * mid.z + t[14]);
+                    let e = vec3f(
+                        t[0].abs() * half.x + t[4].abs() * half.y + t[8].abs() * half.z,
+                        t[1].abs() * half.x + t[5].abs() * half.y + t[9].abs() * half.z,
+                        t[2].abs() * half.x + t[6].abs() * half.y + t[10].abs() * half.z,
+                    );
+                    r.occluded(c - e, c + e)
+                });
                 culled += !shown as u64;
                 shown
             });
@@ -209,7 +223,8 @@ impl Renderer {
         if matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key {
             let mut built = std::mem::take(&mut self.model_orders[which]);
             let chains = &self.model_lod_chains;
-            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum);
+            let occluders = self.stream.as_ref().map(|st| st.occluders());
+            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum, occluders);
             match lane {
                 WorldModelLane::Placed => stats.model_culled += culled,
                 WorldModelLane::Attachment => stats.world_attachment_culled += culled,
