@@ -36,9 +36,29 @@ pub const CHUNK: usize = 4096;
 /// [`CHUNK`]s, whose partials combine in order.
 pub const MIN_SPLIT: usize = 512;
 
-/// Whether a call of `count` elements runs split across threads.
+/// Whether a call of `count` elements may run split across threads (what
+/// admission checks buffer sizes for; [`split_threads`] decides how many
+/// threads it actually takes).
 pub(crate) fn splits(kernel: &Kernel, threads: usize, count: usize) -> bool {
     threads > 1 && kernel.parallel_safe && count > if kernel.reduce_init().1 == 0 { MIN_SPLIT } else { CHUNK }
+}
+
+/// Work one more thread must get before splitting pays: waking a parked
+/// worker and joining it costs about 10-20 us (measured with
+/// examples/bench_dispatch: a 4096-element multiply-add took 1.9 us on the
+/// caller and 22 us fanned out over 8 threads).
+pub const SPLIT_NS: f64 = 25_000.0;
+
+/// Threads a call of `count` elements runs on (1: the caller alone): one
+/// per SPLIT_NS of estimated work, at most `threads`. The estimate is the
+/// kernel's measured time per element (see [`Kernel::ns_per_element`]).
+/// The result never depends on it: any split gives the same bits.
+pub(crate) fn split_threads(kernel: &Kernel, threads: usize, count: usize, mode: Mode) -> usize {
+    if !splits(kernel, threads, count) {
+        return 1;
+    }
+    let ns = kernel.ns_per_element(mode) * count as f64;
+    ((ns / SPLIT_NS) as usize).clamp(1, threads)
 }
 
 /// The kernel prelude: hashing, noise, quaternions, matrices, curves and
@@ -68,6 +88,9 @@ pub struct Kernel {
     /// Admission's worst-case element estimate, computed on first admit
     /// (the job path stays allocation-free).
     pub(crate) admission: std::sync::OnceLock<crate::admission::ElementCost>,
+    /// Measured ns per element (f32 bits, a moving average; 0: none yet):
+    /// how many threads a call is worth.
+    speed: AtomicU32,
 }
 
 impl std::fmt::Debug for Kernel {
@@ -166,6 +189,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         #[cfg(target_arch = "aarch64")]
         neon,
         admission: std::sync::OnceLock::new(),
+        speed: AtomicU32::new(0),
     }))
 }
 
@@ -267,6 +291,35 @@ impl Kernel {
         return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.neon.as_ref().map_or(&[][..], |c| c.words()));
         #[cfg(not(target_arch = "aarch64"))]
         (&[], &[])
+    }
+
+    /// Estimated ns per element on one thread: the moving average of
+    /// native runs, or before any, the worst-case op count at about 0.03
+    /// ns per op for NEON code (0.1 for scalar, 20 for the interpreter).
+    pub fn ns_per_element(&self, mode: Mode) -> f64 {
+        let per_op = match mode {
+            Mode::Interp => return self.cost as f64 * 20.0,
+            Mode::Vector if self.simd() => 0.03,
+            _ => 0.1,
+        };
+        let s = f32::from_bits(self.speed.load(Ordering::Relaxed));
+        if s > 0.0 {
+            s as f64
+        } else {
+            self.cost as f64 * per_op
+        }
+    }
+
+    /// Records a native run of `count` elements on `threads` threads that
+    /// took `nanos` (one-thread-equivalent time per element, averaged).
+    pub(crate) fn observe(&self, count: usize, threads: usize, nanos: u64, mode: Mode) {
+        if mode == Mode::Interp || count < 256 {
+            return;
+        }
+        let per = (nanos as f64 * threads as f64 / count as f64) as f32;
+        let old = f32::from_bits(self.speed.load(Ordering::Relaxed));
+        let new = if old > 0.0 { old * 0.75 + per * 0.25 } else { per };
+        self.speed.store(new.to_bits(), Ordering::Relaxed);
     }
 
     /// Words of the read-only shared tables.
@@ -569,7 +622,7 @@ pub(crate) fn run_chunks(
 
 /// How a range of elements runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
+pub enum Mode {
     Interp,
     Scalar,
     /// NEON ×4 where the kernel has it, else scalar.
@@ -744,7 +797,10 @@ impl<'a> Call<'a> {
         let mode = if interp { Mode::Interp } else { self.native_mode(count) };
         self.ctx[K_COUNT as usize] = count as u32;
         let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
-        let (overflowed, host_error, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, if split { threads } else { 1 })?;
+        let t = split_threads(self.kernel, threads, count, mode);
+        let t1 = std::time::Instant::now();
+        let (overflowed, host_error, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, t)?;
+        self.kernel.observe(count, t, t1.elapsed().as_nanos() as u64, mode);
         let lanes = self.kernel.reduce_init().1;
         Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), nanos: t0.elapsed().as_nanos() as u64 })
     }

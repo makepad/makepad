@@ -631,7 +631,10 @@ impl Job {
             self.cells.resize_with(chunks, ChunkCell::default);
         }
         self.ctx[K_COUNT as usize] = count as u32;
-        let (overflowed, host_error, reduced) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, if split { threads } else { 1 })?;
+        let t = crate::kernel::split_threads(&self.kernel, threads, count, mode);
+        let t1 = Instant::now();
+        let (overflowed, host_error, reduced) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, t)?;
+        self.kernel.observe(count, t, t1.elapsed().as_nanos() as u64, mode);
         let lanes = self.kernel.reduce_parts().1;
         self.stats.elements = count;
         self.stats.overflowed = overflowed;
