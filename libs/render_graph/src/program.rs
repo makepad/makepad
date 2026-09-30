@@ -167,6 +167,9 @@ impl Programs {
         }
         let code = decl.source();
         let label = decl.label.clone();
+        let file = format!("graph://pass/{:016x}", id.0);
+        // Errors name the document's lines where the pass's code is written.
+        let at = |line: u32| decl.locate(line);
         let made = cx.try_with_vm(|vm| {
             let evaluated = EVALUATED.with(|e| e.borrow().get(&id).cloned());
             let v: ScriptValue = match evaluated {
@@ -174,11 +177,11 @@ impl Programs {
                 Some(Err(e)) => return Err(e),
                 None => {
                     vm.bx.captured_errors = Some(Vec::new());
-                    let v = vm.eval(ScriptMod { file: format!("graph://pass/{:016x}", id.0), code, ..Default::default() });
+                    let v = vm.eval(ScriptMod { file: file.clone(), code, ..Default::default() });
                     let errors = vm.take_errors();
                     let made = match v.as_object() {
                         Some(obj) if errors.is_empty() && !v.is_err() => Ok(vm.bx.heap.new_object_ref(obj)),
-                        _ => Err(format!("{label} did not compile: {}", errors.join("; "))),
+                        _ => Err(format!("{label} did not compile: {}", errors.iter().map(|e| located(e, &file, &at)).collect::<Vec<_>>().join("; "))),
                     };
                     EVALUATED.with(|e| e.borrow_mut().insert(id, made.clone()));
                     v
@@ -206,4 +209,19 @@ impl Programs {
     pub fn retain(&mut self, keep: &[ProgramId]) {
         self.compiled.retain(|k, _| keep.contains(k));
     }
+}
+
+
+/// `error` with its `file:line:col` in the generated pass source replaced by
+/// where that line is written in the document (`at`), when it is.
+fn located(error: &str, file: &str, at: &dyn Fn(u32) -> Option<crate::pass::CodeAt>) -> String {
+    let Some(i) = error.find(file) else { return error.to_string() };
+    let rest = &error[i + file.len()..];
+    let mut parts = rest.splitn(3, ':');
+    let (Some(""), Some(line)) = (parts.next(), parts.next()) else { return error.to_string() };
+    let Ok(line) = line.parse::<u32>() else { return error.to_string() };
+    let tail = parts.next().unwrap_or("");
+    let col_len = tail.chars().take_while(|c| c.is_ascii_digit()).count();
+    let Some(doc) = at(line) else { return error.to_string() };
+    format!("{}{}:{}:{}{}", &error[..i], doc.file, doc.line, doc.col.max(1), &tail[col_len..])
 }

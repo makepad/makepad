@@ -79,7 +79,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
                     let width = if v.as_number().is_some() { 1 } else { 4 };
                     decl.uniforms.push(UniformDecl { name, width });
                 }
-                decl.validate().unwrap_or_else(|e| panic!("{}: {e}", decl.label));
+                decl.validate().unwrap_or_else(|e| panic!("{}: {e}\n---\n{}\n---", decl.label, decl.pixel));
                 decls.push(decl);
             }
             pass::namespace(&mut decls, &format!("k{}_", chain.len()));
@@ -120,6 +120,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             ],
             label: "mrt".into(),
             map: false,
+            origins: Vec::new(),
         };
         mrt.validate().unwrap();
         compile_pass(vm, &mrt);
@@ -131,6 +132,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             pixel: "fn() -> vec4 { let q = fract(self.uv() * 3.0) return self.color.sample_grad(q, dFdx(self.uv() * 3.0), dFdy(self.uv() * 3.0)) }".into(),
             label: "grad".into(),
             map: false,
+            origins: Vec::new(),
             ..mrt.clone()
         };
         compile_pass(vm, &grad);
@@ -152,6 +154,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             outputs: Vec::new(),
             label: "bad".into(),
             map: false,
+            origins: Vec::new(),
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
         assert!(compile_value(vm, "bad", code).is_err());
@@ -173,6 +176,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             outputs: Vec::new(),
             label: "short".into(),
             map: false,
+            origins: Vec::new(),
         };
         short.validate().unwrap();
         compile_pass(vm, &short);

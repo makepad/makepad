@@ -580,6 +580,7 @@ mod tests {
             outputs: Vec::new(),
             label: "Pass".into(),
             map: false,
+            origins: Vec::new(),
         }
     }
 

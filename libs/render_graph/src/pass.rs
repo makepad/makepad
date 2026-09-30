@@ -101,6 +101,18 @@ pub struct PassDecl {
     /// (`self.color.sample(self.uv())`): passes like it that follow one
     /// another run as one ([`fuse`]).
     pub map: bool,
+    /// Where the pass's code is written: each function's text (`pixel`,
+    /// a helper) and its place in the document, so a compile error names
+    /// the document's line.
+    pub origins: Vec<(String, CodeAt)>,
+}
+
+/// A place in a document's source.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CodeAt {
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
 }
 
 /// A further output of a pass: its resource name (what later passes read),
@@ -198,6 +210,21 @@ impl PassDecl {
     }
 
     /// The Splash shader source of this pass.
+    /// Where line `line` (1-based) of [`Self::source`] is written in the
+    /// document, when it is inside one of the pass's functions.
+    pub fn locate(&self, line: u32) -> Option<CodeAt> {
+        let src = self.source();
+        for (text, at) in &self.origins {
+            let Some(start) = src.find(text.as_str()) else { continue };
+            let first = src[..start].matches('\n').count() as u32 + 1;
+            let last = first + text.matches('\n').count() as u32;
+            if line >= first && line <= last {
+                return Some(CodeAt { file: at.file.clone(), line: at.line + (line - first), col: if line == first { at.col } else { 0 } });
+            }
+        }
+        None
+    }
+
     pub fn source(&self) -> String {
         let mut s = String::new();
         s.push_str("use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nmod.draw.DrawGraphPass{\n");
@@ -400,6 +427,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
             outputs: Vec::new(),
             label: members.iter().map(|d| d.label.as_str()).collect::<Vec<_>>().join(" + "),
             map: true,
+            origins: members.iter().flat_map(|d| d.origins.iter().cloned()).collect(),
         });
         map.push((i..j).collect());
         i = j;
@@ -429,6 +457,7 @@ mod tests {
             outputs: Vec::new(),
             label: label.into(),
             map: true,
+            origins: Vec::new(),
         };
         let a = m("a", &["color", "bloom"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c + self.bloom.sample(self.uv()) * self.amount }", &["amount"]);
         let b = m("b", &["color"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c * self.amount }", &["amount"]);
@@ -467,6 +496,7 @@ mod tests {
             outputs: Vec::new(),
             label: "Pass".into(),
             map: false,
+            origins: Vec::new(),
         }
     }
 
@@ -483,6 +513,18 @@ mod tests {
         d.stage = Stage::Final;
         assert!(d.source().contains("color_format: @Bgra8NoBlend"));
         assert_ne!(d.program_id(), decl().program_id());
+    }
+
+    #[test]
+    fn a_line_of_the_pass_source_is_found_in_the_document() {
+        let mut d = decl();
+        d.pixel = "fn() -> vec4 {\n    let c = self.color.sample(self.uv())\n    return c * self.amount\n}".into();
+        d.origins = vec![(d.pixel.clone(), CodeAt { file: "motion".into(), line: 40, col: 16 })];
+        let src = d.source();
+        let first = src[..src.find("fn() -> vec4").unwrap()].matches('\n').count() as u32 + 1;
+        assert_eq!(d.locate(first), Some(CodeAt { file: "motion".into(), line: 40, col: 16 }));
+        assert_eq!(d.locate(first + 2).map(|a| a.line), Some(42));
+        assert_eq!(d.locate(1), None, "the header is not the document's");
     }
 
     #[test]

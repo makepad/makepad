@@ -229,6 +229,13 @@ pub struct ScriptTokenPos {
     pub preceded_by_space: bool,
 }
 
+impl ScriptTokenPos {
+    /// Where the token starts in its body's code (a character index).
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+}
+
 /// One captured `/** ... */` doc annotation (see `ScriptTokenizer::docs`).
 #[derive(Clone, Debug)]
 pub struct ScriptTokDoc {

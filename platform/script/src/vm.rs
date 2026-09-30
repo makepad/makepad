@@ -202,6 +202,66 @@ impl ScriptCode {
         Some((loc, text))
     }
 
+    /// The exact text of the fn whose body starts at `ip`, from its `fn`
+    /// keyword to its closing brace (`fn(uv: vec2) -> vec4 { ... }`), and
+    /// where the `fn` keyword is. For hosts that take a document's function
+    /// as code of their own (a shader pass compiled elsewhere): they keep the
+    /// text and report its errors at the document's lines.
+    pub fn fn_text(&self, ip: ScriptIp) -> Option<(ScriptLoc, String)> {
+        let bodies = self.bodies.borrow();
+        let body = bodies.get(ip.body as usize)?;
+        let source_map = &body.parser.source_map;
+        let ip_index = (ip.index as usize).min(source_map.len().saturating_sub(1));
+        let token_index = (0..=ip_index)
+            .rev()
+            .find_map(|i| source_map.get(i).and_then(|slot| *slot))
+            .or_else(|| ((ip_index + 1)..source_map.len()).find_map(|i| source_map.get(i).and_then(|slot| *slot)))? as usize;
+        let tokens = &body.tokenizer.tokens;
+        // Back to the header's `fn` (a parameter list holds none).
+        let mut k = token_index.min(tokens.len().checked_sub(1)?);
+        while !matches!(tokens[k].token, ScriptToken::Identifier(id) if id == id!(fn)) {
+            k = k.checked_sub(1)?;
+        }
+        // From the `fn` keyword (a token's position may sit a character into
+        // it) through the body's matching `}` (comments skipped).
+        let chars: Vec<char> = body.effective_code.chars().collect();
+        let mut start = tokens[k].pos().min(chars.len());
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        let mut i = start;
+        let mut depth = 0i32;
+        let mut end = None;
+        while i < chars.len() {
+            match chars[i] {
+                '/' if chars.get(i + 1) == Some(&'/') => {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let end = end?;
+        let text: String = chars[start..end].iter().collect();
+        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
+        let loc = match &body.source {
+            ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
+            _ => ScriptLoc { file: "generated".into(), line: row, col },
+        };
+        Some((loc, text))
+    }
+
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
             let source_map = &body.parser.source_map;

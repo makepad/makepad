@@ -69,21 +69,21 @@ const SOURCES: &[(&str, &str)] = &[
 // levels; `strength` is how much is added.
 $M.Glow = $M.Glow{strength: 0.6 radius: 0.6 threshold: 1.0 tint: #ffffff source: @color}
 $M.kit_glow = fn(p) {
-    let down = "fn() -> vec4 {
+    let down = fn() -> vec4 {
         let t = self.texel() * 0.5
         let c = self.src.sample(self.uv()) * 4.0 + self.src.sample(self.uv() + vec2(t.x, t.y)) + self.src.sample(self.uv() - vec2(t.x, t.y)) + self.src.sample(self.uv() + vec2(t.x, 0.0 - t.y)) + self.src.sample(self.uv() - vec2(t.x, 0.0 - t.y))
         return vec4(c.xyz / 8.0, 1.0)
-    }"
-    let up = "fn() -> vec4 {
+    }
+    let up = fn() -> vec4 {
         let t = self.texel()
         var c = self.small.sample(self.uv() + vec2(0.0 - t.x * 2.0, 0.0)) + self.small.sample(self.uv() + vec2(t.x * 2.0, 0.0)) + self.small.sample(self.uv() + vec2(0.0, 0.0 - t.y * 2.0)) + self.small.sample(self.uv() + vec2(0.0, t.y * 2.0))
         c = c + (self.small.sample(self.uv() + vec2(0.0 - t.x, t.y)) + self.small.sample(self.uv() + vec2(t.x, t.y)) + self.small.sample(self.uv() + vec2(0.0 - t.x, 0.0 - t.y)) + self.small.sample(self.uv() + vec2(t.x, 0.0 - t.y))) * 2.0
         let r = clamp(self.radius, 0.0, 1.0)
         return vec4(self.same.sample(self.uv()).xyz + c.xyz / 12.0 * (0.35 + 0.65 * r), 1.0)
-    }"
+    }
     return [
         {at: @hdr name: "pre" reads: [p.source] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let t = self.texel() * 0.5
                 var c = vec3(0.0, 0.0, 0.0)
                 var w = 0.0
@@ -103,7 +103,7 @@ $M.kit_glow = fn(p) {
                     w = w + kw
                 }
                 return vec4(c / max(w, 0.0001), 1.0)
-            }"}
+            }}
         {at: @hdr name: "d1" reads: ["pre"] slots: ["src"] scale: 0.25 pixel: down}
         {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
         {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 pixel: down}
@@ -113,11 +113,11 @@ $M.kit_glow = fn(p) {
         {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u0" reads: ["u1", "pre"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
         {map: true at: @hdr reads: [@color, "u0"] uniforms: {strength: p.strength tint: p.tint}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let g = self.u0.sample(self.uv()).xyz * self.tint.xyz * self.strength
                 return vec4(c.xyz + g, c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -133,7 +133,7 @@ $M.kit_glow = fn(p) {
 // 1/16 level's luma, tinted by `halation_tint`: linear 1, 0.18, 0.04), added too.
 $M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638}
 $M.kit_bloom = fn(p) {
-    let down = "fn() -> vec4 {
+    let down = fn() -> vec4 {
         let t = self.texel() * 0.5
         let uv = self.uv()
         let a = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 2.0 * t.y)).xyz
@@ -151,18 +151,18 @@ $M.kit_bloom = fn(p) {
         let m = self.src.sample(uv + vec2(t.x, 0.0 - t.y)).xyz
         let o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
         return vec4(o, 1.0)
-    }"
-    let up = "fn() -> vec4 {
+    }
+    let up = fn() -> vec4 {
         let t = self.texel() * 0.5 * (0.5 + self.radius)
         let uv = self.uv()
         var c = self.small.sample(uv).xyz * 4.0
         c = c + (self.small.sample(uv + vec2(t.x, 0.0)).xyz + self.small.sample(uv - vec2(t.x, 0.0)).xyz + self.small.sample(uv + vec2(0.0, t.y)).xyz + self.small.sample(uv - vec2(0.0, t.y)).xyz) * 2.0
         c = c + self.small.sample(uv + vec2(t.x, t.y)).xyz + self.small.sample(uv - vec2(t.x, t.y)).xyz + self.small.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.small.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
         return vec4(self.same.sample(uv).xyz + c / 16.0, 1.0)
-    }"
+    }
     return [
         {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let t = self.texel() * 0.25
                 let uv = self.uv()
                 var s = self.source.sample(uv + vec2(t.x, t.y)).xyz + self.source.sample(uv - vec2(t.x, t.y)).xyz + self.source.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.source.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
@@ -173,7 +173,7 @@ $M.kit_bloom = fn(p) {
                 rq = rq * rq / (4.0 * kn)
                 let w = max(rq, l - self.threshold) / max(l, 0.0001)
                 return vec4(s * w, 1.0)
-            }"}
+            }}
         {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 pixel: down}
         {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
         {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 pixel: down}
@@ -187,12 +187,12 @@ $M.kit_bloom = fn(p) {
         {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
         {map: true at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let b = self.bloom.sample(self.uv()).xyz * (self.strength / 3.0)
                 let h = self.tint.xyz * (self.luma(self.wide.sample(self.uv()).xyz) * self.halation)
                 return vec4(c.xyz + b + h, c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -209,7 +209,7 @@ $M.Shoulder = $M.Shoulder{knee: 0.72 white_from: 2 white_to: 12 white: 0.85}
 $M.kit_shoulder = fn(p) {
     return [
         {map: true at: @hdr reads: [@color] uniforms: {knee: p.knee white_from: p.white_from white_to: p.white_to white: p.white}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let a = clamp(c.w, 0.0, 1.0)
                 if a < 0.0001 {
@@ -222,7 +222,7 @@ $M.kit_shoulder = fn(p) {
                 let m = max(x.x, max(x.y, x.z))
                 y = mix(y, vec3(1.0, 1.0, 1.0), smoothstep(self.white_from, self.white_to, m) * self.white)
                 return vec4(y * a, c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -235,19 +235,19 @@ $M.Halation = $M.Halation{strength: 0.35 threshold: 0.8 tint: #ff3a12}
 $M.kit_halation = fn(p) {
     return [
         {at: @hdr name: "pre" reads: [@color] scale: 0.5 uniforms: {threshold: p.threshold}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let l = self.luma(max(self.color.sample(self.uv()).xyz, vec3(0.0, 0.0, 0.0)))
                 let h = max(l - self.threshold, 0.0) / (1.0 + l)
                 return vec4(h, h, h, 1.0)
-            }"}
+            }}
         {at: @hdr name: "d1" reads: ["pre"] slots: ["src"] scale: 0.25
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let t = self.texel()
                 let c = self.src.sample(self.uv() + vec2(t.x, t.y) * 0.5) + self.src.sample(self.uv() - vec2(t.x, t.y) * 0.5) + self.src.sample(self.uv() + vec2(t.x, 0.0 - t.y) * 0.5) + self.src.sample(self.uv() - vec2(t.x, 0.0 - t.y) * 0.5)
                 return vec4(c.xyz * 0.25, 1.0)
-            }"}
+            }}
         {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let t = self.texel()
                 var c = vec3(0.0, 0.0, 0.0)
                 for k in 0..9 {
@@ -255,13 +255,13 @@ $M.kit_halation = fn(p) {
                     c = c + self.src.sample(self.uv() + o * t).xyz * (2.0 - abs(o.x)) * (2.0 - abs(o.y))
                 }
                 return vec4(c / 16.0, 1.0)
-            }"}
+            }}
         {map: true at: @hdr reads: [@color, "d2", "d1"] uniforms: {strength: p.strength tint: p.tint}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let h = (self.d2.sample(self.uv()).x * 0.7 + self.d1.sample(self.uv()).x * 0.3) * self.strength
                 return vec4(c.xyz + self.tint.xyz * h, c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -275,7 +275,7 @@ $M.Aberration = $M.Aberration{amount: 2.0 falloff: 1}
 $M.kit_aberration = fn(p) {
     return [
         {at: @hdr reads: [@color] uniforms: {amount: p.amount falloff: p.falloff}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let dc = self.uv() - vec2(0.5, 0.5)
                 var d = dc * vec2(1.0 / self.aspect(), 1.0) * (self.amount / 1080.0)
                 if self.falloff > 1.5 {
@@ -284,7 +284,7 @@ $M.kit_aberration = fn(p) {
                 }
                 let c = self.color.sample(self.uv())
                 return vec4(self.color.sample(self.uv() + d).x, c.y, self.color.sample(self.uv() - d).z, c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -299,7 +299,7 @@ $M.Grain = $M.Grain{amount: 0.055 size: 1}
 $M.kit_grain = fn(p) {
     return [
         {map: true at: @final reads: [@color] uniforms: {amount: p.amount grain: p.size}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let px = floor(self.uv() * self.size())
                 let cell = floor(px / max(self.grain * self.size().y / 1080.0, 1.0))
@@ -310,7 +310,7 @@ $M.kit_grain = fn(p) {
                 let dn = (self.hash(px * 1.37 + vec2(self.frame_hash(5.0), self.frame_hash(6.0)) * 100.0) - 0.5) / 255.0
                 let n = (0.6 * g1 + 0.4 * g2) * k + dn
                 return vec4(clamp(c.xyz + vec3(n, n, n), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -325,23 +325,23 @@ $M.kit_vignette = fn(p) {
     if p.mode == 1 {
         return [
             {map: true at: @hdr reads: [@color] uniforms: {amount: p.amount}
-                pixel: "fn() -> vec4 {
+                pixel: fn() -> vec4 {
                     let c = self.color.sample(self.uv())
                     let dc = (self.uv() - vec2(0.5, 0.5)) * vec2(1.0, 0.8)
                     let v = mix(1.0, smoothstep(0.95, 0.25, length(dc)), self.amount)
                     return vec4(c.xyz * v, c.w)
-                }"}
+                }}
         ]
     }
     return [
         {map: true at: @final reads: [@color] uniforms: {amount: p.amount softness: p.softness tone: p.color}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let q = (self.uv() - vec2(0.5, 0.5)) * vec2(self.aspect(), 1.0)
                 let r = length(q) / length(vec2(self.aspect() * 0.5, 0.5))
                 let v = smoothstep(1.0 - self.softness, 1.0 + 0.001, r) * self.amount
                 return vec4(mix(c.xyz, self.tone.xyz, v), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -360,14 +360,14 @@ $M.kit_frame_post = fn(p) {
     return [
         {at: if p.mode == 1 { @hdr } else { @final } reads: [@color]
             uniforms: {shake: p.shake zoom: p.zoom flash: p.flash flash_color: p.flash_color fade: p.fade invert: p.invert}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let j = vec2(self.frame_hash(3.0) - 0.5, self.frame_hash(4.0) - 0.5) * 2.0 * self.shake * vec2(1.0 / self.aspect(), 1.0)
                 let uv = (self.uv() - vec2(0.5, 0.5)) / max(self.zoom, 0.01) + vec2(0.5, 0.5) + j
                 var c = self.color.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
                 c = vec4(mix(c.xyz, vec3(1.0, 1.0, 1.0) - c.xyz, clamp(self.invert, 0.0, 1.0)), c.w)
                 c = vec4(mix(c.xyz, self.flash_color.xyz, clamp(self.flash, 0.0, 1.0)), c.w)
                 return vec4(c.xyz * (1.0 - clamp(self.fade, 0.0, 1.0)), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -379,7 +379,7 @@ $M.Lut = $M.Lut{image: "lut" amount: 1 size: 16}
 $M.kit_lut = fn(p) {
     return [
         {map: true at: @display reads: [@color, p.image] slots: ["color", "lut"] uniforms: {amount: p.amount cells: p.size}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let n = max(self.cells, 2.0)
                 let x = clamp(c.xyz, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)) * (n - 1.0)
@@ -389,7 +389,7 @@ $M.kit_lut = fn(p) {
                 let a = self.lut.sample(px + vec2(b0 / n, 0.0)).xyz
                 let b = self.lut.sample(px + vec2(b1 / n, 0.0)).xyz
                 return vec4(mix(c.xyz, mix(a, b, x.z - b0), clamp(self.amount, 0.0, 1.0)), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -402,13 +402,13 @@ $M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16}
 $M.kit_dof = fn(p) {
     return [
         {at: @hdr name: "coc" reads: [@color, @depth] scale: 0.5 uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let z = self.view_depth(self.depth.sample_nearest(self.uv()).x)
                 let coc = min(abs(1.0 - self.focus / max(z, 0.001)) * self.aperture, self.max_blur) * self.size().y / 540.0
                 return vec4(self.color.sample(self.uv()).xyz, coc)
-            }"}
+            }}
         {at: @hdr name: "blur" reads: ["coc"] scale: 0.5
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let centre = self.coc.sample(self.uv())
                 var sum = centre.xyz
                 var w = 1.0
@@ -423,13 +423,13 @@ $M.kit_dof = fn(p) {
                     w = w + sw
                 }
                 return vec4(sum / w, centre.w)
-            }"}
+            }}
         {map: true at: @hdr reads: [@color, "blur"]
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let b = self.blur.sample(self.uv())
                 return vec4(mix(c.xyz, b.xyz, clamp(b.w / 2.0, 0.0, 1.0)), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -447,11 +447,11 @@ $M.kit_outline = fn(p) {
     if p.mode == 1 {
         return [
             {map: true at: @display reads: [@color, @id] slots: ["color", "ids"] uniforms: {ink: p.color thickness: p.thickness}
-                helpers: "surface: fn(uv: vec2) -> float {
+                helpers: {surface: fn(uv: vec2) -> float {
                     let c = self.ids.sample_nearest(uv)
                     return floor(c.y * 255.0 + 0.5) * 256.0 + floor(c.x * 255.0 + 0.5)
-                }"
-                pixel: "fn() -> vec4 {
+                }}
+                pixel: fn() -> vec4 {
                     let c = self.color.sample(self.uv())
                     let r = max(self.thickness * self.size().y / 1080.0, self.px_scale())
                     let own = self.surface(self.uv())
@@ -468,12 +468,12 @@ $M.kit_outline = fn(p) {
                     let e = hit * self.ink.w
                     let rgb = self.to_srgb(self.from_srgb(c.xyz) * (1.0 - e) + self.ink.xyz * e)
                     return vec4(rgb, c.w * (1.0 - e) + e)
-                }"}
+                }}
         ]
     }
     return [
         {map: true at: @display reads: [@color, @depth] uniforms: {ink: p.color thickness: p.thickness threshold: p.threshold}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let t = self.texel() * max(self.thickness * self.size().y / 1080.0, 0.5)
                 let z = self.view_depth(self.depth.sample_nearest(self.uv()).x)
@@ -484,7 +484,7 @@ $M.kit_outline = fn(p) {
                 let e = max(max(abs(zx0 - z) / max(min(zx0, z), 0.001), abs(zx1 - z) / max(min(zx1, z), 0.001)), max(abs(zy0 - z) / max(min(zy0, z), 0.001), abs(zy1 - z) / max(min(zy1, z), 0.001)))
                 let a = smoothstep(self.threshold, self.threshold * 1.5, e) * self.ink.w
                 return vec4(mix(c.xyz, self.ink.xyz, a), c.w)
-            }"}
+            }}
     ]
 }
 "##),
@@ -503,7 +503,7 @@ $M.Upsample = $M.Upsample{src: "march" depth: "march_depth" guide: @depth guide_
 $M.kit_upsample = fn(p) {
     return [
         {at: @hdr reads: [@color, p.src, p.depth, p.guide] slots: ["color", "lo", "lo_depth", "guide"] uniforms: {sigma: p.sigma guide_view: p.guide_view}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let g = self.guide.sample_nearest(self.uv()).x
                 var z = g
                 if self.guide_view < 0.5 {
@@ -535,7 +535,7 @@ $M.kit_upsample = fn(p) {
                     return c
                 }
                 return up + c * (1.0 - clamp(up.w, 0.0, 1.0))
-            }"}
+            }}
     ]
 }
 "##),
@@ -551,7 +551,7 @@ $M.VelocityBlur = $M.VelocityBlur{amount: 0.5 samples: 12}
 $M.kit_velocity_blur = fn(p) {
     return [
         {at: @hdr reads: [@color, @depth] uniforms: {amount: p.amount taps: p.samples}
-            pixel: "fn() -> vec4 {
+            pixel: fn() -> vec4 {
                 let uv = self.uv()
                 // The pixel's motion, or a neighbour's when that is longer
                 // (a moving edge smears over what is behind it: the motion
@@ -582,7 +582,7 @@ $M.kit_velocity_blur = fn(p) {
                     }
                 }
                 return sum / n
-            }"}
+            }}
     ]
 }
 "##),
