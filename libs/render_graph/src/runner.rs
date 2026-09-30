@@ -103,6 +103,8 @@ pub struct GraphRunner {
     view: Option<PassView>,
     /// Frame pixels per output pixel (the host's supersampling; 0 = 1).
     px_scale: f32,
+    /// A realtime preview draws the frame (`self.realtime()` is 1).
+    realtime: bool,
     /// The passes as the host gave them.
     given: Vec<PassDecl>,
     /// The passes that run (`map` passes that follow one another fused),
@@ -186,6 +188,13 @@ impl GraphRunner {
     /// any supersampling.
     pub fn set_px_scale(&mut self, px_scale: f32) {
         self.px_scale = if px_scale.is_finite() && px_scale > 0.0 { px_scale } else { 1.0 };
+    }
+
+    /// Whether the frame is a realtime preview's (not a render's or an
+    /// export's): passes read it as `self.realtime()` and may take fewer
+    /// samples then. Off by default.
+    pub fn set_realtime(&mut self, realtime: bool) {
+        self.realtime = realtime;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -464,7 +473,9 @@ impl GraphRunner {
             dv.set_uniform(cx.cx, live_id!(g_size), &[w, h, 1.0 / w, 1.0 / h]);
             let base = if self.px_scale > 0.0 { self.px_scale } else { 1.0 };
             let pass_px = base * w / plan_w.max(1.0);
-            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, history_ready, pass_px]);
+            // history_ready in 0..1, plus 2 in a realtime preview.
+            let mode = history_ready + if self.realtime { 2.0 } else { 0.0 };
+            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, mode, pass_px]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
             if let Some(v) = &self.view {
                 // Rows of the column-major matrix.

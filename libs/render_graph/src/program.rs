@@ -58,7 +58,10 @@ script_mod! {
         frame: fn() -> float { return self.g_frame.y }
         ss_tap: fn() -> float { return self.g_frame.z }
         exposure: fn() -> float { return self.g_misc.x }
-        history_ready: fn() -> float { return self.g_misc.z }
+        history_ready: fn() -> float { return self.g_misc.z - 2.0 * step(1.5, self.g_misc.z) }
+        // 1 in a realtime preview, 0 in a render or an export: a pass may
+        // take fewer samples (supersampling taps, march steps) when 1.
+        realtime: fn() -> float { return step(1.5, self.g_misc.z) }
         // This pass's pixels per output pixel (supersampling times the
         // pass's scale): a line N output pixels wide is N * px_scale()
         // pass pixels, and fwidth()/dFdx() are in pass pixels. Take
