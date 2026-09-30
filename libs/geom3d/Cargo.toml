@@ -1,0 +1,16 @@
+[package]
+name = "makepad-geom3d"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "CPU geometry for the shared renderer: an indexed mesh, primitives, 2D shapes with extrusion and lathe, curves and tubes, procedural surfaces and deformers, the fx vertex stream, and deterministic noise"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-math = { path = "../math" }
+# SVG path data and whole SVG documents for extruded shapes.
+makepad-svg = { path = "../svg" }
+# Constrained triangulation of extruded caps (shapes with holes).
+makepad-csg-boolean = { path = "../csg/csg_boolean" }

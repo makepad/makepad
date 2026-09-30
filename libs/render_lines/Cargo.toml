@@ -1,0 +1,17 @@
+[package]
+name = "makepad-render-lines"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Fat lines, points and sprites for the shared renderer: capsule segment batches that keep their ink at every output scale, drawn linear and unclamped into HDR targets"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+# The record layouts kernels write lines and sprites in.
+makepad-script-compute = { path = "../../platform/script/compute" }
+
+[dev-dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
