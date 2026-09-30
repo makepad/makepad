@@ -627,7 +627,7 @@ pub fn define_mtk_view() -> *const Class {
             touches_ended as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
         decl.add_method(
-            sel!(touchesCanceled: withEvent:),
+            sel!(touchesCancelled: withEvent:),
             touches_canceled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
 
