@@ -8,12 +8,12 @@
 //! returns the input unchanged and records nothing: with no nodes the host's
 //! chain is exactly what it was.
 
-use crate::pass::{DrawGraphPass, PassDecl, Programs};
+use crate::pass::PassDecl;
+use crate::program::{DrawGraphPass, Programs};
 use crate::plan::{Attachments, FramePlan, PlanError, PostGraph, PassNode, Resource, Source, Stage};
 use makepad_draw::*;
 
-/// The per-frame values of one pass's uniforms, in declaration order.
-pub type PassValues = Vec<[f32; 4]>;
+pub use crate::PassValues;
 
 /// What the stage's passes may read from the host.
 pub struct StageInputs<'a> {

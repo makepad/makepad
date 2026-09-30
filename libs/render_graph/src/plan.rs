@@ -27,7 +27,7 @@
 //! With no nodes the plan is empty and a host's chain runs exactly as it
 //! did before the graph existed (the zero-cost check).
 
-use makepad_draw::*;
+use makepad_script::*;
 use std::hash::{Hash, Hasher};
 
 /// Where a pass sits in the chain.
@@ -99,7 +99,9 @@ impl Format {
         }
     }
 
-    pub fn texture_format(self) -> TextureFormat {
+    #[cfg(feature = "gpu")]
+    pub fn texture_format(self) -> makepad_draw::TextureFormat {
+        use makepad_draw::{TextureFormat, TextureSize};
         match self {
             Format::Rgba16f => TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true },
             Format::Rgba32f => TextureFormat::RenderRGBAf32 { size: TextureSize::Auto, initial: true },

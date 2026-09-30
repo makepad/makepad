@@ -37,7 +37,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.with_vm(|vm| {
         makepad_draw::script_mod(vm);
-        makepad_render_graph::pass::script_mod(vm);
+        makepad_render_graph::program::script_mod(vm);
         makepad_render_graph::accum::script_mod(vm);
         // A host module with the kits' types (the host's own markers).
         let m = vm.new_module(LiveId::from_str("gtest"));

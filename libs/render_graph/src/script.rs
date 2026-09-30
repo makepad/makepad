@@ -8,7 +8,7 @@
 
 use crate::pass::PassDecl;
 use crate::plan::{Format, Stage};
-use makepad_draw::*;
+use makepad_script::*;
 
 /// A pass read from a document, before its uniforms are typed.
 pub struct PassRead {

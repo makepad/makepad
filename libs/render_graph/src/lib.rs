@@ -7,8 +7,11 @@
 //! * [`plan`]: the post graph (`@hdr` / `@display` / `@final` passes reading
 //!   named resources), compiled into a frame plan with pass ids, resource
 //!   versions and admitted memory.
-//! * [`pass`]: Splash passes, compiled at runtime; [`runner`] records a
-//!   plan's stages in the slots a host gives them.
+//! * [`pass`]: Splash passes, compiled at runtime (`program`); `runner`
+//!   records a plan's stages in the slots a host gives them.
+//!
+//! Without the default `gpu` feature the crate is UI-free (plan, schedules,
+//! locked-time rules, pass declarations, kits), for document readers.
 //! * [`kits`]: the standard kits in Splash (Glow, Halation, Aberration,
 //!   Grain, Vignette, FramePost, Lut, DepthOfField, Outline); [`script`]
 //!   reads passes from documents.
@@ -19,35 +22,57 @@
 //! * [`BloomPass`] and [`DrawSceneTexture`]: the Sandbox lane's bloom and
 //!   auto-exposure chain and its composite (exposure, AgX, FXAA, dither).
 
+#[cfg(feature = "gpu")]
 use makepad_draw::*;
 
+#[cfg(feature = "gpu")]
 pub mod accum;
+#[cfg(feature = "gpu")]
 pub mod bloom;
+#[cfg(feature = "gpu")]
 pub mod composite;
 pub mod kits;
 pub mod locked;
 pub mod mode;
 pub mod pass;
 pub mod plan;
+#[cfg(feature = "gpu")]
+pub mod program;
+#[cfg(feature = "gpu")]
 pub mod runner;
 pub mod script;
+#[cfg(feature = "gpu")]
+pub mod tonemap;
 
+#[cfg(feature = "gpu")]
 pub use accum::{Accumulator, Step};
+#[cfg(feature = "gpu")]
 pub use bloom::BloomPass;
+#[cfg(feature = "gpu")]
 pub use composite::DrawSceneTexture;
+#[cfg(feature = "gpu")]
+pub use tonemap::{DrawToneMap, Grade, ToneCurve};
 pub use mode::{AdaptiveSampling, Rational, RenderMode, Sampling};
 pub use pass::{PassDecl, UniformDecl};
 pub use plan::{Attachments, Format, PostGraph, Resource, Stage};
-pub use runner::{FrameUniforms, GraphRunner, PassValues, StageInputs};
+#[cfg(feature = "gpu")]
+pub use runner::{FrameUniforms, GraphRunner, StageInputs};
 
+/// A pass's uniform values for one frame, `[f32; 4]` per uniform in
+/// declaration order.
+pub type PassValues = Vec<[f32; 4]>;
+
+#[cfg(feature = "gpu")]
 /// Register the graph's draw shaders. Call after `makepad_widgets::script_mod`
 /// (the composite uses the widgets prelude).
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     bloom::script_mod(vm);
     script_mod_passes(vm);
+    tonemap::script_mod(vm);
     composite::script_mod(vm)
 }
 
+#[cfg(feature = "gpu")]
 /// Register the pass and accumulator shaders only (a host without the
 /// Sandbox lane's bloom and composite), once per VM however many hosts ask.
 pub fn script_mod_passes(vm: &mut ScriptVm) {
@@ -57,7 +82,7 @@ pub fn script_mod_passes(vm: &mut ScriptVm) {
         !v.is_nil() && !v.is_err()
     });
     if !have {
-        pass::script_mod(vm);
+        program::script_mod(vm);
         accum::script_mod(vm);
     }
 }

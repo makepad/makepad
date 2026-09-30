@@ -5,5 +5,14 @@ edition = "2021"
 description = "The render graph: post passes, HDR composite, locked-time accumulation"
 license = "MIT OR Apache-2.0"
 
+[features]
+# The GPU side (passes, accumulation, the Sandbox lane's bloom and
+# composite). Without it: the plan, the schedules, the locked-time rules,
+# pass declarations and the kits' Splash source, for UI-free document
+# readers.
+default = ["gpu"]
+gpu = ["dep:makepad-draw"]
+
 [dependencies]
-makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-script = { path = "../../platform/script" }
+makepad-draw = { path = "../../draw", version = "2.0.0", optional = true }
