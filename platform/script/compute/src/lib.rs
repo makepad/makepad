@@ -24,6 +24,8 @@
 
 pub mod admission;
 pub mod host;
+#[cfg(feature = "vm")]
+pub mod imports;
 pub mod ir;
 pub mod kernel;
 pub mod lower;
