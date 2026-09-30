@@ -105,9 +105,28 @@ impl Aligned {
         })
     }
 
+    /// A speech item: tokens without durations (aligned by MAS in training),
+    /// no notes. None when longer than `max_frames` or with too few frames.
+    pub fn from_speech_item(it: &Item, max_frames: usize) -> Option<Aligned> {
+        if it.kind != Kind::Speech || it.frames() > max_frames || it.frames() < 2 * it.tokens.len() {
+            return None;
+        }
+        let nf = it.frames();
+        Some(Aligned {
+            tokens: it.tokens.clone(),
+            dur: Vec::new(),
+            notes: vec![0.0; nf],
+            f0: it.f0.clone(),
+            vel: vec![0.0; nf],
+            audio: it.audio_f32(),
+            singer: it.speaker as usize,
+            band: it.band_hz,
+        })
+    }
+
     /// A window of whole tokens covering at most `max_frames` frames.
     pub fn crop(&self, max_frames: usize, rng: &mut Rng) -> Aligned {
-        if self.frames() <= max_frames {
+        if self.frames() <= max_frames || self.dur.is_empty() {
             return self.clone();
         }
         let starts: Vec<usize> = self.dur.iter().scan(0, |acc, d| {

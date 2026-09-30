@@ -410,6 +410,8 @@ fn check_once(tol: f64) -> bool {
     let mut rng = Rng::new(9);
     let items: Vec<Aligned> = (0..3).map(|_| synth.example(&mut rng).crop(160, &mut rng)).collect();
     let ab = train::ac_batch(&items);
+    let unaligned: Vec<Aligned> = items.iter().map(|a| Aligned { dur: Vec::new(), ..a.clone() }).collect();
+    let abm = train::ac_batch(&unaligned);
     let crops: Vec<_> = items.iter().map(|a| {
         let t = 40.min(a.frames());
         (a.audio[..t * HOP].to_vec(), a.f0[..t].to_vec(), if a.frames() % 2 == 0 { 24_000.0 } else { 12_000.0 })
@@ -419,12 +421,12 @@ fn check_once(tol: f64) -> bool {
     let mut vb = train::voc_batch(&crops, t, 4);
     vb.src.host = true;
     let mut worst = 0.0f64;
-    for (what, run_ac) in [("acoustic", true), ("vocoder", false)] {
+    for (what, run_ac, mas) in [("acoustic", true, false), ("acoustic, aligned by MAS", true, true), ("vocoder", false, false)] {
         let eval = |gpu: bool| {
             let mut g = if gpu { Graph::new_gpu(&params, &dev, true) } else { Graph::new(&params, true) };
             let mut r = Rng::new(77);
             let (loss, parts) = if run_ac {
-                let l = train::acoustic_loss(&mut g, &ac, &ab, &mut r);
+                let l = train::acoustic_loss(&mut g, &ac, if mas { &abm } else { &ab }, &mut r);
                 (l.total, vec![l.mel, l.dur, l.f0, l.voicing, l.flow, l.prior])
             } else {
                 let l = train::vocoder_loss(&mut g, &voc, &vb);
@@ -444,6 +446,12 @@ fn check_once(tol: f64) -> bool {
         for (a, b) in cv.iter().zip(&gv) {
             let r = ((a - b).abs() / a.abs().max(1e-3)) as f64;
             worst = worst.max(r);
+        }
+        if mas && tol > 1e-3 {
+            // A discrete alignment follows TF32 rounding upstream of it; its
+            // gradients are compared in the exact pass only.
+            eprintln!("  {what}: gradients compared in the exact-f32 pass only");
+            continue;
         }
         let mut shown = 0;
         for (i, (a, b)) in cg.iter().zip(&gg).enumerate() {
@@ -687,13 +695,17 @@ fn main() {
         }
         "ac" => {
             let items = load_items(&a.all("--data"));
-            let aligned: Vec<Aligned> = items.iter().filter_map(Aligned::from_vowel_item).collect();
-            eprintln!("{} aligned items of {}", aligned.len(), items.len());
-            let aligned = Arc::new(aligned);
             let max_frames = a.num("--ac-frames", 600usize);
-            let al2 = aligned.clone();
+            let sung: Vec<Aligned> = items.iter().filter_map(Aligned::from_vowel_item).collect();
+            let speech: Vec<Aligned> = items.iter().filter_map(|i| Aligned::from_speech_item(i, a.num("--speech-frames", 1000usize))).collect();
+            drop(items);
+            let speech_frac: f32 = a.num("--speech-frac", if sung.is_empty() { 1.0 } else if speech.is_empty() { 0.0 } else { 0.7 });
+            eprintln!("{} sung items, {} speech items; speech batches {:.0}%", sung.len(), speech.len(), speech_frac * 100.0);
+            let (sung, speech) = (Arc::new(sung), Arc::new(speech));
             let rx = prefetch(workers, 8, 2, Arc::new(move |rng: &mut Rng| {
-                let v: Vec<Aligned> = (0..batch).map(|_| al2[rng.below(al2.len())].crop(max_frames, rng)).collect();
+                // Batches are all speech (aligned on the fly) or all sung.
+                let pool = if !speech.is_empty() && (sung.is_empty() || rng.unit() < speech_frac) { &speech } else { &sung };
+                let v: Vec<Aligned> = (0..batch).map(|_| pool[rng.below(pool.len())].crop(max_frames, rng)).collect();
                 train::ac_batch(&v)
             }));
             let mut opt = if a.flag("--resume") && out.join("ac.mksing").exists() {

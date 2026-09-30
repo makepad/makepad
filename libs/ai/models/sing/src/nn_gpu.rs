@@ -555,7 +555,12 @@ pub fn mas_align(g: &mut Graph, mu: Id, mel: Id, tok_lens: &[u32], frame_lens: &
     let (mv, ev) = (g.vals[mu].clone(), g.vals[mel].clone());
     let (n, t, d, b) = (mv.seg, ev.seg, mv.cols, mv.items());
     let lp = DevBuf::new(b * n * t);
+    // Exact f32 here: the alignment is a discrete decision and must not
+    // depend on the GEMM precision.
+    let prec = tf32();
+    set_tf32(false);
     gemm(false, true, n, t, d, 1.0, dp(&mv), d, (n * d) as i64, dp(&ev), d, (t * d) as i64, 0.0, lp.mptr(), t, (n * t) as i64, b);
+    set_tf32(prec);
     ck("mas_logp", unsafe { mkt_mas_logp(lp.mptr(), dp(&mv), dp(&ev), b, n as i32, t as i32, d as i32, st()) });
     let nt = DevU32::from_host(tok_lens);
     let nf = DevU32::from_host(frame_lens);

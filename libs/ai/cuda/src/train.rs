@@ -343,6 +343,10 @@ pub fn set_tf32(on: bool) {
     TF32.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn tf32() -> bool {
+    TF32.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Row-major, strided-batched: C[m,n] = alpha op(A) op(B) + beta C, where
 /// op(A) is [m,k] (A stored [k,m] when `ta`) and op(B) is [k,n] (B stored
 /// [n,k] when `tb`); lda/ldb/ldc are the stored row lengths.
