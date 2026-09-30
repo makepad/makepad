@@ -134,6 +134,32 @@ pub fn prepared_texture_key(source: &[u8], semantic: PixelSemantic) -> u64 {
     let h = source.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3));
     h ^ (source.len() as u64).rotate_left(29) ^ ((semantic as u64) << 56) ^ ((PREPARED_TEXTURE_FORMAT as u64) << 48).rotate_left(7)
 }
+/// In-memory dedupe key of an image's bytes (with its length): four
+/// independent 64-bit lanes, so it runs at memory speed. A load hashes the
+/// same material images once per model that names them (a level's terrain
+/// tiles: hundreds of megabytes), where a byte-at-a-time hash was most of
+/// the texture work. Never persisted: stored keys use
+/// [`prepared_texture_key`].
+pub fn image_content_hash(bytes: &[u8]) -> u64 {
+    const K: [u64; 4] = [0x9e37_79b9_7f4a_7c15, 0xc2b2_ae3d_27d4_eb4f, 0x1656_67b1_9e37_79f9, 0xd6e8_feb8_6659_fd93];
+    let mut h = [K[0] ^ bytes.len() as u64, K[1], K[2], K[3]];
+    let mut chunks = bytes.chunks_exact(32);
+    for c in &mut chunks {
+        for (i, h) in h.iter_mut().enumerate() {
+            let v = u64::from_le_bytes(c[i * 8..i * 8 + 8].try_into().unwrap());
+            *h = (*h ^ v).wrapping_mul(K[i]).rotate_left(29);
+        }
+    }
+    let mut tail = [0u8; 32];
+    tail[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+    for (i, h) in h.iter_mut().enumerate() {
+        let v = u64::from_le_bytes(tail[i * 8..i * 8 + 8].try_into().unwrap());
+        *h = (*h ^ v).wrapping_mul(K[i]).rotate_left(29);
+    }
+    let mut out = h[0];
+    for (i, v) in h.iter().enumerate().skip(1) { out = (out ^ v.rotate_left(17 * i as u32)).wrapping_mul(K[0]); }
+    out ^ (out >> 32)
+}
 /// Images smaller than this prepare faster than a cache round trip.
 pub const PREPARED_TEXTURE_CACHE_MIN_TEXELS: usize = 256 * 256;
 /// Images at least this large go to the GPU block-compressed when the host
@@ -481,7 +507,7 @@ impl PreparedSurface {
             let texture=if let Some(bytes)=bytes{
                 // Once per load for every model that uses the image (a
                 // level's tiles share their material maps).
-                let hash=texture_work(TextureWork::Hash,||bytes.iter().fold(0xcbf2_9ce4_8422_2325u64,|h,b|(h^*b as u64).wrapping_mul(0x100_0000_01b3)));
+                let hash=texture_work(TextureWork::Hash,||image_content_hash(&bytes));
                 let budget=*remaining;
                 std::sync::Arc::unwrap_or_clone(prepared_once((hash,bytes.len(),semantic as u8),||{
                     let image=texture_work(TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?;
@@ -504,6 +530,21 @@ impl PreparedSurface {
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn image_content_hash_tells_bytes_and_lengths_apart() {
+        let a: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+        assert_eq!(image_content_hash(&a), image_content_hash(&a.clone()));
+        // Every length around the 32-byte blocks, and a change in the tail,
+        // the last block and the first byte, each give another key.
+        let mut seen = std::collections::HashSet::new();
+        for n in 0..100 { assert!(seen.insert(image_content_hash(&a[..n])), "length {n}"); }
+        for at in [0, 500, 990, 999] {
+            let mut b = a.clone();
+            b[at] ^= 1;
+            assert_ne!(image_content_hash(&a), image_content_hash(&b), "byte {at}");
+        }
+        assert_ne!(image_content_hash(&[0u8; 64]), image_content_hash(&[0u8; 65]));
+    }
     #[test]
     fn bc7_block_alpha_floor() {
         // Mode 1 (no alpha), and a reserved all-zero mode byte.

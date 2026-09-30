@@ -2666,16 +2666,18 @@ fn gltf_used_material_image(json: &Val) -> usize {
 /// every model that names it (level products' material images). The host
 /// resolves the key ([`set_shared_image_resolver`]).
 pub const SHARED_IMAGE_SCHEME: &str = "makepad-image:";
-static SHARED_IMAGE_RESOLVER: std::sync::OnceLock<fn(&str) -> Option<std::sync::Arc<[u8]>>> = std::sync::OnceLock::new();
-/// How this process finds a shared image's bytes by key (worker threads call it).
-pub fn set_shared_image_resolver(resolve: fn(&str) -> Option<std::sync::Arc<[u8]>>) {
+static SHARED_IMAGE_RESOLVER: std::sync::OnceLock<fn(&str) -> Option<Vec<u8>>> = std::sync::OnceLock::new();
+/// How this process finds a shared image's bytes by key (worker threads call
+/// it, once per model naming the image: the bytes it returns are the copy
+/// the model keeps).
+pub fn set_shared_image_resolver(resolve: fn(&str) -> Option<Vec<u8>>) {
     let _ = SHARED_IMAGE_RESOLVER.set(resolve);
 }
 
 pub(crate) fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
     let image = json.get("images").and_then(|i| i.idx(image_index))?;
     if let Some(key) = image.get("uri").and_then(Val::str).and_then(|u| u.strip_prefix(SHARED_IMAGE_SCHEME)) {
-        return SHARED_IMAGE_RESOLVER.get().and_then(|resolve| resolve(key)).map(|bytes| bytes.to_vec());
+        return SHARED_IMAGE_RESOLVER.get().and_then(|resolve| resolve(key));
     }
     let bv = image.get("bufferView").and_then(Val::usize)?;
     let view = json.get("bufferViews").and_then(|v| v.idx(bv))?;
@@ -2707,8 +2709,27 @@ fn split_draw_layers(
         /// chrome bumper with a rubber tyre would be the actual bug.
         pbr: Option<(u32, u32, usize)>,
     }
+    // Surface materials that differ only in their base colour (which the
+    // vertex tint already carries) share a layer: a script model declares
+    // one material per colour of trim, and each was a draw of its own.
+    // Anything with images, fur, a far stand-in or a plate keeps its own.
+    let mut canonical: BTreeMap<usize, usize> = BTreeMap::new();
+    {
+        let mut seen: Vec<(Vec<u32>, usize)> = Vec::new();
+        let mut materials: Vec<usize> = prim_spans.iter().filter_map(|s| s.material).collect();
+        materials.sort_unstable();
+        materials.dedup();
+        for i in materials {
+            let Some(sig) = plain_surface_signature(json, bin, i) else { continue };
+            let first = match seen.iter().find(|(s, _)| *s == sig) {
+                Some((_, first)) => *first,
+                None => { seen.push((sig, i)); i }
+            };
+            canonical.insert(i, first);
+        }
+    }
     let key_of = |s: &PrimSpan| LayerKey {
-        surface: s.material.filter(|i| gltf_material_is_surface(json,*i)),
+        surface: s.material.filter(|i| gltf_material_is_surface(json,*i)).map(|i| canonical.get(&i).copied().unwrap_or(i)),
         image: s.image,
         detail: s.detail_image.map(|i| i as i32).unwrap_or(-1),
         sx: s.detail_scale[0].to_bits(),
@@ -2769,6 +2790,25 @@ fn split_draw_layers(
     } else {
         layers
     }
+}
+
+/// Everything but the base colour of an untextured surface material, for
+/// merging layers; `None` when it has anything a colour cannot stand in for.
+fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u32>> {
+    let s = gltf_material_surface(json, bin, index)?;
+    let material = json.get("materials")?.idx(index)?;
+    let textured = material.get("pbrMetallicRoughness").is_some_and(|p| p.get("baseColorTexture").is_some() || p.get("metallicRoughnessTexture").is_some())
+        || material.get("extras").is_some_and(|e| e.get("makepadMips").is_some());
+    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate {
+        return None;
+    }
+    let factor = |key: &str| material.get("pbrMetallicRoughness").and_then(|p| p.get(key)).and_then(Val::f64).unwrap_or(1.0) as f32;
+    let (metallic, roughness) = (factor("metallicFactor"), factor("roughnessFactor"));
+    Some(vec![
+        s.emissive[0].to_bits(), s.emissive[1].to_bits(), s.emissive[2].to_bits(), s.alpha_mode as u32, s.alpha_cutoff.to_bits(),
+        s.base_alpha.to_bits(), s.double_sided as u32, s.triplanar.to_bits(), s.wind.to_bits(), s.clearcoat.to_bits(),
+        s.flake.to_bits(), s.rim.to_bits(), metallic.to_bits(), roughness.to_bits(),
+    ])
 }
 
 /// How parallel two faces must be for a shared corner to smooth between
@@ -3879,6 +3919,62 @@ pub(crate) mod tests {
         assert!(m.draw_layers.is_empty(), "one material is one layer: the main texture draws it");
         assert_eq!(m.texture_png.as_deref(), Some(leaf));
         assert_eq!(embedded_base_color_png(&glb).as_deref(), Some(leaf));
+    }
+
+    /// Script-model materials (every one a surface) that differ only in
+    /// their colour share one draw layer, each part keeping its colour in
+    /// the vertex tint; a different finish, or an emissive, stays apart.
+    #[test]
+    fn surfaces_differing_only_in_colour_share_a_layer() {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let material = |rgb: &str, rough: f32, extra: &str| format!(
+            r#"{{"pbrMetallicRoughness":{{"baseColorFactor":[{rgb},1],"roughnessFactor":{rough},"metallicFactor":0}}{extra},"extras":{{"makepadSurface":true}}}}"#);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[
+              {{"attributes":{{"POSITION":0}},"material":0}},
+              {{"attributes":{{"POSITION":0}},"material":1}},
+              {{"attributes":{{"POSITION":0}},"material":2}},
+              {{"attributes":{{"POSITION":0}},"material":3}}]}}],
+            "materials":[{},{},{},{}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            material("0.1,0.1,0.1", 0.9, ""),
+            material("0.8,0.8,0.8", 0.9, ""),
+            material("0.1,0.1,0.1", 0.5, ""),
+            material("0.9,0.1,0.1", 0.9, r#","emissiveFactor":[1,0,0]"#),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+
+        let m = StaticModel::parse_glb(&glb).unwrap();
+        let tris: Vec<usize> = m.draw_layers.iter().map(|l| l.indices.len() / 3).collect();
+        assert_eq!(tris.len(), 3, "dark and light matte merge; the glossy and the lamp stay apart: {tris:?}");
+        assert!(tris.contains(&2));
+        // The merged layer still carries both colours in its vertex tint.
+        let merged = m.draw_layers.iter().find(|l| l.indices.len() == 6).unwrap();
+        let reds: std::collections::BTreeSet<u32> = merged.vertices.chunks_exact(MODEL_VERTEX_FLOATS).map(|v| v[5].to_bits() & 0xff).collect();
+        assert_eq!(reds.len(), 2, "two tints in one layer");
     }
 
     /// A splat terrain (level terrain_mesh → level glb): an opaque base part

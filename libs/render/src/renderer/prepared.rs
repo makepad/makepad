@@ -162,7 +162,7 @@ impl PreparedStaticPreview {
                 return Ok(texture);
             }
             let key=match bytes {
-                Some(bytes)=>(crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||bytes.iter().fold(0xcbf2_9ce4_8422_2325u64,|h,b|(h^*b as u64).wrapping_mul(0x100_0000_01b3))),bytes.len(),0,kind),
+                Some(bytes)=>(crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||crate::material_surface::image_content_hash(bytes)),bytes.len(),0,kind),
                 None=>(0,0,fallback,kind),
             };
             if let Some(texture)=shared.borrow().get(&key){return Ok(texture.clone());}
