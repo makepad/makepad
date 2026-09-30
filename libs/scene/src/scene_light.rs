@@ -22,6 +22,9 @@ pub enum Light {
     Lamp { pos: Vec3f, color: Vec3f, intensity: f32, range: f32, shadow: bool },
     /// Hemisphere ambient.
     Sky { top: Vec3f, ground: Vec3f, intensity: f32 },
+    /// A rectangular area light emitting from the side `normal` faces. It
+    /// spans `size.x` along `tangent` and `size.y` along `normal x tangent`.
+    Rect { pos: Vec3f, normal: Vec3f, tangent: Vec3f, size: Vec2f, color: Vec3f, intensity: f32, range: f32 },
 }
 
 impl Light {
@@ -51,6 +54,19 @@ impl Light {
             Light::Sky { top, ground, intensity } => {
                 if !colour(top) || !colour(ground) || !level(intensity) { return Err("sky light needs colours and an intensity"); }
             }
+            Light::Rect { pos, normal, tangent, size, color, intensity, range: r } => {
+                if !finite(pos) || !unit(normal) || !unit(tangent) || !colour(color) || !level(intensity) || !range(r) {
+                    return Err("rect light needs a position, normal, tangent, colour, intensity and range");
+                }
+                let n = normal * (1.0 / normal.length());
+                let t = tangent * (1.0 / tangent.length());
+                if n.dot(t).abs() > 0.99 {
+                    return Err("rect light tangent must not be parallel to its normal");
+                }
+                if !(size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0 && size.x <= 1.0e4 && size.y <= 1.0e4) {
+                    return Err("rect light size must be positive");
+                }
+            }
         }
         Ok(())
     }
@@ -69,5 +85,8 @@ mod tests {
         let sun = Light::Sun { dir: Vec3f::default(), color: vec3f(1.0, 1.0, 1.0), lux: 1.0, shadow: ShadowSpec::default() };
         assert!(sun.validate().is_err(), "zero direction");
         assert!(Light::Sky { top: vec3f(-1.0, 0.0, 0.0), ground: Vec3f::default(), intensity: 1.0 }.validate().is_err());
+        let rect = |tangent| Light::Rect { pos: Vec3f::default(), normal: vec3f(0.0, -1.0, 0.0), tangent, size: vec2f(2.0, 1.0), color: vec3f(1.0, 1.0, 1.0), intensity: 10.0, range: 8.0 };
+        assert!(rect(vec3f(1.0, 0.0, 0.0)).validate().is_ok());
+        assert!(rect(vec3f(0.0, 1.0, 0.0)).validate().is_err(), "tangent along the normal");
     }
 }

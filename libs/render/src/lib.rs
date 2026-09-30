@@ -59,9 +59,11 @@ pub mod ssao;
 pub mod stream;
 pub mod sun;
 pub mod thermometer;
+pub mod world_lights;
 
 pub use bake::*;
-pub use custom_material::DrawSceneCustom;
+pub use custom_material::{DrawSceneCustom, DrawMaterialShadow};
+pub use makepad_render_material;
 pub use clustered::{ClusterConfig, ClusterStats};
 pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug};
 pub use local_shadows::{LocalShadowConfig, LocalShadowStats};

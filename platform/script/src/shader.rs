@@ -527,9 +527,18 @@ impl ShaderFnCompiler {
                 // build the pipeline. Before this, an error whose value had
                 // no ip (or whose ip had no source location) set has_errors
                 // and vanished — the shader silently stopped drawing.
+                // The author's source position rides along (` at file:line:col`),
+                // so a material or pass compile error can point at the line
+                // that caused it (makepad-render-material parses it).
+                let at = err
+                    .value
+                    .as_err()
+                    .and_then(|ptr| vm.bx.code.ip_to_loc(ptr.ip))
+                    .map(|loc| format!(" at {}:{}:{}", loc.file, loc.line, loc.col))
+                    .unwrap_or_default();
                 output.push_error(format!(
-                    "{} ({}:{})",
-                    err.message, err.origin_file, err.origin_line
+                    "{} ({}:{}){}",
+                    err.message, err.origin_file, err.origin_line, at
                 ));
                 if let Some(ptr) = err.value.as_err() {
                     if let Some(loc2) = vm.bx.code.ip_to_loc(ptr.ip) {

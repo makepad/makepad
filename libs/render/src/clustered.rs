@@ -95,6 +95,9 @@ fn valid_light(l: &LmLight) -> bool {
         && l.pos.length().is_finite()
         && (l.radius * l.radius).is_finite()
         && l.color.x.max(l.color.y).max(l.color.z) > 0.0
+        && l.area.map_or(true, |a| finite(a.tangent) && a.tangent.length() > 1.0e-6
+            && a.half_width.is_finite() && a.half_height.is_finite()
+            && a.half_width > 0.0 && a.half_height >= 0.0 && l.dir.length() > 1.0e-6)
 }
 fn row(m: &Mat4f, i: usize) -> Vec4f {
     vec4(m.v[i], m.v[4 + i], m.v[8 + i], m.v[12 + i])
@@ -524,6 +527,13 @@ impl ClusteredLights {
                 (false, Some((inner, outer))) => (outer.to_radians().cos(), -3.0-inner.to_radians().cos()),
                 (false, None) => (l.spot.clamp(0.0,1.0), -1.0),
             };
+            // A rectangle: the direction carries the normal scaled by the
+            // half width, mode = -5 - half height, and the colour's w the
+            // tangent's angle about the normal (see cluster_area).
+            let (angular, mode, dir) = match l.area {
+                Some(a) => (a.angle_about(dir), -5.0 - a.half_height, dir * a.half_width),
+                None => (angular, mode, dir),
+            };
             data[at..at + 12].copy_from_slice(&[
                 l.pos.x,
                 l.pos.y,
@@ -714,6 +724,9 @@ script_mod! {
                 let color=self.cluster_fetch(self.cluster_z.w+index*3.0+1.0)
                 let light=delta/max(distance,0.0001)
                 let direction=self.cluster_fetch(self.cluster_z.w+index*3.0+2.0)
+                if direction.w < -4.5 {
+                    return self.cluster_area(pos,color,direction,wp,n,view,f0,dalb,a2,pa,pbr)
+                }
                 var attenuation=pow(max(1.0-distance/pos.w,0.0),2.0)
                 var cone=1.0
                 if direction.w>=0.0 || (direction.w < -1.5 && direction.w > -2.5) {
@@ -753,10 +766,75 @@ script_mod! {
                     // lane restores the pi the 1/pi BRDF divides out.
                     response=(diffuse+spec)*(ndl*pa.w)
                 }
-                return color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w))*response
+                // The material's `light` hook (render-material); the stock
+                // body is radiance * response, this very product.
+                return self.mat_light(color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w)),light,n,view,response)
                 }
             }
             return vec3(0.0,0.0,0.0)
+        }
+        // A rectangular area light (lightmap.rs AreaRect): diffuse from the
+        // point of the rectangle nearest the surface, specular from the
+        // point nearest the reflected ray with the lobe widened by the
+        // rectangle's angular size (the representative-point method), a
+        // one-sided emitter, and the same finite range as every lamp.
+        cluster_area: fn(pos: vec4, color: vec4, direction: vec4, wp: vec3, n: vec3, view: vec3, f0: vec3, dalb: vec3, a2: float, pa: vec4, pbr: float) -> vec3 {
+            let hw=length(direction.xyz)
+            let hh=-5.0-direction.w
+            let rn=direction.xyz/max(hw,0.000001)
+            var helper=vec3(1.0,0.0,0.0)
+            if abs(rn.y)<0.9 { helper=vec3(0.0,1.0,0.0) }
+            let b0=normalize(cross(helper,rn))
+            let b1=cross(rn,b0)
+            let t=b0*cos(color.w)+b1*sin(color.w)
+            let b=cross(rn,t)
+            let d0=wp-pos.xyz
+            // Behind the emitting side: no light.
+            if dot(d0,rn)<=0.0 { return vec3(0.0,0.0,0.0) }
+            let q=pos.xyz+t*clamp(dot(d0,t),0.0-hw,hw)+b*clamp(dot(d0,b),0.0-hh,hh)
+            let dl=q-wp
+            let dist=max(length(dl),0.0001)
+            let light=dl/dist
+            let ndl=max(dot(n,light),0.0)
+            let area=4.0*hw*hh
+            let ratio=dist/pos.w
+            let window=max(1.0-ratio*ratio*ratio*ratio,0.0)
+            let irr=max(dot(rn,light*(-1.0)),0.0)*area/(dist*dist+area)*window*window
+            if ndl<=0.0 || irr<=0.0 { return vec3(0.0,0.0,0.0) }
+            var response=vec3(ndl,ndl,ndl)
+            if pbr>0.5 {
+                let r=n*(2.0*dot(n,view))-view
+                let denom=dot(r,rn)
+                var sp=q
+                if denom < -0.0001 {
+                    let hit=wp+r*(dot(pos.xyz-wp,rn)/denom)
+                    let hd=hit-pos.xyz
+                    sp=pos.xyz+t*clamp(dot(hd,t),0.0-hw,hw)+b*clamp(dot(hd,b),0.0-hh,hh)
+                }
+                let sl=normalize(sp-wp)
+                let sdist=max(length(sp-wp),0.0001)
+                let alpha=sqrt(a2)
+                let alpha2=clamp(alpha+max(hw,hh)/(2.0*sdist),0.0,1.0)
+                let norm=(alpha/max(alpha2,0.0001))*(alpha/max(alpha2,0.0001))
+                let halfdir=normalize(sl+view)
+                let ndh=max(dot(n,halfdir),0.0)
+                let vdh=max(dot(view,halfdir),0.0)
+                let sndl=max(dot(n,sl),0.0)
+                let f=f0+(vec3(1.0,1.0,1.0)-f0)*pow(1.0-vdh,5.0)
+                let den=ndh*ndh*(a2-1.0)+1.0
+                let distribution=a2/max(3.14159265*den*den,0.000001)
+                let k=pa.y
+                let geometry=pa.z*(sndl/max(sndl*(1.0-k)+k,0.0001))
+                let spec=f*(distribution*geometry*norm/max(4.0*pa.x*sndl,0.0001))*sndl
+                response=((vec3(1.0,1.0,1.0)-f)*dalb*ndl+spec)*pa.w
+            }
+            return self.mat_light(color.xyz*irr,light,n,view,response)
+        }
+        // One light's contribution: the material `light` hook's stock body.
+        // `radiance` arrives with falloff, cone and shadow applied; `brdf`
+        // is the lane's response per unit radiance (N.L included).
+        mat_light: fn(radiance: vec3, l: vec3, n: vec3, v: vec3, brdf: vec3) -> vec3 {
+            return radiance*brdf
         }
         cluster_lights: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
             if self.cluster_on < 0.5 { return vec3(0.0,0.0,0.0) }

@@ -334,6 +334,8 @@ script_mod! {
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
             var normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             if self.morph_ctl.w>0.5{normal_in=normalize(normal_in+self.morph_delta(self.geom.ao_uv,1.0))}
+            // The material `vertex` hook (render-material): identity here.
+            pos = self.mat_vertex(pos, normal_in, unpack2f16(self.geom.uv))
             self.v_fur_root = vec3(self.geom.px, self.geom.py, self.geom.pz)
             self.v_fur_normal = self.oct_decode(unpack2f16(self.geom.nrm))
             pos = pos + normal_in * (self.fur.x * self.fur_layer.x)
@@ -408,6 +410,10 @@ script_mod! {
         // dither, no occluder fade) goes through the same shader with this
         // emptied (`Renderer::opaque_shader`).
         clip: fn() { discard() }
+        // The material `vertex` hook's stock body: the model-space position
+        // unchanged. Custom materials replace it (custom_material.rs), and
+        // their shadow casters run the same function.
+        mat_vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p }
 
         // The base-colour texel. With `tex_mag.x` set (the material's glTF
         // sampler says magFilter NEAREST) a MAGNIFIED texel — larger than a

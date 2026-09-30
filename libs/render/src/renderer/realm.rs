@@ -480,10 +480,26 @@ impl Renderer {
 
     /// Install only a successfully frontend-compiled material. Failure keeps
     /// the previous draw (or the stock fallback), never a blank model.
-    pub fn install_custom_material(&mut self, name: String, draw: DrawSceneCustom) -> bool {
-        if !draw.draw_vars.can_instance() { return false; }
-        self.custom_draws.insert(name, Box::new(draw));
+    pub fn install_custom_material(&mut self, name: String, material: impl Into<CustomMaterial>) -> bool {
+        let material = material.into();
+        if !material.draw.draw_vars.can_instance() { return false; }
+        self.custom_draws.insert(name, Box::new(material));
         true
+    }
+
+    /// Install the error material (hatched magenta) under `name`: what a
+    /// preview shows for a material that did not compile. A host that
+    /// keeps the last good material instead (Sandbox) never calls this.
+    pub fn install_error_material(&mut self, cx: &mut Cx, name: String) -> bool {
+        match cx.try_with_vm(crate::custom_material::DrawSceneCustom::error_material) {
+            Some(Ok(material)) => self.install_custom_material(name, material),
+            _ => false,
+        }
+    }
+
+    /// The installed material by name (its plan, variants and warnings).
+    pub fn custom_material(&self, name: &str) -> Option<&CustomMaterial> {
+        self.custom_draws.get(name).map(|m| &**m)
     }
 
     pub fn retain_custom_materials(&mut self, names: &[String]) {
@@ -491,7 +507,7 @@ impl Renderer {
     }
 
     pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
-        self.custom_draws.get(name).and_then(|draw| draw.draw_shader_id)
+        self.custom_draws.get(name).and_then(|m| m.draw.draw_shader_id)
     }
 
     #[allow(clippy::too_many_arguments)]

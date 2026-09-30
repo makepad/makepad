@@ -48,8 +48,25 @@ script_mod! {
         // dynamic lights already use.
         eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
-        // Albedo hook for game.material surfaces (custom_material.rs).
+        // The material hooks (makepad-render-material). Each stock body
+        // returns its input, so the stock lane draws exactly as before and a
+        // custom material (custom_material.rs) replaces only what it hooks.
+        // `surface` is also game.material's albedo hook.
         surface: fn(base: vec4) -> vec4 { return base }
+        mat_normal: fn(n: vec3) -> vec3 { return n }
+        mat_metal_rough: fn(mr: vec2) -> vec2 { return mr }
+        mat_emission: fn(e: vec3) -> vec3 { return e }
+        mat_ambient: fn(n: vec3, a: vec3) -> vec3 { return a }
+        mat_lighting: fn(direct: vec3, ambient: vec3) -> vec3 { return direct + ambient }
+        mat_finish: fn(c: vec4) -> vec4 { return c }
+        // The lit colour from its parts (see mat_compose_hooked in
+        // render-material for what a light or lighting hook swaps in): the
+        // ambient, sun and lamp diffuse (a, s, l) under the diffuse albedo,
+        // plus the sun, ambient and clustered specular (ss, sa, sl). The
+        // trailing arguments describe the sun for the hooks and fold away here.
+        mat_compose: fn(albedo: vec3, metal: float, a: vec3, s: vec3, l: vec3, ss: vec3, sa: vec3, sl: vec3, n: vec3, ldir: vec3, v: vec3, sun_rad: vec3, f: vec3, lobe: float) -> vec3 {
+            return albedo * ((1.0 - metal) * (a + s + l)) + ss + sa + sl
+        }
         tn_hash: fn(p: vec2) -> float {
             return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
         }
@@ -307,8 +324,12 @@ script_mod! {
             // Roughness floored at 0.045: a2 goes to zero below that and the
             // GGX denominator collapses to a single blown-out pixel that
             // aliases into a crawling white dot as the camera moves.
-            let rough = clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
-            let metal = clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0)
+            let mr = self.mat_metal_rough(vec2(
+                clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0),
+                clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
+            ))
+            let rough = mr.y
+            let metal = mr.x
 
             // TRUE world space for all three vectors.
             var n=normalize(self.v_csm_n)
@@ -329,6 +350,7 @@ script_mod! {
                     n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
                 }
             }
+            n = self.mat_normal(n)
             let l = normalize(self.light_dir)
             let v = normalize(self.eye.xyz - self.v_csm.xyz)
             let h = normalize(l + v)
@@ -353,7 +375,7 @@ script_mod! {
             // radiance * BRDF * N.L. Shadowed exactly like the diffuse sun:
             // a highlight surviving inside a shadow is the classic tell.
             let surface_direct=mix(self.v_direct,self.sun_color*ndl,self.surface_on)
-            let surface_ambient=self.gi_ambient(self.v_csm.xyz,n,mix(self.v_ambient,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)),self.surface_on))
+            let surface_ambient=self.mat_ambient(n,self.gi_ambient(self.v_csm.xyz,n,mix(self.v_ambient,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)),self.surface_on)))
             // Light arrives as irradiance/pi units (the diffuse lobe carries
             // no 1/pi), so the HDR lane lifts the lobe by pi to match.
             let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
@@ -385,12 +407,18 @@ script_mod! {
             if self.occlusion_strength*self.surface_on>0.0 {occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)}
             var emission=vec3(0.0,0.0,0.0)
             if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive}
-            var lit = self.fur_shade(albedo * ((1.0 - metal) * (surface_ambient*(ao*sao*occlusion)+surface_direct*(ao_direct*sun_lit)+local*ao_direct)) + sun_spec*f + amb_spec*occlusion + local_pbr*ao_direct, n, self.eye.xyz-self.v_csm.xyz) + emission
+            emission = self.mat_emission(emission)
+            // The sun as the light hook sees it: its radiance (colour and
+            // shadow, before N.L) and its specular lobe per unit N.L.
+            let sun_rad = self.sun_color * (ao_direct * sun_lit)
+            let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, sun_spec*f, amb_spec*occlusion, local_pbr*ao_direct, n, l, v, sun_rad, f, lobe), n, self.eye.xyz-self.v_csm.xyz) + emission
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)
             }
-            let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
-            return self.csm_debug_view(self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,alpha,step(1.5,self.alpha_mode))))
+            let coverage=fin.w
+            return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }
 
         // Re-declared rather than inherited so the depth-clip wrapper is

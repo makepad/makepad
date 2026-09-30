@@ -4,7 +4,7 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
-use crate::custom_material::DrawSceneCustom;
+use crate::custom_material::CustomMaterial;
 use makepad_scene::{
     entity_index_sorted, BodyKind, ChunkKey, Entity, World, Part, Shape, Terrain, TerrainMaterials,
     VoxelView, WaterView, WaterSurface, MAX_WAVES,
@@ -397,7 +397,9 @@ pub struct Renderer {
     /// out of `self` for the duration of the draw so the loop can still
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
-    custom_draws: std::collections::BTreeMap<String, Box<DrawSceneCustom>>,
+    custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
+    /// Image-based lighting for Splash materials (renderer/ibl.rs).
+    ibl: ibl::IblState,
     /// The streamed world's surface shader, created on first streamed draw.
     city_draw: Option<Box<crate::shaders::DrawSceneCity>>,
     /// The level's grass field (grass.rs), its shader and this frame's
@@ -620,6 +622,7 @@ mod gi;
 mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
+mod ibl;
 
 pub use draw_items::*;
 pub use prepared::*;
@@ -691,6 +694,7 @@ impl Default for Renderer {
             orm_fallback: None,
             pbr_draw: None,
             custom_draws: Default::default(),
+            ibl: Default::default(),
             city_draw: None,
             grass: None,
             grass_draw: None,

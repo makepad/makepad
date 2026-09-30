@@ -78,6 +78,7 @@ impl Renderer {
         let geometry=self.ensure_shadow_shape_geometry(cx,shape);
         for j in 0..3 { transform.v[j]*=size.x; transform.v[4+j]*=size.y; transform.v[8+j]*=size.z; }
         out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: None,
             geometry,
             transform,min:vec3f(-0.5,-0.5,-0.5),max:vec3f(0.5,0.5,0.5),skin:None,morph:None,
         });
@@ -144,6 +145,7 @@ impl Renderer {
                 let pose = Mat4f::mul(&inst.transform, &self.model_anim_state.transform(&target,&inst.model,&part.def));
                 for (g, ..) in &part.draws {
                     out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: None,
                         geometry: g.geometry_id(),
                         transform: pose,
                         min: part.def.min,
@@ -163,6 +165,7 @@ impl Renderer {
                 let pose = Mat4f::mul(&inst.transform, &local);
                 for (g, ..) in &part.draws {
                     out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: None,
                         geometry: g.geometry_id(),
                         transform: pose,
                         min: part.def.min,
@@ -178,14 +181,22 @@ impl Renderer {
             // A multi-material GLB owns one resident geometry per layer.
             // The main geometry alone would make only layer zero cast; walk
             // every visible layer so "dynamic model" means the whole model.
-            for geometry in std::iter::once(m.geometry.as_ref())
-                .chain(m.extra_draws.iter().map(|(geometry, ..)| geometry.as_ref()))
+            // A Splash material with a derived caster (a vertex hook or a
+            // mask) casts through it: displaced geometry, cut-out holes.
+            let caster = inst.custom_material.as_ref().and_then(|cm| {
+                let m = self.custom_draws.get(&cm.name)?;
+                Some((m.shadow?, cm.params, m.cutoff, m.bounds_pad))
+            });
+            let pad = vec3f(1.0, 1.0, 1.0) * caster.map_or(0.0, |c| c.3);
+            for (geometry, texture) in std::iter::once((m.geometry.as_ref(), &m.texture))
+                .chain(m.extra_draws.iter().map(|(geometry, texture, ..)| (geometry.as_ref(), texture)))
             {
                 out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: caster.map(|(shader, params, cutoff, _)| crate::gpu_lightmap::MoverMaterial { shader, params, cutoff, texture: texture.clone() }),
                     geometry: geometry.geometry_id(),
                     transform: inst.transform,
-                    min: m.min,
-                    max: m.max,
+                    min: m.min - pad,
+                    max: m.max + pad,
                     skin: None,
                     morph:morph.clone(),
                 });
@@ -215,6 +226,7 @@ impl Renderer {
                 let morph=if let Some(lod)=lod{lod.morph.as_ref()}else{self.skin_morphs.get(&item.rig)};
                 let morph=morph.map(|m|m.depth(m.source.sample_playback(item.morph_clip.as_deref(),item.morph_time,item.morph_looping)));
                 out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: None,
                     geometry: lod.map_or_else(||self.skin_rig_geometries[at].1.geometry_id(),|lod|lod.geometry.geometry_id()),
                     transform: item.transform,
                     min,
@@ -262,6 +274,7 @@ impl Renderer {
                 // a shape not yet resident skips one frame's shadow.
                 let Some(geometry) = self.shadow_shape_geometries[e.shape.index()].as_ref() else { continue };
                 out.push(crate::gpu_lightmap::GpuLmMover {
+                    material: None,
                     geometry: geometry.geometry_id(),
                     transform: t,
                     min: vec3f(-0.5, -0.5, -0.5),

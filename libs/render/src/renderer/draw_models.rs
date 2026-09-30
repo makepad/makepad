@@ -85,6 +85,9 @@ impl Renderer {
             ModelDraw::Diffuse(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Diffuse),
             ModelDraw::Pbr(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Pbr),
             ModelDraw::Foliage(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Foliage),
+            // A Splash material's own discard-free program, when no hook of
+            // it can cut a pixel (custom_material.rs).
+            ModelDraw::Custom(_, m) => m.opaque_variant.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output)),
             _ => None,
         };
         // Swaying models (a layer with wind) draw in the foliage lane once
@@ -185,12 +188,12 @@ impl Renderer {
                 let uses_pbr_lane = self.pbr_materials_enabled && loaded.wants_pbr && self.pbr_ready;
                 let wanted_custom = inst.custom_material.as_ref().filter(|m| {
                     custom_name.as_deref() == Some(m.name.as_str())
-                        || self.custom_draws.get(&m.name).is_some_and(|d| d.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
+                        || self.custom_draws.get(&m.name).is_some_and(|d| d.draw.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
                 });
                 if let Some(name) = custom_name.as_deref() {
                     if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
                     if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
-                        d.params = material.params;
+                        d.draw.params = material.params;
                     }
                 } else if wanted_custom.is_some() || sways != foliage_lane || (!foliage_lane && uses_pbr_lane != pbr_lane) {
                     continue;
@@ -223,7 +226,10 @@ impl Renderer {
                     // bounds are available; a rest-only cull would hide motion.
                     // Fur can extend beyond the authored base geometry. The
                     // validated recipe is bounded to 5 cm in model space.
-                    let fur_margin = vec3f(0.05, 0.05, 0.05);
+                    // A Splash material's vertex hook may move geometry up to
+                    // its declared bounds_pad.
+                    let pad = match &draw { ModelDraw::Custom(_, m) => m.bounds_pad, _ => 0.0 };
+                    let fur_margin = vec3f(0.05 + pad, 0.05 + pad, 0.05 + pad);
                     if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min-fur_margin, root.max+fur_margin, &inst.transform) {
                         if layer_pass == 0 {
                             match lane {
@@ -371,6 +377,8 @@ impl Renderer {
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                    // An IBL material reads its environment on the detail slot.
+                    if let (ModelDraw::Custom(_, m), Some(t)) = (&mut draw, self.ibl_texture()) { if m.ibl { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                     draw.set_material(cx.cx, material);
                     // A far stand-in's cards in the foliage lane skip the
@@ -462,6 +470,8 @@ impl Renderer {
                         draw.base().draw_vars.set_texture(0, texture);
                         draw.base().draw_vars.set_texture(5, detail);
                         draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                        // An IBL material reads its environment on the detail slot.
+                        if let (ModelDraw::Custom(_, m), Some(t)) = (&mut draw, self.ibl_texture()) { if m.ibl { m.draw.draw_vars.set_texture(5, t); } }
                         draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                         draw.set_material(cx.cx, material);
                         stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);

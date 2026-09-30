@@ -106,6 +106,10 @@ impl Renderer {
         crate::entity_lights::append_entity_lights_with_model_headlights(
             world, &mut self.frame_lights, &self.model_headlight_owners,
         );
+        // The world's generic lights (documents, kits): none in a game world.
+        crate::world_lights::append_world_lights(world, &mut self.frame_lights);
+        // Image-based lighting for the materials that ask for it.
+        self.resolve_ibl(cx.cx, &world.environment);
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.

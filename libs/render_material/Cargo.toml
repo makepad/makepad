@@ -1,0 +1,10 @@
+[package]
+name = "makepad-render-material"
+version = "0.1.0"
+edition = "2021"
+description = "Materials for the 3D renderer: the Splash hook set, derived variants, compile diagnostics, IBL"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-scene = { path = "../scene" }

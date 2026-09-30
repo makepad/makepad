@@ -347,6 +347,20 @@ pub struct GpuLmMover {
     /// frame's joint palette. `None` = rigid.
     pub skin: Option<GpuLmSkin>,
     pub morph: Option<crate::asset_morph::DepthMorph>,
+    /// A Splash material's derived caster (custom_material.rs): its
+    /// displaced or alpha-tested shadow instead of the stock one.
+    pub material: Option<MoverMaterial>,
+}
+
+/// The derived caster a mover's material asked for, and what it binds.
+#[derive(Clone)]
+pub struct MoverMaterial {
+    pub shader: DrawShaderId,
+    pub params: Vec4f,
+    /// Alpha under this cuts the caster (Mask); 0 = none.
+    pub cutoff: f32,
+    /// The layer's base texture (the Mask test samples it).
+    pub texture: Texture,
 }
 
 /// A skinned mover's pose source: the frame's shared joint-palette texture
@@ -524,6 +538,9 @@ struct LmDraws {
     sun_depth_cutout: DrawLmSunDepthCutout,
     sun_depth_inside: DrawLmSunDepthInside,
     sun_depth_skinned: DrawLmSunDepthSkinned,
+    /// Splash materials' derived casters: one draw struct, the variant's
+    /// shader swapped in per mover (every variant has this struct's layout).
+    material_shadow: Option<crate::custom_material::DrawMaterialShadow>,
     lamp_depth: DrawLmLampDepth,
     gather_mesh: DrawLmSunGatherMesh,
     gather_ground: DrawLmSunGatherGround,
@@ -1736,6 +1753,7 @@ impl GpuLightmapBaker {
                 sun_depth_cutout: DrawLmSunDepthCutout::script_new_with_default(vm),
                 sun_depth_inside: DrawLmSunDepthInside::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
+                material_shadow: None,
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
                 gather_mesh: DrawLmSunGatherMesh::script_new_with_default(vm),
                 gather_ground: DrawLmSunGatherGround::script_new_with_default(vm),
@@ -2813,6 +2831,12 @@ impl GpuLightmapBaker {
         // Where the backend applies the tile scissor, nothing reaches past
         // the tile at all and every caster takes the discard-free pipeline.
         let scissored = cx.cx.gpu_backend().honors_scissor();
+        if draws.material_shadow.is_none() && movers.iter().any(|m| m.material.is_some()) {
+            draws.material_shadow = cx.cx.try_with_vm(|vm| {
+                crate::custom_material::register(vm);
+                crate::custom_material::DrawMaterialShadow::script_new_with_default(vm)
+            });
+        }
         for (ci, casc) in frame.cascades.iter().enumerate() {
             if !due[ci] {
                 continue;
@@ -2962,6 +2986,29 @@ impl GpuLightmapBaker {
                     continue;
                 }
                 draws_n += 1;
+                // A material's derived caster, once its pipeline exists
+                // (until then the stock shadow below).
+                if let (Some(mat), Some(dm)) = (&mv.material, draws.material_shadow.as_mut()) {
+                    if cx.cx.draw_shader_ready(mat.shader, false) {
+                        dm.set_morph(cx.cx, mv.morph.as_ref());
+                        dm.depth.depth.flip_a = gen;
+                        dm.depth.depth.tile_a = tile;
+                        dm.depth.depth.draw_vars.options.scissor = scissor;
+                        dm.depth.depth.sun_rx = casc.rx;
+                        dm.depth.depth.sun_ry = casc.ry;
+                        dm.depth.depth.sun_rz = casc.rz;
+                        dm.depth.depth.transform = mv.transform;
+                        dm.params = mat.params;
+                        dm.cutoff = mat.cutoff;
+                        dm.draw_vars.geometry_id = Some(mv.geometry);
+                        dm.draw_vars.set_texture(0, &mat.texture);
+                        dm.draw_vars.draw_shader_id = Some(mat.shader);
+                        if dm.draw_vars.can_instance() {
+                            cx.add_instance(&dm.draw_vars);
+                        }
+                        continue;
+                    }
+                }
                 if mv.morph.is_none() && (scissored || crate::shadow_csm::cascade_contains_xy(casc, *lo, *hi)) {
                     di.transform = mv.transform;
                     di.draw_vars.geometry_id = Some(mv.geometry);

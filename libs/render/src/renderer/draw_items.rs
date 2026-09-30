@@ -369,7 +369,7 @@ pub(super) struct LayerMaterial {
 pub(super) enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
-    Custom(&'a str, &'a mut DrawSceneCustom),
+    Custom(&'a str, &'a mut crate::custom_material::CustomMaterial),
     /// The streamed world's surfaces (stream_draw.rs).
     City(&'a mut crate::shaders::DrawSceneCity),
     /// Grass blades (grass_draw.rs): the lane binding only.
@@ -383,7 +383,7 @@ impl ModelDraw<'_> {
         match self {
             ModelDraw::Diffuse(d) => d,
             ModelDraw::Pbr(d) => &mut d.skinned,
-            ModelDraw::Custom(_, d) => &mut d.pbr.skinned,
+            ModelDraw::Custom(_, d) => &mut d.draw.pbr.skinned,
             ModelDraw::City(d) => &mut d.pbr.skinned,
             ModelDraw::Grass(d) => &mut d.pbr.skinned,
             ModelDraw::Foliage(d) => &mut d.pbr.skinned,
@@ -400,7 +400,7 @@ impl ModelDraw<'_> {
         match self {
             ModelDraw::Diffuse(_) => None,
             ModelDraw::Pbr(d) => Some(d),
-            ModelDraw::Custom(_, d) => Some(&mut d.pbr),
+            ModelDraw::Custom(_, d) => Some(&mut d.draw.pbr),
             ModelDraw::City(d) => Some(&mut d.pbr),
             ModelDraw::Grass(d) => Some(&mut d.pbr),
             ModelDraw::Foliage(d) => Some(&mut d.pbr),

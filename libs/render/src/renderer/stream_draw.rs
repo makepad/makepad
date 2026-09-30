@@ -538,6 +538,7 @@ impl Renderer {
                 let axis = vec3f(v[0] * dir.x + v[4] * dir.y + v[8] * dir.z, v[1] * dir.x + v[5] * dir.y + v[9] * dir.z, v[2] * dir.x + v[6] * dir.y + v[10] * dir.z).normalize();
                 self.host_asset_lights.push(crate::lightmap::LmLight {
                     pos, color: color * (st.source.mover_light_level(m.kind as usize, st.night) * fade), radius: 26.0, dir: axis, spot: 1.0, cone: Some((10.0, 34.0)), shadows: false,
+                    area: None,
                 });
             }
         }
@@ -559,6 +560,7 @@ impl Renderer {
                 let (radius, strength) = crate::lightmap::lamp_photometry(*mount);
                 self.host_asset_lights.push(crate::lightmap::LmLight {
                     pos, color: *color * (strength * st.night), radius, dir: vec3f(0.0, -1.0, 0.0), spot: 1.0, cone: None, shadows: false,
+                    area: None,
                 });
             }
         }

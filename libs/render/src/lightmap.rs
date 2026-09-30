@@ -459,6 +459,36 @@ pub struct LmLight {
     /// Request a budgeted realtime shadow. Unallocated requests are omitted
     /// rather than silently lighting through walls.
     pub shadows: bool,
+    /// A rectangular area light (clustered lighting only): `pos` is the
+    /// rectangle's centre and `dir` the side it emits from. The atlas bake
+    /// and the per-vertex lamp slots treat it as a point at its centre.
+    pub area: Option<AreaRect>,
+}
+
+/// A rectangle's extent: it spans +-`half_width` along `tangent` (at right
+/// angles to the light's `dir`) and +-`half_height` along `dir x tangent`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AreaRect {
+    pub tangent: Vec3f,
+    pub half_width: f32,
+    pub half_height: f32,
+}
+
+impl AreaRect {
+    /// The rotation of `tangent` about the unit normal `n`, from the
+    /// canonical basis the shader rebuilds (clustered.rs `area_basis`).
+    pub fn angle_about(&self, n: Vec3f) -> f32 {
+        let (b0, b1) = area_basis(n);
+        self.tangent.dot(b1).atan2(self.tangent.dot(b0))
+    }
+}
+
+/// The basis perpendicular to unit `n` that the cluster shader derives
+/// from the normal alone (so a rectangle's tangent packs as one angle).
+pub fn area_basis(n: Vec3f) -> (Vec3f, Vec3f) {
+    let helper = if n.y.abs() < 0.9 { Vec3f { x: 0.0, y: 1.0, z: 0.0 } } else { Vec3f { x: 1.0, y: 0.0, z: 0.0 } };
+    let b0 = Vec3f::cross(helper, n).normalize();
+    (b0, Vec3f::cross(n, b0))
 }
 
 impl Default for LmLight {
@@ -468,7 +498,7 @@ impl Default for LmLight {
 impl LmLight {
     /// An omnidirectional light.
     pub fn omni(pos: Vec3f, color: Vec3f, radius: f32) -> Self {
-        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false }
+        LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false, area: None }
     }
 }
 
