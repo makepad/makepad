@@ -219,9 +219,9 @@ impl Renderer {
         let mut image = ImageBuffer::default();
         image.width = width;
         image.height = height;
-        // 0xAARRGGBB words (the lanes sample them as BGRA), bottom row
-        // first: the lanes' v runs up the image, an item's uv (glTF) down.
-        image.data = rgba.chunks_exact(width * 4).rev().flat_map(|row| row.chunks_exact(4)).map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32).collect();
+        // 0xAARRGGBB words (the lanes sample them as BGRA), top row first
+        // at v = 0, as glTF's uv reads them.
+        image.data = rgba.chunks_exact(4).map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32).collect();
         let t = Arc::new(PreparedTexture::prepare(image, semantic));
         self.items.prepared.insert(key, t.clone());
         Some(t)
