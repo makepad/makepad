@@ -124,48 +124,35 @@ impl Aligned {
         })
     }
 
-    /// A window of whole tokens covering at most `max_frames` frames.
+    /// A window of at most `max_frames` frames at a random start; the tokens
+    /// it overlaps, each clipped to the window.
     pub fn crop(&self, max_frames: usize, rng: &mut Rng) -> Aligned {
-        if self.frames() <= max_frames || self.dur.is_empty() {
+        let nf = self.frames();
+        if nf <= max_frames || self.dur.is_empty() {
             return self.clone();
         }
-        let starts: Vec<usize> = self.dur.iter().scan(0, |acc, d| {
-            let s = *acc;
-            *acc += d;
-            Some(s)
-        }).collect();
-        for _ in 0..16 {
-            let a = rng.below(self.tokens.len());
-            let mut b = a;
-            let mut frames = 0;
-            while b < self.tokens.len() && frames + self.dur[b] <= max_frames {
-                frames += self.dur[b];
-                b += 1;
-            }
+        let f0 = rng.below(nf - max_frames + 1);
+        let f1 = f0 + max_frames;
+        let (mut tokens, mut dur) = (Vec::new(), Vec::new());
+        let mut at = 0;
+        for (tk, d) in self.tokens.iter().zip(&self.dur) {
+            let (a, b) = (at.max(f0), (at + d).min(f1));
             if b > a {
-                let f0 = starts[a];
-                let f1 = f0 + frames;
-                return Aligned {
-                    tokens: self.tokens[a..b].to_vec(),
-                    dur: self.dur[a..b].to_vec(),
-                    notes: self.notes[f0..f1].to_vec(),
-                    f0: self.f0[f0..f1].to_vec(),
-                    vel: self.vel[f0..f1].to_vec(),
-                    audio: self.audio[f0 * HOP..(f1 * HOP).min(self.audio.len())].to_vec(),
-                    singer: self.singer,
-                    band: self.band,
-                };
+                tokens.push(*tk);
+                dur.push(b - a);
             }
+            at += d;
         }
-        // A single token longer than the window: cut it.
-        let mut c = self.clone();
-        c.tokens.truncate(1);
-        c.dur = vec![max_frames];
-        c.notes.truncate(max_frames);
-        c.f0.truncate(max_frames);
-        c.vel.truncate(max_frames);
-        c.audio.truncate(max_frames * HOP);
-        c
+        Aligned {
+            tokens,
+            dur,
+            notes: self.notes[f0..f1].to_vec(),
+            f0: self.f0[f0..f1].to_vec(),
+            vel: self.vel[f0..f1].to_vec(),
+            audio: self.audio[f0 * HOP..(f1 * HOP).min(self.audio.len())].to_vec(),
+            singer: self.singer,
+            band: self.band,
+        }
     }
 }
 
@@ -807,4 +794,22 @@ impl SynthSinger {
 /// steady frames), for reports.
 pub fn f0_cents(audio: &[f32], f0: &[f32]) -> f32 {
     crate::cantor::f0_error_cents(audio, f0).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_keeps_the_vowel_of_a_long_sung_item() {
+        let nf = 1000;
+        let a = Aligned { tokens: vec![1, 9, 1], dur: vec![50, 900, 50], notes: vec![60.0; nf], f0: vec![261.6; nf], vel: vec![0.8; nf], audio: vec![0.0; nf * HOP], singer: 0, band: 24_000.0 };
+        let mut rng = Rng::new(1);
+        for _ in 0..20 {
+            let c = a.crop(300, &mut rng);
+            assert_eq!(c.frames(), 300);
+            assert_eq!(c.dur.iter().sum::<usize>(), 300);
+            assert!(c.tokens.contains(&9));
+        }
+    }
 }
