@@ -4,7 +4,9 @@
 //!
 //! - Values: SSA temporaries ([`Val`], defined once by [`Stmt::Def`]) and
 //!   typed mutable locals ([`Var`], like wasm locals) for everything that
-//!   crosses control flow. Types are `F32`, `I32` and `Bool` (0/1).
+//!   crosses control flow. Types are `F32`, `I32`, `Bool` (0/1) and
+//!   `F64` (registers only: memory is 32-bit words, so an f64 is stored as
+//!   its two words through [`Un::HiD`]/[`Un::LoD`] and [`Bin::MakeD`]).
 //! - Control flow is structured: [`Stmt::If`] with two blocks, and
 //!   [`Stmt::Loop`] with an iteration **cap** (the loop exits when the cap
 //!   is reached), `Break(d)`/`Continue(d)` naming the d-th enclosing loop.
@@ -25,6 +27,7 @@ pub enum Ty {
     F32,
     I32,
     Bool,
+    F64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -68,6 +71,26 @@ pub enum Un {
     BitsIF,
     NegI,
     NotB,
+    NegD,
+    AbsD,
+    SqrtD,
+    FloorD,
+    CeilD,
+    TruncD,
+    /// Round half away from zero (Rust `f64::round`).
+    RoundD,
+    /// f32 -> f64 (exact).
+    F2D,
+    /// f64 -> f32, round to nearest.
+    D2F,
+    /// f64 -> i32, truncating, saturating, NaN -> 0 (Rust `as`).
+    D2I,
+    /// i32 -> f64 (exact).
+    I2D,
+    /// The high word of an f64's bits (i32).
+    HiD,
+    /// The low word of an f64's bits (i32).
+    LoD,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -96,6 +119,16 @@ pub enum Bin {
     ShrUI,
     AndB,
     OrB,
+    AddD,
+    SubD,
+    MulD,
+    DivD,
+    /// `a < b ? a : b`.
+    MinD,
+    /// `a > b ? a : b`.
+    MaxD,
+    /// The f64 whose bits are `(hi << 32) | lo` (two i32 words).
+    MakeD,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -111,6 +144,7 @@ pub enum Cmp {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Op {
     ConstF(f32),
+    ConstD(f64),
     ConstI(i32),
     ConstB(bool),
     Get(Var),
@@ -119,6 +153,7 @@ pub enum Op {
     CmpF(Cmp, Val, Val),
     /// Integer (or bool) compare.
     CmpI(Cmp, Val, Val),
+    CmpD(Cmp, Val, Val),
     /// `c ? a : b` (any type; both sides already evaluated).
     Sel(Val, Val, Val),
     /// Euclidean `x mod len` (len > 0) -> i32 in `0..len`.
@@ -169,9 +204,16 @@ pub struct Program {
 }
 
 impl Program {
-    /// Registers the interpreter needs (vals + vars + frame).
+    /// Registers the interpreter needs (vals + vars + frame, then the
+    /// high words of every register when the program uses f64).
     pub fn scratch_words(&self) -> usize {
-        self.vals.len() + self.vars.len() + self.frame_words as usize
+        let regs = self.vals.len() + self.vars.len();
+        regs + self.frame_words as usize + if self.uses_f64() { regs } else { 0 }
+    }
+
+    /// Any f64 value or variable (their high words need registers too).
+    pub fn uses_f64(&self) -> bool {
+        self.vals.iter().chain(&self.vars).any(|t| *t == Ty::F64)
     }
 
     /// Worst-case ops of one whole run: every loop at its cap (`init()`).
@@ -217,40 +259,70 @@ impl Program {
 // =========================================================================
 
 #[inline(always)]
-fn f(x: u32) -> f32 {
-    f32::from_bits(x)
+fn f(x: u64) -> f32 {
+    f32::from_bits(x as u32)
 }
 
 #[inline(always)]
-fn i(x: u32) -> i32 {
-    x as i32
+fn i(x: u64) -> i32 {
+    x as u32 as i32
 }
 
 #[inline(always)]
-pub fn eval_un(op: Un, a: u32) -> u32 {
+fn d(x: u64) -> f64 {
+    f64::from_bits(x)
+}
+
+#[inline(always)]
+fn fw(x: f32) -> u64 {
+    x.to_bits() as u64
+}
+
+#[inline(always)]
+fn iw(x: i32) -> u64 {
+    x as u32 as u64
+}
+
+/// An op on register bits: 32-bit types in the low word (the high word of
+/// the result is 0), f64 in all 64 bits.
+#[inline(always)]
+pub fn eval_un(op: Un, a: u64) -> u64 {
     match op {
-        Un::NegF => (-f(a)).to_bits(),
-        Un::AbsF => f(a).abs().to_bits(),
-        Un::SqrtF => f(a).sqrt().to_bits(),
-        Un::FloorF => f(a).floor().to_bits(),
-        Un::CeilF => f(a).ceil().to_bits(),
-        Un::TruncF => f(a).trunc().to_bits(),
-        Un::RoundF => f(a).round().to_bits(),
-        Un::F2I => (f(a) as i32) as u32,
-        Un::I2F => (i(a) as f32).to_bits(),
-        Un::BitsFI | Un::BitsIF => a,
-        Un::NegI => i(a).wrapping_neg() as u32,
-        Un::NotB => (a == 0) as u32,
+        Un::NegF => fw(-f(a)),
+        Un::AbsF => fw(f(a).abs()),
+        Un::SqrtF => fw(f(a).sqrt()),
+        Un::FloorF => fw(f(a).floor()),
+        Un::CeilF => fw(f(a).ceil()),
+        Un::TruncF => fw(f(a).trunc()),
+        Un::RoundF => fw(f(a).round()),
+        Un::F2I => iw(f(a) as i32),
+        Un::I2F => fw(i(a) as f32),
+        Un::BitsFI | Un::BitsIF => a & 0xFFFF_FFFF,
+        Un::NegI => iw(i(a).wrapping_neg()),
+        Un::NotB => (a as u32 == 0) as u64,
+        Un::NegD => (-d(a)).to_bits(),
+        Un::AbsD => d(a).abs().to_bits(),
+        Un::SqrtD => d(a).sqrt().to_bits(),
+        Un::FloorD => d(a).floor().to_bits(),
+        Un::CeilD => d(a).ceil().to_bits(),
+        Un::TruncD => d(a).trunc().to_bits(),
+        Un::RoundD => d(a).round().to_bits(),
+        Un::F2D => (f(a) as f64).to_bits(),
+        Un::D2F => fw(d(a) as f32),
+        Un::D2I => iw(d(a) as i32),
+        Un::I2D => (i(a) as f64).to_bits(),
+        Un::HiD => a >> 32,
+        Un::LoD => a & 0xFFFF_FFFF,
     }
 }
 
 #[inline(always)]
-pub fn eval_bin(op: Bin, a: u32, b: u32) -> u32 {
+pub fn eval_bin(op: Bin, a: u64, b: u64) -> u64 {
     match op {
-        Bin::AddF => (f(a) + f(b)).to_bits(),
-        Bin::SubF => (f(a) - f(b)).to_bits(),
-        Bin::MulF => (f(a) * f(b)).to_bits(),
-        Bin::DivF => (f(a) / f(b)).to_bits(),
+        Bin::AddF => fw(f(a) + f(b)),
+        Bin::SubF => fw(f(a) - f(b)),
+        Bin::MulF => fw(f(a) * f(b)),
+        Bin::DivF => fw(f(a) / f(b)),
         Bin::MinF => {
             if f(a) < f(b) {
                 a
@@ -265,35 +337,53 @@ pub fn eval_bin(op: Bin, a: u32, b: u32) -> u32 {
                 b
             }
         }
-        Bin::AddI => i(a).wrapping_add(i(b)) as u32,
-        Bin::SubI => i(a).wrapping_sub(i(b)) as u32,
-        Bin::MulI => i(a).wrapping_mul(i(b)) as u32,
+        Bin::AddI => iw(i(a).wrapping_add(i(b))),
+        Bin::SubI => iw(i(a).wrapping_sub(i(b))),
+        Bin::MulI => iw(i(a).wrapping_mul(i(b))),
         Bin::DivI => {
-            if b == 0 {
+            if b as u32 == 0 {
                 0
             } else {
-                i(a).wrapping_div(i(b)) as u32
+                iw(i(a).wrapping_div(i(b)))
             }
         }
         Bin::RemI => {
-            if b == 0 {
+            if b as u32 == 0 {
                 a
             } else {
-                i(a).wrapping_rem(i(b)) as u32
+                iw(i(a).wrapping_rem(i(b)))
             }
         }
         Bin::AndI | Bin::AndB => a & b,
         Bin::OrI | Bin::OrB => a | b,
         Bin::XorI => a ^ b,
-        Bin::ShlI => i(a).wrapping_shl(b) as u32,
-        Bin::ShrI => i(a).wrapping_shr(b) as u32,
-        Bin::ShrUI => a.wrapping_shr(b),
+        Bin::ShlI => iw(i(a).wrapping_shl(b as u32)),
+        Bin::ShrI => iw(i(a).wrapping_shr(b as u32)),
+        Bin::ShrUI => (a as u32).wrapping_shr(b as u32) as u64,
+        Bin::AddD => (d(a) + d(b)).to_bits(),
+        Bin::SubD => (d(a) - d(b)).to_bits(),
+        Bin::MulD => (d(a) * d(b)).to_bits(),
+        Bin::DivD => (d(a) / d(b)).to_bits(),
+        Bin::MinD => {
+            if d(a) < d(b) {
+                a
+            } else {
+                b
+            }
+        }
+        Bin::MaxD => {
+            if d(a) > d(b) {
+                a
+            } else {
+                b
+            }
+        }
+        Bin::MakeD => (a << 32) | (b & 0xFFFF_FFFF),
     }
 }
 
 #[inline(always)]
-pub fn eval_cmp_f(cc: Cmp, a: u32, b: u32) -> u32 {
-    let (a, b) = (f(a), f(b));
+fn cmp<T: PartialOrd>(cc: Cmp, a: T, b: T) -> u64 {
     (match cc {
         Cmp::Lt => a < b,
         Cmp::Le => a <= b,
@@ -301,20 +391,22 @@ pub fn eval_cmp_f(cc: Cmp, a: u32, b: u32) -> u32 {
         Cmp::Ge => a >= b,
         Cmp::Eq => a == b,
         Cmp::Ne => a != b,
-    }) as u32
+    }) as u64
 }
 
 #[inline(always)]
-pub fn eval_cmp_i(cc: Cmp, a: u32, b: u32) -> u32 {
-    let (a, b) = (i(a), i(b));
-    (match cc {
-        Cmp::Lt => a < b,
-        Cmp::Le => a <= b,
-        Cmp::Gt => a > b,
-        Cmp::Ge => a >= b,
-        Cmp::Eq => a == b,
-        Cmp::Ne => a != b,
-    }) as u32
+pub fn eval_cmp_f(cc: Cmp, a: u64, b: u64) -> u64 {
+    cmp(cc, f(a), f(b))
+}
+
+#[inline(always)]
+pub fn eval_cmp_d(cc: Cmp, a: u64, b: u64) -> u64 {
+    cmp(cc, d(a), d(b))
+}
+
+#[inline(always)]
+pub fn eval_cmp_i(cc: Cmp, a: u64, b: u64) -> u64 {
+    cmp(cc, i(a), i(b))
 }
 
 #[inline(always)]
@@ -322,7 +414,7 @@ pub fn eval_wrap(x: u32, len: u32) -> u32 {
     if len.is_power_of_two() {
         x & (len - 1)
     } else {
-        let r = i(x).wrapping_rem(len as i32);
+        let r = (x as i32).wrapping_rem(len as i32);
         (if r < 0 { r + len as i32 } else { r }) as u32
     }
 }
@@ -419,6 +511,8 @@ enum Flow {
 
 struct Interp<'a, 'm, 'i> {
     regs: &'a mut [u32],
+    /// High words of the registers (empty unless the program uses f64).
+    hi: &'a mut [u32],
     nvals: usize,
     frame: &'a mut [u32],
     mem: &'a mut Mem<'m>,
@@ -428,8 +522,25 @@ struct Interp<'a, 'm, 'i> {
 
 impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
     #[inline(always)]
-    fn r(&self, v: Val) -> u32 {
-        self.regs[v.0 as usize]
+    fn r(&self, v: Val) -> u64 {
+        self.reg(v.0 as usize)
+    }
+
+    #[inline(always)]
+    fn reg(&self, at: usize) -> u64 {
+        let lo = self.regs[at] as u64;
+        match self.hi.get(at) {
+            Some(h) => lo | (*h as u64) << 32,
+            None => lo,
+        }
+    }
+
+    #[inline(always)]
+    fn set_reg(&mut self, at: usize, x: u64) {
+        self.regs[at] = x as u32;
+        if let Some(h) = self.hi.get_mut(at) {
+            *h = (x >> 32) as u32;
+        }
     }
 
     /// Reads word `at` of an owned region (clamped callers; out of range
@@ -465,15 +576,17 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
         }
     }
 
-    fn eval(&mut self, op: &Op) -> u32 {
+    fn eval(&mut self, op: &Op) -> u64 {
         match *op {
-            Op::ConstF(x) => x.to_bits(),
-            Op::ConstI(x) => x as u32,
-            Op::ConstB(x) => x as u32,
-            Op::Get(v) => self.regs[self.nvals + v.0 as usize],
+            Op::ConstF(x) => x.to_bits() as u64,
+            Op::ConstD(x) => x.to_bits(),
+            Op::ConstI(x) => x as u32 as u64,
+            Op::ConstB(x) => x as u64,
+            Op::Get(v) => self.reg(self.nvals + v.0 as usize),
             Op::Un(u, a) => eval_un(u, self.r(a)),
             Op::Bin(b, x, y) => eval_bin(b, self.r(x), self.r(y)),
             Op::CmpF(cc, x, y) => eval_cmp_f(cc, self.r(x), self.r(y)),
+            Op::CmpD(cc, x, y) => eval_cmp_d(cc, self.r(x), self.r(y)),
             Op::CmpI(cc, x, y) => eval_cmp_i(cc, self.r(x), self.r(y)),
             Op::Sel(c, x, y) => {
                 if self.r(c) != 0 {
@@ -482,27 +595,27 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                     self.r(y)
                 }
             }
-            Op::Wrap(x, len) => eval_wrap(self.r(x), len),
+            Op::Wrap(x, len) => eval_wrap(self.r(x) as u32, len) as u64,
             Op::Load { region: Region::Buf(k), base, off, .. } => {
                 let Some(b) = self.mem.bufs.get(k as usize) else { return 0 };
                 if b.len == 0 {
                     return 0;
                 }
-                b.load(buf_index(base, off.map(|o| self.r(o)), b.len))
+                b.load(buf_index(base, off.map(|o| self.r(o) as u32), b.len)) as u64
             }
-            Op::BufLen(k) => self.mem.bufs.get(k as usize).map_or(0, |b| b.len as u32),
+            Op::BufLen(k) => self.mem.bufs.get(k as usize).map_or(0, |b| b.len as u32) as u64,
             Op::Load { region, base, extent, off } => {
                 let off = match off {
-                    Some(o) => clamp_off(self.r(o), extent),
+                    Some(o) => clamp_off(self.r(o) as u32, extent),
                     None => 0,
                 };
-                self.read_word(region, base as usize + off as usize)
+                self.read_word(region, base as usize + off as usize) as u64
             }
             Op::In { ch, idx } => {
-                let at = clamp_off(self.r(idx), self.n) as usize;
-                self.io.ins[ch as usize][at].to_bits()
+                let at = clamp_off(self.r(idx) as u32, self.n) as usize;
+                self.io.ins[ch as usize][at].to_bits() as u64
             }
-            Op::FrameCount => self.n,
+            Op::FrameCount => self.n as u64,
         }
     }
 
@@ -511,15 +624,15 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
             match s {
                 Stmt::Def(v, op) => {
                     let x = self.eval(op);
-                    self.regs[v.0 as usize] = x;
+                    self.set_reg(v.0 as usize, x);
                 }
                 Stmt::Set(var, v) => {
                     let x = self.r(*v);
-                    self.regs[self.nvals + var.0 as usize] = x;
+                    self.set_reg(self.nvals + var.0 as usize, x);
                 }
                 Stmt::Store { region: Region::Buf(k), base, off, val, .. } => {
-                    let x = self.r(*val);
-                    let o = off.map(|o| self.r(o));
+                    let x = self.r(*val) as u32;
+                    let o = off.map(|o| self.r(o) as u32);
                     if let Some(b) = self.mem.bufs.get(*k as usize) {
                         if b.len > 0 {
                             b.store(buf_index(*base, o, b.len), x);
@@ -528,15 +641,15 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 }
                 Stmt::Store { region, base, extent, off, val } => {
                     let off = match off {
-                        Some(o) => clamp_off(self.r(*o), *extent),
+                        Some(o) => clamp_off(self.r(*o) as u32, *extent),
                         None => 0,
                     };
-                    let x = self.r(*val);
+                    let x = self.r(*val) as u32;
                     self.write_word(*region, *base as usize + off as usize, x);
                 }
                 Stmt::Out { ch, idx, val } => {
-                    let at = clamp_off(self.r(*idx), self.n) as usize;
-                    let x = f32::from_bits(self.r(*val));
+                    let at = clamp_off(self.r(*idx) as u32, self.n) as usize;
+                    let x = f32::from_bits(self.r(*val) as u32);
                     let out = &mut self.io.outs[*ch as usize][at];
                     *out += x;
                 }
@@ -574,8 +687,10 @@ pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32)
         return;
     }
     let nregs = p.vals.len() + p.vars.len();
-    let (regs, frame) = scratch.split_at_mut(nregs);
-    let mut interp = Interp { regs, nvals: p.vals.len(), frame, mem, io, n };
+    let (regs, rest) = scratch.split_at_mut(nregs);
+    let (frame, hi) = rest.split_at_mut(p.frame_words as usize);
+    let hi = if p.uses_f64() { hi } else { &mut [] };
+    let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n };
     interp.block(&p.body);
 }
 
@@ -675,26 +790,17 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
             let t = self.ty(v)?;
             let want = match *op {
                 Op::ConstF(_) => F32,
+                Op::ConstD(_) => F64,
                 Op::ConstI(_) => I32,
                 Op::ConstB(_) => Bool,
                 Op::Get(var) => self.var_ty(var)?,
                 Op::Un(u, a) => {
-                    let (inp, out) = match u {
-                        Un::NegF | Un::AbsF | Un::SqrtF | Un::FloorF | Un::CeilF | Un::TruncF | Un::RoundF => (F32, F32),
-                        Un::F2I | Un::BitsFI => (F32, I32),
-                        Un::I2F | Un::BitsIF => (I32, F32),
-                        Un::NegI => (I32, I32),
-                        Un::NotB => (Bool, Bool),
-                    };
+                    let (inp, out) = un_types(u);
                     self.used(a, Some(inp))?;
                     out
                 }
                 Op::Bin(b, x, y) => {
-                    let (inp, out) = match b {
-                        Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF | Bin::MinF | Bin::MaxF => (F32, F32),
-                        Bin::AndB | Bin::OrB => (Bool, Bool),
-                        _ => (I32, I32),
-                    };
+                    let (inp, out) = bin_types(b);
                     self.used(x, Some(inp))?;
                     self.used(y, Some(inp))?;
                     out
@@ -704,10 +810,15 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                     self.used(y, Some(F32))?;
                     Bool
                 }
+                Op::CmpD(_, x, y) => {
+                    self.used(x, Some(F64))?;
+                    self.used(y, Some(F64))?;
+                    Bool
+                }
                 Op::CmpI(_, x, y) => {
                     let tx = self.used(x, None)?;
                     self.used(y, Some(tx))?;
-                    if tx == F32 {
+                    if tx == F32 || tx == F64 {
                         return Err("integer compare of floats".into());
                     }
                     Bool
@@ -727,6 +838,9 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                 }
                 Op::Load { region, base, extent, off } => {
                     self.access(region, base, extent, off, false)?;
+                    if t == F64 {
+                        return Err("memory words are 32-bit: an f64 is loaded as two words".into());
+                    }
                     t
                 }
                 Op::In { idx, .. } => {
@@ -768,7 +882,9 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                         self.used(*v, Some(want))?;
                     }
                     Stmt::Store { region, base, extent, off, val } => {
-                        self.used(*val, None)?;
+                        if self.used(*val, None)? == Ty::F64 {
+                            return Err("memory words are 32-bit: an f64 is stored as two words".into());
+                        }
                         self.access(*region, *base, *extent, *off, true)?;
                     }
                     Stmt::Out { idx, val, .. } => {
@@ -803,12 +919,41 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
     v.block(&p.body, 0)
 }
 
+/// Operand and result types of a unary op.
+pub fn un_types(u: Un) -> (Ty, Ty) {
+    use Ty::*;
+    match u {
+        Un::NegF | Un::AbsF | Un::SqrtF | Un::FloorF | Un::CeilF | Un::TruncF | Un::RoundF => (F32, F32),
+        Un::F2I | Un::BitsFI => (F32, I32),
+        Un::I2F | Un::BitsIF => (I32, F32),
+        Un::NegI => (I32, I32),
+        Un::NotB => (Bool, Bool),
+        Un::NegD | Un::AbsD | Un::SqrtD | Un::FloorD | Un::CeilD | Un::TruncD | Un::RoundD => (F64, F64),
+        Un::F2D => (F32, F64),
+        Un::D2F => (F64, F32),
+        Un::D2I | Un::HiD | Un::LoD => (F64, I32),
+        Un::I2D => (I32, F64),
+    }
+}
+
+/// Operand and result types of a binary op.
+pub fn bin_types(b: Bin) -> (Ty, Ty) {
+    use Ty::*;
+    match b {
+        Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF | Bin::MinF | Bin::MaxF => (F32, F32),
+        Bin::AddD | Bin::SubD | Bin::MulD | Bin::DivD | Bin::MinD | Bin::MaxD => (F64, F64),
+        Bin::MakeD => (I32, F64),
+        Bin::AndB | Bin::OrB => (Bool, Bool),
+        _ => (I32, I32),
+    }
+}
+
 /// The operands an op reads.
 pub fn op_uses(op: &Op) -> Vec<Val> {
     match *op {
-        Op::ConstF(_) | Op::ConstI(_) | Op::ConstB(_) | Op::Get(_) | Op::FrameCount | Op::BufLen(_) => vec![],
+        Op::ConstF(_) | Op::ConstD(_) | Op::ConstI(_) | Op::ConstB(_) | Op::Get(_) | Op::FrameCount | Op::BufLen(_) => vec![],
         Op::Un(_, a) | Op::Wrap(a, _) => vec![a],
-        Op::Bin(_, a, b) | Op::CmpF(_, a, b) | Op::CmpI(_, a, b) => vec![a, b],
+        Op::Bin(_, a, b) | Op::CmpF(_, a, b) | Op::CmpD(_, a, b) | Op::CmpI(_, a, b) => vec![a, b],
         Op::Sel(c, a, b) => vec![c, a, b],
         Op::Load { off, .. } => off.into_iter().collect(),
         Op::In { idx, .. } => vec![idx],
@@ -819,19 +964,12 @@ pub fn op_uses(op: &Op) -> Vec<Val> {
 pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
     Some(match *op {
         Op::ConstF(_) => Ty::F32,
+        Op::ConstD(_) => Ty::F64,
         Op::ConstI(_) | Op::Wrap(..) | Op::FrameCount | Op::BufLen(_) => Ty::I32,
-        Op::ConstB(_) | Op::CmpF(..) | Op::CmpI(..) => Ty::Bool,
+        Op::ConstB(_) | Op::CmpF(..) | Op::CmpD(..) | Op::CmpI(..) => Ty::Bool,
         Op::Get(v) => p.vars[v.0 as usize],
-        Op::Un(u, _) => match u {
-            Un::F2I | Un::BitsFI | Un::NegI => Ty::I32,
-            Un::NotB => Ty::Bool,
-            _ => Ty::F32,
-        },
-        Op::Bin(b, _, _) => match b {
-            Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF | Bin::MinF | Bin::MaxF => Ty::F32,
-            Bin::AndB | Bin::OrB => Ty::Bool,
-            _ => Ty::I32,
-        },
+        Op::Un(u, _) => un_types(u).1,
+        Op::Bin(b, _, _) => bin_types(b).1,
         Op::Sel(_, a, _) => p.vals[a.0 as usize],
         Op::In { .. } => Ty::F32,
         Op::Load { .. } => return None,

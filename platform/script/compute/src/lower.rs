@@ -14,6 +14,7 @@
 use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, Val, Var};
 
 pub mod kernel;
+mod portable;
 
 /// Which front end a program is lowered for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +114,8 @@ enum T {
     F,
     I,
     B,
+    /// f64: a register value; two words (low, high) in memory.
+    D,
     /// n f32 lanes: vec2, vec3, vec4, and mat4 (16, column-major).
     Vec(u8),
     Struct(usize),
@@ -181,6 +184,7 @@ struct Place {
 enum V {
     Lit(f64),
     F(Val),
+    D(Val),
     I(Val),
     B(Val),
     Vec(u8, Lanes),
@@ -240,11 +244,12 @@ fn err<X>(span: Span, msg: impl Into<String>) -> LResult<X> {
 /// loop boundary).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Key {
-    Const(Ty, u32),
+    Const(Ty, u64),
     Un(Un, Val),
     Bin(Bin, Val, Val),
     CmpF(Cmp, Val, Val),
     CmpI(Cmp, Val, Val),
+    CmpD(Cmp, Val, Val),
     Sel(Val, Val, Val),
     Wrap(Val, u32),
     Load(Region, u32, u32, Option<Val>),
@@ -257,14 +262,16 @@ enum Key {
 impl Key {
     fn of(op: &Op, ty: Ty) -> Key {
         match *op {
-            Op::ConstF(x) => Key::Const(ty, x.to_bits()),
-            Op::ConstI(x) => Key::Const(ty, x as u32),
-            Op::ConstB(x) => Key::Const(ty, x as u32),
+            Op::ConstF(x) => Key::Const(ty, x.to_bits() as u64),
+            Op::ConstD(x) => Key::Const(ty, x.to_bits()),
+            Op::ConstI(x) => Key::Const(ty, x as u32 as u64),
+            Op::ConstB(x) => Key::Const(ty, x as u64),
             Op::Get(v) => Key::Get(v),
             Op::Un(u, a) => Key::Un(u, a),
             Op::Bin(b, x, y) => Key::Bin(b, x, y),
             Op::CmpF(c, x, y) => Key::CmpF(c, x, y),
             Op::CmpI(c, x, y) => Key::CmpI(c, x, y),
+            Op::CmpD(c, x, y) => Key::CmpD(c, x, y),
             Op::Sel(c, x, y) => Key::Sel(c, x, y),
             Op::Wrap(x, n) => Key::Wrap(x, n),
             Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off),
@@ -283,7 +290,8 @@ impl Key {
 struct Builder {
     prog: Program,
     blocks: Vec<Block>,
-    consts: Vec<Option<u32>>,
+    /// Register bits of constant values (f64 in all 64).
+    consts: Vec<Option<u64>>,
     /// Per open block: values by key, and whether the block is a loop body
     /// (memory keys from outside it are not reused inside).
     cse: Vec<(HashMap<Key, Val>, bool)>,
@@ -345,13 +353,18 @@ impl Builder {
         Var(self.prog.vars.len() as u32 - 1)
     }
 
+    /// A constant's low word (every 32-bit type).
     fn cst(&self, v: Val) -> Option<u32> {
+        self.cst64(v).map(|c| c as u32)
+    }
+
+    fn cst64(&self, v: Val) -> Option<u64> {
         // A value of another builder (an outer local seen while a constant
         // initializer is folded in a scratch builder) is not a constant.
         self.consts.get(v.0 as usize).copied().flatten()
     }
 
-    fn raw(&mut self, ty: Ty, op: Op, c: Option<u32>) -> Val {
+    fn raw(&mut self, ty: Ty, op: Op, c: Option<u64>) -> Val {
         let key = Key::of(&op, ty);
         if let Some(v) = self.lookup(&key) {
             return v;
@@ -365,38 +378,47 @@ impl Builder {
     }
 
     fn cf(&mut self, x: f32) -> Val {
-        self.raw(Ty::F32, Op::ConstF(x), Some(x.to_bits()))
+        self.raw(Ty::F32, Op::ConstF(x), Some(x.to_bits() as u64))
+    }
+
+    fn cd(&mut self, x: f64) -> Val {
+        self.raw(Ty::F64, Op::ConstD(x), Some(x.to_bits()))
     }
 
     fn ci(&mut self, x: i32) -> Val {
-        self.raw(Ty::I32, Op::ConstI(x), Some(x as u32))
+        self.raw(Ty::I32, Op::ConstI(x), Some(x as u32 as u64))
     }
 
     fn cb(&mut self, x: bool) -> Val {
-        self.raw(Ty::Bool, Op::ConstB(x), Some(x as u32))
+        self.raw(Ty::Bool, Op::ConstB(x), Some(x as u64))
     }
 
-    fn konst(&mut self, ty: Ty, bits: u32) -> Val {
+    fn konst(&mut self, ty: Ty, bits: u64) -> Val {
         match ty {
-            Ty::F32 => self.cf(f32::from_bits(bits)),
-            Ty::I32 => self.ci(bits as i32),
-            Ty::Bool => self.cb(bits != 0),
+            Ty::F32 => self.cf(f32::from_bits(bits as u32)),
+            Ty::I32 => self.ci(bits as u32 as i32),
+            Ty::Bool => self.cb(bits as u32 != 0),
+            Ty::F64 => self.cd(f64::from_bits(bits)),
         }
     }
 
     /// Emits `op` of type `ty`, folding it when every operand is constant.
     fn def(&mut self, ty: Ty, op: Op) -> Val {
         let folded = match op {
-            Op::Un(u, a) => self.cst(a).map(|a| ir::eval_un(u, a)),
-            Op::Bin(b, x, y) => match (self.cst(x), self.cst(y)) {
+            Op::Un(u, a) => self.cst64(a).map(|a| ir::eval_un(u, a)),
+            Op::Bin(b, x, y) => match (self.cst64(x), self.cst64(y)) {
                 (Some(x), Some(y)) => Some(ir::eval_bin(b, x, y)),
                 _ => None,
             },
-            Op::CmpF(cc, x, y) => match (self.cst(x), self.cst(y)) {
+            Op::CmpF(cc, x, y) => match (self.cst64(x), self.cst64(y)) {
                 (Some(x), Some(y)) => Some(ir::eval_cmp_f(cc, x, y)),
                 _ => None,
             },
-            Op::CmpI(cc, x, y) => match (self.cst(x), self.cst(y)) {
+            Op::CmpD(cc, x, y) => match (self.cst64(x), self.cst64(y)) {
+                (Some(x), Some(y)) => Some(ir::eval_cmp_d(cc, x, y)),
+                _ => None,
+            },
+            Op::CmpI(cc, x, y) => match (self.cst64(x), self.cst64(y)) {
                 (Some(x), Some(y)) => Some(ir::eval_cmp_i(cc, x, y)),
                 _ => None,
             },
@@ -404,7 +426,7 @@ impl Builder {
                 Some(c) => return if c != 0 { x } else { y },
                 None => None,
             },
-            Op::Wrap(x, len) => self.cst(x).map(|x| ir::eval_wrap(x, len)),
+            Op::Wrap(x, len) => self.cst(x).map(|x| ir::eval_wrap(x, len) as u64),
             _ => None,
         };
         match folded {
@@ -836,6 +858,9 @@ struct Lowerer {
     domain: Domain,
     /// Kernel front end: buffers, emit counters, the element value.
     kernel: kernel::KernelCtx,
+    /// `math: portable`: f32 math functions evaluate in f64 with the
+    /// fdlibm kernels of `makepad_csg_math::portable` and round once.
+    portable: bool,
 }
 
 fn ty_of(t: &T) -> Ty {
@@ -843,6 +868,7 @@ fn ty_of(t: &T) -> Ty {
         T::F => Ty::F32,
         T::I => Ty::I32,
         T::B => Ty::Bool,
+        T::D => Ty::F64,
         _ => unreachable!("aggregate has no scalar type"),
     }
 }
@@ -858,6 +884,7 @@ impl Lowerer {
     fn words(&self, t: &T) -> u32 {
         match t {
             T::F | T::I | T::B => 1,
+            T::D => 2,
             T::Vec(n) => *n as u32,
             T::Struct(s) => self.structs[*s].words,
             T::Array(e, n) => self.words(e) * n,
@@ -870,6 +897,7 @@ impl Lowerer {
             T::F => "f32".into(),
             T::I => "i32".into(),
             T::B => "bool".into(),
+            T::D => "f64".into(),
             T::Vec(n) => vec_name(*n).into(),
             T::Struct(s) => {
                 let d = &self.structs[*s];
@@ -894,6 +922,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => "f32".into(),
             V::I(_) => "i32".into(),
             V::B(_) => "bool".into(),
+            V::D(_) => "f64".into(),
             V::Vec(n, _) => vec_name(*n).into(),
             V::Place(p) => self.tname(&p.ty),
             V::Unit => "nothing".into(),
@@ -940,6 +969,20 @@ impl Lowerer {
             V::Lit(x) => self.b.cf(*x as f32),
             V::F(x) => *x,
             V::I(x) => self.b.un(Ty::F32, Un::I2F, *x),
+            // An f64 rounds once to f32.
+            V::D(x) => self.b.d2f(*x),
+            _ => return err(span, format!("expected a number, found {}", self.vname(v))),
+        })
+    }
+
+    /// A number as f64 (f32 and i32 widen exactly; literals keep their
+    /// full f64 value).
+    fn to_d(&mut self, v: &V, span: Span) -> LResult<Val> {
+        Ok(match v {
+            V::Lit(x) => self.b.cd(*x),
+            V::D(x) => *x,
+            V::F(x) => self.b.f2d(*x),
+            V::I(x) => self.b.un(Ty::F64, Un::I2D, *x),
             _ => return err(span, format!("expected a number, found {}", self.vname(v))),
         })
     }
@@ -954,6 +997,10 @@ impl Lowerer {
             }
             V::I(x) => *x,
             V::F(x) => self.b.floor_to_i(*x),
+            V::D(x) => {
+                let f = self.b.un(Ty::F64, Un::FloorD, *x);
+                self.b.un(Ty::I32, Un::D2I, f)
+            }
             _ => return err(span, format!("expected an integer, found {}", self.vname(v))),
         })
     }
@@ -969,6 +1016,10 @@ impl Lowerer {
             V::I(x) => {
                 let z = self.b.ci(0);
                 self.b.cmpi(Cmp::Ne, *x, z)
+            }
+            V::D(x) => {
+                let z = self.b.cd(0.0);
+                self.b.def(Ty::Bool, Op::CmpD(Cmp::Ne, *x, z))
             }
             _ => return err(span, format!("expected a condition, found {}", self.vname(v))),
         })
@@ -986,6 +1037,12 @@ impl Lowerer {
             T::F => V::F(self.b.load(Ty::F32, p.region, base, extent, off)),
             T::I => V::I(self.b.load(Ty::I32, p.region, base, extent, off)),
             T::B => V::B(self.b.load(Ty::Bool, p.region, base, extent, off)),
+            T::D => {
+                let lo = self.b.load(Ty::I32, p.region, base, extent, off);
+                let o = self.offset_plus(p, 1);
+                let hi = self.b.load(Ty::I32, p.region, o.0, o.1, o.2);
+                V::D(self.b.def(Ty::F64, Op::Bin(Bin::MakeD, hi, lo)))
+            }
             T::Vec(n) => {
                 let mut l = [Val(0); 16];
                 l[0] = self.b.load(Ty::F32, p.region, base, extent, off);
@@ -1049,6 +1106,13 @@ impl Lowerer {
                 self.write_word(p, 0, x);
             }
             (T::B, V::B(x)) => self.write_word(p, 0, *x),
+            (T::D, V::D(_) | V::F(_) | V::I(_) | V::Lit(_)) => {
+                let x = self.to_d(v, span)?;
+                let lo = self.b.un(Ty::I32, Un::LoD, x);
+                let hi = self.b.un(Ty::I32, Un::HiD, x);
+                self.write_word(p, 0, lo);
+                self.write_word(p, 1, hi);
+            }
             (T::Vec(n), _) => {
                 let n = *n;
                 let l = self.to_vec(v, n, span)?;
@@ -1077,7 +1141,7 @@ impl Lowerer {
     fn leaf_ty(&self, t: &T, k: u32) -> Ty {
         match t {
             T::F | T::Vec(_) => Ty::F32,
-            T::I => Ty::I32,
+            T::I | T::D => Ty::I32,
             T::B => Ty::Bool,
             T::Struct(s) => {
                 let d = &self.structs[*s];
@@ -1105,7 +1169,7 @@ impl Lowerer {
     fn to_vec(&mut self, v: &V, n: u8, span: Span) -> LResult<Lanes> {
         match v {
             V::Vec(m, l) if *m == n => Ok(*l),
-            V::Lit(_) | V::F(_) | V::I(_) => {
+            V::Lit(_) | V::F(_) | V::I(_) | V::D(_) => {
                 let x = self.to_f(v, span)?;
                 Ok([x; 16])
             }
@@ -1356,7 +1420,7 @@ impl Lowerer {
             let end = self.b.ci(n as i32);
             let done = self.b.cmpi(Cmp::Ge, jv, end);
             self.b.push(IS::If(done, vec![IS::Break(0)], vec![]));
-            let x = self.b.konst(leaf, words[0]);
+            let x = self.b.konst(leaf, words[0] as u64);
             let (base, extent, off) = match p.off {
                 None => (p.root + p.stat, n, Some(jv)),
                 Some(_) => {
@@ -1375,7 +1439,7 @@ impl Lowerer {
         }
         for (k, w) in words.iter().enumerate() {
             let leaf = self.leaf_ty(&t, k as u32);
-            let x = self.b.konst(leaf, *w);
+            let x = self.b.konst(leaf, *w as u64);
             self.write_word(p, k as u32, x);
         }
     }
@@ -1817,6 +1881,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => (T::F, vec![self.b.var(Ty::F32)]),
             V::I(_) => (T::I, vec![self.b.var(Ty::I32)]),
             V::B(_) => (T::B, vec![self.b.var(Ty::Bool)]),
+            V::D(_) => (T::D, vec![self.b.var(Ty::F64)]),
             V::Vec(n, _) => (T::Vec(*n), (0..*n).map(|_| self.b.var(Ty::F32)).collect()),
             V::Place(p) => return Ok(Bind::Place(p.clone())),
             V::Unit => return err(span, "this has no value"),
@@ -1842,6 +1907,10 @@ impl Lowerer {
                 let V::B(x) = v else { return err(span, format!("expected bool, found {}", self.vname(v))) };
                 self.b.set(vars[0], *x);
             }
+            T::D => {
+                let x = self.to_d(v, span)?;
+                self.b.set(vars[0], x);
+            }
             T::Vec(n) => {
                 let l = self.to_vec(v, *n, span)?;
                 for k in 0..*n as usize {
@@ -1858,6 +1927,7 @@ impl Lowerer {
             T::F => V::F(self.b.get(vars[0])),
             T::I => V::I(self.b.get(vars[0])),
             T::B => V::B(self.b.get(vars[0])),
+            T::D => V::D(self.b.get(vars[0])),
             T::Vec(n) => {
                 let mut l = [Val(0); 16];
                 for k in 0..*n as usize {
@@ -1875,6 +1945,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => T::F,
             V::I(_) => T::I,
             V::B(_) => T::B,
+            V::D(_) => T::D,
             V::Vec(n, _) => T::Vec(*n),
             _ => return None,
         })
@@ -2204,6 +2275,7 @@ impl Lowerer {
                 match v {
                     V::Lit(x) => Ok(V::Lit(-x)),
                     V::F(x) => Ok(V::F(self.b.fneg(x))),
+                    V::D(x) => Ok(V::D(self.b.un(Ty::F64, Un::NegD, x))),
                     V::I(x) => Ok(V::I(self.b.un(Ty::I32, Un::NegI, x))),
                     V::Vec(n, l) => {
                         let mut o = l;
@@ -2531,6 +2603,8 @@ impl Lowerer {
                     Some(a.clone())
                 } else if (*a == T::F && *b == T::I) || (*a == T::I && *b == T::F) {
                     Some(T::F)
+                } else if (*a == T::D && matches!(b, T::F | T::I)) || (*b == T::D && matches!(a, T::F | T::I)) {
+                    Some(T::D)
                 } else if matches!((a, b), (T::Vec(_), T::F | T::I) | (T::F | T::I, T::Vec(_))) {
                     Some(if let T::Vec(n) = a { T::Vec(*n) } else { b.clone() })
                 } else {
@@ -2591,6 +2665,11 @@ impl Lowerer {
             T::B => {
                 let (V::B(x), V::B(y)) = (a, b) else { unreachable!() };
                 V::B(self.b.sel(c, *x, *y))
+            }
+            T::D => {
+                let x = self.to_d(a, span)?;
+                let y = self.to_d(b, span)?;
+                V::D(self.b.sel(c, x, y))
             }
             T::Vec(n) => {
                 let la = self.to_vec(a, *n, span)?;
@@ -2671,6 +2750,33 @@ impl Lowerer {
             }
             return Ok(V::Vec(n, o));
         }
+        // f64: the other side widens exactly.
+        if matches!(a, V::D(_)) || matches!(b, V::D(_)) {
+            let x = self.to_d(&a, span)?;
+            let y = self.to_d(&b, span)?;
+            let arith = |l: &mut Self, op: Bin| Ok(V::D(l.b.def(Ty::F64, Op::Bin(op, x, y))));
+            let c = |l: &mut Self, cc| Ok(V::B(l.b.def(Ty::Bool, Op::CmpD(cc, x, y))));
+            return match op {
+                Add => arith(self, Bin::AddD),
+                Sub => arith(self, Bin::SubD),
+                Mul => arith(self, Bin::MulD),
+                Div => arith(self, Bin::DivD),
+                Rem => {
+                    // a - b * trunc(a / b)
+                    let q = self.b.def(Ty::F64, Op::Bin(Bin::DivD, x, y));
+                    let t = self.b.un(Ty::F64, Un::TruncD, q);
+                    let m = self.b.def(Ty::F64, Op::Bin(Bin::MulD, y, t));
+                    Ok(V::D(self.b.def(Ty::F64, Op::Bin(Bin::SubD, x, m))))
+                }
+                Lt => c(self, Cmp::Lt),
+                Le => c(self, Cmp::Le),
+                Gt => c(self, Cmp::Gt),
+                Ge => c(self, Cmp::Ge),
+                Eq => c(self, Cmp::Eq),
+                Ne => c(self, Cmp::Ne),
+                _ => err(span, "f64 supports + - * / % and comparisons"),
+            };
+        }
         // Bools.
         if matches!(a, V::B(_)) || matches!(b, V::B(_)) {
             let (V::B(x), V::B(y)) = (&a, &b) else {
@@ -2747,6 +2853,117 @@ impl Lowerer {
 
     // -- builtin calls -----------------------------------------------------------
 
+    /// f64 arithmetic and portable math: `f64(x)`; math on f64 arguments
+    /// (always the portable kernels, giving f64); f32 math in
+    /// `math: portable` (in f64, rounded once); and asin, acos, hypot and
+    /// cbrt, which only exist in the portable form.
+    fn f64_call(&mut self, name: &str, vals: &[V], args: &[Expr], span: Span) -> LResult<Option<V>> {
+        type D1 = fn(&mut Builder, Val) -> Val;
+        type D2 = fn(&mut Builder, Val, Val) -> Val;
+        let un: Option<D1> = match name {
+            "sin" => Some(|b, x| b.p_sin(x)),
+            "cos" => Some(|b, x| b.p_cos(x)),
+            "tan" => Some(|b, x| b.p_tan(x)),
+            "atan" => Some(|b, x| b.p_atan(x)),
+            "asin" => Some(|b, x| b.p_asin_acos(x, false)),
+            "acos" => Some(|b, x| b.p_asin_acos(x, true)),
+            "exp" => Some(|b, x| b.p_exp(x)),
+            "log" | "ln" => Some(|b, x| b.p_ln(x)),
+            "cbrt" => Some(|b, x| b.p_cbrt(x)),
+            "sqrt" => Some(|b, x| b.un(Ty::F64, Un::SqrtD, x)),
+            "abs" => Some(|b, x| b.un(Ty::F64, Un::AbsD, x)),
+            "floor" => Some(|b, x| b.un(Ty::F64, Un::FloorD, x)),
+            "ceil" => Some(|b, x| b.un(Ty::F64, Un::CeilD, x)),
+            "round" => Some(|b, x| b.un(Ty::F64, Un::RoundD, x)),
+            "trunc" => Some(|b, x| b.un(Ty::F64, Un::TruncD, x)),
+            "fract" => Some(|b, x| {
+                let f = b.un(Ty::F64, Un::FloorD, x);
+                b.def(Ty::F64, Op::Bin(Bin::SubD, x, f))
+            }),
+            _ => None,
+        };
+        let bin: Option<D2> = match name {
+            "pow" => Some(|b, x, y| b.p_pow(x, y)),
+            "atan2" => Some(|b, y, x| b.p_atan2(y, x)),
+            "hypot" => Some(|b, x, y| b.p_hypot(x, y)),
+            "min" => Some(|b, x, y| b.def(Ty::F64, Op::Bin(Bin::MinD, x, y))),
+            "max" => Some(|b, x, y| b.def(Ty::F64, Op::Bin(Bin::MaxD, x, y))),
+            _ => None,
+        };
+        let any_d = vals.iter().any(|v| matches!(v, V::D(_)));
+        // Functions that are only portable, and the f32 math that
+        // `math: portable` routes through f64.
+        let only_portable = matches!(name, "asin" | "acos" | "hypot" | "cbrt");
+        let exact = matches!(name, "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "fract" | "min" | "max");
+        let portable_f32 = (self.portable || only_portable) && !exact;
+        if name == "f64" {
+            if vals.len() != 1 {
+                return err(span, "`f64` takes 1 argument");
+            }
+            return Ok(Some(V::D(self.to_d(&vals[0], args[0].span)?)));
+        }
+        if let Some(f) = un {
+            if vals.len() != 1 || !(any_d || portable_f32) {
+                return Ok(None);
+            }
+            return Ok(Some(match &vals[0] {
+                V::D(x) => V::D(f(&mut self.b, *x)),
+                V::Vec(n, l) => {
+                    let mut o = *l;
+                    for k in 0..*n as usize {
+                        let d = self.b.f2d(l[k]);
+                        let r = f(&mut self.b, d);
+                        o[k] = self.b.d2f(r);
+                    }
+                    V::Vec(*n, o)
+                }
+                v => {
+                    let x = self.to_f(v, args[0].span)?;
+                    let d = self.b.f2d(x);
+                    let r = f(&mut self.b, d);
+                    V::F(self.b.d2f(r))
+                }
+            }));
+        }
+        if let Some(f) = bin {
+            if vals.len() != 2 || !(any_d || portable_f32) {
+                return Ok(None);
+            }
+            if vals.iter().any(|v| matches!(v, V::Vec(..))) {
+                return err(span, format!("`{}` on vectors: apply it per component", name));
+            }
+            if any_d {
+                let x = self.to_d(&vals[0], args[0].span)?;
+                let y = self.to_d(&vals[1], args[1].span)?;
+                return Ok(Some(V::D(f(&mut self.b, x, y))));
+            }
+            let x = self.to_f(&vals[0], args[0].span)?;
+            let y = self.to_f(&vals[1], args[1].span)?;
+            let x = self.b.f2d(x);
+            let y = self.b.f2d(y);
+            let r = f(&mut self.b, x, y);
+            return Ok(Some(V::F(self.b.d2f(r))));
+        }
+        if any_d && matches!(name, "clamp" | "mix" | "lerp") {
+            if vals.len() != 3 {
+                return err(span, format!("`{}` takes 3 arguments", name));
+            }
+            let x = self.to_d(&vals[0], args[0].span)?;
+            let y = self.to_d(&vals[1], args[1].span)?;
+            let z = self.to_d(&vals[2], args[2].span)?;
+            let b = &mut self.b;
+            return Ok(Some(V::D(if name == "clamp" {
+                let m = b.def(Ty::F64, Op::Bin(Bin::MaxD, x, y));
+                b.def(Ty::F64, Op::Bin(Bin::MinD, m, z))
+            } else {
+                let d = b.def(Ty::F64, Op::Bin(Bin::SubD, y, x));
+                let d = b.def(Ty::F64, Op::Bin(Bin::MulD, d, z));
+                b.def(Ty::F64, Op::Bin(Bin::AddD, x, d))
+            })));
+        }
+        Ok(None)
+    }
+
     fn call_expr(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<V> {
         if name == "emit" && self.domain == Domain::Kernel && !self.fns.contains_key("emit") {
             return self.kernel_emit(args, span);
@@ -2773,6 +2990,9 @@ impl Lowerer {
                 Ok(())
             }
         };
+        if let Some(v) = self.f64_call(name, &vals, args, span)? {
+            return Ok(v);
+        }
         // Lane-wise unary math on f32 or vec2.
         let unary: Option<fn(&mut Builder, Val) -> Val> = match name {
             "sin" => Some(|b, x| b.sincos(x, false)),
@@ -3304,7 +3524,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 const BUILTIN_FNS: &[&str] = &[
-    "sin", "cos", "tan", "tanh", "atan", "atan2", "exp", "exp2", "log", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
+    "sin", "cos", "tan", "tanh", "atan", "atan2", "asin", "acos", "hypot", "cbrt", "f64", "exp", "exp2", "log", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
     "sign", "midi_to_hz", "db_to_gain", "min", "max", "clamp", "mix", "pow", "step", "smoothstep", "vec2", "int", "float", "len",
     "read", "read_cubic", "rand", "stop",
 ];
@@ -3336,6 +3556,7 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         prelude_base,
         domain,
         kernel: Default::default(),
+        portable: false,
     }
 }
 

@@ -127,8 +127,23 @@ impl KernelCtx {
     }
 }
 
+/// A kernel's math functions (`let math = portable | fast`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MathMode {
+    /// f32 Cephes-style polynomials: fast, deterministic on every machine.
+    Fast,
+    /// fdlibm kernels in f64, rounded once: the same bits as
+    /// `makepad_csg_math::portable`; NaN results are stored as one
+    /// canonical quiet NaN.
+    Portable,
+}
+
+/// The one NaN a portable kernel stores.
+pub const CANONICAL_NAN: u32 = 0x7FC0_0000;
+
 pub struct KernelLowered {
     pub kind: KernelKind,
+    pub math: MathMode,
     /// The entry's name (vertex, instance, element, primitive, reduce_*).
     pub entry: String,
     pub program: Program,
@@ -189,6 +204,8 @@ fn type_words(name: &str) -> Option<(T, u32)> {
     Some(match name {
         "f32" | "float" => (T::F, 1),
         "i32" | "int" | "u32" => (T::I, 1),
+        // Two words: low, then high.
+        "f64" => (T::D, 2),
         "vec2" => (T::Vec(2), 2),
         "vec3" => (T::Vec(3), 3),
         "vec4" => (T::Vec(4), 4),
@@ -426,6 +443,24 @@ impl Lowerer {
 pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> Result<KernelLowered, ShaderError> {
     let mut l = new_lowerer(prelude_base, Domain::Kernel);
     l.add_layouts(layouts)?;
+    // `let math = portable | fast`: the kernel's math mode.
+    let mut math = MathMode::Fast;
+    let mut rest = Vec::with_capacity(items.len());
+    for item in items {
+        if let Item::Let { name, value, span, .. } = item {
+            if name == "math" {
+                math = match &value.kind {
+                    ExprKind::Ident(m) if m == "portable" => MathMode::Portable,
+                    ExprKind::Ident(m) if m == "fast" => MathMode::Fast,
+                    _ => return err(*span, "`let math = portable` (f32 math through f64, bit-exact with the modelling libraries) or `let math = fast`"),
+                };
+                continue;
+            }
+        }
+        rest.push(item.clone());
+    }
+    let items = &rest[..];
+    l.portable = math == MathMode::Portable;
     l.top(items)?;
     let entries: Vec<&str> = ENTRIES.iter().copied().filter(|e| l.fns.contains_key(*e)).collect();
     let entry_name = match entries[..] {
@@ -532,11 +567,44 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     let mut program = l.b.prog;
     program.body = l.b.blocks.into_iter().next().unwrap();
     program.frame_words = l.frame_words;
+    if math == MathMode::Portable {
+        canonical_nan_stores(&mut program.body, &mut program.vals);
+    }
     dce(&mut program);
     let cost = program.cost();
     if cost > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
     let parallel_safe = !l.kernel.nonlocal;
-    Ok(KernelLowered { kind, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe })
+    Ok(KernelLowered { kind, math, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe })
+}
+
+/// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so
+/// any NaN leaves the kernel as [`CANONICAL_NAN`] whatever produced it.
+fn canonical_nan_stores(b: &mut Block, vals: &mut Vec<Ty>) {
+    let mut out = Vec::with_capacity(b.len());
+    for mut s in std::mem::take(b) {
+        match &mut s {
+            IS::Store { region: Region::Buf(_), val, .. } if vals[val.0 as usize] == Ty::F32 => {
+                let x = *val;
+                let mut new = |ty: Ty| {
+                    vals.push(ty);
+                    Val(vals.len() as u32 - 1)
+                };
+                let (is_nan, nan, sel) = (new(Ty::Bool), new(Ty::F32), new(Ty::F32));
+                out.push(IS::Def(is_nan, Op::CmpF(Cmp::Ne, x, x)));
+                out.push(IS::Def(nan, Op::ConstF(f32::from_bits(CANONICAL_NAN))));
+                out.push(IS::Def(sel, Op::Sel(is_nan, nan, x)));
+                *val = sel;
+            }
+            IS::If(_, t, e) => {
+                canonical_nan_stores(t, vals);
+                canonical_nan_stores(e, vals);
+            }
+            IS::Loop { body, .. } => canonical_nan_stores(body, vals),
+            _ => {}
+        }
+        out.push(s);
+    }
+    *b = out;
 }

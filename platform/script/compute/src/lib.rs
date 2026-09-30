@@ -6,7 +6,8 @@
 //! ```text
 //! Splash source --[parse]--> AST --[lower: types, inlining, math]--> AIR
 //!     AIR --> ir::run          (the reference; also the no-JIT path)
-//!     AIR --> arm64            (native scalar code: audio shaders)
+//!     AIR --> arm64            (native scalar code: audio shaders, kernels)
+//!     AIR --> neon             (kernels: 4 elements per iteration)
 //! ```
 //!
 //! Front ends decide what a program's entry is and what it can read and
@@ -21,9 +22,12 @@ pub mod ir;
 pub mod kernel;
 pub mod lower;
 pub mod parse;
+pub mod sched;
 
 #[cfg(target_arch = "aarch64")]
 pub mod arm64;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 
 /// A compile error with a byte span into the source it came from.
 #[derive(Clone, Debug, PartialEq)]

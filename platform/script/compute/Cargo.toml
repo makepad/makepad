@@ -9,3 +9,6 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+
+[dev-dependencies]
+makepad-csg-math = { path = "../../../libs/csg/csg_math" }

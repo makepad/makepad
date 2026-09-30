@@ -66,7 +66,7 @@ unsafe impl Sync for Code {}
 type Entry = unsafe extern "C" fn(*mut u32, *mut u32, *mut u32, *const *mut f32, u32);
 
 impl Code {
-    fn new(words: &[u32]) -> Option<Code> {
+    pub(crate) fn new(words: &[u32]) -> Option<Code> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = words;
@@ -162,7 +162,7 @@ impl Drop for Code {
 // =========================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Loc {
+pub(crate) enum Loc {
     /// W register (GPR) or S register (FP) number.
     Reg(u8),
     /// Byte offset of a 4-byte spill slot from sp.
@@ -182,7 +182,7 @@ const FS2: u8 = 29;
 
 /// Allocation entity: a Val, a Var or a loop counter.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Ent {
+pub(crate) enum Ent {
     Val(u32),
     Var(u32),
     Counter(u32),
@@ -291,19 +291,28 @@ impl Liveness {
     }
 }
 
-struct Alloc {
-    locs: std::collections::HashMap<Ent, Loc>,
-    spill_bytes: u32,
+pub(crate) struct Alloc {
+    pub(crate) locs: std::collections::HashMap<Ent, Loc>,
+    pub(crate) spill_bytes: u32,
 }
 
 fn allocate(p: &Program) -> Alloc {
+    let ty = |e: Ent| match e {
+        Ent::Val(v) => Some(p.vals[v as usize]),
+        Ent::Var(v) => Some(p.vars[v as usize]),
+        Ent::Counter(_) => None,
+    };
+    let class = |e: Ent| matches!(ty(e), Some(Ty::F32 | Ty::F64)) as usize;
+    let slot = |e: Ent| if ty(e) == Some(Ty::F64) { 8 } else { 4 };
+    allocate_with(p, class, &[GPR_POOL, FP_POOL], slot)
+}
+
+/// Linear-scan allocation of every entity into register class
+/// `class(e)` (an index into `pools`), spilling to stack slots of
+/// `slot(e)` bytes (aligned to their size).
+pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32) -> Alloc {
     let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0 };
     lv.walk(&p.body);
-    let class_fp = |e: Ent| match e {
-        Ent::Val(v) => p.vals[v as usize] == Ty::F32,
-        Ent::Var(v) => p.vars[v as usize] == Ty::F32,
-        Ent::Counter(_) => false,
-    };
     let mut ivs: Vec<(u32, u32, Ent)> = lv.refs.iter().map(|(e, r)| {
         let (s, t) = lv.interval(r);
         (s, t, *e)
@@ -311,17 +320,17 @@ fn allocate(p: &Program) -> Alloc {
     ivs.sort_by_key(|(s, e, ent)| (*s, *e, format!("{:?}", ent)));
     let mut locs = std::collections::HashMap::new();
     let mut spill_bytes = 0u32;
-    let new_slot = |spill: &mut u32| {
+    let new_slot = |spill: &mut u32, size: u32| {
+        *spill = (*spill + size - 1) & !(size - 1);
         let at = *spill;
-        *spill += 4;
+        *spill += size;
         Loc::Stack(at)
     };
-    for fp in [false, true] {
-        let pool: &[u8] = if fp { FP_POOL } else { GPR_POOL };
+    for (ci, pool) in pools.iter().enumerate() {
         let mut free: Vec<u8> = pool.iter().rev().copied().collect();
         // (end, ent, reg)
         let mut active: Vec<(u32, Ent, u8)> = Vec::new();
-        for &(s, e, ent) in ivs.iter().filter(|iv| class_fp(iv.2) == fp) {
+        for &(s, e, ent) in ivs.iter().filter(|iv| class(iv.2) == ci) {
             active.retain(|(end, _, reg)| {
                 if *end < s {
                     free.push(*reg);
@@ -338,12 +347,12 @@ fn allocate(p: &Program) -> Alloc {
             // Spill whichever of (the furthest-ending active, this) ends last.
             let (k, &(far_end, far_ent, far_reg)) = active.iter().enumerate().max_by_key(|(_, a)| a.0).unwrap();
             if far_end > e {
-                locs.insert(far_ent, new_slot(&mut spill_bytes));
+                locs.insert(far_ent, new_slot(&mut spill_bytes, slot(far_ent)));
                 active.remove(k);
                 active.push((e, ent, far_reg));
                 locs.insert(ent, Loc::Reg(far_reg));
             } else {
-                locs.insert(ent, new_slot(&mut spill_bytes));
+                locs.insert(ent, new_slot(&mut spill_bytes, slot(ent)));
             }
         }
     }
@@ -354,7 +363,7 @@ fn allocate(p: &Program) -> Alloc {
 // Encoding
 // =========================================================================
 
-mod enc {
+pub(crate) mod enc {
     pub fn fp3(base: u32, d: u8, n: u8, m: u8) -> u32 {
         base | (m as u32) << 16 | (n as u32) << 5 | d as u32
     }
@@ -437,6 +446,17 @@ mod enc {
         };
         base | (m as u32) << 16 | (n as u32) << 5 | t as u32
     }
+    /// ldr/str D, [Xn, #imm] (imm a multiple of 8 below 32768).
+    pub fn ldst_d(load: bool, t: u8, n: u8, byte_off: u32) -> u32 {
+        (if load { 0xFD40_0000 } else { 0xFD00_0000 }) | (byte_off / 8) << 10 | (n as u32) << 5 | t as u32
+    }
+    /// The double-precision form of a single-precision FP data-processing
+    /// or compare instruction (type = 01).
+    pub const DBL: u32 = 0x0040_0000;
+    pub const FCVT_DS: u32 = 0x1E22_C000;
+    pub const FCVT_SD: u32 = 0x1E62_4000;
+    pub const FMOV_XD: u32 = 0x9E66_0000;
+    pub const FMOV_DX: u32 = 0x9E67_0000;
     pub fn ldr_x(t: u8, n: u8, byte_off: u32) -> u32 {
         0xF940_0000 | (byte_off / 8) << 10 | (n as u32) << 5 | t as u32
     }
@@ -479,7 +499,7 @@ struct Emit<'a> {
 }
 
 /// Upper bounds of offsets built from `Wrap`/mask/const arithmetic.
-fn bounds(p: &Program) -> Vec<Option<u32>> {
+pub(crate) fn bounds(p: &Program) -> Vec<Option<u32>> {
     let mut out = vec![None; p.vals.len()];
     let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
     fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>) {
@@ -567,9 +587,19 @@ impl<'a> Emit<'a> {
         match self.loc(e) {
             Loc::Reg(r) => r,
             Loc::Stack(off) => {
-                self.e(ldst_imm(true, true, scratch, 31, off));
+                let w = if self.wide(e) { ldst_d(true, scratch, 31, off) } else { ldst_imm(true, true, scratch, 31, off) };
+                self.e(w);
                 scratch
             }
+        }
+    }
+
+    /// An f64 entity (D register view, 8-byte spill slot).
+    fn wide(&self, e: Ent) -> bool {
+        match e {
+            Ent::Val(v) => self.p.vals[v as usize] == Ty::F64,
+            Ent::Var(v) => self.p.vars[v as usize] == Ty::F64,
+            Ent::Counter(_) => false,
         }
     }
 
@@ -597,12 +627,22 @@ impl<'a> Emit<'a> {
 
     fn fdone(&mut self, e: Ent, r: u8) {
         if let Loc::Stack(off) = self.loc(e) {
-            self.e(ldst_imm(true, false, r, 31, off));
+            let w = if self.wide(e) { ldst_d(false, r, 31, off) } else { ldst_imm(true, false, r, 31, off) };
+            self.e(w);
         }
     }
 
     fn is_fp(&self, v: Val) -> bool {
-        self.p.vals[v.0 as usize] == Ty::F32
+        matches!(self.p.vals[v.0 as usize], Ty::F32 | Ty::F64)
+    }
+
+    /// DBL for an f64 value (the double form of an FP instruction).
+    fn dbl(&self, v: Val) -> u32 {
+        if self.p.vals[v.0 as usize] == Ty::F64 {
+            DBL
+        } else {
+            0
+        }
     }
 
     // -- memory -----------------------------------------------------------
@@ -716,13 +756,13 @@ impl<'a> Emit<'a> {
         match s {
             Stmt::Def(v, op) => self.def(*v, op),
             Stmt::Set(var, v) => {
-                let fp = self.p.vars[var.0 as usize] == Ty::F32;
+                let fp = self.is_fp(*v);
                 let dst = Ent::Var(var.0);
                 if fp {
                     let d = self.fdst(dst);
                     let r = self.fsrc(Ent::Val(v.0), d);
                     if r != d {
-                        self.e(fp2(FMOV, d, r));
+                        self.e(fp2(FMOV | self.dbl(*v), d, r));
                     }
                     self.fdone(dst, d);
                 } else {
@@ -832,6 +872,20 @@ impl<'a> Emit<'a> {
                 }
                 self.fdone(dst, d);
             }
+            Op::ConstD(x) => {
+                let d = self.fdst(dst);
+                let bits = x.to_bits();
+                // x16 = bits (movz + movk per non-zero halfword), fmov d, x16.
+                self.e(0xD280_0000 | ((bits & 0xFFFF) as u32) << 5 | XS0 as u32);
+                for hw in 1..4u32 {
+                    let h = ((bits >> (16 * hw)) & 0xFFFF) as u32;
+                    if h != 0 {
+                        self.e(0xF280_0000 | hw << 21 | h << 5 | XS0 as u32);
+                    }
+                }
+                self.e(fp2(FMOV_DX, d, XS0));
+                self.fdone(dst, d);
+            }
             Op::ConstI(x) => {
                 let d = self.gdst(dst);
                 self.mov_imm(d, x as u32);
@@ -844,11 +898,11 @@ impl<'a> Emit<'a> {
             }
             Op::Get(var) => {
                 let src = Ent::Var(var.0);
-                if self.p.vars[var.0 as usize] == Ty::F32 {
+                if self.is_fp(v) {
                     let d = self.fdst(dst);
                     let r = self.fsrc(src, d);
                     if r != d {
-                        self.e(fp2(FMOV, d, r));
+                        self.e(fp2(FMOV | self.dbl(v), d, r));
                     }
                     self.fdone(dst, d);
                 } else {
@@ -880,11 +934,41 @@ impl<'a> Emit<'a> {
                     self.gdone(dst, d);
                 }
                 Un::NotB => {
+                    // (a == 0): any non-zero word is true, like the
+                    // interpreter (a bool loaded from memory may hold any
+                    // bits).
                     let ra = self.gsrc(ev(a), XS0);
-                    self.e(movz(XS1, 1, 0));
+                    self.e(cmp_imm(ra, 0));
                     let d = self.gdst(dst);
-                    self.e(EOR | (XS1 as u32) << 16 | (ra as u32) << 5 | d as u32);
+                    self.e(cset(d, EQ));
                     self.gdone(dst, d);
+                }
+                Un::D2I | Un::LoD | Un::HiD => {
+                    let ra = self.fsrc(ev(a), FS0);
+                    let d = self.gdst(dst);
+                    match u {
+                        Un::D2I => self.e(fp2(FCVTZS | DBL, d, ra)),
+                        // The S view of the D register is its low word.
+                        Un::LoD => self.e(fp2(FMOV_WS, d, ra)),
+                        _ => {
+                            // fmov x16, d; lsr xd, x16, #32
+                            self.e(fp2(FMOV_XD, XS0, ra));
+                            self.e(0xD360_FC00 | (XS0 as u32) << 5 | d as u32);
+                        }
+                    }
+                    self.gdone(dst, d);
+                }
+                Un::I2D => {
+                    let ra = self.gsrc(ev(a), XS0);
+                    let d = self.fdst(dst);
+                    self.e(fp2(SCVTF | DBL, d, ra));
+                    self.fdone(dst, d);
+                }
+                Un::F2D | Un::D2F => {
+                    let ra = self.fsrc(ev(a), FS0);
+                    let d = self.fdst(dst);
+                    self.e(fp2(if u == Un::F2D { FCVT_DS } else { FCVT_SD }, d, ra));
+                    self.fdone(dst, d);
                 }
                 _ => {
                     let base = match u {
@@ -895,6 +979,13 @@ impl<'a> Emit<'a> {
                         Un::CeilF => FRINTP,
                         Un::TruncF => FRINTZ,
                         Un::RoundF => FRINTA,
+                        Un::NegD => FNEG | DBL,
+                        Un::AbsD => FABS | DBL,
+                        Un::SqrtD => FSQRT | DBL,
+                        Un::FloorD => FRINTM | DBL,
+                        Un::CeilD => FRINTP | DBL,
+                        Un::TruncD => FRINTZ | DBL,
+                        Un::RoundD => FRINTA | DBL,
                         _ => unreachable!(),
                     };
                     let ra = self.fsrc(ev(a), FS0);
@@ -904,12 +995,16 @@ impl<'a> Emit<'a> {
                 }
             },
             Op::Bin(b, x, y) => match b {
-                Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF => {
+                Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF | Bin::AddD | Bin::SubD | Bin::MulD | Bin::DivD => {
                     let base = match b {
                         Bin::AddF => FADD,
                         Bin::SubF => FSUB,
                         Bin::MulF => FMUL,
-                        _ => FDIV,
+                        Bin::DivF => FDIV,
+                        Bin::AddD => FADD | DBL,
+                        Bin::SubD => FSUB | DBL,
+                        Bin::MulD => FMUL | DBL,
+                        _ => FDIV | DBL,
                     };
                     let rx = self.fsrc(ev(x), FS0);
                     let ry = self.fsrc(ev(y), FS1);
@@ -917,12 +1012,23 @@ impl<'a> Emit<'a> {
                     self.e(fp3(base, d, rx, ry));
                     self.fdone(dst, d);
                 }
-                Bin::MinF | Bin::MaxF => {
+                Bin::MinF | Bin::MaxF | Bin::MinD | Bin::MaxD => {
+                    let dbl = self.dbl(x);
                     let rx = self.fsrc(ev(x), FS0);
                     let ry = self.fsrc(ev(y), FS1);
-                    self.e(fcmp(rx, ry));
+                    self.e(fcmp(rx, ry) | dbl);
                     let d = self.fdst(dst);
-                    self.e(fcsel(d, rx, ry, if b == Bin::MinF { MI } else { GT }));
+                    self.e(fcsel(d, rx, ry, if matches!(b, Bin::MinF | Bin::MinD) { MI } else { GT }) | dbl);
+                    self.fdone(dst, d);
+                }
+                Bin::MakeD => {
+                    // x16 = zero-extended lo | hi << 32; fmov d, x16.
+                    let rhi = self.gsrc(ev(x), XS1);
+                    let rlo = self.gsrc(ev(y), XS0);
+                    self.e(mov(XS0, rlo));
+                    self.e(0xAA00_8000 | (rhi as u32) << 16 | (XS0 as u32) << 5 | XS0 as u32);
+                    let d = self.fdst(dst);
+                    self.e(fp2(FMOV_DX, d, XS0));
                     self.fdone(dst, d);
                 }
                 Bin::RemI => {
@@ -959,10 +1065,11 @@ impl<'a> Emit<'a> {
                     self.gdone(dst, d);
                 }
             },
-            Op::CmpF(cc, x, y) => {
+            Op::CmpF(cc, x, y) | Op::CmpD(cc, x, y) => {
+                let dbl = self.dbl(x);
                 let rx = self.fsrc(ev(x), FS0);
                 let ry = self.fsrc(ev(y), FS1);
-                self.e(fcmp(rx, ry));
+                self.e(fcmp(rx, ry) | dbl);
                 let cond = match cc {
                     Cmp::Lt => MI,
                     Cmp::Le => LS,
@@ -995,10 +1102,11 @@ impl<'a> Emit<'a> {
                 let rc = self.gsrc(ev(c), XS0);
                 self.e(cmp_imm(rc, 0));
                 if self.is_fp(x) {
+                    let dbl = self.dbl(x);
                     let rx = self.fsrc(ev(x), FS0);
                     let ry = self.fsrc(ev(y), FS1);
                     let d = self.fdst(dst);
-                    self.e(fcsel(d, rx, ry, NE));
+                    self.e(fcsel(d, rx, ry, NE) | dbl);
                     self.fdone(dst, d);
                 } else {
                     // The flags survive the operand reloads (plain loads).
@@ -1102,6 +1210,10 @@ impl<'a> Emit<'a> {
 /// no executable memory).
 pub fn compile(p: &Program) -> Option<Code> {
     let alloc = allocate(p);
+    // Spill slots are addressed with a scaled 12-bit immediate.
+    if alloc.spill_bytes >= 16384 {
+        return None;
+    }
     let frame_bytes = p.frame_words * 4;
     let total = (alloc.spill_bytes + frame_bytes + 15) & !15;
     let mut em = Emit {
