@@ -198,6 +198,8 @@ pub(crate) enum Ent {
 struct Refs {
     first: u32,
     last: u32,
+    /// Spill cost: each reference weighs 8^(repeating loops around it).
+    weight: u64,
     /// Block (index into `blocks`) holding the first reference.
     block: u32,
     /// Every reference position.
@@ -212,13 +214,17 @@ struct Liveness {
     refs: std::collections::HashMap<Ent, Refs>,
     pos: u32,
     loop_count: u32,
+    /// Repeating loops around the current statement.
+    depth: u32,
 }
 
 impl Liveness {
     fn touch(&mut self, e: Ent, block: u32) {
         let pos = self.pos;
-        let r = self.refs.entry(e).or_insert(Refs { first: pos, last: pos, block, at: Vec::new() });
+        let w = 8u64.pow(self.depth.min(6));
+        let r = self.refs.entry(e).or_insert(Refs { first: pos, last: pos, weight: 0, block, at: Vec::new() });
         r.last = pos;
+        r.weight += w;
         r.at.push(pos);
     }
 
@@ -262,7 +268,9 @@ impl Liveness {
                     let li = self.loops.len();
                     self.loops.push((self.pos, 0, *cap > 1));
                     self.touch(Ent::Counter(id), bid);
+                    self.depth += (*cap > 1) as u32;
                     self.walk(body);
+                    self.depth -= (*cap > 1) as u32;
                     self.pos += 1;
                     self.touch(Ent::Counter(id), bid);
                     self.loops[li].1 = self.pos;
@@ -333,12 +341,16 @@ fn allocate(p: &Program) -> Alloc {
 /// `class(e)` (an index into `pools`), spilling to stack slots of
 /// `slot(e)` bytes (aligned to their size).
 pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32) -> Alloc {
-    let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0 };
+    let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0, depth: 0 };
     lv.walk(&p.body);
     let mut ivs: Vec<(u32, u32, Ent)> = lv.refs.iter().map(|(e, r)| {
         let (s, t) = lv.interval(r);
         (s, t, *e)
     }).collect();
+    // Spill priority: references (weighted by loop depth) per position
+    // covered; the lowest is spilled first (a param or constant used once
+    // per element over the whole loop, never a hot temporary or a counter).
+    let density: std::collections::HashMap<Ent, f64> = ivs.iter().map(|(s, t, e)| (*e, lv.refs[e].weight as f64 / (t - s + 1) as f64)).collect();
     // The entity's name breaks ties: formatted once per entity, not per
     // comparison (a large kernel has thousands).
     ivs.sort_by_cached_key(|(s, e, ent)| (*s, *e, format!("{:?}", ent)));
@@ -368,9 +380,11 @@ pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[
                 locs.insert(ent, Loc::Reg(reg));
                 continue;
             }
-            // Spill whichever of (the furthest-ending active, this) ends last.
-            let (k, &(far_end, far_ent, far_reg)) = active.iter().enumerate().max_by_key(|(_, a)| a.0).unwrap();
-            if far_end > e {
+            // Spill whichever of (the sparsest active, this) is used least
+            // per position it covers (ties: the one ending last).
+            let key = |end: u32, en: Ent| (density[&en], std::cmp::Reverse(end));
+            let (k, &(far_end, far_ent, far_reg)) = active.iter().enumerate().min_by(|(_, a), (_, b)| key(a.0, a.1).partial_cmp(&key(b.0, b.1)).unwrap()).unwrap();
+            if key(far_end, far_ent) < key(e, ent) {
                 locs.insert(far_ent, new_slot(&mut spill_bytes, slot(far_ent)));
                 active.remove(k);
                 active.push((e, ent, far_reg));
