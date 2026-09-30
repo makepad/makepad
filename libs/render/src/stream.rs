@@ -457,19 +457,21 @@ impl OcclusionRaster {
             limit(-(a0 + a1), 1.0 - b0 - b1);
             let xs = if lo.is_finite() { x0.max((lo - 0.5).floor() as i32 - 1) } else { x0 };
             let xe = if hi.is_finite() { x1.min((hi - 0.5).ceil() as i32 + 1) } else { x1 };
-            for x in xs..=xe {
-                let px = x as f32 + 0.5;
+            if xe < xs { continue; }
+            // Branch-free over the span (the same arithmetic per pixel), so
+            // the row vectorizes.
+            let span = &mut self.depth[row + xs as usize..=row + xe as usize];
+            for (k, slot) in span.iter_mut().enumerate() {
+                let px = (xs + k as i32) as f32 + 0.5;
                 // Barycentrics (sign-agnostic: both windings fill).
                 let w0 = ((b.0 - px) * (c.1 - py) - (b.1 - py) * (c.0 - px)) * inv;
                 let w1 = ((c.0 - px) * (a.1 - py) - (c.1 - py) * (a.0 - px)) * inv;
                 let w2 = 1.0 - w0 - w1;
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 { continue; }
                 // 1/w interpolates linearly in screen space.
                 let iw = w0 * a.2 + w1 * b.2 + w2 * c.2;
-                if iw <= 0.0 { continue; }
                 let d = 1.0 / iw;
-                let slot = &mut self.depth[row + x as usize];
-                if d < *slot { *slot = d; }
+                let inside = w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 && iw > 0.0;
+                *slot = if inside && d < *slot { d } else { *slot };
             }
         }
     }

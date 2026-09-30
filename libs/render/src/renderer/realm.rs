@@ -404,6 +404,21 @@ impl Renderer {
     /// batched by model, but list order is still scene identity: lightmap
     /// remaps are indexed by placed slot. Producers should therefore keep a
     /// stable order so a harmless reorder does not request a new bake.
+    /// [`Self::set_models`] for a host that rebuilds its list every frame:
+    /// `fill` gets last frame's list to overwrite in place (with
+    /// `clone_from`, which keeps each copy's strings), and the result is
+    /// set exactly as `set_models` would.
+    pub fn rebuild_models(&mut self, fill: impl FnOnce(&mut Vec<ModelInstance>)) {
+        let mut instances = std::mem::take(&mut self.placed_models);
+        fill(&mut instances);
+        self.set_models(instances);
+    }
+
+    /// This frame's placed list (as last set).
+    pub fn placed_models(&self) -> &[ModelInstance] {
+        &self.placed_models
+    }
+
     pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
         if let Err(error)=self.try_set_models(instances){self.report_asset_light_error(error);}
     }

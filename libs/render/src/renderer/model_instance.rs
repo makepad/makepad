@@ -223,7 +223,6 @@ pub struct AnimPartBox {
 
 /// One placed stock prop. `model` is the asset id it was loaded under, e.g.
 /// `kenney/car-kit/ambulance`.
-#[derive(Clone)]
 pub struct ModelInstance {
     pub model: String,
     /// Visual-only opt-in; absent or failed custom shader uses the stock lane.
@@ -249,16 +248,65 @@ pub struct ModelInstance {
     pub part_poses: Vec<ModelPartPose>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct CustomMaterialInstance {
     pub name: String,
     pub params: Vec4f,
 }
 
-#[derive(Clone)]
 pub struct ModelPartPose {
     pub connection: String,
     pub transform: Mat4f,
+}
+
+// Field-wise `clone_from`: a host that refills last frame's list in place
+// (`Renderer::rebuild_models`) reuses every copy's strings instead of
+// allocating and freeing thousands of them per frame.
+impl Clone for ModelInstance {
+    fn clone(&self) -> Self {
+        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses } = self;
+        ModelInstance {
+            model: model.clone(),
+            custom_material: custom_material.clone(),
+            transform: *transform,
+            tint: *tint,
+            color_adjust: *color_adjust,
+            dynamic: *dynamic,
+            depth_order: *depth_order,
+            part_poses: part_poses.clone(),
+        }
+    }
+    fn clone_from(&mut self, source: &Self) {
+        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses } = source;
+        self.model.clone_from(model);
+        self.custom_material.clone_from(custom_material);
+        self.transform = *transform;
+        self.tint = *tint;
+        self.color_adjust = *color_adjust;
+        self.dynamic = *dynamic;
+        self.depth_order = *depth_order;
+        self.part_poses.clone_from(part_poses);
+    }
+}
+
+impl Clone for CustomMaterialInstance {
+    fn clone(&self) -> Self {
+        CustomMaterialInstance { name: self.name.clone(), params: self.params }
+    }
+    fn clone_from(&mut self, source: &Self) {
+        self.name.clone_from(&source.name);
+        self.params = source.params;
+    }
+}
+
+impl Clone for ModelPartPose {
+    fn clone(&self) -> Self {
+        ModelPartPose { connection: self.connection.clone(), transform: self.transform }
+    }
+    fn clone_from(&mut self, source: &Self) {
+        self.connection.clone_from(&source.connection);
+        self.transform = source.transform;
+    }
 }
 
 /// Read-only connection metadata exposed to game object loaders. All values
