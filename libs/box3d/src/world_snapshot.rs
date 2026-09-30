@@ -55,7 +55,9 @@ use crate::types::{
 
 // Snapshot image magic 'BNS3' and version
 pub const SNAP_MAGIC: u32 = 0x33534E42;
-pub const SNAP_VERSION: u32 = 1;
+// 2: free contact slots carry only their generation; the pair set writes
+// its occupied slots only.
+pub const SNAP_VERSION: u32 = 2;
 
 pub const SNAP_FLAG_VALIDATION: u32 = 0x1;
 pub const SNAP_FLAG_DOUBLE_PRECISION: u32 = 0x2;
@@ -296,29 +298,48 @@ fn des_bit_set(r: &mut RecCursor, bs: &mut BitSet) {
 }
 
 // HashSet: capacity + count + raw items (probe order depends on layout)
+// Sparse: the capacity, then each occupied slot (index, key, hash). An
+// empty slot is (0, 0) (removal clears both), so the restored set is the
+// same slot for slot; the pair set's capacity never shrinks, and after a
+// burst of pairs most of it is empty.
 fn ser_hash_set(buf: &mut RecBuffer, hs: &HashSet) {
     buf.w_u32(hs.capacity());
-    buf.w_u32(hs.count);
-    for item in &hs.items {
-        buf.w_u64(item.key);
-        buf.w_u32(item.hash);
+    let occupied = hs.items.iter().filter(|item| item.key != 0).count() as u32;
+    buf.w_u32(occupied);
+    for (i, item) in hs.items.iter().enumerate() {
+        if item.key != 0 {
+            buf.w_u32(i as u32);
+            buf.w_u64(item.key);
+            buf.w_u32(item.hash);
+        }
     }
 }
 
 fn des_hash_set(r: &mut RecCursor, hs: &mut HashSet) {
     let cap = r.r_u32();
     let cnt = r.r_u32();
-    let valid = r.check_count(cap as i32, 12) && (cap & cap.wrapping_sub(1)) == 0 && cnt <= cap;
+    // The capacity is allocated, not read: bound it like any array (at most
+    // 1 << 28 slots) besides the occupied entries the image must hold.
+    let valid = cap <= 1 << 28 && (cap & cap.wrapping_sub(1)) == 0 && cnt <= cap && r.check_count(cnt as i32, 16);
     if !valid && (cap != 0 || cnt != 0) {
         r.ok = false;
         *hs = HashSet::default();
         return;
     }
-    let mut items = Vec::with_capacity(cap as usize);
-    for _ in 0..cap {
+    let mut items = vec![SetItem::default(); cap as usize];
+    let mut next = 0u32;
+    for _ in 0..cnt {
+        let i = r.r_u32();
         let key = r.r_u64();
         let hash = r.r_u32();
-        items.push(SetItem { key, hash });
+        // Ascending, in range, non-empty: anything else is corrupt.
+        if i < next || i >= cap || key == 0 {
+            r.ok = false;
+            *hs = HashSet::default();
+            return;
+        }
+        items[i as usize] = SetItem { key, hash };
+        next = i + 1;
     }
     hs.items = items;
     hs.count = cnt;
@@ -1265,6 +1286,16 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
         let c = &world.contacts[i as usize];
         let is_live = c.contact_id == i;
 
+        // A free slot keeps only its generation: creating a contact resets
+        // every other field (contact.rs create_contact), and nothing reads
+        // a free slot but its id and generation. (The array never shrinks,
+        // so after a burst of pairs most slots are free.)
+        buf.w_i32(c.contact_id);
+        if !is_live {
+            buf.w_u32(c.generation);
+            continue;
+        }
+
         // Struct image with transient/pointer fields scrubbed
         buf.w_i32(c.set_index);
         buf.w_i32(c.color_index);
@@ -1279,7 +1310,6 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
         buf.w_i32(c.child_index);
         buf.w_i32(c.island_id);
         buf.w_i32(c.island_index);
-        buf.w_i32(c.contact_id);
         buf.w_i32(NULL_INDEX); // bodySimIndexA (transient)
         buf.w_i32(NULL_INDEX); // bodySimIndexB (transient)
         buf.w_u32(c.flags);
@@ -1293,12 +1323,6 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
         buf.w_f32(c.rolling_resistance);
         buf.w_vec3(c.tangent_velocity);
         buf.w_u32(c.generation);
-
-        if !is_live {
-            // Free slot: no heap data
-            buf.w_i32(0); // manifoldCount
-            continue;
-        }
 
         // Manifolds
         buf.w_i32(c.manifolds.len() as i32);
@@ -1319,8 +1343,8 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
 
 fn des_contacts(r: &mut RecCursor, world: &mut World) {
     let count = r.r_i32();
-    // Each contact image is at least the fixed struct bytes.
-    if !r.check_count(count, 64) {
+    // Each contact image is at least an id and a generation (a free slot).
+    if !r.check_count(count, 8) {
         return;
     }
 
@@ -1332,6 +1356,17 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         }
 
         let mut c = Contact::default();
+        c.contact_id = r.r_i32();
+        if c.contact_id != i {
+            // A free slot, as destroy_contact leaves it.
+            c.contact_id = NULL_INDEX;
+            c.set_index = NULL_INDEX;
+            c.color_index = NULL_INDEX;
+            c.local_index = NULL_INDEX;
+            c.generation = r.r_u32();
+            contacts.push(c);
+            continue;
+        }
         c.set_index = r.r_i32();
         c.color_index = r.r_i32();
         c.local_index = r.r_i32();
@@ -1347,7 +1382,6 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         c.child_index = r.r_i32();
         c.island_id = r.r_i32();
         c.island_index = r.r_i32();
-        c.contact_id = r.r_i32();
         c.body_sim_index_a = r.r_i32();
         c.body_sim_index_b = r.r_i32();
         c.flags = r.r_u32();
@@ -1365,14 +1399,12 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         c.body_sim_index_a = NULL_INDEX;
         c.body_sim_index_b = NULL_INDEX;
 
-        let is_live = c.contact_id == i;
-
         let manifold_count = r.r_i32();
         if !r.check_count(manifold_count, 32) {
             break;
         }
 
-        if is_live && manifold_count > 0 {
+        if manifold_count > 0 {
             c.manifolds = crate::contact::Manifolds::with_count(manifold_count);
             for m in c.manifolds.iter_mut() {
                 *m = des_manifold(r);
@@ -1380,7 +1412,7 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         }
 
         // Mesh triangleCache
-        if is_live && (c.flags & SIM_MESH_CONTACT) != 0 {
+        if (c.flags & SIM_MESH_CONTACT) != 0 {
             let cache_count = r.r_i32();
             if !r.check_count(cache_count, 20) {
                 break;
