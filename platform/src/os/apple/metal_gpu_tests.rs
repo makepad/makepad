@@ -159,6 +159,10 @@ fn words_f32(bytes: &[u8]) -> Vec<f32> {
 /// buffer, one `vec4f` output) into the Metal library source the backend
 /// builds, with `u_n` a uniform the GPU reads as 0.
 fn splash_metal_source(fragment_body: &str, extra: &str) -> String {
+    splash_metal_source_with(fragment_body, extra, "")
+}
+
+fn splash_metal_source_with(fragment_body: &str, extra: &str, vertex_extra: &str) -> String {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
     let code = format!(
@@ -168,7 +172,7 @@ fn splash_metal_source(fragment_body: &str, extra: &str) -> String {
          pixel: shader.fragment_output(0, vec4f)\n\
          u_n: shader.uniform(0.0)\n\
          {extra}\n\
-         vertex: fn() {{ self.vertex_pos = vec4(self.geom.x, self.geom.y, 0.0, 1.0) }}\n\
+         vertex: fn() {{ self.vertex_pos = vec4(self.geom.x, self.geom.y, 0.0, 1.0)\n{vertex_extra}\n}}\n\
          fragment: fn() {{\n{fragment_body}\n}}\n}}"
     );
     let value = vm.with_instruction_limit(5_000_000, |vm| {
@@ -193,7 +197,11 @@ fn splash_metal_source(fragment_body: &str, extra: &str) -> String {
 /// Run a Splash fragment on a 4x4 RGBA32Float target: the pixel it wrote
 /// and the GPU time.
 fn run_splash(gpu: &Gpu, fragment_body: &str, extra: &str) -> ([f32; 4], Duration) {
-    let source = splash_metal_source(fragment_body, extra);
+    run_splash_with(gpu, fragment_body, extra, "")
+}
+
+fn run_splash_with(gpu: &Gpu, fragment_body: &str, extra: &str, vertex_extra: &str) -> ([f32; 4], Duration) {
+    let source = splash_metal_source_with(fragment_body, extra, vertex_extra);
     let library = gpu.library(&source);
     let descriptor: ObjcId = unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] };
     unsafe {
@@ -248,6 +256,28 @@ fn runaway_nested_loops_finish_within_the_budget_on_the_gpu() {
     let (px, time) = run_splash(&gpu, &format!("var s = 0f\nfor i in 0..{huge} {{ s += self.spin() }}\nself.pixel = vec4(s, 0.0, 0.0, 1.0)"), extra);
     assert!(px[0] > 1000.0 && px[0] <= budget + 65536.0, "{px:?}");
     assert!(time < Duration::from_secs(10), "{time:?}");
+}
+
+#[test]
+fn scalar_varyings_after_vector_varyings_interpolate_correctly() {
+    let Some(gpu) = Gpu::new() else { return };
+    // VJ5's case: a float varying declared after a vec2 one.
+    for (extra, vertex, fragment, want) in [
+        ("v_uv: shader.varying(vec2f)\nv_f: shader.varying(f32)", "self.v_uv = vec2(0.25, 0.5)\nself.v_f = 0.75", "self.pixel = vec4(self.v_uv.x, self.v_uv.y, self.v_f, 1.0)", [0.25, 0.5, 0.75, 1.0]),
+        ("v_f: shader.varying(f32)\nv_uv: shader.varying(vec2f)", "self.v_uv = vec2(0.25, 0.5)\nself.v_f = 0.75", "self.pixel = vec4(self.v_uv.x, self.v_uv.y, self.v_f, 1.0)", [0.25, 0.5, 0.75, 1.0]),
+        ("v_a: shader.varying(vec3f)\nv_f: shader.varying(f32)\nv_uv: shader.varying(vec2f)\nv_g: shader.varying(f32)", "self.v_a = vec3(0.1, 0.2, 0.3)\nself.v_uv = vec2(0.25, 0.5)\nself.v_f = 0.75\nself.v_g = 0.125", "self.pixel = vec4(self.v_uv.y, self.v_f, self.v_g, self.v_a.z)", [0.5, 0.75, 0.125, 0.3]),
+        // VJ's spelling: `float` (and the vec4 before the vec2 as in the
+        // firefly engine).
+        ("v_c: shader.varying(vec4f)\nv_uv: shader.varying(vec2f)\nv_f: shader.varying(float)", "self.v_c = vec4(0.1, 0.2, 0.3, 0.4)\nself.v_uv = vec2(0.25, 0.5)\nself.v_f = 0.75", "self.pixel = vec4(self.v_uv.x, self.v_uv.y, self.v_f, self.v_c.w)", [0.25, 0.5, 0.75, 0.4]),
+        // Written in branches that return early, read through comparisons
+        // (the firefly kit's shape).
+        ("v_c: shader.varying(vec4f)\nv_uv: shader.varying(vec2f)\nv_f: shader.varying(float)", "if self.geom.x > 100.0 {\n self.v_uv = vec2(9.0, 9.0)\n self.v_f = 2.0\n self.v_c = vec4(1.0)\n } else {\n self.v_c = vec4(0.1, 0.2, 0.3, 0.4)\n self.v_uv = vec2(0.25, 0.5)\n self.v_f = 1.0\n }\n self.v_c.w = 0.4", "var o = vec4(1.0)\nif self.v_f > 1.5 { o = vec4(0.0) }\nif self.v_f > 0.5 && self.v_f < 1.5 { o = vec4(self.v_uv.x, self.v_uv.y, self.v_f, self.v_c.w) }\nself.pixel = o", [0.25, 0.5, 1.0, 0.4]),
+    ] {
+        let (px, _) = run_splash_with(&gpu, fragment, extra, vertex);
+        for (got, want) in px.iter().zip(want) {
+            assert!((got - want).abs() < 1e-5, "{extra}: {px:?} != {want:?}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
