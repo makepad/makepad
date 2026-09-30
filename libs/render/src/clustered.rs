@@ -135,6 +135,9 @@ pub struct ClusteredLights {
     stats: ClusterStats,
     last_overflow: (usize, usize),
     last_overflow_log: f64,
+    /// The texture holds an empty grid (no light in any cluster): a frame
+    /// with no lights again has nothing new to pack or upload.
+    uploaded_empty: bool,
     /// The lighting convention every lit lane reads (`lin_ctl`; see
     /// `Renderer::lin_ctl`), bound together with the cluster uniforms.
     pub(crate) lin_ctl: [f32; 4],
@@ -166,6 +169,7 @@ impl Default for ClusteredLights {
             stats: ClusterStats::default(),
             last_overflow: (0, 0),
             last_overflow_log: -1.0,
+            uploaded_empty: false,
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
             fog_ctl: [0.0; 4],
             fog_eye: [0.0; 4],
@@ -317,7 +321,8 @@ impl ClusteredLights {
             self.near = 2.0f32.min(self.far * 0.1);
             self.log_scale = (c.slices - 1) as f32 / (self.far / self.near).log2();
             let ortho = p.v[15].abs() > 0.5;
-            for z in 0..c.slices {
+            // Cluster bounds only place lights: none, nothing to place.
+            for z in (0..c.slices).filter(|_| !self.lights.is_empty()) {
                 let (z0, z1) = (self.slice_start(z), self.slice_start(z + 1));
                 for y in 0..c.tiles_y {
                     for x in 0..c.tiles_x {
@@ -356,7 +361,7 @@ impl ClusteredLights {
                 vec4(0.0, 0.0, 0.0, 1.0),
             ];
             self.depth_row = vec4(0.0, 0.0, 1.0 / s.z, -b.min.z / s.z);
-            for z in 0..c.slices {
+            for z in (0..c.slices).filter(|_| !self.lights.is_empty()) {
                 for y in 0..c.tiles_y {
                     for x in 0..c.tiles_x {
                         let lo = b.min
@@ -559,6 +564,14 @@ impl ClusteredLights {
     ) -> ClusterStats {
         let start = Cx::monotonic_now();
         self.build(lights, view);
+        // An empty grid packs to zeros whatever the camera: the texture
+        // already holds exactly that.
+        let empty = self.lights.is_empty();
+        if empty && self.uploaded_empty && self.texture.is_some() && self.light_texel == self.config.count() {
+            self.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
+            return self.stats;
+        }
+        self.uploaded_empty = empty;
         let old_height = self.texture_height;
         let mut data = self
             .texture

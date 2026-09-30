@@ -440,7 +440,24 @@ impl OcclusionRaster {
         for y in y0..=y1 {
             let py = y as f32 + 0.5;
             let row = y as usize * self.width;
-            for x in x0..=x1 {
+            // The row's covered span from the three barycentrics (each
+            // linear in px), widened a pixel each way; every pixel in it
+            // still takes the exact test below, so only pixels that test
+            // outside are skipped (a large wall's bounding box is mostly
+            // outside its triangles).
+            let (mut lo, mut hi) = (f32::NEG_INFINITY, f32::INFINITY);
+            let mut limit = |a: f32, b: f32| {
+                // a * px + b >= 0
+                if a > 1e-6 { lo = lo.max(-b / a); } else if a < -1e-6 { hi = hi.min(-b / a); }
+            };
+            let (a0, b0) = ((b.1 - c.1) * inv, (b.0 * (c.1 - py) - (b.1 - py) * c.0) * inv);
+            let (a1, b1) = ((c.1 - a.1) * inv, (c.0 * (a.1 - py) - (c.1 - py) * a.0) * inv);
+            limit(a0, b0);
+            limit(a1, b1);
+            limit(-(a0 + a1), 1.0 - b0 - b1);
+            let xs = if lo.is_finite() { x0.max((lo - 0.5).floor() as i32 - 1) } else { x0 };
+            let xe = if hi.is_finite() { x1.min((hi - 0.5).ceil() as i32 + 1) } else { x1 };
+            for x in xs..=xe {
                 let px = x as f32 + 0.5;
                 // Barycentrics (sign-agnostic: both windings fill).
                 let w0 = ((b.0 - px) * (c.1 - py) - (b.1 - py) * (c.0 - px)) * inv;
@@ -651,5 +668,51 @@ mod tests {
         r.add_box(vec3f(-5.0, 0.0, -500.0), vec3f(-4.0, 300.0, 500.0));
         r.finish();
         assert!(r.occluded(vec3f(-60.0, 0.0, -60.0), vec3f(-40.0, 20.0, -40.0)));
+    }
+
+    /// The row spans skip only pixels outside the triangle: the depth
+    /// written equals the whole-bounding-box walk's, pixel for pixel.
+    #[test]
+    fn occluder_row_spans_write_what_the_bounding_box_walk_writes() {
+        fn walk(r: &mut OcclusionRaster, a: (f32, f32, f32), b: (f32, f32, f32), c: (f32, f32, f32)) {
+            let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+            if area.abs() < 1e-6 { return; }
+            let x0 = a.0.min(b.0).min(c.0).floor().max(0.0) as i32;
+            let x1 = a.0.max(b.0).max(c.0).ceil().min(r.width as f32 - 1.0) as i32;
+            let y0 = a.1.min(b.1).min(c.1).floor().max(0.0) as i32;
+            let y1 = a.1.max(b.1).max(c.1).ceil().min(r.height as f32 - 1.0) as i32;
+            let inv = 1.0 / area;
+            for y in y0..=y1 {
+                let py = y as f32 + 0.5;
+                for x in x0..=x1 {
+                    let px = x as f32 + 0.5;
+                    let w0 = ((b.0 - px) * (c.1 - py) - (b.1 - py) * (c.0 - px)) * inv;
+                    let w1 = ((c.0 - px) * (a.1 - py) - (c.1 - py) * (a.0 - px)) * inv;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 { continue; }
+                    let iw = w0 * a.2 + w1 * b.2 + w2 * c.2;
+                    if iw <= 0.0 { continue; }
+                    let d = 1.0 / iw;
+                    let slot = &mut r.depth[y as usize * r.width + x as usize];
+                    if d < *slot { *slot = d; }
+                }
+            }
+        }
+        let (mut fast, mut slow) = (OcclusionRaster::new(192, 112), OcclusionRaster::new(192, 112));
+        let mut seed = 0x9e37_79b9u32;
+        let mut rnd = |lo: f32, hi: f32| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; lo + (hi - lo) * (seed as f32 / u32::MAX as f32) };
+        for _ in 0..4000 {
+            let t: [(f32, f32, f32); 3] = std::array::from_fn(|_| (rnd(-60.0, 250.0), rnd(-60.0, 170.0), rnd(0.001, 1.0)));
+            fast.triangle(t[0], t[1], t[2]);
+            walk(&mut slow, t[0], t[1], t[2]);
+        }
+        // Thin slivers and near-horizontal edges.
+        for k in 0..400 {
+            let y = rnd(0.0, 112.0);
+            let t = [(rnd(-10.0, 200.0), y, 0.5), (rnd(-10.0, 200.0), y + (k % 3) as f32 * 0.01, 0.4), (rnd(-10.0, 200.0), y + rnd(0.0, 3.0), 0.3)];
+            fast.triangle(t[0], t[1], t[2]);
+            walk(&mut slow, t[0], t[1], t[2]);
+        }
+        assert!(fast.depth.iter().zip(&slow.depth).all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 }
