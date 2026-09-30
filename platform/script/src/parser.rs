@@ -1057,6 +1057,16 @@ impl ScriptParser {
             // placeholder and is resolved against post-removal lengths.
             self.opcodes.remove(ctx.slots_frame_at as usize);
             self.source_map.remove(ctx.slots_frame_at as usize);
+            // The position markers past the placeholder shift with the code.
+            // Left as they were, a marker for the body's end (a statement if
+            // closing the body) lands on the code that follows the body: the
+            // fn literal after it then reads as "leaves no value" and a call
+            // argument `g(|a| { if c { for … {} } })` loses its function.
+            for marker in [&mut self.valueless_end, &mut self.last_jump_target] {
+                if *marker != u32::MAX && *marker > ctx.slots_frame_at {
+                    *marker -= 1;
+                }
+            }
             return;
         }
         let ok = |name: &LiveId| !ctx.poisoned.contains(name);

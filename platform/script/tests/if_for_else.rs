@@ -180,6 +180,35 @@ fn the_repro_from_the_brief() {
     assert_eq!(number(code, "brief"), 21.0);
 }
 
+/// A closure passed straight into a call, whose body ends in a statement if
+/// holding a loop, is still a function (leap's `game.on_touch(|a, b, side|
+/// { … if t == "portal" { for p in portals { … } } })`). The body's
+/// valueless-end marker used to survive the removal of the body's slot
+/// frame placeholder, land on the code right after the body, and make the
+/// fn literal read as a statement that leaves no value: the call got nil,
+/// the game's touch handler was never registered and its portals did
+/// nothing.
+#[test]
+fn a_closure_argument_ending_in_a_statement_if_with_a_loop_is_a_function() {
+    let take = "let seen = []\nfn take(f) { seen.push(f) }\nfn call(f) { return f(3) }\nfn keep(f) { return f }\n";
+    for (name, closure) in [
+        ("if_for", "|a| { if a > 0 { for s in [1, 2] { let k = s } } }"),
+        ("if_for_multiline", "|a| {\n    if a > 0 {\n        for s in [1, 2] {\n            let k = s\n        }\n    }\n}"),
+        ("if_for_if", "|a| { let t = 1\n if t == 1 { for s in [1] { if s == a { t = 2 } } } }"),
+        ("nested_closure", "|a| { if a > 0 { for s in [1] { keep(|| { let q = s }) } } }"),
+        ("if_else_for", "|a| { if a > 0 { for s in [1] { let k = s } } else { for s in [2] { let k = s } } }"),
+    ] {
+        let code = format!("{take}take({closure})\nlet f = seen[0]\ncall(f)\nseen.len()");
+        assert_eq!(number(&code, name), 1.0, "{name}: the closure argument arrived");
+        let (value, errs, _vm) = run(name, &format!("{take}call({closure})\n7"));
+        assert!(errs.is_empty(), "{name}: calling the closure argument failed: {errs:?}");
+        assert_eq!(value.as_number(), Some(7.0), "{name}");
+        // Two arguments, the closure last, as `game.after(secs, || { … })`.
+        let two = format!("{take}fn later(n, f) {{ return f(n) }}\nlater(3, {closure})\n9");
+        assert_eq!(number(&two, name), 9.0, "{name}: second argument");
+    }
+}
+
 mod shader_ifs {
     //! Shader ifs are statements: their arms stay valueless whatever the
     //! parser does for script ifs. Every if/match shape compiles on every
