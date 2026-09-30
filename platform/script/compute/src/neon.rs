@@ -81,6 +81,8 @@ mod v {
     pub const BSL: u32 = 0x6E60_1C00;
     /// d = m ? n : d (bitwise).
     pub const BIT: u32 = 0x6EA0_1C00;
+    /// d = m ? d : n (bitwise).
+    pub const BIF: u32 = 0x6EE0_1C00;
     pub const CMEQ: u32 = 0x6EA0_8C00;
     pub const CMGT: u32 = 0x4EA0_3400;
     pub const CMGE: u32 = 0x4EA0_3C00;
@@ -836,6 +838,21 @@ impl Em {
         }
     }
 
+    /// d = m ? x : y (m a mask register), in one BSL/BIT/BIF when d is
+    /// one of the three, else a copy of the mask and BSL.
+    fn select_into(&mut self, d: u8, m: u8, x: u8, y: u8) {
+        if d == m {
+            self.e(v::r3(v::BSL, d, x, y));
+        } else if d == y {
+            self.e(v::r3(v::BIT, d, x, m));
+        } else if d == x {
+            self.e(v::r3(v::BIF, d, y, m));
+        } else {
+            self.e(v::mov(d, m));
+            self.e(v::r3(v::BSL, d, x, y));
+        }
+    }
+
     fn is_bool(&self, v: Val) -> bool {
         self.p_vals[v.0 as usize] == crate::ir::Ty::Bool
     }
@@ -1539,6 +1556,11 @@ impl Em {
                 // A raw bool variable takes a mask as its 0/1 word.
                 let word = self.is_bool(*v) && !self.var_mask[var.0 as usize];
                 let r = self.vsrc_word(*v, VS1, word);
+                if self.full && matches!(self.loc(dst), Loc::Stack(_)) {
+                    // A spilled variable takes the value straight from r.
+                    self.done(dst, r);
+                    return;
+                }
                 if self.full {
                     let d = self.dst(dst);
                     if d != r {
@@ -1852,14 +1874,14 @@ impl Em {
                     }
                     Bin::MinF | Bin::MaxF => {
                         // a < b ? a : b  /  a > b ? a : b (false on NaN: b).
-                        if b == Bin::MinF {
-                            self.e(v::r3(v::FCMGT, VS2, ry, rx));
-                        } else {
-                            self.e(v::r3(v::FCMGT, VS2, rx, ry));
-                        }
-                        self.e(v::r3(v::BSL, VS2, rx, ry));
                         let d = self.dst(dst);
-                        self.e(v::mov(d, VS2));
+                        let m = if d != rx && d != ry { d } else { VS2 };
+                        if b == Bin::MinF {
+                            self.e(v::r3(v::FCMGT, m, ry, rx));
+                        } else {
+                            self.e(v::r3(v::FCMGT, m, rx, ry));
+                        }
+                        self.select_into(d, m, rx, ry);
                         self.done(dst, d);
                         return;
                     }
@@ -1941,7 +1963,16 @@ impl Em {
                 }
                 let d = self.dst(dst);
                 if self.mask[v.0 as usize] {
-                    self.e(v::mov(d, VS2));
+                    if d != VS2 {
+                        // The compare straight into d (it reads before writing).
+                        let n = self.code.len();
+                        let last = self.code[n - 1];
+                        if last & 0x1F == VS2 as u32 && cc != Cmp::Ne {
+                            self.code[n - 1] = (last & !0x1F) | d as u32;
+                        } else {
+                            self.e(v::mov(d, VS2));
+                        }
+                    }
                 } else {
                     self.e(v::r2(v::USHR31, d, VS2));
                 }
@@ -1949,21 +1980,17 @@ impl Em {
             }
             Op::Sel(c, x, y) => {
                 // The selector: a mask as it is, raw bits made one.
-                let rc = self.vsrc(c, VS2);
-                if self.mask[c.0 as usize] {
-                    if rc != VS2 {
-                        self.e(v::mov(VS2, rc));
-                    }
-                } else {
+                let mut rc = self.vsrc(c, VS2);
+                if !self.mask[c.0 as usize] {
                     self.e(v::r3(v::CMTST, VS2, rc, rc));
+                    rc = VS2;
                 }
                 // A bool select of raw words takes masks as their 0/1 word.
                 let raw = self.is_bool(v) && !self.mask[v.0 as usize];
                 let rx = self.vsrc_word(x, VS0, raw);
                 let ry = self.vsrc_word(y, VS1, raw);
-                self.e(v::r3(v::BSL, VS2, rx, ry));
                 let d = self.dst(dst);
-                self.e(v::mov(d, VS2));
+                self.select_into(d, rc, rx, ry);
                 self.done(dst, d);
             }
             Op::Wrap(x, len) => {
@@ -2027,8 +2054,11 @@ impl Em {
                 } else {
                     self.vsrc(b, VS1)
                 };
-                let rc = self.vsrc(c, VS2);
                 let d = self.dst(dst);
+                // A spilled or packed addend loads straight into the
+                // accumulator when the result register is free for it.
+                let direct = d != ra && (pk.is_some() || d != rb) && d != VS0 && (self.packed.contains_key(&c.0) || matches!(self.loc(Ent::Val(c.0)), Loc::Stack(_)));
+                let rc = self.vsrc(c, if direct { d } else { VS2 });
                 let acc = if d != ra && (pk.is_some() || d != rb) && d != VS0 { d } else { VS2 };
                 if k == crate::ir::Fma::Sub {
                     self.e(v::r2(v::FNEG, acc, rc));
