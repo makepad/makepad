@@ -44,7 +44,7 @@ impl StageInputs<'_> {
             Resource::Glow => self.glow,
             Resource::Id => self.id,
             Resource::Named(n) => self.named.iter().find(|(k, _)| *k == n).map(|(_, t)| t),
-            Resource::History => None,
+            Resource::History | Resource::Previous(_) => None,
         }
     }
 }
@@ -238,6 +238,17 @@ impl GraphRunner {
         }
     }
 
+    /// A history pass's latest output (None while it is cold).
+    fn latest_of(&self, node: usize) -> Option<Texture> {
+        let h = self.history.iter().find(|h| h.node == node)?;
+        if h.cold {
+            return None;
+        }
+        let plan = self.plan.as_ref()?;
+        let v = plan.passes.iter().find(|p| p.node == node)?.output;
+        Some(if h.in_twin { h.twin.clone() } else { self.targets[v.0 as usize].1.clone() })
+    }
+
     /// Start every history cold again (a live unit suspended, a document
     /// reloaded), and drop what the passes recorded, so nothing keeps the
     /// producers they sampled. Targets stay allocated.
@@ -348,14 +359,19 @@ impl GraphRunner {
                     Source::Host(r) => inputs.get(r).cloned(),
                     Source::Target(v) => Some(self.version_texture(v)),
                     Source::History => prev.clone(),
+                    Source::Previous(node) => self.latest_of(node),
                 })
                 .collect();
             // A cold history reads the pass's first input instead (zeros
             // when that is the history itself).
             let mut history_ready = 1.0;
-            if let Some(i) = p.inputs.iter().position(|s| *s == Source::History) {
-                if textures[i].is_none() {
-                    textures[i] = match textures[0].clone() {
+            let cold: Vec<usize> = p.inputs.iter().enumerate().filter(|(i, s)| matches!(s, Source::History | Source::Previous(_)) && textures[*i].is_none()).map(|(i, _)| i).collect();
+            for i in cold {
+                {
+                    // `@history` falls back to the pass's first input, a
+                    // cold `name.prev` to zeros.
+                    let first = if matches!(p.inputs[i], Source::History) { textures[0].clone() } else { None };
+                    textures[i] = match first {
                         Some(t) => Some(t),
                         None => Some(
                             self.zero

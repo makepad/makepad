@@ -25,7 +25,11 @@
 //! history, and the slot reads the pass's first input instead while
 //! `self.history_ready()` is 0 (a pass never samples a texture it has not
 //! written itself); a pass whose first read is `@history` itself (state
-//! with no other input) reads zeros then. Locked time refuses history (see [`crate::locked`]).
+//! with no other input) reads zeros then. A pass may read another history
+//! pass's latest output as `"name.prev"` (give it a slot name): last
+//! frame's when that pass comes later, which is how a multi-pass
+//! simulation (advect, solve, project) feeds its last pass back to its
+//! first. Locked time refuses history (see [`crate::locked`]).
 //!
 //! and the host turns it into a [`PassDecl`]. [`PassDecl::source`] makes
 //! the Splash shader text: a subclass of `DrawGraphPass` (the standard

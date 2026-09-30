@@ -146,6 +146,10 @@ pub enum Resource {
     /// The reading pass's own output of the previous frame (a history
     /// pass only).
     History,
+    /// `name.prev`: the named history pass's latest output when the
+    /// reading pass runs (last frame's when that pass comes later: a
+    /// multi-pass simulation closes its loop).
+    Previous(LiveId),
 }
 
 impl Resource {
@@ -159,12 +163,15 @@ impl Resource {
             "glow" | "emission" => Resource::Glow,
             "id" => Resource::Id,
             "history" => Resource::History,
-            other => Resource::Named(LiveId::from_str(other)),
+            other => match other.strip_suffix(".prev") {
+                Some(name) => Resource::Previous(LiveId::from_str(name)),
+                None => Resource::Named(LiveId::from_str(other)),
+            },
         }
     }
 
     fn is_attachment(self) -> bool {
-        !matches!(self, Resource::Color | Resource::Named(_) | Resource::History)
+        !matches!(self, Resource::Color | Resource::Named(_) | Resource::History | Resource::Previous(_))
     }
 }
 
@@ -248,6 +255,8 @@ pub enum Source {
     Target(Version),
     /// This pass's own output of the previous frame.
     History,
+    /// A history pass's latest output (the plan node).
+    Previous(usize),
 }
 
 /// A planned target: one per written version.
@@ -291,7 +300,7 @@ impl Attachments {
             Resource::Velocity => self.velocity,
             Resource::Glow => self.glow,
             Resource::Id => self.id,
-            Resource::Color | Resource::Named(_) | Resource::History => true,
+            Resource::Color | Resource::Named(_) | Resource::History | Resource::Previous(_) => true,
         }
     }
 }
@@ -397,6 +406,10 @@ impl FramePlan {
                             }
                             Source::History
                         }
+                        Resource::Previous(n) => match graph.nodes.iter().position(|o| o.name == Some(n) && o.history) {
+                            Some(at) => Source::Previous(at),
+                            None => return Err(PlanError::NoHistory { pass: format!("{} (reads {n}.prev: no history pass is named {n})", node.label) }),
+                        },
                         a if a.is_attachment() => {
                             if !attachments.has(a) {
                                 return Err(PlanError::MissingAttachment { pass: node.label.clone(), resource: format!("{a:?}").to_lowercase() });
@@ -564,6 +577,20 @@ mod tests {
         assert_eq!(plan.named, vec![(LiveId::from_str("state"), Version(0))]);
         let bad = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(Some("s"), Stage::Pre, &["color"], 1.0)] };
         assert!(matches!(FramePlan::compile(&bad, (64, 64), Attachments::default(), &[], false, BIG), Err(PlanError::PreColor { .. })));
+    }
+
+    #[test]
+    fn a_pass_reads_a_later_history_pass_s_last_frame() {
+        let mut advect = pass(Some("advect"), Stage::Pre, &["project.prev"], 1.0);
+        advect.size = Some((64, 64));
+        let mut project = pass(Some("project"), Stage::Pre, &["advect"], 1.0);
+        project.history = true;
+        project.size = Some((64, 64));
+        let g = PostGraph { color: ColorPipeline::Hdr, nodes: vec![advect.clone(), project] };
+        let plan = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap();
+        assert_eq!(plan.passes[0].inputs, vec![Source::Previous(1)]);
+        let bad = PostGraph { color: ColorPipeline::Hdr, nodes: vec![advect] };
+        assert!(matches!(FramePlan::compile(&bad, (64, 64), Attachments::default(), &[], false, BIG), Err(PlanError::NoHistory { .. })));
     }
 
     #[test]
