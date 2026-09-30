@@ -22,16 +22,18 @@ use std::sync::{Arc, Mutex};
 enum Slot {
     Absent,
     Queued,
-    /// `casts`: how many leading layers render into the shadow cascades.
-    Resident { model: LoadedModel, bytes: usize, casts: usize },
+    /// `casts`: the layers that render into the shadow cascades; `scene`:
+    /// how many leading layers the scene draws (a merged caster-only layer,
+    /// when there is one, is the last and only in `casts`).
+    Resident { model: LoadedModel, bytes: usize, casts: std::ops::Range<usize>, scene: usize },
 }
 impl Slot {
     fn resident(&self) -> bool { matches!(self, Slot::Resident { .. }) }
-    fn model(&self) -> Option<&LoadedModel> { if let Slot::Resident { model, .. } = self { Some(model) } else { None } }
-    fn casting(&self) -> Option<(&LoadedModel, usize)> { if let Slot::Resident { model, casts, .. } = self { Some((model, *casts)) } else { None } }
+    fn casting(&self) -> Option<(&LoadedModel, std::ops::Range<usize>)> { if let Slot::Resident { model, casts, .. } = self { Some((model, casts.clone())) } else { None } }
+    fn scene(&self) -> Option<(&LoadedModel, usize)> { if let Slot::Resident { model, scene, .. } = self { Some((model, *scene)) } else { None } }
 }
 
-type BuildResult = (u64, StreamPiece, Result<(PreparedStaticPreview, usize, usize), String>);
+type BuildResult = (u64, StreamPiece, Result<(PreparedStaticPreview, usize, std::ops::Range<usize>, usize), String>);
 type BuildJob = (u64, StreamPiece, Arc<dyn TileSource>);
 
 pub(super) struct Workers {
@@ -56,7 +58,8 @@ fn start_workers() -> Workers {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mesh = source.build(piece)?;
                 let bytes = mesh.geometry_bytes();
-                prepared_from_stream(mesh).map(|(p, casts)| (p, bytes, casts))
+                // Props never cast (only chunks and cells do).
+                prepared_from_stream(mesh, !matches!(piece, StreamPiece::Prop(_))).map(|(p, casts, scene, merged_bytes)| (p, bytes + merged_bytes, casts, scene))
             })).unwrap_or_else(|_| Err("stream build panicked".into()));
             if tx.send((generation, piece, result)).is_err() { return; }
         });
@@ -66,11 +69,30 @@ fn start_workers() -> Workers {
 
 /// A streamed mesh as the renderer's prepared static payload: layers only,
 /// no colliders, bake charts, parts or sidecars. Casting layers are moved
-/// first; the second value is how many there are.
-fn prepared_from_stream(mut mesh: StreamMesh) -> Result<(PreparedStaticPreview, usize), String> {
+/// first. Several casting layers are also merged into one caster-only layer
+/// at the end (the cascades draw a chunk's walls, roofs and glass as ONE
+/// draw instead of one per layer: a city's hundreds of chunks were most of
+/// the cascades' draw calls). Returns the layers the cascades draw, how
+/// many leading layers the scene draws, and the merged layer's bytes.
+fn prepared_from_stream(mut mesh: StreamMesh, merge: bool) -> Result<(PreparedStaticPreview, std::ops::Range<usize>, usize, usize), String> {
     mesh.layers.retain(|l| l.indices.len() >= 3);
     mesh.layers.sort_by_key(|l| !l.casts);
     let casts = mesh.layers.iter().filter(|l| l.casts).count();
+    let scene = mesh.layers.len();
+    let merged = (merge && casts >= 2).then(|| {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for l in &mesh.layers[..casts] {
+            let base = (vertices.len() / crate::model::MODEL_VERTEX_FLOATS) as u32;
+            vertices.extend_from_slice(&l.vertices);
+            indices.extend(l.indices.iter().map(|i| i + base));
+        }
+        let first = &mesh.layers[0];
+        crate::stream::StreamLayer { vertices, indices, texture: first.texture.clone(), detail: None, casts: true, material: first.material.clone() }
+    });
+    let merged_bytes = merged.as_ref().map_or(0, |l| l.vertices.len() * 4 + l.indices.len() * 4);
+    let casts = if merged.is_some() { scene..scene + 1 } else { 0..casts };
+    mesh.layers.extend(merged);
     use crate::material_surface::{PixelSemantic, PreparedTexture};
     let solid = |fallback: u32, semantic: PixelSemantic| {
         let mut image = ImageBuffer::default();
@@ -100,7 +122,7 @@ fn prepared_from_stream(mut mesh: StreamMesh) -> Result<(PreparedStaticPreview, 
         mesh_indices: std::sync::Arc::new(vec![0; triangles * 3]),
         authored_collisions: Default::default(), collider_parts: Default::default(), occluder_parts: Default::default(),
         anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, min: mesh.min, max: mesh.max, prelit: false,
-    }, casts))
+    }, casts, scene, merged_bytes))
 }
 
 /// Counters for one frame of the streamed lane (see [`Renderer::stream_stats`]).
@@ -149,7 +171,7 @@ pub(super) struct StreamState {
     cell: Vec<Slot>,
     prop_models: Vec<Slot>,
     inflight: usize,
-    ready: Vec<(StreamPiece, PreparedStaticPreview, usize, usize)>,
+    ready: Vec<(StreamPiece, PreparedStaticPreview, usize, std::ops::Range<usize>, usize)>,
     resident_bytes: usize,
     wanted: Vec<(f32, StreamPiece)>,
     selection: Selection,
@@ -288,7 +310,7 @@ impl Renderer {
             for (m, t) in mine.iter_mut().zip(theirs) {
                 match (&*m, t) {
                     (Slot::Resident { model: a, .. }, Slot::Resident { model: b, .. }) if a.geometry.geometry_id() == b.geometry.geometry_id() => {}
-                    (_, Slot::Resident { model, bytes, casts }) => *m = Slot::Resident { model: model.clone(), bytes: *bytes, casts: *casts },
+                    (_, Slot::Resident { model, bytes, casts, scene }) => *m = Slot::Resident { model: model.clone(), bytes: *bytes, casts: casts.clone(), scene: *scene },
                     (Slot::Absent, _) => {}
                     _ => *m = Slot::Absent,
                 }
@@ -321,7 +343,7 @@ impl Renderer {
             if generation != st.generation { continue; }
             st.inflight = st.inflight.saturating_sub(1);
             match result {
-                Ok((prepared, bytes, casts)) => st.ready.push((piece, prepared, bytes, casts)),
+                Ok((prepared, bytes, casts, scene)) => st.ready.push((piece, prepared, bytes, casts, scene)),
                 Err(e) => {
                     log!("stream: {piece:?} failed: {e}");
                     // Leave it Absent-but-not-requeued this frame; a later
@@ -358,8 +380,8 @@ impl Renderer {
             let mut ready = std::mem::take(&mut st.ready);
             ready.sort_by(|a, b| prio(&st, b.0).total_cmp(&prio(&st, a.0)));
             let mut spent = 0usize;
-            while let Some((piece, prepared, bytes, casts)) = ready.pop() {
-                if spent > 0 && spent + bytes > s.upload_bytes_per_frame { ready.push((piece, prepared, bytes, casts)); break; }
+            while let Some((piece, prepared, bytes, casts, scene)) = ready.pop() {
+                if spent > 0 && spent + bytes > s.upload_bytes_per_frame { ready.push((piece, prepared, bytes, casts, scene)); break; }
                 // A piece that went out of range while building is dropped.
                 if !matches!(piece, StreamPiece::Prop(_) | StreamPiece::Cell(_)) && evictable(&s, &foci, st.bounds(piece), piece) {
                     *st.slot(piece) = Slot::Absent;
@@ -367,7 +389,7 @@ impl Renderer {
                 }
                 let uploaded = self.upload_static_preview(cx, prepared);
                 let model = Self::uploaded_static_model(uploaded);
-                *st.slot(piece) = Slot::Resident { model, bytes, casts };
+                *st.slot(piece) = Slot::Resident { model, bytes, casts, scene };
                 st.resident_bytes += bytes;
                 spent += bytes;
                 stats.uploaded += 1;
@@ -636,7 +658,7 @@ impl Renderer {
         }
         let mut triangles = 0usize;
         let mut fur_budget = 0usize;
-        let mut submit = |draw: &mut ModelDraw<'_>, cx: &mut Cx3d, m: &LoadedModel, transform: Mat4f, tint: Vec4f, dither: f32| {
+        let mut submit = |draw: &mut ModelDraw<'_>, cx: &mut Cx3d, m: &LoadedModel, scene: usize, transform: Mat4f, tint: Vec4f, dither: f32| {
             draw.base().transform = transform;
             draw.base().tint = tint;
             draw.base().color_adjust_ctl = vec4(0.0, 1.0, 1.0, dither);
@@ -650,7 +672,7 @@ impl Renderer {
                 draw.submit_as(cx, 0.0, &mut fur_budget, opaque.filter(|_| !cut));
             };
             layers(&m.geometry, &m.texture, &m.detail, m.detail_scale, &m.material, draw, cx);
-            for (g, t, d, s, mat) in &m.extra_draws { layers(g, t, d, *s, mat, draw, cx); }
+            for (g, t, d, s, mat) in m.extra_draws.iter().take(scene.saturating_sub(1)) { layers(g, t, d, *s, mat, draw, cx); }
             triangles += m.triangles;
         };
         for &(piece, dither, _) in &st.draw_list {
@@ -660,10 +682,10 @@ impl Renderer {
                 StreamPiece::Cell(i) => &st.cell[i as usize],
                 StreamPiece::Prop(_) => continue,
             };
-            if let Some(m) = slot.model() { submit(draw, cx, m, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither); }
+            if let Some((m, scene)) = slot.scene() { submit(draw, cx, m, scene, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither); }
         }
         for (kind, transform, tint, dither) in &st.prop_list {
-            if let Some(m) = st.prop_models.get(*kind as usize).and_then(Slot::model) { submit(draw, cx, m, *transform, *tint, *dither); }
+            if let Some((m, scene)) = st.prop_models.get(*kind as usize).and_then(Slot::scene) { submit(draw, cx, m, scene, *transform, *tint, *dither); }
         }
         drop(submit);
         draw.base().color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
@@ -681,11 +703,11 @@ fn city_shader_on() -> bool {
     *ON.get_or_init(|| std::env::var("MAKEPAD_CITY_SHADER").map_or(true, |v| v != "0"))
 }
 
-/// The shadow-casting layers of a streamed model: its first `casting`
-/// layers (`prepared_from_stream` sorts them first).
-fn stream_casters_of(casters: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>, m: &LoadedModel, casting: usize) {
+/// The shadow-casting layers of a streamed model (`prepared_from_stream`:
+/// its leading casting layers, or their merged caster-only layer).
+fn stream_casters_of(casters: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>, m: &LoadedModel, casting: std::ops::Range<usize>) {
     for (k, g) in std::iter::once(&m.geometry).chain(m.extra_draws.iter().map(|(g, ..)| g)).enumerate() {
-        if k >= casting { break; }
+        if !casting.contains(&k) { continue; }
         casters.push(crate::gpu_lightmap::GpuBakeMesh { geometry: g.geometry_id(), transform: Mat4f::identity(), min: m.min, max: m.max, cutout: None, band: Default::default() });
     }
 }
