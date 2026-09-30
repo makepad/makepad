@@ -1,0 +1,222 @@
+//! B2, the records: one `Glyph` record per element (a glyph, a voxel cell,
+//! times the copies), the kernel's input. The rest pose, ordinals and
+//! counts are set when a glyph set arrives; the change times carry over
+//! from the previous set (a glyph whose char changed at its ordinal gets
+//! the arrival time); the karaoke words are refreshed every frame.
+
+use crate::shapes::GlyphSet;
+use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_typography::karaoke::{states, KaraokeStyle, State, SungWord};
+
+/// Words per `Glyph` record.
+pub const GLYPH_WORDS: usize = 36;
+
+const F_CHANGED: usize = 24;
+const F_SUNG: usize = 25;
+const F_AGE: usize = 26;
+const F_NEAR: usize = 27;
+const F_PROGRESS: usize = 28;
+
+/// The `Glyph` layout the animator reads (`let g = glyphs[i]`).
+pub fn glyph_layout() -> Layout {
+    let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
+    let mut fields = vec![f("rest", FieldTy::Vec3, 0), f("size", FieldTy::Vec3, 3), f("word_c", FieldTy::Vec3, 6), f("line_c", FieldTy::Vec3, 9)];
+    let scalars = [
+        "index", "count", "t", "word", "words", "line", "lines", "copy", "copies", "char", "shape", "seed", "changed_at", "sung", "age", "near", "progress", "ink", "layer", "glyph",
+    ];
+    for (k, name) in scalars.iter().enumerate() {
+        fields.push(f(name, FieldTy::F32, 12 + k as u32));
+    }
+    fields.push(f("from", FieldTy::Vec3, 32));
+    Layout { name: "Glyph".into(), stride: GLYPH_WORDS as u32, fields }
+}
+
+/// What is being sung.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Karaoke {
+    /// Nothing: every glyph unsung.
+    #[default]
+    None,
+    /// The line's sung fraction (0..1): glyph k of n is sung from
+    /// `progress * n > k`, the wipe crossing it.
+    Progress(f32),
+    /// Sung words with their times (char ranges of the text) at a time.
+    Words { words: Vec<SungWord>, time: f32, style: KaraokeStyle },
+}
+
+/// The records of a set, kept across frames.
+#[derive(Default)]
+pub struct Records {
+    pub data: Vec<f32>,
+    /// Char per element (to carry change times over).
+    chars: Vec<char>,
+    char_index: Vec<usize>,
+    text_chars: usize,
+    pub count: usize,
+}
+
+fn hash01(i: u32, k: u32) -> f32 {
+    let mut h = i.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846C_A68B);
+    h ^= h >> 16;
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+impl Records {
+    /// Fill the records for `set` repeated `copies` times. `now` is the
+    /// host time the set arrives; glyphs that differ from the previous
+    /// set at their ordinal are stamped with it.
+    pub fn set(&mut self, set: &GlyphSet, copies: usize, now: f32, text_chars: usize) {
+        let copies = copies.max(1);
+        let n = set.elements.len();
+        let old_changed: Vec<f32> = (0..self.chars.len().min(n)).map(|i| self.data[i * GLYPH_WORDS + F_CHANGED]).collect();
+        // Where each element was in the previous set (the same ordinal),
+        // for morphs from the old text into the new; its own rest if new.
+        let old_rest: Vec<[f32; 3]> = (0..self.chars.len()).map(|i| [self.data[i * GLYPH_WORDS], self.data[i * GLYPH_WORDS + 1], self.data[i * GLYPH_WORDS + 2]]).collect();
+        let first = self.chars.is_empty();
+        let old_chars = std::mem::take(&mut self.chars);
+        self.count = n * copies;
+        self.data.clear();
+        self.data.resize(self.count * GLYPH_WORDS, 0.0);
+        self.char_index.clear();
+        self.text_chars = text_chars;
+        let letters = set.letters.max(1);
+        for c in 0..copies {
+            for (i, e) in set.elements.iter().enumerate() {
+                let r = &mut self.data[(c * n + i) * GLYPH_WORDS..(c * n + i + 1) * GLYPH_WORDS];
+                let wc = set.word_centers.get(e.word).copied().unwrap_or(e.pivot);
+                let lc = set.line_centers.get(e.line).copied().unwrap_or(e.pivot);
+                r[0..3].copy_from_slice(&e.pivot);
+                r[3..6].copy_from_slice(&e.size);
+                r[6..9].copy_from_slice(&wc);
+                r[9..12].copy_from_slice(&lc);
+                let t = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
+                let changed = if first {
+                    -1e9
+                } else if old_chars.get(i) == Some(&e.ch) {
+                    old_changed.get(i).copied().unwrap_or(-1e9)
+                } else {
+                    now
+                };
+                let vals = [
+                    i as f32,
+                    n as f32,
+                    t,
+                    e.word as f32,
+                    set.words as f32,
+                    e.line as f32,
+                    set.lines as f32,
+                    c as f32,
+                    copies as f32,
+                    e.ch as u32 as f32,
+                    e.shape as f32,
+                    hash01(i as u32, 17),
+                    changed,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    e.ink,
+                    e.layer as f32,
+                    e.glyph as f32,
+                ];
+                r[12..32].copy_from_slice(&vals);
+                r[32..35].copy_from_slice(old_rest.get(i).unwrap_or(&e.pivot));
+            }
+        }
+        self.chars = set.elements.iter().map(|e| e.ch).collect();
+        self.char_index = set.elements.iter().map(|e| e.char_index).collect();
+        let _ = letters;
+    }
+
+    /// The karaoke fields for this frame.
+    pub fn sing(&mut self, karaoke: &Karaoke) {
+        let n = self.chars.len();
+        if n == 0 {
+            return;
+        }
+        let copies = self.count / n;
+        let mut per: Vec<(f32, f32, f32)> = vec![(0.0, 0.0, 0.0); n];
+        let mut progress = 0.0;
+        match karaoke {
+            Karaoke::None => {}
+            Karaoke::Progress(p) => {
+                let p = p.clamp(0.0, 1.0);
+                progress = p;
+                // The letter ordinal of each element (cells share theirs).
+                let letters = self.letter_count();
+                let at = p * letters as f32;
+                for (i, v) in per.iter_mut().enumerate() {
+                    let k = self.letter_of(i) as f32;
+                    let sung = (at - k).clamp(0.0, 1.0);
+                    let d = k + 0.5 - at;
+                    v.0 = sung;
+                    v.2 = (-d * d * 0.35).exp();
+                }
+            }
+            Karaoke::Words { words, time, style } => {
+                let st = states(words, self.text_chars, *time, style);
+                let mut sung_total = 0.0;
+                for (i, v) in per.iter_mut().enumerate() {
+                    let Some(s) = self.char_index.get(i).and_then(|&c| st.get(c)) else { continue };
+                    v.0 = match s.state {
+                        State::Unsung => 0.0,
+                        _ => s.sweep.max(if s.state == State::Cooled { 1.0 } else { 0.0 }),
+                    };
+                    v.1 = s.age;
+                    v.2 = s.anticipation;
+                    sung_total += v.0;
+                }
+                progress = sung_total / n as f32;
+            }
+        }
+        for c in 0..copies {
+            for (i, v) in per.iter().enumerate() {
+                let r = &mut self.data[(c * n + i) * GLYPH_WORDS..];
+                r[F_SUNG] = v.0;
+                r[F_AGE] = v.1;
+                r[F_NEAR] = v.2;
+                r[F_PROGRESS] = progress;
+            }
+        }
+    }
+
+    fn letter_of(&self, i: usize) -> usize {
+        let g = self.data[i * GLYPH_WORDS + 31];
+        if g >= 0.0 { g as usize } else { 0 }
+    }
+
+    fn letter_count(&self) -> usize {
+        (0..self.chars.len()).map(|i| self.letter_of(i) + 1).max().unwrap_or(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shapes::{build, ShapeSpec};
+
+    #[test]
+    fn records_carry_ordinals_changes_and_karaoke() {
+        let a = build(&ShapeSpec { text: "10:58".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
+        let b = build(&ShapeSpec { text: "10:59".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
+        let mut r = Records::default();
+        r.set(&a, 2, 1.0, 5);
+        assert_eq!(r.count, 10);
+        let at = |r: &Records, i: usize, f: usize| r.data[i * GLYPH_WORDS + f];
+        assert_eq!((at(&r, 6, 12), at(&r, 6, 19), at(&r, 6, 20)), (1.0, 1.0, 2.0), "copy 1 of glyph 1");
+        assert_eq!(at(&r, 4, 14), 1.0, "t of the last glyph");
+        r.set(&b, 2, 5.0, 5);
+        assert_eq!((at(&r, 3, F_CHANGED), at(&r, 4, F_CHANGED)), (-1e9, 5.0), "only the last digit changed");
+        r.sing(&Karaoke::Progress(0.5));
+        assert_eq!((at(&r, 0, F_SUNG), at(&r, 2, F_SUNG), at(&r, 4, F_SUNG)), (1.0, 0.5, 0.0), "the wipe is in the middle glyph");
+        r.sing(&Karaoke::Words { words: vec![SungWord { chars: 0..5, start: 0.0, end: 1.0, syllables: vec![] }], time: 0.5, style: KaraokeStyle::default() });
+        assert!(at(&r, 0, F_SUNG) == 1.0 && at(&r, 4, F_SUNG) == 0.0);
+        let l = glyph_layout();
+        assert_eq!(l.fields.last().unwrap().offset, 32);
+        assert_eq!(at(&r, 4, 32), a.elements[4].pivot[0], "from: where glyph 4 was before");
+    }
+}
