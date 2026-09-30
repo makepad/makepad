@@ -713,6 +713,24 @@ impl ScriptHeap {
         std::mem::swap(&mut out_data, &mut self.pods[pod_ptr].data);
     }
 
+    /// The number a scalar pod holds: what `int(x)`, `i32(x)`, `u32(x)`,
+    /// `f32(x)` and `f16(x)` return in script code. They stay pods (a shader
+    /// declaration such as `uniform(float(1.0))` takes its type from one),
+    /// and read as that number wherever script code wants a number: an
+    /// array index, arithmetic, a comparison. Any other value is `None`.
+    pub fn pod_scalar_number(&self, value: ScriptValue) -> Option<f64> {
+        let pod = value.as_pod()?;
+        let pod = self.pods.get_checked(pod)?;
+        let bits = *pod.data.first()?;
+        match self.pod_types[pod.ty.index as usize].ty {
+            ScriptPodTy::F32 => Some(f32::from_bits(bits) as f64),
+            ScriptPodTy::F16 => Some(f16_to_f32(bits as u16) as f64),
+            ScriptPodTy::U32 => Some(bits as f64),
+            ScriptPodTy::I32 => Some(bits as i32 as f64),
+            _ => None,
+        }
+    }
+
     pub fn pod_check_arg_total(
         &mut self,
         pod: ScriptPod,

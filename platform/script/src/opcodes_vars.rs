@@ -536,6 +536,16 @@ impl<'a> ScriptVm<'a> {
         if let Some(index) = index.checked_index() {
             return Some(index);
         }
+        // `int(x)` and the other scalar pod constructors index like the
+        // number they hold.
+        if let Some(index) = self
+            .bx
+            .heap
+            .pod_scalar_number(index)
+            .and_then(|n| ScriptValue::from_f64(n).checked_index())
+        {
+            return Some(index);
+        }
         let error = script_err_invalid_args!(
             self.bx.threads.cur_ref().trap,
             "array index must be a finite nonnegative integer"

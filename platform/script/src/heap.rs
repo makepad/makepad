@@ -831,6 +831,9 @@ impl ScriptHeap {
         if v.is_nil() {
             return 0.0;
         }
+        if let Some(v) = self.pod_scalar_number(v) {
+            return v;
+        }
         ScriptValue::from_f64_traced_nan(f64::NAN, ip)
             .as_f64()
             .unwrap()

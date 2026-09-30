@@ -33,6 +33,14 @@ fn number(name: &str, code: &str) -> f64 {
     value.as_number().unwrap_or_else(|| panic!("{name}: not a number: {value:?}"))
 }
 
+fn fails(name: &str, code: &str) -> Vec<String> {
+    let (_value, errs, _vm) = run(name, code);
+    assert!(!errs.is_empty(), "{name}: expected an error");
+    errs
+}
+
+const PRELUDE: &str = "use mod.math.*\nuse mod.pod.*\n";
+
 /// A binary op folds a constant right operand into its immediate. The fold
 /// took the last constant of an if/match arm or a `||` operand too, and
 /// popping it moved their jump targets: `var z = 1.0 * (if v { 0.2 } else
@@ -60,4 +68,27 @@ fn an_op_after_an_if_ending_in_a_whole_float() {
     }
     // Constants still fold where they are the whole operand.
     assert_eq!(number("plain", "let a = 7\na * 2.0 + a - 3.0"), 18.0);
+}
+
+/// `int(x)` (and `i32`, `u32`, `f32`, `f16`) make a scalar pod: it indexes
+/// arrays and does arithmetic as the number it holds.
+#[test]
+fn int_values_index_arrays() {
+    let a = format!("{PRELUDE}let a = [5, 6, 7]\n");
+    assert_eq!(number("int_lit", &format!("{a}a[int(1.7)]")), 6.0);
+    assert_eq!(number("int_var", &format!("{a}let i = int(2)\na[i]")), 7.0);
+    assert_eq!(number("i32", &format!("{a}a[i32(0)]")), 5.0);
+    assert_eq!(number("u32", &format!("{a}a[u32(2)]")), 7.0);
+    assert_eq!(number("f32", &format!("{a}a[f32(1.0)]")), 6.0);
+    assert_eq!(number("sum", &format!("{a}a[int(0.9) + 1]")), 6.0);
+    assert_eq!(number("arith", &format!("{PRELUDE}int(2.9) * 1.5 + u32(1)")), 4.0);
+    assert_eq!(number("cmp", &format!("{PRELUDE}if int(2.5) < 3 {{ 1 }} else {{ 0 }}")), 1.0);
+    assert_eq!(number("loop", &format!("{PRELUDE}let a = [1, 2, 3]\nvar s = 0\nfor k in 0..3 {{ s += a[int(k)] }}\ns")), 6.0);
+    assert_eq!(number("assign", &format!("{a}a[int(1)] = 9\na[1]")), 9.0);
+    // Still only whole, non-negative, in-range indices.
+    fails("negative", &format!("{a}a[int(-1)]"));
+    fails("fraction", &format!("{a}a[f32(0.5)]"));
+    // `float(1.0)` stays a pod, which shader declarations take their type from.
+    let (value, errs, _vm) = run("pod", &format!("{PRELUDE}float(1.0)"));
+    assert!(errs.is_empty() && value.as_pod().is_some(), "{value:?} {errs:?}");
 }
