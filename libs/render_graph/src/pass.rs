@@ -91,6 +91,10 @@ pub struct PassDecl {
     pub outputs: Vec<OutputDecl>,
     /// For diagnostics.
     pub label: String,
+    /// The pass reads `@color` only at its own pixel
+    /// (`self.color.sample(self.uv())`): passes like it that follow one
+    /// another run as one ([`fuse`]).
+    pub map: bool,
 }
 
 /// A further output of a pass: its resource name (what later passes read),
@@ -249,9 +253,194 @@ pub fn namespace(decls: &mut [PassDecl], prefix: &str) {
     }
 }
 
+/// Whether `d` can run inside a fused pass: a `map` pass writing the frame
+/// colour at the frame's size, nothing else.
+fn fusable(d: &PassDecl) -> bool {
+    d.map && d.name.is_none() && d.scale == 1.0 && d.size.is_none() && d.format.is_none() && d.outputs.is_empty() && !d.history
+        && d.reads.first().is_some_and(|r| r == "color") && d.slot(0) == "color"
+}
+
+/// Rename `self.<name>` for the names in `names` to `self.<prefix><name>`.
+fn prefixed(src: &str, names: &[String], prefix: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 64);
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if src[i..].starts_with("self.") && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) {
+            let start = i + 5;
+            let mut end = start;
+            while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+                end += 1;
+            }
+            let ident = &src[start..end];
+            out.push_str("self.");
+            if names.iter().any(|n| n == ident) {
+                out.push_str(prefix);
+            }
+            out.push_str(ident);
+            i = end;
+        } else {
+            let ch = src[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// The helper names a pass defines (`name: fn(` at the start of a line).
+fn helper_names(helpers: &str) -> Vec<String> {
+    helpers
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (name, rest) = l.split_once(':')?;
+            (rest.trim_start().starts_with("fn") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Consecutive `map` passes of one stage run as one pass: each one's pixel
+/// becomes a function of the colour so far, called in order on the colour
+/// at the pixel, with its uniforms, reads and helpers renamed apart. What a
+/// run writes is the same picture without the intermediate targets (only
+/// the rounding of the half-float frames between them differs). Returns the
+/// passes to run and, for each, the original passes it holds (in order; a
+/// pass alone holds itself), whose uniform values go in that order.
+pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
+    // At most this many floats of uniforms and textures in one fused pass
+    // (the standard block takes its own).
+    const MAX_FLOATS: usize = 96;
+    const MAX_READS: usize = 8;
+    let floats = |d: &PassDecl| d.uniforms.iter().map(|u| if u.width == 1 { 1 } else { 4 }).sum::<usize>();
+    let mut out = Vec::new();
+    let mut map = Vec::new();
+    let mut i = 0;
+    while i < decls.len() {
+        let mut j = i + 1;
+        if fusable(&decls[i]) {
+            let (mut f, mut r) = (floats(&decls[i]), decls[i].reads.len());
+            while j < decls.len() && fusable(&decls[j]) && decls[j].stage == decls[i].stage {
+                let (nf, nr) = (f + floats(&decls[j]), r + decls[j].reads.len() - 1);
+                if nf > MAX_FLOATS || nr > MAX_READS {
+                    break;
+                }
+                (f, r) = (nf, nr);
+                j += 1;
+            }
+        }
+        if j == i + 1 {
+            out.push(decls[i].clone());
+            map.push(vec![i]);
+            i = j;
+            continue;
+        }
+        let members = &decls[i..j];
+        let mut reads = vec!["color".to_string()];
+        let mut slots = vec!["color".to_string()];
+        let mut uniforms = Vec::new();
+        let mut helpers = String::new();
+        let mut pixel = String::from("fn() -> vec4 {\n    var c = self.color.sample(self.uv())\n");
+        for (k, d) in members.iter().enumerate() {
+            let prefix = format!("f{k}_");
+            let mut names: Vec<String> = d.uniforms.iter().map(|u| u.name.clone()).collect();
+            names.extend((1..d.reads.len()).map(|n| d.slot(n).to_string()));
+            names.extend(helper_names(&d.helpers));
+            for u in &d.uniforms {
+                uniforms.push(UniformDecl { name: format!("{prefix}{}", u.name), width: u.width });
+            }
+            for n in 1..d.reads.len() {
+                reads.push(d.reads[n].clone());
+                slots.push(format!("{prefix}{}", d.slot(n)));
+            }
+            if !d.helpers.trim().is_empty() {
+                // Its helpers' own names too, where they are defined.
+                let own = helper_names(&d.helpers);
+                let renamed: Vec<String> = prefixed(&d.helpers, &names, &prefix)
+                    .lines()
+                    .map(|l| {
+                        let t = l.trim_start();
+                        match own.iter().find(|n| t.starts_with(n.as_str()) && t[n.len()..].trim_start().starts_with(':')) {
+                            Some(_) => format!("{}{prefix}{t}", &l[..l.len() - t.len()]),
+                            None => l.to_string(),
+                        }
+                    })
+                    .collect();
+                helpers.push_str(&renamed.join("\n"));
+                helpers.push('\n');
+            }
+            // Its pixel, as a function of the colour so far.
+            let body = d.pixel.trim();
+            let open = body.find('{').map_or(0, |o| o + 1);
+            let close = body.rfind('}').unwrap_or(body.len());
+            let inner = prefixed(&body[open..close], &names, &prefix).replace("self.color.sample(self.uv())", "c_in");
+            helpers.push_str(&format!("    {prefix}pixel: fn(c_in: vec4) -> vec4 {{{inner}}}\n"));
+            pixel.push_str(&format!("    c = self.{prefix}pixel(c)\n"));
+        }
+        pixel.push_str("    return c\n}");
+        out.push(PassDecl {
+            name: None,
+            stage: members[0].stage,
+            reads,
+            slots,
+            scale: 1.0,
+            size: None,
+            format: None,
+            uniforms,
+            pixel,
+            helpers,
+            history: false,
+            outputs: Vec::new(),
+            label: members.iter().map(|d| d.label.as_str()).collect::<Vec<_>>().join(" + "),
+            map: true,
+        });
+        map.push((i..j).collect());
+        i = j;
+    }
+    (out, map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_passes_that_follow_one_another_fuse() {
+        let m = |label: &str, reads: &[&str], pixel: &str, uniforms: &[&str]| PassDecl {
+            name: None,
+            stage: Stage::Hdr,
+            reads: reads.iter().map(|r| r.to_string()).collect(),
+            slots: Vec::new(),
+            scale: 1.0,
+            size: None,
+            format: None,
+            uniforms: uniforms.iter().map(|u| UniformDecl { name: u.to_string(), width: 1 }).collect(),
+            pixel: pixel.into(),
+            helpers: String::new(),
+            history: false,
+            outputs: Vec::new(),
+            label: label.into(),
+            map: true,
+        };
+        let a = m("a", &["color", "bloom"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c + self.bloom.sample(self.uv()) * self.amount }", &["amount"]);
+        let b = m("b", &["color"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c * self.amount }", &["amount"]);
+        let mut c = m("c", &["color"], "fn() -> vec4 { return self.color.sample(self.uv() + vec2(0.01, 0.0)) }", &[]);
+        c.map = false;
+        let (out, map) = fuse(&[a, b, c.clone()]);
+        assert_eq!(map, vec![vec![0, 1], vec![2]]);
+        assert_eq!(out.len(), 2);
+        let f = &out[0];
+        assert_eq!(f.reads, vec!["color", "bloom"]);
+        assert_eq!(f.slots, vec!["color", "f0_bloom"]);
+        assert_eq!(f.uniforms.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), vec!["f0_amount", "f1_amount"]);
+        assert!(f.helpers.contains("f0_pixel: fn(c_in: vec4) -> vec4 { let c = c_in return c + self.f0_bloom.sample(self.uv()) * self.f0_amount }"), "{}", f.helpers);
+        assert!(f.helpers.contains("f1_pixel: fn(c_in: vec4) -> vec4 { let c = c_in return c * self.f1_amount }"), "{}", f.helpers);
+        assert!(f.pixel.contains("c = self.f0_pixel(c)") && f.pixel.contains("c = self.f1_pixel(c)"));
+        assert_eq!(out[1], c);
+        // A lone map pass is itself.
+        let (out, map) = fuse(&out[1..2]);
+        assert_eq!((out.len(), map), (1, vec![vec![0]]));
+    }
 
     fn decl() -> PassDecl {
         PassDecl {
@@ -268,6 +457,7 @@ mod tests {
             history: false,
             outputs: Vec::new(),
             label: "Pass".into(),
+            map: false,
         }
     }
 

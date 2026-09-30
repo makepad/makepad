@@ -112,7 +112,7 @@ $M.kit_glow = fn(p) {
         {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u0" reads: ["u1", "pre"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr reads: [@color, "u0"] uniforms: {strength: p.strength tint: p.tint}
+        {map: true at: @hdr reads: [@color, "u0"] uniforms: {strength: p.strength tint: p.tint}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let g = self.u0.sample(self.uv()).xyz * self.tint.xyz * self.strength
@@ -186,7 +186,7 @@ $M.kit_bloom = fn(p) {
         {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
         {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
+        {map: true at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let b = self.bloom.sample(self.uv()).xyz * (self.strength / 3.0)
@@ -208,7 +208,7 @@ $M.kit_bloom = fn(p) {
 $M.Shoulder = $M.Shoulder{knee: 0.72 white_from: 2 white_to: 12 white: 0.85}
 $M.kit_shoulder = fn(p) {
     return [
-        {at: @hdr reads: [@color] uniforms: {knee: p.knee white_from: p.white_from white_to: p.white_to white: p.white}
+        {map: true at: @hdr reads: [@color] uniforms: {knee: p.knee white_from: p.white_from white_to: p.white_to white: p.white}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let a = clamp(c.w, 0.0, 1.0)
@@ -256,7 +256,7 @@ $M.kit_halation = fn(p) {
                 }
                 return vec4(c / 16.0, 1.0)
             }"}
-        {at: @hdr reads: [@color, "d2", "d1"] uniforms: {strength: p.strength tint: p.tint}
+        {map: true at: @hdr reads: [@color, "d2", "d1"] uniforms: {strength: p.strength tint: p.tint}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let h = (self.d2.sample(self.uv()).x * 0.7 + self.d1.sample(self.uv()).x * 0.3) * self.strength
@@ -298,7 +298,7 @@ $M.kit_aberration = fn(p) {
 $M.Grain = $M.Grain{amount: 0.055 size: 1}
 $M.kit_grain = fn(p) {
     return [
-        {at: @final reads: [@color] uniforms: {amount: p.amount grain: p.size}
+        {map: true at: @final reads: [@color] uniforms: {amount: p.amount grain: p.size}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let px = floor(self.uv() * self.size())
@@ -324,7 +324,7 @@ $M.Vignette = $M.Vignette{amount: 0.35 softness: 0.55 color: #000000 mode: 0}
 $M.kit_vignette = fn(p) {
     if p.mode == 1 {
         return [
-            {at: @hdr reads: [@color] uniforms: {amount: p.amount}
+            {map: true at: @hdr reads: [@color] uniforms: {amount: p.amount}
                 pixel: "fn() -> vec4 {
                     let c = self.color.sample(self.uv())
                     let dc = (self.uv() - vec2(0.5, 0.5)) * vec2(1.0, 0.8)
@@ -334,7 +334,7 @@ $M.kit_vignette = fn(p) {
         ]
     }
     return [
-        {at: @final reads: [@color] uniforms: {amount: p.amount softness: p.softness tone: p.color}
+        {map: true at: @final reads: [@color] uniforms: {amount: p.amount softness: p.softness tone: p.color}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let q = (self.uv() - vec2(0.5, 0.5)) * vec2(self.aspect(), 1.0)
@@ -378,7 +378,7 @@ $M.kit_frame_post = fn(p) {
 $M.Lut = $M.Lut{image: "lut" amount: 1 size: 16}
 $M.kit_lut = fn(p) {
     return [
-        {at: @display reads: [@color, p.image] slots: ["color", "lut"] uniforms: {amount: p.amount cells: p.size}
+        {map: true at: @display reads: [@color, p.image] slots: ["color", "lut"] uniforms: {amount: p.amount cells: p.size}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let n = max(self.cells, 2.0)
@@ -424,7 +424,7 @@ $M.kit_dof = fn(p) {
                 }
                 return vec4(sum / w, centre.w)
             }"}
-        {at: @hdr reads: [@color, "blur"]
+        {map: true at: @hdr reads: [@color, "blur"]
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let b = self.blur.sample(self.uv())
@@ -446,7 +446,7 @@ $M.Outline = $M.Outline{color: #000000 thickness: 1.5 threshold: 0.08 mode: 0}
 $M.kit_outline = fn(p) {
     if p.mode == 1 {
         return [
-            {at: @display reads: [@color, @id] slots: ["color", "ids"] uniforms: {ink: p.color thickness: p.thickness}
+            {map: true at: @display reads: [@color, @id] slots: ["color", "ids"] uniforms: {ink: p.color thickness: p.thickness}
                 helpers: "surface: fn(uv: vec2) -> float {
                     let c = self.ids.sample_nearest(uv)
                     return floor(c.y * 255.0 + 0.5) * 256.0 + floor(c.x * 255.0 + 0.5)
@@ -472,7 +472,7 @@ $M.kit_outline = fn(p) {
         ]
     }
     return [
-        {at: @display reads: [@color, @depth] uniforms: {ink: p.color thickness: p.thickness threshold: p.threshold}
+        {map: true at: @display reads: [@color, @depth] uniforms: {ink: p.color thickness: p.thickness threshold: p.threshold}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
                 let t = self.texel() * max(self.thickness * self.size().y / 1080.0, 0.5)

@@ -103,7 +103,13 @@ pub struct GraphRunner {
     view: Option<PassView>,
     /// Frame pixels per output pixel (the host's supersampling; 0 = 1).
     px_scale: f32,
+    /// The passes as the host gave them.
+    given: Vec<PassDecl>,
+    /// The passes that run (`map` passes that follow one another fused),
+    /// and for each the given passes it holds (their uniform values, in
+    /// order).
     decls: Vec<PassDecl>,
+    members: Vec<Vec<usize>>,
     graph: PostGraph,
     plan: Option<FramePlan>,
     plan_key: Option<((u32, u32), Attachments, Vec<LiveId>, bool)>,
@@ -135,10 +141,15 @@ impl GraphRunner {
     /// Set the document's passes (cheap when unchanged). New passes start
     /// with a cold history.
     pub fn set_passes(&mut self, decls: &[PassDecl]) {
-        if self.decls.as_slice() == decls {
+        if self.given.as_slice() == decls {
             return;
         }
-        self.decls = decls.to_vec();
+        self.given = decls.to_vec();
+        let (fused, members) = crate::pass::fuse(decls);
+        self.decls = fused;
+        self.members = members;
+        let decls = self.decls.clone();
+        let decls = decls.as_slice();
         self.history.clear();
         self.graph = PostGraph {
             color: self.color.unwrap_or(ColorPipeline::Hdr),
@@ -470,10 +481,10 @@ impl GraphRunner {
                 dv.set_uniform(cx.cx, live_id!(g_pvp2), &[p[2], p[6], p[10], p[14]]);
                 dv.set_uniform(cx.cx, live_id!(g_pvp3), &[p[3], p[7], p[11], p[15]]);
             }
-            if let Some(vals) = values.get(p.node) {
-                for (u, v) in decl.uniforms.iter().zip(vals.iter()) {
-                    dv.set_uniform(cx.cx, LiveId::from_str(&u.name), &v[..u.width as usize]);
-                }
+            // The values of the given passes this one holds, in order.
+            let vals = self.members.get(p.node).into_iter().flatten().filter_map(|&m| values.get(m)).flatten();
+            for (u, v) in decl.uniforms.iter().zip(vals) {
+                dv.set_uniform(cx.cx, LiveId::from_str(&u.name), &v[..u.width as usize]);
             }
             let extra: Vec<Texture> = p.extra.iter().map(|v| self.version_texture(*v)).collect();
             let Some(draw) = self.programs.get_mut(program) else { continue };

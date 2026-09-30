@@ -49,6 +49,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         let errors = script::install_kits(vm, "mod.gtest", None);
         assert!(errors.is_empty(), "kits did not evaluate: {errors:?}");
         let mut total = 0;
+        let mut chain: Vec<pass::PassDecl> = Vec::new();
         // Every kit with its defaults, and the variants a parameter selects.
         let variants: Vec<(&kits::KitDef, Option<(&str, f64)>)> = kits::KITS.iter().map(|k| (k, None)).chain([("vignette", "mode", 1.0), ("frame_post", "mode", 1.0), ("outline", "mode", 1.0)].into_iter().map(|(kind, f, v)| (kits::kit(kind).unwrap(), Some((f, v))))).collect();
         for (k, over) in variants {
@@ -81,13 +82,23 @@ fn every_kit_builds_passes_that_compile_everywhere() {
                 decl.validate().unwrap_or_else(|e| panic!("{}: {e}", decl.label));
                 decls.push(decl);
             }
-            pass::namespace(&mut decls, "k0_");
+            pass::namespace(&mut decls, &format!("k{}_", chain.len()));
             for d in &decls {
                 compile_pass(vm, d);
                 total += 1;
             }
+            chain.extend(decls);
         }
         assert!(total >= 20, "{total} passes");
+        // Every kit one after another: the map passes that follow one
+        // another fuse, and each fused pass compiles everywhere.
+        let (fused, members) = pass::fuse(&chain);
+        let merged: Vec<&pass::PassDecl> = fused.iter().zip(&members).filter(|(_, m)| m.len() > 1).map(|(d, _)| d).collect();
+        assert!(!merged.is_empty(), "no kit passes fused");
+        for d in merged {
+            d.validate().unwrap_or_else(|e| panic!("{}: {e}", d.label));
+            compile_pass(vm, d);
+        }
         // A raymarch-style pass with further outputs (MRT): a G-buffer and
         // a view distance, written as `self.<name>`.
         let mrt = pass::PassDecl {
@@ -107,6 +118,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
                 pass::OutputDecl { name: "march_depth".into(), slot: "march_depth".into(), format: makepad_render_graph::Format::R32f },
             ],
             label: "mrt".into(),
+            map: false,
         };
         mrt.validate().unwrap();
         compile_pass(vm, &mrt);
@@ -117,6 +129,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             outputs: Vec::new(),
             pixel: "fn() -> vec4 { let q = fract(self.uv() * 3.0) return self.color.sample_grad(q, dFdx(self.uv() * 3.0), dFdy(self.uv() * 3.0)) }".into(),
             label: "grad".into(),
+            map: false,
             ..mrt.clone()
         };
         compile_pass(vm, &grad);
@@ -136,6 +149,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             history: false,
             outputs: Vec::new(),
             label: "bad".into(),
+            map: false,
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
         assert!(compile_value(vm, "bad", code).is_err());
@@ -155,6 +169,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             history: false,
             outputs: Vec::new(),
             label: "short".into(),
+            map: false,
         };
         short.validate().unwrap();
         compile_pass(vm, &short);

@@ -20,7 +20,7 @@ pub struct PassRead {
 }
 
 /// The fields a pass object may have (for a host's unknown-field check).
-pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history"];
+pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history", "map"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
     let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
@@ -126,6 +126,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         }
     }
     let history = get(vm, o, "history").as_bool().unwrap_or(false);
+    let map = get(vm, o, "map").as_bool().unwrap_or(false);
     // `outputs: [@gbuf1, {name: "depth" format: @r32f}]`: further outputs
     // (linear half float unless given), written as `self.<name>`.
     let mut outputs = Vec::new();
@@ -146,7 +147,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         };
         outputs.push(crate::pass::OutputDecl { slot: name.clone(), name, format });
     }
-    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string() };
+    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map };
     Ok(PassRead { decl, uniforms })
 }
 
