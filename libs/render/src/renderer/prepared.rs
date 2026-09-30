@@ -170,29 +170,11 @@ impl PreparedStaticPreview {
             // the load-ready form) decode and mip here, once per load for all
             // the models that use them.
             let prepare=||{
-            let store=crate::material_surface::prepared_texture_store();
-            // A host cache of prepared textures skips the decode and the mips.
-            // Small images prepare faster than a cache round trip.
-            let store_key=bytes.filter(|b|b.len()>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES).map(|b|crate::material_surface::texture_work(crate::material_surface::TextureWork::Hash,||crate::material_surface::prepared_texture_key(b,semantic)));
-            let cached=match (store,store_key) {
-                (Some(store),Some(store_key))=>crate::material_surface::texture_work(crate::material_surface::TextureWork::Cache,||store.get(store_key)).filter(|t|t.data.len()*4<=remaining.get()),
-                _=>None,
-            };
-            let texture=match cached {
-                Some(texture)=>{ remaining.set(remaining.get()-texture.width*texture.height*4); texture }
-                None=>{
-                    let decoded=if let Some(bytes)=bytes {
-                        let image=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||decode_generated_png_within(bytes,4096,remaining.get()))?;
-                        remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
-                    } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
-                    let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::material_surface::PreparedTexture::prepare(decoded,semantic));
-                    if let (Some(store),Some(store_key))=(store,store_key) {
-                        if texture.width*texture.height>=crate::material_surface::PREPARED_TEXTURE_CACHE_MIN_TEXELS { crate::material_surface::texture_work(crate::material_surface::TextureWork::Cache,||store.put(store_key,&texture)); }
-                    }
-                    texture
-                }
-            };
-            Ok(texture)
+                let decoded=if let Some(bytes)=bytes {
+                    let image=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||decode_generated_png_within(bytes,4096,remaining.get()))?;
+                    remaining.set(remaining.get().saturating_sub(image.data.len()*4)); image
+                } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
+                Ok(crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::material_surface::PreparedTexture::prepare(decoded,semantic)))
             };
             let texture=match bytes { Some(_)=>crate::material_surface::prepared_once((key.0,key.1,key.3),prepare)?, None=>std::sync::Arc::new(prepare()?) };
             shared.borrow_mut().insert(key,texture.clone());

@@ -125,28 +125,27 @@ fn srgb_byte(v:f32)->u32{
     }));
     starts.partition_point(|start|*start<=v)as u32
 }
-/// A host's cache of prepared (mipped) textures, keyed by
-/// [`prepared_texture_key`] of the SOURCE image bytes. Opt-in: a host that
-/// installs none prepares every image as before. `get` and `put` run on
-/// preparation workers; `put` must not block on I/O.
+/// A host's store of Basis/UASTC KTX2 forms of source images (keyed by
+/// [`basis_texture_key`]), for hosts that set a compression target: encoding
+/// UASTC is far slower than any lookup. Mipped RGBA chains are not stored:
+/// decoding and mipping a source image costs about what fetching its stored
+/// chain did. Both methods run on preparation workers; `put_basis` must not
+/// block on I/O.
 pub trait PreparedTextureStore: Send + Sync {
-    fn get(&self, key: u64) -> Option<PreparedTexture>;
-    fn put(&self, key: u64, texture: &PreparedTexture);
-    /// The Basis/UASTC KTX2 of an image (see [`basis_texture_key`]), for
-    /// hosts that set a compression target.
-    fn get_basis(&self, _key: u64) -> Option<Vec<u8>> { None }
-    fn put_basis(&self, _key: u64, _ktx2: &[u8]) {}
+    fn get_basis(&self, key: u64) -> Option<Vec<u8>>;
+    fn put_basis(&self, key: u64, ktx2: &[u8]);
 }
 
 static TEXTURE_STORE: std::sync::OnceLock<Box<dyn PreparedTextureStore>> = std::sync::OnceLock::new();
 /// Install the process's prepared-texture cache (first call wins).
 pub fn set_prepared_texture_store(store: Box<dyn PreparedTextureStore>) { let _ = TEXTURE_STORE.set(store); }
 pub(crate) fn prepared_texture_store() -> Option<&'static dyn PreparedTextureStore> { TEXTURE_STORE.get().map(|s| s.as_ref()) }
-/// Bumped whenever [`PreparedTexture::prepare`] or the serialized layout
-/// changes, so cached textures from an older build are never used.
+/// Part of every source image key ([`prepared_texture_key`]): bumped when
+/// [`PreparedTexture::prepare`] changes the chains it makes, so stored forms
+/// derived from older chains are never used.
 pub const PREPARED_TEXTURE_FORMAT: u32 = 1;
-/// Cache key of a source image: its bytes, its semantic (colour and masked
-/// colour mip differently) and the format version.
+/// Key of a source image: its bytes, its semantic (colour and masked colour
+/// mip differently) and the format version.
 pub fn prepared_texture_key(source: &[u8], semantic: PixelSemantic) -> u64 {
     let h = source.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3));
     h ^ (source.len() as u64).rotate_left(29) ^ ((semantic as u64) << 56) ^ ((PREPARED_TEXTURE_FORMAT as u64) << 48).rotate_left(7)
@@ -177,8 +176,6 @@ pub fn image_content_hash(bytes: &[u8]) -> u64 {
     for (i, v) in h.iter().enumerate().skip(1) { out = (out ^ v.rotate_left(17 * i as u32)).wrapping_mul(K[0]); }
     out ^ (out >> 32)
 }
-/// Images smaller than this prepare faster than a cache round trip.
-pub const PREPARED_TEXTURE_CACHE_MIN_TEXELS: usize = 256 * 256;
 /// Images at least this large go to the GPU block-compressed when the host
 /// set a compression target (smaller ones save little).
 pub const COMPRESS_MIN_TEXELS: usize = 128 * 128;
@@ -200,12 +197,10 @@ pub enum TextureWork {
     /// Load-ready KTX2: UASTC remapped to the device format (or decoded
     /// to RGBA when there is no compression target).
     Remap,
-    /// Hashing source bytes for cache and dedupe keys.
+    /// Hashing source bytes for store and dedupe keys.
     Hash,
-    /// Device/Basis cache lookups and fills (disk and store).
-    Cache,
 }
-pub static TEXTURE_WORK: [[std::sync::atomic::AtomicUsize; 2]; 4] = [const { [const { std::sync::atomic::AtomicUsize::new(0) }; 2] }; 4];
+pub static TEXTURE_WORK: [[std::sync::atomic::AtomicUsize; 2]; 3] = [const { [const { std::sync::atomic::AtomicUsize::new(0) }; 2] }; 3];
 /// Run `f`, charging its time to `stage`.
 pub fn texture_work<R>(stage: TextureWork, f: impl FnOnce() -> R) -> R {
     let started = std::time::Instant::now();
@@ -255,7 +250,7 @@ pub fn release_remapped_ktx2() {
 }
 
 /// `[(count, ms)]` per [`TextureWork`] stage.
-pub fn texture_work_stats() -> [(usize, usize); 4] {
+pub fn texture_work_stats() -> [(usize, usize); 3] {
     std::array::from_fn(|i| (TEXTURE_WORK[i][0].load(std::sync::atomic::Ordering::Relaxed), TEXTURE_WORK[i][1].load(std::sync::atomic::Ordering::Relaxed) / 1000))
 }
 pub fn prepared_texture_upload_stats() -> [usize; 5] {
@@ -321,31 +316,6 @@ pub fn basis_texture_key(source: &[u8], semantic: PixelSemantic) -> u64 {
 pub const PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES: usize = 32 * 1024;
 
 impl PreparedTexture {
-    /// Serialized form: magic, format, width, height, max_level, hash, texels
-    /// (level 0 then every mip, BGRA8 little-endian words).
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + self.data.len() * 4);
-        out.extend_from_slice(b"MPTX");
-        for v in [PREPARED_TEXTURE_FORMAT, self.width as u32, self.height as u32, self.max_level as u32] { out.extend_from_slice(&v.to_le_bytes()); }
-        out.extend_from_slice(&self.hash.to_le_bytes());
-        for t in &self.data { out.extend_from_slice(&t.to_le_bytes()); }
-        out
-    }
-    /// The inverse of [`Self::to_bytes`]; `None` for another format or a
-    /// truncated / inconsistent payload (the caller then prepares from source).
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 28 || &bytes[..4] != b"MPTX" { return None; }
-        let word = |i: usize| u32::from_le_bytes(bytes[4 + i * 4..8 + i * 4].try_into().unwrap());
-        if word(0) != PREPARED_TEXTURE_FORMAT { return None; }
-        let (width, height, max_level) = (word(1) as usize, word(2) as usize, word(3) as usize);
-        let hash = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
-        // Texel count of the full chain this header promises.
-        let (mut w, mut h, mut texels) = (width, height, width * height);
-        for _ in 0..max_level { w = (w / 2).max(1); h = (h / 2).max(1); texels += w * h; }
-        if width == 0 || height == 0 || width > 16384 || height > 16384 || bytes.len() != 28 + texels * 4 { return None; }
-        let data = bytes[28..].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-        Some(Self { width, height, data, max_level, hash, compressed: None })
-    }
     pub fn prepare(image:ImageBuffer,semantic:PixelSemantic)->Self {
         let (width,height)=(image.width,image.height);let mut data=image.data;
         let hash=data.iter().fold(0xcbf2_9ce4_8422_2325u64^((width as u64)<<32|height as u64)^(semantic as u64).rotate_left(17),|h,t|(h^*t as u64).wrapping_mul(0x100_0000_01b3));
@@ -649,20 +619,10 @@ mod tests{
 }
 
 #[cfg(test)]
-mod prepared_texture_bytes_tests {
+mod prepared_texture_key_tests {
     use super::*;
     #[test]
-    fn serialized_mip_chain_round_trips_and_refuses_other_formats() {
-        let mut image = ImageBuffer::default(); image.width = 5; image.height = 3;
-        image.data = (0..15u32).map(|i| 0xff00_0000 | i * 0x0102_03).collect();
-        let texture = PreparedTexture::prepare(image, PixelSemantic::MaskedColor);
-        let bytes = texture.to_bytes();
-        let back = PreparedTexture::from_bytes(&bytes).expect("round trip");
-        assert_eq!((back.width, back.height, back.max_level, back.hash), (texture.width, texture.height, texture.max_level, texture.hash));
-        assert_eq!(back.data, texture.data);
-        assert!(PreparedTexture::from_bytes(&bytes[..bytes.len() - 4]).is_none(), "truncated");
-        let mut other = bytes.clone(); other[4] = other[4].wrapping_add(1);
-        assert!(PreparedTexture::from_bytes(&other).is_none(), "another format version");
+    fn source_keys_tell_semantics_apart() {
         assert_ne!(prepared_texture_key(b"png", PixelSemantic::Color), prepared_texture_key(b"png", PixelSemantic::MaskedColor));
     }
 }
