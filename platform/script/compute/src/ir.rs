@@ -43,6 +43,9 @@ pub enum Region {
     Shared,
     /// Per-call scratch (local arrays and structs).
     Frame,
+    /// A host buffer (geometry kernels' inputs and outputs), sized at run
+    /// time: an access clamps to the buffer's real length, not `extent`.
+    Buf(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -129,8 +132,10 @@ pub enum Op {
     },
     /// Input channel `ch` at frame `clamp(idx, 0, n - 1)`.
     In { ch: u8, idx: Val },
-    /// The frame count of this call (i32).
+    /// The frame count of this call (i32); for kernels, the element count.
     FrameCount,
+    /// Length in words of host buffer k (i32).
+    BufLen(u8),
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +331,14 @@ pub struct Mem<'a> {
     pub ctx: &'a mut [u32],
     pub state: &'a mut [u32],
     pub shared: &'a mut [u32],
+    /// Host buffers (each at least one word long).
+    pub bufs: &'a mut [&'a mut [u32]],
+}
+
+/// A buffer access: `base + off` (wrapping), clamped to the last word.
+#[inline(always)]
+pub fn buf_index(base: u32, off: Option<u32>, len: usize) -> usize {
+    (base.wrapping_add(off.unwrap_or(0)) as usize).min(len - 1)
 }
 
 enum Flow {
@@ -355,6 +368,7 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
             Region::State => self.mem.state,
             Region::Shared => self.mem.shared,
             Region::Frame => self.frame,
+            Region::Buf(k) => self.mem.bufs[k as usize],
         }
     }
 
@@ -376,6 +390,11 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 }
             }
             Op::Wrap(x, len) => eval_wrap(self.r(x), len),
+            Op::Load { region: Region::Buf(k), base, off, .. } => {
+                let buf = &self.mem.bufs[k as usize];
+                buf[buf_index(base, off.map(|o| self.r(o)), buf.len())]
+            }
+            Op::BufLen(k) => self.mem.bufs[k as usize].len() as u32,
             Op::Load { region, base, extent, off } => {
                 let off = match off {
                     Some(o) => clamp_off(self.r(o), extent),
@@ -401,6 +420,13 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 Stmt::Set(var, v) => {
                     let x = self.r(*v);
                     self.regs[self.nvals + var.0 as usize] = x;
+                }
+                Stmt::Store { region: Region::Buf(k), base, off, val, .. } => {
+                    let x = self.r(*val);
+                    let o = off.map(|o| self.r(o));
+                    let buf = &mut self.mem.bufs[*k as usize];
+                    let at = buf_index(*base, o, buf.len());
+                    buf[at] = x;
                 }
                 Stmt::Store { region, base, extent, off, val } => {
                     let off = match off {
@@ -498,7 +524,7 @@ pub fn validate(p: &Program, sizes: &dyn Fn(Region) -> u32) -> Result<(), String
                         }
                     }
                     if let Op::Load { region, base, extent, .. } = op {
-                        if *extent == 0 || base + extent > sizes(*region) {
+                        if !matches!(region, Region::Buf(_)) && (*extent == 0 || base + extent > sizes(*region)) {
                             return Err(format!("load outside {:?}", region));
                         }
                     }
@@ -510,7 +536,7 @@ pub fn validate(p: &Program, sizes: &dyn Fn(Region) -> u32) -> Result<(), String
                     }
                 }
                 Stmt::Store { region, base, extent, .. } => {
-                    if *extent == 0 || base + extent > sizes(*region) {
+                    if !matches!(region, Region::Buf(_)) && (*extent == 0 || base + extent > sizes(*region)) {
                         return Err(format!("store outside {:?}", region));
                     }
                 }
@@ -538,7 +564,7 @@ pub fn validate(p: &Program, sizes: &dyn Fn(Region) -> u32) -> Result<(), String
 /// The operands an op reads.
 pub fn op_uses(op: &Op) -> Vec<Val> {
     match *op {
-        Op::ConstF(_) | Op::ConstI(_) | Op::ConstB(_) | Op::Get(_) | Op::FrameCount => vec![],
+        Op::ConstF(_) | Op::ConstI(_) | Op::ConstB(_) | Op::Get(_) | Op::FrameCount | Op::BufLen(_) => vec![],
         Op::Un(_, a) | Op::Wrap(a, _) => vec![a],
         Op::Bin(_, a, b) | Op::CmpF(_, a, b) | Op::CmpI(_, a, b) => vec![a, b],
         Op::Sel(c, a, b) => vec![c, a, b],
@@ -551,7 +577,7 @@ pub fn op_uses(op: &Op) -> Vec<Val> {
 pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
     Some(match *op {
         Op::ConstF(_) => Ty::F32,
-        Op::ConstI(_) | Op::Wrap(..) | Op::FrameCount => Ty::I32,
+        Op::ConstI(_) | Op::Wrap(..) | Op::FrameCount | Op::BufLen(_) => Ty::I32,
         Op::ConstB(_) | Op::CmpF(..) | Op::CmpI(..) => Ty::Bool,
         Op::Get(v) => p.vars[v.0 as usize],
         Op::Un(u, _) => match u {

@@ -23,7 +23,7 @@ pub struct Token {
 }
 
 const PUNCTS: &[&str] = &[
-    "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "->", "+",
+    ">>>", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "->", "+",
     "-", "*", "/", "%", "=", "<", ">", "!", "&", "|", "^", "(", ")", "{", "}", "[", "]", ",", ";", ":",
     ".",
 ];
@@ -145,6 +145,9 @@ pub enum TypeAnn {
     I32,
     Bool,
     Vec2,
+    Vec3,
+    Vec4,
+    Mat4,
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +218,8 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    /// `>>>`: logical (unsigned) shift right.
+    ShrU,
 }
 
 #[derive(Clone, Debug)]
@@ -385,7 +390,10 @@ impl<'a> Parser<'a> {
             "i32" | "int" | "u32" => TypeAnn::I32,
             "bool" => TypeAnn::Bool,
             "vec2" | "vec2f" => TypeAnn::Vec2,
-            _ => return Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, i32, bool, vec2)", name))),
+            "vec3" | "vec3f" => TypeAnn::Vec3,
+            "vec4" | "vec4f" => TypeAnn::Vec4,
+            "mat4" | "mat4f" => TypeAnn::Mat4,
+            _ => return Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, i32, bool, vec2, vec3, vec4, mat4)", name))),
         }))
     }
 
@@ -537,6 +545,7 @@ impl<'a> Parser<'a> {
             Tk::Punct("&") => (BinOp::BitAnd, 6),
             Tk::Punct("<<") => (BinOp::Shl, 7),
             Tk::Punct(">>") => (BinOp::Shr, 7),
+            Tk::Punct(">>>") => (BinOp::ShrU, 7),
             Tk::Punct("+") => (BinOp::Add, 8),
             Tk::Punct("-") => (BinOp::Sub, 8),
             Tk::Punct("*") => (BinOp::Mul, 9),

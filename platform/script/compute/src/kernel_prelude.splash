@@ -1,0 +1,351 @@
+// The kernel prelude: building blocks every compute kernel can use
+// without declaring them (a kernel's own item of the same name wins; only
+// what a kernel calls is compiled in). All of it is exact, portable math:
+// the same inputs give the same bits on every machine and backend.
+
+// ---- Hashing and per-element randomness ------------------------------------
+
+// A 32-bit integer hash (PCG output permutation): well mixed, cheap.
+// (int(): constants hash with the same wrapping arithmetic as values.)
+fn hash(x) {
+    let s = int(x) * 747796405 + 0xAC564B05
+    let w = ((s >>> ((s >>> 28) + 4)) ^ s) * 277803737
+    (w >>> 22) ^ w
+}
+fn hash2(a, b) { hash(int(a) ^ hash(int(b) + 0x9E3779B9)) }
+fn hash3(a, b, c) { hash(int(a) ^ hash(int(b) ^ hash(int(c) + 0x7F4A7C15))) }
+// Uniform 0..1 from integers (24 bits of the hash).
+fn hash01(i, k) { float(hash2(i, k) >>> 8) * (1.0 / 16777216.0) }
+// Uniform 0..1 for element i, stream k, under a seed.
+fn rand01(s, i, k) { float(hash3(s, i, k) >>> 8) * (1.0 / 16777216.0) }
+// Uniform -1..1.
+fn rand11(s, i, k) { rand01(s, i, k) * 2.0 - 1.0 }
+// A random unit vector.
+fn rand_dir(s, i, k) {
+    let z = rand11(s, i, k)
+    let a = TAU * rand01(s, i, k + 1)
+    let r = sqrt(max(1.0 - z * z, 0.0))
+    vec3(r * cos(a), r * sin(a), z)
+}
+
+// ---- Noise -------------------------------------------------------------------
+
+fn fade(t) { t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
+// Hash of an integer lattice point to 0..1.
+fn lattice2(x, y) { float(hash2(x, y) >>> 8) * (1.0 / 16777216.0) }
+fn lattice3(x, y, z) { float(hash3(x, y, z) >>> 8) * (1.0 / 16777216.0) }
+
+// Value noise, 0..1.
+fn value_noise2(p) {
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let a = mix(lattice2(x, y), lattice2(x + 1, y), u)
+    let b = mix(lattice2(x, y + 1), lattice2(x + 1, y + 1), u)
+    mix(a, b, v)
+}
+fn value_noise3(p) {
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let w = fade(f.z)
+    let a = mix(mix(lattice3(x, y, z), lattice3(x + 1, y, z), u), mix(lattice3(x, y + 1, z), lattice3(x + 1, y + 1, z), u), v)
+    let b = mix(mix(lattice3(x, y, z + 1), lattice3(x + 1, y, z + 1), u), mix(lattice3(x, y + 1, z + 1), lattice3(x + 1, y + 1, z + 1), u), v)
+    mix(a, b, w)
+}
+
+// Gradient (Perlin-style) noise, about -1..1.
+let GRAD2 = [1.0, 0.0, 0.70710678, 0.70710678, 0.0, 1.0, -0.70710678, 0.70710678, -1.0, 0.0, -0.70710678, -0.70710678, 0.0, -1.0, 0.70710678, -0.70710678]
+fn grad2(x, y, fx, fy) {
+    let h = (hash2(x, y) & 7) * 2
+    fx * GRAD2[h] + fy * GRAD2[h + 1]
+}
+fn gradient_noise2(p) {
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let a = mix(grad2(x, y, f.x, f.y), grad2(x + 1, y, f.x - 1.0, f.y), u)
+    let b = mix(grad2(x, y + 1, f.x, f.y - 1.0), grad2(x + 1, y + 1, f.x - 1.0, f.y - 1.0), u)
+    mix(a, b, v) * 1.4142
+}
+fn grad3(x, y, z, f) {
+    // 12 edge directions of a cube.
+    let h = hash3(x, y, z) % 12
+    let h = if h < 0 { h + 12 } else { h }
+    let u = if h < 8 { f.x } else { f.y }
+    let v = if h < 4 { f.y } elif h == 12 || h == 14 { f.x } else { f.z }
+    let su = if (h & 1) == 0 { u } else { -u }
+    let sv = if (h & 2) == 0 { v } else { -v }
+    su + sv
+}
+fn gradient_noise3(p) {
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let w = fade(f.z)
+    let n000 = grad3(x, y, z, f)
+    let n100 = grad3(x + 1, y, z, f - vec3(1.0, 0.0, 0.0))
+    let n010 = grad3(x, y + 1, z, f - vec3(0.0, 1.0, 0.0))
+    let n110 = grad3(x + 1, y + 1, z, f - vec3(1.0, 1.0, 0.0))
+    let n001 = grad3(x, y, z + 1, f - vec3(0.0, 0.0, 1.0))
+    let n101 = grad3(x + 1, y, z + 1, f - vec3(1.0, 0.0, 1.0))
+    let n011 = grad3(x, y + 1, z + 1, f - vec3(0.0, 1.0, 1.0))
+    let n111 = grad3(x + 1, y + 1, z + 1, f - vec3(1.0, 1.0, 1.0))
+    let a = mix(mix(n000, n100, u), mix(n010, n110, u), v)
+    let b = mix(mix(n001, n101, u), mix(n011, n111, u), v)
+    mix(a, b, w)
+}
+
+// 2D simplex noise, about -1..1.
+fn simplex2(p) {
+    let F2 = 0.36602540378
+    let G2 = 0.2113248654
+    let s = (p.x + p.y) * F2
+    let i = floor(p.x + s)
+    let j = floor(p.y + s)
+    let t = (i + j) * G2
+    let x0 = p.x - (i - t)
+    let y0 = p.y - (j - t)
+    let i1 = if x0 > y0 { 1 } else { 0 }
+    let j1 = 1 - i1
+    let x1 = x0 - float(i1) + G2
+    let y1 = y0 - float(j1) + G2
+    let x2 = x0 - 1.0 + 2.0 * G2
+    let y2 = y0 - 1.0 + 2.0 * G2
+    let ii = int(i)
+    let jj = int(j)
+    let n = 0.0
+    let t0 = 0.5 - x0 * x0 - y0 * y0
+    if t0 > 0.0 {
+        let t0 = t0 * t0
+        n = n + t0 * t0 * grad2(ii, jj, x0, y0)
+    }
+    let t1 = 0.5 - x1 * x1 - y1 * y1
+    if t1 > 0.0 {
+        let t1 = t1 * t1
+        n = n + t1 * t1 * grad2(ii + i1, jj + j1, x1, y1)
+    }
+    let t2 = 0.5 - x2 * x2 - y2 * y2
+    if t2 > 0.0 {
+        let t2 = t2 * t2
+        n = n + t2 * t2 * grad2(ii + 1, jj + 1, x2, y2)
+    }
+    n * 99.0
+}
+
+// Worley (cellular) noise: distance to the nearest feature point, 0..~1.
+fn worley2(p) {
+    let i = floor(p)
+    let x = int(i.x)
+    let y = int(i.y)
+    let best = 8.0
+    for dy in -1..2 {
+        for dx in -1..2 {
+            let cx = x + dx
+            let cy = y + dy
+            let fp = vec2(float(cx) + lattice2(cx, cy), float(cy) + lattice2(cy + 7919, cx))
+            best = min(best, length(fp - p))
+        }
+    }
+    best
+}
+fn worley3(p) {
+    let i = floor(p)
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let best = 8.0
+    for dz in -1..2 {
+        for dy in -1..2 {
+            for dx in -1..2 {
+                let cx = x + dx
+                let cy = y + dy
+                let cz = z + dz
+                let fp = vec3(float(cx) + lattice3(cx, cy, cz), float(cy) + lattice3(cy, cz, cx + 31), float(cz) + lattice3(cz, cx, cy + 57))
+                best = min(best, length(fp - p))
+            }
+        }
+    }
+    best
+}
+
+// Fractal sums (octaves up to 16).
+fn fbm2(p, octaves, lacunarity, gain) {
+    let s = 0.0
+    let a = 0.5
+    let q = p
+    for o in 0..octaves {
+        s = s + a * gradient_noise2(q)
+        q = q * lacunarity
+        a = a * gain
+    }
+    s
+}
+fn fbm3(p, octaves, lacunarity, gain) {
+    let s = 0.0
+    let a = 0.5
+    let q = p
+    for o in 0..octaves {
+        s = s + a * gradient_noise3(q)
+        q = q * lacunarity
+        a = a * gain
+    }
+    s
+}
+// Ridged fractal (mountain ridges), 0..~1.
+fn ridged2(p, octaves) {
+    let s = 0.0
+    let a = 0.5
+    let q = p
+    for o in 0..octaves {
+        let n = 1.0 - abs(gradient_noise2(q))
+        s = s + a * n * n
+        q = q * 2.0
+        a = a * 0.5
+    }
+    s
+}
+
+// ---- Quaternions (vec4 x y z w) ----------------------------------------------
+
+fn quat_identity() { vec4(0.0, 0.0, 0.0, 1.0) }
+fn quat_axis_angle(axis, angle) {
+    let h = angle * 0.5
+    let s = sin(h)
+    let a = normalize(axis)
+    vec4(a.x * s, a.y * s, a.z * s, cos(h))
+}
+fn quat_mul(a, b) {
+    vec4(
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    )
+}
+fn quat_rotate(q, v) {
+    let u = q.xyz
+    let t = cross(u, v) * 2.0
+    v + t * q.w + cross(u, t)
+}
+// Yaw (y), pitch (x), roll (z) in radians.
+fn quat_euler(pitch, yaw, roll) {
+    quat_mul(quat_mul(quat_axis_angle(vec3(0.0, 1.0, 0.0), yaw), quat_axis_angle(vec3(1.0, 0.0, 0.0), pitch)), quat_axis_angle(vec3(0.0, 0.0, 1.0), roll))
+}
+// The rotation taking unit vector a onto unit vector b.
+fn quat_between(a, b) {
+    let c = cross(a, b)
+    let d = dot(a, b)
+    if d < -0.99999 {
+        let axis = if abs(a.x) < 0.9 { cross(a, vec3(1.0, 0.0, 0.0)) } else { cross(a, vec3(0.0, 1.0, 0.0)) }
+        return quat_axis_angle(axis, PI)
+    }
+    normalize(vec4(c.x, c.y, c.z, 1.0 + d))
+}
+
+// ---- Matrices (mat4, column-major; m * vec4) ----------------------------------
+
+fn mat4_identity() { mat4(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0) }
+fn mat4_translate(p) { mat4(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, p.x, p.y, p.z, 1.0) }
+fn mat4_scale(s) { mat4(s.x, 0.0, 0.0, 0.0, 0.0, s.y, 0.0, 0.0, 0.0, 0.0, s.z, 0.0, 0.0, 0.0, 0.0, 1.0) }
+fn mat4_from_quat(q) {
+    let x2 = q.x + q.x
+    let y2 = q.y + q.y
+    let z2 = q.z + q.z
+    let xx = q.x * x2
+    let yy = q.y * y2
+    let zz = q.z * z2
+    let xy = q.x * y2
+    let xz = q.x * z2
+    let yz = q.y * z2
+    let wx = q.w * x2
+    let wy = q.w * y2
+    let wz = q.w * z2
+    mat4(
+        1.0 - yy - zz, xy + wz, xz - wy, 0.0,
+        xy - wz, 1.0 - xx - zz, yz + wx, 0.0,
+        xz + wy, yz - wx, 1.0 - xx - yy, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    )
+}
+// Translation, rotation (quaternion), scale (vec3): T * R * S.
+fn mat4_trs(p, q, s) {
+    let r = mat4_from_quat(q)
+    mat4(r.c0 * s.x, r.c1 * s.y, r.c2 * s.z, vec4(p.x, p.y, p.z, 1.0))
+}
+fn transform_point(m, p) { (m * vec4(p.x, p.y, p.z, 1.0)).xyz }
+fn transform_dir(m, d) { (m * vec4(d.x, d.y, d.z, 0.0)).xyz }
+fn rotate_x(v, a) { vec3(v.x, v.y * cos(a) - v.z * sin(a), v.y * sin(a) + v.z * cos(a)) }
+fn rotate_y(v, a) { vec3(v.x * cos(a) + v.z * sin(a), v.y, -v.x * sin(a) + v.z * cos(a)) }
+fn rotate_z(v, a) { vec3(v.x * cos(a) - v.y * sin(a), v.x * sin(a) + v.y * cos(a), v.z) }
+
+// ---- Curves -----------------------------------------------------------------
+
+fn bezier3(a, b, c, d, t) {
+    let u = 1.0 - t
+    a * (u * u * u) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * (t * t * t)
+}
+fn bezier3_tangent(a, b, c, d, t) {
+    let u = 1.0 - t
+    (b - a) * (3.0 * u * u) + (c - b) * (6.0 * u * t) + (d - c) * (3.0 * t * t)
+}
+// Catmull-Rom through p1..p2 (p0, p3 the neighbours).
+fn catmull_rom(p0, p1, p2, p3, t) {
+    let t2 = t * t
+    let t3 = t2 * t
+    (p1 * 2.0 + (p2 - p0) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3) * 0.5
+}
+// A frame (right, up) perpendicular to a tangent.
+fn frame_right(t) {
+    let up = if abs(t.y) < 0.99 { vec3(0.0, 1.0, 0.0) } else { vec3(1.0, 0.0, 0.0) }
+    normalize(cross(t, up))
+}
+
+// ---- Buffer sampling --------------------------------------------------------
+
+// Bilinear sample of a row-major grid (w columns, h rows) at (x, z) in
+// cell units, clamped at the edges.
+fn sample_grid(buf, w, h, x, z) {
+    let cx = clamp(x, 0.0, float(w - 1))
+    let cz = clamp(z, 0.0, float(h - 1))
+    let x0 = int(floor(cx))
+    let z0 = int(floor(cz))
+    let x1 = min(x0 + 1, w - 1)
+    let z1 = min(z0 + 1, h - 1)
+    let fx = cx - float(x0)
+    let fz = cz - float(z0)
+    let a = mix(buf[z0 * w + x0], buf[z0 * w + x1], fx)
+    let b = mix(buf[z1 * w + x0], buf[z1 * w + x1], fx)
+    mix(a, b, fz)
+}
+// A grid's normal at (x, z) by central differences (cell size `cell`).
+fn grid_normal(buf, w, h, x, z, cell) {
+    let l = sample_grid(buf, w, h, x - 1.0, z)
+    let r = sample_grid(buf, w, h, x + 1.0, z)
+    let d = sample_grid(buf, w, h, x, z - 1.0)
+    let u = sample_grid(buf, w, h, x, z + 1.0)
+    normalize(vec3(l - r, 2.0 * cell, d - u))
+}
+
+// ---- Shaping ------------------------------------------------------------------
+
+fn remap(x, a, b, c, d) { c + (x - a) * (d - c) / (b - a) }
+fn saturate(x) { clamp(x, 0.0, 1.0) }
+fn smin(a, b, k) {
+    let h = saturate(0.5 + 0.5 * (b - a) / k)
+    mix(b, a, h) - k * h * (1.0 - h)
+}

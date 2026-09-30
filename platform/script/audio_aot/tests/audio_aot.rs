@@ -655,3 +655,93 @@ fn check_reports_health() {
     let broken = makepad_script_audio_aot::check("fn effect(l, r) { vec2(log(0.0 * l) * 0.0, l * 3.0) }").unwrap();
     assert!(broken.nonfinite > 0 && broken.warnings.len() >= 2, "{:?}", broken.warnings);
 }
+
+// -- golden renders: the compute-core refactor must not change a bit -------------
+
+fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in bits {
+        for byte in b.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// Every example and shipped library shader, rendered through the scripted
+/// performance on both backends, hashed.
+fn golden_hashes() -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let lib_dir = format!("{}/../../../apps/commercial/stage/libs/score_player/shaders", env!("CARGO_MANIFEST_DIR"));
+    let mut sources: Vec<(String, String)> = INSTRUMENTS.iter().chain(EFFECTS).map(|n| (n.to_string(), shader_src(n))).collect();
+    if let Ok(dir) = std::fs::read_dir(&lib_dir) {
+        let mut names: Vec<_> = dir.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        names.sort();
+        for p in names {
+            sources.push((format!("lib/{}", p.file_stem().unwrap().to_string_lossy()), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    for (name, src) in sources {
+        for interp in [false, true] {
+            let s = build(&src, Backend::Native);
+            let (l, r) = perform(&s, interp, &[128], 30000);
+            out.push((format!("{}{}", name, if interp { "/interp" } else { "" }), fnv(bits(&l).into_iter().chain(bits(&r)))));
+        }
+    }
+    out
+}
+
+const GOLDEN: &[(&str, u64)] = &[
+    ("saw_svf", 0xc8dfc528a8eeed81),
+    ("saw_svf/interp", 0xc8dfc528a8eeed81),
+    ("fm4", 0x27017e5aa48b62a5),
+    ("fm4/interp", 0x27017e5aa48b62a5),
+    ("pluck", 0xdc303800f51fe491),
+    ("pluck/interp", 0xdc303800f51fe491),
+    ("wavetable_pad", 0x978a07348239c3bf),
+    ("wavetable_pad/interp", 0x978a07348239c3bf),
+    ("fm2_svf", 0x0d7fe18dcc2fd471),
+    ("fm2_svf/interp", 0x0d7fe18dcc2fd471),
+    ("allpass_reverb", 0xebe5fd62eeab7d0a),
+    ("allpass_reverb/interp", 0xebe5fd62eeab7d0a),
+    ("waveshaper4x", 0xbaf761b5859d7176),
+    ("waveshaper4x/interp", 0xbaf761b5859d7176),
+    ("lib/acid", 0xc785649af8f0a525),
+    ("lib/acid/interp", 0xc785649af8f0a525),
+    ("lib/analog_poly", 0xa14f9b3d160ebab5),
+    ("lib/analog_poly/interp", 0xa14f9b3d160ebab5),
+    ("lib/drive", 0x279d54cd64bcb051),
+    ("lib/drive/interp", 0x279d54cd64bcb051),
+    ("lib/echo", 0xabd15e701858205a),
+    ("lib/echo/interp", 0xabd15e701858205a),
+    ("lib/epiano", 0x580aad531bfdd513),
+    ("lib/epiano/interp", 0x580aad531bfdd513),
+    ("lib/flanger", 0xa207408b506acf19),
+    ("lib/flanger/interp", 0xa207408b506acf19),
+    ("lib/modal_bell", 0x628b207e9249e181),
+    ("lib/modal_bell/interp", 0x628b207e9249e181),
+    ("lib/phaser", 0x3d92343036a714f3),
+    ("lib/phaser/interp", 0x3d92343036a714f3),
+    ("lib/pluck", 0x44ccdb790d68505d),
+    ("lib/pluck/interp", 0x44ccdb790d68505d),
+    ("lib/supersaw", 0xc259b05b8867b5f2),
+    ("lib/supersaw/interp", 0xc259b05b8867b5f2),
+    ("lib/techno_kick", 0xae479453bd1470d5),
+    ("lib/techno_kick/interp", 0xae479453bd1470d5),
+];
+
+#[test]
+fn renders_match_the_golden_hashes() {
+    let got = golden_hashes();
+    if GOLDEN.is_empty() || std::env::var("AUDIO_AOT_PRINT_GOLDEN").is_ok() {
+        for (n, h) in &got {
+            println!("    (\"{}\", 0x{:016x}),", n, h);
+        }
+        return;
+    }
+    for (n, h) in &got {
+        let want = GOLDEN.iter().find(|(g, _)| g == n).map(|(_, h)| *h);
+        assert_eq!(want, Some(*h), "{} changed", n);
+    }
+}

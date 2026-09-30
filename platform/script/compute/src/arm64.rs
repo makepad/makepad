@@ -130,6 +130,20 @@ impl Code {
     }
 }
 
+impl Code {
+    /// Runs a kernel: `table` holds (pointer, length in words) per host
+    /// buffer, at least two entries (the prologue reads four words).
+    ///
+    /// # Safety
+    /// The pointers and lengths must describe live buffers the kernel may
+    /// read and write, and ctx/state/shared must be the sizes the program
+    /// was compiled for.
+    pub unsafe fn run_kernel(&self, ctx: *mut u32, state: *mut u32, shared: *mut u32, table: *const u64, n: u32) {
+        let f: Entry = std::mem::transmute(self.ptr);
+        f(ctx, state, shared, table as *const *mut f32, n);
+    }
+}
+
 impl Drop for Code {
     fn drop(&mut self) {
         unsafe {
@@ -150,9 +164,11 @@ enum Loc {
     Stack(u32),
 }
 
-const GPR_POOL: &[u8] = &[9, 10, 11, 12, 13, 14, 15, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28];
+const GPR_POOL: &[u8] = &[9, 10, 11, 12, 13, 14, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28];
 const FP_POOL: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 8, 9, 10, 11, 12, 13, 14, 15];
-/// Scratch registers: x16/x17 and s29/s30/s31.
+/// Scratch registers: x15/x16/x17 and s29/s30/s31 (x15 holds a host
+/// buffer's base pointer).
+const XS2: u8 = 15;
 const XS0: u8 = 16;
 const XS1: u8 = 17;
 const FS0: u8 = 30;
@@ -593,12 +609,39 @@ impl<'a> Emit<'a> {
             Region::State => 1,
             Region::Shared => 2,
             Region::Frame => 31,
+            Region::Buf(_) => XS2,
         }
     }
 
     /// Emits the address computation; returns (base reg, Some(byte imm)) or
     /// (base reg, None) with the word index in w16.
     fn addr(&mut self, region: Region, base: u32, extent: u32, off: Option<Val>) -> (u8, Option<u32>) {
+        if let Region::Buf(k) = region {
+            // Host buffer k: the table at x3 holds (pointer, length) pairs.
+            // index = min(base + off, len - 1), wrapping like the interpreter.
+            match off {
+                Some(o) => {
+                    let ro = self.gsrc(Ent::Val(o.0), XS0);
+                    if base == 0 {
+                        if ro != XS0 {
+                            self.e(mov(XS0, ro));
+                        }
+                    } else if base < 4096 {
+                        self.e(add_imm(XS0, ro, base));
+                    } else {
+                        self.mov_imm(XS1, base);
+                        self.e(ADD | (XS1 as u32) << 16 | (ro as u32) << 5 | XS0 as u32);
+                    }
+                }
+                None => self.mov_imm(XS0, base),
+            }
+            self.e(ldst_imm(false, true, XS1, 3, k as u32 * 16 + 8));
+            self.e(0x5100_0000 | 1 << 10 | (XS1 as u32) << 5 | XS1 as u32);
+            self.e(cmp(XS0, XS1));
+            self.e(csel(XS0, XS0, XS1, LS));
+            self.e(ldr_x(XS2, 3, k as u32 * 16));
+            return (XS2, None);
+        }
         let rb = Self::region_reg(region);
         let base = if region == Region::Frame { base + self.frame_word0 } else { base };
         match off {
@@ -1013,6 +1056,11 @@ impl<'a> Emit<'a> {
             Op::FrameCount => {
                 let d = self.gdst(dst);
                 self.e(mov(d, 4));
+                self.gdone(dst, d);
+            }
+            Op::BufLen(k) => {
+                let d = self.gdst(dst);
+                self.e(ldst_imm(false, true, d, 3, k as u32 * 16 + 8));
                 self.gdone(dst, d);
             }
         }

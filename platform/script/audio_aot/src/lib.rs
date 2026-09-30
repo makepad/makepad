@@ -17,56 +17,18 @@
 
 pub mod fuse;
 mod guide;
-pub mod ir;
-pub mod lower;
-pub mod parse;
 
+// The language, IR, interpreter and native backends are the Splash compute
+// core's; audio is one of its front ends.
 #[cfg(target_arch = "aarch64")]
-pub mod arm64;
+pub use makepad_script_compute::arm64;
+pub use makepad_script_compute::{ir, lower, parse, Backend, ShaderError};
 
 pub use guide::GUIDE;
 pub use fuse::{fuse, FuseError, FuseNode, Port};
 pub use lower::{header, Kind, ParamInfo, StateVar, CONTROL_BLOCK, CTX_FRAME, CTX_PARAMS, CTX_RATE, MAX_FRAMES};
 
 use std::sync::Arc;
-
-/// A compile error with a byte span into the shader's code string.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ShaderError {
-    pub start: usize,
-    pub end: usize,
-    pub message: String,
-}
-
-impl ShaderError {
-    pub fn new(start: usize, end: usize, message: String) -> Self {
-        ShaderError { start, end, message }
-    }
-
-    /// 1-based line and column of the error start in `src`.
-    pub fn line_col(&self, src: &str) -> (usize, usize) {
-        let at = self.start.min(src.len());
-        let before = &src[..at];
-        let line = before.matches('\n').count() + 1;
-        let col = before.len() - before.rfind('\n').map_or(0, |i| i + 1) + 1;
-        (line, col)
-    }
-}
-
-impl std::fmt::Display for ShaderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (at {}..{})", self.message, self.start, self.end)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    /// The AIR interpreter (the reference; the path where executable
-    /// memory is unavailable).
-    Interp,
-    /// Native machine code for the host (ARM64 today).
-    Native,
-}
 
 /// A compiled audio shader. Immutable and shareable; all mutable data
 /// (ctx, state, scratch) belongs to the caller, allocated off the audio
@@ -98,15 +60,8 @@ pub fn compile_with(code: &str, backend: Backend) -> Result<Arc<AudioShader>, Ve
 /// The prelude: DSP building blocks every shader sees (see prelude.splash).
 pub const PRELUDE: &str = include_str!("prelude.splash");
 
-/// The prelude's items, parsed with spans placed after `user_len` bytes of
-/// user code (so a span tells which side an error is on).
 fn prelude_items(user_len: usize) -> Vec<parse::Item> {
-    let mut toks = parse::lex(PRELUDE).expect("the prelude lexes");
-    for t in &mut toks {
-        t.start += user_len + 1;
-        t.end += user_len + 1;
-    }
-    parse::Parser::new(&toks).items().expect("the prelude parses")
+    makepad_script_compute::parse_prelude(PRELUDE, user_len)
 }
 
 /// Compiles a parsed shader (also the back half of [`fuse::fuse`]).
@@ -125,7 +80,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
             ir::Region::Ctx => ctx_words as u32,
             ir::Region::State => state_words as u32,
             ir::Region::Shared => shared_words as u32,
-            ir::Region::Frame => u32::MAX,
+            ir::Region::Frame | ir::Region::Buf(_) => u32::MAX,
         }
     };
     if let Err(e) = ir::validate(&lowered.render, &sizes) {
@@ -182,7 +137,7 @@ fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], share
     let mut scratch = vec![0u32; init.scratch_words()];
     let zeros = [0f32; 1];
     let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-    let mut mem = ir::Mem { ctx, state, shared };
+    let mut mem = ir::Mem { ctx, state, shared, bufs: &mut [] };
     let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
     ir::run(init, &mut scratch, &mut mem, &mut io, 1);
 }
@@ -363,7 +318,7 @@ impl AudioShader {
         // front end), so a shared view is sound.
         let shared = self.shared.as_ptr() as *mut u32;
         let shared = unsafe { std::slice::from_raw_parts_mut(shared, self.shared.len()) };
-        let mut mem = ir::Mem { ctx, state, shared };
+        let mut mem = ir::Mem { ctx, state, shared, bufs: &mut [] };
         let [o0, o1] = outs;
         let mut io = ir::Io { ins, outs: [o0, o1] };
         ir::run(&self.render, scratch, &mut mem, &mut io, n as u32);

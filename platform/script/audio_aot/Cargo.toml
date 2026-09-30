@@ -9,3 +9,4 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-script-compute = { path = "../compute", version = "1.0.0" }

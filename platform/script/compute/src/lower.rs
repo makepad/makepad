@@ -12,6 +12,17 @@
 //! which is dropped again when the helper has no early return.
 
 use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, Val, Var};
+
+pub mod kernel;
+
+/// Which front end a program is lowered for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Domain {
+    /// Audio shaders: voices and effects with state, run per sample.
+    Audio,
+    /// Compute kernels: stateless per-element programs over host buffers.
+    Kernel,
+}
 use crate::parse::*;
 use crate::ShaderError;
 use std::collections::HashMap;
@@ -96,9 +107,50 @@ enum T {
     F,
     I,
     B,
-    V2,
+    /// n f32 lanes: vec2, vec3, vec4, and mat4 (16, column-major).
+    Vec(u8),
     Struct(usize),
     Array(Box<T>, u32),
+    /// A view of host buffer region k: element type, stride and offset in
+    /// words, and whether the kernel may write it.
+    Buf(Box<T>, u32, u32, bool),
+}
+
+/// The lanes of a vector value (the first n are used).
+type Lanes = [Val; 16];
+
+fn lanes_of(vals: &[Val]) -> Lanes {
+    let mut l = [Val(0); 16];
+    l[..vals.len()].copy_from_slice(vals);
+    l
+}
+
+fn vec_name(n: u8) -> &'static str {
+    match n {
+        2 => "vec2",
+        3 => "vec3",
+        4 => "vec4",
+        _ => "mat4",
+    }
+}
+
+/// The lane a component name selects (`x y z w`, `r g b a`; for vec2 also
+/// `l r` = left, right, and `0 1`).
+fn lane_of(n: u8, c: char) -> Option<usize> {
+    let lane = match c {
+        'x' => 0,
+        'y' => 1,
+        'z' => 2,
+        'w' => 3,
+        'l' if n == 2 => 0,
+        'r' if n == 2 => 1,
+        'r' => 0,
+        'g' => 1,
+        'b' => 2,
+        'a' => 3,
+        _ => return None,
+    };
+    (lane < n as usize && n <= 4).then_some(lane)
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +177,7 @@ enum V {
     F(Val),
     I(Val),
     B(Val),
-    V2(Val, Val),
+    Vec(u8, Lanes),
     Place(Place),
     Unit,
 }
@@ -139,13 +191,18 @@ enum Bind {
     Local(T, Vec<Var>),
     Place(Place),
     Param(usize),
+    /// A kernel uniform (ctx word).
+    Uniform(usize),
+    /// A kernel emit buffer: (data region, count region, record width,
+    /// slots per element).
+    Emit(u8, u8, u32, u32),
 }
 
 /// A constant initializer (state, struct defaults, tables).
 #[derive(Clone, Debug)]
 enum CInit {
     W(u32, T),
-    V2(u32, u32),
+    Vec(u8, [u32; 16]),
     Struct(usize, Vec<CInit>),
     Array(T, Vec<CInit>),
 }
@@ -188,6 +245,7 @@ enum Key {
     Get(Var),
     In(u8, Val),
     FrameCount,
+    BufLen(u8),
 }
 
 impl Key {
@@ -206,6 +264,7 @@ impl Key {
             Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off),
             Op::In { ch, idx } => Key::In(ch, idx),
             Op::FrameCount => Key::FrameCount,
+            Op::BufLen(k) => Key::BufLen(k),
         }
     }
 
@@ -766,6 +825,9 @@ struct Lowerer {
     in_init: bool,
     /// Spans at or past this lie in the prelude.
     prelude_base: usize,
+    domain: Domain,
+    /// Kernel front end: buffers, emit counters, the element value.
+    kernel: kernel::KernelCtx,
 }
 
 fn ty_of(t: &T) -> Ty {
@@ -788,9 +850,10 @@ impl Lowerer {
     fn words(&self, t: &T) -> u32 {
         match t {
             T::F | T::I | T::B => 1,
-            T::V2 => 2,
+            T::Vec(n) => *n as u32,
             T::Struct(s) => self.structs[*s].words,
             T::Array(e, n) => self.words(e) * n,
+            T::Buf(..) => 0,
         }
     }
 
@@ -799,13 +862,14 @@ impl Lowerer {
             T::F => "f32".into(),
             T::I => "i32".into(),
             T::B => "bool".into(),
-            T::V2 => "vec2".into(),
+            T::Vec(n) => vec_name(*n).into(),
             T::Struct(s) => {
                 let d = &self.structs[*s];
                 let fields: Vec<String> = d.fields.iter().map(|(n, t, _, _)| format!("{}:{}", n, self.sig(t))).collect();
                 format!("{}{{{}}}", d.name, fields.join(","))
             }
             T::Array(e, n) => format!("[{};{}]", self.sig(e), n),
+            T::Buf(e, ..) => format!("buffer<{}>", self.sig(e)),
         }
     }
 
@@ -822,7 +886,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => "f32".into(),
             V::I(_) => "i32".into(),
             V::B(_) => "bool".into(),
-            V::V2(..) => "vec2".into(),
+            V::Vec(n, _) => vec_name(*n).into(),
             V::Place(p) => self.tname(&p.ty),
             V::Unit => "nothing".into(),
         }
@@ -904,16 +968,24 @@ impl Lowerer {
 
     /// Reads a place of value type; aggregates stay places.
     fn read(&mut self, p: &Place) -> V {
+        if let Region::Buf(k) = p.region {
+            if !matches!(p.ty, T::Buf(..)) {
+                self.kernel.access(k, p.off);
+            }
+        }
         let (base, extent, off) = self.addr(p);
         match p.ty {
             T::F => V::F(self.b.load(Ty::F32, p.region, base, extent, off)),
             T::I => V::I(self.b.load(Ty::I32, p.region, base, extent, off)),
             T::B => V::B(self.b.load(Ty::Bool, p.region, base, extent, off)),
-            T::V2 => {
-                let x = self.b.load(Ty::F32, p.region, base, extent, off);
-                let off1 = self.offset_plus(p, 1);
-                let y = self.b.load(Ty::F32, p.region, off1.0, off1.1, off1.2);
-                V::V2(x, y)
+            T::Vec(n) => {
+                let mut l = [Val(0); 16];
+                l[0] = self.b.load(Ty::F32, p.region, base, extent, off);
+                for k in 1..n as usize {
+                    let o = self.offset_plus(p, k as u32);
+                    l[k] = self.b.load(Ty::F32, p.region, o.0, o.1, o.2);
+                }
+                V::Vec(n, l)
             }
             _ => V::Place(p.clone()),
         }
@@ -953,6 +1025,12 @@ impl Lowerer {
         if p.region == Region::Shared && !self.in_init {
             return err(span, "tables (top-level `let` arrays) are read-only; fill them in `fn init()`");
         }
+        if let Region::Buf(k) = p.region {
+            if !self.kernel.writable(k) {
+                return err(span, "input buffers are read-only; declare an output(...) to write");
+            }
+            self.kernel.access(k, p.off);
+        }
         match (&p.ty, v) {
             (T::F, _) => {
                 let x = self.to_f(v, span)?;
@@ -963,10 +1041,12 @@ impl Lowerer {
                 self.write_word(p, 0, x);
             }
             (T::B, V::B(x)) => self.write_word(p, 0, *x),
-            (T::V2, _) => {
-                let (x, y) = self.to_v2(v, span)?;
-                self.write_word(p, 0, x);
-                self.write_word(p, 1, y);
+            (T::Vec(n), _) => {
+                let n = *n;
+                let l = self.to_vec(v, n, span)?;
+                for k in 0..n as usize {
+                    self.write_word(p, k as u32, l[k]);
+                }
             }
             (t, V::Place(src)) if *t == src.ty => {
                 let words = self.words(t);
@@ -988,7 +1068,7 @@ impl Lowerer {
     /// The scalar type of word `k` of type `t`.
     fn leaf_ty(&self, t: &T, k: u32) -> Ty {
         match t {
-            T::F | T::V2 => Ty::F32,
+            T::F | T::Vec(_) => Ty::F32,
             T::I => Ty::I32,
             T::B => Ty::Bool,
             T::Struct(s) => {
@@ -1004,18 +1084,82 @@ impl Lowerer {
                 let w = self.words(e);
                 self.leaf_ty(e, k % w)
             }
+            T::Buf(e, ..) => self.leaf_ty(e, k),
         }
     }
 
     fn to_v2(&mut self, v: &V, span: Span) -> LResult<(Val, Val)> {
+        let l = self.to_vec(v, 2, span)?;
+        Ok((l[0], l[1]))
+    }
+
+    /// A value as n lanes: a vector of that width, or a scalar broadcast.
+    fn to_vec(&mut self, v: &V, n: u8, span: Span) -> LResult<Lanes> {
         match v {
-            V::V2(x, y) => Ok((*x, *y)),
+            V::Vec(m, l) if *m == n => Ok(*l),
             V::Lit(_) | V::F(_) | V::I(_) => {
                 let x = self.to_f(v, span)?;
-                Ok((x, x))
+                Ok([x; 16])
             }
-            _ => err(span, format!("expected a vec2, found {}", self.vname(v))),
+            _ => err(span, format!("expected a {}, found {}", vec_name(n), self.vname(v))),
         }
+    }
+
+    /// Swizzles and components: `v.x`, `v.zyx`, `v.xy`, `c.rgb`, `m.c2`.
+    fn swizzle(&mut self, n: u8, l: &Lanes, field: &str, span: Span) -> LResult<V> {
+        if n == 16 {
+            if let Some(c) = field.strip_prefix('c').and_then(|c| c.parse::<usize>().ok()).filter(|c| *c < 4) {
+                return Ok(V::Vec(4, lanes_of(&l[c * 4..c * 4 + 4])));
+            }
+            return err(span, format!("mat4 has columns c0..c3, not `{}`", field));
+        }
+        if let Some(k) = single_lane(n, field) {
+            return Ok(V::F(l[k]));
+        }
+        let picked: Option<Vec<Val>> = field.chars().map(|c| lane_of(n, c).map(|k| l[k])).collect();
+        match picked {
+            Some(p) if (2..=4).contains(&p.len()) => Ok(V::Vec(p.len() as u8, lanes_of(&p))),
+            _ => err(span, format!("{} has no component `{}` (x y z w / r g b a)", vec_name(n), field)),
+        }
+    }
+
+    /// Left-associated sum of products over n lanes.
+    fn dot(&mut self, a: &Lanes, b: &Lanes, n: u8) -> Val {
+        let mut s = self.b.mul(a[0], b[0]);
+        for k in 1..n as usize {
+            let p = self.b.mul(a[k], b[k]);
+            s = self.b.add(s, p);
+        }
+        s
+    }
+
+    /// Column-major mat4 times vec4.
+    fn mat_vec(&mut self, m: &Lanes, v: &Lanes) -> V {
+        let mut o = [Val(0); 16];
+        for r in 0..4 {
+            let mut s = self.b.mul(m[r], v[0]);
+            for c in 1..4 {
+                let p = self.b.mul(m[c * 4 + r], v[c]);
+                s = self.b.add(s, p);
+            }
+            o[r] = s;
+        }
+        V::Vec(4, o)
+    }
+
+    /// The width of the vector among some values (None when all scalars).
+    fn vec_width(&self, vals: &[&V], span: Span) -> LResult<Option<u8>> {
+        let mut w = None;
+        for v in vals {
+            if let V::Vec(n, _) = v {
+                match w {
+                    None => w = Some(*n),
+                    Some(m) if m == *n => {}
+                    Some(m) => return err(span, format!("mixing {} and {}", vec_name(m), vec_name(*n))),
+                }
+            }
+        }
+        Ok(w)
     }
 
     // -- constant initializers ---------------------------------------------
@@ -1023,7 +1167,7 @@ impl Lowerer {
     fn cinit_ty(&self, c: &CInit) -> T {
         match c {
             CInit::W(_, t) => t.clone(),
-            CInit::V2(..) => T::V2,
+            CInit::Vec(n, _) => T::Vec(*n),
             CInit::Struct(s, _) => T::Struct(*s),
             CInit::Array(t, v) => T::Array(Box::new(t.clone()), v.len() as u32),
         }
@@ -1032,10 +1176,7 @@ impl Lowerer {
     fn flatten(c: &CInit, out: &mut Vec<u32>) {
         match c {
             CInit::W(w, _) => out.push(*w),
-            CInit::V2(x, y) => {
-                out.push(*x);
-                out.push(*y);
-            }
+            CInit::Vec(n, l) => out.extend_from_slice(&l[..*n as usize]),
             CInit::Struct(_, f) | CInit::Array(_, f) => {
                 for c in f {
                     Self::flatten(c, out);
@@ -1105,18 +1246,24 @@ impl Lowerer {
                         }
                         CInit::W(*x as i32 as u32, T::I)
                     }
-                    (V::Lit(x), Some(TypeAnn::Vec2)) => {
+                    (V::Lit(x), Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4))) => {
                         let b = (*x as f32).to_bits();
-                        CInit::V2(b, b)
+                        CInit::Vec(ann_width(ann), [b; 16])
                     }
                     (V::Lit(x), _) => CInit::W((*x as f32).to_bits(), T::F),
                     (V::F(_), _) => CInit::W(scratch_const(&v2, &scratch).map_or_else(bad, Ok)?, T::F),
                     (V::I(_), _) => CInit::W(scratch_const(&v2, &scratch).map_or_else(bad, Ok)?, T::I),
                     (V::B(_), _) => CInit::W(scratch_const(&v2, &scratch).map_or_else(bad, Ok)?, T::B),
-                    (V::V2(x, y), _) => match (scratch.cst(*x), scratch.cst(*y)) {
-                        (Some(x), Some(y)) => CInit::V2(x, y),
-                        _ => return err(e.span, "initial values must be constants (numbers, constants, math on them)"),
-                    },
+                    (V::Vec(n, l), _) => {
+                        let mut w = [0u32; 16];
+                        for k in 0..*n as usize {
+                            match scratch.cst(l[k]) {
+                                Some(c) => w[k] = c,
+                                None => return err(e.span, "initial values must be constants (numbers, constants, math on them)"),
+                            }
+                        }
+                        CInit::Vec(*n, w)
+                    }
                     _ => return err(e.span, "initial values must be constants (numbers, constants, math on them)"),
                 })
             }
@@ -1137,7 +1284,7 @@ impl Lowerer {
                 Ok(CInit::W(x as i32 as u32, T::I))
             }
             (CInit::W(w, T::I), T::F) => Ok(CInit::W((w as i32 as f32).to_bits(), T::F)),
-            (CInit::W(w, T::F), T::V2) => Ok(CInit::V2(w, w)),
+            (CInit::W(w, T::F), T::Vec(n)) => Ok(CInit::Vec(*n, [w; 16])),
             _ => err(span, format!("expected {}, found {}", self.tname(want), self.tname(&have))),
         }
     }
@@ -1232,6 +1379,11 @@ impl Lowerer {
                 Item::Let { name, ann, value, span } => {
                     self.check_new_global(name, *span)?;
                     if let ExprKind::Call(f, args) = &value.kind {
+                        if self.domain == Domain::Kernel && matches!(f.as_str(), "input" | "output" | "emit_buffer" | "param") {
+                            let bind = self.kernel_decl(name, f, args, value.span)?;
+                            self.globals.insert(name.clone(), bind);
+                            continue;
+                        }
                         if f == "param" {
                             let bind = self.param(name, args, value.span)?;
                             self.globals.insert(name.clone(), bind);
@@ -1274,6 +1426,9 @@ impl Lowerer {
                     }
                 }
                 Item::Var { name, ann, value, span } => {
+                    if self.domain == Domain::Kernel {
+                        return err(*span, "kernels have no state that persists between elements: use `let` inside the kernel, or write an output buffer");
+                    }
                     self.check_new_global(name, *span)?;
                     let c = self.cinit(value, ann.as_ref())?;
                     let t = self.cinit_ty(&c);
@@ -1290,12 +1445,12 @@ impl Lowerer {
                             self.promoted.push((offset, v));
                             Bind::Local(t, vec![v])
                         }
-                        T::V2 => {
-                            let x = self.b.var(Ty::F32);
-                            let y = self.b.var(Ty::F32);
-                            self.promoted.push((offset, x));
-                            self.promoted.push((offset + 1, y));
-                            Bind::Local(T::V2, vec![x, y])
+                        T::Vec(n) => {
+                            let vars: Vec<Var> = (0..n).map(|_| self.b.var(Ty::F32)).collect();
+                            for (k, v) in vars.iter().enumerate() {
+                                self.promoted.push((offset + k as u32, *v));
+                            }
+                            Bind::Local(T::Vec(n), vars)
                         }
                         t => Bind::Place(Place { region: Region::State, root: offset, extent: words, off: None, stat: 0, ty: t }),
                     };
@@ -1526,16 +1681,23 @@ impl Lowerer {
                     let v = match ann {
                         Some(TypeAnn::F32) => V::F(self.to_f(&v, span)?),
                         Some(TypeAnn::I32) => V::I(self.to_i(&v, span)?),
-                        Some(TypeAnn::Vec2) => {
-                            let (x, y) = self.to_v2(&v, span)?;
-                            V::V2(x, y)
+                        Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4 | TypeAnn::Mat4)) => {
+                            let n = ann_width(ann);
+                            V::Vec(n, self.to_vec(&v, n, span)?)
                         }
                         _ => match v {
                             V::Lit(x) => V::F(self.b.cf(x as f32)),
                             v => v,
                         },
                     };
-                    self.new_local(&v, span)?
+                    // A parameter the function never assigns is its value
+                    // (no copy): the element index stays recognisably the
+                    // element's own.
+                    if assigns(&f.body, name) {
+                        self.new_local(&v, span)?
+                    } else {
+                        Bind::Value(v)
+                    }
                 }
             };
             scope.insert(name.clone(), bind);
@@ -1602,7 +1764,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => (T::F, vec![self.b.var(Ty::F32)]),
             V::I(_) => (T::I, vec![self.b.var(Ty::I32)]),
             V::B(_) => (T::B, vec![self.b.var(Ty::Bool)]),
-            V::V2(..) => (T::V2, vec![self.b.var(Ty::F32), self.b.var(Ty::F32)]),
+            V::Vec(n, _) => (T::Vec(*n), (0..*n).map(|_| self.b.var(Ty::F32)).collect()),
             V::Place(p) => return Ok(Bind::Place(p.clone())),
             V::Unit => return err(span, "this has no value"),
         };
@@ -1627,10 +1789,11 @@ impl Lowerer {
                 let V::B(x) = v else { return err(span, format!("expected bool, found {}", self.vname(v))) };
                 self.b.set(vars[0], *x);
             }
-            T::V2 => {
-                let (x, y) = self.to_v2(v, span)?;
-                self.b.set(vars[0], x);
-                self.b.set(vars[1], y);
+            T::Vec(n) => {
+                let l = self.to_vec(v, *n, span)?;
+                for k in 0..*n as usize {
+                    self.b.set(vars[k], l[k]);
+                }
             }
             _ => unreachable!(),
         }
@@ -1642,10 +1805,12 @@ impl Lowerer {
             T::F => V::F(self.b.get(vars[0])),
             T::I => V::I(self.b.get(vars[0])),
             T::B => V::B(self.b.get(vars[0])),
-            T::V2 => {
-                let x = self.b.get(vars[0]);
-                let y = self.b.get(vars[1]);
-                V::V2(x, y)
+            T::Vec(n) => {
+                let mut l = [Val(0); 16];
+                for k in 0..*n as usize {
+                    l[k] = self.b.get(vars[k]);
+                }
+                V::Vec(*n, l)
             }
             _ => unreachable!(),
         }
@@ -1657,7 +1822,7 @@ impl Lowerer {
             V::Lit(_) | V::F(_) => T::F,
             V::I(_) => T::I,
             V::B(_) => T::B,
-            V::V2(..) => T::V2,
+            V::Vec(n, _) => T::Vec(*n),
             _ => return None,
         })
     }
@@ -1675,9 +1840,9 @@ impl Lowerer {
                     let v = match ann {
                         Some(TypeAnn::I32) => V::I(self.to_i(&v, *span)?),
                         Some(TypeAnn::F32) => V::F(self.to_f(&v, *span)?),
-                        Some(TypeAnn::Vec2) => {
-                            let (x, y) = self.to_v2(&v, *span)?;
-                            V::V2(x, y)
+                        Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4 | TypeAnn::Mat4)) => {
+                            let n = ann_width(ann);
+                            V::Vec(n, self.to_vec(&v, n, *span)?)
                         }
                         _ => v,
                     };
@@ -1752,10 +1917,10 @@ impl Lowerer {
                     if !matches!(v, V::Unit) {
                         if self.rets[ret_i].vars.is_none() {
                             let Some(t) = Self::value_t(&v) else {
-                                return err(*span, "functions return f32, i32, bool or vec2 (aggregates are passed by reference instead)");
+                                return err(*span, "functions return f32, i32, bool, vec2/3/4 or mat4 (structs and arrays are passed by reference instead)");
                             };
                             let vars = match &t {
-                                T::V2 => vec![self.b.var(Ty::F32), self.b.var(Ty::F32)],
+                                T::Vec(n) => (0..*n).map(|_| self.b.var(Ty::F32)).collect(),
                                 t => vec![self.b.var(ty_of(t))],
                             };
                             self.rets[ret_i].vars = Some((t, vars));
@@ -1805,11 +1970,11 @@ impl Lowerer {
                 None => err(target.span, format!("unknown name `{}`", name)),
             },
             ExprKind::Field(base, field) => {
-                // A lane of a vec2 local.
+                // A lane of a vector local.
                 if let ExprKind::Ident(name) = &base.kind {
-                    if let Some(Bind::Local(T::V2, vars)) = self.lookup(name) {
-                        let lane = vec2_lane(field).ok_or_else(|| {
-                            ShaderError::new(target.span.start, target.span.end, format!("vec2 has x and y, not `{}`", field))
+                    if let Some(Bind::Local(T::Vec(n), vars)) = self.lookup(name) {
+                        let lane = single_lane(n, field).ok_or_else(|| {
+                            ShaderError::new(target.span.start, target.span.end, format!("{} has no single component `{}`", vec_name(n), field))
                         })?;
                         let old = V::F(self.b.get(vars[lane]));
                         let v = combine(self, old)?;
@@ -1865,8 +2030,14 @@ impl Lowerer {
                 };
                 Ok(Place { ty: ft.clone(), stat: p.stat + off, ..p.clone() })
             }
-            T::V2 => {
-                let lane = vec2_lane(field).ok_or_else(|| ShaderError::new(span.start, span.end, format!("vec2 has x and y, not `{}`", field)))?;
+            T::Vec(n) => {
+                let n = *n;
+                if n == 16 {
+                    if let Some(c) = field.strip_prefix('c').and_then(|c| c.parse::<u32>().ok()).filter(|c| *c < 4) {
+                        return Ok(Place { ty: T::Vec(4), stat: p.stat + c * 4, ..p.clone() });
+                    }
+                }
+                let lane = single_lane(n, field).ok_or_else(|| ShaderError::new(span.start, span.end, format!("{} has no single component `{}`", vec_name(n), field)))?;
                 Ok(Place { ty: T::F, stat: p.stat + lane as u32, ..p.clone() })
             }
             t => err(span, format!("{} has no fields", self.tname(t))),
@@ -1874,6 +2045,21 @@ impl Lowerer {
     }
 
     fn index_place(&mut self, p: &Place, idx: &V, span: Span) -> LResult<Place> {
+        if let T::Buf(el, stride, offset, _) = &p.ty {
+            // Host buffers clamp (no wrap): element idx at idx * stride.
+            let (el, stride, offset) = ((**el).clone(), *stride, *offset);
+            let i = self.to_i(idx, span)?;
+            let off = if stride == 1 {
+                i
+            } else {
+                let c = self.b.ci(stride as i32);
+                self.b.ib(Bin::MulI, i, c)
+            };
+            if self.kernel.element == Some(i) {
+                self.kernel.local_offsets.insert(off);
+            }
+            return Ok(Place { ty: el, stat: p.stat + offset, off: Some(off), ..p.clone() });
+        }
         let T::Array(el, n) = &p.ty else {
             return err(span, format!("{} cannot be indexed", self.tname(&p.ty)));
         };
@@ -1963,10 +2149,12 @@ impl Lowerer {
                     V::Lit(x) => Ok(V::Lit(-x)),
                     V::F(x) => Ok(V::F(self.b.fneg(x))),
                     V::I(x) => Ok(V::I(self.b.un(Ty::I32, Un::NegI, x))),
-                    V::V2(x, y) => {
-                        let x = self.b.fneg(x);
-                        let y = self.b.fneg(y);
-                        Ok(V::V2(x, y))
+                    V::Vec(n, l) => {
+                        let mut o = l;
+                        for k in 0..n as usize {
+                            o[k] = self.b.fneg(l[k]);
+                        }
+                        Ok(V::Vec(n, o))
                     }
                     v => err(span, format!("cannot negate {}", self.vname(&v))),
                 }
@@ -2012,11 +2200,7 @@ impl Lowerer {
             ExprKind::Field(base, field) => {
                 let v = self.expr(base)?;
                 match v {
-                    V::V2(x, y) => match vec2_lane(field) {
-                        Some(0) => Ok(V::F(x)),
-                        Some(_) => Ok(V::F(y)),
-                        None => err(span, format!("vec2 has x and y, not `{}`", field)),
-                    },
+                    V::Vec(n, l) => self.swizzle(n, &l, field, span),
                     V::Place(p) => {
                         let fp = self.field_place(&p, field, span)?;
                         Ok(self.read(&fp))
@@ -2163,7 +2347,14 @@ impl Lowerer {
                 let d = self.b.mul(sv, t);
                 return Ok(V::F(self.b.add(bv, d)));
             }
+            Some(Bind::Uniform(k)) => return Ok(V::F(self.b.load(Ty::F32, Region::Ctx, kernel::K_PARAMS + k as u32, 1, None))),
+            Some(Bind::Emit(..)) => return err(span, format!("`{}` is an emit buffer: write it with emit({}, ...)", name, name)),
             None => {}
+        }
+        if self.domain == Domain::Kernel {
+            if let Some(v) = self.kernel_ident(name) {
+                return Ok(v);
+            }
         }
         match name {
             "PI" => return Ok(V::Lit(std::f64::consts::PI)),
@@ -2171,7 +2362,7 @@ impl Lowerer {
             "E" => return Ok(V::Lit(std::f64::consts::E)),
             _ => {}
         }
-        if INPUT_NAMES.contains(&name) {
+        if INPUT_NAMES.contains(&name) && self.domain == Domain::Audio {
             let Some(ent) = self.entry.clone() else {
                 return err(span, format!("`{}` is an audio input: not available in init() or initial values", name));
             };
@@ -2284,8 +2475,8 @@ impl Lowerer {
                     Some(a.clone())
                 } else if (*a == T::F && *b == T::I) || (*a == T::I && *b == T::F) {
                     Some(T::F)
-                } else if *a == T::V2 || *b == T::V2 {
-                    Some(T::V2)
+                } else if matches!((a, b), (T::Vec(_), T::F | T::I) | (T::F | T::I, T::Vec(_))) {
+                    Some(if let T::Vec(n) = a { T::Vec(*n) } else { b.clone() })
                 } else {
                     return err(span, format!("the branches give {} and {}", self.vname(&tv), self.vname(&ev)));
                 }
@@ -2307,7 +2498,7 @@ impl Lowerer {
             return self.select_v(c, &rt, &tv, &ev, span);
         }
         let vars = match &rt {
-            T::V2 => vec![self.b.var(Ty::F32), self.b.var(Ty::F32)],
+            T::Vec(n) => (0..*n).map(|_| self.b.var(Ty::F32)).collect(),
             t => vec![self.b.var(ty_of(t))],
         };
         // An unconditional first write keeps the variables' live ranges
@@ -2345,10 +2536,14 @@ impl Lowerer {
                 let (V::B(x), V::B(y)) = (a, b) else { unreachable!() };
                 V::B(self.b.sel(c, *x, *y))
             }
-            T::V2 => {
-                let (ax, ay) = self.to_v2(a, span)?;
-                let (bx, by) = self.to_v2(b, span)?;
-                V::V2(self.b.sel(c, ax, bx), self.b.sel(c, ay, by))
+            T::Vec(n) => {
+                let la = self.to_vec(a, *n, span)?;
+                let lb = self.to_vec(b, *n, span)?;
+                let mut o = la;
+                for k in 0..*n as usize {
+                    o[k] = self.b.sel(c, la[k], lb[k]);
+                }
+                V::Vec(*n, o)
             }
             _ => unreachable!(),
         })
@@ -2382,23 +2577,43 @@ impl Lowerer {
                 BitXor => V::Lit((bits(x) ^ bits(y)) as f64),
                 Shl => V::Lit(((bits(x) as i32).wrapping_shl(bits(y) as u32)) as f64),
                 Shr => V::Lit(((bits(x) as i32).wrapping_shr(bits(y) as u32)) as f64),
+                ShrU => V::Lit(((bits(x) as i32 as u32).wrapping_shr(bits(y) as u32)) as i32 as f64),
                 And | Or => unreachable!(),
             });
         }
-        // vec2 arithmetic, lane-wise with scalar broadcast.
-        if matches!(a, V::V2(..)) || matches!(b, V::V2(..)) {
-            let (ax, ay) = self.to_v2(&a, span)?;
-            let (bx, by) = self.to_v2(&b, span)?;
+        // Matrix products.
+        if let (V::Vec(16, m), Mul) = (&a, op) {
+            match &b {
+                V::Vec(4, v) => return Ok(self.mat_vec(m, v)),
+                V::Vec(16, m2) => {
+                    let mut o = [Val(0); 16];
+                    for c in 0..4 {
+                        let col = lanes_of(&m2[c * 4..c * 4 + 4]);
+                        let V::Vec(_, r) = self.mat_vec(m, &col) else { unreachable!() };
+                        o[c * 4..c * 4 + 4].copy_from_slice(&r[..4]);
+                    }
+                    return Ok(V::Vec(16, o));
+                }
+                _ => {}
+            }
+        }
+        // Vector arithmetic, lane-wise with scalar broadcast.
+        if matches!(a, V::Vec(..)) || matches!(b, V::Vec(..)) {
+            let n = self.vec_width(&[&a, &b], span)?.unwrap();
+            let la = self.to_vec(&a, n, span)?;
+            let lb = self.to_vec(&b, n, span)?;
             let fop = match op {
                 Add => Bin::AddF,
                 Sub => Bin::SubF,
                 Mul => Bin::MulF,
                 Div => Bin::DivF,
-                _ => return err(span, "vec2 supports + - * /"),
+                _ => return err(span, format!("{} supports + - * / (compare components one by one)", vec_name(n))),
             };
-            let x = self.b.fb(fop, ax, bx);
-            let y = self.b.fb(fop, ay, by);
-            return Ok(V::V2(x, y));
+            let mut o = la;
+            for k in 0..n as usize {
+                o[k] = self.b.fb(fop, la[k], lb[k]);
+            }
+            return Ok(V::Vec(n, o));
         }
         // Bools.
         if matches!(a, V::B(_)) || matches!(b, V::B(_)) {
@@ -2420,7 +2635,7 @@ impl Lowerer {
             (V::F(_) | V::Lit(_), V::F(_) | V::Lit(_)) | (V::F(_), V::I(_)) | (V::I(_), V::F(_)) => false,
             _ => return err(span, format!("cannot combine {} and {}", self.vname(&a), self.vname(&b))),
         };
-        let bitop = matches!(op, BitAnd | BitOr | BitXor | Shl | Shr);
+        let bitop = matches!(op, BitAnd | BitOr | BitXor | Shl | Shr | ShrU);
         if bitop && !int {
             return err(span, "bit operators need integers (use int(x))");
         }
@@ -2439,6 +2654,7 @@ impl Lowerer {
                 BitXor => Ok(V::I(self.b.ib(Bin::XorI, x, y))),
                 Shl => Ok(V::I(self.b.ib(Bin::ShlI, x, y))),
                 Shr => Ok(V::I(self.b.ib(Bin::ShrI, x, y))),
+                ShrU => Ok(V::I(self.b.ib(Bin::ShrUI, x, y))),
                 Lt => c(self, Cmp::Lt),
                 Le => c(self, Cmp::Le),
                 Gt => c(self, Cmp::Gt),
@@ -2476,6 +2692,9 @@ impl Lowerer {
     // -- builtin calls -----------------------------------------------------------
 
     fn call_expr(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<V> {
+        if name == "emit" && self.domain == Domain::Kernel && !self.fns.contains_key("emit") {
+            return self.kernel_emit(args, span);
+        }
         if let Some(f) = self.fns.get(name).cloned() {
             if matches!(name, "voice" | "effect" | "block" | "init") {
                 return err(span, format!("`{}` is an entry point and cannot be called", name));
@@ -2557,10 +2776,12 @@ impl Lowerer {
         if let Some(f) = unary {
             want(1)?;
             return Ok(match &vals[0] {
-                V::V2(x, y) => {
-                    let x = f(&mut self.b, *x);
-                    let y = f(&mut self.b, *y);
-                    V::V2(x, y)
+                V::Vec(n, l) => {
+                    let mut o = *l;
+                    for k in 0..*n as usize {
+                        o[k] = f(&mut self.b, l[k]);
+                    }
+                    V::Vec(*n, o)
                 }
                 v => {
                     let x = self.to_f(v, args[0].span)?;
@@ -2581,27 +2802,30 @@ impl Lowerer {
                     return Ok(V::I(self.b.sel(c, x, y)));
                 }
                 let op = if name == "min" { Bin::MinF } else { Bin::MaxF };
-                if matches!(vals[0], V::V2(..)) || matches!(vals[1], V::V2(..)) {
-                    let (ax, ay) = self.to_v2(&vals[0], span)?;
-                    let (bx, by) = self.to_v2(&vals[1], span)?;
-                    let x = self.b.fb(op, ax, bx);
-                    let y = self.b.fb(op, ay, by);
-                    return Ok(V::V2(x, y));
+                if let Some(n) = self.vec_width(&[&vals[0], &vals[1]], span)? {
+                    let la = self.to_vec(&vals[0], n, span)?;
+                    let lb = self.to_vec(&vals[1], n, span)?;
+                    let mut o = la;
+                    for k in 0..n as usize {
+                        o[k] = self.b.fb(op, la[k], lb[k]);
+                    }
+                    return Ok(V::Vec(n, o));
                 }
                 let v = f_args(self, &vals)?;
                 Ok(V::F(self.b.fb(op, v[0], v[1])))
             }
             "clamp" => {
                 want(3)?;
-                if matches!(vals[0], V::V2(..)) {
-                    let (x, y) = self.to_v2(&vals[0], span)?;
-                    let lo = self.to_f(&vals[1], span)?;
-                    let hi = self.to_f(&vals[2], span)?;
-                    let x = self.b.fb(Bin::MaxF, x, lo);
-                    let x = self.b.fb(Bin::MinF, x, hi);
-                    let y = self.b.fb(Bin::MaxF, y, lo);
-                    let y = self.b.fb(Bin::MinF, y, hi);
-                    return Ok(V::V2(x, y));
+                if let V::Vec(n, _) = vals[0] {
+                    let l = self.to_vec(&vals[0], n, span)?;
+                    let lo = self.to_vec(&vals[1], n, span)?;
+                    let hi = self.to_vec(&vals[2], n, span)?;
+                    let mut o = l;
+                    for k in 0..n as usize {
+                        let x = self.b.fb(Bin::MaxF, l[k], lo[k]);
+                        o[k] = self.b.fb(Bin::MinF, x, hi[k]);
+                    }
+                    return Ok(V::Vec(n, o));
                 }
                 if let V::I(_) = vals[0] {
                     let x = self.to_i(&vals[0], span)?;
@@ -2619,16 +2843,16 @@ impl Lowerer {
             "mix" | "lerp" => {
                 want(3)?;
                 let t = self.to_f(&vals[2], args[2].span)?;
-                if matches!(vals[0], V::V2(..)) || matches!(vals[1], V::V2(..)) {
-                    let (ax, ay) = self.to_v2(&vals[0], span)?;
-                    let (bx, by) = self.to_v2(&vals[1], span)?;
-                    let dx = self.b.sub(bx, ax);
-                    let dx = self.b.mul(dx, t);
-                    let x = self.b.add(ax, dx);
-                    let dy = self.b.sub(by, ay);
-                    let dy = self.b.mul(dy, t);
-                    let y = self.b.add(ay, dy);
-                    return Ok(V::V2(x, y));
+                if let Some(n) = self.vec_width(&[&vals[0], &vals[1]], span)? {
+                    let la = self.to_vec(&vals[0], n, span)?;
+                    let lb = self.to_vec(&vals[1], n, span)?;
+                    let mut o = la;
+                    for k in 0..n as usize {
+                        let d = self.b.sub(lb[k], la[k]);
+                        let d = self.b.mul(d, t);
+                        o[k] = self.b.add(la[k], d);
+                    }
+                    return Ok(V::Vec(n, o));
                 }
                 let v = f_args(self, &vals)?;
                 let d = self.b.sub(v[1], v[0]);
@@ -2669,20 +2893,120 @@ impl Lowerer {
                 let inner = self.b.sub(three, t2);
                 Ok(V::F(self.b.mul(tt, inner)))
             }
-            "vec2" => match n {
-                1 => {
-                    if let V::V2(x, y) = vals[0] {
-                        return Ok(V::V2(x, y));
+            "vec2" | "vec3" | "vec4" | "mat4" => {
+                let w: u8 = match name {
+                    "vec2" => 2,
+                    "vec3" => 3,
+                    "vec4" => 4,
+                    _ => 16,
+                };
+                // One scalar broadcasts (a mat4 of one scalar is s * identity
+                // is NOT implied: mat4(s) fills every lane); otherwise the
+                // components concatenate (vec4(v3, 1.0), mat4(c0, c1, c2, c3)).
+                if n == 1 {
+                    if let V::Vec(m, l) = vals[0] {
+                        if m == w {
+                            return Ok(V::Vec(m, l));
+                        }
+                    } else {
+                        let x = self.to_f(&vals[0], span)?;
+                        return Ok(V::Vec(w, [x; 16]));
                     }
-                    let x = self.to_f(&vals[0], span)?;
-                    Ok(V::V2(x, x))
                 }
-                2 => {
+                let mut out = Vec::new();
+                for (v, a) in vals.iter().zip(args) {
+                    match v {
+                        V::Vec(m, l) => out.extend_from_slice(&l[..*m as usize]),
+                        v => out.push(self.to_f(v, a.span)?),
+                    }
+                }
+                if out.len() != w as usize {
+                    return err(span, format!("{} needs {} components, got {}", name, w, out.len()));
+                }
+                Ok(V::Vec(w, lanes_of(&out)))
+            }
+            "dot" => {
+                want(2)?;
+                let n = self.vec_width(&[&vals[0], &vals[1]], span)?.unwrap_or(1);
+                if n == 1 {
                     let v = f_args(self, &vals)?;
-                    Ok(V::V2(v[0], v[1]))
+                    return Ok(V::F(self.b.mul(v[0], v[1])));
                 }
-                _ => err(span, "vec2(x) or vec2(l, r)"),
-            },
+                let a = self.to_vec(&vals[0], n, span)?;
+                let b = self.to_vec(&vals[1], n, span)?;
+                Ok(V::F(self.dot(&a, &b, n)))
+            }
+            "length" => {
+                want(1)?;
+                match &vals[0] {
+                    V::Vec(n, l) => {
+                        let d = self.dot(l, l, *n);
+                        Ok(V::F(self.b.un(Ty::F32, Un::SqrtF, d)))
+                    }
+                    v => {
+                        let x = self.to_f(v, span)?;
+                        Ok(V::F(self.b.fabs(x)))
+                    }
+                }
+            }
+            "distance" => {
+                want(2)?;
+                let d = self.binary(BinOp::Sub, vals[0].clone(), vals[1].clone(), span)?;
+                match &d {
+                    V::Vec(n, l) => {
+                        let s = self.dot(l, l, *n);
+                        Ok(V::F(self.b.un(Ty::F32, Un::SqrtF, s)))
+                    }
+                    v => {
+                        let x = self.to_f(v, span)?;
+                        Ok(V::F(self.b.fabs(x)))
+                    }
+                }
+            }
+            "normalize" => {
+                want(1)?;
+                let V::Vec(n, l) = vals[0] else {
+                    return err(span, "normalize() takes a vector");
+                };
+                // A zero vector stays zero.
+                let d = self.dot(&l, &l, n);
+                let len = self.b.un(Ty::F32, Un::SqrtF, d);
+                let zero = self.b.cf(0.0);
+                let is_zero = self.b.cmpf(Cmp::Eq, len, zero);
+                let one = self.b.cf(1.0);
+                let safe = self.b.sel(is_zero, one, len);
+                let inv = self.b.div(one, safe);
+                let mut o = l;
+                for k in 0..n as usize {
+                    o[k] = self.b.mul(l[k], inv);
+                }
+                Ok(V::Vec(n, o))
+            }
+            "cross" => {
+                want(2)?;
+                let a = self.to_vec(&vals[0], 3, span)?;
+                let b = self.to_vec(&vals[1], 3, span)?;
+                let m = |l: &mut Self, i: usize, j: usize| {
+                    let p = l.b.mul(a[i], b[j]);
+                    let q = l.b.mul(a[j], b[i]);
+                    l.b.sub(p, q)
+                };
+                let x = m(self, 1, 2);
+                let y = m(self, 2, 0);
+                let z = m(self, 0, 1);
+                Ok(V::Vec(3, lanes_of(&[x, y, z])))
+            }
+            "transpose" => {
+                want(1)?;
+                let l = self.to_vec(&vals[0], 16, span)?;
+                let mut o = l;
+                for c in 0..4 {
+                    for r in 0..4 {
+                        o[c * 4 + r] = l[r * 4 + c];
+                    }
+                }
+                Ok(V::Vec(16, o))
+            }
             "int" | "i32" => {
                 want(1)?;
                 Ok(match &vals[0] {
@@ -2713,6 +3037,15 @@ impl Lowerer {
                 want(1)?;
                 match &vals[0] {
                     V::Place(Place { ty: T::Array(_, n), .. }) => Ok(V::Lit(*n as f64)),
+                    V::Place(Place { ty: T::Buf(_, stride, offset, _), region: Region::Buf(k), .. }) => {
+                        // Whole elements in the host buffer.
+                        let (stride, offset, k) = (*stride, *offset, *k);
+                        let words = self.b.raw(Ty::I32, Op::BufLen(k), None);
+                        let o = self.b.ci(offset as i32);
+                        let words = self.b.ib(Bin::SubI, words, o);
+                        let st = self.b.ci(stride.max(1) as i32);
+                        Ok(V::I(self.b.ib(Bin::DivI, words, st)))
+                    }
                     v => err(span, format!("len() of {}", self.vname(v))),
                 }
             }
@@ -2766,6 +3099,9 @@ impl Lowerer {
                 let t = b.mul(t, frac);
                 Ok(V::F(b.add(t, x0)))
             }
+            "rand" | "noise" if self.domain == Domain::Kernel => {
+                err(span, "kernels have no running random state: use hash01(i, k) or rand01(seed, i, k) for per-element randomness")
+            }
             "rand" | "noise" => {
                 want(0)?;
                 let Some(ent) = self.entry.clone() else {
@@ -2808,10 +3144,23 @@ impl Lowerer {
     }
 }
 
-fn vec2_lane(field: &str) -> Option<usize> {
+fn ann_width(a: &TypeAnn) -> u8 {
+    match a {
+        TypeAnn::Vec2 => 2,
+        TypeAnn::Vec3 => 3,
+        TypeAnn::Vec4 => 4,
+        _ => 16,
+    }
+}
+
+/// One component of a vector (`x`, `r`, `0`, …).
+fn single_lane(n: u8, field: &str) -> Option<usize> {
     match field {
-        "x" | "l" | "0" => Some(0),
-        "y" | "r" | "1" => Some(1),
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" if n >= 3 && n <= 4 => Some(2),
+        "3" if n == 4 => Some(3),
+        f if f.len() == 1 => lane_of(n, f.chars().next().unwrap()),
         _ => None,
     }
 }
@@ -2845,6 +3194,44 @@ fn has_own_break(body: &[Stmt]) -> bool {
     stmts(body)
 }
 
+/// Is `name` assigned (as a whole or by component) anywhere in `body`?
+fn assigns(body: &[Stmt], name: &str) -> bool {
+    fn root(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(n),
+            ExprKind::Field(b, _) | ExprKind::Index(b, _) => root(b),
+            _ => None,
+        }
+    }
+    fn expr(e: &Expr, name: &str) -> bool {
+        match &e.kind {
+            ExprKind::If(arms, else_) => {
+                arms.iter().any(|(c, b)| expr(c, name) || stmts(b, name)) || else_.as_ref().is_some_and(|b| stmts(b, name))
+            }
+            ExprKind::Match(s, arms) => expr(s, name) || arms.iter().any(|(_, b)| stmts(b, name)),
+            ExprKind::Block(b) => stmts(b, name),
+            ExprKind::Bin(_, a, b) | ExprKind::Index(a, b) | ExprKind::ArrayRepeat(a, b) => expr(a, name) || expr(b, name),
+            ExprKind::Neg(a) | ExprKind::Not(a) | ExprKind::Field(a, _) => expr(a, name),
+            ExprKind::Call(_, args) | ExprKind::ArrayList(args) => args.iter().any(|a| expr(a, name)),
+            ExprKind::StructLit(_, f) => f.iter().any(|(_, a)| expr(a, name)),
+            _ => false,
+        }
+    }
+    fn stmts(b: &[Stmt], name: &str) -> bool {
+        b.iter().any(|s| match s {
+            Stmt::Assign { target, value, .. } => root(target) == Some(name) || expr(value, name),
+            Stmt::Let { value, .. } => expr(value, name),
+            Stmt::Expr(e) => expr(e, name),
+            Stmt::For { from, to, body, .. } => expr(from, name) || expr(to, name) || stmts(body, name),
+            Stmt::While { cond, body, .. } => expr(cond, name) || stmts(body, name),
+            Stmt::Loop { body, .. } => stmts(body, name),
+            Stmt::Return(Some(e), _) => expr(e, name),
+            _ => false,
+        })
+    }
+    stmts(body, name)
+}
+
 fn edit_distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let mut row: Vec<usize> = (0..=b.len()).collect();
@@ -2872,8 +3259,8 @@ const BUILTIN_NAMES: &[&str] = &[
 ];
 
 /// Lowers a parsed shader into its render (and optional init) programs.
-pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError> {
-    let mut l = Lowerer {
+fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
+    Lowerer {
         b: Builder::new(),
         structs: Vec::new(),
         fns: HashMap::new(),
@@ -2891,7 +3278,13 @@ pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError
         entry: None,
         in_init: false,
         prelude_base,
-    };
+        domain,
+        kernel: Default::default(),
+    }
+}
+
+pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError> {
+    let mut l = new_lowerer(prelude_base, Domain::Audio);
     l.top(items)?;
     let kind = match (l.fns.get("voice"), l.fns.get("effect")) {
         (Some(_), None) => Kind::Instrument,

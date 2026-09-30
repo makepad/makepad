@@ -1,0 +1,11 @@
+[package]
+name = "makepad-script-compute"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "The Splash compute core: a typed Splash subset with logic, compiled to a structured SSA IR with a reference interpreter and native ARM64 backends (scalar and 4-lane NEON); front ends for audio shaders and geometry kernels"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
