@@ -21,6 +21,14 @@ pub struct World {
     pub render_rev: u64,
     pub paint_rev: u64,
     pub content_generation: u64,
+    // --- generic items (KERNELS.md §3.2). Empty for a host that fills only
+    // the game features above; the renderer draws nothing new from them yet.
+    pub view: View,
+    pub lights: Vec<Light>,
+    pub environment: Environment,
+    pub materials: Vec<MaterialFrame>,
+    pub items: Vec<Item>,
+    pub anchors: Vec<Anchor>,
 }
 impl World {
     pub fn new() -> Self { Self::default() }
@@ -41,6 +49,51 @@ impl World {
                 Ok(())
             }
         }
+    }
+    /// This frame's material by id (`materials` is kept sorted by id).
+    pub fn material(&self, id: MaterialId) -> Option<&MaterialFrame> {
+        self.materials.binary_search_by_key(&id, |m| m.id).ok().map(|i| &self.materials[i])
+    }
+    /// Insert or replace a material, keeping `materials` sorted by id.
+    pub fn set_material(&mut self, material: MaterialFrame) {
+        match self.materials.binary_search_by_key(&material.id, |m| m.id) {
+            Ok(i) => self.materials[i] = material,
+            Err(i) => self.materials.insert(i, material),
+        }
+    }
+    /// Check the generic half of the frame before the renderer sees it:
+    /// every value finite and in range, every item's materials present,
+    /// the light count bounded. The first problem is reported with where
+    /// it is.
+    pub fn validate_frame(&self) -> Result<(), String> {
+        if let Some(camera) = &self.view.camera {
+            camera.validate().map_err(|e| format!("view: {e}"))?;
+        }
+        self.environment.validate().map_err(|e| format!("environment: {e}"))?;
+        if self.lights.len() > MAX_WORLD_LIGHTS {
+            return Err(format!("{} lights; at most {MAX_WORLD_LIGHTS}", self.lights.len()));
+        }
+        for (i, light) in self.lights.iter().enumerate() {
+            light.validate().map_err(|e| format!("lights[{i}]: {e}"))?;
+        }
+        if !self.materials.windows(2).all(|w| w[0].id < w[1].id) {
+            return Err("materials must be sorted by id, without duplicates".into());
+        }
+        for m in &self.materials {
+            m.validate().map_err(|e| format!("material {}: {e}", m.id.0))?;
+        }
+        for (i, item) in self.items.iter().enumerate() {
+            item.validate().map_err(|e| format!("items[{i}]: {e}"))?;
+            if let Some(missing) = item.materials().find(|id| self.material(*id).is_none()) {
+                return Err(format!("items[{i}]: material {} is not in this frame", missing.0));
+            }
+        }
+        for (i, a) in self.anchors.iter().enumerate() {
+            if !(a.pos.x.is_finite() && a.pos.y.is_finite() && a.pos.z.is_finite()) {
+                return Err(format!("anchors[{i}] '{}': position must be finite", a.name));
+            }
+        }
+        Ok(())
     }
     pub fn mark_render_dirty(&mut self) { self.render_rev = self.render_rev.wrapping_add(1); }
     pub fn mark_paint_dirty(&mut self) { self.paint_rev = self.paint_rev.wrapping_add(1); }
@@ -63,6 +116,26 @@ mod tests {
         w.mark_render_dirty();
         assert_eq!(w.render_rev, render.wrapping_add(1));
         assert_eq!(w.paint_rev, paint.wrapping_add(1));
+    }
+
+    #[test]
+    fn generic_items_validate_against_the_frame_materials() {
+        let mut w = World::new();
+        assert!(w.validate_frame().is_ok(), "an empty frame is valid");
+        let item = Item::new(ItemKind::Mesh { geometry: GeometryRef::Resident(GeometryId(1)), material: MaterialId(4), transform: makepad_math::Mat4f::identity() });
+        w.items.push(item);
+        assert!(w.validate_frame().unwrap_err().contains("material 4"));
+        w.set_material(MaterialFrame { id: MaterialId(9), ..Default::default() });
+        w.set_material(MaterialFrame { id: MaterialId(4), ..Default::default() });
+        w.set_material(MaterialFrame { id: MaterialId(4), glow: 2.0, ..Default::default() });
+        assert_eq!(w.materials.iter().map(|m| m.id.0).collect::<Vec<_>>(), vec![4, 9]);
+        assert_eq!(w.material(MaterialId(4)).unwrap().glow, 2.0);
+        assert!(w.validate_frame().is_ok());
+        w.view.camera = Some(Camera { near: -1.0, ..Camera::default() });
+        assert!(w.validate_frame().unwrap_err().starts_with("view"));
+        w.view.camera = Some(Camera::default());
+        w.anchors.push(Anchor { name: "a".into(), pos: makepad_math::vec3f(f32::NAN, 0.0, 0.0) });
+        assert!(w.validate_frame().is_err());
     }
 
     #[test]

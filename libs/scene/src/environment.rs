@@ -114,3 +114,74 @@ pub struct SunConfig {
     pub shadow_alpha: Option<f32>,
 }
 
+
+/// What surrounds a world: its background, image-based lighting and fog.
+/// `Environment::default()` asks for nothing, and a host that leaves it so
+/// keeps its own sky (`World::sky`) and analytic reflections.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Environment {
+    pub background: Background,
+    /// `Some` switches on image-based lighting (prefiltered specular and
+    /// SH9 diffuse). `None` keeps the analytic sky reflection.
+    pub ibl: Option<Ibl>,
+    pub fog: Fog,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Background {
+    /// The host's sky (`World::sky`, or none).
+    #[default]
+    Host,
+    Color(Vec4f),
+    /// Vertical gradient, zenith to nadir.
+    Gradient { top: Vec4f, bottom: Vec4f },
+    /// The IBL source image itself.
+    Environment { blur: f32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ibl {
+    pub source: IblSource,
+    pub intensity: f32,
+    /// Rotation about +Y, degrees.
+    pub rotation_deg: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IblSource {
+    /// An equirectangular HDR image (a resident texture handle).
+    Hdri(crate::item::TextureRef),
+    /// One of the built-in procedural environments, by index.
+    Procedural(u32),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Fog {
+    /// The host's fog (`SkyConfig::fog`), or none.
+    #[default]
+    Host,
+    None,
+    Linear { color: Vec3f, start: f32, end: f32 },
+    Exp2 { color: Vec3f, density: f32 },
+    /// Exponential in distance, falling off with height above `base`.
+    Height { color: Vec3f, density: f32, base: f32, falloff: f32 },
+}
+
+impl Environment {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let f = |v: f32| v.is_finite();
+        if let Some(ibl) = &self.ibl {
+            if !f(ibl.intensity) || ibl.intensity < 0.0 || !f(ibl.rotation_deg) {
+                return Err("ibl intensity must be non-negative and its rotation finite");
+            }
+        }
+        match self.fog {
+            Fog::Linear { start, end, .. } if !(f(start) && f(end) && start < end) => Err("linear fog needs start < end"),
+            Fog::Exp2 { density, .. } if !(f(density) && density >= 0.0) => Err("fog density must be non-negative"),
+            Fog::Height { density, falloff, base, .. } if !(f(density) && density >= 0.0 && f(falloff) && falloff >= 0.0 && f(base)) => {
+                Err("height fog needs a non-negative density and falloff")
+            }
+            _ => Ok(()),
+        }
+    }
+}

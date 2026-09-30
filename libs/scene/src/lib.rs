@@ -1,27 +1,37 @@
 //! Presentation descriptions and pure geometry shared by Makepad renderers.
+pub mod anchor;
 pub mod camera;
 pub mod decal;
 pub mod entity;
 pub mod environment;
 pub mod heading;
+pub mod item;
 pub mod light;
+pub mod material;
 pub mod mesh;
 pub mod particles;
+pub mod scene_light;
 pub mod terrain;
 pub mod vfx;
+pub mod view;
 pub mod voxel;
 pub mod water;
 pub mod world;
 
+pub use anchor::*;
 pub use camera::{camera_shake_offset, CameraEffects, CameraState};
 pub use decal::*;
 pub use entity::*;
 pub use environment::*;
 pub use heading::*;
+pub use item::*;
 pub use light::*;
+pub use material::*;
 pub use particles::*;
+pub use scene_light::*;
 pub use terrain::*;
 pub use vfx::*;
+pub use view::*;
 pub use voxel::{ChunkKey, ChunkMesh, VoxelView};
 pub use water::{WaterSurface, WaterView, WaterWave, MAX_WAVES};
 pub use world::*;
