@@ -70,6 +70,7 @@ workspace.members = [
     "libs/render_kernels",
     "libs/render_kernels/tools",
     "libs/render_graph",
+    "libs/effect_sim",
     "libs/render_material",
     "libs/render_lines",
     "libs/geom3d",

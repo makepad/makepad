@@ -1,0 +1,10 @@
+[package]
+name = "makepad-effect-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Physics and stateful kernels as a VFX layer: a fixed-step, seeded stepper over box3d worlds and kernel sims, on an exact time grid, with complete in-memory checkpoints, seek, contact and event history, and the bridge to kernel buffers"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-box3d = { path = "../box3d" }
+makepad-render-kernels = { path = "../render_kernels" }
