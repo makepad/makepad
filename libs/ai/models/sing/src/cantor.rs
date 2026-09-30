@@ -116,6 +116,8 @@ impl Cantor {
     /// Render one aligned phrase to (normalised mel, audio).
     pub fn render_frames(&self, f: &Frames, opts: &RenderOpts) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let t = f.len();
+        let timing = std::env::var("CANTOR_TIMING").is_ok();
+        let t0 = std::time::Instant::now();
         let mut g = Graph::new(&self.params, false);
         let n = f.tokens.len();
         let enc = acoustic::encode(&mut g, &self.ac, &f.tokens, &[f.singer], n, None);
@@ -139,12 +141,24 @@ impl Cantor {
         let dec = acoustic::decode(&mut g, &self.ac, enc.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note, &f.f0_feats(&f0));
         let coarse = g.val(dec.mel).clone();
         let cond = g.val(dec.cond).clone();
+        let t_ac = t0.elapsed();
         let mel = acoustic::refine(&self.params, &self.ac, &coarse, &cond, opts.refine_t0, opts.refine_steps, opts.seed);
+        let t_rf = t0.elapsed();
         let src = vocoder::SourceCtl::new(&f0, t, opts.seed ^ 0x5eed);
         let mut gv = Graph::new(&self.params, false);
         let mi = gv.input(mel.clone());
         let w = vocoder::forward(&mut gv, &self.voc, mi, &f0, t, &src);
-        (mel.data, gv.host(w), f0)
+        let audio = gv.host(w);
+        if timing {
+            let t_all = t0.elapsed();
+            eprintln!(
+                "cantor timing ({t} frames): acoustic {:.0} ms, refiner {:.0} ms, vocoder {:.0} ms",
+                t_ac.as_secs_f64() * 1e3,
+                (t_rf - t_ac).as_secs_f64() * 1e3,
+                (t_all - t_rf).as_secs_f64() * 1e3
+            );
+        }
+        (mel.data, audio, f0)
     }
 
     /// Render a whole line, phrase by phrase (split at rests of 0.6 s or more).
