@@ -322,7 +322,8 @@ impl Renderer {
         let (base, normal, orm, emissive, occlusion) = match &material.kind {
             MaterialKind::Pbr(p) => (p.base_map, p.normal_map, p.metal_rough_map, p.emissive_map, p.occlusion_map),
             MaterialKind::Unlit(u) => (u.map, None, None, None, None),
-            MaterialKind::Splash(_) => (None, None, None, None, None),
+            // A Splash program's first texture is its base map (`tex`).
+            MaterialKind::Splash(sm) => (sm.textures.first().copied(), None, None, None, None),
         };
         let masked = matches!(material.blend, Blend::Mask { .. });
         if let Some(t) = base.and_then(|r| self.item_image(r, if masked { PixelSemantic::MaskedColor } else { PixelSemantic::Color })) {
