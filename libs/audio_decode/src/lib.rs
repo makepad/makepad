@@ -28,6 +28,7 @@ pub mod mp3;
 pub mod ogg;
 pub mod tags;
 pub mod vorbis;
+pub mod wav;
 
 pub use error::AudioError;
 pub use tags::Tags;
@@ -77,6 +78,7 @@ pub enum AudioFormat {
     Mp3,
     OggVorbis,
     Flac,
+    Wav,
 }
 
 /// Bounds every decode honours. Defaults are generous for a music library
@@ -112,6 +114,9 @@ pub fn sniff(bytes: &[u8]) -> Option<AudioFormat> {
     }
     // FLAC's marker is exact; MP3's probe is a loose frame-sync scan and also
     // treats any ID3v2 prefix as MP3, so a tagged FLAC must win here.
+    if wav::looks_like_wav(bytes) {
+        return Some(AudioFormat::Wav);
+    }
     if flac::looks_like_flac(bytes) {
         return Some(AudioFormat::Flac);
     }
@@ -135,6 +140,7 @@ pub fn decode_audio_limited(
         AudioFormat::Mp3 => mp3::decode_all_limited(bytes, limits),
         AudioFormat::OggVorbis => vorbis::decode_all_limited(bytes, limits),
         AudioFormat::Flac => flac::decode_all_limited(bytes, limits),
+        AudioFormat::Wav => wav::decode_all_limited(bytes, limits),
     }
 }
 
@@ -151,6 +157,7 @@ pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
         AudioFormat::Mp3 => mp3::probe_duration(bytes),
         AudioFormat::OggVorbis => vorbis::probe_duration(bytes),
         AudioFormat::Flac => flac::probe_duration(bytes),
+        AudioFormat::Wav => wav::probe_duration(bytes),
     }
 }
 
@@ -165,6 +172,7 @@ pub fn head_needed(head: &[u8], file_len: u64) -> Option<usize> {
         AudioFormat::Mp3 => mp3::head_needed(head, file_len),
         AudioFormat::OggVorbis => vorbis::head_needed(head),
         AudioFormat::Flac => flac::head_needed(head),
+        AudioFormat::Wav => None,
     }
     .filter(|_| (head.len() as u64) < file_len)
 }
@@ -180,6 +188,7 @@ pub fn probe_ends(head: &[u8], tail: &[u8], file_len: u64) -> Result<(Tags, Opti
         AudioFormat::Mp3 => Ok(mp3::probe_ends(head, tail, file_len)),
         AudioFormat::OggVorbis => vorbis::probe_ends(head, tail),
         AudioFormat::Flac => flac::probe_head(head),
+        AudioFormat::Wav => Ok((Tags::default(), wav::probe_duration(head).ok())),
     }
 }
 
@@ -189,6 +198,7 @@ pub fn read_tags(bytes: &[u8]) -> Result<Tags, AudioError> {
         AudioFormat::Mp3 => Ok(mp3::read_tags(bytes)),
         AudioFormat::OggVorbis => vorbis::read_tags(bytes),
         AudioFormat::Flac => flac::read_tags(bytes),
+        AudioFormat::Wav => Ok(Tags::default()),
     }
 }
 
