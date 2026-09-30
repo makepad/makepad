@@ -457,8 +457,9 @@ impl LineRenderer {
         std::mem::take(&mut self.calls)
     }
 
-    /// Record `batch` into the current draw list.
-    pub fn draw_lines(&mut self, cx: &mut Cx2d, view: &LineView, batch: &LineBatch) {
+    /// Record `batch` into the current draw list (of a 2D or a 3D draw:
+    /// both are a `CxDraw`).
+    pub fn draw_lines(&mut self, cx: &mut CxDraw, view: &LineView, batch: &LineBatch) {
         if batch.is_empty() {
             return;
         }
@@ -481,8 +482,8 @@ impl LineRenderer {
         }
     }
 
-    /// Record `batch` into the current draw list.
-    pub fn draw_points(&mut self, cx: &mut Cx2d, view: &LineView, batch: &PointBatch) {
+    /// Record `batch` into the current draw list (of a 2D or a 3D draw).
+    pub fn draw_points(&mut self, cx: &mut CxDraw, view: &LineView, batch: &PointBatch) {
         if batch.is_empty() {
             return;
         }
