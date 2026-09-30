@@ -136,6 +136,10 @@ pub struct ScriptHeap {
     /// string ceiling). The interpreter asks `take_allocation_error` before
     /// every instruction, so the no-error case must be one flag read.
     pub(crate) allocation_error_pending: bool,
+    /// Bounded document evaluation (`eval_bounded`): natives that build a
+    /// string without a preflight build it and charge its length after,
+    /// instead of being refused. Off for Octoscript, which refuses them.
+    pub(crate) charge_native_strings_after: bool,
 }
 
 impl ScriptHeap {

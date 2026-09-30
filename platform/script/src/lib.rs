@@ -43,6 +43,7 @@ pub mod native;
 pub mod apply;
 pub mod array;
 pub mod array_heap;
+pub mod bounded;
 pub mod function;
 pub mod gc;
 pub mod handle;
@@ -86,6 +87,7 @@ pub mod vm;
 
 pub use apply::*;
 pub use array::*;
+pub use bounded::*;
 pub use docs::*;
 pub use function::*;
 pub use gc::*;

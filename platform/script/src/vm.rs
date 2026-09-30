@@ -1422,6 +1422,12 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn new_string_with<F: FnOnce(&mut Self, &mut String)>(&mut self, f: F) -> ScriptValue {
+        if self.bx.heap.has_allocation_budget() && self.bx.heap.charge_native_strings_after {
+            // Charged on its real length when it is stored.
+            let mut out = String::new();
+            f(self, &mut out);
+            return self.bx.heap.intern_or_store_string(out);
+        }
         if self.bx.heap.has_allocation_budget() {
             let _ = self.bx.heap.charge_allocation(
                 usize::MAX,

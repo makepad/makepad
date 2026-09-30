@@ -296,6 +296,12 @@ impl ScriptHeap {
     }
 
     pub fn new_string_with<F: FnOnce(&mut Self, &mut String)>(&mut self, cb: F) -> ScriptValue {
+        if self.has_allocation_budget() && self.charge_native_strings_after {
+            // Charged on its real length when it is stored.
+            let mut out = String::new();
+            cb(self, &mut out);
+            return self.intern_or_store_string(out);
+        }
         if self.has_allocation_budget() {
             // A raw `&mut String` callback has no way to enforce a ceiling
             // before `push` reallocates. Sandboxed execution must use one of
