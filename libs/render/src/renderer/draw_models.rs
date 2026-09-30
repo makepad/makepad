@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// How much of a model LOD chain's switch distance its two levels crossfade
+/// over, just before it: a copy in the band draws both levels through
+/// complementary screen-door windows, so a car that drives away changes
+/// level as a short dissolve instead of a pop.
+const CHAIN_FADE: f32 = 0.1;
+
+/// The two screen-door windows (near level, next level) of a copy at
+/// `distance` from a chain switch at `threshold`, or `None` outside the band.
+/// A pixel's noise n in [0, 1) shows the near level when n >= q and the next
+/// when n < q, q rising from 0 to 1 across the band.
+fn chain_fade_windows(threshold: f32, distance: f32) -> Option<(f32, f32)> {
+    let t = (distance - threshold * (1.0 - CHAIN_FADE)) / (threshold * CHAIN_FADE);
+    if !(t > 0.0 && t < 1.0) { return None; }
+    let q = (t * 255.0).round().clamp(1.0, 254.0);
+    Some((1.0 + q * 256.0 + 255.0, 1.0 + q))
+}
+
 /// One instance list's draw order for one frame: each copy's model slot and
 /// LOD, and the copies grouped by (model, LOD).
 #[derive(Default)]
@@ -10,21 +27,39 @@ pub(super) struct ModelOrder {
     slots: Vec<Option<usize>>,
     lods: Vec<usize>,
     distances: Vec<f32>,
-    order: Vec<usize>,
+    /// Draw entries: (copy, LOD, screen-door window). A copy crossfading
+    /// between two chain levels has an entry for each, their windows
+    /// complementary (the shader's `color_adjust_ctl.w` dither code); 0 is
+    /// no window.
+    order: Vec<(usize, usize, f32)>,
     /// Each model slot's pack occlusion atlas (index into `ao_textures`),
     /// resolved on first use this frame.
     ao: Vec<Option<Option<usize>>>,
 }
 
 impl ModelOrder {
-    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize)) {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>) -> u64 {
         // Model slot per instance, resolved once through a map: a linear
         // search per instance is O(instances x models), which a streamed or
         // prop-heavy world turns into milliseconds.
         let index: std::collections::HashMap<&str, usize> =
             models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
         self.slots.clear();
-        self.slots.extend(instances.iter().map(|inst| index.get(inst.model.as_str()).copied()));
+        // Copies of one model often follow each other: those skip the hash.
+        let mut last: Option<(&str, Option<usize>)> = None;
+        self.slots.extend(instances.iter().map(|inst| {
+            let id = inst.model.as_str();
+            match last {
+                Some((prev, slot)) if prev == id => slot,
+                _ => {
+                    let slot = index.get(id).copied();
+                    last = Some((id, slot));
+                    slot
+                }
+            }
+        }));
+        // Whether each model is an authored chain, once per model.
+        let chained: Vec<bool> = models.iter().map(|(k, _)| chained(k)).collect();
         self.distances.clear();
         self.distances.extend(instances.iter().map(|inst| crate::asset_lod::instance_distance(&inst.transform, eye)));
         self.lods.clear();
@@ -32,17 +67,50 @@ impl ModelOrder {
             models[at].1.lods.partition_point(|(threshold, _)| *threshold <= *distance)
         })));
         self.order.clear();
-        self.order.extend(0..instances.len());
+        for (i, (slot, (&lod, &distance))) in self.slots.iter().zip(self.lods.iter().zip(&self.distances)).enumerate() {
+            // Only authored chains (m.lod_models) fade: their few copies
+            // (vehicles) are worth a second draw in the band; a decimated
+            // prop's levels differ by less than the dither would show.
+            let fade = slot.filter(|at| chained[*at]).and_then(|at| {
+                chain_fade_windows(models[at].1.lods.get(lod)?.0, distance)
+            });
+            match fade {
+                Some((near, next)) => {
+                    self.order.push((i, lod, near));
+                    self.order.push((i, lod + 1, next));
+                }
+                None => self.order.push((i, lod, 0.0)),
+            }
+        }
+        // Culled once for every lane that walks this list: an entry with no
+        // model, or offscreen by the lanes' own test (a copy with a
+        // Splash material keeps its lane's test, which pads its bounds).
+        // A crossfading copy's two entries are tested on their own levels.
+        let mut culled = 0;
+        {
+            let slots = &self.slots;
+            self.order.retain(|&(i, lod, _)| {
+                let Some(at) = slots[i] else { return false };
+                let (Some(frustum), None) = (frustum, instances[i].custom_material.as_ref()) else { return true };
+                let root = &models[at].1;
+                let loaded = if lod == 0 { root } else { &root.lods[lod - 1].1 };
+                let m = vec3f(0.05, 0.05, 0.05);
+                let shown = !loaded.anim_parts.is_empty() || frustum.intersects_obb(root.min - m, root.max + m, &instances[i].transform);
+                culled += !shown as u64;
+                shown
+            });
+        }
         // Nearest first within each (model, LOD) group: a batch keeps its
         // geometry, and a cut-out layer (leaves) that cannot use hidden-
         // surface removal still has its hidden fragments rejected by the
         // early depth test instead of shaded and then covered. Distances
         // are non-negative, so their bits order like the floats.
-        let (slots, lods, distances) = (&self.slots, &self.lods, &self.distances);
-        self.order.sort_unstable_by_key(|&i| (slots[i], lods[i], distances[i].to_bits(), i));
+        let (slots, distances) = (&self.slots, &self.distances);
+        self.order.sort_unstable_by_key(|&(i, lod, _)| (slots[i], lod, distances[i].to_bits(), i));
         self.ao.clear();
         self.ao.resize(models.len(), None);
         self.key = key;
+        culled
     }
 }
 
@@ -140,46 +208,53 @@ impl Renderer {
         let key = (instances.as_ptr() as usize, instances.len());
         if matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key {
             let mut built = std::mem::take(&mut self.model_orders[which]);
-            built.build(&self.static_models, instances, eye, key);
+            let chains = &self.model_lod_chains;
+            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum);
+            match lane {
+                WorldModelLane::Placed => stats.model_culled += culled,
+                WorldModelLane::Attachment => stats.world_attachment_culled += culled,
+            }
             self.model_orders[which] = built;
         }
         let mut model_order = std::mem::take(&mut self.model_orders[which]);
-        let ModelOrder { slots, lods, distances, order, ao: model_ao, .. } = &mut model_order;
+        let ModelOrder { slots, distances, order, ao: model_ao, .. } = &mut model_order;
         // Layer-major: every copy's first layer, then every copy's second.
         // A multi-layer model (a tree: trunk, then leaves) drawn copy by
         // copy alternates geometry, and the batcher only appends to the
         // previous item of the same geometry: thousands of scattered trees
         // were thousands of draws. Stats and rigid parts count on pass 0.
-        let layer_passes = order.iter().filter_map(|i| slots[*i]).map(|at| {
+        let layer_passes = order.iter().filter_map(|(i, _, _)| slots[*i]).map(|at| {
             let root = &self.static_models[at].1;
             std::iter::once(root).chain(root.lods.iter().map(|(_, m)| m)).map(|m| (m.triangles > 0) as usize + m.extra_draws.len()).max().unwrap_or(1)
         }).max().unwrap_or(1).max(1);
-        // Pass 0 walks every copy; later passes only the drawn copies that
-        // have that many layers (index, layer count).
-        let mut layered: Vec<(usize, usize)> = Vec::new();
+        // Pass 0 walks every entry; later passes only the drawn entries that
+        // have that many layers (entry, layer count).
+        // The models are read, not cloned, per copy: set aside for the walk
+        // (nothing below reads them through `self`) and put back after it.
+        let static_models = std::mem::take(&mut self.static_models);
+        let mut layered: Vec<((usize, usize, f32), usize)> = Vec::new();
         for layer_pass in 0..layer_passes {
             let mut last: Option<(usize, usize)> = None;
-            let pass_order: std::borrow::Cow<[usize]> = if layer_pass == 0 {
+            let pass_order: std::borrow::Cow<[(usize, usize, f32)]> = if layer_pass == 0 {
                 std::borrow::Cow::Borrowed(&order[..])
             } else {
-                std::borrow::Cow::Owned(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(i, _)| *i).collect())
+                std::borrow::Cow::Owned(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(e, _)| *e).collect())
             };
             if pass_order.is_empty() {
                 break;
             }
-            for &i in pass_order.iter() {
+            for &(i, lod_index, window) in pass_order.iter() {
                 let inst = &instances[i];
                 let dynamic = lane.is_dynamic(inst);
                 let Some(at) = slots[i] else {
                     continue;
                 };
-                let root = &self.static_models[at].1;
+                let root = &static_models[at].1;
                 let inv_height = 1.0 / root.max.y.max(0.5);
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
                 let distance=distances[i];
                 let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
-                let lod_index=lods[i];
                 let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
                 // Lane filter. Both passes walk the same instance list — indices
                 // address `lm_remaps` / `model_ground` / the light-cell key, so
@@ -220,7 +295,7 @@ impl Renderer {
                 // copies all fall outside never opens a draw item at all. The
                 // shadow a prop casts is not affected: prop shadows live in the
                 // merged static shadow mesh, which is drawn whole regardless.
-                if let Some(frustum) = frustum {
+                if let Some(frustum) = frustum.filter(|_| inst.custom_material.is_some()) {
                     // Generic node clips can leave the authored rest bounds.
                     // Their small, bounded part sets remain visible until posed
                     // bounds are available; a rest-only cull would hide motion.
@@ -248,19 +323,19 @@ impl Renderer {
                     if m.triangles > 0 {
                         layers.push((
                             m.geometry.geometry_id(),
-                            m.texture.clone(),
-                            m.detail.clone(),
+                            &m.texture,
+                            &m.detail,
                             m.detail_scale,
-                            m.material.clone(),
+                            &m.material,
                         ));
                     }
                     for (g, t, d, s, mat) in &m.extra_draws {
-                        layers.push((g.geometry_id(), t.clone(), d.clone(), *s, mat.clone()));
+                        layers.push((g.geometry_id(), t, d, *s, mat));
                     }
                     (layers, m.prelit)
                 };
                 if layer_pass == 0 && layer_draws.len() > 1 {
-                    layered.push((i, layer_draws.len()));
+                    layered.push(((i, lod_index, window), layer_draws.len()));
                 }
                 // Rigid parts ride the PARENT's material: a door is cut from the
                 // level tile it sits in, so its metal/roughness is the model's.
@@ -285,7 +360,10 @@ impl Renderer {
                 }
                 draw.base().transform = inst.transform;
                 draw.base().tint = inst.tint;
-                draw.base().color_adjust_ctl = inst.color_adjust;
+                // A crossfading copy's window replaces its w (a plate's
+                // number blanks for the few frames of the dissolve).
+                let adjust = if window > 0.0 { vec4(inst.color_adjust.x, inst.color_adjust.y, inst.color_adjust.z, window) } else { inst.color_adjust };
+                draw.base().color_adjust_ctl = adjust;
                 // Screen-door cuts: the streamed-LOD dither, and the occluder
                 // fade wherever its cone can reach this copy.
                 // The level's ground (terrain tiles, road ribbons) never
@@ -295,7 +373,7 @@ impl Renderer {
                 // on the discarding pipeline: hidden ground under a city
                 // then shaded in full (gpuperf lane, citydrive).
                 let ground = inst.model.starts_with("gen/surface/level-terrain") || inst.model.starts_with("gen/surface/level-road");
-                let screen_clip = inst.color_adjust.w > 0.5
+                let screen_clip = adjust.w > 0.5
                     || !ground && occluder_focus.is_some_and(|focus| {
                         let (center, radius) = opaque::bounding_sphere(root.min, root.max, &inst.transform);
                         opaque::in_occluder_fade(eye, focus, center, radius)
@@ -417,7 +495,7 @@ impl Renderer {
                 // the static atlas never had a window for it. Its shadow comes
                 // from the realtime cascades, which see it as a mover.
                 let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2],LayerMaterial)>)> = {
-                    let root=&self.static_models[at].1;
+                    let root=&static_models[at].1;
                     let m = if lod_index==0{root}else{&root.lods[lod_index-1].1};
                     let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
                     if !m.anim_parts.is_empty() {
@@ -491,6 +569,7 @@ impl Renderer {
                 }
             }
         }
+        self.static_models = static_models;
         self.model_orders[which] = model_order;
     }
 
@@ -621,10 +700,18 @@ impl Renderer {
         if !self.pbr_materials_enabled {
             return;
         }
+        // The diffuse lane's order for this list (built this frame) holds
+        // every copy's model slot: no hashing of every model name.
+        let which = matches!(lane, WorldModelLane::Attachment) as usize;
         let any = {
-            let shiny: std::collections::HashSet<&str> = self.static_models.iter()
-                .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
-            !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str()))
+            let order = &self.model_orders[which];
+            if order.key == (instances.as_ptr() as usize, instances.len()) {
+                order.slots.iter().any(|slot| slot.is_some_and(|at| self.static_models[at].1.wants_pbr))
+            } else {
+                let shiny: std::collections::HashSet<&str> = self.static_models.iter()
+                    .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
+                !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str()))
+            }
         };
         if !any {
             return;
@@ -904,5 +991,36 @@ impl Renderer {
             stats.view_model_instances += 1;
             stats.view_model_triangles += loaded.triangles;
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_fade_tests {
+    use super::chain_fade_windows;
+
+    /// The shader's test (skinned.rs / pbr.rs): shown while lo <= n*255 < hi.
+    fn shows(window: f32, n: f32) -> bool {
+        let dv = window - 1.0;
+        let lo = (dv / 256.0).floor();
+        let hi = dv - lo * 256.0;
+        !(n < lo / 255.0 || n >= hi / 255.0)
+    }
+
+    #[test]
+    fn a_copy_in_the_band_shows_each_pixel_in_exactly_one_level() {
+        for d in [27.1f32, 28.0, 28.5, 29.2, 29.9] {
+            let (near, next) = chain_fade_windows(30.0, d).expect("inside the band");
+            for k in 0..1000 {
+                let n = k as f32 / 1000.0;
+                assert!(shows(near, n) != shows(next, n), "d {d} n {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_next_level_takes_over_across_the_band() {
+        let cover = |d: f32| { let (_, next) = chain_fade_windows(90.0, d).unwrap(); (0..1000).filter(|k| shows(next, *k as f32 / 1000.0)).count() };
+        assert!(cover(81.5) < 100 && cover(85.5) > 400 && cover(85.5) < 600 && cover(89.5) > 900);
+        assert!(chain_fade_windows(90.0, 80.0).is_none() && chain_fade_windows(90.0, 90.0).is_none() && chain_fade_windows(90.0, 120.0).is_none());
     }
 }
