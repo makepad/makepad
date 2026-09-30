@@ -12,12 +12,13 @@ use crate::records::{Karaoke, Records, GLYPH_WORDS};
 use crate::shapes::{self, GlyphSet, VERT_FLOATS};
 use makepad_draw::makepad_platform::draw_shader_layout::{LayoutKind, LayoutPacking, PodType};
 use makepad_draw::*;
+use makepad_audio_reactive::{bind_audio, AudioFrame};
 use makepad_render_graph::{Attachments, FrameUniforms, GraphRunner, Stage, StageInputs};
 use makepad_script_compute::kernel::{FieldTy, Kernel, Layout, LayoutField};
 use std::sync::Arc;
 
 /// The per-frame signals a host gives.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct KineticFrame {
     /// Seconds (the layer's time).
     pub time: f32,
@@ -32,7 +33,16 @@ pub struct KineticFrame {
     pub karaoke: Karaoke,
     /// The picture under the layer (glass, backdrops).
     pub content: Option<Texture>,
+    /// The sound (makepad-audio-reactive): looks read it with
+    /// `self.audio_fft(f, age)`, `self.audio_wave(t)`, `self.audio_hit`, ...
+    pub audio: Option<AudioFrame>,
+    /// The newest spectrum in [`BANDS`] log bands (0..1), for animators:
+    /// `band(f)` with `f` 0..1 low to high.
+    pub spectrum: [f32; BANDS],
 }
+
+/// Log bands of the animators' spectrum.
+pub const BANDS: usize = 32;
 
 /// What the last frame cost on the CPU.
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,7 +108,7 @@ fn compile_shader<T: ScriptNew + ScriptApply>(cx: &mut Cx, base: &str, members: 
         if members.trim().is_empty() {
             return Ok(draw);
         }
-        let code = format!("use mod.std.*\nuse mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nuse mod.shared.*\nmod.draw.{base}{{\n{}{members}}}\n", marker(members));
+        let code = format!("use mod.std.*\nuse mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nuse mod.shared.*\nmod.draw.{base}{{\n{}{}{members}}}\n", marker(members), makepad_audio_reactive::SPLASH);
         vm.bx.captured_errors = Some(Vec::new());
         let value = vm.eval(ScriptMod { file: file.to_string(), code, ..Default::default() });
         let errors = vm.take_errors();
@@ -187,6 +197,15 @@ struct Picture {
     list: DrawList,
     color: Texture,
     depth: Texture,
+}
+
+/// Bind `tex` to the texture slot the shader named `id` (no-op without it).
+fn bind_named(cx: &Cx, dv: &mut DrawVars, id: LiveId, tex: &Texture) {
+    if let Some(sid) = dv.draw_shader_id {
+        if let Some(slot) = cx.draw_shaders[sid.index].mapping.textures.iter().position(|t| t.id == id) {
+            dv.set_texture(slot, tex);
+        }
+    }
 }
 
 impl Picture {
@@ -289,6 +308,9 @@ pub struct KineticView {
     backdrop: Option<DrawKineticBackdrop>,
     glyph_kernel: Arc<Kernel>,
     camera_kernel: Option<Arc<Kernel>>,
+    curve_kernel: Option<Arc<Kernel>>,
+    /// The curve's points, resampled data and texture.
+    curve: (Vec<f32>, Vec<[f32; 3]>, Option<Texture>, f32),
     layout: Layout,
     shape_word: usize,
     set: Option<GlyphSet>,
@@ -330,6 +352,11 @@ impl KineticView {
             Some(f) => Some(kernel::compile(&kernel::compose_camera(&split, &values.dials, f), &layout)?),
             None => None,
         };
+        let curve_kernel = match (&split.curve, values.curve_points) {
+            (Some(f), Some(_)) => Some(kernel::compile(&kernel::compose_curve(&split, &values.dials, f), &layout)?),
+            (Some(_), None) => return Err("a kit with `curve_fn` also declares `curve: {points: 256}`".into()),
+            _ => None,
+        };
         let pass = DrawPass::new_with_name(cx, "kinetic");
         // The pass keeps the camera this view sets (not the 2D ortho).
         cx.passes[pass.draw_pass_id()].keep_camera_matrix = true;
@@ -344,6 +371,8 @@ impl KineticView {
             backdrop,
             glyph_kernel,
             camera_kernel,
+            curve_kernel,
+            curve: (Vec::new(), Vec::new(), None, 0.0),
             layout,
             shape_word,
             set: None,
@@ -454,6 +483,12 @@ impl KineticView {
         self.pass.draw_pass_id()
     }
 
+    fn bind_picture(cx: &Cx, dv: &mut DrawVars, pp: &Picture, picture: Option<(u32, u32, f32)>) {
+        bind_named(cx, dv, live_id!(pic_tex), &pp.color);
+        let (w, h) = picture.map_or((1024.0, 256.0), |p| (p.0 as f32, p.1 as f32));
+        dv.set_uniform(cx, live_id!(k_pic), &[w, h, 0.0, 0.0]);
+    }
+
     pub fn has_text(&self) -> bool {
         self.set.is_some()
     }
@@ -556,7 +591,7 @@ impl KineticView {
                     call.set_param(name, p[k]);
                 }
             }
-            let ok = call.input("glyphs", &self.records.data[..n * GLYPH_WORDS]).and_then(|_| call.output("out", &mut self.out[..]));
+            let ok = call.input("glyphs", &self.records.data[..n * GLYPH_WORDS]).and_then(|_| call.input("spectrum", &frame.spectrum)).and_then(|_| call.output("out", &mut self.out[..]));
             let run = ok.and_then(|_| if n > 2048 { call.run_parallel(n, 8) } else { call.run(n) });
             if let Err(e) = run {
                 let e = format!("animator: {e}");
@@ -609,11 +644,47 @@ impl KineticView {
             for k in 0..4 {
                 call.set_param(&format!("p{}", k + 1), p[k]);
             }
-            let r = call.input("base", &base).and_then(|_| call.output("out", &mut o)).and_then(|_| call.run(1));
+            let r = call.input("base", &base).and_then(|_| call.input("spectrum", &frame.spectrum)).and_then(|_| call.output("out", &mut o)).and_then(|_| call.run(1));
             match r {
                 Ok(_) => cam = o,
                 Err(e) => {
                     let e = format!("camera: {e}");
+                    if !self.errors.contains(&e) {
+                        self.errors.push(e);
+                    }
+                }
+            }
+        }
+        if let (Some(k), Some(np)) = (&self.curve_kernel, self.values.curve_points) {
+            let np = np as usize;
+            self.curve.0.resize(np * 4, 0.0);
+            let mut call = k.call();
+            call.set_time(frame.time);
+            for ((name, _), v) in SIGNALS.iter().zip(sig.iter()) {
+                call.set_param(name, *v);
+            }
+            for k in 0..4 {
+                call.set_param(&format!("p{}", k + 1), p[k]);
+            }
+            let r = call.input("spectrum", &frame.spectrum).and_then(|_| call.output("out", &mut self.curve.0)).and_then(|_| call.run(np));
+            match r {
+                Ok(_) => {
+                    self.curve.1.clear();
+                    self.curve.1.extend(self.curve.0.chunks_exact(4).map(|c| [c[0], c[1], c[2]]));
+                    let (data, len) = crate::curve::resample(&self.curve.1, np);
+                    self.curve.3 = len;
+                    match &self.curve.2 {
+                        Some(t) => {
+                            let _ = t.take_vec_f32(cx.cx);
+                            t.put_back_vec_f32(cx.cx, data, None);
+                        }
+                        None => {
+                            self.curve.2 = Some(Texture::new_with_format(cx.cx, TextureFormat::VecRGBAf32 { width: np, height: crate::curve::ROWS, data: Some(data), updated: TextureUpdated::Full }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let e = format!("curve: {e}");
                     if !self.errors.contains(&e) {
                         self.errors.push(e);
                     }
@@ -663,6 +734,9 @@ impl KineticView {
             pp.list.begin_always(cx);
             let pview = [pw as f32, ph as f32, self.text_at, 1.0];
             Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu);
+            if let Some(a) = &frame.audio {
+                bind_audio(cx.cx, &mut self.draw.draw_vars, a);
+            }
             calls += glyphs.draw(cx, &mut self.draw);
             pp.list.end(cx);
             cx.end_pass(&pp.pass);
@@ -680,8 +754,11 @@ impl KineticView {
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
             }
+            if let Some(a) = &frame.audio {
+                bind_audio(cx.cx, &mut b.draw_super.draw_vars, a);
+            }
             if let Some(pp) = &self.picture {
-                b.draw_super.draw_vars.set_texture(1, &pp.color);
+                Self::bind_picture(cx.cx, &mut b.draw_super.draw_vars, pp, picture);
             }
             b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
             calls += 1;
@@ -690,8 +767,16 @@ impl KineticView {
         if let Some(c) = &frame.content {
             self.draw.draw_vars.set_texture(0, c);
         }
+        if let Some(a) = &frame.audio {
+            bind_audio(cx.cx, &mut self.draw.draw_vars, a);
+        }
         if let Some(pp) = &self.picture {
-            self.draw.draw_vars.set_texture(1, &pp.color);
+            Self::bind_picture(cx.cx, &mut self.draw.draw_vars, pp, picture);
+        }
+        if let Some(t) = &self.curve.2 {
+            bind_named(cx.cx, &mut self.draw.draw_vars, live_id!(curve_tex), t);
+            let np = self.values.curve_points.unwrap_or(2) as f32;
+            self.draw.draw_vars.set_uniform(cx.cx, live_id!(k_curve), &[self.curve.3, np, 0.0, 0.0]);
         }
         if picture.is_none() {
             calls += glyphs.draw(cx, &mut self.draw);

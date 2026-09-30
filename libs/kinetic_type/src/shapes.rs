@@ -66,6 +66,9 @@ pub struct ShapeSpec {
     /// Glyphs an animator may switch to (`o.shape = alpha0 + k`).
     pub alphabet: String,
     pub cells: Option<CellSpec>,
+    /// A word cloud: every distinct word once, sized by how often it
+    /// occurs, packed round the centre without overlaps.
+    pub cloud: bool,
 }
 
 impl Default for ShapeSpec {
@@ -87,6 +90,7 @@ impl Default for ShapeSpec {
             wrap: None,
             alphabet: String::new(),
             cells: None,
+            cloud: false,
         }
     }
 }
@@ -118,6 +122,10 @@ pub struct Rest {
     pub glyph: i32,
     /// Index of the char in the text (for karaoke), or usize::MAX.
     pub char_index: usize,
+    /// The element's base scale (a cloud word's size; 1 elsewhere).
+    pub scale: f32,
+    /// Its word's weight 0..1 (a cloud word's share of the heaviest; 1 elsewhere).
+    pub weight: f32,
 }
 
 /// A built text: its shapes and every element at rest.
@@ -214,9 +222,93 @@ fn ink_chars(text: &str) -> Vec<(usize, char)> {
     text.chars().enumerate().filter(|(_, c)| !c.is_whitespace()).collect()
 }
 
+/// The distinct words of `text` in first-seen order with their counts.
+fn word_counts(text: &str) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for w in text.split_whitespace() {
+        match out.iter_mut().find(|(k, _)| k == w) {
+            Some(e) => e.1 += 1,
+            None => out.push((w.to_string(), 1)),
+        }
+    }
+    out
+}
+
+/// A word cloud: the distinct words set one per line, then each word
+/// scaled by its weight and packed on a spiral (heaviest first, nearest the
+/// centre) so no two word boxes overlap.
+fn build_cloud(spec: &ShapeSpec) -> Result<GlyphSet, String> {
+    let words = word_counts(&spec.text);
+    let max = words.iter().map(|w| w.1).max().unwrap_or(1).max(1) as f32;
+    let lines: Vec<&str> = words.iter().map(|w| w.0.as_str()).collect();
+    let mut set = build(&ShapeSpec { text: lines.join("\n"), cloud: false, wrap: None, ..spec.clone() })?;
+    let n = words.len();
+    // Each word's ink box (from its letters) and its scale.
+    let mut boxes = vec![([f32::MAX; 2], [f32::MIN; 2]); n];
+    for e in &set.elements {
+        let b = &mut boxes[e.line.min(n.saturating_sub(1))];
+        b.0[0] = b.0[0].min(e.pivot[0] - e.size[0] * 0.5);
+        b.0[1] = b.0[1].min(e.pivot[1] - e.size[1] * 0.5);
+        b.1[0] = b.1[0].max(e.pivot[0] + e.size[0] * 0.5);
+        b.1[1] = b.1[1].max(e.pivot[1] + e.size[1] * 0.5);
+    }
+    let weight: Vec<f32> = words.iter().map(|w| w.1 as f32 / max).collect();
+    let scale: Vec<f32> = weight.iter().map(|w| 0.55 + 0.95 * w).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| weight[*b].partial_cmp(&weight[*a]).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(b)));
+    let gap = spec.size * 0.12;
+    let mut placed: Vec<([f32; 2], [f32; 2])> = Vec::new();
+    let mut centre = vec![[0.0f32; 2]; n];
+    for &w in &order {
+        let (lo, hi) = boxes[w];
+        let half = [(hi[0] - lo[0]).max(0.0) * 0.5 * scale[w] + gap, (hi[1] - lo[1]).max(0.0) * 0.5 * scale[w] + gap];
+        let mut k = 0u32;
+        loop {
+            // An Archimedean spiral, wider than tall (a 16:9 frame).
+            let a = k as f32 * 0.35;
+            let r = spec.size * 0.12 * a;
+            let c = [r * a.cos() * 1.7, r * a.sin()];
+            let hit = placed.iter().any(|(pc, ph)| (pc[0] - c[0]).abs() < ph[0] + half[0] && (pc[1] - c[1]).abs() < ph[1] + half[1]);
+            if !hit || k > 20000 {
+                placed.push((c, half));
+                centre[w] = c;
+                break;
+            }
+            k += 1;
+        }
+    }
+    let mut min = [f32::MAX; 3];
+    let mut max3 = [f32::MIN; 3];
+    let mids: Vec<[f32; 2]> = boxes.iter().map(|(lo, hi)| [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5]).collect();
+    for e in &mut set.elements {
+        let w = e.line.min(n.saturating_sub(1));
+        let s = scale[w];
+        e.pivot = [centre[w][0] + (e.pivot[0] - mids[w][0]) * s, centre[w][1] + (e.pivot[1] - mids[w][1]) * s, e.pivot[2] * s];
+        e.scale = s;
+        e.weight = weight[w];
+        e.word = w;
+        e.line = 0;
+        for k in 0..3 {
+            min[k] = min[k].min(e.pivot[k] - e.size[k] * 0.5 * s);
+            max3[k] = max3[k].max(e.pivot[k] + e.size[k] * 0.5 * s);
+        }
+    }
+    if !set.elements.is_empty() {
+        set.bounds = (min, max3);
+    }
+    set.word_centers = centre.iter().map(|c| [c[0], c[1], 0.0]).collect();
+    set.words = n;
+    set.lines = 1;
+    set.line_centers = vec![[0.0; 3]];
+    Ok(set)
+}
+
 /// Build the set for `spec` (the shapes of the text, then the alphabet's,
 /// then the cube for cells).
 pub fn build(spec: &ShapeSpec) -> Result<GlyphSet, String> {
+    if spec.cloud {
+        return build_cloud(spec);
+    }
     let voxels = spec.cells.as_ref().map(|c| (c.res.clamp(4, 40), c.layers.clamp(1, 12)));
     let t3 = build_text3d(&params(spec, &spec.text, voxels))?;
     let mut set = GlyphSet {
@@ -275,6 +367,8 @@ pub fn build(spec: &ShapeSpec) -> Result<GlyphSet, String> {
                     layer: 0,
                     glyph: k as i32,
                     char_index: chars.get(l.index).map_or(usize::MAX, |c| c.0),
+                    scale: 1.0,
+                    weight: 1.0,
                 });
             }
         }
@@ -303,6 +397,8 @@ pub fn build(spec: &ShapeSpec) -> Result<GlyphSet, String> {
                     layer,
                     glyph: v.glyph as i32,
                     char_index: chars.get(v.glyph).map_or(usize::MAX, |c| c.0),
+                    scale: 1.0,
+                    weight: 1.0,
                 });
             }
             if cells.block && !t3.voxels.is_empty() {
@@ -333,6 +429,8 @@ pub fn build(spec: &ShapeSpec) -> Result<GlyphSet, String> {
                                 layer,
                                 glyph: -1,
                                 char_index: usize::MAX,
+                                scale: 1.0,
+                                weight: 1.0,
                             });
                         }
                     }
@@ -365,6 +463,29 @@ mod tests {
         let xs: Vec<f32> = a.verts.chunks(VERT_FLOATS).map(|v| v[0]).collect();
         let (lo, hi) = (xs.iter().cloned().fold(f32::MAX, f32::min), xs.iter().cloned().fold(f32::MIN, f32::max));
         assert!((lo + hi).abs() < 0.05, "centred: {lo} {hi}");
+    }
+
+    #[test]
+    fn a_cloud_sizes_words_by_count_and_never_overlaps() {
+        let set = build(&ShapeSpec { text: "sing sing sing along with me sing along".into(), cloud: true, ..ShapeSpec::default() }).unwrap();
+        assert_eq!(set.words, 4);
+        let sing = set.elements.iter().find(|e| e.ch == 'S' || e.ch == 's').unwrap();
+        let me = set.elements.iter().find(|e| e.ch == 'm').unwrap();
+        assert!(sing.weight == 1.0 && me.weight == 0.25 && sing.scale > me.scale);
+        // Word boxes are apart.
+        let bx = |w: usize| {
+            let es: Vec<_> = set.elements.iter().filter(|e| e.word == w).collect();
+            let lo = es.iter().fold([f32::MAX; 2], |a, e| [a[0].min(e.pivot[0] - e.size[0] * 0.5 * e.scale), a[1].min(e.pivot[1] - e.size[1] * 0.5 * e.scale)]);
+            let hi = es.iter().fold([f32::MIN; 2], |a, e| [a[0].max(e.pivot[0] + e.size[0] * 0.5 * e.scale), a[1].max(e.pivot[1] + e.size[1] * 0.5 * e.scale)]);
+            (lo, hi)
+        };
+        for a in 0..4 {
+            for b in a + 1..4 {
+                let (p, q) = (bx(a), bx(b));
+                let apart = p.1[0] <= q.0[0] + 1e-3 || q.1[0] <= p.0[0] + 1e-3 || p.1[1] <= q.0[1] + 1e-3 || q.1[1] <= p.0[1] + 1e-3;
+                assert!(apart, "words {a} and {b} overlap: {p:?} {q:?}");
+            }
+        }
     }
 
     #[test]

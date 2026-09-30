@@ -6,6 +6,7 @@
 //! looks like and how it moves is Splash ([`kit`]); nothing here knows a
 //! preset.
 
+pub mod curve;
 pub mod draw;
 pub mod kernel;
 pub mod kit;

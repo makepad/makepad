@@ -5,7 +5,7 @@
 //! Kinetic{
 //!     name: "Wave Line"  text: "KINETIC TEXT"  case: @upper  font: @bold
 //!     size: 1.0  depth: 0.35  bevel: 0.03  bevel_type: @round  material: @metal
-//!     layout: @line  wrap: 12  align: @center  line_gap: 1.2  tracking: 0.0
+//!     layout: @line | @cloud  wrap: 12  align: @center  line_gap: 1.2  tracking: 0.0
 //!     copies: 1  alphabet: "#%&"  cells: {res: 12 layers: 2 fill: @block}
 //!     colors: {bg: #05060d a: #ffc84a b: #2a1450 c: #49e6ff}
 //!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1
@@ -16,6 +16,7 @@
 //!     post: [Glow{threshold: 0.62 strength: 0.9}]
 //!     glyph: fn(g, o) { ... }            // the animator: a kernel (CPU)
 //!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU)
+//!     curve: {points: 256}  curve_fn: fn(c) { c.pos = ... }   // a path at c.u, even by arc length
 //!     look: fn() -> vec4 { ... }         // every other fn: the glyph shader
 //! }
 //! ```
@@ -47,6 +48,8 @@ pub struct Split {
     pub kernel_items: String,
     pub glyph: Option<FnSrc>,
     pub camera: Option<FnSrc>,
+    /// `curve_fn: fn(c) { c.pos = ... }`: a point on a path at `c.u` 0..1.
+    pub curve: Option<FnSrc>,
     /// Shader members of the glyph draw (`name: fn ...`), in order.
     pub shader: Vec<(String, FnSrc)>,
     /// `backdrop: fn() -> vec4 {...}`.
@@ -215,6 +218,7 @@ pub fn split(src: &str) -> Result<Split, String> {
                     match name {
                         "glyph" => split.glyph = Some(f),
                         "camera_fn" => split.camera = Some(f),
+                        "curve_fn" => split.curve = Some(f),
                         "backdrop" => split.backdrop = Some(f),
                         _ => split.shader.push((name.to_string(), f)),
                     }
@@ -289,6 +293,9 @@ pub struct KitValues {
     /// shapes (a globe, a knot, a ribbon printed with the picture), drawn
     /// `copies` times (`self.attr.x` = the copy).
     pub surface: Option<(u32, u32, u32)>,
+    /// `curve: {points: 256}`: the curve_fn sampled at this many points and
+    /// resampled evenly by arc length (see crate::curve).
+    pub curve_points: Option<u32>,
     /// `grow` runs 0..1 over this many beats (0: stays 1).
     pub cycle_beats: f32,
     pub pingpong: bool,
@@ -489,6 +496,9 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
             _ => TextAlign::Center,
         };
     }
+    if s(vm, "layout").as_deref() == Some("cloud") {
+        shape.cloud = true;
+    }
     if let Some(a) = s(vm, "alphabet") {
         shape.alphabet = a;
     }
@@ -564,6 +574,8 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         let v = num(field(vm, c, "v")).unwrap_or(32.0).clamp(2.0, 1024.0) as u32;
         (u, v, num(field(vm, c, "copies")).unwrap_or(1.0).clamp(1.0, 256.0) as u32)
     });
+    let cv = field(vm, o, "curve");
+    let curve_points = cv.as_object().map(|c| num(field(vm, c, "points")).unwrap_or(256.0).clamp(4.0, 4096.0) as u32);
     let (mut cycle_beats, mut pingpong) = (0.0, false);
     let cy = field(vm, o, "cycle");
     if let Some(c) = cy.as_object() {
@@ -642,6 +654,7 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         floor,
         picture,
         surface,
+        curve_points,
         cycle_beats,
         pingpong,
         passes,

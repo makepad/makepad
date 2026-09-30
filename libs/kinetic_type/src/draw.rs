@@ -34,6 +34,13 @@ script_mod! {
         content_tex: texture_2d(float)
         // The kit's picture, for surfaces printed with it.
         pic_tex: texture_2d(float)
+        // xy = the picture's size in pixels
+        k_pic: uniform(vec4(1024.0, 256.0, 0.0, 0.0))
+        // The kit's curve (`curve_fn`), even by arc length: row 0 the point
+        // and its fraction, rows 1..3 tangent, normal, binormal.
+        curve_tex: texture_2d(float)
+        // x = the curve's length, y = its samples
+        k_curve: uniform(vec4(0.0, 2.0, 0.0, 0.0))
 
         backface_culling: false
         alpha_blend: true
@@ -82,6 +89,30 @@ script_mod! {
         // (a dome, a squash, a twist). Identity by default.
         deform: fn(p: vec3) -> vec3 {
             return p
+        }
+
+        // The curve at arc-length fraction s 0..1 (vertex stage): row 0 the
+        // point, 1 tangent, 2 normal, 3 binormal, linear between samples.
+        curve_row: fn(s: float, row: float) -> vec4 {
+            let n = max(self.k_curve.y, 2.0)
+            let x = clamp(s, 0.0, 1.0) * (n - 1.0)
+            let i = floor(x)
+            let v = (row + 0.5) / 4.0
+            let a = self.curve_tex.sample_nearest(vec2((i + 0.5) / n, v), 0.0)
+            let b = self.curve_tex.sample_nearest(vec2((min(i + 1.0, n - 1.0) + 0.5) / n, v), 0.0)
+            return mix(a, b, x - i)
+        }
+        curve_at: fn(s: float) -> vec3 {
+            return self.curve_row(s, 0.0).xyz
+        }
+        curve_t: fn(s: float) -> vec3 {
+            return normalize(self.curve_row(s, 1.0).xyz)
+        }
+        curve_n: fn(s: float) -> vec3 {
+            return normalize(self.curve_row(s, 2.0).xyz)
+        }
+        curve_b: fn(s: float) -> vec3 {
+            return normalize(self.curve_row(s, 3.0).xyz)
         }
 
         // A surface's point at (u, v) in 0..1 (`surface: {u v copies}`;
@@ -157,8 +188,25 @@ script_mod! {
             return vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5)
         }
         // The kit's picture at uv (0,0 top left) and its ink (luma).
+        // The picture at uv (0,0 top left), filtered over this pixel's
+        // footprint: squeezed small (a far ring, a pole) it averages a 3x3
+        // grid of taps across the footprint instead of shimmering. A seam
+        // of a fract()-tiled uv (a huge footprint) reads one tap.
         picture: fn(uv: vec2) -> vec4 {
-            return self.pic_tex.sample(uv)
+            let dx = dFdx(uv)
+            let dy = dFdy(uv)
+            let d = max(length(dx * self.k_pic.xy), length(dy * self.k_pic.xy))
+            if d < 1.5 || d > 64.0 {
+                return self.pic_tex.sample(uv)
+            }
+            let mut c = vec4(0.0, 0.0, 0.0, 0.0)
+            for j in 0..3 {
+                for i in 0..3 {
+                    let o = (float(i) - 1.0) / 3.0 * dx + (float(j) - 1.0) / 3.0 * dy
+                    c = c + self.pic_tex.sample(uv + o)
+                }
+            }
+            return c / 9.0
         }
         ink: fn(uv: vec2) -> float {
             return clamp(dot(self.picture(uv).xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
@@ -292,6 +340,8 @@ script_mod! {
         content_tex: texture_2d(float)
         // The kit's picture (`picture: {...}`): its glyphs drawn flat.
         pic_tex: texture_2d(float)
+        // xy = the picture's size in pixels
+        k_pic: uniform(vec4(1024.0, 256.0, 0.0, 0.0))
         depth_write: false
         time: uniform(0.0)
         beat: uniform(0.0)
@@ -321,8 +371,25 @@ script_mod! {
             return self.content_tex.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
         // The picture at uv (0,0 top left); `fract` a coordinate to tile it.
+        // The picture at uv (0,0 top left), filtered over this pixel's
+        // footprint: squeezed small (a far ring, a pole) it averages a 3x3
+        // grid of taps across the footprint instead of shimmering. A seam
+        // of a fract()-tiled uv (a huge footprint) reads one tap.
         picture: fn(uv: vec2) -> vec4 {
-            return self.pic_tex.sample(uv)
+            let dx = dFdx(uv)
+            let dy = dFdy(uv)
+            let d = max(length(dx * self.k_pic.xy), length(dy * self.k_pic.xy))
+            if d < 1.5 || d > 64.0 {
+                return self.pic_tex.sample(uv)
+            }
+            let mut c = vec4(0.0, 0.0, 0.0, 0.0)
+            for j in 0..3 {
+                for i in 0..3 {
+                    let o = (float(i) - 1.0) / 3.0 * dx + (float(j) - 1.0) / 3.0 * dy
+                    c = c + self.pic_tex.sample(uv + o)
+                }
+            }
+            return c / 9.0
         }
         // The picture's ink 0..1 at uv (its luma).
         ink: fn(uv: vec2) -> float {

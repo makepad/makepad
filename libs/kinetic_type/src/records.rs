@@ -9,7 +9,7 @@ use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
 use makepad_typography::karaoke::{states, KaraokeStyle, State, SungWord};
 
 /// Words per `Glyph` record.
-pub const GLYPH_WORDS: usize = 36;
+pub const GLYPH_WORDS: usize = 40;
 
 const F_CHANGED: usize = 24;
 const F_SUNG: usize = 25;
@@ -28,6 +28,11 @@ pub fn glyph_layout() -> Layout {
         fields.push(f(name, FieldTy::F32, 12 + k as u32));
     }
     fields.push(f("from", FieldTy::Vec3, 32));
+    // base scale (a cloud word's size), word weight 0..1, the word's ink
+    // width and height (at its scale).
+    for (k, name) in ["k", "weight", "word_w", "word_h"].iter().enumerate() {
+        fields.push(f(name, FieldTy::F32, 35 + k as u32));
+    }
     Layout { name: "Glyph".into(), stride: GLYPH_WORDS as u32, fields }
 }
 
@@ -78,6 +83,17 @@ impl Records {
         let old_rest: Vec<[f32; 3]> = (0..self.chars.len()).map(|i| [self.data[i * GLYPH_WORDS], self.data[i * GLYPH_WORDS + 1], self.data[i * GLYPH_WORDS + 2]]).collect();
         let first = self.chars.is_empty();
         let old_chars = std::mem::take(&mut self.chars);
+        // Each word's ink extent (x0, y0, x1, y1).
+        let mut word_ext = vec![[f32::MAX, f32::MAX, f32::MIN, f32::MIN]; set.words.max(1)];
+        for e in &set.elements {
+            if let Some(b) = word_ext.get_mut(e.word) {
+                let (hx, hy) = (e.size[0] * 0.5 * e.scale, e.size[1] * 0.5 * e.scale);
+                b[0] = b[0].min(e.pivot[0] - hx);
+                b[1] = b[1].min(e.pivot[1] - hy);
+                b[2] = b[2].max(e.pivot[0] + hx);
+                b[3] = b[3].max(e.pivot[1] + hy);
+            }
+        }
         self.count = n * copies;
         self.data.clear();
         self.data.resize(self.count * GLYPH_WORDS, 0.0);
@@ -125,6 +141,11 @@ impl Records {
                 ];
                 r[12..32].copy_from_slice(&vals);
                 r[32..35].copy_from_slice(old_rest.get(i).unwrap_or(&e.pivot));
+                let ext = word_ext.get(e.word).copied().unwrap_or([0.0; 4]);
+                r[35] = e.scale;
+                r[36] = e.weight;
+                r[37] = (ext[2] - ext[0]).max(0.0);
+                r[38] = (ext[3] - ext[1]).max(0.0);
             }
         }
         self.chars = set.elements.iter().map(|e| e.ch).collect();
@@ -216,7 +237,8 @@ mod tests {
         r.sing(&Karaoke::Words { words: vec![SungWord { chars: 0..5, start: 0.0, end: 1.0, syllables: vec![] }], time: 0.5, style: KaraokeStyle::default() });
         assert!(at(&r, 0, F_SUNG) == 1.0 && at(&r, 4, F_SUNG) == 0.0);
         let l = glyph_layout();
-        assert_eq!(l.fields.last().unwrap().offset, 32);
+        assert_eq!(l.fields.iter().find(|f| f.name == "word_h").unwrap().offset, 38);
+        assert!(at(&r, 0, 37) > 0.0 && at(&r, 0, 35) == 1.0, "word width and base scale");
         assert_eq!(at(&r, 4, 32), a.elements[4].pivot[0], "from: where glyph 4 was before");
     }
 }

@@ -7,7 +7,8 @@
 //! MAKEPAD_HIDE_WINDOWS=1 kinetic_check bench <kit.splash> [--text "..."] [--frames 240]
 //! ```
 //!
-//! `--sing` sweeps the karaoke progress 0..1 across the strip. Frame k is
+//! `--bed` plays the deterministic music bed into the audio input
+//! (spectrum, levels, hits). `--sing` sweeps the karaoke progress 0..1 across the strip. Frame k is
 //! at beat `from + k * step`; time = beat * 60 / bpm. `--texts "A|B|C"
 //! --every 1` shows the texts in turn, one every `every` beats (a feed:
 //! lyric words, a clock), each change stamped at its beat.
@@ -106,6 +107,8 @@ struct Job {
     bench: usize,
     texts: Vec<String>,
     every: f32,
+    /// Play the deterministic music bed into the audio input.
+    bed: bool,
 }
 
 enum State {
@@ -146,6 +149,8 @@ pub struct KineticHost {
     cpu: Vec<(f32, f32, f32)>,
     #[rust]
     started: f64,
+    #[rust]
+    bed: Option<makepad_audio_reactive::bed::BedPlayer>,
 }
 
 impl KineticHost {
@@ -174,6 +179,7 @@ impl KineticHost {
             bench: if mode == "bench" { argf(args, "--frames", 240.0) as usize } else { 0 },
             texts: arg(args, "--texts").map(|t| t.split('|').map(|s| s.replace("\\n", "\n")).collect()).unwrap_or_default(),
             every: argf(args, "--every", 1.0).max(0.01),
+            bed: args.iter().any(|a| a == "--bed"),
         });
         self.state = Some(State::Load);
         self.next_frame = cx.new_next_frame();
@@ -189,6 +195,8 @@ impl KineticHost {
             bpm: job.bpm,
             energy: 0.5,
             bands: [0.5, 0.4, 0.3],
+            audio: None,
+            spectrum: [0.0; makepad_kinetic_type::view::BANDS],
             dials: job.dials,
             karaoke: if job.sing { Karaoke::Progress((k as f32 + 0.5) / n as f32) } else { Karaoke::None },
             content: None,
@@ -197,7 +205,16 @@ impl KineticHost {
 
     fn record(&mut self, cx: &mut Cx2d, k: usize) {
         let size = self.job.as_ref().unwrap().size;
-        let frame = self.frame_of(k);
+        let mut frame = self.frame_of(k);
+        if self.job.as_ref().unwrap().bed {
+            let bed = self.bed.get_or_insert_with(makepad_audio_reactive::bed::BedPlayer::new);
+            frame.audio = bed.pump(cx.cx, frame.time as f64);
+            bed.bus.bands(&mut frame.spectrum);
+            if let Some(a) = &frame.audio {
+                frame.energy = a.levels[0];
+                frame.bands = [a.env.x, a.env.y, a.env.z];
+            }
+        }
         let job = self.job.as_ref().unwrap();
         if !job.texts.is_empty() {
             let slot = (frame.beat / job.every).floor().max(0.0);

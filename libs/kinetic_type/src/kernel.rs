@@ -8,7 +8,8 @@
 //! bar bpm energy grow`, the text's `width height size`, the shape ids
 //! `alpha0 alphas cube`, `text_at` (the time the text last changed),
 //! `bass mid high` (0..1 bands), `floor_y` (the floor's height),
-//! `view_w view_h` (a picture's world extent, 0 without one), the
+//! `view_w view_h` (a picture's world extent, 0 without one), `band(f)`
+//! (the spectrum at log frequency f 0..1, the host's 32 bands), the
 //! dials `p1..p4` and each dial by its own name;
 //! `time` is the kernel's own time input. The `kinetic` module
 //! (kinetic.splash) is imported unqualified.
@@ -84,6 +85,8 @@ pub fn compose(split: &Split, dials: &[(String, f32)], out: &str) -> Composed {
     s.push_str(&split.kernel_items);
     s.push('\n');
     s.push_str("let glyphs = input(Glyph)\n");
+    // The newest spectrum in 32 log bands; band(f), f 0..1 low to high.
+    s.push_str("let spectrum = input(f32)\nfn band(f) { spectrum[clamp(int(f * 32.0), 0, 31)] }\n");
     s.push_str(&format!("let out = output({out})\n"));
     for (name, default) in SIGNALS {
         s.push_str(&format!("let {name} = param({default:?}, -1000000000.0, 1000000000.0)\n"));
@@ -102,7 +105,7 @@ pub fn compose(split: &Split, dials: &[(String, f32)], out: &str) -> Composed {
     }
     s.push_str("fn instance(i) {\n let g = glyphs[i]\n let o = ");
     s.push_str(out);
-    s.push_str("{}\n o.pos = g.rest\n o.rot = vec4(0.0, 0.0, 0.0, 1.0)\n o.scale = vec3(1.0, 1.0, 1.0)\n o.color = vec4(1.0, 1.0, 1.0, 1.0)\n o.info = vec4(g.t, g.word, g.line, g.index)\n o.shape = g.shape\n");
+    s.push_str("{}\n o.pos = g.rest\n o.rot = vec4(0.0, 0.0, 0.0, 1.0)\n o.scale = vec3(g.k, g.k, g.k)\n o.color = vec4(1.0, 1.0, 1.0, 1.0)\n o.info = vec4(g.t, g.word, g.line, g.index)\n o.shape = g.shape\n");
     if split.glyph.is_some() {
         s.push_str(" out[i] = kit_glyph(g, o)\n}\n");
     } else {
@@ -116,6 +119,27 @@ pub fn camera_layout() -> Layout {
     use makepad_script_compute::kernel::{FieldTy, LayoutField};
     let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
     Layout { name: "Camera".into(), stride: 12, fields: vec![f("eye", FieldTy::Vec3, 0), f("target", FieldTy::Vec3, 3), f("up", FieldTy::Vec3, 6), f("fov", FieldTy::F32, 9), f("roll", FieldTy::F32, 10)] }
+}
+
+/// The record a `curve_fn: fn(c)` writes: its point at parameter `u`.
+pub fn curve_layout() -> Layout {
+    use makepad_script_compute::kernel::{FieldTy, LayoutField};
+    Layout { name: "CurvePoint".into(), stride: 4, fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "u".into(), ty: FieldTy::F32, offset: 3 }] }
+}
+
+/// Compose the curve kernel: element i is the point at u = i / (count - 1).
+pub fn compose_curve(split: &Split, dials: &[(String, f32)], f: &FnSrc) -> Composed {
+    let mut split = split.clone();
+    split.glyph = None;
+    let mut c = compose(&split, dials, "CurvePoint");
+    c.source = c.source.replacen("let glyphs = input(Glyph)\n", "\n", 1);
+    let at = c.source.find("fn instance(i)").unwrap_or(c.source.len());
+    c.source.truncate(at);
+    let v = f.params.first().map_or("c", |s| s.as_str());
+    c.map.push((lines(&c.source), f.line, lines(&f.body) + 1));
+    c.source.push_str(&format!("fn kit_curve({v}) {{{}\n{v}\n}}\n", f.body));
+    c.source.push_str("fn element(i) {\n let c = CurvePoint{}\n c.u = float(i) / float(max(count - 1, 1))\n out[i] = kit_curve(c)\n}\n");
+    c
 }
 
 /// Compose the camera kernel: `c` starts as the default framing.
@@ -139,7 +163,7 @@ pub fn compose_camera(split: &Split, dials: &[(String, f32)], f: &FnSrc) -> Comp
 /// Compile a composed kernel with the draw record's layout; errors name
 /// the kit line.
 pub fn compile(c: &Composed, out: &Layout) -> Result<Arc<Kernel>, String> {
-    let layouts = [glyph_layout(), out.clone(), camera_layout()];
+    let layouts = [glyph_layout(), out.clone(), camera_layout(), curve_layout()];
     let modules = [Module { path: "kinetic", source: KINETIC_MODULE }];
     compile_with_modules(&c.source, &layouts, Backend::Native, &modules).map_err(|errors| {
         errors
@@ -187,13 +211,17 @@ mod tests {
         let sp = split(src).unwrap();
         let c = compose(&sp, &[("swing".into(), 0.25)], "KineticGlyph");
         let k = compile(&c, &out_layout()).unwrap_or_else(|e| panic!("{e}\n{}", c.source));
-        let mut recs = vec![0.0f32; 2 * 36];
+        let mut recs = vec![0.0f32; 2 * 40];
         recs[14] = 0.0;
-        recs[36 + 14] = 1.0;
-        recs[36] = 1.0;
+        recs[40 + 14] = 1.0;
+        recs[40] = 1.0;
+        recs[35] = 1.0;
+        recs[40 + 35] = 1.0;
         let mut out = vec![0.0f32; 2 * 24];
+        let spec = [0.5f32; 32];
         let mut call = k.call();
         call.set_time(0.3);
+        call.input("spectrum", &spec).unwrap();
         call.set_param("width", 2.0);
         call.input("glyphs", &recs).unwrap();
         call.output("out", &mut out).unwrap();
@@ -207,6 +235,7 @@ mod tests {
         let mut o = [0.0f32; 12];
         let mut call = ck.call();
         call.input("base", &base).unwrap();
+        call.input("spectrum", &spec).unwrap();
         call.output("out", &mut o).unwrap();
         call.run(1).unwrap();
         assert_eq!((o[1], o[7], o[9]), (1.0, 1.0, 60.0), "{o:?}");
