@@ -28,6 +28,9 @@ pub fn optimize(p: &mut Program) {
     forward_sets(p);
     cse(p);
     dce(p);
+    fold_offsets(p);
+    forward_stores(p);
+    dce(p);
     dead_frame_stores(p);
     dead_loops(p);
     drop_wraps(p);
@@ -111,6 +114,156 @@ pub fn drop_wraps(p: &mut Program) {
         }
     }
     walk(&p.body, &b, &mut map);
+    rename(&mut p.body, &map);
+}
+
+// ---------------------------------------------------------------------------
+// Constant offsets and store-to-load forwarding
+// ---------------------------------------------------------------------------
+
+/// A load or store whose offset became a constant (a loop index or a
+/// variable forwarded to one) addresses one static word: the offset
+/// folds into the base as the lowering folds literal offsets (clamped
+/// into the extent; for host buffers the 64-bit sum, clamped at run time
+/// to the buffer as before).
+pub fn fold_offsets(p: &mut Program) {
+    let mut consts: HashMap<u32, u32> = HashMap::new();
+    fn find(b: &Block, consts: &mut HashMap<u32, u32>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c as u32);
+                }
+                Stmt::If(_, t, e) => {
+                    find(t, consts);
+                    find(e, consts);
+                }
+                Stmt::Loop { body, .. } => find(body, consts),
+                _ => {}
+            }
+        }
+    }
+    find(&p.body, &mut consts);
+    let fold = |region: Region, base: &mut u32, extent: &mut u32, off: &mut Option<Val>| {
+        let Some(c) = off.and_then(|o| consts.get(&o.0).copied()) else { return };
+        let at = match region {
+            Region::Buf(_) => match base.checked_add(c) {
+                Some(a) => a,
+                None => return,
+            },
+            _ => *base + ir::clamp_off(c, *extent),
+        };
+        *base = at;
+        *extent = 1;
+        *off = None;
+    };
+    fn walk(b: &mut Block, fold: &dyn Fn(Region, &mut u32, &mut u32, &mut Option<Val>)) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::Def(_, Op::Load { region, base, extent, off }) => fold(*region, base, extent, off),
+                Stmt::Store { region, base, extent, off, .. } => fold(*region, base, extent, off),
+                Stmt::If(_, t, e) => {
+                    walk(t, fold);
+                    walk(e, fold);
+                }
+                Stmt::Loop { body, .. } => walk(body, fold),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut p.body, &fold);
+}
+
+/// A load of a static frame, ctx or state word after a store of it (same
+/// type) with nothing between that may write it reads the stored value.
+/// Host buffers are left alone (two words past the end clamp to one).
+pub fn forward_stores(p: &mut Program) {
+    type Known = HashMap<(Region, u32, ir::Ty), Val>;
+    fn forget(known: &mut Known, region: Region) {
+        known.retain(|k, _| k.0 != region);
+    }
+    fn written(b: &Block, out: &mut HashSet<Region>, host: &mut bool) {
+        for s in b {
+            match s {
+                Stmt::Store { region, .. } => {
+                    out.insert(*region);
+                }
+                Stmt::CallHost { .. } => *host = true,
+                Stmt::If(_, t, e) => {
+                    written(t, out, host);
+                    written(e, out, host);
+                }
+                Stmt::Loop { body, .. } => written(body, out, host),
+                _ => {}
+            }
+        }
+    }
+    fn walk(b: &mut Block, known: &mut Known, tys: &[ir::Ty], map: &mut HashMap<u32, Val>) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::Def(v, op) => {
+                    rename_op(op, map);
+                    if let Op::Load { region, base, off: None, .. } = *op {
+                        if !matches!(region, Region::Buf(_)) {
+                            if let Some(x) = known.get(&(region, base, tys[v.0 as usize])) {
+                                map.insert(v.0, *x);
+                            }
+                        }
+                    }
+                }
+                Stmt::Store { region, base, off, val, .. } => {
+                    subst(val, map);
+                    if let Some(o) = off {
+                        subst(o, map);
+                    }
+                    if off.is_none() && !matches!(region, Region::Buf(_)) {
+                        // This word only (as any type), then its new value.
+                        let (r, w) = (*region, *base);
+                        known.retain(|k, _| !(k.0 == r && k.1 == w));
+                        known.insert((r, w, tys[val.0 as usize]), *val);
+                    } else {
+                        forget(known, *region);
+                    }
+                }
+                Stmt::If(c, t, e) => {
+                    subst(c, map);
+                    walk(t, &mut known.clone(), tys, map);
+                    walk(e, &mut known.clone(), tys, map);
+                    let (mut regs, mut host) = (HashSet::new(), false);
+                    written(t, &mut regs, &mut host);
+                    written(e, &mut regs, &mut host);
+                    for r in regs {
+                        forget(known, r);
+                    }
+                    if host {
+                        forget(known, Region::Ctx);
+                    }
+                }
+                Stmt::Loop { body, .. } => {
+                    let (mut regs, mut host) = (HashSet::new(), false);
+                    written(body, &mut regs, &mut host);
+                    for r in &regs {
+                        forget(known, *r);
+                    }
+                    if host {
+                        forget(known, Region::Ctx);
+                    }
+                    walk(body, &mut known.clone(), tys, map);
+                    for r in regs {
+                        forget(known, r);
+                    }
+                }
+                Stmt::CallHost { .. } => {
+                    rename_stmt(s, map);
+                    forget(known, Region::Ctx);
+                }
+                other => rename_stmt(other, map),
+            }
+        }
+    }
+    let tys = p.vals.clone();
+    let mut map = HashMap::new();
+    walk(&mut p.body, &mut HashMap::new(), &tys, &mut map);
     rename(&mut p.body, &map);
 }
 
@@ -806,14 +959,19 @@ pub fn if_convert(p: &mut Program) {
         }
         out
     }
-    fn block(b: &mut Block, p_vals: &mut Vec<ir::Ty>, p_vars: &[ir::Ty]) {
+    // `inside`: values defined in the innermost repeating loop around the
+    // block. An if whose condition is not one of them does not change
+    // during the loop: it stays a branch (always predicted; vector code
+    // takes it uniformly), so neither side runs for nothing.
+    fn block(b: &mut Block, p_vals: &mut Vec<ir::Ty>, p_vars: &[ir::Ty], inside: Option<&HashSet<u32>>) {
         let mut out = Vec::with_capacity(b.len());
         for mut s in std::mem::take(b) {
             match &mut s {
                 Stmt::If(c, t, e) => {
-                    block(t, p_vals, p_vars);
-                    block(e, p_vals, p_vars);
-                    if let (Some(dt), Some(de)) = (flat(t), flat(e)) {
+                    block(t, p_vals, p_vars, inside);
+                    block(e, p_vals, p_vars, inside);
+                    let invariant = inside.is_some_and(|d| !d.contains(&c.0));
+                    if let (Some(dt), Some(de), false) = (flat(t), flat(e), invariant) {
                         if dt + de <= IF_CONVERT_DEFS {
                             let c = *c;
                             let st = last_sets(t);
@@ -851,7 +1009,15 @@ pub fn if_convert(p: &mut Program) {
                         }
                     }
                 }
-                Stmt::Loop { body, .. } => block(body, p_vals, p_vars),
+                Stmt::Loop { cap, body } => {
+                    if *cap > 1 {
+                        let mut d = HashSet::new();
+                        defs_in(body, &mut d);
+                        block(body, p_vals, p_vars, Some(&d));
+                    } else {
+                        block(body, p_vals, p_vars, inside);
+                    }
+                }
                 _ => {}
             }
             out.push(s);
@@ -859,7 +1025,7 @@ pub fn if_convert(p: &mut Program) {
         *b = out;
     }
     let vars = p.vars.clone();
-    block(&mut p.body, &mut p.vals, &vars);
+    block(&mut p.body, &mut p.vals, &vars, None);
 }
 
 // ---------------------------------------------------------------------------
