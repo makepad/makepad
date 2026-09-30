@@ -108,6 +108,23 @@ fn bc7_min_alpha(b:u128)->u32{
 }
 fn linear(v:f32)->f32{if v<=0.04045{v/12.92}else{((v+0.055)/1.055).powf(2.4)}}
 fn srgb(v:f32)->f32{if v<=0.0031308{v*12.92}else{1.055*v.max(0.0).powf(1.0/2.4)-0.055}}
+/// A mip texel's sRGB byte: `(srgb(v).clamp(0, 1) * 255 + 0.5) as u32`.
+fn srgb_byte_exact(v:f32)->u32{(srgb(v).clamp(0.0,1.0)*255.0+0.5)as u32}
+/// The same byte without a powf: the smallest f32 at which each byte value
+/// starts (the byte only grows with v), found once by bisection over the
+/// float bit patterns with [`srgb_byte_exact`] itself, so every v gets the
+/// byte srgb_byte_exact gives it (checked over every float in 0..1 by the
+/// ignored test `srgb_byte_table_matches_every_float`).
+fn srgb_byte(v:f32)->u32{
+    static STARTS:std::sync::OnceLock<[f32;255]>=std::sync::OnceLock::new();
+    let starts=STARTS.get_or_init(||std::array::from_fn(|i|{
+        let want=i as u32+1;
+        let (mut lo,mut hi)=(0u32,1.0f32.to_bits());
+        while lo<hi { let mid=lo+(hi-lo)/2; if srgb_byte_exact(f32::from_bits(mid))>=want {hi=mid} else {lo=mid+1} }
+        f32::from_bits(lo)
+    }));
+    starts.partition_point(|start|*start<=v)as u32
+}
 /// A host's cache of prepared (mipped) textures, keyed by
 /// [`prepared_texture_key`] of the SOURCE image bytes. Opt-in: a host that
 /// installs none prepares every image as before. `get` and `put` run on
@@ -342,6 +359,9 @@ impl PreparedTexture {
         let alpha_hist=|texels:&[u32]|{let mut hist=[0u32;256];for t in texels{hist[(t>>24)as usize]+=1;}hist};
         let hist0=alpha_hist(&data);
         let varied=hist0.iter().filter(|c|**c>0).count()>1;
+        // sRGB bytes to linear once per byte value, not per texel read: the
+        // same linear() of the same 256 inputs, without four powf per texel.
+        let to_linear:[f32;256]=std::array::from_fn(|b|linear(b as f32/255.0));
         let(mut w,mut h,mut start,mut max_level)=(width,height,0usize,0usize);
         while w>1||h>1 {
             let(nw,nh)=((w/2).max(1),(h/2).max(1));let offset=data.len();
@@ -349,17 +369,18 @@ impl PreparedTexture {
                 let mut sum=[0.0f32;4];
                 for(dy,dx)in[(0,0),(0,1),(1,0),(1,1)] {
                     let pixel=data[start+(y*2+dy).min(h-1)*w+(x*2+dx).min(w-1)];
-                    let mut c=[((pixel>>16)&255)as f32/255.0,((pixel>>8)&255)as f32/255.0,(pixel&255)as f32/255.0,(pixel>>24)as f32/255.0];
-                    match semantic {PixelSemantic::Color|PixelSemantic::MaskedColor=>{for i in 0..3{c[i]=linear(c[i])*c[3];}},PixelSemantic::Normal=>{for i in 0..3{c[i]=c[i]*2.0-1.0;}},PixelSemantic::Data=>{}}
+                    let bytes=[(pixel>>16)&255,(pixel>>8)&255,pixel&255];
+                    let mut c=[bytes[0]as f32/255.0,bytes[1]as f32/255.0,bytes[2]as f32/255.0,(pixel>>24)as f32/255.0];
+                    match semantic {PixelSemantic::Color|PixelSemantic::MaskedColor=>{for i in 0..3{c[i]=to_linear[bytes[i]as usize]*c[3];}},PixelSemantic::Normal=>{for i in 0..3{c[i]=c[i]*2.0-1.0;}},PixelSemantic::Data=>{}}
                     for i in 0..4{sum[i]+=c[i]*0.25;}
                 }
-                match semantic {
-                    PixelSemantic::Color|PixelSemantic::MaskedColor=>{for i in 0..3{sum[i]=srgb(if sum[3]>1e-8{sum[i]/sum[3]}else{0.0});}},
-                    PixelSemantic::Normal=>{let length=(sum[0]*sum[0]+sum[1]*sum[1]+sum[2]*sum[2]).sqrt();for i in 0..3{sum[i]=if length>1e-8{sum[i]/length*0.5+0.5}else{if i==2{1.0}else{0.5}};}},
-                    PixelSemantic::Data=>{},
-                }
                 let byte=|v:f32|(v.clamp(0.0,1.0)*255.0+0.5)as u32;
-                data.push(byte(sum[3])<<24|byte(sum[0])<<16|byte(sum[1])<<8|byte(sum[2]));
+                let rgb=match semantic {
+                    PixelSemantic::Color|PixelSemantic::MaskedColor=>{let v=|i:usize|if sum[3]>1e-8{sum[i]/sum[3]}else{0.0};[srgb_byte(v(0)),srgb_byte(v(1)),srgb_byte(v(2))]},
+                    PixelSemantic::Normal=>{let length=(sum[0]*sum[0]+sum[1]*sum[1]+sum[2]*sum[2]).sqrt();let n=|i:usize|if length>1e-8{sum[i]/length*0.5+0.5}else{if i==2{1.0}else{0.5}};[byte(n(0)),byte(n(1)),byte(n(2))]},
+                    PixelSemantic::Data=>[byte(sum[0]),byte(sum[1]),byte(sum[2])],
+                };
+                data.push(byte(sum[3])<<24|rgb[0]<<16|rgb[1]<<8|rgb[2]);
             }}
             if varied && matches!(semantic,PixelSemantic::MaskedColor) {
                 let level=&mut data[offset..];
@@ -577,6 +598,47 @@ mod tests{
         let start=n*n+32*32+16*16;let level3=cover(&texture.data[start..start+64],0.5);
         assert!(level0>0.2&&level0<0.35,"{level0}");
         assert!((level3-level0).abs()<0.1,"coverage {level0} at level 0 but {level3} at level 3");
+    }
+    #[test]
+    #[ignore]
+    fn srgb_byte_table_matches_every_float(){
+        // Every float from 0 to 1 (about a billion): release, some seconds.
+        let mut bits=0u32;
+        while bits<=1.0f32.to_bits() { let v=f32::from_bits(bits); assert_eq!(srgb_byte(v),srgb_byte_exact(v),"{v}"); bits+=1; }
+    }
+    #[test]fn srgb_byte_table_matches_at_every_step(){
+        for v in [-1.0f32,-0.0,0.0,f32::NAN,1.0,2.0,f32::INFINITY] { assert_eq!(srgb_byte(v),srgb_byte_exact(v),"{v}"); }
+        // Around every byte boundary, and on a fine grid.
+        for i in 0..=100_000u32 { let v=i as f32/100_000.0; assert_eq!(srgb_byte(v),srgb_byte_exact(v),"{v}"); }
+        let mut v=1.0e-6f32;
+        while v<1.0 { for d in [-2i32,-1,0,1,2] { let w=f32::from_bits((v.to_bits() as i32+d)as u32); assert_eq!(srgb_byte(w),srgb_byte_exact(w),"{w}"); } v*=1.0003; }
+    }
+    #[test]fn color_mips_match_linear_per_texel(){
+        // The byte table must give the very bytes linear() per texel gave.
+        let (w,h)=(16usize,8usize);
+        let mut seed=0x1234_5678u32;
+        let data:Vec<u32>=(0..w*h).map(|_|{seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;seed}).collect();
+        let mut image=ImageBuffer::default();image.width=w;image.height=h;image.data=data.clone();
+        let texture=PreparedTexture::prepare(image,PixelSemantic::Color);
+        let mut expect=data;
+        let (mut w,mut h,mut start)=(w,h,0);
+        while w>1||h>1 {
+            let (nw,nh)=((w/2).max(1),(h/2).max(1));let offset=expect.len();
+            for y in 0..nh {for x in 0..nw {
+                let mut sum=[0.0f32;4];
+                for (dy,dx) in [(0,0),(0,1),(1,0),(1,1)] {
+                    let p=expect[start+(y*2+dy).min(h-1)*w+(x*2+dx).min(w-1)];
+                    let mut c=[((p>>16)&255)as f32/255.0,((p>>8)&255)as f32/255.0,(p&255)as f32/255.0,(p>>24)as f32/255.0];
+                    for i in 0..3{c[i]=linear(c[i])*c[3];}
+                    for i in 0..4{sum[i]+=c[i]*0.25;}
+                }
+                for i in 0..3{sum[i]=srgb(if sum[3]>1e-8{sum[i]/sum[3]}else{0.0});}
+                let byte=|v:f32|(v.clamp(0.0,1.0)*255.0+0.5)as u32;
+                expect.push(byte(sum[3])<<24|byte(sum[0])<<16|byte(sum[1])<<8|byte(sum[2]));
+            }}
+            start=offset;w=nw;h=nh;
+        }
+        assert_eq!(texture.data,expect);
     }
     #[test]fn color_mips_filter_linear_premultiplied_pixels(){
         let mut image=ImageBuffer::default();image.width=2;image.height=1;image.data=vec![0xffff_ffff,0xff00_0000];
