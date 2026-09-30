@@ -603,7 +603,7 @@ impl<'a> Accessors<'a> {
             .json
             .get("accessors")
             .and_then(|a| a.idx(index))
-            .ok_or(format!("missing accessor {index}"))?;
+            .ok_or_else(|| format!("missing accessor {index}"))?;
         let ct = acc.get("componentType").and_then(Val::usize).unwrap_or(0);
         let ty = acc.get("type").and_then(Val::str).unwrap_or("");
         let count = acc.get("count").and_then(Val::usize).unwrap_or(0);
@@ -616,12 +616,12 @@ impl<'a> Accessors<'a> {
         let view_index = acc
             .get("bufferView")
             .and_then(Val::usize)
-            .ok_or(format!("accessor {index}: sparse/no view unsupported"))?;
+            .ok_or_else(|| format!("accessor {index}: sparse/no view unsupported"))?;
         let view = self
             .json
             .get("bufferViews")
             .and_then(|v| v.idx(view_index))
-            .ok_or(format!("missing bufferView {view_index}"))?;
+            .ok_or_else(|| format!("missing bufferView {view_index}"))?;
         let view_off = view.get("byteOffset").and_then(Val::usize).unwrap_or(0);
         let stride = view
             .get("byteStride")
@@ -633,14 +633,12 @@ impl<'a> Accessors<'a> {
         let end=if count==0{base}else{base.checked_add((count-1).checked_mul(stride).ok_or("accessor stride overflow")?).and_then(|n|n.checked_add(lanes*csize)).ok_or("accessor range overflow")?};
         if floats>32*1024*1024||end>self.bin.len()||stride<lanes*csize{return Err("accessor exceeds source or128MiB decoded budget".into())}
         let mut out = Vec::with_capacity(floats);
+        // `end` was checked against the buffer above: every element is in range.
         for i in 0..count {
             let elem = base + i * stride;
             for lane in 0..lanes {
                 let at = elem + lane * csize;
-                let bytes = self
-                    .bin
-                    .get(at..at + csize)
-                    .ok_or(format!("accessor {index}: out of range"))?;
+                let bytes = &self.bin[at..at + csize];
                 let v = match ct {
                     5126 => f32::from_le_bytes(bytes.try_into().unwrap()),
                     5121 => {
