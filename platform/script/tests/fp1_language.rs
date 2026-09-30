@@ -151,3 +151,65 @@ fn optional_field_read() {
     fails("nil_or_missing", &format!("{o}o.b |? 7"));
     fails("plain_index", "let a = [1]\na[3]");
 }
+
+/// `ln(x)` is `log(x)`, the natural log, in script code; in shaders it
+/// compiles to each backend's `log` (tests/if_for_else.rs's harness).
+#[test]
+fn ln_is_the_natural_log() {
+    assert!((number("ln", &format!("{PRELUDE}ln(2.718281828)")) - 1.0).abs() < 1e-5);
+    assert!((number("log", &format!("{PRELUDE}log(2.718281828)")) - 1.0).abs() < 1e-5);
+    assert!((number("ln_vec", &format!("{PRELUDE}ln(vec2(1.0, 2.718281828)).y")) - 1.0).abs() < 1e-5);
+}
+
+mod shader_ln {
+    use makepad_script::makepad_math::*;
+    use makepad_script::traits::*;
+    use makepad_script::*;
+
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct ShaderLnTest {
+        #[live]
+        pub tint: Vec4f,
+    }
+
+    const SHADER: &str = r#"
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let sh = #(0){
+            vertex_pos: shader.vertex_position(vec4f)
+            fb0: shader.fragment_output(0, vec4f)
+            vertex: fn() {
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+            fragment: fn() {
+                let x = max(self.tint.x, 0.5)
+                self.fb0 = vec4(ln(x), log(x), ln(vec2(x, x)).y, 1.0)
+            }
+        }
+    "#;
+
+    #[test]
+    fn ln_compiles_to_log_on_every_backend() {
+        let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+        let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
+        for backend in ["metal", "hlsl", "glsl", "wgsl"] {
+            let shader_obj = ShaderLnTest::script_shader(&mut vm);
+            let value = vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
+                module_path: "shader_ln".to_string(),
+                file: "shader_ln.rs".to_string(),
+                line: 1,
+                column: 1,
+                code: format!("{SHADER}\n        shader.test_compile_draw_source(sh, \"{backend}\", false)"),
+                values: vec![shader_obj],
+            });
+            assert!(!value.is_err(), "{backend}: script errored: {value:?}");
+            let source = vm.bx.heap.string_with(value, |_heap, s| s.to_string()).unwrap_or_default();
+            assert!(!source.is_empty() && !source.starts_with("ERRORS"), "{backend}: {source}");
+            assert!(!source.contains("ln("), "{backend}: ln reached the backend:\n{source}");
+        }
+    }
+}

@@ -376,6 +376,9 @@ pub fn define_shader_builtins(
                 .to_script_value_vm(vm)
         },
     );
+    // `ln`: the natural log by its other name (the same function).
+    let ln = heap.value(math, id!(log).into(), NoTrap);
+    heap.set_value_def(math, id_lut!(ln).into(), ln);
     native.add_method(
         heap,
         math,

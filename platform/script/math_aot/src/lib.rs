@@ -282,6 +282,7 @@ impl MathAot {
             ("atan", Intrinsic::Un(MathFn::Atan)),
             ("exp", Intrinsic::Un(MathFn::Exp)),
             ("log", Intrinsic::Un(MathFn::Ln)),
+            ("ln", Intrinsic::Un(MathFn::Ln)),
             ("sqrt", Intrinsic::Sqrt),
             ("abs", Intrinsic::Abs),
             ("floor", Intrinsic::Floor),

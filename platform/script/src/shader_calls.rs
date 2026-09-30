@@ -89,6 +89,8 @@ impl ShaderFnCompiler {
                         }
                         // builtin shader fns
                         ScriptFnPtr::Native(fnptr) => {
+                            // `ln` is `log` (the natural log) by its other name.
+                            let name = if name == id!(ln) { id!(log) } else { name };
                             self.mes.push(ShaderMe::BuiltinCall {
                                 name,
                                 fnptr,

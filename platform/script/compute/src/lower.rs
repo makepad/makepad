@@ -3586,7 +3586,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 const BUILTIN_FNS: &[&str] = &[
-    "sin", "cos", "tan", "tanh", "atan", "atan2", "asin", "acos", "hypot", "cbrt", "f64", "exp", "exp2", "log", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
+    "sin", "cos", "tan", "tanh", "atan", "atan2", "asin", "acos", "hypot", "cbrt", "f64", "exp", "exp2", "log", "ln", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
     "sign", "midi_to_hz", "db_to_gain", "min", "max", "clamp", "mix", "pow", "step", "smoothstep", "vec2", "int", "float", "len",
     "read", "read_cubic", "rand", "stop",
 ];

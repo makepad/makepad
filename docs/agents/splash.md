@@ -159,7 +159,9 @@ In script functions, `a.b ?? d` reads an optional field: a missing field
 `mod(a, b)` is the floored modulo of shading languages (the result takes
 b's sign); `mod` alone is still the module root, and `modf(a, b)` is the
 truncating remainder. `int(x)`, `i32`, `u32` and `f32` values index arrays
-and do arithmetic as the number they hold.
+and do arithmetic as the number they hold. `log(x)` from `mod.math` is the
+natural log, and `ln(x)` is the same function (script, shaders, kernels);
+`mod.std.log(v)` prints.
 
 ## Templates and lists
 
