@@ -37,37 +37,146 @@ pub(super) struct ModelOrder {
     ao: Vec<Option<Option<usize>>>,
 }
 
+/// The placed list's static copies grouped by place (64 m cells) with
+/// their world bounds, so the once-per-frame cull skips a whole patch of a
+/// forest at once. Rebuilt when the placed scene, the loaded models or the
+/// set of Splash-material copies changes; each member keeps its model slot.
+#[derive(Default)]
+pub(super) struct PlacedBlocks {
+    key: Option<(u64, u64, u64, usize)>,
+    /// (world min, world max, members as (copy, model slot)).
+    blocks: Vec<(Vec3f, Vec3f, Vec<(u32, u32)>)>,
+    /// Copies no block holds (dynamic, Splash material, animated parts,
+    /// model not loaded): tested one by one every frame.
+    loose: Vec<u32>,
+}
+
+impl PlacedBlocks {
+    fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], signature: Option<u64>) {
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for (_, m) in models {
+                m.geometry.geometry_id().hash(&mut h);
+                m.lods.len().hash(&mut h);
+                for (_, l) in &m.lods {
+                    l.geometry.geometry_id().hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        let custom = instances.iter().enumerate().filter(|(_, inst)| inst.custom_material.is_some())
+            .fold(0u64, |h, (i, _)| (h ^ i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let key = signature.map(|signature| (signature, fingerprint, custom, instances.len()));
+        if key.is_some() && key == self.key {
+            return;
+        }
+        self.key = key;
+        self.blocks.clear();
+        self.loose.clear();
+        if key.is_none() {
+            self.loose.extend(0..instances.len() as u32);
+            return;
+        }
+        let index: std::collections::HashMap<&str, usize> =
+            models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
+        let mut cells: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
+        for (i, inst) in instances.iter().enumerate() {
+            let slot = index.get(inst.model.as_str()).copied();
+            let root = slot.map(|at| &models[at].1);
+            let Some((at, root)) = slot.zip(root).filter(|(_, root)| {
+                !inst.dynamic && inst.custom_material.is_none()
+                    && std::iter::once(*root).chain(root.lods.iter().map(|(_, m)| m)).all(|m| m.anim_parts.is_empty())
+            }) else {
+                self.loose.push(i as u32);
+                continue;
+            };
+            // The copy's world box, padded as the lanes' own test pads it.
+            let pad = vec3f(0.05, 0.05, 0.05);
+            let (mid, half) = ((root.min + root.max) * 0.5, (root.max - root.min) * 0.5 + pad);
+            let t = &inst.transform.v;
+            let c = vec3f(t[0] * mid.x + t[4] * mid.y + t[8] * mid.z + t[12], t[1] * mid.x + t[5] * mid.y + t[9] * mid.z + t[13], t[2] * mid.x + t[6] * mid.y + t[10] * mid.z + t[14]);
+            let e = vec3f(
+                t[0].abs() * half.x + t[4].abs() * half.y + t[8].abs() * half.z,
+                t[1].abs() * half.x + t[5].abs() * half.y + t[9].abs() * half.z,
+                t[2].abs() * half.x + t[6].abs() * half.y + t[10].abs() * half.z,
+            );
+            let (lo, hi) = (c - e, c + e);
+            let cell = ((c.x / 64.0).floor() as i32, (c.z / 64.0).floor() as i32);
+            let b = *cells.entry(cell).or_insert_with(|| {
+                self.blocks.push((lo, hi, Vec::new()));
+                self.blocks.len() - 1
+            });
+            let block = &mut self.blocks[b];
+            block.0 = vec3f(block.0.x.min(lo.x), block.0.y.min(lo.y), block.0.z.min(lo.z));
+            block.1 = vec3f(block.1.x.max(hi.x), block.1.y.max(hi.y), block.1.z.max(hi.z));
+            block.2.push((i as u32, at as u32));
+        }
+    }
+}
+
 impl ModelOrder {
-    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>) -> u64 {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>, blocks: Option<&PlacedBlocks>) -> u64 {
         // Model slot per instance, resolved once through a map: a linear
         // search per instance is O(instances x models), which a streamed or
         // prop-heavy world turns into milliseconds.
         let index: std::collections::HashMap<&str, usize> =
             models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
+        let n = instances.len();
         self.slots.clear();
-        // Copies of one model often follow each other: those skip the hash.
-        let mut last: Option<(&str, Option<usize>)> = None;
-        self.slots.extend(instances.iter().map(|inst| {
-            let id = inst.model.as_str();
-            match last {
-                Some((prev, slot)) if prev == id => slot,
-                _ => {
-                    let slot = index.get(id).copied();
-                    last = Some((id, slot));
-                    slot
+        self.slots.resize(n, None);
+        self.distances.clear();
+        self.distances.resize(n, 0.0);
+        self.lods.clear();
+        self.lods.resize(n, 0);
+        let mut culled = 0;
+        {
+            let (slots, distances, lods) = (&mut self.slots, &mut self.distances, &mut self.lods);
+            let mut visit = |i: usize, slot: Option<usize>| {
+                let distance = crate::asset_lod::instance_distance(&instances[i].transform, eye);
+                slots[i] = slot;
+                distances[i] = distance;
+                lods[i] = slot.map_or(0, |at| models[at].1.lods.partition_point(|(threshold, _)| *threshold <= distance));
+            };
+            // Copies of one model often follow each other: those skip the hash.
+            let mut last: Option<(&str, Option<usize>)> = None;
+            let mut slot_of = |i: usize| {
+                let id = instances[i].model.as_str();
+                match last {
+                    Some((prev, slot)) if prev == id => slot,
+                    _ => {
+                        let slot = index.get(id).copied();
+                        last = Some((id, slot));
+                        slot
+                    }
+                }
+            };
+            match blocks {
+                None => (0..n).for_each(|i| visit(i, slot_of(i))),
+                Some(blocks) => {
+                    for &i in &blocks.loose {
+                        visit(i as usize, slot_of(i as usize));
+                    }
+                    // A block wholly offscreen or hidden holds only copies
+                    // the per-copy tests below would drop (their boxes lie
+                    // inside it): skipped without a look at them.
+                    for (lo, hi, members) in &blocks.blocks {
+                        if frustum.is_some_and(|f| !f.intersects_aabb(*lo, *hi)) || occluders.is_some_and(|r| r.occluded(*lo, *hi)) {
+                            culled += members.len() as u64;
+                            continue;
+                        }
+                        for &(i, at) in members {
+                            visit(i as usize, Some(at as usize));
+                        }
+                    }
                 }
             }
-        }));
+        }
         // Whether each model is an authored chain, once per model.
         let chained: Vec<bool> = models.iter().map(|(k, _)| chained(k)).collect();
-        self.distances.clear();
-        self.distances.extend(instances.iter().map(|inst| crate::asset_lod::instance_distance(&inst.transform, eye)));
-        self.lods.clear();
-        self.lods.extend(self.slots.iter().zip(&self.distances).map(|(slot, distance)| slot.map_or(0, |at| {
-            models[at].1.lods.partition_point(|(threshold, _)| *threshold <= *distance)
-        })));
         self.order.clear();
         for (i, (slot, (&lod, &distance))) in self.slots.iter().zip(self.lods.iter().zip(&self.distances)).enumerate() {
+            if slot.is_none() { continue; }
             // Only authored chains (m.lod_models) fade: their few copies
             // (vehicles) are worth a second draw in the band; a decimated
             // prop's levels differ by less than the dither would show.
@@ -86,7 +195,6 @@ impl ModelOrder {
         // model, or offscreen by the lanes' own test (a copy with a
         // Splash material keeps its lane's test, which pads its bounds).
         // A crossfading copy's two entries are tested on their own levels.
-        let mut culled = 0;
         {
             let slots = &self.slots;
             self.order.retain(|&(i, lod, _)| {
@@ -224,7 +332,11 @@ impl Renderer {
             let mut built = std::mem::take(&mut self.model_orders[which]);
             let chains = &self.model_lod_chains;
             let occluders = self.stream.as_ref().map(|st| st.occluders());
-            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum, occluders);
+            let blocks = matches!(lane, WorldModelLane::Placed).then(|| {
+                self.placed_blocks.refresh(&self.static_models, instances, self.placed_scene_signature);
+                &self.placed_blocks
+            });
+            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
             match lane {
                 WorldModelLane::Placed => stats.model_culled += culled,
                 WorldModelLane::Attachment => stats.world_attachment_culled += culled,

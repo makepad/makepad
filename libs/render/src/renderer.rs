@@ -361,6 +361,8 @@ pub struct Renderer {
     model_pack: Vec<(String, String)>,
     /// The placed and attached lists' per-frame draw order (draw_models.rs).
     model_orders: [draw_models::ModelOrder; 2],
+    /// The placed list's static copies grouped by place (draw_models.rs).
+    placed_blocks: draw_models::PlacedBlocks,
     /// One shell per entry — this is the whole per-frame firework upload.
     firework_instances: Vec<crate::firework::FireworkInstance>,
     /// This frame's smoke clouds (see [`Renderer::set_smoke_volumes`]).
@@ -685,6 +687,7 @@ impl Default for Renderer {
             ao_textures: Vec::new(),
             model_pack: Vec::new(),
             model_orders: Default::default(),
+            placed_blocks: Default::default(),
             firework_instances: Vec::new(),
             smoke_volumes: Vec::new(),
             smoke_draw: None,
