@@ -38,7 +38,106 @@ pub fn optimize(p: &mut Program) {
     cse(p);
     dce(p);
     cluster_stores(p);
+    peel_offsets(p);
+    cluster_loads(p);
+    dce(p);
     fuse_mla(p);
+}
+
+/// A table read at `h + k` (k a constant, h proven with h + k inside the
+/// read's extent) is the read of word `base + k` at `h`: no clamp applies
+/// either way, so it is the same word; reads of one row at one offset then
+/// share it (`GRAD2[h]`, `GRAD2[h + 1]`).
+pub fn peel_offsets(p: &mut Program) {
+    let b = ir::bounds(p);
+    let mut adds: HashMap<u32, (Val, u32)> = HashMap::new();
+    let mut consts: HashMap<u32, u32> = HashMap::new();
+    fn find(blk: &Block, adds: &mut HashMap<u32, (Val, Val)>, consts: &mut HashMap<u32, u32>) {
+        for s in blk {
+            match s {
+                Stmt::Def(v, Op::Bin(ir::Bin::AddI, x, y)) => {
+                    adds.insert(v.0, (*x, *y));
+                }
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c as u32);
+                }
+                Stmt::If(_, t, e) => {
+                    find(t, adds, consts);
+                    find(e, adds, consts);
+                }
+                Stmt::Loop { body, .. } => find(body, adds, consts),
+                _ => {}
+            }
+        }
+    }
+    let mut raw = HashMap::new();
+    find(&p.body, &mut raw, &mut consts);
+    for (v, (x, y)) in raw {
+        if let Some(k) = consts.get(&y.0) {
+            adds.insert(v, (x, *k));
+        } else if let Some(k) = consts.get(&x.0) {
+            adds.insert(v, (y, *k));
+        }
+    }
+    fn walk(blk: &mut Block, adds: &HashMap<u32, (Val, u32)>, b: &[Option<u32>]) {
+        for s in blk.iter_mut() {
+            match s {
+                Stmt::Def(_, Op::Load { region: Region::Shared, base, extent, off }) => {
+                    let Some(o) = *off else { continue };
+                    let Some(&(h, k)) = adds.get(&o.0) else { continue };
+                    if k < *extent && b[h.0 as usize].is_some_and(|m| (m as u64) + (k as u64) < *extent as u64) {
+                        *base += k;
+                        *extent -= k;
+                        *off = Some(h);
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, adds, b);
+                    walk(e, adds, b);
+                }
+                Stmt::Loop { body, .. } => walk(body, adds, b),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut p.body, &adds, &b);
+}
+
+/// A table read moves up to just after an earlier read at the same
+/// offset in its block (its offset is defined by then; tables never
+/// change), so the reads of one row sit together.
+pub fn cluster_loads(p: &mut Program) {
+    fn block(b: &mut Block) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::If(_, t, e) => {
+                    block(t);
+                    block(e);
+                }
+                Stmt::Loop { body, .. } => block(body),
+                _ => {}
+            }
+        }
+        let mut k = 0;
+        while k < b.len() {
+            if let Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(o), .. }) = b[k] {
+                // The last read at this offset before k, and the run of
+                // reads at it that follows.
+                if let Some(j) = (0..k).rev().find(|&j| matches!(b[j], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o)) {
+                    let mut at = j + 1;
+                    while at < k && matches!(b[at], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o) {
+                        at += 1;
+                    }
+                    if at < k {
+                        let s = b.remove(k);
+                        b.insert(at, s);
+                    }
+                }
+            }
+            k += 1;
+        }
+    }
+    block(&mut p.body);
 }
 
 /// `Wrap(x, n)` of an x proven in `0..n` ([`ir::bounds`]) is x.
@@ -1040,6 +1139,59 @@ pub fn if_convert(p: &mut Program) {
 /// fused bits.
 pub fn fuse_fma(p: &mut Program) {
     fuse(p, true);
+    negate_constant_addends(p);
+}
+
+/// `a * b - c` with a constant c is `a * b + (-c)` exactly (negation is
+/// exact): the backends then need no negation of the addend.
+fn negate_constant_addends(p: &mut Program) {
+    let mut konst: HashMap<u32, f32> = HashMap::new();
+    fn find(b: &Block, k: &mut HashMap<u32, f32>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, Op::ConstF(x)) => {
+                    k.insert(v.0, *x);
+                }
+                Stmt::If(_, t, e) => {
+                    find(t, k);
+                    find(e, k);
+                }
+                Stmt::Loop { body, .. } => find(body, k),
+                _ => {}
+            }
+        }
+    }
+    find(&p.body, &mut konst);
+    let mut negs: HashMap<u32, Val> = HashMap::new();
+    let mut new_defs = Vec::new();
+    fn walk(b: &mut Block, konst: &HashMap<u32, f32>, negs: &mut HashMap<u32, Val>, new_defs: &mut Vec<Stmt>, vals: &mut Vec<ir::Ty>) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::Def(_, op) => {
+                    if let Op::Fma(ir::Fma::Sub, a, bb, c) = *op {
+                        if let Some(x) = konst.get(&c.0) {
+                            let n = *negs.entry(c.0).or_insert_with(|| {
+                                vals.push(ir::Ty::F32);
+                                let v = Val(vals.len() as u32 - 1);
+                                new_defs.push(Stmt::Def(v, Op::ConstF(-x)));
+                                v
+                            });
+                            *op = Op::Fma(ir::Fma::Add, a, bb, n);
+                        }
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, konst, negs, new_defs, vals);
+                    walk(e, konst, negs, new_defs, vals);
+                }
+                Stmt::Loop { body, .. } => walk(body, konst, negs, new_defs, vals),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut p.body, &konst, &mut negs, &mut new_defs, &mut p.vals);
+    p.body.splice(0..0, new_defs);
+    dce(p);
 }
 
 /// i32 `a * b + c` whose product has no other use becomes one multiply-add
@@ -1203,3 +1355,4 @@ pub fn dce(p: &mut Program) {
         }
     }
 }
+

@@ -587,6 +587,7 @@ mod fast {
         unsafe {
             let g = super::GRAD2;
             let t = vld4q_u8_x(g.as_ptr() as *const u8);
+            let unroll = std::env::var_os("KC1_UNROLL").is_some();
             let mut i = 0;
             while i < n4 {
                 let iv = vaddq_s32(si(i as i32), vld1q_s32([0, 1, 2, 3].as_ptr()));
@@ -595,11 +596,21 @@ mod fast {
                 let (mut qx, mut qy) = (vmulq_f32(x, s(0.01)), vmulq_f32(z, s(0.01)));
                 let mut sum = s(0.0);
                 let mut a = 0.5f32;
-                for _ in 0..4 {
-                    sum = vfmaq_f32(sum, s(a), gnoise2(t, qx, qy));
-                    qx = vmulq_f32(qx, s(2.0));
-                    qy = vmulq_f32(qy, s(2.0));
-                    a *= 0.5;
+                if unroll {
+                    let (qx1, qy1) = (vmulq_f32(qx, s(2.0)), vmulq_f32(qy, s(2.0)));
+                    let (qx2, qy2) = (vmulq_f32(qx1, s(2.0)), vmulq_f32(qy1, s(2.0)));
+                    let (qx3, qy3) = (vmulq_f32(qx2, s(2.0)), vmulq_f32(qy2, s(2.0)));
+                    sum = vfmaq_f32(sum, s(0.5), gnoise2(t, qx, qy));
+                    sum = vfmaq_f32(sum, s(0.25), gnoise2(t, qx1, qy1));
+                    sum = vfmaq_f32(sum, s(0.125), gnoise2(t, qx2, qy2));
+                    sum = vfmaq_f32(sum, s(0.0625), gnoise2(t, qx3, qy3));
+                } else {
+                    for _ in 0..4 {
+                        sum = vfmaq_f32(sum, s(a), gnoise2(t, qx, qy));
+                        qx = vmulq_f32(qx, s(2.0));
+                        qy = vmulq_f32(qy, s(2.0));
+                        a *= 0.5;
+                    }
                 }
                 // Clamped reads and writes: the last group is inside (n4 <= len).
                 let b = if i + 3 < base.len() { vld1q_f32(base.as_ptr().add(i)) } else { ld(&[0.0; 4]) };

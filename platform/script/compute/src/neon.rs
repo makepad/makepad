@@ -970,12 +970,17 @@ impl Em {
                     self.e(v::mov(d, VS2));
                 }
             }
-            Region::Shared if !uniform && self.table == Some((base, extent)) && self.proven(off.unwrap(), extent) => {
+            Region::Shared if !uniform && self.table.is_some_and(|(tb, w)| base >= tb && base + extent <= tb + w && base < tb + w) && self.proven(off.unwrap(), extent) => {
                 // Word o of the table in v24..: byte indices 4o + 0..3.
                 let ro = ro.unwrap();
+                let (tb, words) = self.table.unwrap();
                 self.e(v::r3(v::MUL, VS2, ro, 22));
                 self.e(v::r3(v::ADD, VS2, VS2, 23));
-                let tbl = if extent == 16 { v::TBL4 } else { v::TBL2 };
+                if base > tb {
+                    self.splat(VS0, (base - tb).wrapping_mul(0x0404_0404));
+                    self.e(v::r3(v::ADD, VS2, VS2, VS0));
+                }
+                let tbl = if words == 16 { v::TBL4 } else { v::TBL2 };
                 self.e(v::r3(tbl, d, 24, VS2));
             }
             Region::Ctx | Region::Shared => {
@@ -1124,7 +1129,10 @@ impl Em {
     fn block(&mut self, b: &Block) {
         let mut k = 0;
         while k < b.len() {
-            let n = match self.gather_group(&b[k..]) {
+            let n = match match self.tbl_group(&b[k..]) {
+                0 => self.gather_group(&b[k..]),
+                n => n,
+            } {
                 0 => match self.store_group(&b[k..]) {
                     0 => self.pair(&b[k..]),
                     n => n,
@@ -1246,6 +1254,48 @@ impl Em {
             self.stmt(s);
         }
         self.bind(end);
+        n
+    }
+
+    /// Consecutive reads of the resident small table at one varying offset
+    /// (a row: `GRAD2[h]`, `GRAD2[h + 1]` once peeled): the byte index is
+    /// made once and stepped by 4 bytes per word, one TBL per read.
+    fn tbl_group(&mut self, b: &[Stmt]) -> usize {
+        let Some((tb, words)) = self.table else { return 0 };
+        let inside = |base: u32, extent: u32| base >= tb && base < tb + words && base + extent <= tb + words;
+        let Some(Stmt::Def(_, Op::Load { region: Region::Shared, base, extent, off: Some(o) })) = b.first() else { return 0 };
+        let (base0, o) = (*base, *o);
+        if self.uniform(o) || !inside(base0, *extent) || !self.proven(o, *extent) {
+            return 0;
+        }
+        let mut n = 1;
+        while n < b.len() {
+            match &b[n] {
+                Stmt::Def(_, Op::Load { region: Region::Shared, base, extent, off: Some(on) }) if *on == o && *base == base0 + n as u32 && inside(*base, *extent) && self.proven(o, *extent) => n += 1,
+                _ => break,
+            }
+        }
+        if n < 2 {
+            return 0;
+        }
+        let ro = self.vsrc(o, VS1);
+        self.e(v::r3(v::MUL, VS2, ro, 22));
+        self.e(v::r3(v::ADD, VS2, VS2, 23));
+        if base0 > tb {
+            self.splat(VS0, (base0 - tb).wrapping_mul(0x0404_0404));
+            self.e(v::r3(v::ADD, VS2, VS2, VS0));
+        }
+        let tbl = if words == 16 { v::TBL4 } else { v::TBL2 };
+        for (m, s) in b[..n].iter().enumerate() {
+            let Stmt::Def(v, _) = s else { unreachable!() };
+            if m > 0 {
+                self.e(v::r3(v::ADD, VS2, VS2, 22));
+            }
+            let e = Ent::Val(v.0);
+            let d = self.dst(e);
+            self.e(v::r3(tbl, d, 24, VS2));
+            self.done(e, d);
+        }
         n
     }
 
