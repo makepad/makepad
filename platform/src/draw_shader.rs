@@ -863,6 +863,10 @@ pub struct CxDrawShaderMapping {
     pub varying_total_slots: usize,
     /// The color-attachment format this shader's pipeline targets.
     pub color_format: DrawShaderColorFormat,
+    /// Bit `i` set when the shader declares `fragment_output(i, …)`. In a
+    /// pass with several color attachments (MRT) an attachment the shader
+    /// does not write keeps its contents: its write mask is off.
+    pub fragment_outputs: u8,
 }
 
 impl CxDrawShaderMapping {
@@ -1038,6 +1042,10 @@ impl CxDrawShaderMapping {
             Some(id) if id == id!(Bgra8NoBlend) => DrawShaderColorFormat::Bgra8NoBlend,
             _ => DrawShaderColorFormat::Bgra8Unorm,
         };
+        let fragment_outputs = output.io.iter().fold(0u8, |mask, io| match io.kind {
+            ShaderIoKind::FragmentOutput(index) if index < 8 => mask | (1 << index),
+            _ => mask,
+        });
         // Use attribute packing for instances (they're vertex attributes)
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -1394,6 +1402,7 @@ impl CxDrawShaderMapping {
             geometry_id,
             varying_total_slots: 0,
             color_format,
+            fragment_outputs,
         }
     }
 

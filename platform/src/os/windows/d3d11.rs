@@ -1475,6 +1475,8 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
         TexturePixel::Ru8 => DXGI_FORMAT_R8_UNORM,
         TexturePixel::RGu8 => DXGI_FORMAT_R8G8_UNORM,
         TexturePixel::Rf32 => DXGI_FORMAT_R32_FLOAT,
+        TexturePixel::RGf16 => DXGI_FORMAT(34), // R16G16_FLOAT
+        TexturePixel::Ru32 => DXGI_FORMAT(42),  // R32_UINT
         TexturePixel::D32 => DXGI_FORMAT_D32_FLOAT,
         TexturePixel::VideoYuvPlane => DXGI_FORMAT_R8_UNORM,
         TexturePixel::VideoExternal => DXGI_FORMAT_B8G8R8A8_UNORM,

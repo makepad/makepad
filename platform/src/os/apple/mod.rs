@@ -2,6 +2,8 @@
 pub mod apple_util;
 pub mod apple_sys;
 pub mod metal;
+#[cfg(all(test, target_os = "macos"))]
+mod metal_gpu_tests;
 pub mod capture_surface;
 
 #[cfg(target_os = "macos")]

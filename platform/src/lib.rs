@@ -40,6 +40,8 @@ pub mod thread;
 pub mod storage;
 pub mod video;
 pub mod gpu_texture;
+pub mod gpu_admission;
+pub mod resource_resolver;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod video_decode;

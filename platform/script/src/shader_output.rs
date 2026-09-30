@@ -255,6 +255,9 @@ pub struct ShaderOutput {
     /// Monotonic id source for loop-guard locals, so nested guards never
     /// collide (see [`crate::shader_control::LOOP_GUARD_MAX_ITERS`]).
     pub loop_guard_counter: usize,
+    /// The static cost of the function the last `compile_shader_def` call
+    /// resolved to, charged to the caller's loop body.
+    pub last_call_cost: u64,
     /// Total emitted source bytes across every function body compiled into
     /// this shader. Bounded by [`MAX_EMITTED_BYTES`]: a call graph that
     /// branches (each call site *inlines* via `compile_fn`) expands
@@ -330,6 +333,8 @@ impl UniformBufferBindings {
 
 #[derive(Debug)]
 pub struct ShaderFn {
+    /// Static worst-case loop iterations of one call, callees included.
+    pub cost: u64,
     pub call_sig: String,
     pub overload: usize,
     pub name: LiveId,

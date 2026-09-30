@@ -1145,7 +1145,9 @@ pub struct MTLClearColor {
 pub enum MTLPixelFormat {
     R8Unorm = 10,
     RG8Unorm = 30,
+    R32Uint = 53,
     R32Float = 55,
+    RG16Float = 65,
     RGBA8Unorm = 70,
     BGRA8Unorm = 80,
     RGBA16Float = 115,

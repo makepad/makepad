@@ -665,6 +665,7 @@ impl ShaderFnCompiler {
             }
             let mut fn_name = output.backend.map_function_name(&fn_name_base);
             write!(fn_name, "(").ok(); // Add opening paren to match new function path
+            output.last_call_cost = fun.cost;
             return (fun.ret, fn_name);
         }
 
@@ -836,6 +837,7 @@ impl ShaderFnCompiler {
                     output.recur_block.push(fnobj);
                     let ret = compiler.compile_fn(vm, output, fnip);
                     output.recur_block.pop();
+                    let cost = compiler.static_cost();
 
                     // Ensure struct return types are registered in output.structs
                     if let ScriptPodTy::Struct { .. } = vm.bx.heap.pod_type_ref(ret).ty {
@@ -875,7 +877,9 @@ impl ShaderFnCompiler {
                         }
                     }
 
+                    output.last_call_cost = cost;
                     output.functions.push(ShaderFn {
+                        cost,
                         overload,
                         call_sig,
                         name,
@@ -910,8 +914,10 @@ impl ShaderFnCompiler {
         let arg_types = args.clone();
         let resolved_arg_types =
             Self::resolve_script_call_arg_types(vm, fnobj, &arg_types, self.trap.pass());
+        output.last_call_cost = 0;
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
+        self.charge_loop_cost(output.last_call_cost);
         if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
             out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
         }

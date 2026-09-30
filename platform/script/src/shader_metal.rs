@@ -5,6 +5,32 @@ use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
 
 impl ShaderOutput {
+    /// The complete Metal library source of a compiled draw shader
+    /// (`vertex_main` + `fragment_main`), after its vertex and fragment
+    /// functions were compiled into `self` and its uniform buffers were given
+    /// indices. The one assembly order the Metal backend and its GPU tests
+    /// share.
+    pub fn metal_draw_source(&mut self, vm: &ScriptVm) -> String {
+        let mut out = String::new();
+        writeln!(out, "#include <metal_stdlib>\nusing namespace metal;").ok();
+        self.create_struct_defs(vm, &mut out);
+        self.metal_create_instance_struct(vm, &mut out);
+        self.metal_create_uniform_struct(vm, &mut out);
+        self.metal_create_scope_uniform_struct(vm, &mut out);
+        self.metal_create_varying_struct(vm, &mut out);
+        self.metal_create_vertex_buffer_struct(vm, &mut out);
+        self.metal_create_io_struct(vm, &mut out);
+        self.metal_create_io_vertex_struct(vm, &mut out);
+        self.metal_create_io_framebuffer_struct(vm, &mut out);
+        self.metal_create_io_fragment_struct(vm, &mut out);
+        self.metal_create_sampler_decls(&mut out);
+        self.metal_create_helpers(&mut out);
+        self.create_functions(&mut out);
+        self.metal_create_vertex_fn(vm, &mut out);
+        self.metal_create_fragment_main_fn(vm, &mut out);
+        out
+    }
+
     pub fn metal_create_helpers(&self, out: &mut String) {
         // Packed vertex attribute unpackers: two f16s / four unorm8s
         // bitcast into one f32 geometry slot (packed map vertex format).
@@ -89,6 +115,9 @@ impl ShaderOutput {
 
     pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct Io {{").ok();
+        // The invocation's shared loop-pass counter
+        // (shader_control::SHADER_ITERATION_BUDGET).
+        writeln!(out, "    uint _mp_iter;").ok();
         writeln!(out, "    constant IoUniform *u;").ok();
         writeln!(out, "    thread IoInstance *i;").ok();
 
@@ -487,6 +516,7 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    _io._mp_iter = 0u;").ok();
         writeln!(
             out,
             "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
@@ -632,6 +662,7 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(out, "    _io._mp_iter = 0u;").ok();
         writeln!(
             out,
             "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"

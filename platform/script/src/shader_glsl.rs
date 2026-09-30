@@ -46,8 +46,11 @@ impl ShaderOutput {
         out.push_str(shared_defs);
         // Manual unpack4u8: `unpackUnorm4x8` is GLSL ES 3.10+ / GL 4.0+, but we
         // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
+        // `_mp_iter`: the invocation's shared loop-pass counter
+        // (shader_control::SHADER_ITERATION_BUDGET).
         out.push_str(
-            "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
+            "uint _mp_iter = 0u;\n\
+vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
 vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
@@ -73,8 +76,11 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         out.push_str(shared_defs);
         // Manual unpack4u8: `unpackUnorm4x8` is GLSL ES 3.10+ / GL 4.0+, but we
         // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
+        // `_mp_iter`: the invocation's shared loop-pass counter
+        // (shader_control::SHADER_ITERATION_BUDGET).
         out.push_str(
-            "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
+            "uint _mp_iter = 0u;\n\
+vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
 vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 

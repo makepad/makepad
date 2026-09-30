@@ -28,6 +28,50 @@ use std::fmt::Write;
 /// blink rather than a hang.
 pub const LOOP_GUARD_MAX_ITERS: u32 = 65536;
 
+/// The work budget of one shader invocation, in loop-body passes.
+///
+/// A per-loop cap alone does not bound a shader: loops nest, and a function
+/// with a loop can be called from inside another loop, so with per-loop caps
+/// alone the worst case is their product (65536² for two nested
+/// runtime-bounded loops). So the whole invocation shares one budget:
+///
+/// - every runtime-bounded loop charges the static cost of one pass through
+///   its body (literal loops and callees inside it included) to a counter
+///   shared by every function of the invocation, and stops once the counter
+///   passes this budget ([`shader_iteration_counter`]);
+/// - what no counter can stop — literal-bounded loops, with runtime loops
+///   counted as a single pass — is checked statically, and a function whose
+///   static cost exceeds this budget is refused at compile time.
+///
+/// Together an invocation does at most about twice this many passes, however
+/// its loops nest or call each other. 2^22 is far above any stock shader
+/// (the largest, the GI relight's voxel traces, needs well under a tenth).
+pub const SHADER_ITERATION_BUDGET: u64 = 1 << 22;
+
+/// The per-invocation pass counter the loops of `backend` charge. Metal has
+/// no mutable globals, so it lives in the `Io` struct every function gets by
+/// reference; elsewhere it is a private global. `None` for the Rust
+/// backend, whose loops keep only their per-loop guard.
+pub fn shader_iteration_counter(backend: &ShaderBackend) -> Option<&'static str> {
+    match backend {
+        ShaderBackend::Metal => Some("_io._mp_iter"),
+        ShaderBackend::Rust => None,
+        _ => Some("_mp_iter"),
+    }
+}
+
+/// One open loop in the function being compiled: its static bound and the
+/// static cost of one pass through its body so far.
+#[derive(Debug)]
+pub(crate) struct LoopCostFrame {
+    /// `Some(n)` for a literal bound small enough to trust; `None` for a
+    /// runtime bound, whose per-pass charge is emitted as `placeholder`
+    /// until the body's cost is known at the loop's end.
+    literal: Option<u64>,
+    placeholder: String,
+    body: u64,
+}
+
 /// Parse an emitted bound expression as a plain integer literal.
 ///
 /// Bounds arrive as already-lowered target-language strings, so this
@@ -56,6 +100,77 @@ pub(crate) fn literal_bound(expr: &str) -> Option<u64> {
 }
 
 impl ShaderFnCompiler {
+    /// Charge `cost` iterations to the innermost open loop body (or to the
+    /// function itself outside every loop).
+    pub(crate) fn charge_loop_cost(&mut self, cost: u64) {
+        match self.loop_frames.last_mut() {
+            Some(frame) => frame.body = frame.body.saturating_add(cost),
+            None => self.fn_cost = self.fn_cost.saturating_add(cost),
+        }
+    }
+
+    /// The static worst-case iteration count of the function compiled so far
+    /// (one for the call itself, plus every loop and callee).
+    pub(crate) fn static_cost(&self) -> u64 {
+        self.fn_cost.saturating_add(1)
+    }
+
+    fn open_loop_frame(&mut self, output: &mut ShaderOutput, literal: Option<u64>) -> String {
+        let placeholder = format!("\u{1}{}\u{1}", output.next_loop_guard());
+        self.loop_frames.push(LoopCostFrame {
+            literal,
+            placeholder: placeholder.clone(),
+            body: 1,
+        });
+        placeholder
+    }
+
+    /// Close the innermost loop: fill in its per-pass charge and add its
+    /// static cost to the enclosing body. A runtime-bounded loop counts one
+    /// pass statically; its further passes are paid from the shared counter.
+    fn close_loop_frame(&mut self) {
+        let Some(frame) = self.loop_frames.pop() else {
+            return;
+        };
+        let cost = match frame.literal {
+            Some(n) => n.saturating_mul(frame.body),
+            None => {
+                let charge = frame.body.min(SHADER_ITERATION_BUDGET);
+                if let Some(at) = self.out.rfind(&frame.placeholder) {
+                    self.out.replace_range(at..at + frame.placeholder.len(), &charge.to_string());
+                }
+                frame.body
+            }
+        };
+        self.charge_loop_cost(cost);
+    }
+
+    /// The guard every runtime-bounded loop runs at the top of each pass:
+    /// its own pass count against the per-loop cap, and the invocation's
+    /// shared counter against [`SHADER_ITERATION_BUDGET`].
+    fn write_loop_guard(&mut self, backend: &ShaderBackend, guard: &str, charge: &str) {
+        let cap = LOOP_GUARD_MAX_ITERS;
+        match (backend, shader_iteration_counter(backend)) {
+            (ShaderBackend::Rust, _) | (_, None) => {
+                write!(self.out, "{guard} += 1; if {guard} > {cap} {{ break; }}\n").ok();
+            }
+            (ShaderBackend::Wgsl, Some(counter)) => {
+                write!(
+                    self.out,
+                    "{guard} = {guard} + 1u; {counter} = {counter} + {charge}u; if({guard} > {cap}u || {counter} > {SHADER_ITERATION_BUDGET}u){{break;}}\n"
+                )
+                .ok();
+            }
+            (_, Some(counter)) => {
+                write!(
+                    self.out,
+                    "{guard}++; {counter} += {charge}u; if({guard} > {cap}u || {counter} > {SHADER_ITERATION_BUDGET}u){{break;}}\n"
+                )
+                .ok();
+            }
+        }
+    }
+
     /// Check if we're currently in unreachable code (after a return in the current branch)
     pub(crate) fn is_unreachable(&self) -> bool {
         // Check if ANY IfBody in the scope chain has returned (making subsequent code unreachable)
@@ -562,7 +677,7 @@ impl ShaderFnCompiler {
     pub(crate) fn handle_for_1(
         &mut self,
         vm: &mut ScriptVm,
-        _output: &mut ShaderOutput,
+        output: &mut ShaderOutput,
         backend: &ShaderBackend,
     ) {
         let (source, _) = self.stack.pop(self.trap.pass());
@@ -582,17 +697,46 @@ impl ShaderFnCompiler {
                         format_pod_type_name(&vm.bx.heap, ty)
                     );
                 }
-                self.shader_scope.enter_scope();
-                let shadow = self.shader_scope.define_var(id, ty);
-                let loop_var_name = backend.map_local_name(id, shadow);
-                let ty_name = backend.map_pod_name(id!(u32));
                 // `end` is an arbitrary expression string, so a bound like
                 // `0..some_uniform` is unbounded at compile time. A literal
                 // small enough to trust is emitted as-is (the overwhelmingly
                 // common case, and it keeps generated code readable); anything
                 // else gets a hard iteration cap so a hostile or merely buggy
-                // shader terminates instead of hanging the GPU.
-                let bounded = literal_bound(&end).is_some_and(|n| n <= LOOP_GUARD_MAX_ITERS as u64);
+                // shader terminates instead of hanging the GPU. Each pass
+                // also charges the invocation's shared budget; the charge is
+                // only known once the body (and every callee in it) has been
+                // compiled, so a placeholder is emitted here and filled in by
+                // `handle_for_end` (see SHADER_ITERATION_BUDGET).
+                let literal = literal_bound(&end).filter(|n| *n <= LOOP_GUARD_MAX_ITERS as u64);
+                let ty_name = backend.map_pod_name(id!(u32));
+                // A runtime bound is evaluated once, before the loop: the
+                // range is a value in Splash, and a call in it would otherwise
+                // run (uncounted) on every iteration.
+                // The guard counts passes in its own local, declared here.
+                let guard = output.next_loop_guard();
+                let end = if literal.is_none() {
+                    let end_name = format!("{guard}_end");
+                    match backend {
+                        ShaderBackend::Wgsl => {
+                            write!(self.out, "let {end_name}: {ty_name} = {ty_name}({end});\nvar {guard}: u32 = 0u;\n").ok();
+                        }
+                        ShaderBackend::Rust => {
+                            write!(self.out, "let {end_name} = {end};\nlet mut {guard}: u32 = 0;\n").ok();
+                        }
+                        _ => {
+                            write!(self.out, "{ty_name} {end_name} = {ty_name}({end});\nuint {guard} = 0u;\n").ok();
+                        }
+                    }
+                    end_name
+                } else {
+                    end
+                };
+                self.shader_scope.enter_scope();
+                // The loop variable is immutable in the body: the guard below
+                // counts through it, and `i = 0` in the body would otherwise
+                // turn a bounded loop into an endless one.
+                let shadow = self.shader_scope.define_let(id, ty);
+                let loop_var_name = backend.map_local_name(id, shadow);
                 match backend {
                     ShaderBackend::Wgsl => {
                         write!(
@@ -629,26 +773,9 @@ impl ShaderFnCompiler {
                         .ok();
                     }
                 }
-                if !bounded {
-                    // The loop variable itself is the counter, so no extra
-                    // local is needed: bail once it has advanced further from
-                    // its start than any legitimate shader loop would.
-                    match backend {
-                        ShaderBackend::Rust => {
-                            write!(
-                                self.out,
-                                "if {loop_var_name} - ({start}) >= {LOOP_GUARD_MAX_ITERS} {{ break; }}\n"
-                            )
-                            .ok();
-                        }
-                        _ => {
-                            write!(
-                                self.out,
-                                "if({loop_var_name} - ({start}) >= {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
-                            )
-                            .ok();
-                        }
-                    }
+                let charge = self.open_loop_frame(output, literal);
+                if literal.is_none() {
+                    self.write_loop_guard(backend, &guard, &charge);
                 }
                 self.mes.push(ShaderMe::ForLoop {
                     var_id: id,
@@ -668,6 +795,7 @@ impl ShaderFnCompiler {
                 ShaderMe::ForLoop { .. } | ShaderMe::LoopBody { .. } => {
                     self.out.push_str("}\n");
                     self.shader_scope.exit_scope();
+                    self.close_loop_frame();
                 }
                 _ => {
                     script_err_unexpected!(self.trap, "unexpected in shader control");
@@ -684,33 +812,21 @@ impl ShaderFnCompiler {
         // `loop{}` breaks on a runtime condition, so nothing in the source
         // bounds it. A shader that never exits hangs the GPU and, on most
         // drivers, takes the whole app down with a device reset — so the
-        // bound is emitted rather than trusted. See LOOP_GUARD_MAX_ITERS.
+        // bound is emitted rather than trusted, together with the charge to
+        // the invocation's shared budget (see SHADER_ITERATION_BUDGET).
         match backend {
             ShaderBackend::Wgsl => {
                 write!(self.out, "var {guard}: u32 = 0u;\nloop{{\n").ok();
-                write!(
-                    self.out,
-                    "{guard} = {guard} + 1u; if({guard} > {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
-                )
-                .ok();
             }
             ShaderBackend::Rust => {
                 write!(self.out, "let mut {guard}: u32 = 0;\nwhile true {{\n").ok();
-                write!(
-                    self.out,
-                    "{guard} += 1; if {guard} > {LOOP_GUARD_MAX_ITERS} {{ break; }}\n"
-                )
-                .ok();
             }
             _ => {
                 write!(self.out, "uint {guard} = 0u;\nwhile(true){{\n").ok();
-                write!(
-                    self.out,
-                    "{guard}++; if({guard} > {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
-                )
-                .ok();
             }
         }
+        let charge = self.open_loop_frame(output, None);
+        self.write_loop_guard(backend, &guard, &charge);
         self.mes.push(ShaderMe::LoopBody {
             stack_depth: self.stack.types.len(),
         });

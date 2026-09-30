@@ -5093,6 +5093,8 @@ impl CxVulkan {
             TexturePixel::RGBAf16 => Some(vk::Format::R16G16B16A16_SFLOAT),
             TexturePixel::RGBAf32 => Some(vk::Format::R32G32B32A32_SFLOAT),
             TexturePixel::Rf32 => Some(vk::Format::R32_SFLOAT),
+            TexturePixel::RGf16 => Some(vk::Format::R16G16_SFLOAT),
+            TexturePixel::Ru32 => Some(vk::Format::R32_UINT),
             _ => None,
         }
     }
@@ -7931,7 +7933,34 @@ impl CxVulkan {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA);
-        let color_blend_attachments = vec![color_blend_attachment; render_pass_key.color_formats.len()];
+        // Per attachment (MRT): an output the shader does not declare keeps
+        // the attachment's contents (empty write mask), and only four-channel
+        // unorm / half-float targets blend (integer, 32-bit float and
+        // alpha-less targets write raw, as on Metal).
+        let written_outputs = sh.mapping.fragment_outputs;
+        let color_blend_attachments: Vec<_> = render_pass_key
+            .color_vk_formats()
+            .iter()
+            .enumerate()
+            .map(|(index, format)| {
+                let written = index >= 8 || written_outputs & (1 << index) != 0;
+                let blendable = matches!(
+                    *format,
+                    vk::Format::B8G8R8A8_UNORM
+                        | vk::Format::B8G8R8A8_SRGB
+                        | vk::Format::R8G8B8A8_UNORM
+                        | vk::Format::R8G8B8A8_SRGB
+                        | vk::Format::R16G16B16A16_SFLOAT
+                );
+                color_blend_attachment
+                    .blend_enable(alpha_blend && written && blendable)
+                    .color_write_mask(if written {
+                        vk::ColorComponentFlags::RGBA
+                    } else {
+                        vk::ColorComponentFlags::empty()
+                    })
+            })
+            .collect();
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let has_depth = render_pass_key.depth_format.is_some();

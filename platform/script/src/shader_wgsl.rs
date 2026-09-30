@@ -532,8 +532,11 @@ fn build_draw_shader_wgsl(
     let mut out = String::new();
     // Packed path geometry travels through f32 attributes as raw bits, just
     // like the Metal/GLSL/HLSL paths. Decode before interpolating its values.
+    // `_mp_iter`: the invocation's shared loop-pass counter
+    // (shader_control::SHADER_ITERATION_BUDGET).
     out.push_str(
-        "fn _mp_unpack2f16(x: f32) -> vec2<f32> { return unpack2x16float(bitcast<u32>(x)); }\n\
+        "var<private> _mp_iter: u32 = 0u;\n\
+fn _mp_unpack2f16(x: f32) -> vec2<f32> { return unpack2x16float(bitcast<u32>(x)); }\n\
 fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); }\n",
     );
 

@@ -17,7 +17,142 @@ use crate::*;
 use makepad_live_id::*;
 use std::fmt::Write;
 
+/// How many elements an indexable shader type has: a fixed array's length,
+/// a vector's lanes, a matrix's columns (`MatCxR`, indexed by its first
+/// dimension in every backend). `None` for an unsized array, which has no
+/// length the emitter could clamp against.
+pub(crate) fn shader_index_len(ty: &ScriptPodTy) -> Option<usize> {
+    use crate::pod::{ScriptPodMat as M, ScriptPodVec as V};
+    match ty {
+        ScriptPodTy::FixedArray { len, .. } => Some(*len),
+        ScriptPodTy::Vec(v) => Some(match v {
+            V::Vec2f | V::Vec2h | V::Vec2u | V::Vec2i | V::Vec2b => 2,
+            V::Vec3f | V::Vec3h | V::Vec3u | V::Vec3i | V::Vec3b => 3,
+            V::Vec4f | V::Vec4h | V::Vec4u | V::Vec4i | V::Vec4b => 4,
+        }),
+        ScriptPodTy::Mat(m) => Some(match m {
+            M::Mat2x2f | M::Mat2x3f | M::Mat2x4f => 2,
+            M::Mat3x2f | M::Mat3x3f | M::Mat3x4f => 3,
+            M::Mat4x2f | M::Mat4x3f | M::Mat4x4f => 4,
+        }),
+        _ => None,
+    }
+}
+
+/// An emitted index expression that is a plain integer literal (`3`, `3u`,
+/// `-1`, `int(3)`, `(2)`), so its bounds can be checked at compile time.
+fn literal_index(expr: &str) -> Option<i64> {
+    let mut s = expr.trim();
+    loop {
+        let inner = ["int(", "uint(", "i32(", "u32(", "("]
+            .iter()
+            .find_map(|p| s.strip_prefix(p).and_then(|r| r.strip_suffix(')')));
+        match inner {
+            Some(inner) => s = inner.trim(),
+            None => break,
+        }
+    }
+    let s = s
+        .strip_suffix("u32")
+        .or_else(|| s.strip_suffix("i32"))
+        .or_else(|| s.strip_suffix('u'))
+        .or_else(|| s.strip_suffix('i'))
+        .unwrap_or(s);
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(d) => (true, d.trim()),
+        None => (false, s),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let v: i64 = digits.parse().ok()?;
+    Some(if neg { -v } else { v })
+}
+
+/// The index expression to emit for `x[index]` with `len` elements.
+///
+/// Shader source is untrusted (AI-written, downloaded, livecoded), and an
+/// out-of-range index into a private array, vector or matrix is undefined
+/// behaviour on Metal, HLSL and GLSL: it reads or writes whatever lies next
+/// to it. So every index the compiler cannot prove in range is clamped into
+/// `0..len` in the emitted code, for reads, assignments and compound
+/// assignments alike. A literal index is checked here instead, and an
+/// out-of-range literal is a compile error. Unsigned indices clamp with
+/// `min` (a wrapped negative lands on the last element); signed and
+/// abstract ones with `clamp`.
+pub(crate) fn clamped_shader_index(
+    backend: &ShaderBackend,
+    unsigned: bool,
+    index_s: &str,
+    len: usize,
+) -> Result<String, String> {
+    if len == 0 {
+        return Err("cannot index an empty array".to_string());
+    }
+    if let Some(v) = literal_index(index_s) {
+        if v < 0 || v as u64 >= len as u64 {
+            return Err(format!("index {v} is out of bounds for length {len}"));
+        }
+        return Ok(index_s.to_string());
+    }
+    let max = len - 1;
+    Ok(match backend {
+        ShaderBackend::Rust => format!("(({index_s}) as usize).min({max})"),
+        ShaderBackend::Wgsl if unsigned => format!("min(u32({index_s}), {max}u)"),
+        ShaderBackend::Wgsl => format!("clamp(i32({index_s}), 0, {max})"),
+        _ if unsigned => format!("min(uint({index_s}), {max}u)"),
+        _ => format!("clamp(int({index_s}), 0, {max})"),
+    })
+}
+
+/// `type name` for a local declared in a C-family backend. Named types map
+/// directly; a fixed array (an unnamed type) is `array<float, 4> name` on
+/// Metal, `float name[4]` in HLSL and `float[4] name` in GLSL.
+pub(crate) fn c_local_declarator(vm: &ScriptVm, backend: &ShaderBackend, ty: ScriptPodType, name: &str) -> String {
+    if let Some(type_name) = vm.bx.heap.pod_type_name(ty) {
+        return format!("{} {}", backend.map_pod_name(type_name), name);
+    }
+    if let ScriptPodTy::FixedArray { ty: elem, len, .. } = &vm.bx.heap.pod_type_ref(ty).ty {
+        if let Some(elem_name) = vm.bx.heap.pod_type_name(elem.self_ref) {
+            let elem_name = backend.map_pod_name(elem_name);
+            return match backend {
+                ShaderBackend::Hlsl => format!("{elem_name} {name}[{len}]"),
+                ShaderBackend::Glsl => format!("{elem_name}[{len}] {name}"),
+                _ => format!("array<{elem_name}, {len}> {name}"),
+            };
+        }
+    }
+    let mut type_name = String::new();
+    backend.pod_type_name_from_ty(&vm.bx.heap, ty, &mut type_name);
+    format!("{type_name} {name}")
+}
+
 impl ShaderFnCompiler {
+    /// Resolve `instance[index]`'s bounded index expression, reporting an
+    /// unsized array or an out-of-range literal as a compile error.
+    pub(crate) fn bounded_index_expr(
+        &mut self,
+        vm: &ScriptVm,
+        output: &mut ShaderOutput,
+        instance_ty: ScriptPodType,
+        index_ty: &ShaderType,
+        index_s: &str,
+    ) -> String {
+        let unsigned = matches!(index_ty, ShaderType::Pod(t) if *t == vm.bx.code.builtins.pod.pod_u32);
+        let result = match shader_index_len(&vm.bx.heap.pod_types[instance_ty.index as usize].ty) {
+            Some(len) => clamped_shader_index(&output.backend, unsigned, index_s, len),
+            None => Err("an unsized array cannot be indexed in a shader".to_string()),
+        };
+        match result {
+            Ok(s) => s,
+            Err(message) => {
+                output.push_error(format!("shader index: {message}"));
+                script_err_shader!(self.trap, "shader index: {}", message);
+                "0".to_string()
+            }
+        }
+    }
+
     fn logical_fetch_pod_type(vm: &ScriptVm, pod_ty: ScriptPodType) -> ScriptPodType {
         match vm.bx.heap.pod_type_ref(pod_ty).ty {
             ScriptPodTy::Packed(packed) if packed.is_vec4() => {
@@ -380,8 +515,9 @@ impl ShaderFnCompiler {
                     }
                 }
 
+                let index_s2 = self.bounded_index_expr(vm, output, pod_ty, &index_ty, &index_s);
                 let mut s = self.stack.new_string();
-                write!(s, "{}[{}]", instance_s, index_s).ok();
+                write!(s, "{}[{}]", instance_s, index_s2).ok();
                 self.stack
                     .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
             } else {
@@ -450,8 +586,9 @@ impl ShaderFnCompiler {
                     );
                 }
 
+                let index_s2 = self.bounded_index_expr(vm, output, pod_ty, &index_ty, &index_s);
                 let mut s = self.stack.new_string();
-                write!(s, "{}[{}] = {}", instance_s, index_s, value_s).ok();
+                write!(s, "{}[{}] = {}", instance_s, index_s2, value_s).ok();
                 self.stack
                     .push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), s);
             } else {
@@ -1452,12 +1589,8 @@ impl ShaderFnCompiler {
                             }
                         }
                         ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
-                            let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
-                                output.backend.map_pod_name(name)
-                            } else {
-                                id!(unknown)
-                            };
-                            write!(self.out, "{} {} = {};\n", type_name, local_name, value).ok();
+                            let decl = c_local_declarator(vm, &output.backend, ty, &local_name);
+                            write!(self.out, "{} = {};\n", decl, value).ok();
                         }
                         ShaderBackend::Rust => {
                             let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
@@ -1505,12 +1638,8 @@ impl ShaderFnCompiler {
                             write!(self.out, "var {} = {};\n", local_name, value).ok();
                         }
                         ShaderBackend::Metal | ShaderBackend::Hlsl | ShaderBackend::Glsl => {
-                            let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
-                                output.backend.map_pod_name(name)
-                            } else {
-                                id!(unknown)
-                            };
-                            write!(self.out, "{} {} = {};\n", type_name, local_name, value).ok();
+                            let decl = c_local_declarator(vm, &output.backend, ty, &local_name);
+                            write!(self.out, "{} = {};\n", decl, value).ok();
                         }
                         ShaderBackend::Rust => {
                             let type_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {

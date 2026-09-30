@@ -596,8 +596,9 @@ impl ShaderFnCompiler {
                     );
                 }
 
+                let index_s2 = self.bounded_index_expr(vm, output, pod_ty, &index_ty, &index_s);
                 let mut s = self.stack.new_string();
-                write!(s, "{}[{}] {} {}", instance_s, index_s, op, s2).ok();
+                write!(s, "{}[{}] {} {}", instance_s, index_s2, op, s2).ok();
                 self.stack
                     .push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), s);
             } else {

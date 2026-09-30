@@ -219,6 +219,11 @@ pub struct ShaderFnCompiler {
     /// Skip the next NEG opcode: the sign of a `/**x*/ -lit` literal was
     /// folded into the table constant just pushed.
     pub skip_next_neg: bool,
+    /// Open loops, innermost last, for the static iteration count (see
+    /// [`crate::shader_control::SHADER_ITERATION_BUDGET`]).
+    pub(crate) loop_frames: Vec<crate::shader_control::LoopCostFrame>,
+    /// Worst-case iterations charged outside every loop (callees' costs).
+    pub(crate) fn_cost: u64,
 }
 
 #[derive(Default)]
@@ -544,6 +549,19 @@ impl ShaderFnCompiler {
             // to determine when to stop. The trap may still be set by handle_return but
             // we ignore it and continue processing to properly close all control structures.
             self.trap.take_on();
+        }
+        // The static cost of this function, callees included, with every
+        // runtime-bounded loop counted as one pass (its further passes are
+        // paid from the invocation's shared counter). What exceeds the
+        // budget here is literal nesting no counter could stop, and such a
+        // shader is refused rather than run.
+        let cost = self.static_cost();
+        if cost > crate::shader_control::SHADER_ITERATION_BUDGET {
+            output.push_error(format!(
+                "shader loops too costly: literal-bounded loops need {} passes per invocation, over the budget of {} (reduce loop bounds or nesting)",
+                cost,
+                crate::shader_control::SHADER_ITERATION_BUDGET
+            ));
         }
         output.emitted_bytes += self.out.len().saturating_sub(fn_start_len);
         // Also check AFTER accumulating: the entry check above only trips

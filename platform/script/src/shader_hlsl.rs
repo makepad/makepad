@@ -156,6 +156,9 @@ impl ShaderOutput {
 
     /// Emit HLSL helper functions that are needed by the shader
     pub fn hlsl_create_helpers(&self, _vm: &ScriptVm, out: &mut String) {
+        // The invocation's shared loop-pass counter
+        // (shader_control::SHADER_ITERATION_BUDGET).
+        writeln!(out, "static uint _mp_iter = 0;").ok();
         // Packed vertex attribute unpackers (map / vector geometry).
         // Two f16s or four unorm8s are bitcast into one f32 geometry slot.
         writeln!(out, "float2 _mp_unpack2f16(float x) {{").ok();

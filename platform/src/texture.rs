@@ -744,6 +744,21 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    /// Two-channel half-float render target (RG16F): an octahedral normal or
+    /// a screen-space velocity written as an extra MRT attachment of a scene
+    /// pass. Written through a `vec2f` fragment output; no blending.
+    RenderRGf16 {
+        size: TextureSize,
+        initial: bool,
+    },
+    /// Single-channel unsigned-integer render target (R32Uint): an item id
+    /// buffer for outlines and picking. Written through a `u32` fragment
+    /// output and read with `texel_fetch`-style nearest loads; integer
+    /// targets never blend.
+    RenderRu32 {
+        size: TextureSize,
+        initial: bool,
+    },
 
     SharedBGRAu8 {
         width: usize,
@@ -824,6 +839,12 @@ impl std::fmt::Debug for TextureFormat {
             }
             TextureFormat::RenderRf32 { size, .. } => {
                 write!(f, "TextureFormat::RenderRf32(size:{:?})", size)
+            }
+            TextureFormat::RenderRGf16 { size, .. } => {
+                write!(f, "TextureFormat::RenderRGf16(size:{:?})", size)
+            }
+            TextureFormat::RenderRu32 { size, .. } => {
+                write!(f, "TextureFormat::RenderRu32(size:{:?})", size)
             }
             TextureFormat::SharedBGRAu8 { width, height, .. } => write!(
                 f,
@@ -996,6 +1017,8 @@ pub(crate) enum TexturePixel {
     Ru8,
     RGu8,
     Rf32,
+    RGf16,
+    Ru32,
     D32,
     /// YUV plane pixel type. Individual planes are R8 (luma, I420 chroma) or
     /// RG8 (NV12 chroma); the actual GPU format is set at upload/wrap time.
@@ -1050,6 +1073,8 @@ impl CxTexture {
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::RenderRf32 { initial, .. } => initial,
+            TextureFormat::RenderRGf16 { initial, .. } => initial,
+            TextureFormat::RenderRu32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
             _ => panic!(),
         }
@@ -1079,6 +1104,8 @@ impl CxTexture {
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::RenderRf32 { initial, .. } => initial,
+            TextureFormat::RenderRGf16 { initial, .. } => initial,
+            TextureFormat::RenderRu32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
             _ => panic!(),
         } = initial;
@@ -1222,6 +1249,8 @@ impl TextureFormat {
             Self::RenderRGBAf16 { .. } => true,
             Self::RenderRGBAf32 { .. } => true,
             Self::RenderRf32 { .. } => true,
+            Self::RenderRGf16 { .. } => true,
+            Self::RenderRu32 { .. } => true,
             _ => false,
         }
     }
@@ -1402,6 +1431,24 @@ impl TextureFormat {
                     width,
                     height,
                     pixel: TexturePixel::Rf32,
+                    category: TextureCategory::Render,
+                })
+            }
+            Self::RenderRGf16 { size, .. } => {
+                let (width, height) = size.width_height(width, height);
+                Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::RGf16,
+                    category: TextureCategory::Render,
+                })
+            }
+            Self::RenderRu32 { size, .. } => {
+                let (width, height) = size.width_height(width, height);
+                Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::Ru32,
                     category: TextureCategory::Render,
                 })
             }
