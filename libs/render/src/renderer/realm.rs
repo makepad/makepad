@@ -333,12 +333,14 @@ impl Renderer {
     /// "mover" merely to get a shadow.
     pub(super) fn rebuild_csm_static_casters(&mut self) {
         self.csm_static_casters.clear();
+        // First entry per id, as the linear find it replaces (a forest is
+        // thousands of copies of a few models; every model install rebuilds).
+        let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(self.static_models.len());
+        for (i, (id, _)) in self.static_models.iter().enumerate() {
+            by_id.entry(id.as_str()).or_insert(i);
+        }
         for inst in self.placed_models.iter().filter(|instance| !instance.dynamic) {
-            let Some((_, model)) = self
-                .static_models
-                .iter()
-                .find(|(id, _)| *id == inst.model)
-            else {
+            let Some((_, model)) = by_id.get(inst.model.as_str()).map(|&i| &self.static_models[i]) else {
                 continue;
             };
             if model.morph.is_some(){continue;}
@@ -396,7 +398,9 @@ impl Renderer {
             };
             spread(c.x) | spread(c.z) << 1
         };
-        self.csm_static_casters.sort_by_key(|m| (m.cutout.is_some(), first[&m.geometry], cell(m)));
+        // Keys once per caster (a lookup per comparison was seconds of a
+        // city's load: every model install rebuilds this list).
+        self.csm_static_casters.sort_by_cached_key(|m| (m.cutout.is_some(), first[&m.geometry], cell(m)));
         self.csm_static_blocks = crate::gpu_lightmap::caster_blocks(&self.csm_static_casters);
     }
 
