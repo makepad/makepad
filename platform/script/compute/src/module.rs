@@ -598,7 +598,19 @@ pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
         code: format!("use mod.math.*\nuse mod.pod.*\n{SHARED_STD}\n{{{exports}}}\n"),
         ..Default::default()
     });
-    if value.as_object().is_some() {
+    if let Some(shared) = value.as_object() {
+        // `rand_seq(seed, i)`: the i-th draw of a seeded sequence; with `n`, an
+        // array of the n draws from i (a table built at load in one call).
+        vm.add_method(shared, id_lut!(rand_seq), script_args!(seed = 0.0, i = 0.0, n = NIL), |vm, args| {
+            let num = |vm: &ScriptVm, k: LiveId| vm.bx.heap.value(args, k.into(), NoTrap).as_number();
+            let (seed, i) = (num(vm, id!(seed)).unwrap_or(0.0), num(vm, id!(i)).unwrap_or(0.0));
+            let Some(n) = num(vm, id!(n)) else { return crate::rand::rand_seq(seed, i).into() };
+            let out = vm.bx.heap.new_array();
+            for k in 0..n.clamp(0.0, 16_777_216.0) as u64 {
+                vm.bx.heap.array_push_unchecked(out, crate::rand::rand_seq(seed, i + k as f64).into());
+            }
+            out.into()
+        });
         vm.bx.heap.set_value(modules, id!(shared).into(), value, NoTrap);
     }
 }
@@ -618,6 +630,21 @@ mod vm_tests {
         for name in super::SHARED_STD.lines().filter_map(|l| l.strip_prefix("fn ").and_then(|r| r.split('(').next())) {
             let f = vm.bx.heap.value(shared, LiveId::from_str(name.trim()).into(), NoTrap);
             assert!(!f.is_nil(), "mod.shared.{name}");
+        }
+        let draw = vm.bx.heap.value(shared, id!(rand_seq).into(), NoTrap);
+        assert!(!draw.is_nil(), "mod.shared.rand_seq");
+        let eval = |vm: &mut ScriptVm, code: &str| vm.eval(ScriptMod { file: "t".into(), code: format!("use mod.math.*\nuse mod.pod.*\nuse mod.shared.*\n{code}"), ..Default::default() }).as_number();
+        assert_eq!(eval(&mut vm, "rand_seq(42, 1)"), Some(crate::rand::rand_seq(42.0, 1.0)));
+        assert_eq!(eval(&mut vm, "let t = rand_seq(42, 0, 3)\nt[2]"), Some(crate::rand::rand_seq(42.0, 2.0)), "a table of draws");
+        // The colour and noise helpers in the interpreter: round trips and ranges.
+        let back = eval(&mut vm, "let c = vec3(0.02, 0.5, 0.93)\nlength(linear_to_srgb(srgb_to_linear(c)) - c)").unwrap();
+        assert!(back < 1e-5, "sRGB round trip {back}");
+        assert!((eval(&mut vm, "srgb_to_linear(vec3(0.5, 0.5, 0.5)).x").unwrap() - 0.21404).abs() < 1e-4);
+        for p in ["vec2(0.3, 7.1)", "vec2(-12.5, 3.25)", "vec2(100.0, 0.01)"] {
+            let h = eval(&mut vm, &format!("hash12({p})")).unwrap();
+            let n = eval(&mut vm, &format!("snoise2({p})")).unwrap();
+            let h2 = eval(&mut vm, &format!("hash22({p}).y")).unwrap();
+            assert!((0.0..1.0).contains(&h) && (0.0..1.0).contains(&h2) && n.abs() <= 1.0, "{p}: {h} {h2} {n}");
         }
         super::register_shared_std(&mut vm);
         assert_eq!(vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object(), Some(shared), "registered once");

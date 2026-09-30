@@ -20,6 +20,14 @@ fn hash01(i, k) { float(hash2(i, k) >>> 8) * (1.0 / 16777216.0) }
 fn rand01(s, i, k) { float(hash3(s, i, k) >>> 8) * (1.0 / 16777216.0) }
 // Uniform -1..1.
 fn rand11(s, i, k) { rand01(s, i, k) * 2.0 - 1.0 }
+// Draw i (from 0) of the seeded sequence `seed`, 0..1: the documents'
+// rand_seq(seed, i) to 24 bits (src/rand.rs).
+fn rand_seq(seed, i) {
+    var t = int(seed) + (int(i) + 1) * 0x6D2B79F5
+    t = (t ^ (t >>> 15)) * (t | 1)
+    t = t ^ (t + (t ^ (t >>> 7)) * (t | 61))
+    float((t ^ (t >>> 14)) >>> 8) * (1.0 / 16777216.0)
+}
 // A random unit vector.
 fn rand_dir(s, i, k) {
     let z = rand11(s, i, k)

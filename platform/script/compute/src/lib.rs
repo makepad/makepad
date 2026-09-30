@@ -31,6 +31,7 @@ pub mod module;
 pub mod opt;
 pub mod parse;
 pub mod pipeline;
+pub mod rand;
 pub mod sched;
 
 #[cfg(target_arch = "aarch64")]
