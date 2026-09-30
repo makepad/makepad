@@ -23,13 +23,25 @@ pub struct PbrParams {
     pub clearcoat: f32,
     pub flake: f32,
     pub rim: f32,
+    /// Base colour (sRGB), times `base_color`.
     pub base_map: Option<TextureRef>,
+    /// The glTF maps: tangent-space normals (scaled by `normal_scale`),
+    /// metal-roughness (G roughness, B metallic, times the factors),
+    /// emission (sRGB, times `emissive`) and occlusion (R, by
+    /// `occlusion_strength`).
+    pub normal_map: Option<TextureRef>,
+    pub normal_scale: f32,
+    pub metal_rough_map: Option<TextureRef>,
+    pub emissive_map: Option<TextureRef>,
+    pub occlusion_map: Option<TextureRef>,
+    pub occlusion_strength: f32,
 }
 
 impl Default for PbrParams {
     fn default() -> Self {
         Self { base_color: vec4(1.0, 1.0, 1.0, 1.0), metallic: 0.0, roughness: 1.0,
-            emissive: Vec3f::default(), clearcoat: 0.0, flake: 0.0, rim: 0.0, base_map: None }
+            emissive: Vec3f::default(), clearcoat: 0.0, flake: 0.0, rim: 0.0, base_map: None,
+            normal_map: None, normal_scale: 1.0, metal_rough_map: None, emissive_map: None, occlusion_map: None, occlusion_strength: 1.0 }
     }
 }
 
@@ -139,6 +151,9 @@ impl MaterialFrame {
             MaterialKind::Pbr(p) => {
                 if !finite4(p.base_color) || !(0.0..=1.0).contains(&p.metallic) || !(0.0..=1.0).contains(&p.roughness) {
                     return Err("pbr needs a finite colour and metallic/roughness in 0..1");
+                }
+                if !p.normal_scale.is_finite() || !(0.0..=1.0).contains(&p.occlusion_strength) {
+                    return Err("pbr needs a finite normal scale and an occlusion strength in 0..1");
                 }
             }
             MaterialKind::Unlit(u) => {

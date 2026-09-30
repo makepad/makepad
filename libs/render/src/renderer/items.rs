@@ -18,8 +18,9 @@ use crate::material_surface::MaterialSurface;
 use makepad_render_material::{HookMask, HookSet, MaterialDesc};
 use makepad_scene::{
     BaseKind, Blend, BufferRef, GeometryId, GeometryRef, InstanceSource, ItemFlags, ItemKind, LayoutId, LightingModel,
-    MaterialFrame, MaterialKind, Side,
+    MaterialFrame, MaterialKind, Side, TextureRef,
 };
+use crate::material_surface::{PixelSemantic, PreparedTexture};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -110,6 +111,10 @@ pub(super) struct ItemState {
     /// Items this frame the model lanes do not draw (lines, points, cards,
     /// models, unresolved buffers), for a host's diagnostics.
     pub(super) skipped: usize,
+    /// Images materials name (RGBA8, sRGB for colour), by reference.
+    images: HashMap<TextureRef, (usize, usize, Arc<Vec<u8>>)>,
+    /// Their mipped forms, by use.
+    prepared: HashMap<(TextureRef, u8), Arc<PreparedTexture>>,
 }
 
 /// What of a material the uploaded model carries (the base colour is the
@@ -121,11 +126,17 @@ fn material_key(m: &MaterialFrame) -> u64 {
     match &m.kind {
         MaterialKind::Pbr(p) => {
             0u8.hash(&mut h);
-            for v in [p.metallic, p.roughness, p.emissive.x, p.emissive.y, p.emissive.z, p.clearcoat, p.flake, p.rim] {
+            for v in [p.metallic, p.roughness, p.emissive.x, p.emissive.y, p.emissive.z, p.clearcoat, p.flake, p.rim, p.normal_scale, p.occlusion_strength] {
                 f(&mut h, v);
             }
+            for map in [p.base_map, p.normal_map, p.metal_rough_map, p.emissive_map, p.occlusion_map] {
+                map.hash(&mut h);
+            }
         }
-        MaterialKind::Unlit(_) => 1u8.hash(&mut h),
+        MaterialKind::Unlit(u) => {
+            1u8.hash(&mut h);
+            u.map.hash(&mut h);
+        }
         MaterialKind::Splash(s) => {
             2u8.hash(&mut h);
             s.program.0.hash(&mut h);
@@ -176,13 +187,58 @@ impl Renderer {
         self.items.geometries.contains_key(&id)
     }
 
-    /// Whether every custom material the last frame's items used has its
-    /// pipeline: until then those items draw through the stock lane, so a
-    /// locked-time host waits for this before it takes the frame.
+    /// Make an image resident under `r` for the materials that name it
+    /// (`base_map`, the glTF maps, an unlit `map`): `rgba` is width x
+    /// height RGBA8, sRGB-encoded for colour maps, linear for data. A
+    /// reference names one image: register a changed image under a new one.
+    pub fn register_image(&mut self, r: TextureRef, width: usize, height: usize, rgba: Arc<Vec<u8>>) -> Result<(), String> {
+        if width == 0 || height == 0 || width > 8192 || height > 8192 || rgba.len() != width * height * 4 {
+            return Err(format!("an image needs width x height x 4 bytes (1..8192 a side), got {width} x {height} and {} bytes", rgba.len()));
+        }
+        self.items.images.entry(r).or_insert((width, height, rgba));
+        Ok(())
+    }
+
+    pub fn unregister_image(&mut self, r: TextureRef) {
+        self.items.images.remove(&r);
+        self.items.prepared.retain(|(k, _), _| *k != r);
+    }
+
+    pub fn has_image(&self, r: TextureRef) -> bool {
+        self.items.images.contains_key(&r)
+    }
+
+    /// A registered image, mipped for `semantic` (once per use).
+    fn item_image(&mut self, r: TextureRef, semantic: PixelSemantic) -> Option<Arc<PreparedTexture>> {
+        let key = (r, semantic as u8);
+        if let Some(t) = self.items.prepared.get(&key) {
+            return Some(t.clone());
+        }
+        let (width, height, rgba) = self.items.images.get(&r)?;
+        let (width, height) = (*width, *height);
+        let mut image = ImageBuffer::default();
+        image.width = width;
+        image.height = height;
+        // 0xAARRGGBB words (the lanes sample them as BGRA), bottom row
+        // first: the lanes' v runs up the image, an item's uv (glTF) down.
+        image.data = rgba.chunks_exact(width * 4).rev().flat_map(|row| row.chunks_exact(4)).map(|p| (p[3] as u32) << 24 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32).collect();
+        let t = Arc::new(PreparedTexture::prepare(image, semantic));
+        self.items.prepared.insert(key, t.clone());
+        Some(t)
+    }
+
+    /// Whether every custom material the last frame's items used, and the
+    /// PBR lane, has its pipeline: until then those items draw through the
+    /// stock (matte) lane, so a locked-time host waits for this before it
+    /// takes the frame.
     pub fn items_ready(&self, cx: &Cx) -> bool {
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
-        self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)))
+        let custom = self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));
+        // Shiny models draw matte (no emission, no maps) until the PBR
+        // pipeline exists; it is made once a frame has any.
+        let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));
+        custom && pbr
     }
 
     /// Items the model lanes skipped last frame (lines, points, cards,
@@ -216,6 +272,8 @@ impl Renderer {
             surface.clearcoat = p.clearcoat;
             surface.flake = p.flake;
             surface.rim = p.rim;
+            surface.normal_scale = if p.normal_map.is_some() { p.normal_scale } else { 0.0 };
+            surface.occlusion_strength = if p.occlusion_map.is_some() { p.occlusion_strength } else { 0.0 };
         }
         match material.blend {
             Blend::Mask { cutoff } => {
@@ -252,13 +310,43 @@ impl Renderer {
         let id = format!("item/{}/{:016x}", geometry.0, key.1);
         // The prepared path keeps the layer's surface (opacity, emission,
         // clear coat, sides), which the parsed-model path drops.
-        let prepared = match PreparedStaticPreview::prepare(model) {
+        let mut prepared = match PreparedStaticPreview::prepare(model) {
             Ok(p) => p,
             Err(e) => {
                 log!("render: item geometry {} did not prepare: {e}", geometry.0);
                 return None;
             }
         };
+        // The material's maps, from the registered images (a map not
+        // registered draws as its neutral image).
+        let (base, normal, orm, emissive, occlusion) = match &material.kind {
+            MaterialKind::Pbr(p) => (p.base_map, p.normal_map, p.metal_rough_map, p.emissive_map, p.occlusion_map),
+            MaterialKind::Unlit(u) => (u.map, None, None, None, None),
+            MaterialKind::Splash(_) => (None, None, None, None, None),
+        };
+        let masked = matches!(material.blend, Blend::Mask { .. });
+        if let Some(t) = base.and_then(|r| self.item_image(r, if masked { PixelSemantic::MaskedColor } else { PixelSemantic::Color })) {
+            prepared.main.cutout = t.cutout();
+            prepared.main.texture = t;
+        }
+        if let Some(t) = orm.and_then(|r| self.item_image(r, PixelSemantic::Data)) {
+            prepared.main.orm = t;
+            prepared.main.orm_on = true;
+        }
+        let normal = normal.and_then(|r| self.item_image(r, PixelSemantic::Normal));
+        let emissive = emissive.and_then(|r| self.item_image(r, PixelSemantic::Color));
+        let occlusion = occlusion.and_then(|r| self.item_image(r, PixelSemantic::Data));
+        if let Some(s) = prepared.main.surface.as_mut() {
+            if let Some(t) = normal {
+                s.normal = (*t).clone();
+            }
+            if let Some(t) = emissive {
+                s.emissive = (*t).clone();
+            }
+            if let Some(t) = occlusion {
+                s.occlusion = (*t).clone();
+            }
+        }
         self.install_static_preview(cx, &id, prepared, false)?;
         self.set_model_casts_shadow(&id, cast);
         self.items.models.insert(key, id.clone());
