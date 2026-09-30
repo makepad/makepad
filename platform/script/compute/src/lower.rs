@@ -346,7 +346,9 @@ impl Builder {
     }
 
     fn cst(&self, v: Val) -> Option<u32> {
-        self.consts[v.0 as usize]
+        // A value of another builder (an outer local seen while a constant
+        // initializer is folded in a scratch builder) is not a constant.
+        self.consts.get(v.0 as usize).copied().flatten()
     }
 
     fn raw(&mut self, ty: Ty, op: Op, c: Option<u32>) -> Val {
@@ -450,11 +452,11 @@ impl Builder {
         self.def(Ty::Bool, Op::CmpI(cc, x, y))
     }
     fn sel(&mut self, c: Val, x: Val, y: Val) -> Val {
-        let ty = self.prog.vals[x.0 as usize];
+        let ty = self.prog.vals.get(x.0 as usize).copied().unwrap_or(Ty::F32);
         self.def(ty, Op::Sel(c, x, y))
     }
     fn get(&mut self, v: Var) -> Val {
-        let ty = self.prog.vars[v.0 as usize];
+        let ty = self.prog.vars.get(v.0 as usize).copied().unwrap_or(Ty::F32);
         self.raw(ty, Op::Get(v), None)
     }
     fn set(&mut self, v: Var, x: Val) {

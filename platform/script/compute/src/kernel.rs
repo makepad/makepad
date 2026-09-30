@@ -201,6 +201,11 @@ impl Kernel {
         &self.program
     }
 
+    /// Words of the read-only shared tables.
+    pub fn shared_words(&self) -> usize {
+        self.shared.len()
+    }
+
     /// Ctx words: base, count, time, seed, cancel, overflow, reduce lanes,
     /// then the params.
     pub fn ctx_words(&self) -> usize {

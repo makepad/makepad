@@ -16,6 +16,7 @@
 //! bit-identical to the interpreter: AIR's ops are total and exactly
 //! specified and math functions are polynomials of those ops (no libm).
 
+pub mod admission;
 pub mod ir;
 pub mod kernel;
 pub mod lower;
