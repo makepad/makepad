@@ -42,6 +42,8 @@ fn linear_to_srgb1(x) {
 fn srgb_to_linear(c) { return vec3(srgb_to_linear1(c.x), srgb_to_linear1(c.y), srgb_to_linear1(c.z)) }
 // A linear-light rgb sRGB-encoded (what a display or a #hex colour holds).
 fn linear_to_srgb(c) { return vec3(linear_to_srgb1(c.x), linear_to_srgb1(c.y), linear_to_srgb1(c.z)) }
+// A colour's (a `#hex`'s) rgb in linear light: what segments, passes and 3D lights take.
+fn linear_rgb(c) { return vec3(srgb_to_linear1(c.r), srgb_to_linear1(c.g), srgb_to_linear1(c.b)) }
 
 // ---- Hashes and noise (float-only, stable across GPUs: no sine) ---------------
 

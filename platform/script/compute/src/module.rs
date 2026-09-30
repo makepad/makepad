@@ -640,6 +640,7 @@ mod vm_tests {
         let back = eval(&mut vm, "let c = vec3(0.02, 0.5, 0.93)\nlength(linear_to_srgb(srgb_to_linear(c)) - c)").unwrap();
         assert!(back < 1e-5, "sRGB round trip {back}");
         assert!((eval(&mut vm, "srgb_to_linear(vec3(0.5, 0.5, 0.5)).x").unwrap() - 0.21404).abs() < 1e-4);
+        assert!((eval(&mut vm, "linear_rgb(#808080).y").unwrap() - 0.21586).abs() < 1e-4, "a colour's channels in linear light");
         for p in ["vec2(0.3, 7.1)", "vec2(-12.5, 3.25)", "vec2(100.0, 0.01)"] {
             let h = eval(&mut vm, &format!("hash12({p})")).unwrap();
             let n = eval(&mut vm, &format!("snoise2({p})")).unwrap();
