@@ -47,7 +47,7 @@ pub(crate) fn convex_hull(points: &[[f64; 3]]) -> Option<(Vec<[f64; 3]>, Vec<[u3
         if [i0, i1, i2, i3].contains(&i) { continue; }
         let visible: Vec<bool> = faces.iter().map(|f| above(f, q)).collect();
         if !visible.iter().any(|v| *v) { continue; }
-        let mut edges = std::collections::HashSet::new();
+        let mut edges = std::collections::BTreeSet::new();
         for (f, _) in faces.iter().zip(&visible).filter(|(_, v)| **v) { for k in 0..3 { edges.insert((f[k], f[(k + 1) % 3])); } }
         let mut next: Vec<[usize; 3]> = faces.iter().zip(&visible).filter(|(_, v)| !**v).map(|(f, _)| *f).collect();
         for &(a, b) in &edges { if !edges.contains(&(b, a)) { next.push([a, b, i]); } }
