@@ -75,3 +75,12 @@ fn accelerate(t, a, vmax) {
     let t1 = if a > 0.0 { vmax / a } else { 0.0 }
     if t <= 0.0 { 0.0 } elif t < t1 { 0.5 * a * t * t } else { 0.5 * a * t1 * t1 + vmax * (t - t1) }
 }
+
+// Birth-clock emitters (AK10): particles born at `rate` per second, each
+// living `life` seconds. A kernel runs `births_max(life, rate)` elements;
+// element e is birth `births_first(t, life, rate) + e`, born at
+// `birth_time(index, rate)` (dead when born after t). Thin with
+// `hash01(index, k) < keep` for a rate that varies.
+fn births_first(t, life, rate) { int(floor(max(t - life, 0.0) * rate)) }
+fn births_max(life, rate) { int(ceil(life * rate)) + 1 }
+fn birth_time(index, rate) { float(index) / rate }

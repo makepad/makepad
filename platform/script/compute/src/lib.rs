@@ -24,6 +24,7 @@ pub mod kernel;
 pub mod lower;
 pub mod module;
 pub mod parse;
+pub mod pipeline;
 pub mod sched;
 
 #[cfg(target_arch = "aarch64")]

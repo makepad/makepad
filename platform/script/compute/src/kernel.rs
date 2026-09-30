@@ -598,6 +598,13 @@ impl<'a> Call<'a> {
         self.work_limit = ops;
     }
 
+    /// The op-equivalents one host call may cost for its actual input (0:
+    /// no limit): larger inputs are refused before the call runs, with
+    /// `RunStats::host_error` set. Admission sets it for untrusted origins.
+    pub fn set_host_call_limit(&mut self, ops: u64) {
+        self.ctx[kl::K_HOST_LIMIT as usize] = ops.min(u32::MAX as u64) as u32;
+    }
+
     /// Allows (default) or forbids the NEON ×4 code (differential tests;
     /// results are bit-identical either way).
     pub fn set_simd(&mut self, on: bool) {

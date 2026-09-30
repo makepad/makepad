@@ -29,14 +29,14 @@ fn fill(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError
 
 fn register() {
     for f in [
-        HostFn { name: "test.sum3", params: &[Ty::F32, Ty::F32, Ty::F32], slices: &[], rets: &[Ty::F32], max_cost: 4, misses: 0, tier: Tier::X, call: sum3, doc: "" },
-        HostFn { name: "test.boom", params: &[Ty::I32], slices: &[], rets: &[Ty::I32], max_cost: 4, misses: 0, tier: Tier::X, call: boom, doc: "" },
+        HostFn { name: "test.sum3", params: &[Ty::F32, Ty::F32, Ty::F32], slices: &[], rets: &[Ty::F32], cost: |_| 4, misses: 0, tier: Tier::X, call: sum3, doc: "" },
+        HostFn { name: "test.boom", params: &[Ty::I32], slices: &[], rets: &[Ty::I32], cost: |_| 4, misses: 0, tier: Tier::X, call: boom, doc: "" },
         HostFn {
             name: "test.fill",
             params: &[Ty::I32],
             slices: &[SliceSig { max_words: 8, writable: true }],
             rets: &[Ty::I32],
-            max_cost: 16,
+            cost: |l| 16 + l[0] as u64,
             misses: 1,
             tier: Tier::D,
             call: fill,
@@ -181,4 +181,67 @@ fn the_validator_checks_host_calls() {
     let p = prog(s(2), vec![Val(0)], vec![Val(1)], f);
     assert!(p.total_cost() >= 16);
     let _ = Region::Frame;
+}
+
+/// A comb: n teeth whose reflex vertices sit near every ear candidate
+/// (ear clipping's hard case), counter-clockwise.
+fn comb(teeth: usize) -> Vec<f32> {
+    let mut p = Vec::new();
+    for k in 0..teeth {
+        let x = k as f32;
+        p.extend_from_slice(&[x, 0.0, x + 0.5, 10.0]);
+    }
+    p.extend_from_slice(&[teeth as f32, 0.0, teeth as f32, -1.0, 0.0, -1.0]);
+    // As built the teeth run clockwise along the top: reverse for ccw.
+    let n = p.len() / 2;
+    let mut r = Vec::with_capacity(p.len());
+    for i in (0..n).rev() {
+        r.extend_from_slice(&p[2 * i..2 * i + 2]);
+    }
+    r
+}
+
+#[test]
+fn triangulate_cost_is_honest_and_budgets_refuse_large_inputs() {
+    let f = host::find("poly.triangulate").unwrap();
+    let h = host::get(f).unwrap();
+    for teeth in [64usize, 512, 2048] {
+        for pts in [comb(teeth), { let mut c = comb(teeth); let n = c.len() / 2; let mut r = Vec::new(); for i in (0..n).rev() { r.extend_from_slice(&c[2 * i..2 * i + 2]); } c.clear(); r }] {
+            let mut pts = pts;
+            let n = pts.len() / 2;
+            let mut tris = vec![0u32; 3 * n];
+            let bufs = [
+                ir::RawBuf { ptr: pts.as_mut_ptr() as *mut u32, len: pts.len(), writable: false },
+                ir::RawBuf { ptr: tris.as_mut_ptr(), len: tris.len(), writable: true },
+            ];
+            let sl = [host::SliceRaw { buf: 0, off: 0, len: pts.len() as u32 }, host::SliceRaw { buf: 1, off: 0, len: tris.len() as u32 }];
+            let mut rets = [0u32];
+            let t0 = std::time::Instant::now();
+            assert!(host::invoke(f, &[], &sl, &mut rets, &bufs));
+            let took = t0.elapsed();
+            assert_eq!(rets[0] as usize, n - 2, "{} points", n);
+            // Charged at the native rate (0.5 ns per op): the real time fits.
+            let declared_ns = h.cost_of(&[pts.len() as u32, tris.len() as u32]) / 2;
+            eprintln!("triangulate {} points: {:.3} ms, declared {:.3} ms", n, took.as_secs_f64() * 1e3, declared_ns as f64 / 1e6);
+            assert!((took.as_nanos() as u64) < declared_ns, "{} points took {:?}, declared {} ns", n, took, declared_ns);
+            // A per-call limit below the input's cost refuses it before it runs.
+            let limit = h.cost_of(&[pts.len() as u32, tris.len() as u32]) - 1;
+            let mut rets = [7u32];
+            assert!(!host::invoke_limited(f, &[], &sl, &mut rets, &bufs, limit));
+            assert_eq!(rets, [0]);
+        }
+    }
+    // The same from a kernel: the limit word refuses the call, and it is reported.
+    let src = "let pts = input(f32)\nlet tris = output(i32, 1, 0, tris)\nlet o = output(i32)\nfn element(i) { o[i] = poly.triangulate(pts, 0, 1030, tris, 0, 1542) }";
+    let k = compile(src).unwrap();
+    let mut j = Job::new(k, 1);
+    j.input("pts", comb(256).into()).unwrap();
+    j.output_u32("tris", vec![0; 1542]).unwrap();
+    j.output_u32("o", vec![0; 1]).unwrap();
+    j.set_host_call_limit(1000);
+    assert!(j.run(&InlineExecutor, 1).unwrap().host_error);
+    assert_eq!(j.out_u32("o").unwrap(), &[0]);
+    j.set_host_call_limit(0);
+    assert!(!j.run(&InlineExecutor, 1).unwrap().host_error);
+    assert_eq!(j.out_u32("o").unwrap(), &[513]);
 }

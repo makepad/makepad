@@ -35,7 +35,10 @@ pub const K_OVERFLOW: u32 = 5;
 pub const K_ACC: u32 = 6;
 /// Set to 1 when a host function call failed (its results were zero).
 pub const K_HOST_ERR: u32 = 22;
-pub const K_PARAMS: u32 = 23;
+/// The op-equivalents one host call may cost for its actual input (0: no
+/// limit); set from admission.
+pub const K_HOST_LIMIT: u32 = 23;
+pub const K_PARAMS: u32 = 24;
 /// Most elements one call may run.
 pub const ELEMENT_CAP: u32 = 1 << 30;
 pub const MAX_BUFFERS: usize = 64;
@@ -634,7 +637,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     }
     dce(&mut program);
     let cost = program.cost();
-    if cost > MAX_COST_PER_ELEMENT {
+    if program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
     let parallel_safe = !l.kernel.nonlocal;

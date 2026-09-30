@@ -204,9 +204,59 @@ pub struct SliceArg {
     pub len: Val,
 }
 
-/// A host call's worst-case cost (an unknown function: the most any may).
-pub fn host_cost(f: u16) -> u64 {
-    crate::host::get(f).map_or(u64::MAX / 4, |h| h.max_cost.saturating_add(8))
+/// A host call's static cost: at its slices' constant lengths where they
+/// are constants; a length known only at run time counts as 0 here (the
+/// call's run-time limit, `K_HOST_LIMIT`, and admission bound it). An
+/// unknown function costs the most any may.
+pub fn host_cost(f: u16, lens: &[Option<u32>]) -> u64 {
+    crate::host::get(f).map_or(u64::MAX / 4, |h| {
+        let mut l = [0u32; 8];
+        for (k, x) in lens.iter().enumerate().take(8) {
+            if let Some(c) = x {
+                l[k] = *c;
+            }
+        }
+        h.cost_of(&l[..lens.len().min(8)]).saturating_add(8)
+    })
+}
+
+/// The block with each host call replaced by a unit statement.
+fn strip_calls(b: &Block) -> Block {
+    b.iter()
+        .map(|s| match s {
+            Stmt::CallHost { .. } => Stmt::Break(u32::MAX),
+            Stmt::If(c, t, e) => Stmt::If(*c, strip_calls(t), strip_calls(e)),
+            Stmt::Loop { cap, body } => Stmt::Loop { cap: *cap, body: strip_calls(body) },
+            s => s.clone(),
+        })
+        .collect()
+}
+
+/// Every ConstI of a program (for costs at constant slice lengths).
+fn const_ints(p: &Program) -> std::collections::HashMap<u32, u32> {
+    fn walk(b: &Block, out: &mut std::collections::HashMap<u32, u32>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    out.insert(v.0, *c as u32);
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, out);
+                    walk(e, out);
+                }
+                Stmt::Loop { body, .. } => walk(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(&p.body, &mut out);
+    out
+}
+
+fn call_cost(f: u16, slices: &[SliceArg], consts: &std::collections::HashMap<u32, u32>) -> u64 {
+    let lens: Vec<Option<u32>> = slices.iter().map(|x| consts.get(&x.len.0).copied()).collect();
+    host_cost(f, &lens)
 }
 
 pub type Block = Vec<Stmt>;
@@ -235,41 +285,50 @@ impl Program {
 
     /// Worst-case ops of one whole run: every loop at its cap (`init()`).
     pub fn total_cost(&self) -> u64 {
-        fn walk(b: &Block) -> u64 {
+        fn walk(b: &Block, c: &std::collections::HashMap<u32, u32>) -> u64 {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t).max(walk(e)),
-                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body) + 2),
-                    Stmt::CallHost { f, .. } => host_cost(*f),
+                    Stmt::If(_, t, e) => 1 + walk(t, c).max(walk(e, c)),
+                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c) + 2),
+                    Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
                     _ => 1,
                 });
             }
             sum
         }
-        walk(&self.body)
+        walk(&self.body, &const_ints(self))
+    }
+
+    /// [`Program::cost`] with every host call counted as its call overhead
+    /// only: the generated code's own work (what the per-element cap
+    /// bounds; host components are bounded per call at run time).
+    pub fn air_cost(&self) -> u64 {
+        let mut p = Program { vals: Vec::new(), vars: Vec::new(), body: Vec::new(), frame_words: 0 };
+        std::mem::swap(&mut p.body, &mut strip_calls(&self.body));
+        p.cost()
     }
 
     /// Static instruction count weighted by loop caps: a bound on the work
     /// of one call per frame of the outer sample loop.
     pub fn cost(&self) -> u64 {
-        fn walk(b: &Block, depth: u32) -> u64 {
+        fn walk(b: &Block, depth: u32, c: &std::collections::HashMap<u32, u32>) -> u64 {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t, depth).max(walk(e, depth)),
+                    Stmt::If(_, t, e) => 1 + walk(t, depth, c).max(walk(e, depth, c)),
                     Stmt::Loop { cap, body } => {
                         // The outermost loop is the per-frame loop: count one frame.
                         let reps = if depth == 0 { 1 } else { *cap as u64 };
-                        reps.saturating_mul(walk(body, depth + 1) + 2)
+                        reps.saturating_mul(walk(body, depth + 1, c) + 2)
                     }
-                    Stmt::CallHost { f, .. } => host_cost(*f),
+                    Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
                     _ => 1,
                 });
             }
             sum
         }
-        walk(&self.body, 0)
+        walk(&self.body, 0, &const_ints(self))
     }
 }
 
@@ -713,7 +772,8 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                     }
                     let mut out = [0u32; 1];
                     let nr = rets.len().min(1);
-                    let ok = crate::host::invoke(*f, &a[..args.len().min(16)], &sl[..slices.len().min(8)], &mut out[..nr], self.mem.bufs);
+                    let limit = self.mem.ctx.get(crate::lower::kernel::K_HOST_LIMIT as usize).copied().unwrap_or(0) as u64;
+                    let ok = crate::host::invoke_limited(*f, &a[..args.len().min(16)], &sl[..slices.len().min(8)], &mut out[..nr], self.mem.bufs, limit);
                     if !ok {
                         if let Some(w) = self.mem.ctx.get_mut(crate::lower::kernel::K_HOST_ERR as usize) {
                             *w = 1;

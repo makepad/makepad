@@ -8,9 +8,14 @@
 //! - **a typed signature**: scalar parameters and results (`Ty`), and
 //!   buffer *slices* (a kernel buffer, a word offset and a word length),
 //!   each with a maximum length and whether the function writes it;
-//! - **a worst-case cost** in op-equivalents (bounded by the slices'
-//!   maximum lengths) and a count of host-memory touches, which the
-//!   kernel's cost and admission charge per call;
+//! - **a worst-case cost as a function of its input**: op-equivalents for
+//!   the slice lengths of a call (monotone in each), and a count of
+//!   host-memory touches. A kernel's cost and admission charge a call at
+//!   its constant lengths, or at the per-call limit; at run time a call
+//!   whose actual input costs more than the call's limit (ctx
+//!   `K_HOST_LIMIT`, set from admission) is refused before it runs, with
+//!   the error word set. Budgets reject oversized inputs; there is no
+//!   capability cap beyond the memory bound `max_words`;
 //! - **a determinism tier**: X (same bits on every machine) or D (same
 //!   device); portable kernels may call only X functions.
 //!
@@ -116,8 +121,9 @@ pub struct HostFn {
     pub slices: &'static [SliceSig],
     /// Results (at most one today: the call's value).
     pub rets: &'static [Ty],
-    /// Worst-case op-equivalents of one call at the slices' maximum sizes.
-    pub max_cost: u64,
+    /// Worst-case op-equivalents of one call for these slice lengths
+    /// (words, clamped), monotone in each.
+    pub cost: fn(slice_words: &[u32]) -> u64,
     /// Host-memory touches per call (admission charges them as misses).
     pub misses: u32,
     pub tier: Tier,
@@ -128,7 +134,27 @@ pub struct HostFn {
 
 impl std::fmt::Debug for HostFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HostFn({}: {} slices, {:?} -> {:?}, cost {}, {:?})", self.name, self.slices.len(), self.params, self.rets, self.max_cost, self.tier)
+        write!(f, "HostFn({}: {} slices, {:?} -> {:?}, cost at most {}, {:?})", self.name, self.slices.len(), self.params, self.rets, self.max_cost(), self.tier)
+    }
+}
+
+impl HostFn {
+    /// The cost at the slices' maximum lengths (the worst any call may be).
+    pub fn max_cost(&self) -> u64 {
+        let mut lens = [0u32; 8];
+        for (k, s) in self.slices.iter().enumerate().take(8) {
+            lens[k] = s.max_words;
+        }
+        (self.cost)(&lens[..self.slices.len().min(8)])
+    }
+
+    /// The cost of a call with these slice lengths (clamped to the maxima).
+    pub fn cost_of(&self, lens: &[u32]) -> u64 {
+        let mut l = [0u32; 8];
+        for (k, s) in self.slices.iter().enumerate().take(8) {
+            l[k] = lens.get(k).copied().unwrap_or(s.max_words).min(s.max_words);
+        }
+        (self.cost)(&l[..self.slices.len().min(8)])
     }
 }
 
@@ -194,6 +220,12 @@ pub struct SliceRaw {
 /// sets the error word. Used by the interpreter and, through
 /// [`trampoline`], native code.
 pub fn invoke(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs: &[RawBuf]) -> bool {
+    invoke_limited(f, args, slices, rets, bufs, 0)
+}
+
+/// [`invoke`] under a per-call budget (op-equivalents; 0: none): a call
+/// whose actual input costs more is refused before it runs.
+pub fn invoke_limited(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs: &[RawBuf], limit: u64) -> bool {
     rets.fill(0);
     let Some(h) = get(f) else { return false };
     if args.len() != h.params.len() || slices.len() != h.slices.len() || rets.len() != h.rets.len() {
@@ -217,6 +249,15 @@ pub fn invoke(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs:
         views[k] = HostSlice { buf, start, len };
     }
     let views = &views[..slices.len()];
+    if limit != 0 {
+        let mut lens = [0u32; 8];
+        for (k, v) in views.iter().enumerate() {
+            lens[k] = v.len as u32;
+        }
+        if (h.cost)(&lens[..views.len()]) > limit {
+            return false;
+        }
+    }
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (h.call)(args, views, rets)));
     match r {
         Ok(Ok(())) => ok,
@@ -259,7 +300,8 @@ pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut 
         for (k, b) in bufs.iter_mut().enumerate().take(nb.min(64)) {
             *b = RawBuf { ptr: *table.add(2 * k) as *mut u32, len: *table.add(2 * k + 1) as usize, writable: writable >> k & 1 != 0 };
         }
-        invoke(f as u16, args, &slices[..ns], rets, &bufs[..nb.min(64)])
+        let limit = *ctx.add(crate::lower::kernel::K_HOST_LIMIT as usize) as u64;
+        invoke_limited(f as u16, args, &slices[..ns], rets, &bufs[..nb.min(64)], limit)
     }));
     if !matches!(r, Ok(true)) {
         *ctx.add(crate::lower::kernel::K_HOST_ERR as usize) = 1;
@@ -270,23 +312,35 @@ pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut 
 // Built-in components
 // =========================================================================
 
-/// Most polygon points `poly.triangulate` takes (ear clipping is O(n²)).
-pub const TRIANGULATE_MAX_POINTS: u32 = 256;
+/// Most polygon points `poly.triangulate` takes (a memory bound; the cost
+/// grows as n²: budgets decide what an untrusted kernel may pass).
+pub const TRIANGULATE_MAX_POINTS: u32 = 1 << 16;
+
+/// Ear clipping's worst case for `words` words of points: n ears, each
+/// found by a scan of at most n vertices and re-tested at its two
+/// neighbours against at most n points (point tests of ~12 ops), plus the
+/// initial test of every vertex.
+fn triangulate_cost(lens: &[u32]) -> u64 {
+    let n = (lens.first().copied().unwrap_or(0) / 2) as u64;
+    16 * n * n + 64 * n + 256
+}
 
 static BUILTIN: &[HostFn] = &[HostFn {
     name: "poly.triangulate",
     params: &[],
-    slices: &[SliceSig { max_words: 2 * TRIANGULATE_MAX_POINTS, writable: false }, SliceSig { max_words: 3 * (TRIANGULATE_MAX_POINTS - 2), writable: true }],
+    slices: &[SliceSig { max_words: 2 * TRIANGULATE_MAX_POINTS, writable: false }, SliceSig { max_words: 3 * TRIANGULATE_MAX_POINTS, writable: true }],
     rets: &[Ty::I32],
-    // Ear clipping: n ears, each a scan of n candidates testing n points.
-    max_cost: 24 * TRIANGULATE_MAX_POINTS as u64 * TRIANGULATE_MAX_POINTS as u64,
+    cost: triangulate_cost,
     misses: 4,
     tier: Tier::X,
     call: triangulate,
-    doc: "poly.triangulate(pts, off, words, tris, off, words) -> triangles: a simple polygon (vec2 points, either winding, up to 256) into triangle indices (3 i32 words each); -1 when it is not simple",
+    doc: "poly.triangulate(pts, off, words, tris, off, words) -> triangles: a simple polygon (vec2 points, either winding) into triangle indices (3 i32 words each); -1 when it is not simple",
 }];
 
-/// Ear clipping of a simple polygon: IEEE arithmetic only (tier X).
+/// Ear clipping of a simple polygon in O(n²): a vertex's ear status is
+/// computed once and re-tested only when a neighbour is clipped; the next
+/// ear is found by walking forward from the last clipped one. IEEE
+/// arithmetic only (tier X).
 fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
     let (pts, out) = (&s[0], &s[1]);
     let n = pts.len() / 2;
@@ -294,73 +348,77 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         rets[0] = 0;
         return Ok(());
     }
-    let p = |i: usize| (pts.get_f32(2 * i), pts.get_f32(2 * i + 1));
-    // Winding by the shoelace sum (in point order, for determinism).
+    let p: Vec<(f64, f64)> = (0..n).map(|i| (pts.get_f32(2 * i) as f64, pts.get_f32(2 * i + 1) as f64)).collect();
     let mut area = 0.0f64;
     for i in 0..n {
-        let (a, b) = (p(i), p((i + 1) % n));
-        area += a.0 as f64 * b.1 as f64 - b.0 as f64 * a.1 as f64;
+        let (a, b) = (p[i], p[(i + 1) % n]);
+        area += a.0 * b.1 - b.0 * a.1;
     }
-    let ccw = area > 0.0;
-    let cross = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (b.0 as f64 - a.0 as f64) * (c.1 as f64 - a.1 as f64) - (b.1 as f64 - a.1 as f64) * (c.0 as f64 - a.0 as f64);
-    let mut idx = [0u16; TRIANGULATE_MAX_POINTS as usize];
-    for (i, x) in idx.iter_mut().enumerate().take(n) {
-        *x = i as u16;
+    if !(area.abs() > 0.0) {
+        rets[0] = (-1i32) as u32;
+        return Ok(());
+    }
+    let sign = if area > 0.0 { 1.0 } else { -1.0 };
+    let cross = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) * sign;
+    let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
+    let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
+    let is_ear = |i: usize, next: &[usize], prev: &[usize]| {
+        let (ia, ic) = (prev[i], next[i]);
+        let (a, b, c) = (p[ia], p[i], p[ic]);
+        if cross(a, b, c) <= 0.0 {
+            return false;
+        }
+        // No other remaining vertex inside or on the triangle (vertices
+        // equal to a corner are allowed: duplicated points).
+        let mut j = next[ic];
+        while j != ia {
+            let q = p[j];
+            if q != a && q != b && q != c && cross(a, b, q) >= 0.0 && cross(b, c, q) >= 0.0 && cross(c, a, q) >= 0.0 {
+                return false;
+            }
+            j = next[j];
+        }
+        true
+    };
+    let mut ear: Vec<bool> = (0..n).map(|i| is_ear(i, &next, &prev)).collect();
+    let need = 3 * (n - 2);
+    if out.len() < need {
+        return Err(HostError(format!("the triangle buffer holds {} words; {} points need {}", out.len(), n, need)));
     }
     let mut m = n;
+    let mut at = 0usize;
+    let mut cur = 0usize;
     let mut written = 0usize;
-    let mut guard = 0;
-    let mut i = 0;
     while m > 3 {
-        guard += 1;
-        if guard > 2 * n * n {
+        let mut i = cur;
+        let mut found = false;
+        for _ in 0..m {
+            if ear[i] {
+                found = true;
+                break;
+            }
+            i = next[i];
+        }
+        if !found {
             rets[0] = (-1i32) as u32;
             return Ok(());
         }
-        let (ia, ib, ic) = (idx[(i + m - 1) % m] as usize, idx[i % m] as usize, idx[(i + 1) % m] as usize);
-        let (a, b, c) = (p(ia), p(ib), p(ic));
-        let turn = cross(a, b, c);
-        let convex = if ccw { turn > 0.0 } else { turn < 0.0 };
-        let mut ear = convex;
-        if ear {
-            for &j in idx.iter().take(m) {
-                let j = j as usize;
-                if j == ia || j == ib || j == ic {
-                    continue;
-                }
-                let q = p(j);
-                let (d1, d2, d3) = (cross(a, b, q), cross(b, c, q), cross(c, a, q));
-                let inside = if ccw { d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0 } else { d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0 };
-                if inside {
-                    ear = false;
-                    break;
-                }
-            }
-        }
-        if ear {
-            if written + 3 > out.len() {
-                return Err(HostError("the triangle buffer is too small".into()));
-            }
-            out.set(written, ia as u32);
-            out.set(written + 1, ib as u32);
-            out.set(written + 2, ic as u32);
-            written += 3;
-            let at = i % m;
-            for k in at..m - 1 {
-                idx[k] = idx[k + 1];
-            }
-            m -= 1;
-            i = if at == 0 { 0 } else { at - 1 };
-        } else {
-            i = (i + 1) % m;
-        }
+        let (a, c) = (prev[i], next[i]);
+        out.set(at, a as u32);
+        out.set(at + 1, i as u32);
+        out.set(at + 2, c as u32);
+        at += 3;
+        written += 1;
+        next[a] = c;
+        prev[c] = a;
+        m -= 1;
+        ear[a] = is_ear(a, &next, &prev);
+        ear[c] = is_ear(c, &next, &prev);
+        cur = c;
     }
-    if written + 3 > out.len() {
-        return Err(HostError("the triangle buffer is too small".into()));
-    }
-    out.set(written, idx[0] as u32);
-    out.set(written + 1, idx[1] as u32);
-    out.set(written + 2, idx[2] as u32);
-    rets[0] = (written / 3 + 1) as u32;
+    out.set(at, prev[cur] as u32);
+    out.set(at + 1, cur as u32);
+    out.set(at + 2, next[cur] as u32);
+    rets[0] = (written + 1) as u32;
     Ok(())
 }

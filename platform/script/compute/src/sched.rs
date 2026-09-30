@@ -473,6 +473,12 @@ impl Job {
         self.ctx[K_SEED as usize] = seed;
     }
 
+    /// The op-equivalents one host call may cost for its actual input (0:
+    /// no limit; see `Call::set_host_call_limit`).
+    pub fn set_host_call_limit(&mut self, ops: u64) {
+        self.ctx[crate::lower::kernel::K_HOST_LIMIT as usize] = ops.min(u32::MAX as u64) as u32;
+    }
+
     /// Allows (default) or forbids the four-wide code (tests).
     pub fn set_simd(&mut self, on: bool) {
         self.simd = on;
@@ -532,6 +538,17 @@ impl Job {
         let k = self.kernel.buffer_index(name)?;
         match std::mem::replace(&mut self.bind[k], Binding::None) {
             Binding::OutF32(v) => Some(v),
+            other => {
+                self.bind[k] = other;
+                None
+            }
+        }
+    }
+
+    pub fn take_output_u32(&mut self, name: &str) -> Option<Vec<u32>> {
+        let k = self.kernel.buffer_index(name)?;
+        match std::mem::replace(&mut self.bind[k], Binding::None) {
+            Binding::OutU32(v) => Some(v),
             other => {
                 self.bind[k] = other;
                 None
