@@ -263,7 +263,11 @@ impl DesktopInit {
         let supported = unsafe { instance.get_physical_device_features(physical_device) };
         let features = vk::PhysicalDeviceFeatures::default()
             .texture_compression_bc(supported.texture_compression_bc == vk::TRUE)
-            .texture_compression_astc_ldr(supported.texture_compression_astc_ldr == vk::TRUE);
+            .texture_compression_astc_ldr(supported.texture_compression_astc_ldr == vk::TRUE)
+            // A multi-attachment pass blends per attachment (the over blend
+            // on the colour target, raw writes on integer and two-channel
+            // ones); different blend states need the feature.
+            .independent_blend(supported.independent_blend == vk::TRUE);
         let mut info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&extensions)

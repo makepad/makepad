@@ -18,7 +18,7 @@ pub struct CxVulkanShaderBinary {
     pub instance_slots: usize,
 }
 
-fn compile_wgsl_to_spirv(wgsl: &str) -> Result<(Option<Vec<u32>>, Option<Vec<u32>>), String> {
+pub(crate) fn compile_wgsl_to_spirv(wgsl: &str) -> Result<(Option<Vec<u32>>, Option<Vec<u32>>), String> {
     use naga::{back::spv, valid};
 
     fn extract_error_line(details: &str) -> Option<usize> {

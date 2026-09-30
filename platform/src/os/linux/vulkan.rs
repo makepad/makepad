@@ -304,6 +304,56 @@ impl VulkanRenderPassKey {
     }
 }
 
+/// Per-attachment colour blend state for a draw into `formats` (MRT): an
+/// output the shader does not declare (`written_outputs` bit clear) keeps the
+/// attachment's contents (empty write mask), and only four-channel unorm /
+/// half-float targets blend (integer, 32-bit float, two-channel and
+/// alpha-less targets write raw, as on Metal).
+fn mrt_blend_attachments(
+    formats: &[vk::Format],
+    written_outputs: u8,
+    alpha_blend: bool,
+    blend_max: bool,
+) -> Vec<vk::PipelineColorBlendAttachmentState> {
+    // `blend_op: @Max` shaders take the per-channel max (factors unused).
+    let op = if blend_max { vk::BlendOp::MAX } else { vk::BlendOp::ADD };
+    let blend = vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(alpha_blend)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(op)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(op)
+        .color_write_mask(vk::ColorComponentFlags::RGBA);
+    formats
+        .iter()
+        .enumerate()
+        .map(|(index, format)| {
+            let written = index >= 8 || (written_outputs as u32) & (1u32 << index) != 0;
+            let blendable = matches!(
+                *format,
+                vk::Format::B8G8R8A8_UNORM
+                    | vk::Format::B8G8R8A8_SRGB
+                    | vk::Format::R8G8B8A8_UNORM
+                    | vk::Format::R8G8B8A8_SRGB
+                    | vk::Format::R16G16B16A16_SFLOAT
+            );
+            blend
+                .blend_enable(alpha_blend && written && blendable)
+                .color_write_mask(if written {
+                    vk::ColorComponentFlags::RGBA
+                } else {
+                    vk::ColorComponentFlags::empty()
+                })
+        })
+        .collect()
+}
+
+#[cfg(all(test, target_os = "linux", use_vulkan))]
+#[path = "vulkan_gpu_tests.rs"]
+mod gpu_tests;
+
 /// What an offscreen draw's `VkRenderPass` is made of: the attachment
 /// formats and, per attachment, whether it is cleared or loaded and whether
 /// the depth is stored to be sampled. Cached for the life of the device
@@ -908,10 +958,15 @@ impl CxVulkan {
         let mut sampler_ycbcr_features =
             vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
                 .sampler_ycbcr_conversion(true);
+        // Per-attachment blend states (MRT) need `independentBlend`.
+        let supported_features = unsafe { instance.get_physical_device_features(physical_device) };
+        let device_features = vk::PhysicalDeviceFeatures::default()
+            .independent_blend(supported_features.independent_blend == vk::TRUE);
         let device_create_info = vk::DeviceCreateInfo::default()
             .push_next(&mut sampler_ycbcr_features)
             .queue_create_infos(&queue_info)
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .enabled_features(&device_features);
 
         let device =
             match unsafe { instance.create_device(physical_device, &device_create_info, None) } {
@@ -1302,9 +1357,14 @@ impl CxVulkan {
         let mut fragment_density_map_features =
             vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default()
                 .fragment_density_map(xr_fragment_density_map_enabled);
+        // Per-attachment blend states (MRT) need `independentBlend`.
+        let supported_features = unsafe { instance.get_physical_device_features(physical_device) };
+        let device_features = vk::PhysicalDeviceFeatures::default()
+            .independent_blend(supported_features.independent_blend == vk::TRUE);
         let mut device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
-            .enabled_extension_names(&device_extensions);
+            .enabled_extension_names(&device_extensions)
+            .enabled_features(&device_features);
         device_create_info = device_create_info.push_next(&mut sampler_ycbcr_features);
         device_create_info = device_create_info.push_next(&mut multiview_features);
         if xr_fragment_density_map_enabled {
@@ -7924,43 +7984,12 @@ impl CxVulkan {
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(alpha_blend)
-            .src_color_blend_factor(vk::BlendFactor::ONE)
-            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .alpha_blend_op(vk::BlendOp::ADD)
-            .color_write_mask(vk::ColorComponentFlags::RGBA);
-        // Per attachment (MRT): an output the shader does not declare keeps
-        // the attachment's contents (empty write mask), and only four-channel
-        // unorm / half-float targets blend (integer, 32-bit float and
-        // alpha-less targets write raw, as on Metal).
-        let written_outputs = sh.mapping.fragment_outputs;
-        let color_blend_attachments: Vec<_> = render_pass_key
-            .color_vk_formats()
-            .iter()
-            .enumerate()
-            .map(|(index, format)| {
-                let written = index >= 8 || written_outputs & (1 << index) != 0;
-                let blendable = matches!(
-                    *format,
-                    vk::Format::B8G8R8A8_UNORM
-                        | vk::Format::B8G8R8A8_SRGB
-                        | vk::Format::R8G8B8A8_UNORM
-                        | vk::Format::R8G8B8A8_SRGB
-                        | vk::Format::R16G16B16A16_SFLOAT
-                );
-                color_blend_attachment
-                    .blend_enable(alpha_blend && written && blendable)
-                    .color_write_mask(if written {
-                        vk::ColorComponentFlags::RGBA
-                    } else {
-                        vk::ColorComponentFlags::empty()
-                    })
-            })
-            .collect();
+        let color_blend_attachments = mrt_blend_attachments(
+            &render_pass_key.color_vk_formats(),
+            sh.mapping.fragment_outputs,
+            alpha_blend,
+            sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
+        );
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let has_depth = render_pass_key.depth_format.is_some();
