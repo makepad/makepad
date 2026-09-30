@@ -161,6 +161,10 @@ pub struct Text3dParams {
     pub font: FontSource,
     /// Variable-font weight (100..900) for fonts with a `wght` axis ("inter"); None = the font's own.
     pub weight: Option<f32>,
+    /// Other variable-font axes as (tag, value), e.g. `wdth` 125 or `slnt`
+    /// -10 (four-letter tags packed big-endian); axes the font lacks are
+    /// ignored. Default none.
+    pub axes: Vec<(u32, f32)>,
     /// Cap height of the first line, world units. Default 1.
     pub size: f32,
     /// Extrusion depth; 0 = flat front faces only. Default 0.3.
@@ -192,6 +196,7 @@ impl Default for Text3dParams {
             text: String::new(),
             font: FontSource::default(),
             weight: None,
+            axes: Vec::new(),
             size: 1.0,
             depth: 0.3,
             bevel: 0.0,
@@ -286,7 +291,7 @@ pub fn build_text3d(params: &Text3dParams) -> Result<Text3d, String> {
             ascender_fudge_in_ems: 0.0,
             descender_fudge_in_ems: 0.0,
             weight: params.weight,
-            variations: Vec::new(),
+            variations: params.axes.clone(),
         },
     );
     layouter.define_font_family(family, FontFamilyDefinition { font_ids: vec![font_id], expected_member_count: 1, diagnostics: Default::default() });
@@ -1102,6 +1107,14 @@ mod tests {
     fn centre_lines_trace_strokes() {
         // Inter: a sans I (Plex's I has serif bars, traced as three strokes).
         let t = build_text3d(&Text3dParams { text: "OIL".into(), font: FontSource::Bundled("inter".into()), weight: Some(700.0), depth: 0.1, ..Default::default() }).unwrap();
+        // A width axis widens the letters (Roboto Flex's wdth).
+        let wide = |w: f32| {
+            let t = build_text3d(&Text3dParams { text: "OIL".into(), font: FontSource::Bundled("roboto".into()), axes: vec![(u32::from_be_bytes(*b"wdth"), w)], depth: 0.1, ..Default::default() }).unwrap();
+            let xs = t.letters.iter().flat_map(|l| l.mesh.positions.iter().map(move |p| p[0] + l.pivot[0]));
+            let (lo, hi) = xs.fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+            hi - lo
+        };
+        assert!(wide(151.0) > wide(25.0) * 1.2, "wdth 151 is wider: {} vs {}", wide(151.0), wide(25.0));
         let o = centre_lines(&ink_grid(&t.letters[0], 0.02), 0.1);
         assert_eq!(o.len(), 1, "O is one loop: {:?}", o.iter().map(|p| (p.0.len(), p.1)).collect::<Vec<_>>());
         assert!(o[0].1, "closed");
