@@ -1302,6 +1302,10 @@ impl Em {
     fn block(&mut self, b: &Block) {
         let mut k = 0;
         while k < b.len() {
+            if let Some(n) = self.compare_branch(&b[k..]) {
+                k += n;
+                continue;
+            }
             let n = match match self.tbl_group(&b[k..]) {
                 0 => self.gather_group(&b[k..]),
                 n => n,
@@ -1323,6 +1327,71 @@ impl Em {
             }
             k += 1;
         }
+    }
+
+    /// A compare of two uniform lanes whose only use is the uniform `if`
+    /// right after it (the element loop's exit and cancel tests, param
+    /// tests): the compare is made on lane 0 into the flags (FCMP, or CMP /
+    /// CBZ from GPRs) and branches, instead of a lane mask moved to a GPR.
+    fn compare_branch(&mut self, b: &[Stmt]) -> Option<usize> {
+        let (Some(Stmt::Def(c, op)), Some(s @ Stmt::If(ci, t, e))) = (b.first(), b.get(1)) else { return None };
+        if ci != c || self.uses[c.0 as usize] != 1 || self.info.div_if.contains(&id(s)) || self.packed.contains_key(&c.0) {
+            return None;
+        }
+        let (float, cc, x, y) = match *op {
+            Op::CmpF(cc, x, y) => (true, cc, x, y),
+            Op::CmpI(cc, x, y) if !self.is_bool(x) => (false, cc, x, y),
+            _ => return None,
+        };
+        let else_l = self.label();
+        let end_l = self.label();
+        // The condition code of `x cc y` (signed ints; floats false on NaN),
+        // inverted: branch to else when it does not hold.
+        let inv: u8 = match (cc, float) {
+            (Cmp::Lt, false) => GE,
+            (Cmp::Le, false) => GT,
+            (Cmp::Gt, false) => LE,
+            (Cmp::Ge, false) => LT,
+            (Cmp::Lt, true) => 5,  // PL
+            (Cmp::Le, true) => 8,  // HI
+            (Cmp::Gt, true) => LE,
+            (Cmp::Ge, true) => LT,
+            (Cmp::Eq, _) => NE,
+            (Cmp::Ne, _) => EQ,
+        };
+        if float {
+            let rx = self.vsrc(x, VS0);
+            let ry = if y == x { rx } else { self.vsrc(y, VS1) };
+            self.e(fcmp(rx, ry));
+            self.jump(Fix::BCond, 0x5400_0000 | inv as u32, else_l);
+        } else if self.consts[y.0 as usize] == Some(0) && matches!(cc, Cmp::Eq | Cmp::Ne) {
+            let rx = self.vsrc(x, VS0);
+            self.e(v::umov_w(9, rx, 0));
+            // cbnz (x == 0 fails) / cbz (x != 0 fails) to else.
+            let op = if cc == Cmp::Eq { 0x3500_0000 } else { 0x3400_0000 };
+            self.jump(Fix::Cbz, op | 9, else_l);
+        } else {
+            let rx = self.vsrc(x, VS0);
+            self.e(v::umov_w(9, rx, 0));
+            let ry = self.vsrc(y, VS1);
+            self.e(v::umov_w(10, ry, 0));
+            self.e(cmp(9, 10));
+            self.jump(Fix::BCond, 0x5400_0000 | inv as u32, else_l);
+        }
+        let full = self.full;
+        self.block(t);
+        if !e.is_empty() {
+            self.jump(Fix::B, 0x1400_0000, end_l);
+        }
+        self.bind(else_l);
+        self.full = full;
+        self.block(e);
+        self.bind(end_l);
+        self.full = full;
+        if self.info.escapes.contains(&id(s)) {
+            self.full = false;
+        }
+        Some(2)
     }
 
     /// Two adjacent definitions whose first has no other use, fused into
