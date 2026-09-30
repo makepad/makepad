@@ -210,6 +210,17 @@ mod tests {
         let fine = outlines(&f, &l, 0.01);
         assert!(fine[0].points.len() > c[0].points.len());
         assert!((fine[0].perimeter() - c[0].perimeter()).abs() < c[0].perimeter() * 0.01);
+        // A variable font away from its default instance still outlines.
+        let rf = test_font("RobotoFlex.ttf").with_axes(&[("wdth", 120.0), ("wght", 900.0)]);
+        let foom = layout(&rf, "FOOM", &TextStyle { size: 100.0, ..TextStyle::default() });
+        assert!(outlines(&rf, &foom, 0.1).len() >= 6, "F, two O with counters, M");
+        for (file, axes) in [("Inter.ttf", vec![("wght", 800.0f32)]), ("Inter.ttf", vec![]), ("RobotoFlex.ttf", vec![("wght", 900.0)])] {
+            let f = test_font(file).with_axes(&axes.iter().map(|(t, v)| (*t, *v)).collect::<Vec<_>>());
+            for text in ["M", "FOOM", "SPARKS"] {
+                let l = layout(&f, text, &TextStyle { size: 200.0, ..TextStyle::default() });
+                assert!(!outlines(&f, &l, 0.5).is_empty(), "{file} {axes:?} {text}: {:?}", l.glyphs);
+            }
+        }
         let r = c[0].resample(32);
         assert_eq!(r.len(), 32);
         assert_eq!(r[0], c[0].points[0]);

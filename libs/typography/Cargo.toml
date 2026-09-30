@@ -13,3 +13,6 @@ repository = "https://github.com/makepad/makepad/"
 rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
 # Kernel host components (`text.outline`, `text.layout`).
 makepad-script-compute = { path = "../../platform/script/compute" }
+# Outlines of variable glyphs at non-default axis values need gvar's
+# allocating path (the same feature the draw crate enables).
+ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"] }
