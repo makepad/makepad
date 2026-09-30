@@ -865,10 +865,10 @@ impl ShaderFnCompiler {
                 return;
             } else if let ShaderType::ScopeObject(obj) = instance_ty {
                 // Field access on a scope object (e.g., test_obj.p2 or test_obj.objfn or test_obj.sub_obj)
-                // Look up the field value
-                let value = vm.bx.heap.value(obj, field_id.into(), self.trap.pass());
+                // Look up the field value. A miss falls back to the type-check lookup below.
+                let value = vm.bx.heap.value(obj, field_id.into(), NoTrap);
 
-                if !value.is_nil() && self.trap.err_is_empty() {
+                if !value.is_nil() && !value.is_err() && self.trap.err_is_empty() {
                     // Check if this is an object
                     if let Some(value_obj) = value.as_object() {
                         // Check if this is a shader_io type - not supported for scope objects
@@ -906,7 +906,7 @@ impl ShaderFnCompiler {
                         let enum_value = vm.bx.heap.value(
                             value_obj,
                             id!(_repr_u32_enum_value).into(),
-                            self.trap.pass(),
+                            NoTrap,
                         );
                         if !enum_value.is_nil() {
                             self.trap.err_take(); // Clear any error
@@ -926,7 +926,7 @@ impl ShaderFnCompiler {
                                 return;
                             }
                         }
-                        self.trap.err_take(); // Clear any error from value lookup
+                        self.trap.err_take(); // Clear any queued error
 
                         // It's a regular sub-object (like test_obj.sub_obj) - return it as ScopeObject
                         // so that further field access can continue (e.g., test_obj.sub_obj.test_p1)
@@ -999,7 +999,7 @@ impl ShaderFnCompiler {
                 }
 
                 // Value not found on prototype - try to get the type from type-check structure
-                self.trap.err_take(); // Clear any error from value lookup
+                self.trap.err_take(); // Clear any queued error
                 if let Some(field_type_id) = vm.bx.heap.field_type_from_type_check(obj, field_id) {
                     // Found field type in type-check structure - convert to pod type
                     if let Some(pod_ty) = vm
@@ -1151,8 +1151,9 @@ impl ShaderFnCompiler {
                 return;
             } else if let ShaderType::IoSelf(obj) = instance_ty {
                 // Look up field value, preferring the highest shader IO marker in the prototype chain
+                // A miss is expected for Rust instance fields, which resolve below.
                 let (value, maybe_io_type) =
-                    Self::get_io_self_field_value(vm, obj, field_id, self.trap.pass());
+                    Self::get_io_self_field_value(vm, obj, field_id, NoTrap);
 
                 if let Some(io_type) = maybe_io_type {
                     // Found a shader IO marker (uniform, varying, texture, etc.)
@@ -1351,7 +1352,7 @@ impl ShaderFnCompiler {
                     return;
                 }
 
-                // No shader IO marker found - clear any trap error from value lookup
+                // No shader IO marker found - clear any queued trap error
                 // before checking RustInstance fields (which don't depend on prototype values)
                 self.trap.err_take();
 
