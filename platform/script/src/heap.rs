@@ -216,6 +216,7 @@ impl ScriptHeap {
         true
     }
 
+    #[inline]
     pub(crate) fn has_allocation_budget(&self) -> bool {
         self.allocation_budget.is_some() || self.heap_cap.is_some()
     }
@@ -444,10 +445,12 @@ impl ScriptHeap {
         bytes
     }
 
+    #[inline]
     pub(crate) fn is_allocation_poison_object(&self, object: ScriptObject) -> bool {
         object == self.allocation_poison_object && object != ScriptObject::ZERO
     }
 
+    #[inline]
     pub(crate) fn is_allocation_poison_array(&self, array: ScriptArray) -> bool {
         array == self.allocation_poison_array && array != ScriptArray::default()
     }
@@ -708,6 +711,7 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn proto(&self, ptr: ScriptObject) -> ScriptValue {
         self.objects[ptr].proto
     }
@@ -724,20 +728,24 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn object_data(&self, ptr: ScriptObject) -> &ScriptObjectData {
         &self.objects[ptr]
     }
 
     /// Monotonic counter bumped when object slots are freed/reused.
     /// Used by higher layers to evict caches keyed by ScriptObject identity.
+    #[inline]
     pub fn object_reuse_epoch(&self) -> u64 {
         self.object_reuse_epoch
     }
 
+    #[inline]
     pub(crate) fn bump_object_reuse_epoch(&mut self) {
         self.object_reuse_epoch = self.object_reuse_epoch.wrapping_add(1);
     }
 
+    #[inline]
     pub fn type_check(&self, index: ScriptTypeIndex) -> &ScriptTypeCheck {
         &self.type_check[index.0 as usize]
     }

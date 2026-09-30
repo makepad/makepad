@@ -12,18 +12,21 @@ pub struct NativeId {
 pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
 
 impl From<ScriptFnRef> for ScriptValue {
+    #[inline]
     fn from(v: ScriptFnRef) -> Self {
         ScriptValue::from_object(v.as_object())
     }
 }
 
 impl ScriptFnRef {
+    #[inline]
     pub fn as_object(&self) -> ScriptObject {
         self.0.as_object()
     }
 
     /// See [`ScriptObjectRef::heap_key`]: identifies the heap that minted this fn ref,
     /// so callers can route the call to the VM that owns it.
+    #[inline]
     pub fn heap_key(&self) -> usize {
         self.0.heap_key()
     }
@@ -36,6 +39,7 @@ pub enum ScriptFnPtr {
 }
 
 impl ScriptRefOptionExt for Option<ScriptFnRef> {
+    #[inline]
     fn as_object(&self) -> Option<ScriptObject> {
         if let Some(x) = self {
             Some(x.as_object())
@@ -49,33 +53,48 @@ impl ScriptRefOptionExt for Option<ScriptFnRef> {
 /// entries, in order. NIL-keyed entries are varargs (`unnamed_fn_arg`) — a
 /// closure captures the scope it was minted in, so those can appear ahead of
 /// real parameters and must never be mistaken for one.
+#[inline]
 fn declared_arg(object: &ScriptObjectData, index: usize) -> Option<&ScriptVecValue> {
-    object.vec.iter().filter(|kv| !kv.key.is_nil()).nth(index)
+    let mut left = index;
+    for kv in object.vec.iter() {
+        if !kv.key.is_nil() {
+            if left == 0 {
+                return Some(kv);
+            }
+            left -= 1;
+        }
+    }
+    None
 }
 
 impl ScriptHeap {
     // Functions
 
+    #[inline]
     pub fn set_fn(&mut self, ptr: ScriptObject, fnptr: ScriptFnPtr) {
         let object = &mut self.objects[ptr];
         object.tag.set_fn(fnptr);
     }
 
+    #[inline]
     pub fn as_fn(&self, ptr: ScriptObject) -> Option<ScriptFnPtr> {
         let object = &self.objects[ptr];
         object.tag.as_fn()
     }
 
+    #[inline]
     pub fn is_fn(&self, ptr: ScriptObject) -> bool {
         let object = &self.objects[ptr];
         object.tag.is_fn()
     }
 
+    #[inline]
     pub fn set_reffed(&mut self, ptr: ScriptObject) {
         let object = &mut self.objects[ptr];
         object.tag.set_reffed();
     }
 
+    #[inline]
     pub fn parent_as_fn(&self, ptr: ScriptObject) -> Option<ScriptFnPtr> {
         let object = &self.objects[ptr];
         if let Some(ptr) = object.proto.as_object() {
@@ -119,10 +138,7 @@ impl ScriptHeap {
                         );
                     }
                 }
-                if !self.charge_object_map_entry(top_ptr, key, "binding a function argument") {
-                    return NIL;
-                }
-                self.objects[top_ptr].map_insert(key, value);
+                self.bind_map_entry(top_ptr, key, value, "binding a function argument");
                 return NIL;
             }
         }

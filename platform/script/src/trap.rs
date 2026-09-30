@@ -52,6 +52,7 @@ impl ScriptTrapInner {
     }
 
     /// Take and clear the whole error queue.
+    #[inline]
     pub fn err_take(&self) -> VecDeque<ScriptError> {
         self.pending
             .set(self.pending.get() & !TRAP_PENDING_ERR);
@@ -59,12 +60,14 @@ impl ScriptTrapInner {
     }
 
     /// Drop all pending errors.
+    #[inline]
     pub fn err_clear(&self) {
         self.pending
             .set(self.pending.get() & !TRAP_PENDING_ERR);
         self.err.borrow_mut().clear();
     }
 
+    #[inline]
     pub fn err_pop_front(&self) -> Option<ScriptError> {
         let mut err = self.err.borrow_mut();
         let r = err.pop_front();
@@ -75,17 +78,20 @@ impl ScriptTrapInner {
         r
     }
 
+    #[inline]
     pub fn err_is_empty(&self) -> bool {
         !self.has_err()
     }
 
     /// Read-only view for diagnostics/GC marking.
+    #[inline]
     pub fn err_borrow(&self) -> std::cell::Ref<'_, VecDeque<ScriptError>> {
         self.err.borrow()
     }
 
     // `on` accessors — the trap slot shares the pending bitfield
 
+    #[inline]
     pub fn set_on(&self, on: Option<ScriptTrapOn>) {
         if on.is_some() {
             self.pending.set(self.pending.get() | TRAP_PENDING_ON);
@@ -100,6 +106,7 @@ impl ScriptTrapInner {
         self.on.get()
     }
 
+    #[inline]
     pub fn take_on(&self) -> Option<ScriptTrapOn> {
         self.pending.set(self.pending.get() & !TRAP_PENDING_ON);
         self.on.take()
@@ -120,12 +127,14 @@ pub enum ScriptTrap<'a> {
 pub use ScriptTrap::NoTrap;
 
 impl<'a> ScriptTrap<'a> {
+    #[inline]
     pub fn pass(self) -> Self {
         self
     }
 }
 
 impl ScriptTrapInner {
+    #[inline]
     pub fn pass<'a>(&'a self) -> ScriptTrap<'a> {
         ScriptTrap::Inner(self)
     }
@@ -148,12 +157,15 @@ impl ScriptTrapInner {
         });
         value
     }
+    #[inline]
     pub fn ip(&self) -> u32 {
         self.ip.index
     }
+    #[inline]
     pub fn goto(&mut self, wh: u32) {
         self.ip.index = wh;
     }
+    #[inline]
     pub fn goto_rel(&mut self, wh: u32) {
         self.ip.index += wh;
     }

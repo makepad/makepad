@@ -10,6 +10,7 @@ use std::fmt::Write;
 impl ScriptHeap {
     // POD TYPES
 
+    #[inline]
     pub fn pod_method(&self, ptr: ScriptPod, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         let pod = &self.pods[ptr];
         let pod_ty = &self.pod_types[pod.ty.index as usize];
@@ -63,12 +64,14 @@ impl ScriptHeap {
         None
     }
 
+    #[inline]
     pub fn pod_type_ref(&self, ty: ScriptPodType) -> &ScriptPodTypeData {
         &self.pod_types[ty.index as usize]
     }
 
     /// Get pod data for a ScriptPod value.
     /// Returns the pod type and data slice for extracting values.
+    #[inline]
     pub fn pod_data(&self, pod: ScriptPod) -> (&ScriptPodTypeData, &[u32]) {
         let pod_data = &self.pods[pod];
         let pod_type = &self.pod_types[pod_data.ty.index as usize];
@@ -78,20 +81,24 @@ impl ScriptHeap {
     /// The data words of a pod value, writable in place: a host that keeps a
     /// pod in an object it owns (a tween pushing a vec4 every frame) rewrites
     /// it here instead of allocating a new pod per frame.
+    #[inline]
     pub fn pod_data_mut(&mut self, pod: ScriptPod) -> &mut [u32] {
         &mut self.pods[pod].data
     }
 
+    #[inline]
     pub fn pod_type_name(&self, ty: ScriptPodType) -> Option<LiveId> {
         let ty = &self.pod_types[ty.index as usize];
         ty.name
     }
 
+    #[inline]
     pub fn pod_type_name_set(&mut self, ty: ScriptPodType, name: LiveId) {
         let ty = &mut self.pod_types[ty.index as usize];
         ty.name = Some(name);
     }
 
+    #[inline]
     pub fn pod_type_name_if_not_set(&mut self, ty: ScriptPodType, name: LiveId) {
         let ty = &mut self.pod_types[ty.index as usize];
         if ty.name.is_none() {

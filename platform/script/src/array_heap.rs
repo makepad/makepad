@@ -6,6 +6,7 @@ use crate::*;
 impl ScriptHeap {
     // Arrays
 
+    #[inline]
     pub fn freeze_array(&mut self, array: ScriptArray) {
         self.arrays[array].tag.freeze()
     }
@@ -39,6 +40,7 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn array_len(&self, array: ScriptArray) -> usize {
         self.arrays[array].storage.len()
     }
@@ -58,6 +60,7 @@ impl ScriptHeap {
         array.storage.push(value);
     }
 
+    #[inline]
     pub fn array_pop_front_option(&mut self, array: ScriptArray) -> Option<ScriptValue> {
         let array = &mut self.arrays[array];
         if array.tag.is_immutable() {
@@ -150,6 +153,7 @@ impl ScriptHeap {
         array.storage.push(value);
     }
 
+    #[inline]
     pub fn array_storage(&self, array: ScriptArray) -> &ScriptArrayStorage {
         let array = &self.arrays[array];
         &array.storage
@@ -282,6 +286,7 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn array_index_unchecked(&self, array: ScriptArray, index: usize) -> ScriptValue {
         if let Some(value) = self.arrays[array].storage.index(index) {
             return value;

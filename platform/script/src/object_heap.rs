@@ -44,6 +44,39 @@ impl ScriptHeap {
         self.charge_allocation(bytes, operation)
     }
 
+    /// `charge_object_map_entry` then `map_insert`, with one scan of the map
+    /// for an untracked object: an existing key is updated in place (no
+    /// charge, order kept), an absent one is charged and appended.
+    #[inline]
+    pub(crate) fn bind_map_entry(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        operation: &'static str,
+    ) {
+        if self.is_allocation_poison_object(ptr) {
+            return;
+        }
+        let object = &mut self.objects[ptr];
+        if object.tag.is_tracked() {
+            if self.charge_object_map_entry(ptr, key, operation) {
+                self.objects[ptr].map_insert(key, value);
+            }
+            return;
+        }
+        if let Some(existing) = object.map.get_mut(&key) {
+            existing.value = value;
+            return;
+        }
+        let bytes = std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
+            .saturating_add(2 * std::mem::size_of::<usize>());
+        if !self.charge_allocation(bytes, operation) {
+            return;
+        }
+        self.objects[ptr].map_insert_absent_untracked(key, value);
+    }
+
     pub fn new_object(&mut self) -> ScriptObject {
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
@@ -82,10 +115,12 @@ impl ScriptHeap {
         self.new_with_proto(proto)
     }
 
+    #[inline]
     pub fn new_with_proto(&mut self, proto: ScriptValue) -> ScriptObject {
         self.new_with_proto_impl(proto, true)
     }
 
+    #[inline]
     pub fn new_with_proto_no_vec(&mut self, proto: ScriptValue) -> ScriptObject {
         self.new_with_proto_impl(proto, false)
     }
@@ -170,16 +205,19 @@ impl ScriptHeap {
     /// Record the ip of the BEGIN opcode that constructed this object.
     /// Set by handle_begin_proto / handle_begin_bare; stays
     /// ScriptIp::UNKNOWN for Rust-built objects.
+    #[inline]
     pub fn set_made_at(&mut self, ptr: ScriptObject, ip: ScriptIp) {
         self.objects[ptr].made_at = ip;
     }
 
     /// The construction-site ip of this object (ScriptIp::UNKNOWN if it
     /// was not built by a script object literal).
+    #[inline]
     pub fn made_at(&self, ptr: ScriptObject) -> ScriptIp {
         self.objects[ptr].made_at
     }
 
+    #[inline]
     pub fn new_if_reffed(&mut self, ptr: ScriptObject) -> ScriptObject {
         let obj = &self.objects[ptr];
         if obj.tag.is_reffed() {
@@ -191,84 +229,104 @@ impl ScriptHeap {
 
     // Object flagv
 
+    #[inline]
     pub fn set_object_deep(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_deep()
     }
 
+    #[inline]
     pub fn set_object_storage_vec2(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_vec2()
     }
 
+    #[inline]
     pub fn set_object_storage_auto(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_auto()
     }
 
+    #[inline]
     pub fn set_object_pod_type(&mut self, ptr: ScriptObject, pt: ScriptPodType) {
         self.objects[ptr].tag.set_pod_type(pt)
     }
 
+    #[inline]
     pub fn set_first_applied_and_clean(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_first_applied_and_clean()
     }
 
+    #[inline]
     pub fn clear_object_deep(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.clear_deep()
     }
 
+    #[inline]
     pub fn freeze(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze()
     }
 
+    #[inline]
     pub fn set_notproto(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_notproto()
     }
 
+    #[inline]
     pub fn set_from_eval(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.set_from_eval()
     }
 
+    #[inline]
     pub fn is_from_eval(&self, ptr: ScriptObject) -> bool {
         self.objects[ptr].tag.is_from_eval()
     }
 
+    #[inline]
     pub fn freeze_module(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_module()
     }
 
+    #[inline]
     pub fn freeze_component(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_component()
     }
 
+    #[inline]
     pub fn freeze_shader(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_shader()
     }
 
+    #[inline]
     pub fn freeze_ext(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_ext()
     }
 
+    #[inline]
     pub fn freeze_api(&mut self, ptr: ScriptObject) {
         self.objects[ptr].tag.freeze_api()
     }
 
+    #[inline]
     pub fn set_object_apply_transform(&mut self, ptr: ScriptObject, ni: NativeId) {
         self.objects[ptr].tag.set_apply_transform(ni)
     }
 
+    #[inline]
     pub fn set_type(&mut self, obj: ScriptObject, ty: ScriptTypeIndex) {
         self.objects[obj].tag.set_type_index(ty);
     }
 
+    #[inline]
     pub fn set_string_keys(&mut self, obj: ScriptObject) {
         let object = &mut self.objects[obj];
         object.tag.set_string_keys();
     }
 
+    #[inline]
     pub fn set_shader_io(&mut self, obj: ScriptObject, io: ShaderIoType) {
         let object = &mut self.objects[obj];
         object.tag.set_shader_io(io);
     }
 
+    #[inline]
     pub fn as_shader_io(&self, obj: ScriptObject) -> Option<ShaderIoType> {
         let object = &self.objects[obj];
         object.tag.as_shader_io()
@@ -403,6 +461,7 @@ impl ScriptHeap {
         NIL
     }
 
+    #[inline]
     fn validate_type(&self, lhs: ScriptValue, rhs: ScriptValue) -> bool {
         lhs.value_type().to_redux() == rhs.value_type().to_redux()
     }
@@ -603,6 +662,7 @@ impl ScriptHeap {
         NIL
     }
 
+    #[inline]
     pub fn set_value_def(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
         self.set_value(ptr, key, value, NoTrap);
     }
@@ -941,6 +1001,7 @@ impl ScriptHeap {
         )
     }
 
+    #[inline]
     pub fn object_method(
         &self,
         ptr: ScriptObject,
@@ -1103,6 +1164,7 @@ impl ScriptHeap {
         None
     }
 
+    #[inline]
     pub fn map_ref(&self, object: ScriptObject) -> &ScriptObjectMap {
         let object = &self.objects[object];
         &object.map
@@ -1158,6 +1220,7 @@ impl ScriptHeap {
         )
     }
 
+    #[inline]
     pub fn vec_value_if_exist(&self, ptr: ScriptObject, index: usize) -> Option<ScriptValue> {
         let object = &self.objects[ptr];
         if let Some(kv) = object.vec.get(index) {
@@ -1167,16 +1230,19 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn vec_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.vec.len()
     }
 
+    #[inline]
     pub fn map_delete(&mut self, ptr: ScriptObject, key: &ScriptValue) -> Option<ScriptValue> {
         let object = &mut self.objects[ptr];
         object.map_delete(&key.unescape_id())
     }
 
+    #[inline]
     pub fn map_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.map_len()
@@ -1184,6 +1250,7 @@ impl ScriptHeap {
 
     /// Total number of iterable entries: vec entries + map entries.
     /// Used by `for k, v in obj` to iterate all entries.
+    #[inline]
     pub fn iter_len(&self, ptr: ScriptObject) -> usize {
         let object = &self.objects[ptr];
         object.vec.len() + object.map_len()
@@ -1221,6 +1288,7 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {
         let object = &self.objects[ptr];
         &object.vec

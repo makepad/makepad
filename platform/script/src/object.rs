@@ -1066,6 +1066,20 @@ impl ScriptObjectData {
         }
     }
 
+    /// `map_insert` for an untracked object whose map is known not to hold
+    /// `key` (the caller just looked): no second scan.
+    #[inline]
+    pub(crate) fn map_insert_absent_untracked(&mut self, key: ScriptValue, value: ScriptValue) {
+        let order = self.map.len() as u32;
+        self.map.insert_absent(
+            key,
+            ScriptMapValue {
+                value,
+                tag: ScriptMapTag::dirty_with_order(order),
+            },
+        );
+    }
+
     pub fn map_set_if_exist(&mut self, key: ScriptValue, value: ScriptValue) -> bool {
         let tracked = self.tag.is_tracked();
         if let Some(old) = self.map.get_mut(&key) {

@@ -10,15 +10,19 @@ use std::{
 pub struct ValueHasher(u64);
 
 impl std::hash::Hasher for ValueHasher {
+    #[inline]
     fn write(&mut self, _: &[u8]) {
         unreachable!();
     }
+    #[inline]
     fn write_u8(&mut self, _n: u8) {
         unreachable!();
     }
+    #[inline]
     fn write_u16(&mut self, _n: u16) {
         unreachable!();
     }
+    #[inline]
     fn write_u32(&mut self, _n: u32) {
         unreachable!();
     }
@@ -26,21 +30,27 @@ impl std::hash::Hasher for ValueHasher {
     fn write_u64(&mut self, n: u64) {
         self.0 = n;
     }
+    #[inline]
     fn write_usize(&mut self, _n: usize) {
         unreachable!();
     }
+    #[inline]
     fn write_i8(&mut self, _n: i8) {
         unreachable!();
     }
+    #[inline]
     fn write_i16(&mut self, _n: i16) {
         unreachable!();
     }
+    #[inline]
     fn write_i32(&mut self, _n: i32) {
         unreachable!();
     }
+    #[inline]
     fn write_i64(&mut self, _n: i64) {
         unreachable!();
     }
+    #[inline]
     fn write_isize(&mut self, _n: isize) {
         unreachable!();
     }
@@ -107,6 +117,7 @@ impl<'a, K, V> Iterator for ValueMapIterMut<'a, K, V> {
             Self::Map(it) => it.next(),
         }
     }
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             Self::Vec(it) => it.size_hint(),
@@ -124,6 +135,7 @@ impl<'a, K, V> Iterator for ValueMapIter<'a, K, V> {
             Self::Map(it) => it.next(),
         }
     }
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             Self::Vec(it) => it.size_hint(),
@@ -192,6 +204,22 @@ where
         None
     }
 
+    /// Insert a key the caller has just checked is absent: the same result
+    /// as `insert`, without scanning for it again.
+    #[inline]
+    pub fn insert_absent(&mut self, key: K, value: V) {
+        if let Some(spill) = &mut self.spill {
+            spill.insert(key, value);
+            return;
+        }
+        if self.vec.len() >= SPILL_AT {
+            self.insert(key, value);
+            return;
+        }
+        self.vec.push((key, value));
+    }
+
+    #[inline]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         if let Some(spill) = &mut self.spill {
             return spill.remove(key);
@@ -220,6 +248,7 @@ where
         vec_bytes.saturating_add(spill_bytes)
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         if let Some(spill) = &self.spill {
             return spill.len();
@@ -234,6 +263,7 @@ where
 
     /// Clears entries. Keeps the vec's capacity for slot reuse, but drops a
     /// spilled hashmap so a reused slot starts in (cheap) linear mode again.
+    #[inline]
     pub fn clear(&mut self) {
         self.vec.clear();
         self.spill = None;
@@ -255,10 +285,12 @@ where
         ValueMapIterMut::Vec(self.vec.iter_mut())
     }
 
+    #[inline]
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
 
+    #[inline]
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
     }
@@ -270,6 +302,7 @@ where
 {
     type Item = (&'a K, &'a V);
     type IntoIter = ValueMapIter<'a, K, V>;
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -280,6 +313,7 @@ where
     K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
     type Output = V;
+    #[inline]
     fn index(&self, index: K) -> &Self::Output {
         self.get(&index).unwrap()
     }
@@ -289,6 +323,7 @@ impl<K, V> IndexMut<K> for ValueMap<K, V>
 where
     K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>,
 {
+    #[inline]
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.get_mut(&index).unwrap()
     }
