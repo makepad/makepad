@@ -7,7 +7,8 @@
 //! Signals are params (set every frame, no recompile): `beat phase pulse
 //! bar bpm energy grow`, the text's `width height size`, the shape ids
 //! `alpha0 alphas cube`, `text_at` (the time the text last changed),
-//! `bass mid high` (0..1 bands), `floor_y` (the floor's height), the
+//! `bass mid high` (0..1 bands), `floor_y` (the floor's height),
+//! `view_w view_h` (a picture's world extent, 0 without one), the
 //! dials `p1..p4` and each dial by its own name;
 //! `time` is the kernel's own time input. The `kinetic` module
 //! (kinetic.splash) is imported unqualified.
@@ -42,6 +43,8 @@ pub const SIGNALS: &[(&str, f32)] = &[
     ("mid", 0.0),
     ("high", 0.0),
     ("floor_y", 0.0),
+    ("view_w", 0.0),
+    ("view_h", 0.0),
 ];
 
 /// A composed kernel: its source and where each part of the kit sits in it.
@@ -120,6 +123,8 @@ pub fn compose_camera(split: &Split, dials: &[(String, f32)], f: &FnSrc) -> Comp
     let mut split = split.clone();
     split.glyph = None;
     let mut c = compose(&split, dials, "Camera");
+    // The camera reads no glyphs (an unread buffer must still be bound).
+    c.source = c.source.replacen("let glyphs = input(Glyph)\n", "\n", 1);
     // Replace the instance entry with the camera's.
     let at = c.source.find("fn instance(i)").unwrap_or(c.source.len());
     c.source.truncate(at);
@@ -127,7 +132,7 @@ pub fn compose_camera(split: &Split, dials: &[(String, f32)], f: &FnSrc) -> Comp
     let head = format!("fn kit_camera({cam}) {{");
     c.map.push((lines(&c.source), f.line, lines(&f.body) + 1));
     c.source.push_str(&format!("{head}{}\n{cam}\n}}\n", f.body));
-    c.source.push_str("let base = input(Camera)\nfn element(i) {\n out[i] = kit_camera(base[0])\n}\n");
+    c.source.push_str("let base = input(Camera)\nfn element(i) {\n let b = base[0]\n let c = Camera{}\n c.eye = b.eye\n c.target = b.target\n c.up = b.up\n c.fov = b.fov\n c.roll = b.roll\n out[i] = kit_camera(c)\n}\n");
     c
 }
 
@@ -195,6 +200,16 @@ mod tests {
         call.run(2).unwrap();
         assert!(out[24 + 1] > 1.5, "the second glyph lifted by lift(g) = 2: {}", out[25]);
         assert!((out[3..7].iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4, "a unit quaternion");
+        // A camera kernel writes its record from the default framing.
+        let cam = split("Kinetic{\n  camera_fn: fn(c) {\n    c.eye = vec3(sin(time) * 5.0, 1.0, cos(time) * 5.0)\n    c.fov = c.fov + 10.0\n  }\n}\n").unwrap();
+        let ck = compile(&compose_camera(&cam, &[], cam.camera.as_ref().unwrap()), &out_layout()).unwrap_or_else(|e| panic!("{e}"));
+        let base = [0.0f32, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 50.0, 0.0, 0.0];
+        let mut o = [0.0f32; 12];
+        let mut call = ck.call();
+        call.input("base", &base).unwrap();
+        call.output("out", &mut o).unwrap();
+        call.run(1).unwrap();
+        assert_eq!((o[1], o[7], o[9]), (1.0, 1.0, 60.0), "{o:?}");
         let bad = split("Kinetic{\n  glyph: fn(g, o) {\n    o.pos.q = 1.0\n  }\n}\n").unwrap();
         let e = compile(&compose(&bad, &[], "KineticGlyph"), &out_layout()).unwrap_err();
         assert!(e.starts_with("kit line 3"), "{e}");

@@ -10,7 +10,9 @@
 //!     colors: {bg: #05060d a: #ffc84a b: #2a1450 c: #49e6ff}
 //!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1
 //!     camera: {fov: 50 dist: 9 height: 0}   // dist, height in cap heights
-//!     floor: {y: -0.7 size: 14}  backdrop: true
+//!     floor: {y: -0.7 size: 14}
+//!     picture: {width: 1024 height: 256 view: 2}   // glyphs into a picture; backdrop = the screen
+//!     surface: {u: 96 v: 32 copies: 1}   // a grid shaped by the look's `surface(uv)` hook
 //!     post: [Glow{threshold: 0.62 strength: 0.9}]
 //!     glyph: fn(g, o) { ... }            // the animator: a kernel (CPU)
 //!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU)
@@ -279,6 +281,14 @@ pub struct KitValues {
     /// Camera height in cap heights; None = level (raised over a floor).
     pub height: Option<f32>,
     pub floor: Option<(Option<f32>, Option<f32>)>,
+    /// `picture: {width height view}`: the glyphs draw flat into a picture
+    /// of width x height pixels showing `view` cap heights vertically (an
+    /// orthographic view), and the backdrop is the frame (a screen).
+    pub picture: Option<(u32, u32, f32)>,
+    /// `surface: {u v copies}`: a u x v grid the look's `surface(uv)` hook
+    /// shapes (a globe, a knot, a ribbon printed with the picture), drawn
+    /// `copies` times (`self.attr.x` = the copy).
+    pub surface: Option<(u32, u32, u32)>,
     /// `grow` runs 0..1 over this many beats (0: stays 1).
     pub cycle_beats: f32,
     pub pingpong: bool,
@@ -410,10 +420,18 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         text_of(vm, v)
     };
     let f = |vm: &ScriptVm, n: &str| num(field(vm, o, n));
+    let mut bold = true;
     if let Some(font) = s(vm, "font") {
+        bold = font == "bold";
         shape.font = if font.contains('/') || font.contains('.') { FontSource::Path(font.into()) } else { FontSource::Bundled(font) };
     }
     shape.weight = f(vm, "weight");
+    // `@bold` (the default) is Inter at 800, the display weight kinetic
+    // type has always been set in.
+    if bold {
+        shape.font = FontSource::Bundled("inter".into());
+        shape.weight = shape.weight.or(Some(800.0));
+    }
     // Variable-font axes by four-letter tag: `axes: {wdth: 125 slnt: -8}`
     // (`wght` is `weight`).
     let axes = field(vm, o, "axes");
@@ -512,6 +530,19 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
             dials.push((name.clone(), num(field(vm, d, &name)).unwrap_or(0.5)));
         }
     }
+    // A dial is a kernel param and a shader function by its name: it may
+    // not take a name the kernel or the look already has.
+    const TAKEN: &[&str] = &[
+        "time", "seed", "count", "p1", "p2", "p3", "p4", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "bands",
+        "key", "rim", "cap", "n", "vd", "eye", "content", "screen_uv", "finish", "shade", "env", "spec", "hue", "fog", "look", "floor", "deform", "backdrop", "picture", "ink",
+        "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy",
+    ];
+    for (name, _) in &dials {
+        let module_fn = crate::kernel::KINETIC_MODULE.lines().filter_map(|l| l.strip_prefix("fn ")).any(|l| l.split('(').next() == Some(name.as_str()));
+        if TAKEN.contains(&name.as_str()) || module_fn || crate::kernel::SIGNALS.iter().any(|(s, _)| s == name) {
+            return Err(format!("dial `{name}` clashes with a name kits already have; call it something else (e.g. `{name}_amt`)"));
+        }
+    }
     let (mut fov, mut dist, mut height) = (50.0, None, None);
     let cam = field(vm, o, "camera");
     if let Some(c) = cam.as_object() {
@@ -521,6 +552,18 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
     }
     let fl = field(vm, o, "floor");
     let floor = fl.as_object().map(|c| (num(field(vm, c, "y")), num(field(vm, c, "size"))));
+    let pic = field(vm, o, "picture");
+    let picture = pic.as_object().map(|c| {
+        let w = num(field(vm, c, "width")).unwrap_or(1024.0).clamp(16.0, 4096.0) as u32;
+        let h = num(field(vm, c, "height")).unwrap_or(256.0).clamp(16.0, 4096.0) as u32;
+        (w, h, num(field(vm, c, "view")).unwrap_or(2.0).max(0.01))
+    });
+    let sf = field(vm, o, "surface");
+    let surface = sf.as_object().map(|c| {
+        let u = num(field(vm, c, "u")).unwrap_or(96.0).clamp(2.0, 1024.0) as u32;
+        let v = num(field(vm, c, "v")).unwrap_or(32.0).clamp(2.0, 1024.0) as u32;
+        (u, v, num(field(vm, c, "copies")).unwrap_or(1.0).clamp(1.0, 256.0) as u32)
+    });
     let (mut cycle_beats, mut pingpong) = (0.0, false);
     let cy = field(vm, o, "cycle");
     if let Some(c) = cy.as_object() {
@@ -597,6 +640,8 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         dist,
         height,
         floor,
+        picture,
+        surface,
         cycle_beats,
         pingpong,
         passes,

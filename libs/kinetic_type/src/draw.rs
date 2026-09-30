@@ -7,7 +7,7 @@
 //! with the inverse scale (a mirrored copy, `scale.y < 0`, lights right).
 //! Pixel: `look()` for letters and cubes, `floor()` for the floor plane.
 //! On `self` the look reads: `face` (0 front, 1 back, 2 side, 3 bevel,
-//! 4 cube, 5 floor), `nrm` (world normal), `wpos`, `lpos` (glyph-local),
+//! 4 cube, 5 floor, 6 surface), `nrm` (world normal), `wpos`, `lpos` (glyph-local),
 //! `luv` (uv in the glyph's ink box), the record's `color`, `attr`, `info`
 //! (t, word, line, index), the frame's `time beat phase pulse bar energy`,
 //! the dials `p` (and each by its name, `self.swing()`), the palette
@@ -32,6 +32,8 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         content_tex: texture_2d(float)
+        // The kit's picture, for surfaces printed with it.
+        pic_tex: texture_2d(float)
 
         backface_culling: false
         alpha_blend: true
@@ -54,6 +56,8 @@ script_mod! {
         // x = the finish (0 matte 1 metal 2 neon 3 plastic 4 glass 5 holo),
         // y = 1 when content is bound, z = the text's width, w = its height
         k_misc: uniform(vec4(0.0, 0.0, 1.0, 1.0))
+        // size (cap height), lines, elements, words
+        k_text: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         // xy = the target in pixels, z = the time the text last changed
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
 
@@ -68,20 +72,43 @@ script_mod! {
             return v + t * q.w + vec3(q.y * t.z - q.z * t.y, q.z * t.x - q.x * t.z, q.x * t.y - q.y * t.x)
         }
 
+        // The same turn for the pixel stage (a helper binds to one stage).
+        qturn: fn(q: vec4, v: vec3) -> vec3 {
+            let t = vec3(q.y * v.z - q.z * v.y, q.z * v.x - q.x * v.z, q.x * v.y - q.y * v.x) * 2.0
+            return v + t * q.w + vec3(q.y * t.z - q.z * t.y, q.z * t.x - q.x * t.z, q.x * t.y - q.y * t.x)
+        }
+
         // A vertex hook: the glyph-local position bent before it is placed
         // (a dome, a squash, a twist). Identity by default.
         deform: fn(p: vec3) -> vec3 {
             return p
         }
 
+        // A surface's point at (u, v) in 0..1 (`surface: {u v copies}`;
+        // `self.attr.x` is the copy). A flat sheet by default.
+        surface: fn(uv: vec2) -> vec3 {
+            return vec3(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0)
+        }
+
         vertex: fn() {
-            let lp = self.deform(self.geom.geom_pos)
+            let mut lp = self.deform(self.geom.geom_pos)
+            let mut ln = self.geom.geom_normal
+            if self.geom.geom_pad > 5.5 {
+                // A surface: its point and its normal from its neighbours.
+                let uv = self.geom.geom_uv
+                let e = 0.002
+                lp = self.surface(uv)
+                let du = self.surface(uv + vec2(e, 0.0)) - lp
+                let dv = self.surface(uv + vec2(0.0, e)) - lp
+                let c = vec3(du.y * dv.z - du.z * dv.y, du.z * dv.x - du.x * dv.z, du.x * dv.y - du.y * dv.x)
+                ln = c / max(length(c), 0.0000001)
+            }
             let sp = lp * self.scale
             let sh = vec3(sp.x + self.shear.x * sp.y, sp.y + self.shear.y * sp.x, sp.z)
             let wp = self.qrot(self.rot, sh) + self.pos
             let s = self.scale
             let inv = vec3(sign(s.x) / max(abs(s.x), 0.0001), sign(s.y) / max(abs(s.y), 0.0001), sign(s.z) / max(abs(s.z), 0.0001))
-            self.nrm = self.qrot(self.rot, self.geom.geom_normal * inv)
+            self.nrm = self.qrot(self.rot, ln * inv)
             self.wpos = wp
             self.lpos = lp
             self.face = self.geom.geom_pad
@@ -95,7 +122,14 @@ script_mod! {
             return c.xyz / max(c.w, 0.0001)
         }
         n: fn() -> vec3 {
-            return self.nrm / max(length(self.nrm), 0.001)
+            let n = self.nrm / max(length(self.nrm), 0.001)
+            // A surface is two-sided: its normal faces the eye.
+            if self.face > 5.5 {
+                if dot(n, self.eye() - self.wpos) < 0.0 {
+                    return 0.0 - n
+                }
+            }
+            return n
         }
         vd: fn() -> vec3 {
             return normalize(self.eye() - self.wpos)
@@ -121,6 +155,13 @@ script_mod! {
             let c = self.draw_pass.camera_projection * (self.draw_pass.camera_view * vec4(self.wpos.x, self.wpos.y, self.wpos.z, 1.0))
             let q = c.xy / max(c.w, 0.0001)
             return vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5)
+        }
+        // The kit's picture at uv (0,0 top left) and its ink (luma).
+        picture: fn(uv: vec2) -> vec4 {
+            return self.pic_tex.sample(uv)
+        }
+        ink: fn(uv: vec2) -> float {
+            return clamp(dot(self.picture(uv).xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
         }
         // Exponential distance fog toward col_bg.
         fog: fn(c: vec3, density: float) -> vec3 {
@@ -230,7 +271,7 @@ script_mod! {
 
         pixel: fn() {
             let mut c = vec4(0.0, 0.0, 0.0, 0.0)
-            if self.face > 4.5 {
+            if abs(self.face - 5.0) < 0.5 {
                 c = self.floor()
             } else {
                 c = self.look()
@@ -242,10 +283,15 @@ script_mod! {
 
     // The backdrop: a full-frame quad behind everything (drawn first, at
     // the far plane, no depth write). `backdrop()` reads `self.pos` (0,0
-    // top left) and the same signals as the look.
+    // top left) and the same signals as the look. A kit with a `picture`
+    // draws its glyphs flat into that picture instead of the frame, and
+    // the backdrop is the whole frame (a screen): `self.picture(uv)`,
+    // `self.ink(uv)`.
     mod.draw.DrawKineticBackdrop = mod.std.set_type_default() do #(DrawKineticBackdrop::script_shader(vm)){
         ..mod.draw.DrawQuad
         content_tex: texture_2d(float)
+        // The kit's picture (`picture: {...}`): its glyphs drawn flat.
+        pic_tex: texture_2d(float)
         depth_write: false
         time: uniform(0.0)
         beat: uniform(0.0)
@@ -262,6 +308,7 @@ script_mod! {
         col_c: uniform(vec4(1.0, 0.5, 0.2, 1.0))
         col_bg: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         k_misc: uniform(vec4(0.0, 0.0, 1.0, 1.0))
+        k_text: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
         vertex: fn() {
             self.pos = self.geom.pos
@@ -273,7 +320,21 @@ script_mod! {
             }
             return self.content_tex.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
+        // The picture at uv (0,0 top left); `fract` a coordinate to tile it.
+        picture: fn(uv: vec2) -> vec4 {
+            return self.pic_tex.sample(uv)
+        }
+        // The picture's ink 0..1 at uv (its luma).
+        ink: fn(uv: vec2) -> float {
+            return clamp(dot(self.picture(uv).xyz, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)
+        }
+        hash1: fn(x: float) -> float {
+            return fract(sin(x * 12.9898) * 43758.5453)
+        }
         backdrop: fn() -> vec4 {
+            if self.k_view.w > 0.5 {
+                return vec4(self.col_bg.xyz.mix(self.col_c.xyz, self.ink(self.pos)), 1.0)
+            }
             return vec4(self.col_bg.xyz, 1.0)
         }
         pixel: fn() {

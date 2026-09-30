@@ -61,6 +61,24 @@ fn members(split: &Split, values: &KitValues) -> String {
     s
 }
 
+/// The kit's helper fns and dial accessors for the backdrop (every shader
+/// fn but the glyph stage's own).
+fn helpers(split: &Split, values: &KitValues) -> String {
+    let mut s = String::new();
+    for (name, f) in &split.shader {
+        if !matches!(name.as_str(), "look" | "floor" | "deform") {
+            s.push_str(&format!("    {name}: {}\n", f.text));
+        }
+    }
+    for (k, (name, _)) in values.dials.iter().enumerate().take(4) {
+        let c = ["x", "y", "z", "w"][k];
+        if !split.shader.iter().any(|(n, _)| n == name) {
+            s.push_str(&format!("    {name}: fn() -> float {{ return self.p.{c} }}\n"));
+        }
+    }
+    s
+}
+
 fn marker(src: &str) -> String {
     format!("    kin_src_{:016x}: fn() -> float {{ return 0.0 }}\n", LiveId::from_str(src).0)
 }
@@ -134,6 +152,25 @@ fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, view: Mat4f, projection: Mat4f)
     p.mark_pass_uniforms_dirty(gen);
 }
 
+/// A u x v grid over 0..1 (face class 6), shaped in the vertex stage by
+/// the look's `surface(uv)`.
+fn surface_shape(id: usize, u: u32, v: u32) -> shapes::Shape {
+    let mut s = shapes::Shape { key: u32::MAX - 2, size: [1.0, 1.0, 0.0], ..Default::default() };
+    for j in 0..=v {
+        for i in 0..=u {
+            let (a, b) = (i as f32 / u as f32, j as f32 / v as f32);
+            s.verts.extend_from_slice(&[a, b, 0.0, id as f32, 0.0, 0.0, 1.0, 6.0, a, b, 1.0, 1.0]);
+        }
+    }
+    for j in 0..v {
+        for i in 0..u {
+            let k = j * (u + 1) + i;
+            s.indices.extend_from_slice(&[k, k + 1, k + u + 2, k, k + u + 2, k + u + 1]);
+        }
+    }
+    s
+}
+
 /// A plane of size 1 in x and z, facing +y, as the floor shape.
 fn floor_shape(id: usize) -> shapes::Shape {
     let mut s = shapes::Shape { key: u32::MAX - 1, size: [1.0, 0.0, 1.0], ..Default::default() };
@@ -142,6 +179,107 @@ fn floor_shape(id: usize) -> shapes::Shape {
     }
     s.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     s
+}
+
+/// The picture pass of a kit with `picture`.
+struct Picture {
+    pass: DrawPass,
+    list: DrawList,
+    color: Texture,
+    depth: Texture,
+}
+
+impl Picture {
+    fn new(cx: &mut Cx) -> Self {
+        let pass = DrawPass::new_with_name(cx, "kinetic picture");
+        cx.passes[pass.draw_pass_id()].keep_camera_matrix = true;
+        Self {
+            pass,
+            list: DrawList::new(cx),
+            color: Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true }),
+            depth: Texture::new_with_format(cx, TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true }),
+        }
+    }
+}
+
+/// What one frame draws: the records bucketed by shape, and the floor.
+struct Glyphs<'a> {
+    set: &'a GlyphSet,
+    buckets: &'a [Vec<u32>],
+    geometries: &'a [Geometry],
+    out: &'a [f32],
+    stride: usize,
+    /// The floor's shape and its size in cap heights (None = auto).
+    floor: Option<(usize, Option<f32>)>,
+    surface: Option<(usize, u32)>,
+    floor_y: f32,
+    centre: [f32; 2],
+    width: f32,
+    height: f32,
+    size: f32,
+}
+
+impl Glyphs<'_> {
+    /// One instanced draw call per shape in use, then the floor; returns
+    /// the draw calls.
+    fn draw(&self, cx: &mut Cx2d, d: &mut DrawKineticGlyph) -> usize {
+        let mut calls = 0;
+        for (shape, bucket) in self.buckets.iter().enumerate() {
+            if bucket.is_empty() || self.set.shapes[shape].indices.is_empty() {
+                continue;
+            }
+            d.draw_vars.geometry_id = Some(self.geometries[shape].geometry_id());
+            let Some(mut many) = cx.begin_many_instances(&d.draw_vars) else { continue };
+            for &i in bucket {
+                let i = i as usize;
+                many.instances.extend_from_slice(&self.out[i * self.stride..(i + 1) * self.stride]);
+            }
+            let area = cx.end_many_instances(many);
+            d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
+            calls += 1;
+        }
+        if let Some((fid, fs)) = self.floor {
+            let span = fs.map_or((self.width.max(self.height) * 3.0).max(self.size * 6.0), |s| s * self.size);
+            d.pos = vec3f(self.centre[0], self.floor_y, 0.0);
+            d.rot = vec4(0.0, 0.0, 0.0, 1.0);
+            d.scale = vec3f(span, 1.0, span);
+            d.shear = vec2f(0.0, 0.0);
+            d.color = vec4(1.0, 1.0, 1.0, 1.0);
+            // The floor's look reads its span and height here.
+            d.attr = vec4(span, self.floor_y, 0.0, 0.0);
+            d.info = vec4(0.0, 0.0, 0.0, -1.0);
+            d.shape = fid as f32;
+            d.draw_vars.geometry_id = Some(self.geometries[fid].geometry_id());
+            if let Some(mut many) = cx.begin_many_instances(&d.draw_vars) {
+                many.instances.extend_from_slice(d.draw_vars.as_slice());
+                let area = cx.end_many_instances(many);
+                d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
+                calls += 1;
+            }
+        }
+        calls
+    }
+
+    /// The surface's copies (drawn in the frame, reading the picture).
+    fn draw_surface(&self, cx: &mut Cx2d, d: &mut DrawKineticGlyph) -> usize {
+        let Some((sid, copies)) = self.surface else { return 0 };
+        d.pos = vec3f(0.0, 0.0, 0.0);
+        d.rot = vec4(0.0, 0.0, 0.0, 1.0);
+        d.scale = vec3f(1.0, 1.0, 1.0);
+        d.shear = vec2f(0.0, 0.0);
+        d.color = vec4(1.0, 1.0, 1.0, 1.0);
+        d.shape = sid as f32;
+        d.draw_vars.geometry_id = Some(self.geometries[sid].geometry_id());
+        let Some(mut many) = cx.begin_many_instances(&d.draw_vars) else { return 0 };
+        for c in 0..copies {
+            d.attr = vec4(c as f32, copies as f32, 0.0, 0.0);
+            d.info = vec4(c as f32 / (copies.max(2) - 1) as f32, 0.0, 0.0, c as f32);
+            many.instances.extend_from_slice(d.draw_vars.as_slice());
+        }
+        let area = cx.end_many_instances(many);
+        d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
+        1
+    }
 }
 
 pub struct KineticView {
@@ -159,6 +297,8 @@ pub struct KineticView {
     text_at: f32,
     geometries: Vec<Geometry>,
     floor: Option<usize>,
+    /// The surface shape and its copies.
+    surface: Option<(usize, u32)>,
     records: Records,
     out: Vec<f32>,
     buckets: Vec<Vec<u32>>,
@@ -166,6 +306,7 @@ pub struct KineticView {
     list: DrawList,
     color: Texture,
     depth: Texture,
+    picture: Option<Picture>,
     graph: GraphRunner,
     pub stats: FrameStats,
     pub errors: Vec<String>,
@@ -178,7 +319,7 @@ impl KineticView {
         let values = cx.with_vm(|vm| kit::read_values(vm, &split, file))?;
         let draw: DrawKineticGlyph = compile_shader(cx, "DrawKineticGlyph", &members(&split, &values), file)?;
         let backdrop = match &split.backdrop {
-            Some(f) => Some(compile_shader::<DrawKineticBackdrop>(cx, "DrawKineticBackdrop", &format!("    backdrop: {}\n", f.text), file)?),
+            Some(f) => Some(compile_shader::<DrawKineticBackdrop>(cx, "DrawKineticBackdrop", &format!("    backdrop: {}\n{}", f.text, helpers(&split, &values)), file)?),
             None => None,
         };
         let layout = instance_layout(cx, &draw)?;
@@ -210,6 +351,7 @@ impl KineticView {
             text_at: -1e9,
             geometries: Vec::new(),
             floor: None,
+            surface: None,
             records: Records::default(),
             out: Vec::new(),
             buckets: Vec::new(),
@@ -217,6 +359,7 @@ impl KineticView {
             pass,
             color,
             depth,
+            picture: None,
             graph,
             stats: FrameStats::default(),
             errors: Vec::new(),
@@ -262,6 +405,12 @@ impl KineticView {
         let chars = set.elements.iter().map(|e| e.char_index).filter(|c| *c != usize::MAX).max().map_or(0, |m| m + 1);
         self.records.set(&set, self.values.copies, now, chars);
         self.text_at = now;
+        self.surface = None;
+        if let Some((u, v, copies)) = self.values.surface {
+            let id = set.shapes.len();
+            set.shapes.push(surface_shape(id, u, v));
+            self.surface = Some((id, copies));
+        }
         self.floor = None;
         if self.values.floor.is_some() {
             let id = set.shapes.len();
@@ -317,7 +466,7 @@ impl KineticView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: [f32; 4], bands: [f32; 4], misc: [f32; 4], view: [f32; 4]) {
+    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: [f32; 4], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4]) {
         for (k, name) in ["time", "beat", "phase", "pulse", "bar", "energy", "bpm"].iter().enumerate() {
             dv.set_uniform(cx, LiveId::from_str(name), &[s[k]]);
         }
@@ -329,6 +478,7 @@ impl KineticView {
         dv.set_uniform(cx, live_id!(col_b), &[c[2].x, c[2].y, c[2].z, c[2].w]);
         dv.set_uniform(cx, live_id!(col_c), &[c[3].x, c[3].y, c[3].z, c[3].w]);
         dv.set_uniform(cx, live_id!(k_misc), &misc);
+        dv.set_uniform(cx, live_id!(k_text), &text);
         dv.set_uniform(cx, live_id!(k_view), &view);
     }
 
@@ -366,6 +516,10 @@ impl KineticView {
         let n = self.records.count;
         let stride = self.layout.stride as usize;
         self.out.resize(n * stride, 0.0);
+        let (view_w, view_h) = match self.values.picture {
+            Some((pw, ph, v)) => (v * size * pw as f32 / ph.max(1) as f32, v * size),
+            None => (0.0, 0.0),
+        };
         let floor_y = self.values.floor.map_or(bmin[1] - 0.05 * size, |(y, _)| y.map_or(bmin[1] - 0.05 * size, |y| y * size));
         let sig = [
             beat,
@@ -386,6 +540,8 @@ impl KineticView {
             frame.bands[1],
             frame.bands[2],
             floor_y,
+            view_w,
+            view_h,
         ];
         let tk = Cx::monotonic_now();
         {
@@ -474,6 +630,43 @@ impl KineticView {
         let tr = Cx::monotonic_now();
         let size_px = dvec2(px.0 as f64, px.1 as f64);
         let bg = self.values.colors[0];
+        let s = [frame.time, beat, phase, pulse, bar, frame.energy, bpm];
+        let misc = [self.values.material, if frame.content.is_some() { 1.0 } else { 0.0 }, width, height];
+        let picture = self.values.picture;
+        let viewu = [px.0 as f32, px.1 as f32, self.text_at, if picture.is_some() { 1.0 } else { 0.0 }];
+        let bands = [frame.bands[0], frame.bands[1], frame.bands[2], frame.energy];
+        let textu = [size, set.lines as f32, n as f32, set.words as f32];
+        let mut calls = 0;
+        let glyphs = Glyphs { set, buckets: &self.buckets, geometries: &self.geometries, out: &self.out, stride, floor: self.floor.zip(self.values.floor.map(|f| f.1)), surface: None, floor_y, centre, width, height, size };
+        // With a picture the glyphs draw flat into it (an orthographic
+        // view `view` cap heights tall about the origin), and the frame is
+        // the backdrop reading it.
+        if let Some((pw, ph, _)) = picture {
+            let pp = self.picture.get_or_insert_with(|| Picture::new(cx.cx));
+            let psize = dvec2(pw as f64, ph as f64);
+            pp.pass.set_size(cx.cx, psize);
+            pp.pass.set_color_texture(cx.cx, &pp.color, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+            pp.pass.set_depth_texture(cx.cx, &pp.depth, DrawPassClearDepth::ClearWith(1.0));
+            cx.make_child_pass(&pp.pass);
+            cx.begin_pass(&pp.pass, Some(1.0));
+            pp.pass.set_size(cx.cx, psize);
+            let view = Mat4f::look_at(vec3f(0.0, 0.0, 100.0), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+            // Orthographic: the view's width and height to clip space, view
+            // depth 1..1000 to 0..1.
+            let (near, far) = (1.0f32, 1000.0f32);
+            let mut proj = Mat4f::identity();
+            proj.v[0] = 2.0 / view_w.max(1e-6);
+            proj.v[5] = 2.0 / view_h.max(1e-6);
+            proj.v[10] = -1.0 / (far - near);
+            proj.v[14] = -near / (far - near);
+            set_pass_camera(cx.cx, &pp.pass, view, proj);
+            pp.list.begin_always(cx);
+            let pview = [pw as f32, ph as f32, self.text_at, 1.0];
+            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu);
+            calls += glyphs.draw(cx, &mut self.draw);
+            pp.list.end(cx);
+            cx.end_pass(&pp.pass);
+        }
         self.pass.set_size(cx.cx, size_px);
         self.pass.set_color_texture(cx.cx, &self.color, DrawPassClearColor::ClearWith(vec4(bg.x, bg.y, bg.z, 1.0)));
         self.pass.set_depth_texture(cx.cx, &self.depth, DrawPassClearDepth::ClearWith(1.0));
@@ -482,61 +675,33 @@ impl KineticView {
         self.pass.set_size(cx.cx, size_px);
         set_pass_camera(cx.cx, &self.pass, view, projection);
         self.list.begin_always(cx);
-        let s = [frame.time, beat, phase, pulse, bar, frame.energy, bpm];
-        let misc = [self.values.material, if frame.content.is_some() { 1.0 } else { 0.0 }, width, height];
-        let viewu = [px.0 as f32, px.1 as f32, self.text_at, 0.0];
-        let bands = [frame.bands[0], frame.bands[1], frame.bands[2], frame.energy];
-        let mut calls = 0;
         if let Some(b) = self.backdrop.as_mut() {
-            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu);
+            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
+            }
+            if let Some(pp) = &self.picture {
+                b.draw_super.draw_vars.set_texture(1, &pp.color);
             }
             b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
             calls += 1;
         }
-        let d = &mut self.draw;
-        Self::set_uniforms(&self.values, d, cx.cx, &s, p, bands, misc, viewu);
+        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, viewu, textu);
         if let Some(c) = &frame.content {
-            d.draw_vars.set_texture(0, c);
+            self.draw.draw_vars.set_texture(0, c);
         }
-        for (shape, bucket) in self.buckets.iter().enumerate() {
-            if bucket.is_empty() || set.shapes[shape].indices.is_empty() {
-                continue;
-            }
-            d.draw_vars.geometry_id = Some(self.geometries[shape].geometry_id());
-            let Some(mut many) = cx.begin_many_instances(&d.draw_vars) else { continue };
-            for &i in bucket {
-                let i = i as usize;
-                many.instances.extend_from_slice(&self.out[i * stride..(i + 1) * stride]);
-            }
-            let area = cx.end_many_instances(many);
-            d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
-            calls += 1;
+        if let Some(pp) = &self.picture {
+            self.draw.draw_vars.set_texture(1, &pp.color);
         }
-        if let (Some(fid), Some((fy, fs))) = (self.floor, self.values.floor) {
-            let _ = fy;
-            let y = floor_y;
-            let span = fs.map_or((width.max(height) * 3.0).max(size * 6.0), |s| s * size);
-            d.pos = vec3f(centre[0], y, 0.0);
-            d.rot = vec4(0.0, 0.0, 0.0, 1.0);
-            d.scale = vec3f(span, 1.0, span);
-            d.shear = vec2f(0.0, 0.0);
-            d.color = vec4(1.0, 1.0, 1.0, 1.0);
-            // The floor's look reads its span and height here.
-            d.attr = vec4(span, y, 0.0, 0.0);
-            d.info = vec4(0.0, 0.0, 0.0, -1.0);
-            d.shape = fid as f32;
-            d.draw_vars.geometry_id = Some(self.geometries[fid].geometry_id());
-            if let Some(mut many) = cx.begin_many_instances(&d.draw_vars) {
-                many.instances.extend_from_slice(d.draw_vars.as_slice());
-                let area = cx.end_many_instances(many);
-                d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
-                calls += 1;
-            }
+        if picture.is_none() {
+            calls += glyphs.draw(cx, &mut self.draw);
         }
+        calls += Glyphs { surface: self.surface, ..glyphs }.draw_surface(cx, &mut self.draw);
         self.list.end(cx);
         cx.end_pass(&self.pass);
+        if let (Some(pp), Some(_)) = (&self.picture, picture) {
+            cx.cx.passes[pp.pass.draw_pass_id()].parent = CxDrawPassParent::DrawPass(self.pass.draw_pass_id());
+        }
         // ---- the kit's passes
         let mut out = self.color.clone();
         if !self.graph.is_empty() && self.graph.prepare(cx.cx, px, Attachments::default(), &[], false, 1 << 30) {
