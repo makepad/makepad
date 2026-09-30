@@ -78,23 +78,23 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().scopes.push(new_scope);
         self.bx
             .heap
-            .set_value_def(new_scope, value_id.into(), first_value);
+            .set_loop_binding(new_scope, value_id.into(), first_value);
         if let Some(key_id) = key_id {
             // For arrays (first_key is NIL), assign index to key_id (FOR_2 semantics: k=index, v=value)
             if first_key.is_nil() {
                 self.bx
                     .heap
-                    .set_value_def(new_scope, key_id.into(), first_index.into());
+                    .set_loop_binding(new_scope, key_id.into(), first_index.into());
             } else {
                 self.bx
                     .heap
-                    .set_value_def(new_scope, key_id.into(), first_key.escape_id());
+                    .set_loop_binding(new_scope, key_id.into(), first_key.escape_id());
             }
         }
         if let Some(index_id) = index_id {
             self.bx
                 .heap
-                .set_value_def(new_scope, index_id.into(), first_index.into());
+                .set_loop_binding(new_scope, index_id.into(), first_index.into());
         }
     }
 
@@ -260,15 +260,15 @@ impl<'a> ScriptVm<'a> {
                 let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                 self.bx
                     .heap
-                    .set_value_def(scope, value_id.into(), index.into());
+                    .set_loop_binding(scope, value_id.into(), index.into());
                 // Multi-var counts follow FOR_2/FOR_3 semantics (k = index):
                 // the first iteration binds these in begin_for_loop_inner, and
                 // dropping them here made `k` vanish from iteration two on.
                 if let Some(key_id) = key_id {
-                    self.bx.heap.set_value_def(scope, key_id.into(), index.into());
+                    self.bx.heap.set_loop_binding(scope, key_id.into(), index.into());
                 }
                 if let Some(index_id) = index_id {
-                    self.bx.heap.set_value_def(scope, index_id.into(), index.into());
+                    self.bx.heap.set_loop_binding(scope, index_id.into(), index.into());
                 }
                 return;
             } else if let Some(obj) = values.source.as_object() {
@@ -326,12 +326,12 @@ impl<'a> ScriptVm<'a> {
                     let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                     self.bx
                         .heap
-                        .set_value_def(scope, value_id.into(), index.into());
+                        .set_loop_binding(scope, value_id.into(), index.into());
                     // For FOR_2 on ranges, key_id gets the index (same as value for simple ranges)
                     if let Some(key_id) = key_id {
                         self.bx
                             .heap
-                            .set_value_def(scope, key_id.into(), index.into());
+                            .set_loop_binding(scope, key_id.into(), index.into());
                     }
                     self.bx.threads.cur().trap.goto(start_ip);
                     return;
@@ -387,11 +387,11 @@ impl<'a> ScriptVm<'a> {
                     let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                     self.bx
                         .heap
-                        .set_value_def(scope, value_id.into(), kv.value.into());
+                        .set_loop_binding(scope, value_id.into(), kv.value.into());
                     if let Some(index_id) = index_id {
                         self.bx
                             .heap
-                            .set_value_def(scope, index_id.into(), index.into());
+                            .set_loop_binding(scope, index_id.into(), index.into());
                     }
                     if let Some(key_id) = key_id {
                         // An id key is escaped: a plain id read back from
@@ -399,7 +399,7 @@ impl<'a> ScriptVm<'a> {
                         // would resolve as a variable reference.
                         self.bx
                             .heap
-                            .set_value_def(scope, key_id.into(), kv.key.escape_id());
+                            .set_loop_binding(scope, key_id.into(), kv.key.escape_id());
                     }
 
                     self.bx.threads.cur().trap.goto(start_ip);
@@ -445,17 +445,17 @@ impl<'a> ScriptVm<'a> {
 
                 self.bx
                     .heap
-                    .set_value_def(scope, value_id.into(), value.into());
+                    .set_loop_binding(scope, value_id.into(), value.into());
                 if let Some(index_id) = index_id {
                     self.bx
                         .heap
-                        .set_value_def(scope, index_id.into(), index.into());
+                        .set_loop_binding(scope, index_id.into(), index.into());
                 }
                 // For FOR_2 on arrays, key_id gets the index (arrays don't have keys)
                 if let Some(key_id) = key_id {
                     self.bx
                         .heap
-                        .set_value_def(scope, key_id.into(), index.into());
+                        .set_loop_binding(scope, key_id.into(), index.into());
                 }
 
                 self.bx.threads.cur().trap.goto(start_ip);

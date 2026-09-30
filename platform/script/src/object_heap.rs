@@ -662,6 +662,27 @@ impl ScriptHeap {
         NIL
     }
 
+    /// A loop variable bound into its iteration scope: `set_value_def`,
+    /// with the plain-scope case (an id key into an untracked map-storage
+    /// object with no type checks) taken without set_value's dispatch.
+    #[inline]
+    pub(crate) fn set_loop_binding(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
+        let tag = &self.objects[ptr].tag;
+        if key.as_id().is_none()
+            || key.is_escaped_id()
+            || tag.is_deep()
+            || tag.needs_checking()
+            || tag.is_string_keys()
+            || tag.is_vec2()
+            || tag.is_immutable()
+        {
+            self.set_value_def(ptr, key, value);
+            return;
+        }
+        self.escape_value(value);
+        self.bind_map_entry(ptr, key, value, "adding an object property");
+    }
+
     #[inline]
     pub fn set_value_def(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
         self.set_value(ptr, key, value, NoTrap);

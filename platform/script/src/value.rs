@@ -1064,10 +1064,17 @@ impl ScriptValue {
         self.0 <= Self::TYPE_NUMBER_MAX
     }
 
+    /// Any numeric value as f64. The f64 case (nearly every number a
+    /// script computes) is inlined into the caller.
+    #[inline]
     pub const fn as_number(&self) -> Option<f64> {
         if let Some(v) = self.as_f64() {
             return Some(v);
         }
+        self.as_number_not_f64()
+    }
+
+    const fn as_number_not_f64(&self) -> Option<f64> {
         if let Some(v) = self.as_u40() {
             return Some(v as _);
         }
