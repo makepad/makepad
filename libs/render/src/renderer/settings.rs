@@ -116,6 +116,44 @@ impl Renderer {
         }
     }
 
+    /// What each stateful subsystem of this renderer is doing
+    /// (KERNELS.md §3.4.3), for `makepad_render_graph::locked::check`
+    /// before a locked-time frame: a subsystem that carries history refuses
+    /// the frame with a diagnostic naming it.
+    pub fn locked_time_usage(&self) -> Vec<(makepad_render_graph::locked::Subsystem, makepad_render_graph::locked::Usage)> {
+        use makepad_render_graph::locked::{Subsystem, Usage};
+        let exposure = if !self.hdr_output {
+            Usage::Off
+        } else if self.auto_exposure && self.grade.auto {
+            Usage::History
+        } else {
+            Usage::Analytic
+        };
+        let bake = if !self.lightmap_enabled {
+            Usage::Off
+        } else if self.gpu_baker.is_idle() {
+            Usage::Synchronous
+        } else {
+            Usage::Pending
+        };
+        vec![
+            (Subsystem::AutoExposure, exposure),
+            (Subsystem::RenderScale, if self.thermometer.level() == 0 { Usage::Analytic } else { Usage::History }),
+            (Subsystem::LightmapBake, bake),
+            (Subsystem::Ssao, if self.ssao.is_some() { Usage::History } else { Usage::Off }),
+            (Subsystem::FastGi, if self.gi.mode() == crate::fast_gi::GiMode::Off { Usage::Off } else { Usage::History }),
+            (Subsystem::VfxParticles, if self.vfx.records.is_empty() { Usage::Off } else { Usage::History }),
+            (Subsystem::OccluderDither, Usage::Stateless),
+            (Subsystem::Fxaa, if self.hdr_output && self.fxaa { Usage::Stateless } else { Usage::Off }),
+        ]
+    }
+
+    /// Whether this renderer can draw a locked-time frame now (see
+    /// [`Renderer::locked_time_usage`]).
+    pub fn check_locked_time(&self) -> Result<(), makepad_render_graph::locked::Refusal> {
+        makepad_render_graph::locked::check(&self.locked_time_usage())
+    }
+
     /// The lanes' `lin_ctl` uniform: (linear on, exposure, 1/exposure,
     /// emission gain).
     pub(super) fn lin_ctl(&self) -> [f32; 4] {
