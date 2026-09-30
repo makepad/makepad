@@ -171,6 +171,7 @@ workspace.members = [
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
+    "libs/audio_reactive",
     # === per-application audio tap, mixer input for a host equalizer ===
     "libs/audio_route",
     # === mkfl motion payload + classical optical flow + all-intra re-encode
