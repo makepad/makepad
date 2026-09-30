@@ -112,6 +112,11 @@ mod v {
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
     pub const UMINV: u32 = 0x6EB1_A800;
+    /// zip1/zip2 of 32-bit lanes and of 64-bit halves.
+    pub const ZIP1S: u32 = 0x4E80_3800;
+    pub const ZIP2S: u32 = 0x4E80_7800;
+    pub const ZIP1D: u32 = 0x4EC0_3800;
+    pub const ZIP2D: u32 = 0x4EC0_7800;
     /// tbl vd.16b, {vn.16b .. vn+3.16b} / {vn, vn+1}, vm.16b
     pub const TBL4: u32 = 0x4E00_6000;
     pub const TBL2: u32 = 0x4E00_2000;
@@ -1145,8 +1150,51 @@ impl Em {
         }
         self.jump(Fix::B, 0x1400_0000, end);
         self.bind(slow);
-        for s in &b[..n] {
-            self.stmt(s);
+        let dests: Vec<Option<u8>> = b[..n]
+            .iter()
+            .map(|s| match s {
+                Stmt::Def(v, _) => match self.loc(Ent::Val(v.0)) {
+                    Loc::Reg(d) if d < VM => Some(d),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if n == 4 && dests.iter().all(|d| d.is_some()) {
+            // Scattered vec4 rows: one q load per lane, then a 4x4
+            // transpose into the four components.
+            let d: Vec<u8> = dests.into_iter().map(|d| d.unwrap()).collect();
+            let ro = self.vsrc(o, VS1);
+            for l in 0..4 {
+                self.e(v::umov_w(12 + l as u8, ro, l));
+            }
+            self.ldst_sp_q(false, VM, self.group_slot);
+            for l in 0..4u8 {
+                self.e(add_x_lsl(9 + (l > 0) as u8 * 0, 2, 12 + l, 2));
+                // x9 = shared + o_l * 4; the row is at + base * 4.
+                if base * 4 < 4096 {
+                    self.e(add_xi(9, 9, base * 4));
+                } else {
+                    self.mov_imm(10, base * 4);
+                    self.e(add_x(9, 9, 10));
+                }
+                self.e(v::ldst_q(true, VM + l, 9, 0));
+            }
+            self.e(v::r3(v::ZIP1S, d[0], VM, VM + 1));
+            self.e(v::r3(v::ZIP2S, d[1], VM, VM + 1));
+            self.e(v::r3(v::ZIP1S, VM, VM + 2, VM + 3));
+            self.e(v::r3(v::ZIP2S, VM + 1, VM + 2, VM + 3));
+            self.e(v::r3(v::ZIP1D, VM + 2, d[0], VM));
+            self.e(v::r3(v::ZIP2D, VM + 3, d[0], VM));
+            self.e(v::r3(v::ZIP1D, d[2], d[1], VM + 1));
+            self.e(v::r3(v::ZIP2D, d[3], d[1], VM + 1));
+            self.e(v::mov(d[0], VM + 2));
+            self.e(v::mov(d[1], VM + 3));
+            self.ldst_sp_q(true, VM, self.group_slot);
+        } else {
+            for s in &b[..n] {
+                self.stmt(s);
+            }
         }
         self.bind(end);
         n

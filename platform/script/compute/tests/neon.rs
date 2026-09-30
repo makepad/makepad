@@ -676,6 +676,13 @@ fn kernels_from_source_agree_with_neon() {
         "o",
         4,
     );
+    // vec4 rows at hashed (scattered) indices: one q load per lane and a
+    // transpose; and at consecutive indices near the end.
+    same_everywhere(
+        "let P = [vec4(1.0, 2.0, 3.0, 4.0), vec4(5.0, 6.0, 7.0, 8.0), vec4(-1.5, 2.5, -3.5, 4.5), vec4(0.25, 0.5, 0.75, 1.0), vec4(9.0, 8.0, 7.0, 6.0), vec4(-9.0, -8.0, -7.0, -6.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(3.0, 1.0, 4.0, 1.5), vec4(2.0, 7.0, 1.0, 8.0)]\nlet o = output(vec4)\nfn element(i) {\n let a = P[hash(i) % 9]\n let b = P[(i + 5) % 9]\n o[i] = vec4(a.x * b.w, a.y + b.z, a.z - b.y, a.w * 2.0 + b.x) }",
+        "o",
+        4,
+    );
     // Small tables read at hashed indices (8 and 16 words: held in vector
     // registers, read by TBL), next to a 12-word one (per-lane loads).
     same_everywhere(
