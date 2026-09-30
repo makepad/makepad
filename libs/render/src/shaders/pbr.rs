@@ -29,7 +29,7 @@ script_mod! {
     //   * the prelit COLOR_0-is-a-lightmap mix (same reason: prelit maps are
     //     the retro look and get no specular),
     //   * the BUILD magenta punch-through key (a Duke overlay convention),
-    //   * the AO and lightmap DEBUG views (SANDBOX_AO_DEBUG / SANDBOX_LM_DEBUG
+    //   * the AO and lightmap DEBUG views (host settings)
     //     still work on every OTHER prop in the scene; a shiny generated mesh
     //     simply keeps its lit look while they are on).
     mod.draw.DrawScenePbr = mod.std.set_type_default() do #(DrawScenePbr::script_shader(vm)){

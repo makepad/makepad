@@ -79,7 +79,7 @@ Build the sandbox in its own workspace, then launch from the checkout root:
 # In apps/commercial/sandbox:
 cargo build --release -p makepad-sandbox
 # From the checkout root:
-SANDBOX_WORLD=clustered MAKEPAD_CLUSTER_STATS=1 ./apps/commercial/sandbox/target/release/makepad-sandbox --remote
+MAKEPAD_CLUSTER_STATS=1 ./apps/commercial/sandbox/target/release/makepad-sandbox --remote   # with Sandbox's world setting set to `clustered`
 ```
 
 The fixture supplies 256 moving lights and a single large floor, independent of

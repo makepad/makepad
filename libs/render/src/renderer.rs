@@ -206,6 +206,17 @@ pub struct RenderStats {
     pub sdf_shadow_instances: u64,
 }
 
+/// Diagnostic settings the host passes in ([`Renderer::set_host_settings`]).
+/// The engine reads no environment variables for these: a host maps its own
+/// switches onto this struct.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostSettings {
+    /// The world shader shows the baked light alone.
+    pub lm_debug: bool,
+    /// Log the mean particle pass GPU time every 120 frames.
+    pub vfx_stats: bool,
+}
+
 /// GPU-side caches for one view family: unit shape geometries, the packed
 /// static instance slabs, and the terrain mesh. Owns no draw structs — see
 /// [`SceneDraws`].
@@ -429,7 +440,7 @@ pub struct Renderer {
     /// 1x1 "no blocker measured" stand-in, bound wherever the real plane
     /// isn't so shaders sample unconditionally.
     lm_top_fallback: Option<Texture>,
-    /// SANDBOX_LM_DEBUG=1: shader shows the lightmap alone.
+    /// Host setting `HostSettings::lm_debug`: shader shows the lightmap alone.
     lm_debug: f32,
     /// The model lanes' shading space: 0 writes the game's display-referred
     /// product raw, 1 shades in linear and finishes through ACES + gamma.
@@ -699,7 +710,7 @@ impl Default for Renderer {
                 std::env::var("MAKEPAD_LIGHTMAP").as_deref(),
                 Ok("off") | Ok("0") | Ok("false")
             ),
-            lm_debug: if std::env::var("SANDBOX_LM_DEBUG").is_ok() { 1.0 } else { 0.0 },
+            lm_debug: 0.0,
             display_transform: 0.0,
             gi_snapshot_omitted: 0,
             shadow_debug: false,

@@ -304,7 +304,7 @@ impl Renderer {
         // DEBUG (macOS): MAKEPAD_GPU_LM_DUMP=<prefix> writes the settled
         // GPU atlas as `<prefix>.a.pgm` (A = sun SDF) + `<prefix>.rgb.ppm`
         // (lamps) — the byte-level counterpart of the CPU bake's old
-        // SANDBOX_LM_DUMP, for numeric parity comparison.
+        // host lightmap dump, for numeric parity comparison.
         #[cfg(target_os = "macos")]
         {
             static DUMPED: std::sync::atomic::AtomicBool =
@@ -519,6 +519,13 @@ impl Renderer {
     /// blue; grey outside) scaled by the filtered shadow visibility.
     pub fn set_shadow_debug(&mut self, on: bool) {
         self.shadow_debug = on;
+    }
+
+    /// Apply the host's diagnostic settings (the host reads its own
+    /// environment or flags; the engine reads none).
+    pub fn set_host_settings(&mut self, settings: &HostSettings) {
+        self.lm_debug = if settings.lm_debug { 1.0 } else { 0.0 };
+        self.vfx.stats = settings.vfx_stats;
     }
 
     pub fn set_display_transform(&mut self, on: bool) {

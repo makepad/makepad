@@ -34,7 +34,7 @@
 //! [`analysis::ClearanceField`], and nothing asks anything else. The planner,
 //! the string pull, the spline relaxer and the QA harness share one oracle.
 //!
-//! The Doom walker (`libs/render/src/{level,player_nav}.rs`) paid for this
+//! The Doom walker (`engine/level_walk/src/{level,player_nav}.rs`) paid for this
 //! lesson: its navigation graph and its body used two nearly-identical wall
 //! tests, and the sliver of disagreement between them was a band of ledge
 //! heights the graph offered and the body then refused, forever. Two clearance

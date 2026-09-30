@@ -20,7 +20,7 @@ use makepad_draw::makepad_math::{Mat3f, Mat4f, Quat, Vec3f};
 
 /// Minimal owned JSON value — glTF headers are small (a few hundred KB max),
 /// clarity beats speed here.
-pub(crate) enum Val {
+pub enum Val {
     Null,
     Bool(bool),
     Num(f64),
@@ -30,19 +30,19 @@ pub(crate) enum Val {
 }
 
 impl Val {
-    pub(crate) fn get(&self, key: &str) -> Option<&Val> {
+    pub fn get(&self, key: &str) -> Option<&Val> {
         match self {
             Val::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    pub(crate) fn idx(&self, i: usize) -> Option<&Val> {
+    pub fn idx(&self, i: usize) -> Option<&Val> {
         match self {
             Val::Arr(items) => items.get(i),
             _ => None,
         }
     }
-    pub(crate) fn arr(&self) -> &[Val] {
+    pub fn arr(&self) -> &[Val] {
         match self {
             Val::Arr(items) => items,
             _ => &[],
@@ -50,22 +50,22 @@ impl Val {
     }
     /// An object's fields in file order — for `extras`, whose keys are
     /// whatever the exporter chose to write.
-    pub(crate) fn obj(&self) -> &[(String, Val)] {
+    pub fn obj(&self) -> &[(String, Val)] {
         match self {
             Val::Obj(fields) => fields,
             _ => &[],
         }
     }
-    pub(crate) fn f64(&self) -> Option<f64> {
+    pub fn f64(&self) -> Option<f64> {
         match self {
             Val::Num(n) => Some(*n),
             _ => None,
         }
     }
-    pub(crate) fn usize(&self) -> Option<usize> {
+    pub fn usize(&self) -> Option<usize> {
         self.f64().map(|n| n as usize)
     }
-    pub(crate) fn str(&self) -> Option<&str> {
+    pub fn str(&self) -> Option<&str> {
         match self {
             Val::Str(s) => Some(s),
             _ => None,
@@ -73,13 +73,13 @@ impl Val {
     }
 }
 
-pub(crate) struct JsonParser<'a> {
+pub struct JsonParser<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Val, String> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Val, String> {
         let mut p = JsonParser { bytes, pos: 0 };
         let v = p.value()?;
         Ok(v)

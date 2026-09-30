@@ -10,10 +10,10 @@ when preparing a scene/grid, never for per-frame lighting.
 
 In Sandbox use Settings → Indirect light, or Shift+F7 while the game has keyboard
 input. `MAKEPAD_GI=fast` opts in at startup. An asset-independent fixture is
-available with `SANDBOX_WORLD=gi`: click to capture mouse look, WASD to walk,
+available with Sandbox's world setting set to `gi`: click to capture mouse look, WASD to walk,
 Shift to run, Space to jump, Escape to release. It uses the ordinary player
-rig and world collisions, with no weapon. Launch without `SANDBOX_TARGET`
-or `SANDBOX_DIST`: those deliberately pin the diagnostic camera.
+rig and world collisions, with no weapon. Launch without Sandbox's
+diagnostic camera target or distance settings: those deliberately pin the diagnostic camera.
 F6 moves its door; Shift+F7 compares GI on/off; F5 compares multi-bounce feedback
 with one-bounce lighting (allow several probe sweeps to settle).
 `MAKEPAD_GI_DEMO_FREEZE=1` freezes the fixture's spotlight for comparisons.

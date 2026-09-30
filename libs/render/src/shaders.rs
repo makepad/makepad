@@ -20,7 +20,6 @@ mod world;
 mod lm_depth;
 mod lm_gather;
 mod lm_encode;
-mod hud_quads;
 
 /// Register every scene shader block, in the order the single block used to
 /// declare them (later blocks spread earlier `mod.draw` objects).
@@ -40,8 +39,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     world::script_mod(vm);
     lm_depth::script_mod(vm);
     lm_gather::script_mod(vm);
-    lm_encode::script_mod(vm);
-    hud_quads::script_mod(vm)
+    lm_encode::script_mod(vm)
 }
 
 /// The concatenated shader source, for the tests that pin shader text.
@@ -60,56 +58,7 @@ pub(crate) const SHADER_SOURCE: &str = concat!(
     include_str!("shaders/lm_depth.rs"),
     include_str!("shaders/lm_gather.rs"),
     include_str!("shaders/lm_encode.rs"),
-    include_str!("shaders/hud_quads.rs"),
 );
-
-/// A HUD plate or arc. `#[repr(C)]` and instance-fields-after-the-deref, the
-/// same layout rule every draw shader here follows.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawHudShape {
-    #[deref]
-    pub draw_super: DrawQuad,
-    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
-    pub fill: Vec4f,
-    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
-    pub stroke: Vec4f,
-    #[live(0.0)]
-    pub border: f32,
-    #[live(0.0)]
-    pub radius: f32,
-    #[live(0.0)]
-    pub shape: f32,
-    #[live(-1.5707963)]
-    pub from: f32,
-    #[live(6.2831853)]
-    pub sweep: f32,
-    #[live(6.0)]
-    pub thickness: f32,
-    #[live(1.0)]
-    pub frac: f32,
-}
-
-/// A HUD image quad.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawHudImage {
-    #[deref]
-    pub draw_super: DrawQuad,
-    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
-    pub tint: Vec4f,
-    #[live(vec2(0.0, 0.0))]
-    pub tex_size: Vec2f,
-    /// Exact level-0 nearest sampling for classic pixel artwork. DrawHudImage
-    /// is the sandbox's dedicated sprite/weapon image lane, so it defaults
-    /// on; a smooth-image caller can opt out without changing draw types.
-    #[live(1.0)]
-    pub pixelated: f32,
-    /// Sub-rectangle of the texture to show, `(u0, v0, u1, v1)`; `u0 > u1`
-    /// mirrors. A packed sheet is one texture with many windows into it.
-    #[live(vec4(0.0, 0.0, 1.0, 1.0))]
-    pub uv_rect: Vec4f,
-}
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -351,7 +300,7 @@ pub struct DrawSceneSkinned {
     pub transform: Mat4f,
     #[live(1.0)]
     pub depth_clip: f32,
-    /// 1.0 = show baked AO alone, contrast-stretched (SANDBOX_AO_DEBUG=1).
+    /// 1.0 = show baked AO alone, contrast-stretched (the host's AO debug setting).
     #[live(0.0)]
     pub ao_debug: f32,
     /// 1.0 when this pack has a baked AO atlas bound.
@@ -385,7 +334,7 @@ pub struct DrawSceneSkinned {
     /// dynamics and unbaked models render exactly as before.
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub lm_rect: Vec4f,
-    /// 1.0 = show the baked light alone (SANDBOX_LM_DEBUG=1).
+    /// 1.0 = show the baked light alone (`HostSettings::lm_debug`).
     #[live(0.0)]
     pub lm_debug: f32,
     /// Dynamic-light gate: 1.0 for dynamic instances (sum every light slot),
@@ -772,7 +721,7 @@ pub struct DrawSceneShadow {
     /// Global dimmer, so a device can soften shadows without a rebuild.
     #[live(1.0)]
     pub shadow_scale: f32,
-    /// Debug overlay: magenta at boosted alpha (SANDBOX_SHADOW_DEBUG).
+    /// Debug overlay: magenta at boosted alpha (the host's shadow debug setting).
     #[live(0.0)]
     pub shadow_debug: f32,
 }
@@ -794,7 +743,7 @@ pub struct DrawSceneShadowSdf {
     /// Global dimmer, mirroring [`DrawSceneShadow::shadow_scale`].
     #[live(1.0)]
     pub shadow_scale: f32,
-    /// Magenta debug overlay (SANDBOX_SHADOW_DEBUG).
+    /// Magenta debug overlay (the host's shadow debug setting).
     #[live(0.0)]
     pub shadow_debug: f32,
     /// xyz = quad anchor (y at the receiver), w = receiver lift.
@@ -863,7 +812,7 @@ pub struct DrawSceneTerrain {
     /// World xz rect that window covers: (x0, z0, width, depth).
     #[live(vec4(0.0, 0.0, 1.0, 1.0))]
     pub lm_world: Vec4f,
-    /// 1.0 = show the baked light alone (SANDBOX_LM_DEBUG=1).
+    /// 1.0 = show the baked light alone (`HostSettings::lm_debug`).
     #[live(0.0)]
     pub lm_debug: f32,
 }

@@ -19,7 +19,7 @@ script_mod! {
     use mod.geom
 
     mod.draw.SunCascades = {
-        // Shadow debug view (Renderer::set_shadow_debug, SANDBOX_SHADOW_DEBUG):
+        // Shadow debug view (Renderer::set_shadow_debug, the host's shadow debug setting):
         // each lane's final colour becomes its cascade's tint (red, green,
         // blue; grey past the last) scaled by the filtered sun visibility.
         csm_debug: uniform(0.0)

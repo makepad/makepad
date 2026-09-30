@@ -98,7 +98,7 @@ script_mod! {
         // already declares them. Re-declaring them here as `instance(...)`
         // applies a shader-descriptor OBJECT to a typed field, which fails
         // the apply: it is what logged the two `type mismatch for property`
-        // errors every app on this shader printed at boot. See DrawHudShape
+        // errors every app on this shader printed at boot. See the HUD shader in makepad-game-hud
         // below for the same rule stated once.
         // ---- per-element lookup (CAD hosts) — slot 6, OFF by default ----
         // A viewer that hides, isolates or explodes PARTS of one merged

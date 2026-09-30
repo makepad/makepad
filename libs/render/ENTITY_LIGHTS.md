@@ -83,8 +83,8 @@ claim is implied by these defaults. Sun CSM remains independent. The legacy
 After a release sandbox build, launch from the checkout root:
 
 ```sh
-SANDBOX_WORLD=clustered MAKEPAD_CLUSTER_DEMO_HEADLIGHTS=1 \
-  ./apps/commercial/sandbox/target/release/makepad-sandbox --remote
+MAKEPAD_CLUSTER_DEMO_HEADLIGHTS=1 \
+  ./apps/commercial/sandbox/target/release/makepad-sandbox --remote   # world setting `clustered`
 ```
 
 A moving body carries two lights toward a freestanding blocker and a rear wall.

@@ -45,6 +45,8 @@ pub(crate) struct VfxState {
     pub pass: Option<(DrawPass, DrawList)>,
     pub gpu_ms: f64,
     gpu_log: (u32, f64),
+    /// Log the mean pass GPU time every 120 frames (`HostSettings::vfx_stats`).
+    pub stats: bool,
     /// Scratch: (sort key, chunk) of this frame.
     pub chunks: Vec<(f32, ParticleInstance)>,
 }
@@ -136,7 +138,7 @@ impl VfxState {
 
     pub fn note_gpu_ms(&mut self, ms: f64) {
         self.gpu_ms = ms;
-        if std::env::var_os("SANDBOX_VFX_STATS").is_some() {
+        if self.stats {
             self.gpu_log.0 += 1;
             self.gpu_log.1 += ms;
             if self.gpu_log.0 >= 120 {
