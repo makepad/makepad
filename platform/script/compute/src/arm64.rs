@@ -347,24 +347,28 @@ fn allocate(p: &Program) -> Alloc {
 pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32, reuse_at_def: bool) -> Alloc {
     // With reuse, a fused multiply-add's result prefers its addend's
     // register (the accumulator then needs no copy).
+    // Its multiplicands' registers are avoided when another is free (the
+    // accumulator cannot be a multiplicand).
     let mut hint: std::collections::HashMap<Ent, Ent> = std::collections::HashMap::new();
+    let mut avoid: std::collections::HashMap<Ent, [Ent; 2]> = std::collections::HashMap::new();
     if reuse_at_def {
-        fn walk(b: &Block, hint: &mut std::collections::HashMap<Ent, Ent>) {
+        fn walk(b: &Block, hint: &mut std::collections::HashMap<Ent, Ent>, avoid: &mut std::collections::HashMap<Ent, [Ent; 2]>) {
             for s in b {
                 match s {
-                    Stmt::Def(v, Op::Fma(_, _, _, c)) => {
+                    Stmt::Def(v, Op::Fma(_, a, bb, c)) => {
                         hint.insert(Ent::Val(v.0), Ent::Val(c.0));
+                        avoid.insert(Ent::Val(v.0), [Ent::Val(a.0), Ent::Val(bb.0)]);
                     }
                     Stmt::If(_, t, e) => {
-                        walk(t, hint);
-                        walk(e, hint);
+                        walk(t, hint, avoid);
+                        walk(e, hint, avoid);
                     }
-                    Stmt::Loop { body, .. } => walk(body, hint),
+                    Stmt::Loop { body, .. } => walk(body, hint, avoid),
                     _ => {}
                 }
             }
         }
-        walk(&p.body, &mut hint);
+        walk(&p.body, &mut hint, &mut avoid);
     }
     let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0, depth: 0 };
     lv.walk(&p.body);
@@ -405,6 +409,16 @@ pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[
                 _ => None,
             });
             if let Some(k) = hinted {
+                let reg = free.remove(k);
+                active.push((e, ent, reg));
+                locs.insert(ent, Loc::Reg(reg));
+                continue;
+            }
+            let shunned: Vec<u8> = avoid.get(&ent).map_or(Vec::new(), |ops| ops.iter().filter_map(|o| match locs.get(o) {
+                Some(Loc::Reg(r)) => Some(*r),
+                _ => None,
+            }).collect());
+            if let Some(k) = (0..free.len()).rev().find(|k| !shunned.is_empty() && !shunned.contains(&free[*k])) {
                 let reg = free.remove(k);
                 active.push((e, ent, reg));
                 locs.insert(ent, Loc::Reg(reg));
