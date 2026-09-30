@@ -86,14 +86,26 @@ pub struct PassDecl {
     pub helpers: String,
     /// The pass keeps its output across frames and may read `@history`.
     pub history: bool,
+    /// Further named outputs written in the same draw (MRT: a raymarch's
+    /// G-buffer and depth). The pixel fn writes them as `self.<slot>`.
+    pub outputs: Vec<OutputDecl>,
     /// For diagnostics.
     pub label: String,
+}
+
+/// A further output of a pass: its resource name (what later passes read),
+/// its name in the shader, and its format.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OutputDecl {
+    pub name: String,
+    pub slot: String,
+    pub format: Format,
 }
 
 /// A slot name must be a plain identifier; the standard block's names are
 /// taken.
 pub fn check_ident(name: &str) -> Result<(), String> {
-    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "history_ready", "g_cam", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
+    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "history_ready", "g_cam", "eye", "ray_dir", "view_distance", "g_ivp0", "g_ivp1", "g_ivp2", "g_ivp3", "g_eye", "g_fwd", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
     let ok = !name.is_empty()
         && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -147,6 +159,19 @@ impl PassDecl {
             }
             seen.push(&u.name);
         }
+        for o in &self.outputs {
+            check_ident(&o.slot)?;
+            if seen.contains(&o.slot.as_str()) {
+                return Err(format!("`{}` is both an output and a read or uniform", o.slot));
+            }
+            if self.history {
+                return Err("a history pass has one output".into());
+            }
+            seen.push(&o.slot);
+        }
+        if self.outputs.len() > 3 {
+            return Err("a pass writes at most four outputs (itself and three more)".into());
+        }
         if let Some(n) = &self.name {
             check_ident(n)?;
         }
@@ -167,6 +192,9 @@ impl PassDecl {
         let mut s = String::new();
         s.push_str("use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nmod.draw.DrawGraphPass{\n");
         s.push_str(&format!("    color_format: {}\n", self.format().shader_color_format()));
+        for (i, o) in self.outputs.iter().enumerate() {
+            s.push_str(&format!("    {}: fragment_output({}, vec4f)\n", o.slot, i + 1));
+        }
         for i in 0..self.reads.len() {
             s.push_str(&format!("    {}: texture_2d(float)\n", self.slot(i)));
         }
@@ -202,7 +230,7 @@ impl PassDecl {
 /// and names the kit does not write are left alone; slot names keep the
 /// shader's view unchanged.
 pub fn namespace(decls: &mut [PassDecl], prefix: &str) {
-    let own: Vec<String> = decls.iter().filter_map(|d| d.name.clone()).collect();
+    let own: Vec<String> = decls.iter().filter_map(|d| d.name.clone()).chain(decls.iter().flat_map(|d| d.outputs.iter().map(|o| o.name.clone()))).collect();
     for d in decls.iter_mut() {
         if d.slots.is_empty() {
             d.slots = d.reads.clone();
@@ -211,6 +239,9 @@ pub fn namespace(decls: &mut [PassDecl], prefix: &str) {
             if own.contains(r) {
                 *r = format!("{prefix}{r}");
             }
+        }
+        for o in d.outputs.iter_mut() {
+            o.name = format!("{prefix}{}", o.name);
         }
         if let Some(n) = &mut d.name {
             *n = format!("{prefix}{n}");
@@ -235,6 +266,7 @@ mod tests {
             pixel: "fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }".into(),
             helpers: String::new(),
             history: false,
+            outputs: Vec::new(),
             label: "Pass".into(),
         }
     }

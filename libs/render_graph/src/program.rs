@@ -30,6 +30,14 @@ script_mod! {
         // The camera for depth reads: proj[10], proj[14], orthographic,
         // depth stores clip z / w directly (else z * 0.5 + 0.5).
         g_cam: uniform(vec4(-1.0, -0.2, 0.0, 1.0))
+        // The view (when the host gives one): the inverse view-projection
+        // by rows, the eye (w = 1 when set) and the view's forward axis.
+        g_ivp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        g_ivp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        g_ivp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        g_ivp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        g_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        g_fwd: uniform(vec4(0.0, 0.0, -1.0, 0.0))
 
         vertex: fn() {
             self.pos = self.geom.pos
@@ -58,6 +66,17 @@ script_mod! {
             }
             return self.g_cam.y / (z + self.g_cam.x)
         }
+        // The camera, for raymarch passes: the eye, the world direction
+        // through `uv`, and a point's view distance (what `view_depth`
+        // gives for the depth buffer, so a pass's depth output and the
+        // scene's compare).
+        eye: fn() -> vec3 { return self.g_eye.xyz }
+        ray_dir: fn(uv: vec2) -> vec3 {
+            let n = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0)
+            let w = vec4(dot(self.g_ivp0, n), dot(self.g_ivp1, n), dot(self.g_ivp2, n), dot(self.g_ivp3, n))
+            return normalize(w.xyz / w.w - self.g_eye.xyz)
+        }
+        view_distance: fn(p: vec3) -> float { return dot(p - self.g_eye.xyz, self.g_fwd.xyz) }
         luma: fn(c: vec3) -> float { return dot(c, vec3(0.2126, 0.7152, 0.0722)) }
         hash: fn(p: vec2) -> float {
             let q = fract(p * vec2(0.1031, 0.1030))

@@ -56,7 +56,7 @@ pub use mode::{AdaptiveSampling, Rational, RenderMode, Sampling};
 pub use pass::{PassDecl, UniformDecl};
 pub use plan::{Attachments, Format, PostGraph, Resource, Stage};
 #[cfg(feature = "gpu")]
-pub use runner::{FrameUniforms, GraphRunner, StageInputs};
+pub use runner::{FrameUniforms, GraphRunner, PassView, StageInputs};
 
 /// A pass's uniform values for one frame, `[f32; 4]` per uniform in
 /// declaration order.

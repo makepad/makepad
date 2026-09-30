@@ -76,6 +76,8 @@ pub enum Format {
     Rgba32f,
     /// 8-bit, display-encoded (the default after the tone map).
     Rgba8,
+    /// One full-float channel (a raymarch's view distance, an id).
+    R32f,
 }
 
 impl Format {
@@ -84,6 +86,7 @@ impl Format {
             "rgba16f" | "hdr" | "f16" => Some(Format::Rgba16f),
             "rgba32f" | "f32" | "data" => Some(Format::Rgba32f),
             "rgba8" | "display" | "u8" => Some(Format::Rgba8),
+            "r32f" | "depth" | "id" => Some(Format::R32f),
             _ => None,
         }
     }
@@ -93,6 +96,7 @@ impl Format {
             Format::Rgba16f => 8,
             Format::Rgba32f => 16,
             Format::Rgba8 => 4,
+            Format::R32f => 4,
         }
     }
 
@@ -111,6 +115,7 @@ impl Format {
             Format::Rgba16f => TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true },
             Format::Rgba32f => TextureFormat::RenderRGBAf32 { size: TextureSize::Auto, initial: true },
             Format::Rgba8 => TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true },
+            Format::R32f => TextureFormat::RenderRf32 { size: TextureSize::Auto, initial: true },
         }
     }
 
@@ -120,6 +125,7 @@ impl Format {
             Format::Rgba16f => "@Rgba16F",
             Format::Rgba32f => "@Rgba32F",
             Format::Rgba8 => "@Bgra8NoBlend",
+            Format::R32f => "@Rf32",
         }
     }
 }
@@ -196,6 +202,9 @@ pub struct PassNode {
     pub program: ProgramId,
     /// It keeps its output across frames (it may read `@history`).
     pub history: bool,
+    /// Further named outputs the pass writes in the same draw (MRT: a
+    /// raymarch's G-buffer, its depth), each at the pass's size.
+    pub outputs: Vec<(LiveId, Format)>,
     /// For diagnostics: the pass's label (its kit and index, or `Pass`).
     pub label: String,
 }
@@ -279,6 +288,9 @@ pub struct PlannedPass {
     pub stage: Stage,
     pub inputs: Vec<Source>,
     pub output: Version,
+    /// The versions of its further outputs, in order (MRT attachments
+    /// 1..).
+    pub extra: Vec<Version>,
     pub size: (u32, u32),
 }
 
@@ -436,9 +448,19 @@ impl FramePlan {
                     }
                     None => color = Some(v),
                 }
-                (stage, &node.reads, node.name, node.format, node.program, node.history, node.size).hash(&mut hasher);
+                let mut extra = Vec::new();
+                for &(n, format) in &node.outputs {
+                    if named.iter().any(|(k, _)| *k == n) {
+                        return Err(PlanError::DuplicateName { pass: node.label.clone(), name: n.to_string() });
+                    }
+                    let ev = Version(targets.len() as u32);
+                    targets.push(TargetDesc { format, scale: node.scale, size: px, writer: id });
+                    named.push((n, ev));
+                    extra.push(ev);
+                }
+                (stage, &node.reads, node.name, node.format, node.program, node.history, node.size, &node.outputs).hash(&mut hasher);
                 node.scale.to_bits().hash(&mut hasher);
-                passes.push(PlannedPass { id, node: ni, stage, inputs, output: v, size: px });
+                passes.push(PlannedPass { id, node: ni, stage, inputs, output: v, extra, size: px });
             }
             stage_color[si] = color;
         }
@@ -490,6 +512,7 @@ mod tests {
             format: Format::default_for(stage),
             program: ProgramId(reads.len() as u64),
             history: false,
+            outputs: Vec::new(),
             size: None,
             label: name.unwrap_or("Pass").to_string(),
         }
@@ -591,6 +614,19 @@ mod tests {
         assert_eq!(plan.passes[0].inputs, vec![Source::Previous(1)]);
         let bad = PostGraph { color: ColorPipeline::Hdr, nodes: vec![advect] };
         assert!(matches!(FramePlan::compile(&bad, (64, 64), Attachments::default(), &[], false, BIG), Err(PlanError::NoHistory { .. })));
+    }
+
+    #[test]
+    fn further_outputs_are_named_versions_of_the_same_size() {
+        let mut march = pass(Some("march"), Stage::Hdr, &["color"], 0.5);
+        march.outputs = vec![(LiveId::from_str("gbuf"), Format::Rgba16f), (LiveId::from_str("march_depth"), Format::R32f)];
+        let g = PostGraph { color: ColorPipeline::Hdr, nodes: vec![march, pass(None, Stage::Hdr, &["color", "march", "march_depth"], 1.0)] };
+        let plan = FramePlan::compile(&g, (200, 100), Attachments::default(), &[], false, BIG).unwrap();
+        assert_eq!(plan.passes[0].extra, vec![Version(1), Version(2)]);
+        assert_eq!(plan.targets[2].format, Format::R32f);
+        assert_eq!(plan.targets[2].size, (100, 50));
+        assert_eq!(plan.passes[1].inputs, vec![Source::Host(Resource::Color), Source::Target(Version(0)), Source::Target(Version(2))]);
+        assert_eq!(plan.bytes(), 100 * 50 * (8 + 8 + 4) + 200 * 100 * 8);
     }
 
     #[test]

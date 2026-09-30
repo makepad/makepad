@@ -20,7 +20,7 @@ pub struct PassRead {
 }
 
 /// The fields a pass object may have (for a host's unknown-field check).
-pub const PASS_FIELDS: &[&str] = &["at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history"];
+pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
     let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
@@ -126,7 +126,27 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         }
     }
     let history = get(vm, o, "history").as_bool().unwrap_or(false);
-    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, label: label.to_string() };
+    // `outputs: [@gbuf1, {name: "depth" format: @r32f}]`: further outputs
+    // (linear half float unless given), written as `self.<name>`.
+    let mut outputs = Vec::new();
+    let outputs_v = get(vm, o, "outputs");
+    for item in list(vm, outputs_v) {
+        let (name, format) = match item.as_object().filter(|_| item.as_id().is_none() && !item.is_string_like()) {
+            Some(oo) => {
+                let n = get(vm, oo, "name");
+                let f = get(vm, oo, "format");
+                (text(vm, n), text(vm, f))
+            }
+            None => (text(vm, item), None),
+        };
+        let Some(name) = name else { return Err(format!("{label}: `outputs` are names or {{name format}}")) };
+        let format = match format {
+            None => Format::Rgba16f,
+            Some(f) => Format::by_name(&f).ok_or_else(|| format!("{label}: output `{name}`: `@{f}` is not a format; one of @rgba16f @rgba32f @r32f"))?,
+        };
+        outputs.push(crate::pass::OutputDecl { slot: name.clone(), name, format });
+    }
+    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string() };
     Ok(PassRead { decl, uniforms })
 }
 

@@ -31,6 +31,7 @@ pub const KITS: &[KitDef] = &[
     KitDef { name: "Lut", kind: "lut", params: &["image", "amount", "size"] },
     KitDef { name: "DepthOfField", kind: "dof", params: &["focus", "aperture", "max_blur"] },
     KitDef { name: "Outline", kind: "outline", params: &["color", "thickness", "threshold"] },
+    KitDef { name: "Upsample", kind: "upsample", params: &["src", "depth", "guide", "guide_view", "sigma"] },
 ];
 
 pub fn kit(kind: &str) -> Option<&'static KitDef> {
@@ -313,6 +314,57 @@ $M.kit_outline = fn(p) {
                 let e = max(max(abs(zx0 - z) / max(min(zx0, z), 0.001), abs(zx1 - z) / max(min(zx1, z), 0.001)), max(abs(zy0 - z) / max(min(zy0, z), 0.001), abs(zy1 - z) / max(min(zy1, z), 0.001)))
                 let a = smoothstep(self.threshold, self.threshold * 1.5, e) * self.ink.w
                 return vec4(mix(c.xyz, self.ink.xyz, a), c.w)
+            }"}
+    ]
+}
+"##),
+    ("upsample", r##"
+// ---------------------------------------------------------------- Upsample
+// A depth-aware upsample of a reduced-resolution pass (a raymarch at
+// `scale: 0.5` with a view-distance output) over the frame: each full-size
+// pixel takes the four nearest low-resolution texels weighted by how close
+// their depth is to its own (so an edge stays sharp instead of bleeding),
+// then goes over @color (premultiplied), except where the guide (the
+// scene) is nearer than the marched surface. `src`: the pass; `depth`: its
+// view-distance output; `guide`: the full-size depth (@depth, the scene's
+// depth buffer, or a pass writing view distance with `guide_view: 1`);
+// `sigma`: the relative depth step that separates two surfaces.
+$M.Upsample = $M.Upsample{src: "march" depth: "march_depth" guide: @depth guide_view: 0 sigma: 0.05}
+$M.kit_upsample = fn(p) {
+    return [
+        {at: @hdr reads: [@color, p.src, p.depth, p.guide] slots: ["color", "lo", "lo_depth", "guide"] uniforms: {sigma: p.sigma guide_view: p.guide_view}
+            pixel: "fn() -> vec4 {
+                let g = self.guide.sample_nearest(self.uv()).x
+                var z = g
+                if self.guide_view < 0.5 {
+                    z = self.view_depth(g)
+                }
+                let ts = vec2(1.0, 1.0) / max(self.lo.size(), vec2(1.0, 1.0))
+                let base = (floor(self.uv() / ts - vec2(0.5, 0.5)) + vec2(0.5, 0.5)) * ts
+                var sum = vec4(0.0, 0.0, 0.0, 0.0)
+                var w = 0.0
+                for k in 0..4 {
+                    let at = base + vec2(float(k % 2), float(k / 2)) * ts
+                    let zl = self.lo_depth.sample_nearest(at).x
+                    let bx = 1.0 - clamp(abs(self.uv().x - at.x) / ts.x, 0.0, 1.0)
+                    let by = 1.0 - clamp(abs(self.uv().y - at.y) / ts.y, 0.0, 1.0)
+                    let dw = exp(0.0 - abs(zl - z) / max(z * self.sigma, 0.0001))
+                    let ww = max(bx * by, 0.0001) * dw
+                    sum = sum + self.lo.sample_nearest(at) * ww
+                    w = w + ww
+                }
+                var up = self.lo.sample(self.uv())
+                if w > 0.00001 {
+                    up = sum / w
+                }
+                let c = self.color.sample(self.uv())
+                // Depth-tested against the guide: where the scene is nearer
+                // than the marched surface, the scene shows.
+                let zm = self.lo_depth.sample_nearest(self.uv()).x
+                if zm > 0.0 && z < zm * (1.0 - self.sigma) {
+                    return c
+                }
+                return up + c * (1.0 - clamp(up.w, 0.0, 1.0))
             }"}
     ]
 }

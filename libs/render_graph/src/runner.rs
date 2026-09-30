@@ -49,6 +49,15 @@ impl StageInputs<'_> {
     }
 }
 
+/// The camera a host gives passes (raymarching): the inverse of
+/// projection x view (column-major, as Makepad's `Mat4f::v`), the eye and
+/// the view's forward axis, in world space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PassView {
+    pub inv_view_proj: [f32; 16],
+    pub eye: [f32; 3],
+    pub forward: [f32; 3],
+}
 /// The frame's standard-block values.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameUniforms {
@@ -87,6 +96,8 @@ struct HistorySlot {
 /// The graph's GPU side for one host view.
 #[derive(Default)]
 pub struct GraphRunner {
+    /// The camera passes see (`self.ray_dir()`, `self.eye()`).
+    view: Option<PassView>,
     decls: Vec<PassDecl>,
     graph: PostGraph,
     plan: Option<FramePlan>,
@@ -137,6 +148,7 @@ impl GraphRunner {
                     format: d.format(),
                     program: d.program_id(),
                     history: d.history,
+                    outputs: d.outputs.iter().map(|o| (LiveId::from_str(&o.name), o.format)).collect(),
                     label: d.label.clone(),
                 })
                 .collect(),
@@ -145,6 +157,11 @@ impl GraphRunner {
         self.plan_key = None;
         let keep: Vec<_> = self.graph.nodes.iter().map(|n| n.program).collect();
         self.programs.retain(&keep);
+    }
+
+    /// The camera the passes see this frame (raymarch passes), or none.
+    pub fn set_view(&mut self, view: Option<PassView>) {
+        self.view = view;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -400,13 +417,25 @@ impl GraphRunner {
             dv.set_uniform(cx.cx, live_id!(g_size), &[w, h, 1.0 / w, 1.0 / h]);
             dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, history_ready, 0.0]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
+            if let Some(v) = &self.view {
+                // Rows of the column-major matrix.
+                let m = &v.inv_view_proj;
+                dv.set_uniform(cx.cx, live_id!(g_ivp0), &[m[0], m[4], m[8], m[12]]);
+                dv.set_uniform(cx.cx, live_id!(g_ivp1), &[m[1], m[5], m[9], m[13]]);
+                dv.set_uniform(cx.cx, live_id!(g_ivp2), &[m[2], m[6], m[10], m[14]]);
+                dv.set_uniform(cx.cx, live_id!(g_ivp3), &[m[3], m[7], m[11], m[15]]);
+                dv.set_uniform(cx.cx, live_id!(g_eye), &[v.eye[0], v.eye[1], v.eye[2], 1.0]);
+                dv.set_uniform(cx.cx, live_id!(g_fwd), &[v.forward[0], v.forward[1], v.forward[2], 0.0]);
+            }
             if let Some(vals) = values.get(p.node) {
                 for (u, v) in decl.uniforms.iter().zip(vals.iter()) {
                     dv.set_uniform(cx.cx, LiveId::from_str(&u.name), &v[..u.width as usize]);
                 }
             }
+            let extra: Vec<Texture> = p.extra.iter().map(|v| self.version_texture(*v)).collect();
+            let Some(draw) = self.programs.get_mut(program) else { continue };
             let slot = &mut self.slots[p.id.0 as usize];
-            record(cx, slot, dvec2(w as f64, h as f64), &target, draw);
+            record(cx, slot, dvec2(w as f64, h as f64), &target, &extra, draw);
         }
         let out = stage_color.map(|v| self.version_texture(v)).unwrap_or_else(|| inputs.color.clone());
         Some((out, ids[0]))
@@ -429,12 +458,17 @@ impl GraphRunner {
     }
 }
 
-fn record(cx: &mut Cx2d, slot: &mut PassSlot, size: DVec2, target: &Texture, draw: &mut DrawGraphPass) {
+/// Record one pass: `target` is attachment 0, `extra` the further outputs
+/// (MRT attachments 1..).
+fn record(cx: &mut Cx2d, slot: &mut PassSlot, size: DVec2, target: &Texture, extra: &[Texture], draw: &mut DrawGraphPass) {
     let id = slot.pass.draw_pass_id();
     let parent = cx.cx.passes[id].parent.clone();
     slot.pass.set_size(cx, size);
     slot.pass.clear_color_textures(cx.cx);
     slot.pass.set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+    for t in extra {
+        slot.pass.add_color_texture(cx.cx, t, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+    }
     cx.cx.passes[id].depth_texture = None;
     cx.cx.passes[id].parent = parent;
     cx.begin_pass(&slot.pass, Some(1.0));

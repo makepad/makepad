@@ -83,6 +83,28 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             }
         }
         assert!(total >= 20, "{total} passes");
+        // A raymarch-style pass with further outputs (MRT): a G-buffer and
+        // a view distance, written as `self.<name>`.
+        let mrt = pass::PassDecl {
+            name: Some("march".into()),
+            stage: makepad_render_graph::Stage::Hdr,
+            reads: vec!["color".into()],
+            slots: Vec::new(),
+            scale: 0.5,
+            size: None,
+            format: None,
+            uniforms: Vec::new(),
+            pixel: "fn() -> vec4 { self.gbuf = vec4(self.uv(), 0.0, 1.0) self.march_depth = vec4(3.0, 0.0, 0.0, 0.0) return vec4(1.0, 0.5, 0.2, 1.0) }".into(),
+            helpers: String::new(),
+            history: false,
+            outputs: vec![
+                pass::OutputDecl { name: "gbuf".into(), slot: "gbuf".into(), format: makepad_render_graph::Format::Rgba16f },
+                pass::OutputDecl { name: "march_depth".into(), slot: "march_depth".into(), format: makepad_render_graph::Format::R32f },
+            ],
+            label: "mrt".into(),
+        };
+        mrt.validate().unwrap();
+        compile_pass(vm, &mrt);
         // And the check has teeth: a pass reading what it does not declare
         // is refused.
         let bad = pass::PassDecl {
@@ -97,6 +119,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             pixel: "fn() -> vec4 { return self.nope.sample(self.uv()) }".into(),
             helpers: String::new(),
             history: false,
+            outputs: Vec::new(),
             label: "bad".into(),
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
