@@ -49,12 +49,17 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         let errors = script::install_kits(vm, "mod.gtest", None);
         assert!(errors.is_empty(), "kits did not evaluate: {errors:?}");
         let mut total = 0;
-        for k in kits::KITS {
+        // Every kit with its defaults, and the variants a parameter selects.
+        let variants: Vec<(&kits::KitDef, Option<(&str, f64)>)> = kits::KITS.iter().map(|k| (k, None)).chain([("vignette", "mode", 1.0)].into_iter().map(|(kind, f, v)| (kits::kit(kind).unwrap(), Some((f, v))))).collect();
+        for (k, over) in variants {
             let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("gtest").into(), NoTrap).as_object().unwrap();
             let template = vm.bx.heap.value(module, LiveId::from_str(&format!("kit_{}", k.kind)).into(), NoTrap);
             let proto = vm.bx.heap.value(module, LiveId::from_str(k.name).into(), NoTrap);
             // The author's object: the kit with its defaults.
             let author = vm.bx.heap.new_with_proto(proto);
+            if let Some((field, value)) = over {
+                vm.bx.heap.set_value_def(author, LiveId::from_str(field).into(), value.into());
+            }
             vm.bx.captured_errors = Some(Vec::new());
             let built = vm.call(template, &[author.into()]);
             let errors = vm.take_errors();

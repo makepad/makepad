@@ -24,9 +24,11 @@ pub struct KitDef {
 pub const KITS: &[KitDef] = &[
     KitDef { name: "Glow", kind: "glow", params: &["strength", "radius", "threshold", "tint", "source"] },
     KitDef { name: "Halation", kind: "halation", params: &["strength", "threshold", "tint"] },
-    KitDef { name: "Aberration", kind: "aberration", params: &["amount"] },
+    KitDef { name: "Bloom", kind: "bloom", params: &["strength", "threshold", "knee", "radius", "halation", "halation_tint"] },
+    KitDef { name: "Shoulder", kind: "shoulder", params: &["knee", "white_from", "white_to", "white"] },
+    KitDef { name: "Aberration", kind: "aberration", params: &["amount", "falloff"] },
     KitDef { name: "Grain", kind: "grain", params: &["amount", "size"] },
-    KitDef { name: "Vignette", kind: "vignette", params: &["amount", "softness", "color"] },
+    KitDef { name: "Vignette", kind: "vignette", params: &["amount", "softness", "color", "mode"] },
     KitDef { name: "FramePost", kind: "frame_post", params: &["shake", "zoom", "flash", "flash_color", "fade", "invert"] },
     KitDef { name: "Lut", kind: "lut", params: &["image", "amount", "size"] },
     KitDef { name: "DepthOfField", kind: "dof", params: &["focus", "aperture", "max_blur"] },
@@ -119,6 +121,111 @@ $M.kit_glow = fn(p) {
     ]
 }
 "##),
+    ("bloom", r##"
+// ---------------------------------------------------------------- Bloom
+// A wide physical bloom: everything bright spreads, with a soft knee so
+// light a little under the threshold already glows a little. The frame
+// at half size (a 4-tap box, clamped to 40, the knee on the brightest
+// channel: `threshold` where it starts, `knee` how soft), six 13-tap
+// reductions down to 1/128, then back up with a 9-tap tent of radius
+// 0.5 + `radius` texels, each level added. The sum goes onto the frame by
+// `strength` / 3. `halation`: film halation from the same pyramid (the
+// 1/16 level's luma, tinted by `halation_tint`: linear 1, 0.18, 0.04), added too.
+$M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638}
+$M.kit_bloom = fn(p) {
+    let down = "fn() -> vec4 {
+        let t = self.texel() * 0.5
+        let uv = self.uv()
+        let a = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 2.0 * t.y)).xyz
+        let b = self.src.sample(uv + vec2(0.0, 2.0 * t.y)).xyz
+        let c = self.src.sample(uv + vec2(2.0 * t.x, 2.0 * t.y)).xyz
+        let d = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 0.0)).xyz
+        let e = self.src.sample(uv).xyz
+        let f = self.src.sample(uv + vec2(2.0 * t.x, 0.0)).xyz
+        let g = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 0.0 - 2.0 * t.y)).xyz
+        let h = self.src.sample(uv + vec2(0.0, 0.0 - 2.0 * t.y)).xyz
+        let i = self.src.sample(uv + vec2(2.0 * t.x, 0.0 - 2.0 * t.y)).xyz
+        let j = self.src.sample(uv + vec2(0.0 - t.x, t.y)).xyz
+        let k = self.src.sample(uv + vec2(t.x, t.y)).xyz
+        let l = self.src.sample(uv + vec2(0.0 - t.x, 0.0 - t.y)).xyz
+        let m = self.src.sample(uv + vec2(t.x, 0.0 - t.y)).xyz
+        let o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
+        return vec4(o, 1.0)
+    }"
+    let up = "fn() -> vec4 {
+        let t = self.texel() * 0.5 * (0.5 + self.radius)
+        let uv = self.uv()
+        var c = self.small.sample(uv).xyz * 4.0
+        c = c + (self.small.sample(uv + vec2(t.x, 0.0)).xyz + self.small.sample(uv - vec2(t.x, 0.0)).xyz + self.small.sample(uv + vec2(0.0, t.y)).xyz + self.small.sample(uv - vec2(0.0, t.y)).xyz) * 2.0
+        c = c + self.small.sample(uv + vec2(t.x, t.y)).xyz + self.small.sample(uv - vec2(t.x, t.y)).xyz + self.small.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.small.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
+        return vec4(self.same.sample(uv).xyz + c / 16.0, 1.0)
+    }"
+    return [
+        {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee}
+            pixel: "fn() -> vec4 {
+                let t = self.texel() * 0.25
+                let uv = self.uv()
+                var s = self.source.sample(uv + vec2(t.x, t.y)).xyz + self.source.sample(uv - vec2(t.x, t.y)).xyz + self.source.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.source.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
+                s = clamp(s * 0.25, vec3(0.0, 0.0, 0.0), vec3(40.0, 40.0, 40.0))
+                let l = max(s.x, max(s.y, s.z))
+                let kn = max(self.knee, 0.0001)
+                var rq = clamp(l - self.threshold + kn, 0.0, 2.0 * kn)
+                rq = rq * rq / (4.0 * kn)
+                let w = max(rq, l - self.threshold) / max(l, 0.0001)
+                return vec4(s * w, 1.0)
+            }"}
+        {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 pixel: down}
+        {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
+        {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 pixel: down}
+        {at: @hdr name: "d4" reads: ["d3"] slots: ["src"] scale: 0.03125 pixel: down}
+        {at: @hdr name: "d5" reads: ["d4"] slots: ["src"] scale: 0.015625 pixel: down}
+        {at: @hdr name: "d6" reads: ["d5"] slots: ["src"] scale: 0.0078125 pixel: down}
+        {at: @hdr name: "u5" reads: ["d6", "d5"] slots: ["small", "same"] scale: 0.015625 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "u4" reads: ["u5", "d4"] slots: ["small", "same"] scale: 0.03125 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "u3" reads: ["u4", "d3"] slots: ["small", "same"] scale: 0.0625 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
+            pixel: "fn() -> vec4 {
+                let c = self.color.sample(self.uv())
+                let b = self.bloom.sample(self.uv()).xyz * (self.strength / 3.0)
+                let h = self.tint.xyz * (self.luma(self.wide.sample(self.uv()).xyz) * self.halation)
+                return vec4(c.xyz + b + h, c.w)
+            }"}
+    ]
+}
+"##),
+    ("shoulder", r##"
+// ---------------------------------------------------------------- Shoulder
+// A film shoulder in linear light, before the display transform: each
+// channel is itself up to `knee`, then rolls off toward 1; very hot light
+// (the brightest channel from `white_from` to `white_to`) goes toward
+// white by up to `white`, so bright cores burn white-hot while their halo
+// keeps its colour. Its output stays within 0..1, which the display
+// transform shows unchanged. Put it after Bloom and before a linear
+// Vignette.
+$M.Shoulder = $M.Shoulder{knee: 0.72 white_from: 2 white_to: 12 white: 0.85}
+$M.kit_shoulder = fn(p) {
+    return [
+        {at: @hdr reads: [@color] uniforms: {knee: p.knee white_from: p.white_from white_to: p.white_to white: p.white}
+            pixel: "fn() -> vec4 {
+                let c = self.color.sample(self.uv())
+                let a = clamp(c.w, 0.0, 1.0)
+                if a < 0.0001 {
+                    return c
+                }
+                let x = max(c.xyz / a, vec3(0.0, 0.0, 0.0))
+                let k = clamp(self.knee, 0.0, 0.999)
+                let r = vec3(k, k, k) + (1.0 - k) * (vec3(1.0, 1.0, 1.0) - exp((vec3(k, k, k) - x) / (1.0 - k)))
+                var y = mix(x, r, step(vec3(k, k, k), x))
+                let m = max(x.x, max(x.y, x.z))
+                y = mix(y, vec3(1.0, 1.0, 1.0), smoothstep(self.white_from, self.white_to, m) * self.white)
+                return vec4(y * a, c.w)
+            }"}
+    ]
+}
+"##),
     ("halation", r##"
 // ---------------------------------------------------------------- Halation
 // Film halation: light scattered back through the film base glows red-
@@ -161,13 +268,20 @@ $M.kit_halation = fn(p) {
     ("aberration", r##"
 // ---------------------------------------------------------------- Aberration
 // Lateral chromatic aberration: red and blue pulled apart toward the frame's
-// edges, `amount` pixels (at 1080p) at the corners.
-$M.Aberration = $M.Aberration{amount: 2.0}
+// edges. `falloff` 1: linear from the centre, `amount` pixels (at 1080p) at
+// the corners; 2: quadratic (a lens: nothing near the centre), the offset
+// dc * |dc * (aspect, 1)|² * amount * 4 / width for dc = uv - 0.5.
+$M.Aberration = $M.Aberration{amount: 2.0 falloff: 1}
 $M.kit_aberration = fn(p) {
     return [
-        {at: @hdr reads: [@color] uniforms: {amount: p.amount}
+        {at: @hdr reads: [@color] uniforms: {amount: p.amount falloff: p.falloff}
             pixel: "fn() -> vec4 {
-                let d = (self.uv() - vec2(0.5, 0.5)) * vec2(1.0 / self.aspect(), 1.0) * (self.amount / 1080.0)
+                let dc = self.uv() - vec2(0.5, 0.5)
+                var d = dc * vec2(1.0 / self.aspect(), 1.0) * (self.amount / 1080.0)
+                if self.falloff > 1.5 {
+                    let q = dc * vec2(self.aspect(), 1.0)
+                    d = dc * dot(q, q) * self.amount * 4.0 / self.size().x
+                }
                 let c = self.color.sample(self.uv())
                 return vec4(self.color.sample(self.uv() + d).x, c.y, self.color.sample(self.uv() - d).z, c.w)
             }"}
@@ -176,28 +290,49 @@ $M.kit_aberration = fn(p) {
 "##),
     ("grain", r##"
 // ---------------------------------------------------------------- Grain
-// Film grain after the tone map: luminance-weighted noise in grains of
-// `size` pixels (at 1080p), a new pattern every frame and the same one
-// across the frame's shutter.
-$M.Grain = $M.Grain{amount: 0.05 size: 1.4}
+// Film grain after the tone map, on the display-encoded picture: two
+// scales of noise (grains of `size` pixels at 1080p, and twice that),
+// strongest in the mid-tones and still present in the blacks, a new
+// pattern every frame and the same one across the frame's shutter; then a
+// dither of one 8-bit step.
+$M.Grain = $M.Grain{amount: 0.055 size: 1}
 $M.kit_grain = fn(p) {
     return [
         {at: @final reads: [@color] uniforms: {amount: p.amount grain: p.size}
             pixel: "fn() -> vec4 {
                 let c = self.color.sample(self.uv())
-                let cell = floor(self.uv() * self.size() / max(self.grain * self.size().y / 1080.0, 1.0))
-                let n = self.hash(cell + vec2(self.frame_hash(1.0) * 413.0, self.frame_hash(2.0) * 211.0)) - 0.5
-                let l = self.luma(c.xyz)
-                let k = self.amount * (1.0 - 0.6 * l) * 2.0
-                return vec4(clamp(c.xyz + vec3(n, n, n) * k, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), c.w)
+                let px = floor(self.uv() * self.size())
+                let cell = floor(px / max(self.grain * self.size().y / 1080.0, 1.0))
+                let g1 = self.hash(cell + vec2(self.frame_hash(1.0), self.frame_hash(2.0)) * 1000.0) - 0.5
+                let g2 = self.hash(floor(cell / 2.0) + vec2(self.frame_hash(3.0), self.frame_hash(4.0)) * 1000.0) - 0.5
+                let l = clamp(self.luma(c.xyz), 0.0, 1.0)
+                let k = self.amount * (0.55 + 1.2 * l * (1.0 - l))
+                let dn = (self.hash(px * 1.37 + vec2(self.frame_hash(5.0), self.frame_hash(6.0)) * 100.0) - 0.5) / 255.0
+                let n = (0.6 * g1 + 0.4 * g2) * k + dn
+                return vec4(clamp(c.xyz + vec3(n, n, n), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), c.w)
             }"}
     ]
 }
 "##),
     ("vignette", r##"
 // ---------------------------------------------------------------- Vignette
-$M.Vignette = $M.Vignette{amount: 0.35 softness: 0.55 color: #000000}
+// `mode` 0: toward `color` on the display picture, from 1 - `softness` of
+// the half diagonal out; 1: a lens falloff multiplied in linear light
+// (after a Shoulder, before the display transform): darkest by `amount` at
+// the corners, from 0.25 to 0.95 of an oval (uv - 0.5) * (1, 0.8).
+$M.Vignette = $M.Vignette{amount: 0.35 softness: 0.55 color: #000000 mode: 0}
 $M.kit_vignette = fn(p) {
+    if p.mode == 1 {
+        return [
+            {at: @hdr reads: [@color] uniforms: {amount: p.amount}
+                pixel: "fn() -> vec4 {
+                    let c = self.color.sample(self.uv())
+                    let dc = (self.uv() - vec2(0.5, 0.5)) * vec2(1.0, 0.8)
+                    let v = mix(1.0, smoothstep(0.95, 0.25, length(dc)), self.amount)
+                    return vec4(c.xyz * v, c.w)
+                }"}
+        ]
+    }
     return [
         {at: @final reads: [@color] uniforms: {amount: p.amount softness: p.softness tone: p.color}
             pixel: "fn() -> vec4 {
