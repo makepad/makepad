@@ -20,6 +20,8 @@
 //! - [`pipeline`]: passes chained by buffer name, with ping-pong pairs, a
 //!   barrier between passes, repeats, and emitted records compacted in
 //!   element order.
+//! - [`tools`]: the AI's `kernel_guide` and `kernel_check` (definitions in
+//!   `makepad-kernel-tools`), the same in every app.
 //! - [`engine`]: the process's kernel scheduler, on the platform `TaskPool`
 //!   (Heavy lane) once an app installs it, on a headless pool before; and a
 //!   compile cache.
@@ -29,6 +31,7 @@ pub mod fences;
 pub mod layout;
 pub mod pipeline;
 pub mod ring;
+pub mod tools;
 pub mod topology;
 
 pub use engine::{compile, engine, install, KernelEngine};

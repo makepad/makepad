@@ -8,3 +8,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-platform = { path = "../../platform", version = "2.0.0" }
 makepad-script-compute = { path = "../../platform/script/compute" }
+makepad-kernel-tools = { path = "tools" }
+makepad-strict-json = { path = "../strict_json" }

@@ -115,3 +115,27 @@ fn out_of_range_accesses_clamp_never_escape() {
     guard[0] = 1.0;
     assert!(!k.parallel_safe, "non-local writes must not be split across threads");
 }
+
+#[test]
+fn a_run_time_loop_past_its_cap_is_reported_not_cut_silently() {
+    // for over a run-time range, while and loop: 1024 iterations at most,
+    // and a loop that wanted more sets the call's overflow word.
+    for (src, want) in [
+        ("let o = output(f32)\nlet n = param(10)\nfn element(i) { let s = 0.0\n for k in 0..int(n) { s = s + 1.0 }\n o[i] = s }", [(10.0, 10.0, false), (1024.0, 1024.0, false), (5000.0, 1024.0, true)]),
+        ("let o = output(f32)\nlet n = param(10)\nfn element(i) { let k: int = 0\n while float(k) < n { k = k + 1 }\n o[i] = float(k) }", [(10.0, 10.0, false), (1024.0, 1024.0, false), (5000.0, 1024.0, true)]),
+        // `loop` counts entries: ending on the 1025th entry is reported.
+        ("let o = output(f32)\nlet n = param(10)\nfn element(i) { let k: int = 0\n loop { if float(k) >= n { break }\n k = k + 1 }\n o[i] = float(k) }", [(10.0, 10.0, false), (1023.0, 1023.0, false), (5000.0, 1024.0, true)]),
+    ] {
+        for backend in [Backend::Interp, Backend::Native] {
+            let k = compile_with(src, &[], backend).unwrap();
+            for (n, got_n, over) in want {
+                let mut o = vec![0.0f32; 4];
+                let mut c = k.call();
+                c.set_param("n", n);
+                c.output("o", &mut o).unwrap();
+                let s = if backend == Backend::Interp { c.run_interp(4) } else { c.run(4) }.unwrap();
+                assert_eq!((o[3], s.overflowed), (got_n, over), "{backend:?} n {n}: {src}");
+            }
+        }
+    }
+}

@@ -2006,7 +2006,7 @@ impl Lowerer {
                     self.loops.pop();
                     let b = self.b.close();
                     r?;
-                    self.b.push(IS::Loop { cap: LOOP_CAP, body: b });
+                    self.capped_loop(b, true);
                 }
                 Stmt::Loop { body, .. } => {
                     self.b.open_loop();
@@ -2015,7 +2015,7 @@ impl Lowerer {
                     self.loops.pop();
                     let b = self.b.close();
                     r?;
-                    self.b.push(IS::Loop { cap: LOOP_CAP, body: b });
+                    self.capped_loop(b, false);
                 }
                 Stmt::Break(span) | Stmt::Continue(span) => {
                     let mut depth = 0;
@@ -2222,6 +2222,46 @@ impl Lowerer {
         Ok(Place { ty: el, off: Some(off), ..p.clone() })
     }
 
+    /// Whether loops that reach their run-time cap set the call's overflow
+    /// word: a kernel's element code (audio and init() keep plain caps).
+    fn reports_caps(&self) -> bool {
+        self.domain == Domain::Kernel && self.kernel.element.is_some()
+    }
+
+    /// A `while` or `loop` body under the run-time cap. In a kernel, a loop
+    /// that starts a 1025th iteration sets the overflow word and stops
+    /// (reported, never silently cut). A `while` is checked after its
+    /// condition (`cond_first`: the body's first statement is the
+    /// condition's break), so one that ends after exactly 1024 is not.
+    fn capped_loop(&mut self, mut body: Block, cond_first: bool) {
+        if !self.reports_caps() {
+            self.b.push(IS::Loop { cap: LOOP_CAP, body });
+            return;
+        }
+        let n = self.b.var(Ty::I32);
+        let zero = self.b.ci(0);
+        self.b.set(n, zero);
+        self.b.open();
+        let k = self.b.get(n);
+        let most = self.b.ci(LOOP_CAP as i32);
+        let hit = self.b.cmpi(Cmp::Ge, k, most);
+        let one = self.b.ci(1);
+        self.b.push(IS::If(hit, vec![IS::Store { region: Region::Ctx, base: crate::lower::kernel::K_OVERFLOW, extent: 1, off: None, val: one }, IS::Break(0)], vec![]));
+        let one = self.b.ci(1);
+        let k1 = self.b.ib(Bin::AddI, k, one);
+        self.b.set(n, k1);
+        let check = self.b.close();
+        let mut outer = Vec::with_capacity(body.len() + check.len());
+        if cond_first && !body.is_empty() {
+            // The condition's value definitions and its break come first.
+            let at = body.iter().position(|s| matches!(s, IS::If(..))).map_or(0, |k| k + 1);
+            outer.extend(body.drain(..at));
+        }
+        outer.extend(check);
+        outer.extend(body);
+        self.b.push(IS::Loop { cap: LOOP_CAP + 1, body: outer });
+    }
+
     fn for_loop(&mut self, var: &str, from: &Expr, to: &Expr, body: &[Stmt], span: Span) -> LResult<()> {
         let a = self.expr(from)?;
         let z = self.expr(to)?;
@@ -2253,6 +2293,15 @@ impl Lowerer {
         };
         let av = self.to_i(&a, from.span)?;
         let zv = self.to_i(&z, to.span)?;
+        if cap == LOOP_CAP && self.reports_caps() {
+            // A run-time range longer than the cap is reported, not
+            // silently cut: the call's overflow word.
+            let len = self.b.ib(Bin::SubI, zv, av);
+            let most = self.b.ci(LOOP_CAP as i32);
+            let over = self.b.cmpi(Cmp::Gt, len, most);
+            let one = self.b.ci(1);
+            self.b.push(IS::If(over, vec![IS::Store { region: Region::Ctx, base: crate::lower::kernel::K_OVERFLOW, extent: 1, off: None, val: one }], vec![]));
+        }
         let iv = self.b.var(Ty::I32);
         self.b.set(iv, av);
         self.b.open_loop();
