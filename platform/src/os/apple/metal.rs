@@ -1639,6 +1639,32 @@ impl Cx {
         }
 
         encoders.end();
+        // Render targets with a mip chain: the levels again from what this
+        // pass drew into level 0 (in order on this command buffer, so every
+        // later reader sees them).
+        for color_texture in self.passes[draw_pass_id].color_textures.iter() {
+            let cxtexture = &self.textures[color_texture.texture.texture_id()];
+            if !cxtexture.render_mips {
+                continue;
+            }
+            if let Some(texture) = cxtexture.os.texture.as_ref() {
+                let levels: u64 = unsafe { msg_send![texture.as_id(), mipmapLevelCount] };
+                if levels > 1 {
+                    // 8-bit pixels are display-encoded: the levels are
+                    // averaged in light through an sRGB view of the same storage.
+                    let format: u64 = unsafe { msg_send![texture.as_id(), pixelFormat] };
+                    let view = (format == MTLPixelFormat::BGRA8Unorm as u64).then(|| {
+                        RcObjcId::from_owned(NonNull::new(unsafe { msg_send![texture.as_id(), newTextureViewWithPixelFormat: MTLPixelFormat::BGRA8Unorm_sRGB] }).unwrap())
+                    });
+                    let target = view.as_ref().map_or(texture.as_id(), |v| v.as_id());
+                    unsafe {
+                        let blit: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+                        let () = msg_send![blit, generateMipmapsForTexture: target];
+                        let () = msg_send![blit, endEncoding];
+                    }
+                }
+            }
+        }
         if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::Encoded); }
         // RENDERER-OWNED TEXTURE CAPTURE: a capture requested for a texture
         // THIS pass renders is blitted on this very command buffer — the
@@ -6918,12 +6944,19 @@ impl CxTexture {
         // reallocates at the real size the moment geometry lands.
         let width = width.max(1);
         let height = height.max(1);
-        if self.alloc_render(width, height) {
+        let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
+        // A mip chain (render_mips): every level down to 1 x 1.
+        let levels = if self.render_mips && !is_cube { usize::BITS - width.max(height).leading_zeros() } else { 1 } as u64;
+        let levels_changed = self.os.texture.as_ref().is_some_and(|t| {
+            let have: u64 = unsafe { msg_send![t.as_id(), mipmapLevelCount] };
+            have != levels
+        });
+        if self.alloc_render(width, height) || levels_changed {
             let alloc = self.alloc.as_ref().unwrap();
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
-            let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
+            let _: () = unsafe { msg_send![descriptor.as_id(), setMipmapLevelCount: levels] };
 
             let _: () = unsafe {
                 msg_send![
@@ -6940,8 +6973,11 @@ impl CxTexture {
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
+            // A mip chain of 8-bit (display-encoded) pixels is built through
+            // an sRGB view of the target, so its levels average light.
+            let view_usage = if levels > 1 { MTLTextureUsage::PixelFormatView as u64 } else { 0 };
             let _: () = unsafe {
-                msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)]
+                msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64 | view_usage)]
             };
             let _: () = unsafe {
                 msg_send![descriptor.as_id(),setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]

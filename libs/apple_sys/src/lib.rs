@@ -1150,6 +1150,7 @@ pub enum MTLPixelFormat {
     RG16Float = 65,
     RGBA8Unorm = 70,
     BGRA8Unorm = 80,
+    BGRA8Unorm_sRGB = 81,
     RGBA16Float = 115,
     RGBA32Float = 125,
     BC5_RGUnorm = 142,

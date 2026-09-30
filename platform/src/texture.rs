@@ -1570,6 +1570,14 @@ impl Texture {
         cx.textures[self.texture_id()].retained_render_target = retained;
     }
 
+    /// Give a 2D render target a mip chain, rebuilt from what each pass
+    /// rendered into level 0 (see `CxTexture::render_mips`): a picture
+    /// sampled minified with gradients or a level. Off by default: plain
+    /// `sample` of an unminified target reads level 0 either way.
+    pub fn set_render_mips(&self, cx: &mut Cx, mips: bool) {
+        cx.textures[self.texture_id()].render_mips = mips;
+    }
+
     pub fn animation<'a>(&self, cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
         &cx.textures[self.texture_id()].animation
     }
@@ -1706,6 +1714,10 @@ pub struct CxTexture {
     /// never releases its framebuffer for idleness or budget while the
     /// handle lives (GPU backends keep every target anyway).
     pub(crate) retained_render_target: bool,
+    /// A render target that carries a mip chain, rebuilt from level 0 after
+    /// every pass that renders into it (for shaders that minify it with
+    /// `sample_grad` / `sample_lod`). Metal; other backends keep level 0 only.
+    pub(crate) render_mips: bool,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
 }
