@@ -342,6 +342,9 @@ pub struct Renderer {
     /// transforms are deliberately excluded: cars move every frame without
     /// changing the baked scene.
     placed_scene_signature: Option<u64>,
+    /// `rebuild_models_with_prefix`: the host's key for the list's leading
+    /// copies, how many they are and their signature.
+    placed_prefix: Option<(u64, usize, u64)>,
     /// How this device projects the world (flat / VR 1:1 / MR diorama).
     /// Applied as the scene draw list's view transform, so it costs one
     /// uniform and never invalidates the static slabs. See stage.rs.
@@ -681,6 +684,7 @@ impl Default for Renderer {
             view_models: Vec::new(),
             view_model_sun: 1.0,
             placed_scene_signature: None,
+            placed_prefix: None,
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             vfx: Default::default(),

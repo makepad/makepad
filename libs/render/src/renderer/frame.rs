@@ -86,6 +86,10 @@ impl Renderer {
         mut models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
         let mut stats = RenderStats::default();
+        // The placed list's static blocks for this frame (draw_models.rs):
+        // the cascades' mover collection and the model lanes' cull read them.
+        self.apply_model_lod_chains();
+        self.placed_blocks.refresh(&self.static_models, &self.placed_models, self.placed_scene_signature);
         let camera_pos = scene_state.camera_pos;
         let stage_matrix = self.stage.matrix();
         let cluster_view = (self.stage.mode == StageMode::Flat).then(|| (

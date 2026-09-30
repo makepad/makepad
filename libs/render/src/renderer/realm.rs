@@ -30,6 +30,7 @@ impl Renderer {
         // only their frame-to-instance mapping belongs to the old realm.
         self.skin_joint_bases.clear();
         self.placed_models.clear();
+        self.placed_prefix = None;
         self.csm_static_casters.clear();
         self.csm_static_blocks.clear();
         self.grass = None;
@@ -418,6 +419,33 @@ impl Renderer {
         self.set_models(instances);
     }
 
+    /// [`Self::rebuild_models`] for a host whose list starts with copies it
+    /// can vouch for: while `prefix_key` is last frame's, last frame's
+    /// leading copies are kept as they are (neither refilled nor hashed
+    /// again) and only `tail` appends this frame's rest; otherwise `prefix`
+    /// fills the list first. A level's placed forest is thousands of copies
+    /// that change only when the level does.
+    pub fn rebuild_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>), tail: impl FnOnce(&mut Vec<ModelInstance>)) {
+        let mut instances = std::mem::take(&mut self.placed_models);
+        let (len, signature) = match self.placed_prefix {
+            Some((key, len, signature)) if key == prefix_key && instances.len() >= len => {
+                instances.truncate(len);
+                (len, signature)
+            }
+            _ => {
+                instances.clear();
+                prefix(&mut instances);
+                (instances.len(), placed_scene_signature(&instances))
+            }
+        };
+        self.placed_prefix = Some((prefix_key, len, signature));
+        tail(&mut instances);
+        let signature = signature.rotate_left(17) ^ (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ placed_scene_signature(&instances[len..]);
+        if let Err(error) = self.try_set_models_signed(instances, signature) {
+            self.report_asset_light_error(error);
+        }
+    }
+
     /// This frame's placed list (as last set).
     pub fn placed_models(&self) -> &[ModelInstance] {
         &self.placed_models
@@ -439,6 +467,11 @@ impl Renderer {
     }
     pub fn try_set_models(&mut self, instances: Vec<ModelInstance>)->Result<(),String> {
         let signature = placed_scene_signature(&instances);
+        self.placed_prefix = None;
+        self.try_set_models_signed(instances, signature)
+    }
+
+    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, signature: u64) -> Result<(), String> {
         let scene_changed = self.placed_scene_signature != Some(signature);
         // Statics are cached against a key; any meaningful placed-scene
         // change must break it or an equal-length replacement would retain

@@ -46,13 +46,13 @@ pub(super) struct PlacedBlocks {
     key: Option<(u64, u64, u64, usize)>,
     /// (world min, world max, members as (copy, model slot)).
     blocks: Vec<(Vec3f, Vec3f, Vec<(u32, u32)>)>,
-    /// Copies no block holds (dynamic, Splash material, animated parts,
-    /// model not loaded): tested one by one every frame.
-    loose: Vec<u32>,
+    /// Copies no block holds (dynamic, Splash material, parts or a morph,
+    /// model not loaded): tested one by one every frame. Ascending.
+    pub(super) loose: Vec<u32>,
 }
 
 impl PlacedBlocks {
-    fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], signature: Option<u64>) {
+    pub(super) fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], signature: Option<u64>) {
         let fingerprint = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -86,7 +86,7 @@ impl PlacedBlocks {
             let root = slot.map(|at| &models[at].1);
             let Some((at, root)) = slot.zip(root).filter(|(_, root)| {
                 !inst.dynamic && inst.custom_material.is_none()
-                    && std::iter::once(*root).chain(root.lods.iter().map(|(_, m)| m)).all(|m| m.anim_parts.is_empty())
+                    && std::iter::once(*root).chain(root.lods.iter().map(|(_, m)| m)).all(|m| m.anim_parts.is_empty() && m.driven_parts.is_empty() && m.morph.is_none())
             }) else {
                 self.loose.push(i as u32);
                 continue;
@@ -332,10 +332,8 @@ impl Renderer {
             let mut built = std::mem::take(&mut self.model_orders[which]);
             let chains = &self.model_lod_chains;
             let occluders = self.stream.as_ref().map(|st| st.occluders());
-            let blocks = matches!(lane, WorldModelLane::Placed).then(|| {
-                self.placed_blocks.refresh(&self.static_models, instances, self.placed_scene_signature);
-                &self.placed_blocks
-            });
+            // Refreshed for this frame's placed list by draw_scene_inner.
+            let blocks = matches!(lane, WorldModelLane::Placed).then_some(&self.placed_blocks);
             let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
             match lane {
                 WorldModelLane::Placed => stats.model_culled += culled,
