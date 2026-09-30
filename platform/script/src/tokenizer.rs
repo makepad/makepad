@@ -285,6 +285,10 @@ pub struct ScriptTokenizer {
     /// `//` and `/* */` remain plain discarded comments.
     pub docs: Vec<ScriptTokDoc>,
     pub original: String,
+    /// The char index each line of `original` after the first starts at
+    /// (one past each `\n`): token positions to rows and columns by a
+    /// binary search, not a scan of the source.
+    line_starts: Vec<u32>,
     unfinished: String,
     temp: String,
     state: State,
@@ -304,6 +308,7 @@ impl ScriptTokenizer {
         self.tokens.clear();
         self.docs.clear();
         self.original.clear();
+        self.line_starts.clear();
         self.unfinished.clear();
         self.temp.clear();
         self.state = State::Whitespace
@@ -322,22 +327,13 @@ impl ScriptTokenizer {
     }
 
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
-        // first find the real pos
-
         let char_index = self.tokens[tok_index as usize].pos;
-
-        let mut line = 0;
-        let mut line_start = 0;
-        for (i, c) in self.original.chars().enumerate() {
-            if i >= char_index as usize {
-                return Some((line as u32, (i - line_start) as u32));
-            }
-            if c == '\n' {
-                line_start = i + 1;
-                line += 1;
-            }
+        if char_index >= self.pos {
+            return None;
         }
-        None
+        let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+        let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+        Some((line as u32, (char_index - line_start) as u32))
     }
 
 
@@ -426,8 +422,8 @@ impl ScriptTokenizer {
         let space_pending = self.space_pending;
         let temp = self.temp.clone();
         let state = self.state.clone();
-        let (tokens_len, docs_len, original_len) =
-            (self.tokens.len(), self.docs.len(), self.original.len());
+        let (tokens_len, docs_len, original_len, lines_len) =
+            (self.tokens.len(), self.docs.len(), self.original.len(), self.line_starts.len());
         self.tokenize("\n", heap);
         let token = self.tokens.get(tokens_len).copied();
         self.pos = pos;
@@ -438,6 +434,7 @@ impl ScriptTokenizer {
         self.tokens.truncate(tokens_len);
         self.docs.truncate(docs_len);
         self.original.truncate(original_len);
+        self.line_starts.truncate(lines_len);
         if let Some(token) = token {
             self.tokens.push(token);
             self.provisional = true;
@@ -725,6 +722,9 @@ impl ScriptTokenizer {
         while let Some(c) = iter.next() {
             self.original.push(c);
             self.pos += 1;
+            if c == '\n' {
+                self.line_starts.push(self.pos as u32);
+            }
             match self.state {
                 State::Whitespace => {
                     if c.is_numeric() {
@@ -1224,6 +1224,37 @@ mod tests {
             tokenizer.token_index_to_row_col(0),
             ascii.token_index_to_row_col(0)
         );
+    }
+
+    #[test]
+    fn token_rows_and_columns_match_a_scan_of_the_source() {
+        // Rows and columns come from the line index; they are what a scan
+        // of the source up to the token gives, for a source streamed in
+        // pieces (a provisional last token in between) too.
+        fn scan(source: &str, at: usize) -> Option<(u32, u32)> {
+            let (mut line, mut start) = (0, 0);
+            for (i, c) in source.chars().enumerate() {
+                if i >= at {
+                    return Some((line, (i - start) as u32));
+                }
+                if c == '\n' {
+                    start = i + 1;
+                    line += 1;
+                }
+            }
+            None
+        }
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        let source = "let a = 1\n\n  b: \u{540d}+ 2\nc(3, 4)\n   x";
+        for piece in ["let a = 1\n", "\n  b: \u{540d}", "+ 2\nc(3, 4)\n   x"] {
+            tokenizer.tokenize(piece, &mut heap);
+            tokenizer.push_pending_token(&mut heap);
+        }
+        assert!(tokenizer.tokens.len() > 8);
+        for (i, token) in tokenizer.tokens.iter().enumerate() {
+            assert_eq!(tokenizer.token_index_to_row_col(i as u32), scan(source, token.pos), "token {i}");
+        }
     }
 
     #[test]
