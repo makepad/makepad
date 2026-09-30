@@ -54,6 +54,13 @@ script_mod! {
         ..mod.draw.DrawLmSunDepthCutout
         v_csm: varying(vec4f)
         v_csm_n: varying(vec3f)
+        // What a colour lane's hooks may read for their alpha: the vertex
+        // colour, and neutral stand-ins for the instance tint, the scene
+        // transform and the eye (the caster's alpha never depends on them).
+        v_tint: varying(vec4f)
+        tint: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        to_scene: fn(c: vec3) -> vec3 { return c }
         oct_decode: fn(e: vec2f) -> vec3f {
             let nz = 1.0 - abs(e.x) - abs(e.y)
             let t = max(0.0 - nz, 0.0)
@@ -74,6 +81,7 @@ script_mod! {
             if self.morph_ctl.w > 0.5 { pos = pos + self.morph_delta(self.geom.ao_uv, 0.0) }
             let n = self.oct_decode(unpack2f16(self.geom.nrm))
             self.v_uv = unpack2f16(self.geom.uv)
+            self.v_tint = unpack4u8(self.geom.color)
             pos = self.mat_vertex(pos, n, self.v_uv)
             let wp = self.transform * vec4(pos, 1.0)
             self.v_csm = vec4(wp.xyz, 0.0)
