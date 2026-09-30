@@ -447,6 +447,21 @@ fn small_table(body: &Block, info: &Info, bounds: &[Option<u32>]) -> Option<(u32
     n.into_iter().filter(|(_, c)| *c >= 2).max_by_key(|((b, e), c)| (*c, std::cmp::Reverse(*b), *e)).map(|(k, _)| k)
 }
 
+/// A copy of `p` for register allocation without the element counter's
+/// step (`Set(i, next)` and next's definition when nothing else reads it),
+/// and next's value id.
+fn without_step(p: &Program, sh: &Shape) -> (Program, Option<u32>) {
+    let mut q = p.clone();
+    let Some(Stmt::Loop { body, .. }) = q.body.last_mut() else { return (q, None) };
+    let Some(Stmt::Set(i, next)) = body.last().cloned() else { return (q, None) };
+    if i != sh.i || use_counts(p)[next.0 as usize] != 1 {
+        return (q, None);
+    }
+    body.pop();
+    body.retain(|s| !matches!(s, Stmt::Def(v, _) if *v == next));
+    (q, Some(next.0))
+}
+
 /// How many times each value is read.
 fn use_counts(p: &Program) -> Vec<u32> {
     let mut n = vec![0u32; p.vals.len()];
@@ -669,6 +684,8 @@ struct Em {
     lanes: u32,
     /// Uses of every value (for fusing a definition into its one user).
     uses: Vec<u32>,
+    /// The element counter's IR step value (not emitted).
+    step_def: Option<u32>,
     /// Constants used only as multiplicands, packed four to a register:
     /// value -> (register, lane), read with by-element FMUL/FMLA/MUL/MLA.
     packed: HashMap<u32, (u8, u32, u32)>,
@@ -1617,6 +1634,9 @@ impl Em {
     // -- ops ------------------------------------------------------------------------
 
     fn def(&mut self, v: Val, op: &Op) {
+        if self.step_def == Some(v.0) {
+            return;
+        }
         if self.packed.contains_key(&v.0) {
             // Lives in a lane of a packed register (loaded in the prologue).
             return;
@@ -1677,7 +1697,7 @@ impl Em {
             }
             Op::Bin(b, x, y) => {
                 let rx = self.vsrc(x, VS0);
-                let ry = self.vsrc(y, VS1);
+                let ry = if y == x { rx } else { self.vsrc(y, VS1) };
                 match b {
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some_and(|c| c > 1 && (c as u32).is_power_of_two()) => {
                         // By 2^k: q = (x + ((x >> 31) >>> (32 - k))) >> k
@@ -1880,7 +1900,13 @@ impl Em {
                 let (a, b) = if self.packed.contains_key(&a.0) { (b, a) } else { (a, b) };
                 let pk = self.packed.get(&b.0).map(|&(r, l, _)| (r, l)).filter(|_| !self.packed.contains_key(&a.0));
                 let ra = self.vsrc(a, VS0);
-                let rb = if pk.is_some() { 0 } else { self.vsrc(b, VS1) };
+                let rb = if pk.is_some() {
+                    0
+                } else if b == a {
+                    ra
+                } else {
+                    self.vsrc(b, VS1)
+                };
                 let rc = self.vsrc(c, VS2);
                 let d = self.dst(dst);
                 let acc = if d != ra && (pk.is_some() || d != rb) && d != VS0 { d } else { VS2 };
@@ -2101,8 +2127,12 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     if mask_depth(&info, &p.body) == 0 && info.masked.is_empty() && info.escapes.is_empty() {
         pool.push(VM);
     }
+    // The counter's step is emitted from the counter itself: its IR value
+    // (iv + 1) is never computed, so the allocator must not keep iv live to
+    // the end of the element for it.
+    let (alloc_view, step_def) = without_step(p, &sh);
     let alloc = allocate_with(
-        p,
+        &alloc_view,
         |e| match e {
             Ent::Counter(_) => 0,
             // Packed constants take no register or slot of their own.
@@ -2144,6 +2174,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         lanes,
         packed,
         uses: use_counts(p),
+        step_def,
         full: true,
         i,
         bounds,
