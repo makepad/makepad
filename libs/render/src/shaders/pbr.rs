@@ -259,6 +259,9 @@ script_mod! {
                 self.color_adjust_ctl
             ), alpha))
             if self.surface_on < 0.5 && surf.w < 0.5 {self.clip()}
+            // A Mask material cuts on the alpha its surface hook gives (the
+            // stock hook returns the alpha tested above).
+            if self.alpha_mode>0.5 && self.alpha_mode<1.5 && surf.w<self.alpha_cutoff {self.clip()}
             let albedo = surf.xyz
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
@@ -416,7 +419,7 @@ script_mod! {
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)
             }
-            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,alpha,step(1.5,self.alpha_mode))))
+            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf.w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }
