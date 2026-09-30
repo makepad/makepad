@@ -723,8 +723,11 @@ impl ShaderFnCompiler {
             return (io_obj.into(), Some(io_type));
         }
 
-        // No shader IO marker found - get the normal value (for RustInstance fields)
-        let value = vm.bx.heap.value(io_self, field_id.into(), trap);
+        // No shader IO marker found - get the normal value (for RustInstance
+        // fields). A miss is expected (the caller falls back to the instance
+        // fields), so it is looked up without the trap: its error, with a
+        // "did you mean" scan of the object, was built only to be cleared.
+        let value = vm.bx.heap.value(io_self, field_id.into(), NoTrap);
         (value, None)
     }
 
@@ -1003,9 +1006,13 @@ impl ShaderFnCompiler {
             } else if let ShaderType::ScopeObject(obj) = instance_ty {
                 // Field access on a scope object (e.g., test_obj.p2 or test_obj.objfn or test_obj.sub_obj)
                 // Look up the field value
-                let value = vm.bx.heap.value(obj, field_id.into(), self.trap.pass());
+                // Looked up without a trap: a miss falls through to the
+                // type-check structure below, and building its error ("did
+                // you mean" over the object) only to clear it cost more than
+                // the rest of the compile.
+                let value = vm.bx.heap.value(obj, field_id.into(), NoTrap);
 
-                if !value.is_nil() && self.trap.err_is_empty() {
+                if !value.is_nil() && !value.is_err() && self.trap.err_is_empty() {
                     // Check if this is an object
                     if let Some(value_obj) = value.as_object() {
                         // Check if this is a shader_io type - not supported for scope objects
@@ -1040,10 +1047,13 @@ impl ShaderFnCompiler {
 
                         // Check if this is a repr(u32) enum variant (has a 'repr_u32_enum_value' field)
                         // If so, emit the value directly as a u32 constant
+                        // A probe that almost always misses: without a trap
+                        // the miss builds no error (its "did you mean" scan of
+                        // the object was most of a material compile).
                         let enum_value = vm.bx.heap.value(
                             value_obj,
                             id!(_repr_u32_enum_value).into(),
-                            self.trap.pass(),
+                            NoTrap,
                         );
                         if !enum_value.is_nil() {
                             self.trap.err_take(); // Clear any error
