@@ -530,6 +530,40 @@ fn bool_masks(p: &Program) -> (Vec<bool>, Vec<bool>) {
     }
 }
 
+/// The negated constants c of right-shift amounts x + c the emitter's
+/// pair fusion will subtract from (most used first).
+fn shift_constants(p: &Program, bounds: &[Option<u32>]) -> Vec<u32> {
+    let uses = use_counts(p);
+    let mut consts: HashMap<u32, i32> = HashMap::new();
+    let mut count: HashMap<u32, u32> = HashMap::new();
+    fn walk(b: &Block, uses: &[u32], bounds: &[Option<u32>], consts: &mut HashMap<u32, i32>, count: &mut HashMap<u32, u32>) {
+        for (k, s) in b.iter().enumerate() {
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c);
+                }
+                Stmt::Def(t, Op::Bin(Bin::AddI, _, kk)) => {
+                    if let (Some(c), Some(Stmt::Def(_, Op::Bin(Bin::ShrUI | Bin::ShrI, _, amt)))) = (consts.get(&kk.0), b.get(k + 1)) {
+                        if amt == t && uses[t.0 as usize] == 1 && bounds[t.0 as usize].is_some_and(|m| m < 32) {
+                            *count.entry(c.wrapping_neg() as u32).or_default() += 1;
+                        }
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, uses, bounds, consts, count);
+                    walk(e, uses, bounds, consts, count);
+                }
+                Stmt::Loop { body, .. } => walk(body, uses, bounds, consts, count),
+                _ => {}
+            }
+        }
+    }
+    walk(&p.body, &uses, bounds, &mut consts, &mut count);
+    let mut v: Vec<(u32, u32)> = count.into_iter().filter(|(_, n)| *n >= 2).collect();
+    v.sort_by_key(|(b, n)| (std::cmp::Reverse(*n), *b));
+    v.into_iter().map(|(b, _)| b).collect()
+}
+
 /// How many times each value is read.
 fn use_counts(p: &Program) -> Vec<u32> {
     let mut n = vec![0u32; p.vals.len()];
@@ -761,6 +795,9 @@ struct Em {
     var_mask: Vec<bool>,
     /// Every value's type.
     p_vals: Vec<crate::ir::Ty>,
+    /// Constants the emitter itself needs in the loop, splatted once into
+    /// registers taken from the pool: (bits, register).
+    resident: Vec<(u32, u8)>,
     /// Constants used only as multiplicands, packed four to a register:
     /// value -> (register, lane), read with by-element FMUL/FMLA/MUL/MLA.
     packed: HashMap<u32, (u8, u32, u32)>,
@@ -1301,8 +1338,15 @@ impl Em {
             {
                 let c = self.consts[k.0 as usize].unwrap();
                 let rx = self.vsrc(x0, VS0);
-                self.splat(VS2, c.wrapping_neg() as u32);
-                self.e(v::r3(v::SUB, VS2, VS2, rx));
+                let neg = c.wrapping_neg() as u32;
+                let kreg = match self.resident.iter().find(|(b, _)| *b == neg) {
+                    Some((_, r)) => *r,
+                    None => {
+                        self.splat(VS2, neg);
+                        VS2
+                    }
+                };
+                self.e(v::r3(v::SUB, VS2, kreg, rx));
                 let rs = self.vsrc(s0, VS1);
                 let d = self.dst(Ent::Val(v.0));
                 self.e(v::r3(if sh == Bin::ShrUI { v::USHL } else { v::SSHL }, d, rs, VS2));
@@ -2271,6 +2315,9 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     // Constants used only as multiplicands, four to a register (taken from
     // the pool's end): each saves three registers.
     let (packed, packs) = pack_constants(p, &mut pool);
+    // The negated constants of shift amounts x + c (one SUB from them per
+    // shift): at most two, each a register from the pool's end.
+    let resident: Vec<(u32, u8)> = shift_constants(p, &bounds).into_iter().take(2).filter_map(|c| pool.pop().map(|r| (c, r))).collect();
     // No divergent branch or masked loop: the mask register is never read
     // (every lane always runs), so it holds values too. (A four-register
     // row load saves and restores v28 whatever it holds.)
@@ -2329,6 +2376,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         mask: bmask,
         var_mask: bvar,
         p_vals: p.vals.clone(),
+        resident: resident.clone(),
         full: true,
         i,
         bounds,
@@ -2371,6 +2419,9 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     }
     for (r, words) in &packs {
         em.vconst(*r, *words);
+    }
+    for (bits, r) in &resident {
+        em.splat(*r, *bits);
     }
     // The execution mask: every lane.
     em.e(v::movi0(VM));
