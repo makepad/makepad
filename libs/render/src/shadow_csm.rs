@@ -131,8 +131,6 @@ pub struct CsmCascade {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CsmFrame {
     pub cascades: [CsmCascade; CSM_CASCADES],
-    /// Each tile's depth generation (see [`CSM_DEPTH_GENS`]).
-    pub generation: [u32; CSM_CASCADES],
     /// False for the off-tier binding (fallback texture, `csm_vis` = 1).
     pub on: bool,
 }
@@ -380,66 +378,9 @@ pub fn fit_cascades_reach(
     frame
 }
 
-/// Depth "generations" per tile. The platform clears a pass's depth only
-/// as a whole and always tests LessEqual, so a tile that is re-rendered
-/// while its neighbours are kept (staggered cascades) cannot be cleared on
-/// its own. Instead each re-render of a tile writes into the next LOWER
-/// slice of the depth range: generation g maps z01 to
-/// `[(G-1-g)/G, (G-g)/G]`, and a tile-sized quad at the slice's far end
-/// (which every older generation's depth is >= to) clears it. After G
-/// renders of any tile the whole target is cleared and all tiles restart at
-/// generation 0. 32-bit float depth keeps ~20 bits per slice.
-pub const CSM_DEPTH_GENS: u32 = 16;
-
-/// Re-render period in frames per cascade: the two near cascades every
-/// frame, cascade 2 every 2nd, the far cascade every 4th (on a phase that
-/// avoids cascade 2's frames). A kept tile keeps the matrices it was
-/// rendered with, so a receiver always compares against a consistent map;
-/// only movers' shadows in the far tiles lag by up to 3 frames.
-const CSM_PERIOD: [u64; CSM_CASCADES] = [1, 1, 2, 4];
-const CSM_PHASE: [u64; CSM_CASCADES] = [0, 0, 0, 1];
-
-/// Clip-space z window of a depth generation: `z_clip = z01 * scale + offset`.
-pub fn depth_generation_window(generation: u32) -> (f32, f32) {
-    let g = CSM_DEPTH_GENS as f32;
-    (1.0 / g, (g - 1.0 - generation.min(CSM_DEPTH_GENS - 1) as f32) / g)
-}
-
-/// Which tiles a frame re-renders and in which depth generation.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CsmSchedule {
-    pub generation: [u32; CSM_CASCADES],
-    valid: [bool; CSM_CASCADES],
-}
-
-impl CsmSchedule {
-    /// Forget every tile: the next frame clears the whole target.
-    pub fn invalidate(&mut self) {
-        self.valid = [false; CSM_CASCADES];
-    }
-
-    /// Plan frame `frame_no`: returns (clear the whole target, tiles to
-    /// re-render). `stagger` false re-renders every tile every frame.
-    pub fn plan(&mut self, frame_no: u64, stagger: bool) -> (bool, [bool; CSM_CASCADES]) {
-        let mut due = [false; CSM_CASCADES];
-        for i in 0..CSM_CASCADES {
-            due[i] = !stagger || !self.valid[i] || frame_no % CSM_PERIOD[i] == CSM_PHASE[i];
-        }
-        let full = self.valid.iter().any(|v| !v)
-            || (0..CSM_CASCADES).any(|i| due[i] && self.generation[i] + 1 >= CSM_DEPTH_GENS);
-        if full {
-            self.generation = [0; CSM_CASCADES];
-            self.valid = [true; CSM_CASCADES];
-            return (true, [true; CSM_CASCADES]);
-        }
-        for i in 0..CSM_CASCADES {
-            if due[i] {
-                self.generation[i] += 1;
-            }
-        }
-        (false, due)
-    }
-}
+/// The clip-space z window the cascade tiles render into:
+/// `z_clip = z01 * scale + offset` (the top sixteenth of the depth range).
+pub const CSM_DEPTH_WINDOW: (f32, f32) = (1.0 / 16.0, 15.0 / 16.0);
 
 /// Can a caster with this world AABB put depth into cascade `c`'s tile?
 /// Its light-space box must overlap the tile's square and reach the z
@@ -972,41 +913,5 @@ mod tests {
             }
         }
         assert!(held > 0, "some casters are held");
-    }
-
-    /// The generation windows nest strictly downward, so a newer tile
-    /// clear passes LessEqual against any older content, and the schedule
-    /// renders each cascade at its period and clears in full before a tile
-    /// runs out of generations.
-    #[test]
-    fn depth_generations_descend_and_the_schedule_staggers() {
-        for g in 1..CSM_DEPTH_GENS {
-            let (s0, o0) = depth_generation_window(g - 1);
-            let (s1, o1) = depth_generation_window(g);
-            assert!(o1 + s1 <= o0 + 1e-6, "generation {g} must sit below {}", g - 1);
-            assert!(o1 >= 0.0 && s0 == s1);
-        }
-        let mut s = CsmSchedule::default();
-        let (full, due) = s.plan(0, true);
-        assert!(full && due.iter().all(|d| *d), "first frame clears and renders all");
-        let mut renders = [0u32; CSM_CASCADES];
-        let mut fulls = 0;
-        for f in 1..=64u64 {
-            let (full, due) = s.plan(f, true);
-            fulls += full as u32;
-            for i in 0..CSM_CASCADES {
-                renders[i] += due[i] as u32;
-                assert!(s.generation[i] < CSM_DEPTH_GENS);
-            }
-        }
-        assert_eq!(renders[0], 64);
-        assert_eq!(renders[1], 64);
-        assert!(renders[2] >= 32 && renders[2] <= 36, "{renders:?}");
-        assert!(renders[3] >= 16 && renders[3] <= 20, "{renders:?}");
-        assert!(fulls >= 3 && fulls <= 5, "one full clear per {CSM_DEPTH_GENS} frames: {fulls}");
-        let mut s = CsmSchedule::default();
-        s.plan(0, false);
-        let (_, due) = s.plan(1, false);
-        assert!(due.iter().all(|d| *d), "stagger off renders every tile");
     }
 }

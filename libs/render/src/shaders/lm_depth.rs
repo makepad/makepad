@@ -40,8 +40,8 @@ script_mod! {
             // sun's view of its top.
             let zq = nz + self.flip_a.x * (1.0 - 2.0 * nz)
             // tile_a places the cascade pass's tiles in the grid; the atlas
-            // passes use the identity tile. flip_a.yz = the cascade tile's
-            // depth generation (shadow_csm::depth_generation_window):
+            // passes use the identity tile. flip_a.yz = the cascade tiles'
+            // depth window (shadow_csm::CSM_DEPTH_WINDOW):
             // z * (1 - y) + z_offset; zero = identity for the atlas passes.
             self.vertex_pos = vec4(
                 nx * self.tile_a.x + self.tile_a.z,

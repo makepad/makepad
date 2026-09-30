@@ -15,7 +15,9 @@
 //!   moved, its tile moved, the static caster set changed, or a mover is (or
 //!   was last time) inside its frustum. Re-rendered faces go into a lower
 //!   depth "generation" of the atlas so a tile can be cleared on its own
-//!   (shadow_csm::CSM_DEPTH_GENS explains the scheme); after
+//!   (the pass clears its depth only as a whole and tests LessEqual, so
+//!   generation g writes the slice `[(G-1-g)/G, (G-g)/G]` and a tile-sized
+//!   quad at its far end clears the tile); after
 //!   [`LOCAL_DEPTH_GENS`] rendering frames the atlas is cleared and every
 //!   face re-rendered.
 //! * Cube faces are rendered a couple of texels wider than 90 degrees, so a
@@ -991,8 +993,7 @@ impl LocalShadows {
     }
 }
 
-/// Clip-space z window of a local-atlas depth generation (see
-/// shadow_csm::depth_generation_window; this atlas uses LOCAL_DEPTH_GENS).
+/// Clip-space z window of a local-atlas depth generation.
 fn local_generation_window(generation: u32) -> (f32, f32) {
     let g = LOCAL_DEPTH_GENS as f32;
     (1.0 / g, (g - 1.0 - generation.min(LOCAL_DEPTH_GENS - 1) as f32) / g)

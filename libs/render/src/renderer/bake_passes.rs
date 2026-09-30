@@ -518,13 +518,6 @@ impl Renderer {
         on
     }
 
-    /// Refresh every shadow cascade every frame (false) instead of on
-    /// staggered frames (true, the realtime default): a locked-time host
-    /// renders frames that must each be whole.
-    pub fn set_csm_stagger(&mut self, stagger: bool) {
-        self.gpu_baker.set_csm_stagger(stagger);
-    }
-
     /// Which SPACE the model lanes shade in.
     ///
     /// Off (the default) is the game's, and it is right for a game: its
@@ -752,7 +745,7 @@ impl Renderer {
         let mut da = [0.0f32; 4];
         let mut db = [0.0f32; 4];
         for i in 0..crate::shadow_csm::CSM_CASCADES {
-            let (gs, go) = crate::shadow_csm::depth_generation_window(frame.generation[i]);
+            let (gs, go) = crate::shadow_csm::CSM_DEPTH_WINDOW;
             da[i] = gs * clip_scale;
             db[i] = go * clip_scale + clip_bias;
         }
