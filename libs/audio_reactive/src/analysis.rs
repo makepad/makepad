@@ -462,6 +462,27 @@ impl AudioReactive {
         (self.loud_short / sum).clamp(0.0, 1.0)
     }
 
+    /// The newest spectrogram row: `AUDIO_BINS` log-spaced magnitudes 0..1
+    /// (30 Hz .. 16 kHz), all 0 before any audio.
+    pub fn spectrum(&self) -> &[f32] {
+        let newest = self.rows_written.saturating_sub(1);
+        let row = (newest % AUDIO_SPEC_ROWS as u64) as usize * AUDIO_TEX_W;
+        &self.data[row..row + AUDIO_BINS]
+    }
+
+    /// The newest spectrum folded into `out.len()` log-spaced bands (each
+    /// the peak of its bins), for a kernel, a Sim or a CPU look that reads
+    /// levels per band rather than the texture.
+    pub fn bands(&self, out: &mut [f32]) {
+        let row = self.spectrum();
+        let n = out.len().max(1);
+        for (k, v) in out.iter_mut().enumerate() {
+            let lo = k * AUDIO_BINS / n;
+            let hi = ((k + 1) * AUDIO_BINS / n).max(lo + 1);
+            *v = row[lo..hi].iter().cloned().fold(0.0, f32::max);
+        }
+    }
+
     /// True once real audio has been analysed at least once (status/debug).
     pub fn has_audio(&self) -> bool {
         self.seen_audio
@@ -703,6 +724,22 @@ mod tests {
         let base = row * AUDIO_TEX_W;
         let peak = quiet.data[base..base + AUDIO_BINS].iter().cloned().fold(0.0f32, f32::max);
         assert!(peak < 0.02, "silence peaked at {peak}");
+    }
+
+    /// Bands fold the newest row: a 1 kHz tone lands in the band that
+    /// holds 1 kHz and not far from it.
+    #[test]
+    fn bands_fold_the_newest_row() {
+        let mut bus = AudioReactive::new();
+        let rate = 48_000.0f32;
+        let sine: Vec<f32> = (0..HOP * 8).map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / rate).sin()).collect();
+        bus.push_samples(&sine, rate);
+        let mut bands = [0.0f32; 8];
+        bus.bands(&mut bands);
+        let loudest = (0..8).max_by(|a, b| bands[*a].total_cmp(&bands[*b])).unwrap();
+        // 1 kHz sits at (ln(1000/30) / ln(16000/30)) ~ 0.56 of the ladder.
+        assert_eq!(loudest, 4, "{bands:?}");
+        assert!(bands[0] < bands[4] * 0.5, "{bands:?}");
     }
 
     /// The waveform section is signed, bounded, and silent-is-zero — the
