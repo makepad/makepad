@@ -61,7 +61,10 @@ script_mod! {
         history_ready: fn() -> float { return self.g_misc.z }
         // This pass's pixels per output pixel (supersampling times the
         // pass's scale): a line N output pixels wide is N * px_scale()
-        // pass pixels, and fwidth()/dFdx() are in pass pixels.
+        // pass pixels, and fwidth()/dFdx() are in pass pixels. Take
+        // derivatives before any branch that differs between pixels: in
+        // such a branch they are undefined (Metal gives too small a
+        // footprint, so filtered detail aliases).
         px_scale: fn() -> float { return self.g_misc.w }
         // The view distance of a depth-buffer value (a sample of a depth
         // read), for depth of field, outlines and fog passes.
