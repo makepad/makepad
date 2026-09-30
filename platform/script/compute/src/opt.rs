@@ -24,6 +24,8 @@ use std::collections::{HashMap, HashSet};
 pub fn optimize(p: &mut Program) {
     forward_sets(p);
     licm(p);
+    if_convert(p);
+    forward_sets(p);
     cse(p);
     dce(p);
 }
@@ -392,13 +394,13 @@ enum Key {
     CmpD(ir::Cmp, u32, u32),
     Sel(u32, u32, u32),
     Wrap(u32, u32),
-    Load(Region, u32, u32, Option<u32>),
+    Load(Region, u32, u32, Option<u32>, ir::Ty),
     Get(u32),
     FrameCount,
     BufLen(u8),
 }
 
-fn key(op: &Op) -> Option<Key> {
+fn key(op: &Op, ty: ir::Ty) -> Option<Key> {
     Some(match *op {
         Op::ConstF(x) => Key::ConstF(x.to_bits()),
         Op::ConstD(x) => Key::ConstD(x.to_bits()),
@@ -411,7 +413,7 @@ fn key(op: &Op) -> Option<Key> {
         Op::CmpD(c, x, y) => Key::CmpD(c, x.0, y.0),
         Op::Sel(c, x, y) => Key::Sel(c.0, x.0, y.0),
         Op::Wrap(x, n) => Key::Wrap(x.0, n),
-        Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off.map(|o| o.0)),
+        Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off.map(|o| o.0), ty),
         Op::Get(v) => Key::Get(v.0),
         Op::FrameCount => Key::FrameCount,
         Op::BufLen(k) => Key::BufLen(k),
@@ -429,6 +431,7 @@ pub fn cse(p: &mut Program) {
     struct St<'a> {
         ro: &'a HashSet<u8>,
         all: &'a Writes,
+        tys: &'a [ir::Ty],
         map: HashMap<u32, Val>,
     }
     fn stable_load(st: &St, op: &Op) -> bool {
@@ -444,7 +447,7 @@ pub fn cse(p: &mut Program) {
             match &mut s {
                 Stmt::Def(v, op) => {
                     rename_op(op, &st.map);
-                    if let Some(k) = key(op).filter(|_| stable_load(st, op)) {
+                    if let Some(k) = key(op, st.tys[v.0 as usize]).filter(|_| stable_load(st, op)) {
                         // Gets are valid only until a set of the variable.
                         if let Some(found) = scope.iter().rev().find_map(|m| m.get(&k)) {
                             st.map.insert(v.0, *found);
@@ -489,10 +492,118 @@ pub fn cse(p: &mut Program) {
         *b = keep;
         scope.pop();
     }
-    let mut st = St { ro: &ro, all: &all, map: HashMap::new() };
+    let tys = p.vals.clone();
+    let mut st = St { ro: &ro, all: &all, tys: &tys, map: HashMap::new() };
     walk(&mut p.body, &mut st, &mut Vec::new());
     let map = st.map;
     rename(&mut p.body, &map);
+}
+
+// ---------------------------------------------------------------------------
+// If-conversion
+// ---------------------------------------------------------------------------
+
+/// Most definitions a converted `if` may run on the path it skipped.
+const IF_CONVERT_DEFS: usize = 16;
+
+/// An `if` whose sides only define values and set variables (after
+/// hoisting, typically a few ops and a `Set`) becomes straight-line code:
+/// both sides' definitions, then each variable set on either side takes
+/// `c ? then-value : else-value` (its old value on a side that leaves it).
+/// Both sides' ops are total and pure, so running the skipped one changes
+/// nothing; vector code runs no masks for it, scalar code no branch.
+pub fn if_convert(p: &mut Program) {
+    fn flat(b: &Block) -> Option<usize> {
+        let mut defs = 0;
+        let mut set = HashSet::new();
+        for s in b {
+            match s {
+                Stmt::Def(_, op) => {
+                    // A get after a set of the same variable on this side
+                    // would read the new value once flattened.
+                    if let Op::Get(v) = op {
+                        if set.contains(&v.0) {
+                            return None;
+                        }
+                    }
+                    if !matches!(op, Op::ConstF(_) | Op::ConstI(_) | Op::ConstB(_) | Op::ConstD(_)) {
+                        defs += 1;
+                    }
+                }
+                Stmt::Set(v, _) => {
+                    set.insert(v.0);
+                }
+                _ => return None,
+            }
+        }
+        Some(defs)
+    }
+    fn last_sets(b: &Block) -> Vec<(u32, Val)> {
+        let mut out: Vec<(u32, Val)> = Vec::new();
+        for s in b {
+            if let Stmt::Set(v, x) = s {
+                match out.iter_mut().find(|(w, _)| *w == v.0) {
+                    Some(e) => e.1 = *x,
+                    None => out.push((v.0, *x)),
+                }
+            }
+        }
+        out
+    }
+    fn block(b: &mut Block, p_vals: &mut Vec<ir::Ty>, p_vars: &[ir::Ty]) {
+        let mut out = Vec::with_capacity(b.len());
+        for mut s in std::mem::take(b) {
+            match &mut s {
+                Stmt::If(c, t, e) => {
+                    block(t, p_vals, p_vars);
+                    block(e, p_vals, p_vars);
+                    if let (Some(dt), Some(de)) = (flat(t), flat(e)) {
+                        if dt + de <= IF_CONVERT_DEFS {
+                            let c = *c;
+                            let st = last_sets(t);
+                            let se = last_sets(e);
+                            let mut vars: Vec<u32> = st.iter().chain(&se).map(|(v, _)| *v).collect();
+                            vars.sort();
+                            vars.dedup();
+                            for x in t.drain(..).chain(e.drain(..)) {
+                                if let Stmt::Def(..) = x {
+                                    out.push(x);
+                                }
+                            }
+                            let mut new = |ty: ir::Ty| {
+                                p_vals.push(ty);
+                                Val(p_vals.len() as u32 - 1)
+                            };
+                            let mut sets = Vec::new();
+                            for v in vars {
+                                let ty = p_vars[v as usize];
+                                let find = |l: &[(u32, Val)]| l.iter().find(|(w, _)| *w == v).map(|x| x.1);
+                                let (tv, ev) = (find(&st), find(&se));
+                                let old = if tv.is_none() || ev.is_none() {
+                                    let o = new(ty);
+                                    out.push(Stmt::Def(o, Op::Get(ir::Var(v))));
+                                    Some(o)
+                                } else {
+                                    None
+                                };
+                                let sel = new(ty);
+                                out.push(Stmt::Def(sel, Op::Sel(c, tv.or(old).unwrap(), ev.or(old).unwrap())));
+                                sets.push(Stmt::Set(ir::Var(v), sel));
+                            }
+                            out.extend(sets);
+                            continue;
+                        }
+                    }
+                }
+                Stmt::Loop { body, .. } => block(body, p_vals, p_vars),
+                _ => {}
+            }
+            out.push(s);
+        }
+        *b = out;
+    }
+    let vars = p.vars.clone();
+    block(&mut p.body, &mut p.vals, &vars);
 }
 
 // ---------------------------------------------------------------------------

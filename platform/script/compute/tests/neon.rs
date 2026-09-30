@@ -706,3 +706,34 @@ fn what_neon_declines_still_runs_scalar() {
     let k = compile("let o = output(f32)\nfn element(i) { o[i / 2] = 1.0 }").unwrap();
     assert!(!k.simd());
 }
+
+#[test]
+fn optimized_random_kernels_give_the_same_bits() {
+    // The AIR passes (forwarding, LICM, if-conversion, CSE, DCE) change
+    // where values are computed, never a value: the optimized program on
+    // every backend equals the original on the interpreter.
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let mut r = Rng(env("OPT_FUZZ_SEED", 0x0B7F_5EED_1234_5678));
+    let regions = Regions { ctx: CTX as u32, state: 1, shared: 1, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
+    let rounds = env("OPT_FUZZ_ROUNDS", 10_000);
+    let mut ran = 0;
+    for round in 0..rounds {
+        let p = random_kernel(&mut r);
+        let mut q = p.clone();
+        makepad_script_compute::opt::optimize(&mut q);
+        if let Err(e) = ir::validate(&q, &regions) {
+            panic!("round {}: the optimized program is invalid: {}\n{:?}", round, e, q.body);
+        }
+        let n = [1usize, 3, 4, 5, 8, 13, 16, 31][r.below(8) as usize];
+        let ctx0 = params(&mut r);
+        let seed = r.next();
+        let (Some(a), Some(b)) = (run3(&p, n, &ctx0, seed), run3(&q, n, &ctx0, seed)) else { continue };
+        ran += 1;
+        let [ia, _, _] = &a;
+        let [ib, sb, vb] = &b;
+        if ia != ib || ia != sb || ia != vb {
+            panic!("round {}: optimized differs\noriginal {:?}\noptimized {:?}", round, p.body, q.body);
+        }
+    }
+    eprintln!("{} optimized random kernels bit-equal on every backend", ran);
+}
