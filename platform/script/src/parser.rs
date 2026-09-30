@@ -805,6 +805,9 @@ pub(crate) struct SlotCtx {
     /// Slots are resolved at log time — a name sealed at loop exit (or
     /// reused in a sibling loop with a fresh slot) keeps correct candidates.
     reads: Vec<(u32, LiveId, u32)>,
+    /// reads inside an object literal's statement list: a bare `{x}` there
+    /// pops the id to the object as its key and value
+    keyed_reads: Vec<(u32, LiveId)>,
     /// LET_DYN / VAR_DYN positions to become LET_SLOT: (position, name, slot)
     lets: Vec<(u32, LiveId, u32)>,
     /// the positions in `lets` that are VAR_DYN (become VAR_SLOT)
@@ -1048,6 +1051,7 @@ impl ScriptParser {
             names: Vec::new(),
             poisoned: Vec::new(),
             reads: Vec::new(),
+            keyed_reads: Vec::new(),
             lets: Vec::new(),
             vars: Vec::new(),
             seen: Vec::new(),
@@ -1060,9 +1064,19 @@ impl ScriptParser {
     /// Close the innermost body: rewrite logged candidates with slot ops if
     /// the body stayed eligible. All rewrites are 1:1 in stream shape.
     fn slot_body_close(&mut self) {
-        let Some(ctx) = self.slot_ctxs.pop() else {
+        let Some(mut ctx) = self.slot_ctxs.pop() else {
             return;
         };
+        // `{x}` pops the bare id to the object as its key AND its value: a
+        // slot read would push the value alone and lose the key (the
+        // object got an unkeyed entry, or the read failed), so such a name
+        // stays dynamic.
+        for (at, name) in &ctx.keyed_reads {
+            let next = self.opcodes.get(*at as usize + 1).and_then(|v| v.as_opcode());
+            if matches!(next, Some((Opcode::POP_TO_ME, _))) && !ctx.poisoned.contains(name) {
+                ctx.poisoned.push(*name);
+            }
+        }
         if !ctx.eligible || ctx.names.is_empty() {
             // Nothing will be rewritten: remove the SLOTS_FRAME placeholder
             // so dynamic bodies pay zero dispatch. Safe: every intra-body
@@ -1231,6 +1245,7 @@ impl ScriptParser {
             return;
         }
         let at = self.code_len();
+        let in_object = !self.slot_ctxs.is_empty() && self.in_object_literal();
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             if !ctx.loop_kinds.is_empty() {
                 ctx.seen.push(name);
@@ -1238,8 +1253,32 @@ impl ScriptParser {
             if let Some((_, slot, _)) = ctx.names.iter().find(|(n, _, _)| *n == name) {
                 let slot = *slot;
                 ctx.reads.push((at, name, slot));
+                if in_object {
+                    ctx.keyed_reads.push((at, name));
+                }
             }
         }
+    }
+
+    /// Whether statements parsed now pop their values into an object
+    /// literal (where a bare id is a key), not a call, array or fn body.
+    fn in_object_literal(&self) -> bool {
+        for st in self.state.iter().rev() {
+            match st {
+                State::EndBare
+                | State::EndProto
+                | State::EndProtoInherit
+                | State::EndScopeInherit
+                | State::EndFieldInherit
+                | State::EndIndexInherit => return true,
+                State::EndBareSquare
+                | State::EndCall { .. }
+                | State::EndFnBlock { .. }
+                | State::EndFnExpr { .. } => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// `let name = expr` about to emit LET_DYN at code_len.

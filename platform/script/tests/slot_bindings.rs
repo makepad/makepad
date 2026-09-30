@@ -69,3 +69,13 @@ fn lets_in_while_bodies_see_the_previous_pass_like_the_loop_scope() {
     // a let inside the loop is not visible after it
     assert_eq!(same_both_ways("while_after", "let k = 7\nvar i = 0\nwhile i < 2 { let k = 1\ni = i + k }\nk"), 7.0);
 }
+
+#[test]
+fn a_bare_name_in_an_object_literal_is_its_key_and_value() {
+    // `{x}` keys the entry by the name: a slotted binding must not lose it
+    assert_eq!(same_both_ways("let_key", "let x = 5\nlet o = {x}\no.x"), 5.0);
+    assert_eq!(same_both_ways("var_key", "var x = 5\nx = x + 1\nlet o = {x}\no.x"), 6.0);
+    assert_eq!(same_both_ways("let_key_loop", "var s = 0\nfor i in 0..3 { let x = i * 2\nlet o = {x}\ns = s + o.x }\ns"), 6.0);
+    // in a call or an array inside the literal the name is a plain value
+    assert_eq!(same_both_ways("let_value", "let id = |v| v\nlet x = 5\nlet o = {a: id(x), b: [x][0]}\no.a + o.b"), 10.0);
+}
