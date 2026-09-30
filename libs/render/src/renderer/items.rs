@@ -248,10 +248,16 @@ impl Renderer {
             pbr,
         };
         let id = format!("item/{}/{:016x}", geometry.0, key.1);
-        if let Err(e) = self.load_model_parsed(cx, &id, model, None, None) {
-            log!("render: item geometry {} did not upload: {e}", geometry.0);
-            return None;
-        }
+        // The prepared path keeps the layer's surface (opacity, emission,
+        // clear coat, sides), which the parsed-model path drops.
+        let prepared = match PreparedStaticPreview::prepare(model) {
+            Ok(p) => p,
+            Err(e) => {
+                log!("render: item geometry {} did not prepare: {e}", geometry.0);
+                return None;
+            }
+        };
+        self.install_static_preview(cx, &id, prepared, false)?;
         self.set_model_casts_shadow(&id, cast);
         self.items.models.insert(key, id.clone());
         Some(id)
