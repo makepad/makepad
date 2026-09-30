@@ -5,7 +5,9 @@ use makepad_render_kernels::precompute::precompute;
 use makepad_render_kernels::{compile, engine};
 use std::time::{Duration, Instant};
 
-const SPRING: &str = "let prev = input(vec2)\nlet next = output(vec2)\nlet k = param(400)\nlet d = param(8)\nlet dt = param(0.001)\nfn element(i) { let s = prev[i]\n let target = if time < 4.0 { 20.0 } else { -5.0 }\n let v = s.y + (k * (target - s.x) - d * s.y) * dt\n next[i] = vec2(s.x + v * dt, v) }";
+// `math: portable`: the kernels promise the host loop's f32 bits (a fast
+// kernel fuses multiply-adds).
+const SPRING: &str = "let math = portable\nlet prev = input(vec2)\nlet next = output(vec2)\nlet k = param(400)\nlet d = param(8)\nlet dt = param(0.001)\nfn element(i) { let s = prev[i]\n let target = if time < 4.0 { 20.0 } else { -5.0 }\n let v = s.y + (k * (target - s.x) - d * s.y) * dt\n next[i] = vec2(s.x + v * dt, v) }";
 
 #[test]
 fn a_one_kilohertz_spring_over_ten_seconds() {
@@ -32,7 +34,7 @@ fn a_one_kilohertz_spring_over_ten_seconds() {
     }
     println!("10k steps of a one-element stepper: {best:.3} ms");
     // Sampled in a kernel by t, exactly as the host samples it.
-    let sample = compile("use std.anim.*\nlet table = input(f32)\nlet out = output(f32)\nlet steps = param(2)\nfn element(i) { out[i] = history_at(table, 1, 2, 0, 0, 0.0, 0.001, int(steps), float(i) * 0.0137 - 0.5) }", &[], &[]).unwrap();
+    let sample = compile("let math = portable\nuse std.anim.*\nlet table = input(f32)\nlet out = output(f32)\nlet steps = param(2)\nfn element(i) { out[i] = history_at(table, 1, 2, 0, 0, 0.0, 0.001, int(steps), float(i) * 0.0137 - 0.5) }", &[], &[]).unwrap();
     let n = 1000;
     let mut job = Job::new(sample, n);
     job.input_vec_u32("table", h.table.clone()).unwrap();
@@ -49,7 +51,7 @@ fn a_one_kilohertz_spring_over_ten_seconds() {
 fn coupled_elements_step_in_lockstep() {
     // Each element relaxes toward its neighbours' previous values: the
     // steps must see the whole previous state.
-    let src = "let prev = input(f32)\nlet next = output(f32)\nfn element(i) { let l = prev[max(i - 1, 0)]\n let r = prev[min(i + 1, count - 1)]\n next[i] = prev[i] + (l + r - 2.0 * prev[i]) * 0.25 }";
+    let src = "let math = portable\nlet prev = input(f32)\nlet next = output(f32)\nfn element(i) { let l = prev[max(i - 1, 0)]\n let r = prev[min(i + 1, count - 1)]\n next[i] = prev[i] + (l + r - 2.0 * prev[i]) * 0.25 }";
     let kern = compile(src, &[], &[]).unwrap();
     let n = 20_000;
     let init: Vec<f32> = (0..n).map(|i| if i % 1000 == 0 { 10.0 } else { 0.0 }).collect();

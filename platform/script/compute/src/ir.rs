@@ -19,7 +19,7 @@
 //!   wraps before that ([`Op::Wrap`]), so the clamp is a safety net: a
 //!   program cannot express an out-of-range address.
 //! - Every op is total and has one exact meaning (IEEE f32 without
-//!   fusion, wrapping i32, division by zero gives 0, min/max are selects),
+//!   fusion except the explicit [`Op::Fma`], wrapping i32, division by zero gives 0, min/max are selects),
 //!   so backends are held BIT-IDENTICAL to [`run`], the reference.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -131,6 +131,17 @@ pub enum Bin {
     MakeD,
 }
 
+/// A fused multiply-add's form: one rounding of the exact result.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Fma {
+    /// `a * b + c`
+    Add,
+    /// `c - a * b`
+    SubFrom,
+    /// `a * b - c`
+    Sub,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Cmp {
     Lt,
@@ -156,6 +167,9 @@ pub enum Op {
     CmpD(Cmp, Val, Val),
     /// `c ? a : b` (any type; both sides already evaluated).
     Sel(Val, Val, Val),
+    /// f32 fused multiply-add of `(a, b, c)`, rounded once (only `math:
+    /// fast` kernels contain it: the fusion pass makes it).
+    Fma(Fma, Val, Val, Val),
     /// Euclidean `x mod len` (len > 0) -> i32 in `0..len`.
     Wrap(Val, u32),
     /// Reads word `base + clamp(off, 0, extent - 1)` of `region`.
@@ -461,6 +475,16 @@ pub fn eval_bin(op: Bin, a: u64, b: u64) -> u64 {
 }
 
 #[inline(always)]
+pub fn eval_fma(k: Fma, a: u64, b: u64, c: u64) -> u64 {
+    let (a, b, c) = (f(a), f(b), f(c));
+    fw(match k {
+        Fma::Add => a.mul_add(b, c),
+        Fma::SubFrom => (-a).mul_add(b, c),
+        Fma::Sub => a.mul_add(b, -c),
+    })
+}
+
+#[inline(always)]
 fn cmp<T: PartialOrd>(cc: Cmp, a: T, b: T) -> u64 {
     (match cc {
         Cmp::Lt => a < b,
@@ -728,6 +752,7 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 }
             }
             Op::Wrap(x, len) => eval_wrap(self.r(x) as u32, len) as u64,
+            Op::Fma(k, a, b, c) => eval_fma(k, self.r(a), self.r(b), self.r(c)),
             Op::Load { region: Region::Buf(k), base, off, .. } => {
                 let Some(b) = self.mem.bufs.get(k as usize) else { return 0 };
                 if b.len == 0 {
@@ -985,6 +1010,12 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                     self.used(y, Some(tx))?;
                     tx
                 }
+                Op::Fma(_, a, b, c) => {
+                    self.used(a, Some(F32))?;
+                    self.used(b, Some(F32))?;
+                    self.used(c, Some(F32))?;
+                    F32
+                }
                 Op::Wrap(x, len) => {
                     self.used(x, Some(I32))?;
                     if len == 0 {
@@ -1145,7 +1176,7 @@ pub fn op_uses(op: &Op) -> Vec<Val> {
         Op::ConstF(_) | Op::ConstD(_) | Op::ConstI(_) | Op::ConstB(_) | Op::Get(_) | Op::FrameCount | Op::BufLen(_) => vec![],
         Op::Un(_, a) | Op::Wrap(a, _) => vec![a],
         Op::Bin(_, a, b) | Op::CmpF(_, a, b) | Op::CmpD(_, a, b) | Op::CmpI(_, a, b) => vec![a, b],
-        Op::Sel(c, a, b) => vec![c, a, b],
+        Op::Sel(c, a, b) | Op::Fma(_, a, b, c) => vec![c, a, b],
         Op::Load { off, .. } => off.into_iter().collect(),
         Op::In { idx, .. } => vec![idx],
     }
@@ -1162,7 +1193,7 @@ pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
         Op::Un(u, _) => un_types(u).1,
         Op::Bin(b, _, _) => bin_types(b).1,
         Op::Sel(_, a, _) => p.vals[a.0 as usize],
-        Op::In { .. } => Ty::F32,
+        Op::In { .. } | Op::Fma(..) => Ty::F32,
         Op::Load { .. } => return None,
     })
 }

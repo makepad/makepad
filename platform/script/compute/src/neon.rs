@@ -5,7 +5,8 @@
 //! Every AIR value lives in a 128-bit vector register, one element per
 //! lane, holding exactly the bits the scalar backend would hold for that
 //! element (bools included: 0/1 words, compared as raw words). Lane-wise
-//! IEEE ops are the scalar ops (no fusion, the same FPCR), integer division
+//! IEEE ops are the scalar ops (no fusion but AIR's explicit `Fma`, the
+//! same FPCR), integer division
 //! and non-power-of-two wraps run per lane through the scalar sequences,
 //! and every memory access clamps per lane exactly like scalar code.
 //!
@@ -61,6 +62,9 @@ mod v {
     pub const FSUB: u32 = 0x4EA0_D400;
     pub const FMUL: u32 = 0x6E20_DC00;
     pub const FDIV: u32 = 0x6E20_FC00;
+    /// vd += vn * vm / vd -= vn * vm (fused).
+    pub const FMLA: u32 = 0x4E20_CC00;
+    pub const FMLS: u32 = 0x4EA0_CC00;
     pub const FCMEQ: u32 = 0x4E20_E400;
     pub const FCMGE: u32 = 0x6E20_E400;
     pub const FCMGT: u32 = 0x6EA0_E400;
@@ -1470,6 +1474,25 @@ impl Em {
                 self.e(ldst_imm(false, true, 9, 3, k as u32 * 16 + 8));
                 let d = self.dst(dst);
                 self.e(v::r2(v::DUP_W, d, 9));
+                self.done(dst, d);
+            }
+            Op::Fma(k, a, b, c) => {
+                // acc = c (negated for a*b - c), then fmla/fmls acc, a, b.
+                let ra = self.vsrc(a, VS0);
+                let rb = self.vsrc(b, VS1);
+                let rc = self.vsrc(c, VS2);
+                let d = self.dst(dst);
+                let acc = if d != ra && d != rb && d != VS0 { d } else { VS2 };
+                if k == crate::ir::Fma::Sub {
+                    self.e(v::r2(v::FNEG, acc, rc));
+                } else if acc != rc {
+                    self.e(v::mov(acc, rc));
+                }
+                let op = if k == crate::ir::Fma::SubFrom { v::FMLS } else { v::FMLA };
+                self.e(v::r3(op, acc, ra, rb));
+                if acc != d {
+                    self.e(v::mov(d, acc));
+                }
                 self.done(dst, d);
             }
             Op::ConstD(_) | Op::CmpD(..) | Op::In { .. } => unreachable!("declined"),

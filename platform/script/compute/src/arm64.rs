@@ -1,7 +1,8 @@
 //! Native ARM64 backend: AIR -> AArch64 machine code (scalar FP/integer;
 //! SIMD across voices is the next step), hand-encoded, in W^X executable
 //! memory. Bit-identical to [`crate::ir::run`]: each AIR op maps to IEEE
-//! single-precision instructions with no fusion (never FMADD), integer ops
+//! single-precision instructions with no fusion (FMADD only for AIR's
+//! explicit `Fma`, which `math: fast` kernels contain), integer ops
 //! with AIR's total semantics (SDIV gives 0 on a zero divisor, shifts take
 //! their amount mod 32, FCVTZS saturates with NaN -> 0 exactly like Rust's
 //! `as`), selects for min/max, and clamped memory offsets.
@@ -1236,6 +1237,20 @@ impl<'a> Emit<'a> {
                 let d = self.gdst(dst);
                 self.e(mov(d, 4));
                 self.gdone(dst, d);
+            }
+            Op::Fma(k, a, b, c) => {
+                // fmadd d = c + a*b; fmsub d = c - a*b; fnmsub d = a*b - c.
+                let ra = self.fsrc(ev(a), FS0);
+                let rb = self.fsrc(ev(b), FS1);
+                let rc = self.fsrc(ev(c), FS2);
+                let d = self.fdst(dst);
+                let base = match k {
+                    crate::ir::Fma::Add => 0x1F00_0000,
+                    crate::ir::Fma::SubFrom => 0x1F00_8000,
+                    crate::ir::Fma::Sub => 0x1F20_8000,
+                };
+                self.e(base | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | d as u32);
+                self.fdone(dst, d);
             }
             Op::BufLen(k) => {
                 let d = self.gdst(dst);

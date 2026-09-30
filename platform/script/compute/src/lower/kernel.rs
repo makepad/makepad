@@ -135,11 +135,14 @@ impl KernelCtx {
 /// A kernel's math functions (`let math = portable | fast`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MathMode {
-    /// f32 Cephes-style polynomials: fast, deterministic on every machine.
+    /// f32 Cephes-style polynomials, and a multiply feeding one add or
+    /// subtract fused into one rounding (`fuse_fma`): fast, the same bits
+    /// on every backend (IEEE fused multiply-add), but not the bits of the
+    /// same expression in unfused host code.
     Fast,
     /// fdlibm kernels in f64, rounded once: the same bits as
-    /// `makepad_csg_math::portable`; NaN results are stored as one
-    /// canonical quiet NaN.
+    /// `makepad_csg_math::portable`, and f32 arithmetic unfused, as in host
+    /// Rust; NaN results are stored as one canonical quiet NaN.
     Portable,
 }
 
@@ -637,6 +640,9 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     }
     dce(&mut program);
     crate::opt::optimize(&mut program);
+    if math == MathMode::Fast {
+        crate::opt::fuse_fma(&mut program);
+    }
     let cost = program.cost();
     if program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));

@@ -23,7 +23,7 @@ In a document the same thing is a `Kernel{}` whose fields are these declarations
 - `output(type [, stride, offset, buffer])`: written buffer; element `i` owns words `stride*i + offset ..`. Several views of one buffer must share a stride.
 - `emit_buffer(type or Layout, n [, buffer])`: up to `n` records per element plus `<name>_count`; `emit(buf, record)` appends one. Records are compacted in element order; more than `n` in one element is an error (no record is lost silently).
 - `param(default [, min, max])`: an f32 uniform. Pass integers as floats (exact below 2^24) and convert with `int(p)`.
-- `let math = portable` (bit-exact f64 fdlibm maths, a NaN stored as one canonical NaN: replicated or golden-matched work) or `let math = fast` (f32 polynomials, the default: looks).
+- `let math = portable` (bit-exact f64 fdlibm maths, a NaN stored as one canonical NaN: replicated or golden-matched work) or `let math = fast` (f32 polynomials and fused multiply-adds, the default: looks; the same bits on every backend, not those of the same expression in host Rust).
 - `struct S { a: 0.0, n: 0 }` (field defaults), constant tables `let T: int = [1, 2, 3]`, `const N = 8`.
 - Types: `f32`/`float`, `i32`/`int`/`u32` (the same 32-bit word), `bool`, `vec2`..`vec4`, `mat4` (column-major, `m * v`), `f64`, structs, host layouts.
 

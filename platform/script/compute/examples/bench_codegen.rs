@@ -502,23 +502,18 @@ fn run_kernel(k: &Kernel, how: How, count: usize, params: &[(&str, f32)], time: 
     }
 }
 
-/// Largest ulp distance between two f32 buffers (bit patterns as ordered ints).
-fn ulps(a: &[f32], b: &[f32]) -> (usize, u32) {
-    let key = |x: f32| {
-        let i = x.to_bits() as i32;
-        if i < 0 {
-            i32::MIN.wrapping_sub(i) as i64
-        } else {
-            i as i64
-        }
-    };
+/// Words that differ, and the largest difference relative to the
+/// buffer's largest magnitude (fused multiply-adds round once where the
+/// twin rounds twice).
+fn ulps(a: &[f32], b: &[f32]) -> (usize, f64) {
+    let scale = b.iter().filter(|x| x.is_finite()).fold(0.0f64, |m, x| m.max(x.abs() as f64)).max(1e-30);
     let mut diff = 0;
-    let mut worst = 0u32;
+    let mut worst = 0.0f64;
     for (x, y) in a.iter().zip(b) {
         if x.to_bits() != y.to_bits() {
             diff += 1;
             if !(x.is_nan() && y.is_nan()) {
-                worst = worst.max((key(*x) - key(*y)).unsigned_abs().min(u32::MAX as u64) as u32);
+                worst = worst.max((*x as f64 - *y as f64).abs() / scale);
             }
         }
     }
@@ -580,7 +575,7 @@ fn bench(name: &'static str, k: &Arc<Kernel>, count: usize, params: &[(&str, f32
             if d == 0 {
                 check += &format!("{}: bit-equal ", n);
             } else {
-                check += &format!("{}: {} words differ (max {} ulp) ", n, d, w);
+                check += &format!("{}: {}/{} words differ (max {:.1e} of range) ", n, d, want.len(), w);
             }
         }
     }

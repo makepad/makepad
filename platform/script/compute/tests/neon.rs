@@ -742,6 +742,18 @@ fn optimized_random_kernels_give_the_same_bits() {
         if ia != ib || ia != sb || ia != vb {
             panic!("round {}: optimized differs\noriginal {:?}\noptimized {:?}", round, p.body, q.body);
         }
+        // Fused multiply-adds (math: fast): every backend gives the
+        // interpreter's fused bits.
+        let mut f = q.clone();
+        makepad_script_compute::opt::fuse_fma(&mut f);
+        if let Err(e) = ir::validate(&f, &regions) {
+            panic!("round {}: the fused program is invalid: {}\n{:?}", round, e, f.body);
+        }
+        if let Some([fi, fs, fv]) = run3(&f, n, &ctx0, seed) {
+            if fi != fs || fi != fv {
+                panic!("round {}: fused backends differ\n{:?}\ninterp {:x?}\nscalar {:x?}\nneon {:x?}", round, f.body, fi, fs, fv);
+            }
+        }
     }
     eprintln!("{} optimized random kernels bit-equal on every backend", ran);
 }

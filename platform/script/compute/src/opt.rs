@@ -49,7 +49,7 @@ fn rename_op(op: &mut Op, map: &HashMap<u32, Val>) {
             subst(a, map);
             subst(b, map);
         }
-        Op::Sel(c, a, b) => {
+        Op::Sel(c, a, b) | Op::Fma(_, a, b, c) => {
             subst(c, map);
             subst(a, map);
             subst(b, map);
@@ -393,6 +393,7 @@ enum Key {
     CmpI(ir::Cmp, u32, u32),
     CmpD(ir::Cmp, u32, u32),
     Sel(u32, u32, u32),
+    Fma(ir::Fma, u32, u32, u32),
     Wrap(u32, u32),
     Load(Region, u32, u32, Option<u32>, ir::Ty),
     Get(u32),
@@ -412,6 +413,7 @@ fn key(op: &Op, ty: ir::Ty) -> Option<Key> {
         Op::CmpI(c, x, y) => Key::CmpI(c, x.0, y.0),
         Op::CmpD(c, x, y) => Key::CmpD(c, x.0, y.0),
         Op::Sel(c, x, y) => Key::Sel(c.0, x.0, y.0),
+        Op::Fma(k, a, b, c) => Key::Fma(k, a.0, b.0, c.0),
         Op::Wrap(x, n) => Key::Wrap(x.0, n),
         Op::Load { region, base, extent, off } => Key::Load(region, base, extent, off.map(|o| o.0), ty),
         Op::Get(v) => Key::Get(v.0),
@@ -604,6 +606,75 @@ pub fn if_convert(p: &mut Program) {
     }
     let vars = p.vars.clone();
     block(&mut p.body, &mut p.vals, &vars);
+}
+
+// ---------------------------------------------------------------------------
+// Fused multiply-add (math: fast only)
+// ---------------------------------------------------------------------------
+
+/// `a * b + c`, `c - a * b` and `a * b - c` whose product has no other use
+/// become one fused multiply-add ([`ir::Op::Fma`], rounded once). This
+/// changes values (by at most the product's rounding), so only `math:
+/// fast` kernels run it; every backend and the interpreter give the same
+/// fused bits.
+pub fn fuse_fma(p: &mut Program) {
+    let mut uses = vec![0u32; p.vals.len()];
+    let mut muls: HashMap<u32, (Val, Val)> = HashMap::new();
+    fn count(b: &Block, uses: &mut [u32], muls: &mut HashMap<u32, (Val, Val)>) {
+        for s in b {
+            let us: Vec<Val> = match s {
+                Stmt::Def(v, op) => {
+                    if let Op::Bin(ir::Bin::MulF, a, b) = op {
+                        muls.insert(v.0, (*a, *b));
+                    }
+                    ir::op_uses(op)
+                }
+                Stmt::Set(_, v) => vec![*v],
+                Stmt::Store { off, val, .. } => off.iter().copied().chain([*val]).collect(),
+                Stmt::Out { idx, val, .. } => vec![*idx, *val],
+                Stmt::If(c, t, e) => {
+                    count(t, uses, muls);
+                    count(e, uses, muls);
+                    vec![*c]
+                }
+                Stmt::Loop { body, .. } => {
+                    count(body, uses, muls);
+                    vec![]
+                }
+                Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
+                _ => vec![],
+            };
+            for u in us {
+                uses[u.0 as usize] += 1;
+            }
+        }
+    }
+    count(&p.body, &mut uses, &mut muls);
+    let single = |v: Val| if uses[v.0 as usize] == 1 { muls.get(&v.0).copied() } else { None };
+    fn walk(b: &mut Block, f: &dyn Fn(Val) -> Option<(Val, Val)>) {
+        for s in b {
+            match s {
+                Stmt::Def(_, op) => {
+                    let fused = match *op {
+                        Op::Bin(ir::Bin::AddF, x, y) => f(x).map(|(a, b)| Op::Fma(ir::Fma::Add, a, b, y)).or_else(|| f(y).map(|(a, b)| Op::Fma(ir::Fma::Add, a, b, x))),
+                        Op::Bin(ir::Bin::SubF, x, y) => f(x).map(|(a, b)| Op::Fma(ir::Fma::Sub, a, b, y)).or_else(|| f(y).map(|(a, b)| Op::Fma(ir::Fma::SubFrom, a, b, x))),
+                        _ => None,
+                    };
+                    if let Some(op2) = fused {
+                        *op = op2;
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, f);
+                    walk(e, f);
+                }
+                Stmt::Loop { body, .. } => walk(body, f),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut p.body, &single);
+    dce(p);
 }
 
 // ---------------------------------------------------------------------------
