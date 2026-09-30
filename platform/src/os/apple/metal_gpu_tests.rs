@@ -165,12 +165,16 @@ fn splash_metal_source(fragment_body: &str, extra: &str) -> String {
 fn splash_metal_source_with(fragment_body: &str, extra: &str, vertex_extra: &str) -> String {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
+    // `base:` in `extra` splits the members: those before it go on a base
+    // object the shader extends (as kits extend DrawVjFxBase).
+    let (base, extra) = extra.split_once("base:").map(|(b, e)| (b, e)).unwrap_or(("", extra));
     let code = format!(
-        "use mod.pod.*\nuse mod.math.*\nuse mod.shader\n{{\n\
+        "use mod.pod.*\nuse mod.math.*\nuse mod.shader\nlet base = {{\n\
          geom: shader.vertex_buffer(vec2f, nil)\n\
          vertex_pos: shader.vertex_position(vec4f)\n\
          pixel: shader.fragment_output(0, vec4f)\n\
          u_n: shader.uniform(0.0)\n\
+         {base}\n}}\nbase{{\n\
          {extra}\n\
          vertex: fn() {{ self.vertex_pos = vec4(self.geom.x, self.geom.y, 0.0, 1.0)\n{vertex_extra}\n}}\n\
          fragment: fn() {{\n{fragment_body}\n}}\n}}"
@@ -272,6 +276,12 @@ fn scalar_varyings_after_vector_varyings_interpolate_correctly() {
         // Written in branches that return early, read through comparisons
         // (the firefly kit's shape).
         ("v_c: shader.varying(vec4f)\nv_uv: shader.varying(vec2f)\nv_f: shader.varying(float)", "if self.geom.x > 100.0 {\n self.v_uv = vec2(9.0, 9.0)\n self.v_f = 2.0\n self.v_c = vec4(1.0)\n } else {\n self.v_c = vec4(0.1, 0.2, 0.3, 0.4)\n self.v_uv = vec2(0.25, 0.5)\n self.v_f = 1.0\n }\n self.v_c.w = 0.4", "var o = vec4(1.0)\nif self.v_f > 1.5 { o = vec4(0.0) }\nif self.v_f > 0.5 && self.v_f < 1.5 { o = vec4(self.v_uv.x, self.v_uv.y, self.v_f, self.v_c.w) }\nself.pixel = o", [0.25, 0.5, 1.0, 0.4]),
+        // The ribbons kit's shape (VJ5): v_color on the base, then float,
+        // vec2, float on the kit; the vertex returns its position.
+        ("v_color: shader.varying(vec4f)\nbase:\nv_side: shader.varying(float)\nv_cuv: shader.varying(vec2f)\nv_head: shader.varying(float)", "self.v_color = vec4(0.1, 0.2, 0.3, 0.4)\n self.v_head = self.geom.y\n self.v_side = self.geom.x\n self.v_cuv = vec2(0.25, 0.5)\n return self.vertex_pos", "self.pixel = vec4(self.v_side, self.v_head, self.v_cuv.y, self.v_color.w)", [-0.75, 0.75, 0.5, 0.4]),
+        // The heightmap kit's shape (VJ5): vec2, float, vec3, vec3, float,
+        // after the base's vec4, interpolated.
+        ("v_color: shader.varying(vec4f)\nbase:\nv_uv: shader.varying(vec2f)\nv_h: shader.varying(float)\nv_world: shader.varying(vec3f)\nv_n: shader.varying(vec3f)\nv_sun: shader.varying(float)", "self.v_color = vec4(0.1, 0.2, 0.3, 0.4)\n self.v_uv = vec2(self.geom.x, 0.5)\n self.v_h = self.geom.y\n self.v_world = vec3(1.0, 2.0, self.geom.x)\n self.v_n = vec3(0.0, 1.0, 0.0)\n self.v_sun = self.geom.x + self.geom.y\n return self.vertex_pos", "self.pixel = vec4(self.v_h, self.v_sun, self.v_world.z + self.v_n.y, self.v_uv.x)", [0.75, 0.0, 0.25, -0.75]),
     ] {
         let (px, _) = run_splash_with(&gpu, fragment, extra, vertex);
         for (got, want) in px.iter().zip(want) {

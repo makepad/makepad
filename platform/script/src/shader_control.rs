@@ -594,9 +594,24 @@ impl ShaderFnCompiler {
             })
             .unwrap_or(false);
 
+        // A body ending in a statement `if` (arms without values) returns
+        // its value: the parser marks that return as carrying one, but the
+        // shader compiler drops the arms' nils, so nothing is on the stack
+        // above the function's own base. That is a plain `return;`.
+        let fn_stack_depth = self
+            .mes
+            .iter()
+            .rev()
+            .find_map(|me| match me {
+                ShaderMe::FnBody { stack_depth, .. } => Some(*stack_depth),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let no_value = opargs.is_nil() || self.stack.types.len() <= fn_stack_depth;
+
         if already_escaped {
             // Still need to consume the stack value if present
-            if !opargs.is_nil() {
+            if !no_value {
                 let (_ty, s) = self.stack.pop(self.trap.pass());
                 self.stack.free_string(s);
             }
@@ -609,9 +624,10 @@ impl ShaderFnCompiler {
             .iter()
             .any(|me| matches!(me, ShaderMe::IfBody { .. }));
 
+
         // Pop and resolve the return value BEFORE borrowing self.mes mutably
         // Use pop_resolved to resolve Id types (like variable names) to their actual Pod types
-        let (ty, s) = if opargs.is_nil() {
+        let (ty, s) = if no_value {
             (vm.bx.code.builtins.pod.pod_void, self.stack.new_string())
         } else {
             let (ty, s) = self.pop_resolved(vm, output);
