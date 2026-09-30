@@ -24,7 +24,7 @@
 pub mod analysis;
 pub mod bed;
 
-pub use analysis::{bind_audio, AudioFrame, AudioReactive, AUDIO_BINS, AUDIO_SIDE_ROWS, AUDIO_SPEC_ROWS, AUDIO_TEX_H, AUDIO_TEX_W, AUDIO_WAVE_ROWS};
+pub use analysis::{bind_audio, AudioFrame, AudioReactive, AUDIO_BINS, AUDIO_SIDE_ROWS, AUDIO_SPEC_ROWS, AUDIO_TEX_H, AUDIO_TEX_W, AUDIO_WAVE_ROWS, SPECTRUM_BANDS};
 
 /// The audio input as Splash shader fields: the texture, its uniforms, and
 /// the three reading helpers. Paste it into a runtime draw shader or

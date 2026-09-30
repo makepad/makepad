@@ -196,7 +196,6 @@ impl KineticHost {
             energy: 0.5,
             bands: [0.5, 0.4, 0.3],
             audio: None,
-            spectrum: [0.0; makepad_kinetic_type::view::BANDS],
             dials: job.dials,
             karaoke: if job.sing { Karaoke::Progress((k as f32 + 0.5) / n as f32) } else { Karaoke::None },
             content: None,
@@ -209,7 +208,6 @@ impl KineticHost {
         if self.job.as_ref().unwrap().bed {
             let bed = self.bed.get_or_insert_with(makepad_audio_reactive::bed::BedPlayer::new);
             frame.audio = bed.pump(cx.cx, frame.time as f64);
-            bed.bus.bands(&mut frame.spectrum);
             if let Some(a) = &frame.audio {
                 frame.energy = a.levels[0];
                 frame.bands = [a.env.x, a.env.y, a.env.z];

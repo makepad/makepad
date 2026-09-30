@@ -36,13 +36,19 @@ pub struct KineticFrame {
     /// The sound (makepad-audio-reactive): looks read it with
     /// `self.audio_fft(f, age)`, `self.audio_wave(t)`, `self.audio_hit`, ...
     pub audio: Option<AudioFrame>,
-    /// The newest spectrum in [`BANDS`] log bands (0..1), for animators:
-    /// `band(f)` with `f` 0..1 low to high.
-    pub spectrum: [f32; BANDS],
 }
 
 /// Log bands of the animators' spectrum.
-pub const BANDS: usize = 32;
+pub const BANDS: usize = makepad_audio_reactive::SPECTRUM_BANDS;
+
+impl KineticFrame {
+    /// The newest spectrum in [`BANDS`] log bands (0..1), which animators
+    /// read as `band(f)`: the sound's, silence without one.
+    pub fn spectrum(&self) -> &[f32] {
+        const SILENCE: [f32; BANDS] = [0.0; BANDS];
+        self.audio.as_ref().map_or(&SILENCE[..], |a| &a.bands[..])
+    }
+}
 
 /// What the last frame cost on the CPU.
 #[derive(Clone, Copy, Debug, Default)]
@@ -97,7 +103,16 @@ fn marker(src: &str) -> String {
 /// and `makepad_render_graph::script_mod_passes`).
 pub fn script_mod(vm: &mut ScriptVm) {
     makepad_script_compute::module::register_shared_std(vm);
-    crate::draw::script_mod(vm);
+    // Once per VM, however many hosts ask.
+    let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
+    let have = draw.is_some_and(|d| {
+        let v = vm.bx.heap.value(d, LiveId::from_str("DrawKineticGlyph").into(), NoTrap);
+        !v.is_nil() && !v.is_err()
+    });
+    if !have {
+        makepad_render_graph::script_mod_passes(vm);
+        crate::draw::script_mod(vm);
+    }
     kit::script_mod(vm);
 }
 
@@ -304,6 +319,10 @@ impl Glyphs<'_> {
 pub struct KineticView {
     pub split: Split,
     pub values: KitValues,
+    /// The kit's own palette (a host override replaces `values.colors`).
+    kit_colors: [Vec4f; 4],
+    /// Letters alone over a clear frame ([`KineticView::set_overlay`]).
+    overlay: bool,
     draw: DrawKineticGlyph,
     backdrop: Option<DrawKineticBackdrop>,
     glyph_kernel: Arc<Kernel>,
@@ -365,6 +384,8 @@ impl KineticView {
         let mut graph = GraphRunner::default();
         graph.set_passes(&values.passes);
         Ok(Self {
+            kit_colors: values.colors,
+            overlay: false,
             split,
             values,
             draw,
@@ -461,6 +482,18 @@ impl KineticView {
     /// Read the font at other variable-axis values (`wdth`, `slnt`, any
     /// tag; `wght` is the weight): the text is rebuilt on the next
     /// `set_text` when they differ from the current ones.
+    /// A host's palette (bg, a, b, c) over the kit's own (`None`: the
+    /// kit's): a VJ console's colour override, a game's team colours.
+    pub fn set_colors(&mut self, colors: Option<[Vec4f; 4]>) {
+        self.values.colors = colors.unwrap_or(self.kit_colors);
+    }
+
+    /// OVERLAY: the letters alone over a clear frame, no backdrop (a game's
+    /// banner over play, a title over footage); off, the kit's whole frame.
+    pub fn set_overlay(&mut self, overlay: bool) {
+        self.overlay = overlay;
+    }
+
     pub fn set_axes(&mut self, weight: Option<f32>, axes: &[(u32, f32)]) {
         let weight = weight.or(self.values.shape.weight);
         let mut merged = self.values.shape.axes.clone();
@@ -591,7 +624,7 @@ impl KineticView {
                     call.set_param(name, p[k]);
                 }
             }
-            let ok = call.input("glyphs", &self.records.data[..n * GLYPH_WORDS]).and_then(|_| call.input("spectrum", &frame.spectrum)).and_then(|_| call.output("out", &mut self.out[..]));
+            let ok = call.input("glyphs", &self.records.data[..n * GLYPH_WORDS]).and_then(|_| call.input("spectrum", frame.spectrum())).and_then(|_| call.output("out", &mut self.out[..]));
             let run = ok.and_then(|_| if n > 2048 { call.run_parallel(n, 8) } else { call.run(n) });
             if let Err(e) = run {
                 let e = format!("animator: {e}");
@@ -644,7 +677,7 @@ impl KineticView {
             for k in 0..4 {
                 call.set_param(&format!("p{}", k + 1), p[k]);
             }
-            let r = call.input("base", &base).and_then(|_| call.input("spectrum", &frame.spectrum)).and_then(|_| call.output("out", &mut o)).and_then(|_| call.run(1));
+            let r = call.input("base", &base).and_then(|_| call.input("spectrum", frame.spectrum())).and_then(|_| call.output("out", &mut o)).and_then(|_| call.run(1));
             match r {
                 Ok(_) => cam = o,
                 Err(e) => {
@@ -666,7 +699,7 @@ impl KineticView {
             for k in 0..4 {
                 call.set_param(&format!("p{}", k + 1), p[k]);
             }
-            let r = call.input("spectrum", &frame.spectrum).and_then(|_| call.output("out", &mut self.curve.0)).and_then(|_| call.run(np));
+            let r = call.input("spectrum", frame.spectrum()).and_then(|_| call.output("out", &mut self.curve.0)).and_then(|_| call.run(np));
             match r {
                 Ok(_) => {
                     self.curve.1.clear();
@@ -742,14 +775,15 @@ impl KineticView {
             cx.end_pass(&pp.pass);
         }
         self.pass.set_size(cx.cx, size_px);
-        self.pass.set_color_texture(cx.cx, &self.color, DrawPassClearColor::ClearWith(vec4(bg.x, bg.y, bg.z, 1.0)));
+        let clear = if self.overlay { vec4(0.0, 0.0, 0.0, 0.0) } else { vec4(bg.x, bg.y, bg.z, 1.0) };
+        self.pass.set_color_texture(cx.cx, &self.color, DrawPassClearColor::ClearWith(clear));
         self.pass.set_depth_texture(cx.cx, &self.depth, DrawPassClearDepth::ClearWith(1.0));
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, Some(1.0));
         self.pass.set_size(cx.cx, size_px);
         set_pass_camera(cx.cx, &self.pass, view, projection);
         self.list.begin_always(cx);
-        if let Some(b) = self.backdrop.as_mut() {
+        if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
             Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);

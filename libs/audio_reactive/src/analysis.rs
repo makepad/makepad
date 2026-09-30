@@ -176,7 +176,14 @@ pub struct AudioFrame {
     /// SONG FORM: (drop 0..1 — 1 on a re-entry after a breakdown, ~3 s
     /// decay; section — the ~6 s energy vs the recent max, 0..1; 0; 0).
     pub form: Vec4f,
+    /// THE SPECTRUM BY BAND: the newest row folded into [`SPECTRUM_BANDS`]
+    /// log-spaced bands (each its bins' peak, 0..1, lows first), for a
+    /// kernel or a CPU look that reads levels per band.
+    pub bands: [f32; SPECTRUM_BANDS],
 }
+
+/// How many bands [`AudioFrame::bands`] folds the spectrum into.
+pub const SPECTRUM_BANDS: usize = 32;
 
 /// Bind the audio texture and its uniforms (the picture's dims, the levels,
 /// the onsets, the auto-gained levels, the song form) onto ONE draw call.
@@ -436,6 +443,11 @@ impl AudioReactive {
                     ((self.env[k] - self.agc_lo[k]) / span).clamp(0.0, 1.0)
                 };
                 vec4(n(0), n(1), n(2), n(3))
+            },
+            bands: {
+                let mut b = [0.0; SPECTRUM_BANDS];
+                self.bands(&mut b);
+                b
             },
         })
     }
