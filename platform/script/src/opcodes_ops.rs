@@ -46,6 +46,18 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.goto_next();
     }
 
+    /// A host's meaning for `a op b` on its objects (see
+    /// `ScriptVmBase::object_op_hook`); `None` when no hook, no object
+    /// operand, or the host declines.
+    fn object_op(&mut self, op: crate::vm::ScriptBinOp, a: ScriptValue, b: ScriptValue) -> Option<ScriptValue> {
+        let hook = self.bx.object_op_hook?;
+        if a.as_object().is_none() && b.as_object().is_none() {
+            return None;
+        }
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        hook(&mut self.bx.heap, op, a, b, ip)
+    }
+
     pub(crate) fn handle_add(&mut self, opargs: OpcodeArgs) {
         let b = if opargs.is_u32() {
             (opargs.to_u32()).into()
@@ -69,6 +81,12 @@ impl<'a> ScriptVm<'a> {
         if a.is_string_like() || b.is_string_like() {
             let ptr = self.bx.heap.new_string_concat(a, b);
             self.bx.threads.cur().push_stack_unchecked(ptr.into());
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
+
+        if let Some(v) = self.object_op(crate::vm::ScriptBinOp::Add, a, b) {
+            self.bx.threads.cur().push_stack_unchecked(v);
             self.bx.threads.cur().trap.goto_next();
             return;
         }
@@ -265,6 +283,12 @@ impl<'a> ScriptVm<'a> {
             return;
         }
 
+        if let Some(v) = self.object_op(crate::vm::ScriptBinOp::Mul, a, b) {
+            self.bx.threads.cur().push_stack_unchecked(v);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
+
         let ip = self.bx.threads.cur_ref().trap.ip;
         let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
         let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
@@ -294,6 +318,12 @@ impl<'a> ScriptVm<'a> {
             return;
         }
 
+        if let Some(v) = self.object_op(crate::vm::ScriptBinOp::Div, a, b) {
+            self.bx.threads.cur().push_stack_unchecked(v);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
+
         let ip = self.bx.threads.cur_ref().trap.ip;
         let na = NumericValue::from_script_value_heap(&self.bx.heap, a, ip);
         let nb = NumericValue::from_script_value_heap(&self.bx.heap, b, ip);
@@ -319,6 +349,12 @@ impl<'a> ScriptVm<'a> {
                 .threads
                 .cur()
                 .push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa - fb, ip));
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
+
+        if let Some(v) = self.object_op(crate::vm::ScriptBinOp::Sub, a, b) {
+            self.bx.threads.cur().push_stack_unchecked(v);
             self.bx.threads.cur().trap.goto_next();
             return;
         }

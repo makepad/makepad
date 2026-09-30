@@ -1781,6 +1781,23 @@ impl<'a> ScriptVm<'a> {
     }
 }
 
+/// The arithmetic operators a host may give meaning to for its own objects
+/// (see [`ScriptVmBase::object_op_hook`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// A host's arithmetic on objects it made: `(heap, op, a, b, ip)`, called
+/// for `a op b` when an operand is an object and the VM would otherwise
+/// produce NaN (it has no arithmetic on objects). `Some(value)` is the
+/// result; `None` keeps the VM's own. `ip` is the operator's place (for the
+/// result's `made_at`).
+pub type ScriptObjectOpHook = fn(&mut ScriptHeap, ScriptBinOp, ScriptValue, ScriptValue, ScriptIp) -> Option<ScriptValue>;
+
 pub struct ScriptVmBase {
     pub void: usize,
     pub code: ScriptCode,
@@ -1813,6 +1830,11 @@ pub struct ScriptVmBase {
     /// The thread's remaining allowance at Return/Bail, stashed because
     /// handle_trap_on wipes instruction_limit_remaining to None on exit.
     pub last_limit_exit_remaining: usize,
+    /// Arithmetic on host objects (none by default): a host whose values
+    /// are objects (animation descriptions, handles) can make `a + b` build
+    /// a derived value. Only reached where an operand is an object, so no
+    /// program on numbers, vectors, colours or strings changes meaning.
+    pub object_op_hook: Option<ScriptObjectOpHook>,
 }
 
 impl ScriptVmBase {
@@ -1832,6 +1854,7 @@ impl ScriptVmBase {
             run_budget: None,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
+            object_op_hook: None,
         }
     }
 
@@ -1870,6 +1893,7 @@ impl ScriptVmBase {
             run_budget: None,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
+            object_op_hook: None,
         }
     }
 }
