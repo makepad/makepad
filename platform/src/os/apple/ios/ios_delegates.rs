@@ -529,20 +529,15 @@ pub fn define_mtk_view() -> *const Class {
         IosApp::send_clipboard_action("select_all");
     }
 
-    fn on_touch(this: &Object, event: ObjcId, state: TouchState) {
+    fn on_touch(this: &Object, touches: ObjcId, state: TouchState) {
         unsafe {
-            let enumerator: ObjcId = msg_send![event, allTouches];
-            let size: u64 = msg_send![enumerator, count];
-            let enumerator: ObjcId = msg_send![enumerator, objectEnumerator];
+            let size: u64 = msg_send![touches, count];
+            let enumerator: ObjcId = msg_send![touches, objectEnumerator];
 
-            for touch_id in 0..size {
+            for _ in 0..size {
                 let ios_touch: ObjcId = msg_send![enumerator, nextObject];
-                let uid_obj: ObjcId = msg_send![ios_touch, estimationUpdateIndex];
-                let uid: u64 = if uid_obj != nil {
-                    msg_send![uid_obj, intValue]
-                } else {
-                    touch_id as u64
-                };
+                // UIKit keeps each UITouch alive throughout its gesture; NSSet order is not stable.
+                let uid = ios_touch as usize as u64;
                 let p: NSPoint = msg_send![ios_touch, locationInView: this];
 
                 // Get touch radius and force from UITouch
@@ -563,23 +558,23 @@ pub fn define_mtk_view() -> *const Class {
         }
     }
 
-    extern "C" fn touches_began(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchState::Start);
+    extern "C" fn touches_began(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchState::Start);
         IosApp::send_touch_update();
     }
 
-    extern "C" fn touches_moved(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchState::Move);
+    extern "C" fn touches_moved(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchState::Move);
         IosApp::send_touch_update();
     }
 
-    extern "C" fn touches_ended(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchState::Stop);
+    extern "C" fn touches_ended(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchState::Stop);
         IosApp::send_touch_update();
     }
 
-    extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchState::Stop);
+    extern "C" fn touches_canceled(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchState::Stop);
         IosApp::send_touch_cancel();
     }
 

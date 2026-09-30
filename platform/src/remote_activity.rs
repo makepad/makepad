@@ -5,7 +5,7 @@
 
 use crate::cx::Cx;
 use crate::cx_api::CxOsApi;
-use crate::event::{Event, KeyCode, MouseButton, PinchPhase, TouchState};
+use crate::event::{DigitDevice, Event, KeyCode, MouseButton, PinchPhase, TouchState};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -119,6 +119,7 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         return;
     }
     let remote = cx.remote_activity.remote_input.get();
+    let cancel_taken_away = matches!(event, Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id));
     let activity = &mut cx.remote_activity;
     if remote {
         match event {
@@ -130,6 +131,11 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
             Event::MouseUp(event) => activity
                 .remote_buttons
                 .retain(|button| *button != event.button),
+            Event::FingerCancel(event) if cancel_taken_away => {
+                if let DigitDevice::Mouse { button } = event.device {
+                    activity.remote_buttons.retain(|held| *held != button);
+                }
+            }
             Event::KeyDown(event) => {
                 if !activity.remote_keys.contains(&event.key_code) {
                     activity.remote_keys.push(event.key_code);
@@ -171,6 +177,14 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         Event::KeyUp(event) => {
             activity.keys.retain(|key| *key != event.key_code);
             ("key_up", None)
+        }
+        Event::FingerCancel(event) if cancel_taken_away => {
+            match event.device {
+                DigitDevice::Touch { uid } => activity.touches.retain(|touch| *touch != (event.window_id.id(), uid)),
+                DigitDevice::Mouse { button } => activity.buttons.retain(|held| *held != (event.window_id.id(), button.bits())),
+                _ => {}
+            }
+            ("pointer_cancel", Some(event.window_id.id()))
         }
         Event::TouchUpdate(event) => {
             let mut changed = false;

@@ -2901,6 +2901,17 @@ impl Widget for TextInput {
 
         let uid = self.widget_uid();
 
+        if let Event::FingerCancel(cancel) = event {
+            if cx.fingers.press_taken_away(cancel.digit_id)
+                && self.pending_outside_focus_loss_touch.is_some_and(|uid| {
+                    let digit_id: crate::event::DigitId = live_id_num!(touch, uid).into();
+                    digit_id == cancel.digit_id
+                })
+            {
+                self.pending_outside_focus_loss_touch = None;
+            }
+        }
+
         // Self-detect focus loss from taps outside our area
         // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
         // And only from a LIVE area: an input not drawn in its list's current
