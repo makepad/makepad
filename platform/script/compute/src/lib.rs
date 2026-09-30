@@ -23,6 +23,7 @@ pub mod ir;
 pub mod kernel;
 pub mod lower;
 pub mod module;
+pub mod opt;
 pub mod parse;
 pub mod pipeline;
 pub mod sched;

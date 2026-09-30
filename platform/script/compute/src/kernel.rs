@@ -260,6 +260,15 @@ impl Kernel {
         false
     }
 
+    /// The scalar and NEON ×4 machine code as instruction words (for
+    /// disassembly; empty where the kernel has none).
+    pub fn code_words(&self) -> (&[u32], &[u32]) {
+        #[cfg(target_arch = "aarch64")]
+        return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.neon.as_ref().map_or(&[][..], |c| c.words()));
+        #[cfg(not(target_arch = "aarch64"))]
+        (&[], &[])
+    }
+
     /// Words of the read-only shared tables.
     pub fn shared_words(&self) -> usize {
         self.shared.len()

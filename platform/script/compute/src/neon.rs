@@ -344,7 +344,8 @@ fn shape(p: &Program) -> Option<Shape<'_>> {
     }
     // The last statement steps the counter: Set(i, iv + 1), iv = Get(i).
     let Some(Stmt::Set(i, next)) = body.last() else { return None };
-    let defs: HashMap<u32, &Op> = body.iter().filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
+    // Loop-invariant code motion may have hoisted the step's constant.
+    let defs: HashMap<u32, &Op> = body.iter().chain(prelude).filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
     let Some(Op::Bin(Bin::AddI, iv, one)) = defs.get(&next.0) else { return None };
     if !matches!(defs.get(&iv.0), Some(Op::Get(g)) if g == i) || !matches!(defs.get(&one.0), Some(Op::ConstI(1))) {
         return None;

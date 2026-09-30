@@ -636,6 +636,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
         canonical_nan_stores(&mut program.body, &mut program.vals);
     }
     dce(&mut program);
+    crate::opt::optimize(&mut program);
     let cost = program.cost();
     if program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
