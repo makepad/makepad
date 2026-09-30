@@ -67,6 +67,7 @@ workspace.members = [
     "libs/csg/csg_primitives",
     "libs/csg/csg_sdf",
     "libs/render",
+    "libs/render_kernels",
     "libs/render_graph",
     "libs/render_material",
     "libs/render_lines",

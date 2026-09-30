@@ -1,0 +1,10 @@
+[package]
+name = "makepad-render-kernels"
+version = "0.1.0"
+edition = "2021"
+description = "Kernel output buffers for the renderers: slots with generations and fences, topology validation, layout hot swaps, multi-pass pipelines, and the kernel scheduler on the platform's task pool"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-platform = { path = "../../platform", version = "2.0.0" }
+makepad-script-compute = { path = "../../platform/script/compute" }

@@ -28,6 +28,19 @@ use std::sync::Arc;
 /// Elements per chunk (the unit of scheduling and of reduce partials).
 pub const CHUNK: usize = 4096;
 
+/// The smallest range a map kernel's call is split into. A map kernel's
+/// result does not depend on how its elements are split (each element
+/// writes only its own records), so a call of a few thousand elements is
+/// shared by every worker in ranges of at least this many (a multiple of 4,
+/// so four-wide code runs whole groups); reduce kernels keep fixed
+/// [`CHUNK`]s, whose partials combine in order.
+pub const MIN_SPLIT: usize = 512;
+
+/// Whether a call of `count` elements runs split across threads.
+pub(crate) fn splits(kernel: &Kernel, threads: usize, count: usize) -> bool {
+    threads > 1 && kernel.parallel_safe && count > if kernel.reduce_init().1 == 0 { MIN_SPLIT } else { CHUNK }
+}
+
 /// The kernel prelude: hashing, noise, quaternions, matrices, curves and
 /// buffer sampling, available to every kernel (only what is called is
 /// compiled in).
@@ -418,8 +431,6 @@ impl Drop for FpEnv {
 #[derive(Default)]
 pub(crate) struct ChunkCell {
     acc: [AtomicU32; 16],
-    overflow: std::sync::atomic::AtomicBool,
-    host_error: std::sync::atomic::AtomicBool,
 }
 
 /// The ctx words a worker copies per chunk (params included).
@@ -476,10 +487,15 @@ pub(crate) fn run_chunks(
     exec: &dyn crate::sched::Executor,
     threads: usize,
 ) -> Result<(bool, bool, [f32; 16]), KernelError> {
-    let chunks = count.div_ceil(CHUNK);
     let (op, lanes, init) = kernel.reduce_init();
+    // Map kernels split into equal ranges, several per thread (any split
+    // gives the same bits); reduce kernels into the fixed chunks.
+    let unit = if lanes == 0 && threads > 1 { count.div_ceil(threads * 4).next_multiple_of(4).clamp(MIN_SPLIT, CHUNK) } else { CHUNK };
+    let chunks = count.div_ceil(unit);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::atomic::AtomicBool::new(false);
+    let any_overflow = std::sync::atomic::AtomicBool::new(false);
+    let any_host_error = std::sync::atomic::AtomicBool::new(false);
     let words = ctx.len().min(MAX_CTX);
     let work = |_worker: usize| {
         let mut buf = [0u32; MAX_CTX];
@@ -498,18 +514,24 @@ pub(crate) fn run_chunks(
             for l in 0..lanes {
                 wctx[K_ACC as usize + l] = init.to_bits();
             }
-            let start = c * CHUNK;
-            let k = (count - start).min(CHUNK);
+            let start = c * unit;
+            let k = (count - start).min(unit);
             if kernel.run_range(wctx, table, lens, start, k, mode, cancel).is_err() {
                 failed.store(true, Ordering::Relaxed);
                 return;
             }
-            let cell = &cells[c];
-            for l in 0..lanes {
-                cell.acc[l].store(wctx[K_ACC as usize + l], Ordering::Relaxed);
+            if wctx[K_OVERFLOW as usize] != 0 {
+                any_overflow.store(true, Ordering::Relaxed);
             }
-            cell.overflow.store(wctx[K_OVERFLOW as usize] != 0, Ordering::Relaxed);
-            cell.host_error.store(wctx[kl::K_HOST_ERR as usize] != 0, Ordering::Relaxed);
+            if wctx[kl::K_HOST_ERR as usize] != 0 {
+                any_host_error.store(true, Ordering::Relaxed);
+            }
+            if lanes > 0 {
+                let cell = &cells[c];
+                for l in 0..lanes {
+                    cell.acc[l].store(wctx[K_ACC as usize + l], Ordering::Relaxed);
+                }
+            }
         }
     };
     let helpers = if kernel.parallel_safe { threads.max(1).min(chunks.max(1)) } else { 1 };
@@ -522,14 +544,14 @@ pub(crate) fn run_chunks(
         return Err(KernelError::Cancelled);
     }
     let mut reduced = [init; 16];
-    let mut overflowed = false;
-    let mut host_error = false;
-    for cell in &cells[..chunks] {
-        // fan_out returned: every chunk's stores happened before (its join).
-        overflowed |= cell.overflow.load(Ordering::Relaxed);
-        host_error |= cell.host_error.load(Ordering::Relaxed);
-        for (l, a) in reduced.iter_mut().enumerate().take(lanes) {
-            *a = combine(op, *a, f32::from_bits(cell.acc[l].load(Ordering::Relaxed)));
+    // fan_out returned: every range's stores happened before (its join).
+    let overflowed = any_overflow.load(Ordering::Relaxed);
+    let host_error = any_host_error.load(Ordering::Relaxed);
+    if lanes > 0 {
+        for cell in &cells[..chunks] {
+            for (l, a) in reduced.iter_mut().enumerate().take(lanes) {
+                *a = combine(op, *a, f32::from_bits(cell.acc[l].load(Ordering::Relaxed)));
+            }
         }
     }
     let _ = op;

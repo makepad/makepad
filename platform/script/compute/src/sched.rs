@@ -356,6 +356,9 @@ enum Binding {
     None,
     InF32(Arc<[f32]>),
     InU32(Arc<[u32]>),
+    /// A read-only input the job owns (a pipeline hands a previous pass's
+    /// output on without copying it).
+    InVecU32(Vec<u32>),
     OutF32(Vec<f32>),
     OutU32(Vec<u32>),
 }
@@ -505,6 +508,14 @@ impl Job {
         Ok(())
     }
 
+    /// Binds a read-only input the job owns; [`Self::take_buffer_u32`]
+    /// gives it back.
+    pub fn input_vec_u32(&mut self, name: &str, data: Vec<u32>) -> Result<(), KernelError> {
+        let k = self.index(name, false)?;
+        self.bind[k] = Binding::InVecU32(data);
+        Ok(())
+    }
+
     /// Binds an output the job owns (returned with the finished job).
     pub fn output(&mut self, name: &str, data: Vec<f32>) -> Result<(), KernelError> {
         let k = self.index(name, true)?;
@@ -556,6 +567,19 @@ impl Job {
         }
     }
 
+    /// Takes an owned buffer out of the job, output or input (it becomes
+    /// unbound).
+    pub fn take_buffer_u32(&mut self, name: &str) -> Option<Vec<u32>> {
+        let k = self.kernel.buffer_index(name)?;
+        match std::mem::replace(&mut self.bind[k], Binding::None) {
+            Binding::OutU32(v) | Binding::InVecU32(v) => Some(v),
+            other => {
+                self.bind[k] = other;
+                None
+            }
+        }
+    }
+
     /// The last run's stats.
     pub fn stats(&self) -> &RunStats {
         &self.stats
@@ -571,6 +595,8 @@ impl Job {
                 Binding::None => return Err(KernelError::Unbound(self.kernel.buffers()[k].name.clone())),
                 Binding::InF32(a) => (a.as_ptr() as *mut u32, a.len()),
                 Binding::InU32(a) => (a.as_ptr() as *mut u32, a.len()),
+                // Read-only: validation proves the kernel never stores to it.
+                Binding::InVecU32(v) => (v.as_ptr() as *mut u32, v.len()),
                 Binding::OutF32(v) => (v.as_mut_ptr() as *mut u32, v.len()),
                 Binding::OutU32(v) => (v.as_mut_ptr(), v.len()),
             };
@@ -596,7 +622,7 @@ impl Job {
         let t0 = Instant::now();
         self.table()?;
         let count = self.count;
-        let split = threads > 1 && self.kernel.parallel_safe && count > CHUNK;
+        let split = crate::kernel::splits(&self.kernel, threads, count);
         let wide_ok = check(&self.kernel, &self.lens, count, true, self.work_limit).is_ok();
         check(&self.kernel, &self.lens, count, split, self.work_limit)?;
         let mode = if self.simd && self.kernel.simd() && self.kernel.parallel_safe && wide_ok { Mode::Vector } else { Mode::Scalar };
