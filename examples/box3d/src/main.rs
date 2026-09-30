@@ -329,7 +329,7 @@ impl PhysicsSim {
                 for j in 0..n {
                     let mut body_def = default_body_def();
                     body_def.body_type = BodyType::Dynamic;
-                    body_def.position = makepad_box3d::math_functions::vec3(
+                    body_def.position = makepad_box3d::math_functions::pos(
                         i as f32 * spacing - offset,
                         y,
                         j as f32 * spacing - offset,
@@ -358,7 +358,7 @@ impl PhysicsSim {
             let angle = k as f32 * (2.0 * std::f32::consts::PI / SPHERE_COUNT as f32);
             let mut body_def = default_body_def();
             body_def.body_type = BodyType::Dynamic;
-            body_def.position = makepad_box3d::math_functions::vec3(
+            body_def.position = makepad_box3d::math_functions::pos(
                 2.6 * angle.cos(),
                 12.0 + 1.7 * k as f32,
                 2.6 * angle.sin(),

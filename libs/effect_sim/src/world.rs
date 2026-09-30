@@ -8,7 +8,7 @@ use crate::layouts::{BodyRecord, RecordShape};
 use makepad_box3d::body::*;
 use makepad_box3d::hull::{create_hull, make_box_hull};
 use makepad_box3d::id::BodyId;
-use makepad_box3d::math_functions::{Quat, Vec3, WorldTransform};
+use makepad_box3d::math_functions::{pos, Pos, Quat, Vec3, WorldTransform};
 use makepad_box3d::mesh::create_mesh;
 use makepad_box3d::physics_world::*;
 use makepad_box3d::recording::{write_registry, RecBuffer, Recording};
@@ -21,6 +21,19 @@ use std::sync::Arc;
 
 pub(crate) fn v3(a: [f32; 3]) -> Vec3 {
     Vec3 { x: a[0], y: a[1], z: a[2] }
+}
+
+/// A world position from a record. box3d's `Pos` is `Vec3` in single
+/// precision and its own f64 struct with `double-precision`, which another
+/// crate in the same build (the sandbox's sim) turns on; `pos` and `f32s`
+/// read the same in both.
+fn p3(a: [f32; 3]) -> Pos {
+    pos(a[0], a[1], a[2])
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn f32s(p: Pos) -> [f32; 3] {
+    [p.x as f32, p.y as f32, p.z as f32]
 }
 
 fn world_def(desc: &PhysicsDesc) -> WorldDef {
@@ -87,7 +100,7 @@ impl PhysWorld {
             Kind::Kinematic => BodyType::Kinematic,
         };
         let q = rec.rotation();
-        bd.position = v3(rec.pos);
+        bd.position = p3(rec.pos);
         bd.rotation = Quat { v: Vec3 { x: q[0], y: q[1], z: q[2] }, s: q[3] };
         if matches!(kind, Kind::Dynamic) {
             bd.linear_velocity = v3(rec.vel);
@@ -202,7 +215,8 @@ impl PhysWorld {
     pub fn pose(&self, body: BodyId) -> [f32; 7] {
         let p = body_get_position(&self.world, body);
         let q = body_get_rotation(&self.world, body);
-        [p.x, p.y, p.z, q.v.x, q.v.y, q.v.z, q.s]
+        let [x, y, z] = f32s(p);
+        [x, y, z, q.v.x, q.v.y, q.v.z, q.s]
     }
 
     pub fn speed(&self, body: BodyId) -> f32 {
@@ -227,7 +241,7 @@ impl PhysWorld {
         if !pose.0.iter().all(|x| x.is_finite() && x.abs() < 1.0e5) {
             return;
         }
-        let target = WorldTransform { p: v3(pose.0), q: Quat { v: Vec3 { x: q[0], y: q[1], z: q[2] }, s: q[3] } };
+        let target = WorldTransform { p: p3(pose.0), q: Quat { v: Vec3 { x: q[0], y: q[1], z: q[2] }, s: q[3] } };
         body_set_target_transform(&mut self.world, body, target, dt, true);
     }
 
@@ -247,7 +261,7 @@ impl PhysWorld {
             let (ba, bb) = (shape_get_body(&self.world, h.shape_id_a), shape_get_body(&self.world, h.shape_id_b));
             let (ma, mb) = (body_get_mass(&self.world, ba), body_get_mass(&self.world, bb));
             let m = if ma > 0.0 && mb > 0.0 { ma * mb / (ma + mb) } else { ma.max(mb) };
-            out.push(([h.point.x, h.point.y, h.point.z], [h.normal.x, h.normal.y, h.normal.z], h.approach_speed, ba, bb, m));
+            out.push((f32s(h.point), [h.normal.x, h.normal.y, h.normal.z], h.approach_speed, ba, bb, m));
         }
     }
 

@@ -293,6 +293,18 @@ impl Browser {
         Ok(())
     }
 
+    pub fn selected_text(&self) -> String {
+        String::new()
+    }
+
+    pub fn copy_selection(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn cut_selection(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     pub fn send_mouse_move(
         &mut self,
         _x: i32,
