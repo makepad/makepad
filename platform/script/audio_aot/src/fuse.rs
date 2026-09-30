@@ -308,6 +308,8 @@ fn rename(mut items: Vec<Item>, prefix: &str) -> Vec<Item> {
         let n = match i {
             Item::Let { name, .. } | Item::Var { name, .. } | Item::Struct { name, .. } => name,
             Item::Fn(f) => &f.name,
+            // Audio shaders import nothing (a `use` is accepted and ignored).
+            Item::Use { .. } => continue,
         };
         map.insert(n.clone(), format!("{}{}", prefix, n));
     }
@@ -324,6 +326,7 @@ fn rename(mut items: Vec<Item>, prefix: &str) -> Vec<Item> {
                 }
                 *name = format!("{}{}", prefix, name);
             }
+            Item::Use { .. } => {}
             Item::Fn(f) => {
                 f.name = format!("{}{}", prefix, f.name);
                 r.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());

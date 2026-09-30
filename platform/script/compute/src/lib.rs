@@ -18,9 +18,11 @@
 //! specified and math functions are polynomials of those ops (no libm).
 
 pub mod admission;
+pub mod host;
 pub mod ir;
 pub mod kernel;
 pub mod lower;
+pub mod module;
 pub mod parse;
 pub mod sched;
 

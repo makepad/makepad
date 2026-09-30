@@ -33,7 +33,9 @@ pub const CONTROL_BUFFER: &str = "#control";
 pub const K_OVERFLOW: u32 = 5;
 /// A reduce kernel's running value (up to 16 lanes).
 pub const K_ACC: u32 = 6;
-pub const K_PARAMS: u32 = 22;
+/// Set to 1 when a host function call failed (its results were zero).
+pub const K_HOST_ERR: u32 = 22;
+pub const K_PARAMS: u32 = 23;
 /// Most elements one call may run.
 pub const ELEMENT_CAP: u32 = 1 << 30;
 pub const MAX_BUFFERS: usize = 64;
@@ -368,6 +370,66 @@ impl Lowerer {
             "seed" => V::I(self.b.load(Ty::I32, Region::Ctx, K_SEED, 1, None)),
             "count" => V::I(self.b.load(Ty::I32, Region::Ctx, K_COUNT, 1, None)),
             _ => return None,
+        })
+    }
+
+    /// A call of a registered host function: per slice parameter three
+    /// arguments (a buffer, a word offset, a word length), then the scalar
+    /// parameters.
+    pub(super) fn kernel_host_call(&mut self, name: &str, vals: &[V], args: &[Expr], span: Span) -> LResult<V> {
+        let f = crate::host::find(name).unwrap();
+        let h = crate::host::get(f).unwrap();
+        let want = 3 * h.slices.len() + h.params.len();
+        if vals.len() != want {
+            return err(span, format!("`{}` takes {} arguments: {}", name, want, h.doc));
+        }
+        if self.portable && h.tier != crate::host::Tier::X {
+            return err(span, format!("`{}` gives the same bits only on one device: not in a `math: portable` kernel", name));
+        }
+        let mut slices = Vec::new();
+        for (k, sig) in h.slices.iter().enumerate() {
+            let (b, o, l) = (&vals[3 * k], &vals[3 * k + 1], &vals[3 * k + 2]);
+            let buf = match b {
+                V::Place(Place { region: Region::Buf(kb), ty: T::Buf(..), .. }) => *kb,
+                _ => return err(args[3 * k].span, format!("`{}`: argument {} is a buffer (then its word offset and word length)", name, 3 * k + 1)),
+            };
+            if sig.writable {
+                if !self.kernel.writable(buf) {
+                    return err(args[3 * k].span, format!("`{}` writes this buffer: bind an output(...)", name));
+                }
+                // The call writes a range the compiler cannot prove is the
+                // element's own: the kernel runs on one thread.
+                self.kernel.nonlocal = true;
+            } else {
+                self.kernel.access(buf, None);
+            }
+            let off = self.to_i(o, args[3 * k + 1].span)?;
+            let len = self.to_i(l, args[3 * k + 2].span)?;
+            slices.push(ir::SliceArg { buf, off, len });
+        }
+        let mut sargs = Vec::new();
+        for (k, t) in h.params.iter().enumerate() {
+            let at = 3 * h.slices.len() + k;
+            let (v, sp) = (&vals[at], args[at].span);
+            sargs.push(match t {
+                Ty::F32 => self.to_f(v, sp)?,
+                Ty::I32 => self.to_i(v, sp)?,
+                Ty::Bool => self.truth(v, sp)?,
+                Ty::F64 => return err(sp, "host functions take word arguments"),
+            });
+        }
+        let mut rets = Vec::new();
+        for t in h.rets {
+            self.b.prog.vals.push(*t);
+            self.b.consts.push(None);
+            rets.push(Val(self.b.prog.vals.len() as u32 - 1));
+        }
+        self.b.push(IS::CallHost { f, args: sargs, slices, rets: rets.clone() });
+        Ok(match (h.rets.first(), rets.first()) {
+            (Some(Ty::F32), Some(v)) => V::F(*v),
+            (Some(Ty::I32), Some(v)) => V::I(*v),
+            (Some(Ty::Bool), Some(v)) => V::B(*v),
+            _ => V::Unit,
         })
     }
 

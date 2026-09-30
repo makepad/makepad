@@ -10,6 +10,8 @@ pub enum Tk {
     /// A number and whether it was written without a fraction/exponent.
     Num(f64, bool),
     Punct(&'static str),
+    /// A string (one line, no escapes): only `use lib("id", "rev")`.
+    Str(String),
     Eof,
 }
 
@@ -102,12 +104,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShaderError> {
                 i += 1;
             }
             Tk::Ident(src[start..i].to_string())
+        } else if c == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
+                i += 1;
+            }
+            if b.get(i) != Some(&b'"') || i - start > 256 {
+                return Err(ShaderError::new(start, i.max(start + 1), "unclosed or overlong string".into()));
+            }
+            i += 1;
+            Tk::Str(src[start + 1..i - 1].to_string())
         } else {
             let rest = &src[i..];
             let Some(p) = PUNCTS.iter().find(|p| rest.starts_with(**p)) else {
                 let ch = rest.chars().next().unwrap();
-                let msg = if ch == '"' || ch == '\'' {
-                    "audio shaders have no strings".to_string()
+                let msg = if ch == '\'' {
+                    "no strings here (a string only names a library: `use lib(\"id\", \"rev\")`)".to_string()
                 } else {
                     format!("unexpected character `{}`", ch)
                 };
@@ -142,6 +154,7 @@ pub struct Span {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeAnn {
     F32,
+    F64,
     I32,
     Bool,
     Vec2,
@@ -156,6 +169,9 @@ pub enum Item {
     Var { name: String, ann: Option<TypeAnn>, value: Expr, span: Span },
     Struct { name: String, fields: Vec<(String, Expr)>, span: Span },
     Fn(FnDecl),
+    /// `use path.*` (glob), `use path as alias`, `use path` (alias: the
+    /// last part), `use lib("id", "rev") as alias` (path `lib:id@rev`).
+    Use { path: String, glob: bool, alias: Option<String>, span: Span },
 }
 
 impl Item {
@@ -163,6 +179,7 @@ impl Item {
         match self {
             Item::Let { name, .. } | Item::Var { name, .. } | Item::Struct { name, .. } => name,
             Item::Fn(f) => &f.name,
+            Item::Use { path, .. } => path,
         }
     }
 }
@@ -252,6 +269,15 @@ pub struct Expr {
 // =========================================================================
 // Parser
 // =========================================================================
+
+/// `a` or `a.b.c` (plain names only): the module path of a qualified call.
+fn dotted(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field(b, n) => dotted(b).map(|q| format!("{}.{}", q, n)),
+        _ => None,
+    }
+}
 
 pub struct Parser<'a> {
     toks: &'a [Token],
@@ -344,7 +370,7 @@ impl<'a> Parser<'a> {
                 return Ok(items);
             }
             let start = self.tok().start;
-            if self.is_kw("let") || self.is_kw("var") {
+            if self.is_kw("let") || self.is_kw("var") || self.is_kw("const") {
                 let is_var = self.is_kw("var");
                 self.bump();
                 let name = self.ident()?;
@@ -367,16 +393,64 @@ impl<'a> Parser<'a> {
                 self.bump();
                 items.push(Item::Fn(self.fn_decl(start)?));
             } else if self.is_kw("use") {
-                // `use mod.math.*` style imports are accepted and ignored:
-                // every builtin is always in scope.
                 self.bump();
-                while !matches!(self.peek(), Tk::Eof) && !self.tok().nl {
-                    self.bump();
-                }
+                items.push(self.use_item(start)?);
             } else {
-                return self.err("expected `let`, `var`, `struct` or `fn` at the top level of an audio shader");
+                return self.err("expected `let`, `const`, `var`, `struct`, `fn` or `use` at the top level");
             }
         }
+    }
+
+    /// After `use`: a dotted path (optionally ending in `.*`) or
+    /// `lib("id", "rev")`, then an optional `as alias`.
+    fn use_item(&mut self, start: usize) -> PResult<Item> {
+        let mut glob = false;
+        let path = if self.is_kw("lib") {
+            self.bump();
+            self.expect("(")?;
+            let mut parts = Vec::new();
+            loop {
+                self.skip_seps();
+                if self.eat(")") {
+                    break;
+                }
+                match self.peek().clone() {
+                    Tk::Str(s) => {
+                        self.bump();
+                        parts.push(s);
+                    }
+                    other => return self.err(format!("lib(\"id\", \"rev\") takes strings, found {}", describe(&other))),
+                }
+            }
+            if parts.is_empty() || parts.len() > 2 {
+                return self.err("lib(\"id\", \"rev\")");
+            }
+            if self.eat(".") {
+                self.expect("*")?;
+                glob = true;
+            }
+            format!("lib:{}", parts.join("@"))
+        } else {
+            let mut parts = vec![self.ident()?];
+            while self.eat(".") {
+                if self.eat("*") {
+                    glob = true;
+                    break;
+                }
+                parts.push(self.ident()?);
+            }
+            parts.join(".")
+        };
+        let alias = if self.is_kw("as") {
+            self.bump();
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        if glob && alias.is_some() {
+            return self.err("`use m.*` brings the names in unqualified; `use m as a` names the module: not both");
+        }
+        Ok(Item::Use { path, glob, alias, span: Span { start, end: self.prev_end() } })
     }
 
     fn type_ann(&mut self) -> PResult<Option<TypeAnn>> {
@@ -386,14 +460,15 @@ impl<'a> Parser<'a> {
         let t = self.tok().clone();
         let name = self.ident()?;
         Ok(Some(match name.as_str() {
-            "f32" | "float" | "f64" => TypeAnn::F32,
+            "f32" | "float" => TypeAnn::F32,
+            "f64" => TypeAnn::F64,
             "i32" | "int" | "u32" => TypeAnn::I32,
             "bool" => TypeAnn::Bool,
             "vec2" | "vec2f" => TypeAnn::Vec2,
             "vec3" | "vec3f" => TypeAnn::Vec3,
             "vec4" | "vec4f" => TypeAnn::Vec4,
             "mat4" | "mat4f" => TypeAnn::Mat4,
-            _ => return Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, i32, bool, vec2, vec3, vec4, mat4)", name))),
+            _ => return Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, f64, i32, bool, vec2, vec3, vec4, mat4)", name))),
         }))
     }
 
@@ -596,6 +671,26 @@ impl<'a> Parser<'a> {
                     }
                     _ => self.ident()?,
                 };
+                // `module.fn(args)`: a qualified call.
+                if self.is("(") && !self.tok().nl {
+                    if let Some(q) = dotted(&e) {
+                        self.bump();
+                        let mut args = Vec::new();
+                        loop {
+                            self.skip_seps();
+                            if self.eat(")") {
+                                break;
+                            }
+                            args.push(self.expr()?);
+                            if !self.is(")") && !self.is(",") {
+                                self.expect(")")?;
+                            }
+                        }
+                        let span = Span { start, end: self.prev_end() };
+                        e = Expr { kind: ExprKind::Call(format!("{}.{}", q, name), args), span };
+                        continue;
+                    }
+                }
                 let span = Span { start, end: self.prev_end() };
                 e = Expr { kind: ExprKind::Field(Box::new(e), name), span };
             } else if self.eat("[") {
@@ -688,6 +783,7 @@ impl<'a> Parser<'a> {
                 }
                 done(self, ExprKind::Ident(name))
             }
+            Tk::Str(_) => self.err("no strings here (a string only names a library: `use lib(\"id\", \"rev\")`)"),
             ref other => self.err(format!("expected a value, found {}", describe(other))),
         }
     }
@@ -762,6 +858,7 @@ fn describe(tk: &Tk) -> String {
         Tk::Ident(s) => format!("`{}`", s),
         Tk::Num(v, _) => format!("`{}`", v),
         Tk::Punct(p) => format!("`{}`", p),
+        Tk::Str(_) => "a string".into(),
         Tk::Eof => "the end of the code".into(),
     }
 }

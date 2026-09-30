@@ -261,6 +261,18 @@ impl Liveness {
                     self.loops[li].1 = self.pos;
                 }
                 Stmt::Break(_) | Stmt::Continue(_) => {}
+                Stmt::CallHost { args, slices, rets, .. } => {
+                    for a in args {
+                        self.touch(Ent::Val(a.0), bid);
+                    }
+                    for x in slices {
+                        self.touch(Ent::Val(x.off.0), bid);
+                        self.touch(Ent::Val(x.len.0), bid);
+                    }
+                    for r in rets {
+                        self.touch(Ent::Val(r.0), bid);
+                    }
+                }
             }
         }
         self.pos += 1;
@@ -496,7 +508,16 @@ struct Emit<'a> {
     /// constant scalings of them), when there is one: an offset proven
     /// below its extent needs no clamp.
     bounds: Vec<Option<u32>>,
+    /// Byte offset from sp of the host-call area (register save area, then
+    /// the call record), and the kernel's buffer writability mask.
+    call_base: u32,
+    writable: u64,
 }
+
+/// The host-call area: x0..x14 and d0..d7, d16..d28 saved (36 words of 8
+/// bytes), then the call record (64 words).
+const CALL_SAVE: u32 = 36 * 8;
+const CALL_AREA: u32 = CALL_SAVE + 64 * 4;
 
 /// Upper bounds of offsets built from `Wrap`/mask/const arithmetic.
 pub(crate) fn bounds(p: &Program) -> Vec<Option<u32>> {
@@ -850,6 +871,7 @@ impl<'a> Emit<'a> {
                 let (_, exit) = self.loop_labels[self.loop_labels.len() - 1 - *d as usize];
                 self.jump(Fix::B, 0x1400_0000, exit);
             }
+            Stmt::CallHost { f, args, slices, rets } => self.call_host(*f, args, slices, rets),
             Stmt::Continue(d) => {
                 let (top, _) = self.loop_labels[self.loop_labels.len() - 1 - *d as usize];
                 self.jump(Fix::B, 0x1400_0000, top);
@@ -1182,6 +1204,105 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// x(d) = a 64-bit immediate.
+    fn mov_imm64(&mut self, d: u8, v: u64) {
+        self.e(0xD280_0000 | ((v & 0xFFFF) as u32) << 5 | d as u32);
+        for hw in 1..4u32 {
+            let h = ((v >> (16 * hw)) & 0xFFFF) as u32;
+            if h != 0 {
+                self.e(0xF280_0000 | hw << 21 | h << 5 | d as u32);
+            }
+        }
+    }
+
+    /// A host call: the record on the stack, caller-saved registers saved,
+    /// `host::trampoline(record, table, ctx, writable)`, registers restored,
+    /// the result loaded. The trampoline's address is a constant of the
+    /// code (never formed from data); it checks the call and never unwinds.
+    fn call_host(&mut self, f: u16, args: &[Val], slices: &[crate::ir::SliceArg], rets: &[Val]) {
+        let rec = self.call_base + CALL_SAVE;
+        // x15 = the record's address (sp + rec).
+        self.sp_plus(XS2, rec);
+        let word = |em: &mut Self, k: usize, r: u8, fp: bool| em.e(ldst_imm(fp, false, r, XS2, 4 * k as u32));
+        for (k, hdr) in [f as u32, args.len() as u32, slices.len() as u32, rets.len() as u32].into_iter().enumerate() {
+            self.mov_imm(XS0, hdr);
+            word(self, k, XS0, false);
+        }
+        let mut at = crate::host::REC_HEADER;
+        for a in args {
+            if self.is_fp(*a) {
+                let r = self.fsrc(Ent::Val(a.0), FS0);
+                word(self, at, r, true);
+            } else {
+                let r = self.gsrc(Ent::Val(a.0), XS0);
+                word(self, at, r, false);
+            }
+            at += 1;
+        }
+        for x in slices {
+            self.mov_imm(XS0, x.buf as u32);
+            word(self, at, XS0, false);
+            let r = self.gsrc(Ent::Val(x.off.0), XS0);
+            word(self, at + 1, r, false);
+            let r = self.gsrc(Ent::Val(x.len.0), XS0);
+            word(self, at + 2, r, false);
+            at += 3;
+        }
+        let ret_at = at;
+        // Save x0..x14 and d0..d7, d16..d28 (x15 still points at the record).
+        self.sp_plus(XS1, self.call_base);
+        let gpr: Vec<u8> = (0..15).collect();
+        let fpr: Vec<u8> = (0..8).chain(16..29).collect();
+        for (k, r) in gpr.iter().enumerate() {
+            self.e(0xF900_0000 | (k as u32) << 10 | (XS1 as u32) << 5 | *r as u32);
+        }
+        for (k, r) in fpr.iter().enumerate() {
+            self.e(ldst_d(false, *r, XS1, 8 * (15 + k as u32)));
+        }
+        // x1 = table, x2 = ctx, x3 = writable mask, x0 = record.
+        self.e(0xAA00_03E0 | 3 << 16 | 1); // mov x1, x3
+        self.e(0xAA00_03E0 | 2); // mov x2, x0
+        self.mov_imm64(3, self.writable);
+        self.e(0xAA00_03E0 | (XS2 as u32) << 16); // mov x0, x15
+        self.mov_imm64(XS0, crate::host::trampoline as *const () as usize as u64);
+        self.e(0xD63F_0000 | (XS0 as u32) << 5); // blr x16
+        // Restore (x17 is caller-saved: recompute the save area's address).
+        self.sp_plus(XS1, self.call_base);
+        for (k, r) in fpr.iter().enumerate() {
+            self.e(ldst_d(true, *r, XS1, 8 * (15 + k as u32)));
+        }
+        for (k, r) in gpr.iter().enumerate() {
+            self.e(0xF940_0000 | (k as u32) << 10 | (XS1 as u32) << 5 | *r as u32);
+        }
+        for v in rets {
+            self.sp_plus(XS2, rec);
+            let e = Ent::Val(v.0);
+            if self.is_fp(*v) {
+                let d = self.fdst(e);
+                self.e(ldst_imm(true, true, d, XS2, 4 * ret_at as u32));
+                self.fdone(e, d);
+            } else {
+                let d = match self.loc(e) {
+                    Loc::Reg(r) => r,
+                    Loc::Stack(_) => XS1,
+                };
+                self.e(ldst_imm(false, true, d, XS2, 4 * ret_at as u32));
+                self.gdone(e, d);
+            }
+        }
+    }
+
+    /// x(d) = sp + byte offset.
+    fn sp_plus(&mut self, d: u8, off: u32) {
+        if off < 4096 {
+            self.e(0x9100_0000 | off << 10 | 31 << 5 | d as u32);
+        } else {
+            self.mov_imm(d, off);
+            // add xd, sp, xd (extended register, UXTX)
+            self.e(0x8B20_63E0 | (d as u32) << 16 | d as u32);
+        }
+    }
+
     fn patch(&mut self) -> bool {
         for &(at, l, kind) in &self.fixups {
             let Some(target) = self.labels[l] else { return false };
@@ -1209,13 +1330,30 @@ impl<'a> Emit<'a> {
 /// Compiles a program to native code (None if it cannot: too far branches,
 /// no executable memory).
 pub fn compile(p: &Program) -> Option<Code> {
+    compile_with(p, 0)
+}
+
+fn has_host_call(b: &Block) -> bool {
+    b.iter().any(|s| match s {
+        Stmt::CallHost { .. } => true,
+        Stmt::If(_, t, e) => has_host_call(t) || has_host_call(e),
+        Stmt::Loop { body, .. } => has_host_call(body),
+        _ => false,
+    })
+}
+
+/// Compiles a kernel whose host buffers have write permission `writable`
+/// (bit k: buffer k), which host calls pass on to the trampoline.
+pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     let alloc = allocate(p);
-    // Spill slots are addressed with a scaled 12-bit immediate.
     if alloc.spill_bytes >= 16384 {
         return None;
     }
     let frame_bytes = p.frame_words * 4;
-    let total = (alloc.spill_bytes + frame_bytes + 15) & !15;
+    let calls = has_host_call(&p.body);
+    let call_base = (alloc.spill_bytes + frame_bytes + 15) & !15;
+    let total = call_base + if calls { CALL_AREA } else { 0 };
+    let total = (total + 15) & !15;
     let mut em = Emit {
         p,
         code: Vec::new(),
@@ -1226,6 +1364,8 @@ pub fn compile(p: &Program) -> Option<Code> {
         loop_labels: Vec::new(),
         loop_id: 0,
         bounds: bounds(p),
+        call_base,
+        writable,
     };
     // Prologue: frame record, callee-saved x19..x28 and d8..d15.
     em.e(0xA9BF_7BFD); // stp x29, x30, [sp, #-16]!

@@ -1,0 +1,101 @@
+// Easing curves with Motion's exact formulas (motion/src/ease.rs): u in
+// 0..1, evaluated in f64 and rounded once. The polynomial, circ, back and
+// bounce curves give Motion's bits; sine, expo, elastic and spring use the
+// portable transcendental kernels (equal within an ulp of the host's).
+
+fn unit(u) { clamp(f64(u), f64(0.0), f64(1.0)) }
+
+fn in_quad_d(u) { u * u }
+fn in_cubic_d(u) { u * u * u }
+fn in_quart_d(u) { u * u * u * u }
+fn in_quint_d(u) { u * u * u * u * u }
+fn in_sine_d(u) { 1.0 - cos(u * f64(PI) * 0.5) }
+fn in_expo_d(u) {
+    if u <= 0.0 { f64(0.0) } else { (pow(f64(2.0), 10.0 * u - 10.0) - pow(f64(2.0), f64(-10.0))) / (1.0 - pow(f64(2.0), f64(-10.0))) }
+}
+fn in_circ_d(u) { 1.0 - sqrt(max(1.0 - u * u, f64(0.0))) }
+fn in_back_d(u) {
+    let c1 = f64(1.70158)
+    let c3 = c1 + 1.0
+    c3 * u * u * u - c1 * u * u
+}
+fn in_elastic_d(u) {
+    if u <= 0.0 { f64(0.0) } else { -pow(f64(2.0), 10.0 * u - 10.0) * sin((u * 10.0 - 10.75) * ((2.0 * f64(PI)) / 3.0)) }
+}
+fn bounce_out_d(u) {
+    let n1 = f64(7.5625)
+    let d1 = f64(2.75)
+    if u < 1.0 / d1 { n1 * u * u }
+    elif u < 2.0 / d1 { let v = u - 1.5 / d1
+        n1 * v * v + 0.75 }
+    elif u < 2.5 / d1 { let v = u - 2.25 / d1
+        n1 * v * v + 0.9375 }
+    else { let v = u - 2.625 / d1
+        n1 * v * v + 0.984375 }
+}
+fn in_bounce_d(u) { 1.0 - bounce_out_d(1.0 - u) }
+
+// Motion's `apply` around a curve: 0 at or below 0, 1 at or above 1.
+fn ends(u, v) { if !(u > 0.0) { 0.0 } elif u >= 1.0 { 1.0 } else { float(v) } }
+
+fn in_quad(u) { ends(u, in_quad_d(unit(u))) }
+fn out_quad(u) { ends(u, 1.0 - in_quad_d(1.0 - unit(u))) }
+fn in_out_quad(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_quad_d(2.0 * d) } else { 1.0 - 0.5 * in_quad_d(2.0 - 2.0 * d) }) }
+fn in_cubic(u) { ends(u, in_cubic_d(unit(u))) }
+fn out_cubic(u) { ends(u, 1.0 - in_cubic_d(1.0 - unit(u))) }
+fn in_out_cubic(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_cubic_d(2.0 * d) } else { 1.0 - 0.5 * in_cubic_d(2.0 - 2.0 * d) }) }
+fn in_quart(u) { ends(u, in_quart_d(unit(u))) }
+fn out_quart(u) { ends(u, 1.0 - in_quart_d(1.0 - unit(u))) }
+fn in_out_quart(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_quart_d(2.0 * d) } else { 1.0 - 0.5 * in_quart_d(2.0 - 2.0 * d) }) }
+fn in_quint(u) { ends(u, in_quint_d(unit(u))) }
+fn out_quint(u) { ends(u, 1.0 - in_quint_d(1.0 - unit(u))) }
+fn in_out_quint(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_quint_d(2.0 * d) } else { 1.0 - 0.5 * in_quint_d(2.0 - 2.0 * d) }) }
+fn in_sine(u) { ends(u, in_sine_d(unit(u))) }
+fn out_sine(u) { ends(u, 1.0 - in_sine_d(1.0 - unit(u))) }
+fn in_out_sine(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_sine_d(2.0 * d) } else { 1.0 - 0.5 * in_sine_d(2.0 - 2.0 * d) }) }
+fn in_expo(u) { ends(u, in_expo_d(unit(u))) }
+fn out_expo(u) { ends(u, 1.0 - in_expo_d(1.0 - unit(u))) }
+fn in_out_expo(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_expo_d(2.0 * d) } else { 1.0 - 0.5 * in_expo_d(2.0 - 2.0 * d) }) }
+fn in_circ(u) { ends(u, in_circ_d(unit(u))) }
+fn out_circ(u) { ends(u, 1.0 - in_circ_d(1.0 - unit(u))) }
+fn in_out_circ(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_circ_d(2.0 * d) } else { 1.0 - 0.5 * in_circ_d(2.0 - 2.0 * d) }) }
+fn in_back(u) { ends(u, in_back_d(unit(u))) }
+fn out_back(u) { ends(u, 1.0 - in_back_d(1.0 - unit(u))) }
+fn in_out_back(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_back_d(2.0 * d) } else { 1.0 - 0.5 * in_back_d(2.0 - 2.0 * d) }) }
+fn in_elastic(u) { ends(u, in_elastic_d(unit(u))) }
+fn out_elastic(u) { ends(u, 1.0 - in_elastic_d(1.0 - unit(u))) }
+fn in_out_elastic(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_elastic_d(2.0 * d) } else { 1.0 - 0.5 * in_elastic_d(2.0 - 2.0 * d) }) }
+fn in_bounce(u) { ends(u, in_bounce_d(unit(u))) }
+fn out_bounce(u) { ends(u, 1.0 - in_bounce_d(1.0 - unit(u))) }
+fn in_out_bounce(u) { let d = unit(u)
+    ends(u, if d < 0.5 { 0.5 * in_bounce_d(2.0 * d) } else { 1.0 - 0.5 * in_bounce_d(2.0 - 2.0 * d) }) }
+
+// A damped spring's step response at time t (stiffness k, damping d).
+fn spring(k, d, t) {
+    let kk = max(f64(k), f64(0.000001))
+    let dd = max(f64(d), f64(0.0))
+    let tt = f64(t)
+    let w0 = sqrt(kk)
+    let zeta = dd / (2.0 * w0)
+    let v = if zeta < 1.0 - 0.000000001 {
+        let wd = w0 * sqrt(1.0 - zeta * zeta)
+        1.0 - exp(-zeta * w0 * tt) * (cos(wd * tt) + zeta * w0 / wd * sin(wd * tt))
+    } elif zeta <= 1.0 + 0.000000001 {
+        1.0 - exp(-w0 * tt) * (1.0 + w0 * tt)
+    } else {
+        let s = sqrt(zeta * zeta - 1.0)
+        let r1 = -w0 * (zeta - s)
+        let r2 = -w0 * (zeta + s)
+        1.0 + r2 / (r1 - r2) * exp(r1 * tt) + (-r1 / (r1 - r2)) * exp(r2 * tt)
+    }
+    float(v)
+}

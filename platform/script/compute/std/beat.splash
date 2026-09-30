@@ -1,0 +1,48 @@
+// Music and lyric timing as kernel inputs (AK2): `beats` holds the time of
+// each beat (ascending), `starts`/`ends` a word's or syllable's times,
+// `events` onset times, `env` an envelope sampled at `rate` per second.
+use std.search.*
+
+// The fractional beat at time t (linear between beats, extrapolated by
+// the neighbouring interval outside them).
+fn beat_at(beats, n, t) {
+    let k = clamp(last_le(beats, n, t), 0, n - 2)
+    let a = beats[k]
+    let b = beats[k + 1]
+    float(k) + (t - a) / max(b - a, 0.000001)
+}
+
+// The time of fractional beat `b`.
+fn time_of_beat(beats, n, b) {
+    let k = clamp(int(floor(b)), 0, n - 2)
+    mix(beats[k], beats[k + 1], b - float(k))
+}
+
+// The next beat that is a multiple of `bar` beats at or after t (its time).
+fn next_downbeat(beats, n, t, bar) {
+    let b = beat_at(beats, n, t)
+    time_of_beat(beats, n, ceil(b / bar) * bar)
+}
+
+// Progress 0..1 of word or syllable w at time t.
+fn word_progress(starts, ends, w, t) {
+    let a = starts[w]
+    let e = ends[w]
+    if t <= a { 0.0 } elif t >= e { 1.0 } else { (t - a) / max(e - a, 0.000001) }
+}
+
+// Which of n words is sung at t (-1 before the first).
+fn word_at(starts, n, t) { last_le(starts, n, t) }
+
+// A hit: a pulse from the last onset at or before t (half-life hl seconds).
+fn hit(events, n, t, hl) {
+    let k = last_le(events, n, t)
+    if k < 0 { 0.0 } else { exp(-(t - events[k]) * 0.6931471805599453 / hl) }
+}
+
+// An envelope sampled at `rate` values per second, read at t (linear).
+fn env(env, n, rate, t) {
+    let x = clamp(t * rate, 0.0, float(n - 1))
+    let k = min(int(floor(x)), n - 2)
+    mix(env[k], env[k + 1], x - float(k))
+}

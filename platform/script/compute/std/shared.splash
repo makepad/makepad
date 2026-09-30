@@ -1,0 +1,97 @@
+// Stdlib additions (SPLASH-TOKENS.md §5.5), in the kernel prelude's style but
+// written for the subset the shader compiler also takes: explicit `return`,
+// no integer ops. Every function is plain arithmetic, inlined where called.
+
+// ---- Math -------------------------------------------------------------------
+
+// The VJ mid-knob multiplier: 1.0 at a dial's rest (0.5), 0.2..1.8 over its travel.
+fn knob(x) { return 0.2 + 1.6 * clamp(x, 0.0, 1.0) }
+// Rotate a 2D point by `a` radians (counter-clockwise).
+fn rot2(p, a) {
+    let c = cos(a)
+    let s = sin(a)
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c)
+}
+// Rec. 601 luma of an rgb colour.
+fn luma(c) { return dot(c, vec3(0.299, 0.587, 0.114)) }
+// 1 inside the unit square (0..1 on both axes), 0 outside.
+fn inside(uv) { return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0) }
+// x wrapped into 0..n.
+fn wrap(x, n) { return x - n * floor(x / n) }
+
+// ---- Colour -----------------------------------------------------------------
+
+// Cosine palette: a + b * cos(2 pi (c t + d)).
+fn palette(t, a, b, c, d) { return a + b * cos(6.283185307179586 * (c * t + d)) }
+fn hsv2rgb(c) {
+    let k = vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)
+    let p = abs(fract(vec3(c.x, c.x, c.x) + k) * 6.0 - vec3(3.0, 3.0, 3.0))
+    return c.z * mix(vec3(1.0, 1.0, 1.0), clamp(p - vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), c.y)
+}
+
+// ---- Signed distances (2D) --------------------------------------------------
+
+fn sd_circle(p, r) { return length(p) - r }
+fn sd_box(p, b) {
+    let d = abs(p) - b
+    return length(max(d, vec2(0.0, 0.0))) + min(max(d.x, d.y), 0.0)
+}
+fn sd_round_box(p, b, r) { return sd_box(p, b - vec2(r, r)) - r }
+fn sd_segment(p, a, b) {
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0)
+    return length(pa - ba * h)
+}
+fn sd_ring(p, r, w) { return abs(length(p) - r) - w }
+
+// ---- Antialiased lines (screen-space width, shaders only) --------------------
+
+// A step at `edge` antialiased over one pixel of `x`.
+fn aa_step(edge, x) {
+    let w = abs(dFdx(x)) + abs(dFdy(x))
+    return clamp((x - edge) / max(w, 0.000001) + 0.5, 0.0, 1.0)
+}
+// Filled where the distance `d` is negative, antialiased.
+fn aa_fill(d) { return 1.0 - aa_step(0.0, d) }
+// Lines of `v` every `spacing`, `width` pixels wide.
+fn isoline(v, spacing, width) {
+    let h = v / spacing
+    let fw = abs(dFdx(h)) + abs(dFdy(h))
+    let d = abs(fract(h) - 0.5) / max(fw, 0.0001)
+    return 1.0 - clamp(d - width, 0.0, 1.0)
+}
+
+// ---- Dithering --------------------------------------------------------------
+
+// The 4x4 Bayer threshold (0..1) at an integer pixel position.
+fn bayer4(p) {
+    let x = wrap(floor(p.x), 4.0)
+    let y = wrap(floor(p.y), 4.0)
+    let a = wrap(x, 2.0) * 2.0 + wrap(y, 2.0) * 3.0 - wrap(x, 2.0) * wrap(y, 2.0) * 4.0
+    let b = floor(x / 2.0) * 2.0 + floor(y / 2.0) * 3.0 - floor(x / 2.0) * floor(y / 2.0) * 4.0
+    return (a * 4.0 + b + 0.5) / 16.0
+}
+
+// ---- Eases (Motion's formulas from motion/src/ease.rs; 0..1 in, 0..1 out) ----
+// `out` is 1 - in(1 - u); `in_out` joins the two halves. Values outside 0..1
+// clamp, as in Motion.
+
+fn ease_in_quad(u) { let v = clamp(u, 0.0, 1.0) return v * v }
+fn ease_in_cubic(u) { let v = clamp(u, 0.0, 1.0) return v * v * v }
+fn ease_in_expo(u) {
+    let v = clamp(u, 0.0, 1.0)
+    if v <= 0.0 { return 0.0 }
+    return (pow(2.0, 10.0 * v - 10.0) - pow(2.0, -10.0)) / (1.0 - pow(2.0, -10.0))
+}
+fn ease_out_quad(u) { return 1.0 - ease_in_quad(1.0 - u) }
+fn ease_out_cubic(u) { return 1.0 - ease_in_cubic(1.0 - u) }
+fn ease_out_expo(u) { return 1.0 - ease_in_expo(1.0 - u) }
+fn ease_in_out_cubic(u) {
+    if u < 0.5 { return 0.5 * ease_in_cubic(2.0 * u) }
+    return 1.0 - 0.5 * ease_in_cubic(2.0 - 2.0 * u)
+}
+fn ease_in_out_expo(u) {
+    if u < 0.5 { return 0.5 * ease_in_expo(2.0 * u) }
+    return 1.0 - 0.5 * ease_in_expo(2.0 - 2.0 * u)
+}

@@ -588,10 +588,11 @@ impl Job {
             self.cells.resize_with(chunks, ChunkCell::default);
         }
         self.ctx[K_COUNT as usize] = count as u32;
-        let (overflowed, reduced) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, if split { threads } else { 1 })?;
+        let (overflowed, host_error, reduced) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, if split { threads } else { 1 })?;
         let lanes = self.kernel.reduce_parts().1;
         self.stats.elements = count;
         self.stats.overflowed = overflowed;
+        self.stats.host_error = host_error;
         self.stats.reduced.clear();
         self.stats.reduced.extend_from_slice(&reduced[..lanes]);
         self.stats.nanos = t0.elapsed().as_nanos() as u64;

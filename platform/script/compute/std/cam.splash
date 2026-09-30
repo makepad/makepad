@@ -1,0 +1,53 @@
+// The camera in kernels (AK7): `view_proj` and its inverse as mat4 params
+// or input records.
+
+// Clip-space projection of a point: vec4 before the divide.
+fn clip(view_proj, p) { view_proj * vec4(p.x, p.y, p.z, 1.0) }
+
+// Normalized device coordinates (x, y in -1..1, z depth), w <= 0 maps far.
+fn project(view_proj, p) {
+    let c = view_proj * vec4(p.x, p.y, p.z, 1.0)
+    if c.w > 0.0 { c.xyz / c.w } else { vec3(0.0, 0.0, 2.0) }
+}
+
+// Screen pixels (origin top left) of a point.
+fn to_screen(view_proj, p, width, height) {
+    let n = project(view_proj, p)
+    vec2((n.x * 0.5 + 0.5) * width, (0.5 - n.y * 0.5) * height)
+}
+
+// The world point at NDC (x, y) and depth z (inverse view-projection).
+fn unproject(inv_view_proj, ndc) {
+    let c = inv_view_proj * vec4(ndc.x, ndc.y, ndc.z, 1.0)
+    if c.w != 0.0 { c.xyz / c.w } else { c.xyz }
+}
+
+// Whether a sphere (centre, radius) may be visible: tested against the
+// clip-space planes (conservative).
+fn sphere_in_view(view_proj, centre, radius) {
+    let c = view_proj * vec4(centre.x, centre.y, centre.z, 1.0)
+    let r = radius * (abs(view_proj.c0.x) + abs(view_proj.c1.y)) * 0.5 + radius
+    c.w + r > 0.0 && abs(c.x) <= c.w + r && abs(c.y) <= c.w + r && c.z <= c.w + r
+}
+
+// Whether a box (min, max corners) may be visible: some corner is inside
+// or the box straddles the frustum (conservative).
+fn box_in_view(view_proj, lo, hi) {
+    let out_l: int = 0
+    let out_r: int = 0
+    let out_b: int = 0
+    let out_t: int = 0
+    let out_n: int = 0
+    let out_f: int = 0
+    for k in 0..8 {
+        let p = vec3(if k % 2 == 0 { lo.x } else { hi.x }, if (k / 2) % 2 == 0 { lo.y } else { hi.y }, if k / 4 == 0 { lo.z } else { hi.z })
+        let c = view_proj * vec4(p.x, p.y, p.z, 1.0)
+        if c.x < -c.w { out_l = out_l + 1 }
+        if c.x > c.w { out_r = out_r + 1 }
+        if c.y < -c.w { out_b = out_b + 1 }
+        if c.y > c.w { out_t = out_t + 1 }
+        if c.z < -c.w { out_n = out_n + 1 }
+        if c.z > c.w { out_f = out_f + 1 }
+    }
+    out_l < 8 && out_r < 8 && out_b < 8 && out_t < 8 && out_n < 8 && out_f < 8
+}

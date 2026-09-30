@@ -384,7 +384,7 @@ fn supported(p: &Program, body: &Block) -> bool {
     fn walk(b: &Block, loads: &mut HashSet<(u32, u32)>, stores: &mut HashSet<(u32, u32)>) -> bool {
         for s in b {
             let ok = match s {
-                Stmt::Def(_, Op::In { .. }) | Stmt::Out { .. } => false,
+                Stmt::Def(_, Op::In { .. }) | Stmt::Out { .. } | Stmt::CallHost { .. } => false,
                 Stmt::Def(_, Op::Load { region: Region::State, .. }) | Stmt::Store { region: Region::State, .. } => false,
                 Stmt::Def(_, Op::Load { region: Region::Ctx, base, extent, .. }) => {
                     loads.insert((*base, *extent));
@@ -1006,6 +1006,7 @@ impl Em {
                 }
                 self.full = full;
             }
+            Stmt::CallHost { .. } => unreachable!("declined"),
             Stmt::Break(d) | Stmt::Continue(d) => {
                 let is_break = matches!(s, Stmt::Break(_));
                 let t = self.loops.len() - 1 - *d as usize;

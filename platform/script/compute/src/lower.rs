@@ -328,6 +328,13 @@ impl Builder {
                     map.retain(|k, _| !matches!(k, Key::Load(r, ..) if *r == region));
                 }
             }
+            // A host call may write its slices' buffers.
+            IS::CallHost { slices, .. } => {
+                let bufs: Vec<u8> = slices.iter().map(|x| x.buf).collect();
+                for (map, _) in &mut self.cse {
+                    map.retain(|k, _| !matches!(k, Key::Load(Region::Buf(b), ..) if bufs.contains(b)));
+                }
+            }
             _ => {}
         }
         self.blocks.last_mut().unwrap().push(s);
@@ -779,6 +786,7 @@ fn dce(p: &mut Program) {
                         mark(body, used);
                         vec![]
                     }
+                    IS::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
                     _ => vec![],
                 };
                 for u in us {
@@ -1563,6 +1571,8 @@ impl Lowerer {
                     self.globals.insert(name.clone(), bind);
                 }
                 Item::Fn(_) => {}
+                // Resolved before lowering (kernels); audio has no modules.
+                Item::Use { .. } => {}
             }
         }
         Ok(())
@@ -1797,6 +1807,7 @@ impl Lowerer {
                 (v, ann) => {
                     let v = match ann {
                         Some(TypeAnn::F32) => V::F(self.to_f(&v, span)?),
+                        Some(TypeAnn::F64) => V::D(self.to_d(&v, span)?),
                         Some(TypeAnn::I32) => V::I(self.to_i(&v, span)?),
                         Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4 | TypeAnn::Mat4)) => {
                             let n = ann_width(ann);
@@ -1964,6 +1975,7 @@ impl Lowerer {
                     let v = match ann {
                         Some(TypeAnn::I32) => V::I(self.to_i(&v, *span)?),
                         Some(TypeAnn::F32) => V::F(self.to_f(&v, *span)?),
+                        Some(TypeAnn::F64) => V::D(self.to_d(&v, *span)?),
                         Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4 | TypeAnn::Mat4)) => {
                             let n = ann_width(ann);
                             V::Vec(n, self.to_vec(&v, n, *span)?)
@@ -3412,6 +3424,7 @@ impl Lowerer {
                 Ok(V::Unit)
             }
             "param" => err(span, "param(...) is declared at the top level: `let cutoff = param(1200, 20, 20000)`"),
+            _ if self.domain == Domain::Kernel && crate::host::find(name).is_some() => self.kernel_host_call(name, &vals, args, span),
             _ => {
                 let hint = self.suggest(name, true);
                 err(span, format!("unknown function `{}`{}", name, hint))

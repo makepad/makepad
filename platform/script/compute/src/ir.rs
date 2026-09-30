@@ -190,6 +190,23 @@ pub enum Stmt {
     Loop { cap: u32, body: Block },
     Break(u32),
     Continue(u32),
+    /// A call of registered host function `f` ([`crate::host`]): scalar
+    /// arguments, buffer slices, and results defined here (like `Def`s).
+    CallHost { f: u16, args: Vec<Val>, slices: Vec<SliceArg>, rets: Vec<Val> },
+}
+
+/// A host call's buffer slice: host buffer `buf`, `len` words from word
+/// `off` (both clamped to the buffer at run time).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliceArg {
+    pub buf: u8,
+    pub off: Val,
+    pub len: Val,
+}
+
+/// A host call's worst-case cost (an unknown function: the most any may).
+pub fn host_cost(f: u16) -> u64 {
+    crate::host::get(f).map_or(u64::MAX / 4, |h| h.max_cost.saturating_add(8))
 }
 
 pub type Block = Vec<Stmt>;
@@ -224,6 +241,7 @@ impl Program {
                 sum = sum.saturating_add(match s {
                     Stmt::If(_, t, e) => 1 + walk(t).max(walk(e)),
                     Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body) + 2),
+                    Stmt::CallHost { f, .. } => host_cost(*f),
                     _ => 1,
                 });
             }
@@ -245,6 +263,7 @@ impl Program {
                         let reps = if depth == 0 { 1 } else { *cap as u64 };
                         reps.saturating_mul(walk(body, depth + 1) + 2)
                     }
+                    Stmt::CallHost { f, .. } => host_cost(*f),
                     _ => 1,
                 });
             }
@@ -453,6 +472,16 @@ unsafe impl Send for RawBuf {}
 unsafe impl Sync for RawBuf {}
 
 impl RawBuf {
+    /// Word `at` (0 past the end).
+    pub fn load_word(&self, at: usize) -> u32 {
+        self.load(at)
+    }
+
+    /// Writes word `at` (ignored past the end or when read-only).
+    pub fn store_word(&self, at: usize, x: u32) {
+        self.store(at, x)
+    }
+
     #[inline(always)]
     fn load(&self, at: usize) -> u32 {
         if at >= self.len {
@@ -673,6 +702,27 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 }
                 Stmt::Break(d) => return Flow::Break(*d),
                 Stmt::Continue(d) => return Flow::Continue(*d),
+                Stmt::CallHost { f, args, slices, rets } => {
+                    let mut a = [0u32; 16];
+                    for (k, v) in args.iter().enumerate().take(16) {
+                        a[k] = self.r(*v) as u32;
+                    }
+                    let mut sl = [crate::host::SliceRaw { buf: 0, off: 0, len: 0 }; 8];
+                    for (k, x) in slices.iter().enumerate().take(8) {
+                        sl[k] = crate::host::SliceRaw { buf: x.buf as u32, off: self.r(x.off) as u32, len: self.r(x.len) as u32 };
+                    }
+                    let mut out = [0u32; 1];
+                    let nr = rets.len().min(1);
+                    let ok = crate::host::invoke(*f, &a[..args.len().min(16)], &sl[..slices.len().min(8)], &mut out[..nr], self.mem.bufs);
+                    if !ok {
+                        if let Some(w) = self.mem.ctx.get_mut(crate::lower::kernel::K_HOST_ERR as usize) {
+                            *w = 1;
+                        }
+                    }
+                    for (k, v) in rets.iter().enumerate().take(1) {
+                        self.set_reg(v.0 as usize, out[k] as u64);
+                    }
+                }
             }
         }
         Flow::Next
@@ -710,6 +760,8 @@ pub struct Regions {
     pub shared_writable: bool,
     /// Writable flag per host buffer index.
     pub bufs: Vec<bool>,
+    /// Audio I/O ops are allowed (audio programs; they never call host
+    /// functions, which only kernels may).
     pub io: bool,
 }
 
@@ -900,6 +952,41 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                         self.block(e, depth)?;
                     }
                     Stmt::Loop { body, .. } => self.block(body, depth + 1)?,
+                    Stmt::CallHost { f, args, slices, rets } => {
+                        if self.r.io {
+                            return Err("a host call in an audio program".into());
+                        }
+                        let Some(h) = crate::host::get(*f) else {
+                            return Err(format!("no host function {}", f));
+                        };
+                        if args.len() != h.params.len() || slices.len() != h.slices.len() || rets.len() != h.rets.len() {
+                            return Err(format!("host call `{}`: wrong arity", h.name));
+                        }
+                        for (v, t) in args.iter().zip(h.params) {
+                            self.used(*v, Some(*t))?;
+                        }
+                        for (x, sig) in slices.iter().zip(h.slices) {
+                            self.used(x.off, Some(Ty::I32))?;
+                            self.used(x.len, Some(Ty::I32))?;
+                            let Some(w) = self.r.bufs.get(x.buf as usize) else {
+                                return Err(format!("host call `{}`: no host buffer {}", h.name, x.buf));
+                            };
+                            if sig.writable && !*w {
+                                return Err(format!("host call `{}` writes read-only buffer {}", h.name, x.buf));
+                            }
+                        }
+                        for (v, t) in rets.iter().zip(h.rets) {
+                            if self.ty(*v)? != *t {
+                                return Err(format!("host call `{}`: result {:?} is not {:?}", h.name, v, t));
+                            }
+                            if self.ever[v.0 as usize] {
+                                return Err(format!("{:?} defined twice", v));
+                            }
+                            self.ever[v.0 as usize] = true;
+                            self.visible[v.0 as usize] = true;
+                            self.scope.push(v.0);
+                        }
+                    }
                     Stmt::Break(d) | Stmt::Continue(d) => {
                         if *d >= depth {
                             return Err("break/continue outside its loop".into());

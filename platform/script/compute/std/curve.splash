@@ -1,0 +1,87 @@
+// Polylines in buffers: `pts` is a buffer of n points (vec2 or vec3),
+// `cum` the running arc length at each point (cum[0] = 0), written by
+// `cumulate` or the host. Parametric forms take u in 0..1.
+use std.search.*
+
+// Length of segment k (points k and k + 1).
+fn seg_len(pts, k) { distance(pts[k + 1], pts[k]) }
+
+// Arc length of the first n points (n <= 1025; longer lines: a `cum`
+// table and `total`).
+fn arclen(pts, n) {
+    let s = 0.0
+    for k in 0..(n - 1) { s = s + distance(pts[k + 1], pts[k]) }
+    s
+}
+
+// Writes the running arc length of point i into cum[i] (a kernel runs it
+// per element: `fn element(i) { cum[i] = curve.cum_at(pts, i) }` for
+// i <= 1024, or chain chunks of 1024 on the host).
+fn cum_at(pts, i) {
+    let s = 0.0
+    for k in 0..i { s = s + distance(pts[k + 1], pts[k]) }
+    s
+}
+
+fn total(cum, n) { cum[n - 1] }
+
+// The point at arc length s along the line (clamped to its ends).
+fn at_length(pts, cum, n, s) {
+    let k = clamp(last_le(cum, n, s), 0, n - 2)
+    let a = cum[k]
+    let b = cum[k + 1]
+    let t = if b > a { clamp((s - a) / (b - a), 0.0, 1.0) } else { 0.0 }
+    mix(pts[k], pts[k + 1], t)
+}
+
+// The unit tangent at arc length s.
+fn tangent_at_length(pts, cum, n, s) {
+    let k = clamp(last_le(cum, n, s), 0, n - 2)
+    normalize(pts[k + 1] - pts[k])
+}
+
+// The point at u (0..1) of the arc length.
+fn sample(pts, cum, n, u) { at_length(pts, cum, n, clamp(u, 0.0, 1.0) * cum[n - 1]) }
+
+// By point index: u (0..1) spread evenly over the points, not the length.
+fn point_at(pts, n, u) {
+    let f = clamp(u, 0.0, 1.0) * float(n - 1)
+    let k = min(int(f), n - 2)
+    mix(pts[k], pts[k + 1], f - float(k))
+}
+
+fn tangent_at(pts, n, u) {
+    let f = clamp(u, 0.0, 1.0) * float(n - 1)
+    let k = min(int(f), n - 2)
+    normalize(pts[k + 1] - pts[k])
+}
+
+// A Catmull-Rom spline through the points (ends repeated), u in 0..1.
+fn spline_at(pts, n, u) {
+    let f = clamp(u, 0.0, 1.0) * float(n - 1)
+    let k = min(int(f), n - 2)
+    let t = f - float(k)
+    catmull_rom(pts[max(k - 1, 0)], pts[k], pts[k + 1], pts[min(k + 2, n - 1)], t)
+}
+
+// Quadratic and cubic Bezier points and tangents.
+fn bezier2(a, b, c, t) {
+    let u = 1.0 - t
+    a * (u * u) + b * (2.0 * u * t) + c * (t * t)
+}
+fn bezier2_tangent(a, b, c, t) { (b - a) * (2.0 * (1.0 - t)) + (c - b) * (2.0 * t) }
+
+// A point on a circular arc (center, radius, start angle, sweep), u in 0..1.
+fn arc(center, radius, a0, sweep, u) {
+    let a = a0 + sweep * u
+    center + vec2(cos(a), sin(a)) * radius
+}
+
+// A 2D offset of a point along the left normal of a tangent.
+fn offset2(p, tangent, d) {
+    let t = normalize(tangent)
+    p + vec2(-t.y, t.x) * d
+}
+
+// The angle of a 2D tangent (radians).
+fn angle2(tangent) { atan2(tangent.y, tangent.x) }

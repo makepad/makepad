@@ -67,9 +67,22 @@ pub fn compile(src: &str) -> Result<Arc<Kernel>, Vec<ShaderError>> {
 /// Compiles with host layouts (GPU vertex/instance structs a kernel may
 /// write by field) for a backend.
 pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+    compile_with_modules(src, layouts, backend, &[])
+}
+
+/// Compiles with host layouts and the modules the kernel's `use` items
+/// name (the host resolved each to its text; std modules are built in).
+pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module]) -> Result<Arc<Kernel>, Vec<ShaderError>> {
     let toks = crate::parse::lex(src).map_err(|e| vec![e])?;
     let items = crate::parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
-    let all = crate::with_prelude(&items, crate::parse_prelude(KERNEL_PRELUDE, src.len()));
+    let prelude = crate::parse_prelude(KERNEL_PRELUDE, src.len());
+    // Module spans go past the prelude's, so errors inside them are
+    // reported at the kernel's call like the prelude's.
+    // The kernel's own items are the roots; library items (modules, the
+    // prelude) are compiled in only when reached.
+    let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
+    let items = crate::module::resolve(items, src.len() + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
+    let all = crate::module::prune(crate::with_prelude(&items, prelude), &roots);
     let lowered = kl::lower_kernel(&all, src.len() + 1, layouts).map_err(|e| vec![e])?;
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
@@ -112,7 +125,12 @@ pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<A
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
     #[cfg(target_arch = "aarch64")]
-    let native = if backend == Backend::Native { crate::arm64::compile(&lowered.program) } else { None };
+    let native = if backend == Backend::Native {
+        let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
+        crate::arm64::compile_with(&lowered.program, writable)
+    } else {
+        None
+    };
     #[cfg(target_arch = "aarch64")]
     let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&lowered.program) } else { None };
     #[cfg(not(target_arch = "aarch64"))]
@@ -179,6 +197,9 @@ pub struct RunStats {
     pub elements: usize,
     /// An emit found an element's slots full (records were dropped).
     pub overflowed: bool,
+    /// A host function call failed (a clamped slice, an error, a panic):
+    /// its results were zero.
+    pub host_error: bool,
     /// A reduce kernel's result (its lanes).
     pub reduced: Vec<f32>,
     pub nanos: u64,
@@ -394,6 +415,7 @@ impl Drop for FpEnv {
 pub(crate) struct ChunkCell {
     acc: [AtomicU32; 16],
     overflow: std::sync::atomic::AtomicBool,
+    host_error: std::sync::atomic::AtomicBool,
 }
 
 /// The ctx words a worker copies per chunk (params included).
@@ -449,7 +471,7 @@ pub(crate) fn run_chunks(
     cells: &[ChunkCell],
     exec: &dyn crate::sched::Executor,
     threads: usize,
-) -> Result<(bool, [f32; 16]), KernelError> {
+) -> Result<(bool, bool, [f32; 16]), KernelError> {
     let chunks = count.div_ceil(CHUNK);
     let (op, lanes, init) = kernel.reduce_init();
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -468,6 +490,7 @@ pub(crate) fn run_chunks(
             }
             wctx.copy_from_slice(&ctx[..words]);
             wctx[K_OVERFLOW as usize] = 0;
+            wctx[kl::K_HOST_ERR as usize] = 0;
             for l in 0..lanes {
                 wctx[K_ACC as usize + l] = init.to_bits();
             }
@@ -482,6 +505,7 @@ pub(crate) fn run_chunks(
                 cell.acc[l].store(wctx[K_ACC as usize + l], Ordering::Relaxed);
             }
             cell.overflow.store(wctx[K_OVERFLOW as usize] != 0, Ordering::Relaxed);
+            cell.host_error.store(wctx[kl::K_HOST_ERR as usize] != 0, Ordering::Relaxed);
         }
     };
     let helpers = if kernel.parallel_safe { threads.max(1).min(chunks.max(1)) } else { 1 };
@@ -495,15 +519,17 @@ pub(crate) fn run_chunks(
     }
     let mut reduced = [init; 16];
     let mut overflowed = false;
+    let mut host_error = false;
     for cell in &cells[..chunks] {
         // fan_out returned: every chunk's stores happened before (its join).
         overflowed |= cell.overflow.load(Ordering::Relaxed);
+        host_error |= cell.host_error.load(Ordering::Relaxed);
         for (l, a) in reduced.iter_mut().enumerate().take(lanes) {
             *a = combine(op, *a, f32::from_bits(cell.acc[l].load(Ordering::Relaxed)));
         }
     }
     let _ = op;
-    Ok((overflowed, reduced))
+    Ok((overflowed, host_error, reduced))
 }
 
 /// How a range of elements runs.
@@ -676,9 +702,9 @@ impl<'a> Call<'a> {
         let mode = if interp { Mode::Interp } else { self.native_mode(count) };
         self.ctx[K_COUNT as usize] = count as u32;
         let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
-        let (overflowed, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, if split { threads } else { 1 })?;
+        let (overflowed, host_error, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, if split { threads } else { 1 })?;
         let lanes = self.kernel.reduce_init().1;
-        Ok(RunStats { elements: count, overflowed, reduced: reduced[..lanes].to_vec(), nanos: t0.elapsed().as_nanos() as u64 })
+        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), nanos: t0.elapsed().as_nanos() as u64 })
     }
 
     /// Runs `count` elements split across up to `threads` workers of the
