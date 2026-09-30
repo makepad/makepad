@@ -230,3 +230,17 @@ pub struct MyDrawShader {
 Putting non-instance state in that region corrupts the GPU instance buffer,
 including when another draw shader extends yours. Follow the base shader's
 current layout and registration.
+
+## Per-frame script cost
+
+- Script runs interpreted, about 1-2 µs a function call. Per-frame code (a
+  property `fn(t)`, a Draw2D `draw`) should call native helpers on whole
+  arrays, such as `c.segs(flat_array, {m alpha})` and `c.curve(...)`, not a
+  script loop per element.
+- Work over roughly 1k elements a frame belongs in a `Kernel` (native code,
+  every core; `active_count: fn(t)` runs only the live elements).
+- In Motion documents, `memo(f, t)` runs a shared per-frame helper (a
+  camera, a beat) once per frame however many properties read it. Wrap a
+  vector result in an array: `[v]`.
+- Measure a Motion document with `makepad-motion bench doc --realtime`. The
+  Stage guide `stage-motion/performance.md` has the rules and budgets.
