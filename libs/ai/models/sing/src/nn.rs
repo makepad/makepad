@@ -190,6 +190,13 @@ impl Tensor {
 // ---------------------------------------------------------------------------
 
 static FORCE_CPU: AtomicBool = AtomicBool::new(false);
+static HOST_NOISE: AtomicBool = AtomicBool::new(false);
+
+/// Make `Graph::randn` noise on the host even on a GPU graph (bit-identical
+/// noise for differential tests).
+pub fn host_noise(v: bool) {
+    HOST_NOISE.store(v, Ordering::Relaxed);
+}
 /// Below this many multiply-accumulates a GPU dispatch costs more than it saves.
 const GPU_MIN_MACS: usize = 2 * 1024 * 1024;
 
@@ -872,6 +879,25 @@ impl<'p> Graph<'p> {
         (RowIndex::Host(idx), ld)
     }
 
+    /// The same values in a new shape (row-major order kept), `seg` rows per item.
+    pub fn reshape(&mut self, x: Id, rows: usize, cols: usize, seg: usize) -> Id {
+        let xv = self.vals[x].clone();
+        assert_eq!(xv.len(), rows * cols, "reshape size");
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if self.gpu {
+            let d = crate::nn_gpu::copy(xv.dev.as_ref().unwrap());
+            let t = Tensor { rows, cols, data: Vec::new(), dev: Some(d), seg, lens: None };
+            let back: Back = Box::new(move |d, g| {
+                if let Some(dx) = g.acc(x) {
+                    crate::nn_gpu::axpy(d.dev(), dx, 1.0);
+                }
+            });
+            return self.push(t, &[x], Some(back));
+        }
+        let back: Back = Box::new(move |d, g| g.add(x, d.host()));
+        self.push(Tensor::batched(rows, cols, xv.data.clone(), seg, None), &[x], Some(back))
+    }
+
     // --- linear algebra ------------------------------------------------------
 
     /// x[T,in] W[out,in]^T + b[1,out].
@@ -1388,6 +1414,18 @@ impl<'p> Graph<'p> {
             g.add_vec(x, dx);
         });
         self.push(Tensor::batched(items * frames, bins, mag, frames, None), &[x], Some(back))
+    }
+
+    /// Standard normal noise [rows, cols] (made on the device on a GPU graph).
+    pub fn randn(&mut self, rows: usize, cols: usize, seg: usize, lens: Option<Vec<u32>>, seed: u64) -> Id {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if self.gpu && !HOST_NOISE.load(Ordering::Relaxed) {
+            let t = crate::nn_gpu::randn(rows, cols, seg, lens, seed);
+            return self.input(t);
+        }
+        let mut rng = Rng::new(seed);
+        let v = (0..rows * cols).map(|_| rng.normal()).collect();
+        self.input(Tensor::batched(rows, cols, v, seg, lens))
     }
 
     /// The source waveforms of a vocoder batch (made on the device on a GPU graph).

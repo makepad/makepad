@@ -112,11 +112,16 @@ mod gpu {
 
 /// One training loop over batches from `next`, with `loss` building the graph.
 #[allow(clippy::too_many_arguments)]
+fn fresh_schedule(opt: &mut Optimizer) {
+    opt.cfg.start = opt.step;
+}
+
 fn run<B>(
     name: &str, opt: &mut Optimizer, use_gpu: bool, steps: usize, log_every: usize, save_every: usize, out: &Path,
     config: &[(String, String)], rx: &Receiver<B>, loss: &dyn Fn(&mut Graph, &B, &mut Rng) -> Vec<(&'static str, usize)>,
     on_save: &dyn Fn(&Optimizer, usize),
 ) {
+    fresh_schedule(opt);
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if use_gpu {
         opt.to_device();
@@ -127,11 +132,19 @@ fn run<B>(
     let mut t_log = Instant::now();
     let mut wait = 0.0f64;
     let start_step = opt.step;
+    // SING_PROFILE=1: per phase, host enqueue time and time to device idle.
+    let profile = std::env::var("SING_PROFILE").map(|v| v == "1").unwrap_or(false);
+    let light = std::env::var("SING_PROFILE").map(|v| v == "2").unwrap_or(false);
+    let mut prof = [0.0f64; 6];
+    let mut lp = [0.0f64; 5];
     while opt.step < start_step + steps {
         let tw = Instant::now();
         let batch = rx.recv().expect("data workers died");
         wait += tw.elapsed().as_secs_f64();
+        let tl = Instant::now();
         gpu::staging_begin_step();
+        lp[0] += tl.elapsed().as_secs_f64();
+        let tl = Instant::now();
         let grads;
         let mut readouts: Vec<(&'static str, usize)>;
         let losses: Option<Vec<(&'static str, f32)>>;
@@ -144,14 +157,33 @@ fn run<B>(
             };
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             let mut g = Graph::new(params, true);
+            let tp = Instant::now();
             readouts = loss(&mut g, &batch, &mut rng);
+            if profile {
+                prof[0] += tp.elapsed().as_secs_f64();
+                gpu::sync();
+                prof[1] += tp.elapsed().as_secs_f64();
+            }
             let total = readouts[0].1;
+            let tp = Instant::now();
             grads = g.backward(total);
+            if profile {
+                prof[2] += tp.elapsed().as_secs_f64();
+                gpu::sync();
+                prof[3] += tp.elapsed().as_secs_f64();
+            }
             let log_now = (opt.step + 1) % log_every == 0;
             losses = log_now.then(|| readouts.drain(..).map(|(n, id)| (n, g.host(id)[0])).collect());
         }
+        lp[1] += tl.elapsed().as_secs_f64();
+        let tp = Instant::now();
         let lr = opt.apply(&grads);
         drop(grads);
+        if profile {
+            prof[4] += tp.elapsed().as_secs_f64();
+            gpu::sync();
+            prof[5] += tp.elapsed().as_secs_f64();
+        }
         gpu::staging_end_step();
         if let Some(l) = losses {
             gpu::sync();
@@ -171,6 +203,19 @@ fn run<B>(
                 (total - free) as f64 / 1e9,
                 total as f64 / 1e9
             );
+            if light {
+                let k = 1000.0 / log_every as f64;
+                eprintln!("  light ms/step: staging wait {:.1} | graph build+backward+drop {:.1}", lp[0] * k, lp[1] * k);
+                lp = [0.0; 5];
+            }
+            if profile {
+                let k = 1000.0 / log_every as f64;
+                eprintln!(
+                    "  profile ms/step: forward enqueue {:.1} done {:.1} | backward enqueue {:.1} done {:.1} | optimiser enqueue {:.1} done {:.1}",
+                    prof[0] * k, prof[1] * k, prof[2] * k, prof[3] * k, prof[4] * k, prof[5] * k
+                );
+                prof = [0.0; 6];
+            }
             t_log = Instant::now();
             wait = 0.0;
         }
@@ -178,6 +223,95 @@ fn run<B>(
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             opt.sync_host();
             opt.save(&out.join(name), config).expect("checkpoint");
+            on_save(opt, opt.step);
+        }
+    }
+}
+
+/// The vocoder's GAN loop: per step a generator update (reconstruction +
+/// adversarial + feature matching; discriminator gradients dropped) and a
+/// discriminator update on the detached output.
+#[allow(clippy::too_many_arguments)]
+fn run_gan(
+    opt: &mut Optimizer, use_gpu: bool, steps: usize, log_every: usize, save_every: usize, out: &Path,
+    config: &[(String, String)], rx: &Receiver<VocBatch>, voc: &VocoderConfig, on_save: &dyn Fn(&Optimizer, usize),
+) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if use_gpu {
+        opt.to_device();
+        gpu::staging_init(512 << 20);
+    }
+    let _ = use_gpu;
+    fresh_schedule(opt);
+    let is_d: Vec<bool> = opt.params.names.iter().map(|n| n.starts_with("disc.")).collect();
+    let mut t_log = Instant::now();
+    let start_step = opt.step;
+    while opt.step < start_step + steps {
+        let batch = rx.recv().expect("data workers died");
+        gpu::staging_begin_step();
+        let log_now = (opt.step + 1) % log_every == 0;
+        let mut logged: Vec<(&str, f32)> = Vec::new();
+        let (fake, real);
+        let lr;
+        {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            let mut g = match &opt.dev {
+                Some(d) => Graph::new_gpu(&opt.params, &d.params, true),
+                None => Graph::new(&opt.params, true),
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let mut g = Graph::new(&opt.params, true);
+            let l = train::vocoder_gan_loss(&mut g, voc, &batch);
+            let mut grads = g.backward(l.total);
+            for (i, d) in is_d.iter().enumerate() {
+                if *d {
+                    grads[i] = None;
+                }
+            }
+            if log_now {
+                for (n, id) in [("stft", l.stft), ("mel", l.mel), ("adv", l.adv), ("fm", l.fm)] {
+                    logged.push((n, g.host(id)[0]));
+                }
+            }
+            fake = (*g.val(l.wave)).clone();
+            real = (*g.val(l.real)).clone();
+            drop(g);
+            lr = opt.apply_part(&grads, false);
+        }
+        {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            let mut g = match &opt.dev {
+                Some(d) => Graph::new_gpu(&opt.params, &d.params, true),
+                None => Graph::new(&opt.params, true),
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let mut g = Graph::new(&opt.params, true);
+            let (fi, ri) = (g.input(fake), g.input(real));
+            let dl = makepad_ai_sing::disc::d_loss(&mut g, ri, fi);
+            let mut grads = g.backward(dl);
+            for (i, d) in is_d.iter().enumerate() {
+                if !*d {
+                    grads[i] = None;
+                }
+            }
+            if log_now {
+                logged.push(("disc", g.host(dl)[0]));
+            }
+            drop(g);
+            opt.apply_part(&grads, true);
+        }
+        gpu::staging_end_step();
+        if log_now {
+            gpu::sync();
+            let dt = t_log.elapsed().as_secs_f64() / log_every as f64;
+            let parts: Vec<String> = logged.iter().map(|(n, v)| format!("{n} {v:.4}")).collect();
+            eprintln!("[voc-gan] step {} | {} | lr {lr:.2e} | {:.1} ms/step", opt.step, parts.join(" "), dt * 1000.0);
+            t_log = Instant::now();
+        }
+        if opt.step % save_every == 0 || opt.step == start_step + steps {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            opt.sync_host();
+            opt.save(&out.join("voc"), config).expect("checkpoint");
             on_save(opt, opt.step);
         }
     }
@@ -267,6 +401,7 @@ fn check() {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn check_once(tol: f64) -> bool {
     makepad_ai_sing::nn::force_cpu(true);
+    makepad_ai_sing::nn::host_noise(true);
     let ac = AcousticConfig::tiny();
     let voc = VocoderConfig::tiny();
     let params = declare(Some(&ac), Some(&voc), 5);
@@ -387,6 +522,38 @@ fn main() {
         check();
         return;
     }
+    if mode == "export" {
+        // sing_train export --ac A.ema.mksing --voc V.ema.mksing --out cantor.mksing
+        let mut c: Option<Cantor> = None;
+        let mut params = Params::new();
+        let mut cfg: Vec<(String, String)> = Vec::new();
+        for key in ["--ac", "--voc"] {
+            if let Some(p) = a.get(key) {
+                let w = makepad_ai_sing::weights::read(Path::new(&p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+                for (n, t) in w.params.names.iter().zip(&w.params.vals) {
+                    if !n.starts_with("disc.") && n.starts_with(if key == "--ac" { "ac." } else { "voc." }) {
+                        params.insert(n, (**t).clone());
+                    }
+                }
+                cfg = w.config.clone();
+            }
+        }
+        let ac = AcousticConfig::from_kv(&makepad_ai_sing::weights::section(&cfg, "ac.")).expect("acoustic config");
+        let voc = VocoderConfig::from_kv(&makepad_ai_sing::weights::section(&cfg, "voc.")).expect("vocoder config");
+        let mut cantor = Cantor::random(ac, voc, 1);
+        for (n, t) in params.names.iter().zip(&params.vals) {
+            cantor.params.insert(n, (**t).clone());
+        }
+        cantor.durations_trained = a.get("--ac").is_some();
+        cantor.f0_trained = a.flag("--f0-trained");
+        let out = PathBuf::from(a.get("--out").unwrap_or_else(|| "cantor.mksing".into()));
+        let mut kv = cantor.config();
+        kv.push(("credits".into(), makepad_ai_sing::CREDITS.into()));
+        makepad_ai_sing::weights::write(&out, &kv, &cantor.params, makepad_ai_sing::weights::Dtype::F16).unwrap();
+        c.replace(cantor);
+        eprintln!("wrote {} ({} params)", out.display(), c.unwrap().params.count());
+        return;
+    }
     let out = PathBuf::from(a.get("--out").unwrap_or_else(|| "cantor-run".into()));
     std::fs::create_dir_all(&out).unwrap();
     let (ac, voc) = configs(&a);
@@ -401,6 +568,7 @@ fn main() {
         makepad_ai_sing::nn::force_cpu(false);
     }
     let mut oc = OptConfig { total: steps, ..OptConfig::default() };
+    // A resumed run starts its own warmup and cosine (set from the checkpoint's step below).
     oc.lr = a.num("--lr", oc.lr);
     oc.warmup = a.num("--warmup", (steps / 20).clamp(10, 2000));
     let mut cfg_kv: Vec<(String, String)> = Vec::new();
@@ -475,10 +643,47 @@ fn main() {
             let voc_c = voc.clone();
             let (acc, vc) = (ac.clone(), voc.clone());
             let outc = out.clone();
-            run("voc", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| {
-                let l = train::vocoder_loss(g, &voc_c, b);
-                vec![("total", l.total), ("stft", l.stft), ("mel", l.mel)]
-            }, &|o, step| sample_render(&outc, step, None, Some(&o.ema_params()), &acc, &vc, reference.as_ref()));
+            let save = |o: &Optimizer, step: usize| {
+                // Samples from the generator's EMA only.
+                let mut p = o.ema_params();
+                let keep: Vec<usize> = (0..p.names.len()).filter(|i| !p.names[*i].starts_with("disc.")).collect();
+                let mut q = Params::new();
+                for i in keep {
+                    q.insert(&p.names[i].clone(), (*p.vals[i]).clone());
+                }
+                p = q;
+                sample_render(&outc, step, None, Some(&p), &acc, &vc, reference.as_ref())
+            };
+            if a.flag("--gan") {
+                // Add the discriminators to a reconstruction-only checkpoint.
+                if !opt.params.has("disc.r0.post.w") {
+                    let mut rng = Rng::new(11);
+                    let mut dp = Params::new();
+                    makepad_ai_sing::disc::declare(&mut dp, &mut rng);
+                    let mut o2 = Optimizer::new(opt.params.clone(), opt.cfg.clone());
+                    o2.step = opt.step;
+                    o2.m = opt.m.clone();
+                    o2.v = opt.v.clone();
+                    o2.ema = opt.ema.clone();
+                    for (n, t) in dp.names.iter().zip(&dp.vals) {
+                        o2.params.insert(n, (**t).clone());
+                        o2.m.push(vec![0.0; t.len()]);
+                        o2.v.push(vec![0.0; t.len()]);
+                        o2.ema.push(t.data.clone());
+                    }
+                    opt = o2;
+                }
+                opt.cfg.b1 = 0.8;
+                opt.cfg.b2 = 0.99;
+                opt.cfg.lr = a.num("--lr", 2e-4);
+                opt.cfg.start = opt.step;
+                run_gan(&mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &voc_c, &save);
+            } else {
+                run("voc", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| {
+                    let l = train::vocoder_loss(g, &voc_c, b);
+                    vec![("total", l.total), ("stft", l.stft), ("mel", l.mel)]
+                }, &save);
+            }
         }
         "ac" => {
             let items = load_items(&a.all("--data"));

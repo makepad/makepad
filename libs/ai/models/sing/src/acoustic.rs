@@ -188,14 +188,14 @@ pub fn velocity(g: &mut Graph, cfg: &AcousticConfig, x_t: Id, t_items: &[f32], c
     };
     let x = g.concat_cols(&[x_t, cond]);
     let mut h = linear(g, "ac.rf.in", x);
-    let mut te = Vec::with_capacity(rows * 64);
-    for r in 0..rows {
-        te.extend(time_embedding(t_items[r / seg]));
-    }
-    let te = g.input(Tensor::batched(rows, 64, te, seg, lens));
+    // The time embedding per item, then expanded to the item's rows.
+    let items = rows / seg;
+    let te: Vec<f32> = t_items.iter().flat_map(|t| time_embedding(*t)).collect();
+    let te = g.input(Tensor::new(items, 64, te));
     let te = linear(g, "ac.rf.t1", te);
     let te = g.act(te, Act::Silu);
     let te = linear(g, "ac.rf.t2", te);
+    let te = g.gather_rows(te, &(0..rows).map(|r| r / seg).collect::<Vec<_>>(), seg, lens);
     h = g.add(h, te);
     for l in 0..cfg.refine_layers {
         h = convnext(g, &format!("ac.rf.{l}"), h, 7);

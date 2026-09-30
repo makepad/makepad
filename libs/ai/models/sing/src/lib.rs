@@ -10,6 +10,7 @@
 //! Design: local/agent_state/edits/design/NEURAL-VOICE.md.
 
 pub mod data;
+pub mod disc;
 pub mod dsp;
 pub mod fft;
 pub mod nn;

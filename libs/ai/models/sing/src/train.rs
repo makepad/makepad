@@ -304,6 +304,27 @@ pub fn vocoder_loss(g: &mut Graph, cfg: &VocoderConfig, batch: &VocBatch) -> Voc
     VocLosses { total, stft, mel, wave }
 }
 
+pub struct GanLosses {
+    pub total: Id,
+    pub stft: Id,
+    pub mel: Id,
+    pub adv: Id,
+    pub fm: Id,
+    pub wave: Id,
+    pub real: Id,
+}
+
+/// The generator's half of a GAN step: reconstruction (weighted) +
+/// adversarial + feature matching.
+pub fn vocoder_gan_loss(g: &mut Graph, cfg: &VocoderConfig, batch: &VocBatch) -> GanLosses {
+    let r = vocoder_loss(g, cfg, batch);
+    let len = batch.t * HOP;
+    let real = g.input(Tensor::batched(batch.b * len, 1, batch.audio.clone(), len, None));
+    let (adv, fm) = crate::disc::g_losses(g, real, r.wave);
+    let total = g.sum_scalars(&[(r.stft, 20.0), (r.mel, 20.0), (adv, 1.0), (fm, 2.0)]);
+    GanLosses { total, stft: r.stft, mel: r.mel, adv, fm, wave: r.wave, real }
+}
+
 pub struct AcLosses {
     pub total: Id,
     pub mel: Id,
@@ -359,8 +380,7 @@ pub fn acoustic_loss(g: &mut Graph, cfg: &AcousticConfig, batch: &AcBatch, rng: 
     let voicing = g.bce_logits(v_p, v_t);
     // Flow refiner on the detached decoder states.
     let times: Vec<f32> = (0..b).map(|_| rng.unit()).collect();
-    let z: Vec<f32> = (0..rows * N_MEL).map(|_| rng.normal()).collect();
-    let zi = g.input(Tensor::batched(rows, N_MEL, z, t, Some(batch.frame_lens.clone())));
+    let zi = g.randn(rows, N_MEL, t, Some(batch.frame_lens.clone()), rng.next_u64());
     let tcol = g.input(Tensor::batched(rows, 1, (0..rows).map(|r| times[r / t]).collect(), t, None));
     let omt = g.input(Tensor::batched(rows, 1, (0..rows).map(|r| 1.0 - times[r / t]).collect(), t, None));
     let a = g.mul_col(zi, omt);
@@ -389,17 +409,20 @@ pub struct OptConfig {
     pub warmup: usize,
     pub total: usize,
     pub ema: f32,
+    /// The step this phase started at (the schedule is relative to it).
+    pub start: usize,
 }
 
 impl Default for OptConfig {
     fn default() -> Self {
-        OptConfig { lr: 4e-4, b1: 0.9, b2: 0.98, eps: 1e-8, wd: 0.01, clip: 1.0, warmup: 2000, total: 200_000, ema: 0.999 }
+        OptConfig { lr: 4e-4, b1: 0.9, b2: 0.98, eps: 1e-8, wd: 0.01, clip: 1.0, warmup: 2000, total: 200_000, ema: 0.999, start: 0 }
     }
 }
 
 impl OptConfig {
     /// Warmup then cosine to 5 % of the peak.
     pub fn lr_at(&self, step: usize) -> f32 {
+        let step = step.saturating_sub(self.start);
         if step < self.warmup {
             return self.lr * (step + 1) as f32 / self.warmup as f32;
         }
@@ -483,11 +506,20 @@ impl Optimizer {
 
     /// One AdamW step with global-norm clipping. Returns the learning rate.
     pub fn apply(&mut self, grads: &[Option<GBuf>]) -> f32 {
+        self.apply_part(grads, true)
+    }
+
+    /// AdamW on the parameters that have gradients; `advance` moves the step
+    /// (a GAN applies its two halves with one step).
+    pub fn apply_part(&mut self, grads: &[Option<GBuf>], advance: bool) -> f32 {
         let c = self.cfg.clone();
         let lr = c.lr_at(self.step);
-        self.step += 1;
-        let bc1 = 1.0 - c.b1.powi(self.step as i32);
-        let bc2 = 1.0 - c.b2.powi(self.step as i32);
+        let t = self.step + 1;
+        if advance {
+            self.step += 1;
+        }
+        let bc1 = 1.0 - c.b1.powi(t as i32);
+        let bc2 = 1.0 - c.b2.powi(t as i32);
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if let Some(d) = &self.dev {
             use makepad_ai_cuda::train::*;

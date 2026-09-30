@@ -373,23 +373,31 @@ pub fn f0_yin(x48: &[f32], fmin: f32, fmax: f32) -> Vec<f32> {
     let min_lag = (sr / fmax).max(2.0) as usize;
     let mut out = vec![0.0; frames];
     let mut d = vec![0.0f32; max_lag + 2];
+    let mut buf: Vec<f32> = Vec::new();
     for t in 0..frames {
         let c = t * hop;
         let start = c as isize - (w / 2) as isize;
-        let get = |i: isize| if i >= 0 && (i as usize) < x.len() { x[i as usize] } else { 0.0 };
-        let energy: f32 = (0..w).map(|k| get(start + k as isize).powi(2)).sum::<f32>() / w as f32;
+        // The frame and its lagged continuation, zero-padded, in one slice.
+        let span = w + max_lag + 2;
+        buf.clear();
+        buf.extend((0..span).map(|k| {
+            let i = start + k as isize;
+            if i >= 0 && (i as usize) < x.len() { x[i as usize] } else { 0.0 }
+        }));
+        let energy: f32 = buf[..w].iter().map(|v| v * v).sum::<f32>() / w as f32;
         if energy < 1e-7 {
             continue;
         }
         d[0] = 0.0;
         let mut cum = 0.0;
         let mut best = None;
+        let a = &buf[..w];
         for lag in 1..=max_lag + 1 {
+            let b = &buf[lag..lag + w];
             let mut s = 0.0;
             for k in 0..w {
-                let a = get(start + k as isize);
-                let b = get(start + (k + lag) as isize);
-                s += (a - b) * (a - b);
+                let e = a[k] - b[k];
+                s += e * e;
             }
             cum += s;
             d[lag] = if cum > 0.0 { s * lag as f32 / cum } else { 1.0 };
@@ -428,7 +436,12 @@ fn median_voiced(f0: &[f32], r: usize) -> Vec<f32> {
     out
 }
 
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// Windowed-sinc resampling (Hann-windowed, 24 zero crossings), any ratio.
+/// Rational ratios with few phases use a precomputed polyphase table.
 pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to {
         return x.to_vec();
@@ -438,7 +451,54 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     let cutoff = ratio.min(1.0);
     let zc = 24.0;
     let half = (zc / cutoff).ceil() as isize;
+    let taps = (2 * half) as usize;
+    let kernel = |t: f64| -> f64 {
+        // t in input samples from the output position.
+        let u = t * cutoff;
+        if u.abs() >= zc {
+            return 0.0;
+        }
+        let sinc = if u.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * u).sin() / (std::f64::consts::PI * u) };
+        sinc * (0.5 + 0.5 * (std::f64::consts::PI * u / zc).cos()) * cutoff
+    };
+    let g = gcd(from as u64, to as u64);
+    let phases = (to as u64 / g) as usize;
+    let step = from as u64 / g;
     let mut out = vec![0.0; out_len];
+    if phases <= 4096 {
+        // Output j sits at input position j*step/phases: integer part and phase.
+        let mut table = vec![0.0f32; phases * taps];
+        for p in 0..phases {
+            let frac = p as f64 / phases as f64;
+            for k in 0..taps {
+                let i = k as isize - half + 1; // relative input index
+                table[p * taps + k] = kernel(frac - i as f64) as f32;
+            }
+        }
+        for (j, o) in out.iter_mut().enumerate() {
+            let num = j as u64 * step;
+            let c = (num / phases as u64) as isize;
+            let p = (num % phases as u64) as usize;
+            let row = &table[p * taps..(p + 1) * taps];
+            let mut acc = 0.0f32;
+            let start = c - half + 1;
+            if start >= 0 && (start as usize + taps) <= x.len() {
+                let xs = &x[start as usize..start as usize + taps];
+                for k in 0..taps {
+                    acc += xs[k] * row[k];
+                }
+            } else {
+                for k in 0..taps {
+                    let i = start + k as isize;
+                    if i >= 0 && (i as usize) < x.len() {
+                        acc += x[i as usize] * row[k];
+                    }
+                }
+            }
+            *o = acc;
+        }
+        return out;
+    }
     for (j, o) in out.iter_mut().enumerate() {
         let pos = j as f64 / ratio;
         let c = pos.floor() as isize;
@@ -447,13 +507,7 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
             if i < 0 || i as usize >= x.len() {
                 continue;
             }
-            let t = (pos - i as f64) * cutoff;
-            if t.abs() >= zc {
-                continue;
-            }
-            let sinc = if t.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
-            let win = 0.5 + 0.5 * (std::f64::consts::PI * t / zc).cos();
-            acc += x[i as usize] as f64 * sinc * win * cutoff;
+            acc += x[i as usize] as f64 * kernel(pos - i as f64);
         }
         *o = acc as f32;
     }
@@ -588,6 +642,20 @@ mod tests {
         for v in mid {
             let cents = 1200.0 * (v / 233.08).log2();
             assert!(cents.abs() < 5.0, "yin {v} Hz");
+        }
+    }
+
+    #[test]
+    fn resampling_keeps_a_sine() {
+        for (from, to) in [(24_000u32, 48_000u32), (44_100, 48_000), (48_000, 16_000)] {
+            let f = 440.0;
+            let x: Vec<f32> = (0..from as usize / 2).map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / from as f32).sin()).collect();
+            let y = resample(&x, from, to);
+            let mid = y.len() / 2;
+            let err = (mid - 500..mid + 500)
+                .map(|i| (y[i] - (2.0 * std::f32::consts::PI * f * i as f32 / to as f32).sin()).abs())
+                .fold(0.0f32, f32::max);
+            assert!(err < 2e-3, "{from}->{to}: error {err}");
         }
     }
 

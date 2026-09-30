@@ -580,3 +580,10 @@ pub fn source_waves(src: &crate::vocoder::SourceCtl) -> (Tensor, Tensor) {
     let mk = |d: DevBuf| Tensor { rows: n, cols: 1, data: Vec::new(), dev: Some(d), seg: src.len, lens: None };
     (mk(h), mk(z))
 }
+
+pub fn randn(rows: usize, cols: usize, seg: usize, lens: Option<Vec<u32>>, seed: u64) -> Tensor {
+    let n = rows * cols;
+    let z = DevBuf::new(n);
+    ck("randn", unsafe { mkt_randn(z.mptr(), n, seed, st()) });
+    Tensor { rows, cols, data: Vec::new(), dev: Some(z), seg: seg.max(1), lens: lens.map(Arc::new) }
+}
