@@ -482,7 +482,10 @@ pub fn cascade_contains_xy(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
 /// stays in the z window, no receiver of its shadow reads a coarser
 /// cascade and the coarser tiles need not draw it. The reach is the length
 /// of the shadow the box casts onto ground `drop` metres below its base:
-/// (height + drop) / sin(sun elevation), capped at a 6 degree sun.
+/// (height + drop) / sin(sun elevation) at the true elevation. (It was
+/// capped at a 6 degree sun: below that a held caster's shadow ran past the
+/// finer tile's depth window into a coarser one that no longer drew it, and
+/// the tail ended in a straight cut across the ground.)
 pub fn cascade_holds_shadow(c: &CsmCascade, min: Vec3f, max: Vec3f, drop: f32) -> bool {
     let center = (min + max) * 0.5;
     let half = (max - min) * 0.5;
@@ -496,7 +499,7 @@ pub fn cascade_holds_shadow(c: &CsmCascade, min: Vec3f, max: Vec3f, drop: f32) -
     let (y0, y1) = span(c.ry);
     let (z0, z1) = span(c.rz);
     let dir = v3(c.rz.x, c.rz.y, c.rz.z);
-    let sin_elev = (dir.y.abs() / dir.length().max(1e-6)).max(0.1);
+    let sin_elev = (dir.y.abs() / dir.length().max(1e-6)).max(1e-3);
     let reach = (max.y - min.y + drop) / sin_elev;
     x0 >= -CORE && x1 <= CORE && y0 >= -CORE && y1 <= CORE && z0 >= 0.0 && z1 + reach * c.z_per_world <= 1.0
 }
@@ -933,6 +936,42 @@ mod tests {
             }
         }
         assert!(held > 0);
+    }
+
+    /// The same guarantee at an evening sun 3.7 degrees up (citydrive at
+    /// 18:54): a caster the finest cascade holds is left out of the next
+    /// one, so its whole shadow — a 13 m tree's is 200 m long — must stay in
+    /// the finest tile's depth window. Reach fitted for a 6 degree sun ended
+    /// held shadows in a straight cut where the next cascade took over.
+    #[test]
+    fn a_held_caster_keeps_its_whole_shadow_under_a_grazing_sun() {
+        let view = test_view();
+        let low = v3(-0.939, 0.065, -0.337).normalize();
+        let frame = fit_cascades(Some(&view), view.cam, low, v3(-600.0, 0.0, -600.0), v3(600.0, 20.0, 600.0), 80.0, 2048.0);
+        let mut held = 0;
+        for (ci, c) in frame.cascades.iter().enumerate().take(CSM_CASCADES - 1) {
+            for (h, half) in [(1.8, 0.4), (6.0, 0.3), (13.0, 4.0)] {
+                let hv = v3(half, h * 0.5, half);
+                for i in 0..60 {
+                    for j in 0..60 {
+                        let at = view.cam + v3(i as f32 * 4.0 - 120.0, h * 0.5 - 1.7, j as f32 * 4.0 - 60.0);
+                        if !cascade_holds_shadow(c, at - hv, at + hv, 2.0) { continue; }
+                        held += 1;
+                        // The tip: the top of the box traced down the light
+                        // to 2 m below its base.
+                        let reach = (h + 2.0) / low.y;
+                        for t in [0.0, reach * 0.5, reach] {
+                            for corner in [at - hv, at + hv] {
+                                let q = cascade_project(c, corner - low * t);
+                                assert!(q.x.abs() <= 0.9 && q.y.abs() <= 0.9 && q.z >= 0.0 && q.z <= 1.0,
+                                    "cascade {ci} holds a {h} m caster whose shadow leaves it: {q:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(held > 0, "some casters are held");
     }
 
     /// The generation windows nest strictly downward, so a newer tile

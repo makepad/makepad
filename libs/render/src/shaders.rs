@@ -1220,6 +1220,41 @@ mod shader_registration_tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
 
+    /// Cut-out casters inherit `morph_map` from DrawLmSunDepth, so their
+    /// alpha texture `tex` sits in a LATER slot. The cascades bind it by
+    /// name (gpu_lightmap::cutout_slot): bound at slot 0 it went to the
+    /// morph lane, and the alpha test read a stale slot — tree stand-ins
+    /// cast nothing, or whole rectangles that a low sun stretched into
+    /// long straight-edged bands across the ground.
+    #[test]
+    fn cutout_casters_bind_their_alpha_texture_by_name() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
+            });
+            vm.bx.heap.new_module(id!(widgets));
+            crate::local_shadows::sampling::script_mod(vm);
+            crate::clustered::script_mod(vm);
+            crate::fast_gi::script_mod(vm);
+            super::script_mod(vm);
+            crate::local_shadows::script_mod(vm);
+            crate::custom_material::register(vm);
+            let stock = DrawLmSunDepthCutout::script_new_with_default(vm).depth.draw_vars;
+            let material = crate::custom_material::DrawMaterialShadow::script_new_with_default(vm).depth.depth.draw_vars;
+            for (name, vars) in [("stock cut-out", stock), ("material caster", material)] {
+                let cx = vm.cx();
+                let textures = &cx.draw_shaders[vars.draw_shader_id.expect("registered").index].mapping.textures;
+                let tex = textures.iter().position(|t| t.id == live_id!(tex)).expect("alpha texture");
+                let morph = textures.iter().position(|t| t.id == live_id!(morph_map)).expect("morph lane");
+                assert_ne!(tex, morph, "{name}");
+                assert_eq!(crate::gpu_lightmap::cutout_slot(cx, &vars), Some(tex), "{name}: the alpha binds where the shader reads it");
+            }
+        });
+    }
+
     #[test]
     fn cube_family_script_shaders_compile_without_errors() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

@@ -852,6 +852,17 @@ pub(crate) fn ema_ms(avg: f32, sample: f64) -> f32 {
     if avg <= 0.0 { sample } else { avg + (sample - avg) * 0.0625 }
 }
 
+/// The slot a cut-out caster's alpha texture (`tex`) binds to. The depth
+/// casters inherit `morph_map` from DrawLmSunDepth, so `tex` is NOT slot 0:
+/// binding the alpha at 0 fed it to the morph lane and left the alpha test
+/// reading whatever the slot held last — stand-in cards cast nothing, or
+/// (with a float palette left bound) their whole rectangles, which a low
+/// sun stretches into long straight-edged bands.
+pub(crate) fn cutout_slot(cx: &Cx, dv: &DrawVars) -> Option<usize> {
+    let id = dv.draw_shader_id?;
+    cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == live_id!(tex))
+}
+
 fn csm_caster_counts(
     state: Option<&BakeState>,
     registered_statics: usize,
@@ -2963,6 +2974,7 @@ impl GpuLightmapBaker {
             // a masked model without a stand-in in every one.
             let cutouts = static_casters;
             let dc = &mut draws.sun_depth_cutout;
+            let cut_slot = cutout_slot(cx.cx, &dc.depth.draw_vars);
             dc.depth.flip_a = gen;
             dc.depth.tile_a = tile;
             dc.depth.draw_vars.options.scissor = scissor;
@@ -2976,7 +2988,7 @@ impl GpuLightmapBaker {
                 draws_n += 1;
                 dc.depth.transform = m.transform;
                 dc.depth.draw_vars.geometry_id = Some(m.geometry);
-                if let Some(t) = &m.cutout { dc.depth.draw_vars.set_texture(0, t); }
+                if let (Some(t), Some(slot)) = (&m.cutout, cut_slot) { dc.depth.draw_vars.set_texture(slot, t); }
                 if dc.depth.draw_vars.can_instance() {
                     cx.add_instance(&dc.depth.draw_vars);
                 }
@@ -2996,6 +3008,9 @@ impl GpuLightmapBaker {
                 // (until then the stock shadow below).
                 if let (Some(mat), Some(dm)) = (&mv.material, draws.material_shadow.as_mut()) {
                     if cx.cx.draw_shader_ready(mat.shader, false) {
+                        // The material's own pipeline first: the morph map and
+                        // the alpha texture bind by name into ITS slots.
+                        dm.draw_vars.draw_shader_id = Some(mat.shader);
                         dm.set_morph(cx.cx, mv.morph.as_ref());
                         dm.depth.depth.flip_a = gen;
                         dm.depth.depth.tile_a = tile;
@@ -3007,8 +3022,9 @@ impl GpuLightmapBaker {
                         dm.params = mat.params;
                         dm.cutoff = mat.cutoff;
                         dm.draw_vars.geometry_id = Some(mv.geometry);
-                        dm.draw_vars.set_texture(0, &mat.texture);
-                        dm.draw_vars.draw_shader_id = Some(mat.shader);
+                        if let Some(slot) = cutout_slot(cx.cx, &dm.draw_vars) {
+                            dm.draw_vars.set_texture(slot, &mat.texture);
+                        }
                         if dm.draw_vars.can_instance() {
                             cx.add_instance(&dm.draw_vars);
                         }
