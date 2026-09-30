@@ -453,7 +453,7 @@ impl KineticView {
     /// Install a built set.
     pub fn install(&mut self, cx: &mut Cx, mut set: GlyphSet, now: f32) {
         let chars = set.elements.iter().map(|e| e.char_index).filter(|c| *c != usize::MAX).max().map_or(0, |m| m + 1);
-        self.records.set(&set, self.values.copies, now, chars);
+        self.records.set(&set, self.values.copies, now, chars, self.values.dying.is_some());
         self.text_at = now;
         self.surface = None;
         if let Some((u, v, copies)) = self.values.surface {
@@ -534,7 +534,9 @@ impl KineticView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: [f32; 4], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4]) {
+    #[allow(clippy::too_many_arguments)]
+    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: [f32; 4], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4], share: [f32; 4]) {
+        dv.set_uniform(cx, live_id!(k_share), &share);
         for (k, name) in ["time", "beat", "phase", "pulse", "bar", "energy", "bpm"].iter().enumerate() {
             dv.set_uniform(cx, LiveId::from_str(name), &[s[k]]);
         }
@@ -580,6 +582,9 @@ impl KineticView {
             }
         }
         // ---- records and the animator
+        if self.records.dying > 0 && self.values.dying.is_none_or(|d| frame.time - self.text_at > d) {
+            self.records.retire_dying();
+        }
         self.records.sing(&frame.karaoke);
         let n = self.records.count;
         let stride = self.layout.stride as usize;
@@ -665,10 +670,10 @@ impl KineticView {
             None if self.values.floor.is_some() => height * 0.35 + size * 0.8,
             None => 0.0,
         };
-        let mut cam = [centre[0] + drift[0], centre[1] + lift + drift[1], dist, centre[0], centre[1], 0.0, 0.0, 1.0, 0.0, fov, 0.0, 0.0];
+        let mut cam = [centre[0] + drift[0], centre[1] + lift + drift[1], dist, centre[0], centre[1], 0.0, 0.0, 1.0, 0.0, fov, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         if let Some(k) = &self.camera_kernel {
             let base = cam;
-            let mut o = [0.0f32; 12];
+            let mut o = [0.0f32; 16];
             let mut call = k.call();
             call.set_time(frame.time);
             for ((name, _), v) in SIGNALS.iter().zip(sig.iter()) {
@@ -704,7 +709,7 @@ impl KineticView {
                 Ok(_) => {
                     self.curve.1.clear();
                     self.curve.1.extend(self.curve.0.chunks_exact(4).map(|c| [c[0], c[1], c[2]]));
-                    let (data, len) = crate::curve::resample(&self.curve.1, np);
+                    let (data, len) = crate::curve::resample(&self.curve.1, np, self.values.curve_frames);
                     self.curve.3 = len;
                     match &self.curve.2 {
                         Some(t) => {
@@ -724,6 +729,7 @@ impl KineticView {
                 }
             }
         }
+        let share = [cam[12], cam[13], cam[14], cam[15]];
         let view = Mat4f::look_at(vec3f(cam[0], cam[1], cam[2]), vec3f(cam[3], cam[4], cam[5]), vec3f(cam[6], cam[7], cam[8]));
         let near = (dist * 0.02).max(0.01);
         let projection = Mat4f::perspective(cam[9].clamp(1.0, 170.0), aspect, near, near * 5000.0);
@@ -766,7 +772,7 @@ impl KineticView {
             set_pass_camera(cx.cx, &pp.pass, view, proj);
             pp.list.begin_always(cx);
             let pview = [pw as f32, ph as f32, self.text_at, 1.0];
-            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu);
+            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu, share);
             if let Some(a) = &frame.audio {
                 bind_audio(cx.cx, &mut self.draw.draw_vars, a);
             }
@@ -784,7 +790,7 @@ impl KineticView {
         set_pass_camera(cx.cx, &self.pass, view, projection);
         self.list.begin_always(cx);
         if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
-            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu);
+            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu, share);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
             }
@@ -797,7 +803,7 @@ impl KineticView {
             b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
             calls += 1;
         }
-        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, viewu, textu);
+        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, viewu, textu, share);
         if let Some(c) = &frame.content {
             self.draw.draw_vars.set_texture(0, c);
         }

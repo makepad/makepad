@@ -114,11 +114,18 @@ pub fn compose(split: &Split, dials: &[(String, f32)], out: &str) -> Composed {
     Composed { source: s, map }
 }
 
-/// The camera record a `camera_fn: fn(c)` writes.
+/// The camera record a `camera_fn: fn(c)` writes. `share` is the kit's
+/// own: four values the camera fn works out once a frame (from the dials,
+/// the beat, the sound) that every look and backdrop reads as
+/// `self.k_share`, so the shaders do not repeat the maths.
 pub fn camera_layout() -> Layout {
     use makepad_script_compute::kernel::{FieldTy, LayoutField};
     let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-    Layout { name: "Camera".into(), stride: 12, fields: vec![f("eye", FieldTy::Vec3, 0), f("target", FieldTy::Vec3, 3), f("up", FieldTy::Vec3, 6), f("fov", FieldTy::F32, 9), f("roll", FieldTy::F32, 10)] }
+    Layout {
+        name: "Camera".into(),
+        stride: 16,
+        fields: vec![f("eye", FieldTy::Vec3, 0), f("target", FieldTy::Vec3, 3), f("up", FieldTy::Vec3, 6), f("fov", FieldTy::F32, 9), f("roll", FieldTy::F32, 10), f("share", FieldTy::Vec4, 12)],
+    }
 }
 
 /// The record a `curve_fn: fn(c)` writes: its point at parameter `u`.
@@ -156,7 +163,7 @@ pub fn compose_camera(split: &Split, dials: &[(String, f32)], f: &FnSrc) -> Comp
     let head = format!("fn kit_camera({cam}) {{");
     c.map.push((lines(&c.source), f.line, lines(&f.body) + 1));
     c.source.push_str(&format!("{head}{}\n{cam}\n}}\n", f.body));
-    c.source.push_str("let base = input(Camera)\nfn element(i) {\n let b = base[0]\n let c = Camera{}\n c.eye = b.eye\n c.target = b.target\n c.up = b.up\n c.fov = b.fov\n c.roll = b.roll\n out[i] = kit_camera(c)\n}\n");
+    c.source.push_str("let base = input(Camera)\nfn element(i) {\n let b = base[0]\n let c = Camera{}\n c.eye = b.eye\n c.target = b.target\n c.up = b.up\n c.fov = b.fov\n c.roll = b.roll\n c.share = b.share\n out[i] = kit_camera(c)\n}\n");
     c
 }
 

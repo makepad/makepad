@@ -15,11 +15,17 @@
 //!     surface: {u: 96 v: 32 copies: 1}   // a grid shaped by the look's `surface(uv)` hook
 //!     post: [Glow{threshold: 0.62 strength: 0.9}]
 //!     glyph: fn(g, o) { ... }            // the animator: a kernel (CPU)
-//!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU)
-//!     curve: {points: 256}  curve_fn: fn(c) { c.pos = ... }   // a path at c.u, even by arc length
+//!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU); c.share -> self.k_share
+//!     curve: {points: 256 closed: true up: [0, 1, 0]}  curve_fn: fn(c) { c.pos = ... }   // a path at c.u, even by arc length
+//!     dying: 0.8                          // a shorter text's surplus stays 0.8 s (g.dying = 1)
 //!     look: fn() -> vec4 { ... }         // every other fn: the glyph shader
 //! }
 //! ```
+//!
+//! Stock shader helpers besides the look's lighting: `self.fwidth(v)` (both
+//! draws), and on the backdrop `self.eye()`, `self.ray(uv)`,
+//! `self.plane_hit(n, d)` (this pixel's ray on the plane dot(n, p) = d) and
+//! `self.text_plane()` (the z = 0 point under the pixel).
 //!
 //! `glyph` and `camera_fn` (and the top-level fns) are kernel source: they
 //! are cut out of the text before the document VM sees it (their lines kept
@@ -296,9 +302,16 @@ pub struct KitValues {
     /// `curve: {points: 256}`: the curve_fn sampled at this many points and
     /// resampled evenly by arc length (see crate::curve).
     pub curve_points: Option<u32>,
+    /// `curve: {closed: true up: [0, 1, 0]}`: how the curve is framed.
+    pub curve_frames: crate::curve::Frames,
     /// `grow` runs 0..1 over this many beats (0: stays 1).
     pub cycle_beats: f32,
     pub pingpong: bool,
+    /// `dying: 0.8`: when a new text needs fewer elements than the last,
+    /// the surplus stays this many seconds as dying records (`g.dying` 1,
+    /// `g.changed_at` the change, `g.from` where it was) so a kit can fly
+    /// or fade them out; None: they vanish with the old text.
+    pub dying: Option<f32>,
     pub passes: Vec<makepad_render_graph::PassDecl>,
     pub pass_values: Vec<Vec<[f32; 4]>>,
 }
@@ -545,7 +558,7 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
     const TAKEN: &[&str] = &[
         "time", "seed", "count", "p1", "p2", "p3", "p4", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "bands",
         "key", "rim", "cap", "n", "vd", "eye", "content", "screen_uv", "finish", "shade", "env", "spec", "hue", "fog", "look", "floor", "deform", "backdrop", "picture", "ink",
-        "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy",
+        "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy", "fwidth", "ray", "plane_hit", "text_plane", "k_share", "dying",
     ];
     for (name, _) in &dials {
         let module_fn = crate::kernel::KINETIC_MODULE.lines().filter_map(|l| l.strip_prefix("fn ")).any(|l| l.split('(').next() == Some(name.as_str()));
@@ -576,6 +589,13 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
     });
     let cv = field(vm, o, "curve");
     let curve_points = cv.as_object().map(|c| num(field(vm, c, "points")).unwrap_or(256.0).clamp(4.0, 4096.0) as u32);
+    let curve_frames = cv.as_object().map_or(crate::curve::Frames::default(), |c| crate::curve::Frames {
+        closed: num(field(vm, c, "closed")).unwrap_or(0.0) > 0.5,
+        up: field(vm, c, "up").as_array().and_then(|a| {
+            let at = |i| num(vm.bx.heap.array_index(a, i, NoTrap));
+            Some([at(0)?, at(1)?, at(2)?])
+        }),
+    });
     let (mut cycle_beats, mut pingpong) = (0.0, false);
     let cy = field(vm, o, "cycle");
     if let Some(c) = cy.as_object() {
@@ -655,8 +675,10 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         picture,
         surface,
         curve_points,
+        curve_frames,
         cycle_beats,
         pingpong,
+        dying: f(vm, "dying").filter(|d| *d > 0.0).map(|d| d.min(30.0)),
         passes,
         pass_values,
     })

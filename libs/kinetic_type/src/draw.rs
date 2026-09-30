@@ -65,6 +65,8 @@ script_mod! {
         k_misc: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         // size (cap height), lines, elements, words
         k_text: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        // The kit's camera_fn `c.share` (four values it works out a frame).
+        k_share: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // xy = the target in pixels, z = the time the text last changed
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
 
@@ -219,6 +221,10 @@ script_mod! {
         hash1: fn(x: float) -> float {
             return fract(sin(x * 12.9898) * 43758.5453)
         }
+        // How fast `v` changes across a pixel (antialiasing widths).
+        fwidth: fn(v: float) -> float {
+            return abs(dFdx(v)) + abs(dFdy(v))
+        }
 
         // ---- the stock finishes ----
         shade: fn(nn: vec3) -> float {
@@ -359,6 +365,8 @@ script_mod! {
         col_bg: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         k_misc: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         k_text: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        // The kit's camera_fn `c.share` (four values it works out a frame).
+        k_share: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
         vertex: fn() {
             self.pos = self.geom.pos
@@ -397,6 +405,44 @@ script_mod! {
         }
         hash1: fn(x: float) -> float {
             return fract(sin(x * 12.9898) * 43758.5453)
+        }
+        // How fast `v` changes across a pixel (antialiasing widths).
+        fwidth: fn(v: float) -> float {
+            return abs(dFdx(v)) + abs(dFdy(v))
+        }
+        // The camera's eye in the world.
+        eye: fn() -> vec3 {
+            let c = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)
+            return c.xyz / max(c.w, 0.0001)
+        }
+        // The world direction the camera looks along through frame uv
+        // (0,0 top left).
+        ray: fn(uv: vec2) -> vec3 {
+            let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0)
+            let c0 = self.draw_pass.camera_projection * vec4(1.0, 0.0, 0.0, 0.0)
+            let c1 = self.draw_pass.camera_projection * vec4(0.0, 1.0, 0.0, 0.0)
+            let c2 = self.draw_pass.camera_projection * vec4(0.0, 0.0, 1.0, 0.0)
+            let zv = sign(c2.w)
+            let w = c2.w * zv
+            let vx = (ndc.x * w - c2.x * zv) / c0.x
+            let vy = (ndc.y * w - c2.y * zv) / c1.y
+            return normalize((self.draw_pass.camera_inv * vec4(vx, vy, zv, 0.0)).xyz)
+        }
+        // Where this pixel's ray meets the plane dot(n, p) = d (far along
+        // the ray when it runs parallel or away).
+        plane_hit: fn(n: vec3, d: float) -> vec3 {
+            let o = self.eye()
+            let r = self.ray(self.pos)
+            let den = dot(n, r)
+            let t = (d - dot(n, o)) / (sign(den) * max(abs(den), 0.000001))
+            if t < 0.0 || abs(den) < 0.000001 {
+                return o + r * 100000.0
+            }
+            return o + r * t
+        }
+        // The text plane (z = 0) point under this pixel, in world units.
+        text_plane: fn() -> vec2 {
+            return self.plane_hit(vec3(0.0, 0.0, 1.0), 0.0).xy
         }
         backdrop: fn() -> vec4 {
             if self.k_view.w > 0.5 {

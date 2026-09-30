@@ -82,7 +82,7 @@ pub const AUDIO_TEX_W: usize = AUDIO_BINS;
 /// Analysis window, samples (power of two — the FFT is radix-2).
 const FFT_SIZE: usize = 2048;
 /// Samples between rows. One hop = one spectrogram row + one waveform row.
-const HOP: usize = 1024;
+pub(crate) const HOP: usize = 1024;
 /// Waveform decimation: `HOP / AUDIO_BINS` samples per stored point, kept
 /// as the peak of the group so a transient never disappears between rows.
 const WAVE_DECIM: usize = HOP / AUDIO_BINS;
@@ -184,6 +184,52 @@ pub struct AudioFrame {
 
 /// How many bands [`AudioFrame::bands`] folds the spectrum into.
 pub const SPECTRUM_BANDS: usize = 32;
+
+/// A spectrum row folded into `out.len()` log-spaced bands, each the peak
+/// of its bins.
+pub fn fold_bands(row: &[f32], out: &mut [f32]) {
+    let n = out.len().max(1);
+    let bins = row.len();
+    for (k, v) in out.iter_mut().enumerate() {
+        let lo = k * bins / n;
+        let hi = ((k + 1) * bins / n).max(lo + 1).min(bins);
+        *v = row.get(lo..hi).map_or(0.0, |r| r.iter().cloned().fold(0.0, f32::max));
+    }
+}
+
+/// The signals beside the picture at one hop (the uniforms of
+/// [`bind_audio`] but the texture's).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Levels {
+    /// Smoothed (bass, mid, high, rms).
+    pub env: [f32; 4],
+    /// (kick, snare, hat, loud).
+    pub hit: [f32; 4],
+    pub lift: f32,
+    /// Auto-gained (bass, mid, high, rms).
+    pub norm: [f32; 4],
+    /// (drop, section).
+    pub form: [f32; 2],
+}
+
+impl Levels {
+    pub(crate) fn frame(&self, tex: Texture, spec_cursor: f32, wave_cursor: f32, hop_secs: f32, stereo: bool, bands: [f32; SPECTRUM_BANDS]) -> AudioFrame {
+        let e = self.env;
+        AudioFrame {
+            tex,
+            dim: vec4(AUDIO_BINS as f32, AUDIO_SPEC_ROWS as f32, spec_cursor, wave_cursor),
+            meta: vec4(AUDIO_TEX_W as f32, AUDIO_TEX_H as f32, AUDIO_WAVE_ROWS as f32, hop_secs),
+            env: vec4(e[0], e[1], e[2], e[3]),
+            levels: [e[3], e[0], e[1], e[2]],
+            hit: vec4(self.hit[0], self.hit[1], self.hit[2], self.hit[3]),
+            lift: self.lift,
+            stereo,
+            norm: vec4(self.norm[0], self.norm[1], self.norm[2], self.norm[3]),
+            form: vec4(self.form[0], self.form[1], 0.0, 0.0),
+            bands,
+        }
+    }
+}
 
 /// Bind the audio texture and its uniforms (the picture's dims, the levels,
 /// the onsets, the auto-gained levels, the song form) onto ONE draw call.
@@ -421,35 +467,35 @@ impl AudioReactive {
         let newest = self.rows_written.saturating_sub(1);
         let spec_cursor = (newest % AUDIO_SPEC_ROWS as u64) as f32;
         let wave_cursor = (newest % AUDIO_WAVE_ROWS as u64) as f32;
-        let hop_secs = if self.rate > 0.0 { HOP as f32 / self.rate } else { HOP as f32 / 48_000.0 };
-        Some(AudioFrame {
-            tex: tex.clone(),
-            dim: vec4(AUDIO_BINS as f32, AUDIO_SPEC_ROWS as f32, spec_cursor, wave_cursor),
-            meta: vec4(AUDIO_TEX_W as f32, AUDIO_TEX_H as f32, AUDIO_WAVE_ROWS as f32, hop_secs),
-            env: vec4(self.env[0], self.env[1], self.env[2], self.env[3]),
-            levels: [self.env[3], self.env[0], self.env[1], self.env[2]],
-            hit: vec4(self.onsets[0].env, self.onsets[1].env, self.onsets[2].env, self.loud()),
+        let mut bands = [0.0; SPECTRUM_BANDS];
+        self.bands(&mut bands);
+        Some(self.levels().frame(tex.clone(), spec_cursor, wave_cursor, self.hop_secs(), self.is_stereo(), bands))
+    }
+
+    fn hop_secs(&self) -> f32 {
+        if self.rate > 0.0 { HOP as f32 / self.rate } else { HOP as f32 / 48_000.0 }
+    }
+
+    /// The signals beside the picture after the newest hop.
+    pub(crate) fn levels(&self) -> Levels {
+        let n = |k: usize| {
+            let span = (self.agc_hi[k] - self.agc_lo[k]).max(0.06);
+            ((self.env[k] - self.agc_lo[k]) / span).clamp(0.0, 1.0)
+        };
+        Levels {
+            env: self.env,
+            hit: [self.onsets[0].env, self.onsets[1].env, self.onsets[2].env, self.loud()],
             lift: self.lift(),
-            stereo: self.is_stereo(),
-            form: vec4(
-                self.drop_env,
-                if self.loud_max > 1.0e-4 { (self.loud_long / self.loud_max).clamp(0.0, 1.0) } else { 0.0 },
-                0.0,
-                0.0,
-            ),
-            norm: {
-                let n = |k: usize| {
-                    let span = (self.agc_hi[k] - self.agc_lo[k]).max(0.06);
-                    ((self.env[k] - self.agc_lo[k]) / span).clamp(0.0, 1.0)
-                };
-                vec4(n(0), n(1), n(2), n(3))
-            },
-            bands: {
-                let mut b = [0.0; SPECTRUM_BANDS];
-                self.bands(&mut b);
-                b
-            },
-        })
+            norm: [n(0), n(1), n(2), n(3)],
+            form: [self.drop_env, if self.loud_max > 1.0e-4 { (self.loud_long / self.loud_max).clamp(0.0, 1.0) } else { 0.0 }],
+        }
+    }
+
+    /// The newest waveform row (signed, `AUDIO_BINS` points).
+    pub(crate) fn wave_row(&self) -> &[f32] {
+        let newest = self.rows_written.saturating_sub(1);
+        let base = (AUDIO_SPEC_ROWS + (newest % AUDIO_WAVE_ROWS as u64) as usize) * AUDIO_TEX_W;
+        &self.data[base..base + AUDIO_BINS]
     }
 
     /// Loudness against its recent maximum, 0..1.
@@ -486,13 +532,7 @@ impl AudioReactive {
     /// the peak of its bins), for a kernel, a Sim or a CPU look that reads
     /// levels per band rather than the texture.
     pub fn bands(&self, out: &mut [f32]) {
-        let row = self.spectrum();
-        let n = out.len().max(1);
-        for (k, v) in out.iter_mut().enumerate() {
-            let lo = k * AUDIO_BINS / n;
-            let hi = ((k + 1) * AUDIO_BINS / n).max(lo + 1);
-            *v = row[lo..hi].iter().cloned().fold(0.0, f32::max);
-        }
+        fold_bands(self.spectrum(), out);
     }
 
     /// True once real audio has been analysed at least once (status/debug).

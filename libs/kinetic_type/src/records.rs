@@ -16,6 +16,7 @@ const F_SUNG: usize = 25;
 const F_AGE: usize = 26;
 const F_NEAR: usize = 27;
 const F_PROGRESS: usize = 28;
+const F_DYING: usize = 39;
 
 /// The `Glyph` layout the animator reads (`let g = glyphs[i]`).
 pub fn glyph_layout() -> Layout {
@@ -30,7 +31,9 @@ pub fn glyph_layout() -> Layout {
     fields.push(f("from", FieldTy::Vec3, 32));
     // base scale (a cloud word's size), word weight 0..1, the word's ink
     // width and height (at its scale).
-    for (k, name) in ["k", "weight", "word_w", "word_h"].iter().enumerate() {
+    // `dying`: 1 on a record of the previous text's surplus (see
+    // `Records::set`), 0 on the text's own.
+    for (k, name) in ["k", "weight", "word_w", "word_h", "dying"].iter().enumerate() {
         fields.push(f(name, FieldTy::F32, 35 + k as u32));
     }
     Layout { name: "Glyph".into(), stride: GLYPH_WORDS as u32, fields }
@@ -57,7 +60,10 @@ pub struct Records {
     chars: Vec<char>,
     char_index: Vec<usize>,
     text_chars: usize,
+    /// Records in all: the text's own, then the dying ones.
     pub count: usize,
+    /// The dying records at the end of `data`.
+    pub dying: usize,
 }
 
 fn hash01(i: u32, k: u32) -> f32 {
@@ -74,9 +80,35 @@ impl Records {
     /// Fill the records for `set` repeated `copies` times. `now` is the
     /// host time the set arrives; glyphs that differ from the previous
     /// set at their ordinal are stamped with it.
-    pub fn set(&mut self, set: &GlyphSet, copies: usize, now: f32, text_chars: usize) {
+    ///
+    /// With `keep_dying`, the previous set's elements past the new set's
+    /// count stay as DYING records after the text's own: their old record
+    /// (rest, ordinals, `from` = where they were), `changed_at` = `now`,
+    /// `dying` = 1, and the new set's shape for the same char (dropped
+    /// when the new set has none: a letter shape that is gone).
+    pub fn set(&mut self, set: &GlyphSet, copies: usize, now: f32, text_chars: usize, keep_dying: bool) {
         let copies = copies.max(1);
         let n = set.elements.len();
+        let mut dying_rows: Vec<f32> = Vec::new();
+        if keep_dying && !self.chars.is_empty() {
+            let old_n = self.chars.len();
+            let alive = self.count - self.dying;
+            let old_copies = (alive / old_n.max(1)).max(1);
+            for c in 0..old_copies.min(copies) {
+                for i in n..old_n {
+                    let Some(shape) = set.elements.iter().find(|e| e.ch == self.chars[i]).map(|e| e.shape) else { continue };
+                    let row = &self.data[(c * old_n + i) * GLYPH_WORDS..(c * old_n + i + 1) * GLYPH_WORDS];
+                    let mut r = row.to_vec();
+                    r[32] = r[0];
+                    r[33] = r[1];
+                    r[34] = r[2];
+                    r[12 + 10] = shape as f32;
+                    r[F_CHANGED] = now;
+                    r[F_DYING] = 1.0;
+                    dying_rows.extend_from_slice(&r);
+                }
+            }
+        }
         let old_changed: Vec<f32> = (0..self.chars.len().min(n)).map(|i| self.data[i * GLYPH_WORDS + F_CHANGED]).collect();
         // Where each element was in the previous set (the same ordinal),
         // for morphs from the old text into the new; its own rest if new.
@@ -151,6 +183,18 @@ impl Records {
         self.chars = set.elements.iter().map(|e| e.ch).collect();
         self.char_index = set.elements.iter().map(|e| e.char_index).collect();
         let _ = letters;
+        self.dying = dying_rows.len() / GLYPH_WORDS;
+        self.count += self.dying;
+        self.data.extend_from_slice(&dying_rows);
+    }
+
+    /// Drop the dying records (their time is up).
+    pub fn retire_dying(&mut self) {
+        if self.dying > 0 {
+            self.count -= self.dying;
+            self.data.truncate(self.count * GLYPH_WORDS);
+            self.dying = 0;
+        }
     }
 
     /// The karaoke fields for this frame.
@@ -159,7 +203,7 @@ impl Records {
         if n == 0 {
             return;
         }
-        let copies = self.count / n;
+        let copies = (self.count - self.dying) / n;
         let mut per: Vec<(f32, f32, f32)> = vec![(0.0, 0.0, 0.0); n];
         let mut progress = 0.0;
         match karaoke {
@@ -225,12 +269,12 @@ mod tests {
         let a = build(&ShapeSpec { text: "10:58".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
         let b = build(&ShapeSpec { text: "10:59".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
         let mut r = Records::default();
-        r.set(&a, 2, 1.0, 5);
+        r.set(&a, 2, 1.0, 5, false);
         assert_eq!(r.count, 10);
         let at = |r: &Records, i: usize, f: usize| r.data[i * GLYPH_WORDS + f];
         assert_eq!((at(&r, 6, 12), at(&r, 6, 19), at(&r, 6, 20)), (1.0, 1.0, 2.0), "copy 1 of glyph 1");
         assert_eq!(at(&r, 4, 14), 1.0, "t of the last glyph");
-        r.set(&b, 2, 5.0, 5);
+        r.set(&b, 2, 5.0, 5, false);
         assert_eq!((at(&r, 3, F_CHANGED), at(&r, 4, F_CHANGED)), (-1e9, 5.0), "only the last digit changed");
         r.sing(&Karaoke::Progress(0.5));
         assert_eq!((at(&r, 0, F_SUNG), at(&r, 2, F_SUNG), at(&r, 4, F_SUNG)), (1.0, 0.5, 0.0), "the wipe is in the middle glyph");
@@ -240,5 +284,31 @@ mod tests {
         assert_eq!(l.fields.iter().find(|f| f.name == "word_h").unwrap().offset, 38);
         assert!(at(&r, 0, 37) > 0.0 && at(&r, 0, 35) == 1.0, "word width and base scale");
         assert_eq!(at(&r, 4, 32), a.elements[4].pivot[0], "from: where glyph 4 was before");
+    }
+
+    /// A shorter text keeps the old surplus as dying records after its own
+    /// (from where they were, stamped with the change) until retired; a
+    /// letter shape the new text lacks is not kept.
+    #[test]
+    fn a_shorter_text_keeps_its_surplus_as_dying_records() {
+        let a = build(&ShapeSpec { text: "1111".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
+        let b = build(&ShapeSpec { text: "11".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
+        let c = build(&ShapeSpec { text: "2".into(), depth: 0.0, ..ShapeSpec::default() }).unwrap();
+        let mut r = Records::default();
+        r.set(&a, 1, 0.0, 4, true);
+        assert_eq!((r.count, r.dying), (4, 0));
+        r.set(&b, 1, 3.0, 2, true);
+        assert_eq!((r.count, r.dying), (4, 2), "two ones die");
+        let at = |r: &Records, i: usize, f: usize| r.data[i * GLYPH_WORDS + f];
+        assert_eq!((at(&r, 2, F_DYING), at(&r, 2, F_CHANGED)), (1.0, 3.0));
+        assert_eq!(at(&r, 1, F_DYING), 0.0);
+        assert_eq!(at(&r, 3, 32), a.elements[3].pivot[0], "from where it was");
+        r.sing(&Karaoke::Progress(1.0));
+        r.retire_dying();
+        assert_eq!((r.count, r.dying, r.data.len()), (2, 0, 2 * GLYPH_WORDS));
+        r.set(&c, 1, 5.0, 1, true);
+        assert_eq!(r.dying, 0, "a `1` has no shape in `2`: not kept");
+        let l = glyph_layout();
+        assert_eq!(l.fields.iter().find(|f| f.name == "dying").unwrap().offset, 39);
     }
 }
