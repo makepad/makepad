@@ -419,6 +419,7 @@ enum State {
     },
     VarDynOrTyped {
         index: u32,
+        name: LiveId,
     },
     VarType {
         index: u32,
@@ -428,6 +429,7 @@ enum State {
     },
     EmitVarDyn {
         index: u32,
+        name: LiveId,
     },
     EmitVarTyped {
         index: u32,
@@ -803,14 +805,23 @@ pub(crate) struct SlotCtx {
     /// Slots are resolved at log time — a name sealed at loop exit (or
     /// reused in a sibling loop with a fresh slot) keeps correct candidates.
     reads: Vec<(u32, LiveId, u32)>,
-    /// LET_DYN positions to become LET_SLOT: (position, name, slot)
+    /// LET_DYN / VAR_DYN positions to become LET_SLOT: (position, name, slot)
     lets: Vec<(u32, LiveId, u32)>,
+    /// the positions in `lets` that are VAR_DYN (become VAR_SLOT)
+    vars: Vec<u32>,
+    /// every bare identifier read or assigned in the body so far, in order
+    /// (slotted or not): a let in a while/loop body may slot only when no
+    /// read of its name since the loop's start (condition included) could
+    /// see the previous iteration's binding in the persisting loop scope.
+    seen: Vec<LiveId>,
     /// assign reduce positions to become STORE_SLOT / ASSIGN_SLOT_*
     assigns: Vec<(u32, LiveId, u32, Opcode)>,
     /// enclosing loop kinds, innermost last (true = for, false = while/loop).
     /// for-loops reset their iteration scope, so lets inside them can be
     /// slotted; while/loop bodies keep shadow chains and stay dynamic.
     loop_kinds: Vec<bool>,
+    /// `seen.len()` when each enclosing loop opened, parallel to loop_kinds
+    loop_marks: Vec<usize>,
 }
 
 pub struct ScriptParser {
@@ -1038,8 +1049,11 @@ impl ScriptParser {
             poisoned: Vec::new(),
             reads: Vec::new(),
             lets: Vec::new(),
+            vars: Vec::new(),
+            seen: Vec::new(),
             assigns: Vec::new(),
             loop_kinds: Vec::new(),
+            loop_marks: Vec::new(),
         });
     }
 
@@ -1083,8 +1097,13 @@ impl ScriptParser {
                 // preserve flag bits (pop_to_me/need_nil set post-emission)
                 let flags = self.opcodes[*at as usize].raw() as u32
                     & (OpcodeArgs::POP_TO_ME_FLAG | OpcodeArgs::NEED_NIL_FLAG);
+                let op = if ctx.vars.contains(at) {
+                    Opcode::VAR_SLOT
+                } else {
+                    Opcode::LET_SLOT
+                };
                 self.opcodes[*at as usize] = ScriptValue::from_opcode_args(
-                    Opcode::LET_SLOT,
+                    op,
                     OpcodeArgs(OpcodeArgs::from_u32(slot).raw() | flags),
                 );
             }
@@ -1213,6 +1232,9 @@ impl ScriptParser {
         }
         let at = self.code_len();
         if let Some(ctx) = self.slot_ctxs.last_mut() {
+            if !ctx.loop_kinds.is_empty() {
+                ctx.seen.push(name);
+            }
             if let Some((_, slot, _)) = ctx.names.iter().find(|(n, _, _)| *n == name) {
                 let slot = *slot;
                 ctx.reads.push((at, name, slot));
@@ -1222,6 +1244,15 @@ impl ScriptParser {
 
     /// `let name = expr` about to emit LET_DYN at code_len.
     fn slot_note_let(&mut self, name: LiveId) {
+        self.slot_note_binding(name, false);
+    }
+
+    /// `var name = expr` about to emit VAR_DYN at code_len: binds like a let.
+    fn slot_note_var(&mut self, name: LiveId) {
+        self.slot_note_binding(name, true);
+    }
+
+    fn slot_note_binding(&mut self, name: LiveId, is_var: bool) {
         if Self::is_reserved_binding(name) || name == id!(_) {
             return;
         }
@@ -1235,10 +1266,16 @@ impl ScriptParser {
                 }
                 return;
             }
-            // inside a while/loop body the iteration shadow chain persists —
-            // only for-loop bodies (scope reset per iteration) can slot lets
+            // A while/loop body keeps its iteration scope across passes: a
+            // read of the name earlier in the loop (its condition, or code
+            // before this let) sees the previous pass's binding there. Such
+            // a name stays dynamic; otherwise the slot, which also persists
+            // across passes, reads exactly what the loop scope would.
             if ctx.loop_kinds.last() == Some(&false) {
-                return;
+                let mark = *ctx.loop_marks.last().unwrap_or(&0);
+                if ctx.seen[mark.min(ctx.seen.len())..].contains(&name) {
+                    return;
+                }
             }
             let slot = ctx
                 .lets
@@ -1250,6 +1287,9 @@ impl ScriptParser {
             let depth = ctx.loop_kinds.len() as u32;
             ctx.names.push((name, slot, depth));
             ctx.lets.push((at, name, slot));
+            if is_var {
+                ctx.vars.push(at);
+            }
         }
     }
 
@@ -1312,12 +1352,14 @@ impl ScriptParser {
     fn slot_loop_enter(&mut self, is_for: bool) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             ctx.loop_kinds.push(is_for);
+            ctx.loop_marks.push(ctx.seen.len());
         }
     }
 
     fn slot_loop_exit(&mut self) {
         if let Some(ctx) = self.slot_ctxs.last_mut() {
             ctx.loop_kinds.pop();
+            ctx.loop_marks.pop();
             // seal names defined inside the exited loop: reads after the
             // loop must resolve dynamically (outer scope or not-found),
             // not to the leftover slot value. Their in-loop candidates
@@ -3098,29 +3140,30 @@ impl ScriptParser {
                             id
                         );
                     }
-                    // var stays dynamic; a slotted name may not be re-bound
-                    self.slot_poison(id);
                     // lets expect an assignment expression
                     // push the id on to the stack
                     self.push_code(id.into(), self.index);
-                    self.state.push(State::VarDynOrTyped { index });
+                    self.state.push(State::VarDynOrTyped { index, name: id });
                     return 1;
                 } else {
                     // unknown
                     error!(self, tokenizer, "Var expected identifier");
                 }
             }
-            State::VarDynOrTyped { index } => {
+            State::VarDynOrTyped { index, name } => {
                 if op == id!(=) {
                     // assignment following
-                    self.state.push(State::EmitVarDyn { index });
+                    self.state.push(State::EmitVarDyn { index, name });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 } else if op == id!(:) {
-                    // type following
+                    // typed var: stays dynamic; the name must too
+                    self.slot_poison(name);
                     self.state.push(State::VarType { index });
                     return 1;
                 } else {
+                    // `var x` without value: stays dynamic; the name must too
+                    self.slot_poison(name);
                     self.push_code(
                         ScriptValue::from_opcode_args(Opcode::VAR_DYN, OpcodeArgs::NIL),
                         index,
@@ -3152,7 +3195,10 @@ impl ScriptParser {
                     );
                 }
             }
-            State::EmitVarDyn { index } => {
+            State::EmitVarDyn { index, name } => {
+                // VAR_DYN binds exactly like LET_DYN; it slots like a let
+                // (VAR_SLOT keeps the var-ness for the shader compiler)
+                self.slot_note_var(name);
                 self.push_code(Opcode::VAR_DYN.into(), index);
             }
             State::EmitVarTyped { index } => {

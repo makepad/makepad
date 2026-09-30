@@ -258,6 +258,10 @@ impl Opcode {
     // Push nil: the value of an if/match arm that leaves none, where the
     // construct's value is used. The shader compiler ignores it.
     pub const NIL_ARM: Self = Self(141);
+
+    // `var name = value` in a slot-compiled body: LET_SLOT for the VM, a
+    // mutable binding for the shader compiler.
+    pub const VAR_SLOT: Self = Self(142); // arg = slot; stack [id, value] -> [], slot = value
 }
 
 impl fmt::Debug for OpcodeArgs {
@@ -453,6 +457,7 @@ impl Opcode {
             Self::ASSIGN_SLOT_DIV => Some("slot/="),
             Self::ASSIGN_SLOT_MOD => Some("slot%="),
             Self::NIL_ARM => Some("nil_arm"),
+            Self::VAR_SLOT => Some("var_slot"),
             _ => None,
         }
     }

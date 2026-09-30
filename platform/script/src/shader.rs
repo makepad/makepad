@@ -1393,6 +1393,7 @@ impl ShaderFnCompiler {
                 }
             }
             Opcode::LET_SLOT => self.handle_let_dyn(vm, output, OpcodeArgs::NONE),
+            Opcode::VAR_SLOT => self.handle_var_dyn(vm, output, OpcodeArgs::NONE),
             Opcode::STORE_SLOT => self.handle_assign(vm, output),
             Opcode::ASSIGN_SLOT_ADD => {
                 self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "+=", false);

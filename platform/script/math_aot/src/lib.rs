@@ -1135,7 +1135,7 @@ impl<'a> Translator<'a> {
                 self.stack.push(CtItem::Val(val));
             }
 
-            Opcode::LET_SLOT | Opcode::STORE_SLOT => {
+            Opcode::LET_SLOT | Opcode::VAR_SLOT | Opcode::STORE_SLOT => {
                 let value = self.pop_value()?;
                 match self.pop()? {
                     CtItem::Id(_) => {}
