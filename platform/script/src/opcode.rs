@@ -19,27 +19,33 @@ impl OpcodeArgs {
     /// error.
     pub const OPTIONAL_FIELD: Self = Self(Self::TYPE_NUMBER | 1);
 
+    #[inline]
     pub fn raw(&self) -> u32 {
         self.0
     }
 
+    #[inline]
     pub fn from_u32(jump_to_next: u32) -> Self {
         Self(Self::TYPE_NUMBER | (jump_to_next & 0x0fff_ffff))
     }
 
     /// The arguments without the NEED_NIL and POP_TO_ME flags.
+    #[inline]
     pub fn without_flags(self) -> Self {
         Self(self.0 & !(Self::NEED_NIL_FLAG | Self::POP_TO_ME_FLAG))
     }
 
+    #[inline]
     pub fn set_need_nil(self) -> Self {
         Self(self.0 | Self::NEED_NIL_FLAG)
     }
 
+    #[inline]
     pub fn to_u32(&self) -> u32 {
         self.0 & 0x1fff_ffff
     }
 
+    #[inline]
     pub fn arg_type(&self) -> u32 {
         self.0 & Self::TYPE_MASK
     }
@@ -48,18 +54,22 @@ impl OpcodeArgs {
     //     self.0 & Self::STATEMENT_FLAG != 0
     // }
 
+    #[inline]
     pub fn is_need_nil(&self) -> bool {
         self.0 & Self::NEED_NIL_FLAG != 0
     }
 
+    #[inline]
     pub fn is_pop_to_me(&self) -> bool {
         self.0 & Self::POP_TO_ME_FLAG != 0
     }
 
+    #[inline]
     pub fn is_nil(&self) -> bool {
         self.0 & Self::TYPE_MASK == Self::TYPE_NIL
     }
 
+    #[inline]
     pub fn is_u32(&self) -> bool {
         self.0 & Self::TYPE_MASK == Self::TYPE_NUMBER
     }
@@ -68,6 +78,7 @@ impl OpcodeArgs {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Opcode(pub u8);
 impl Opcode {
+    #[inline]
     pub fn raw(&self) -> u8 {
         self.0
     }
@@ -100,6 +111,7 @@ impl Opcode {
     pub const SHALLOW_EQ: Self = Self(23);
     pub const SHALLOW_NEQ: Self = Self(24);
 
+    #[inline]
     pub const fn is_assign(self) -> bool {
         self.0 >= Opcode::ASSIGN_ME.0 && self.0 <= Opcode::ASSIGN_INDEX_IFNIL.0
     }

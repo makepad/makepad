@@ -188,37 +188,45 @@ impl ScriptObjectTag {
     pub const STORAGE_VEC2: u64 = 1 << Self::STORAGE_SHIFT;
     pub const STORAGE_MAP: u64 = 2 << Self::STORAGE_SHIFT;
 
+    #[inline]
     pub fn proto_fwd(&self) -> u64 {
         self.0 & Self::PROTO_FWD
     }
 
+    #[inline]
     pub fn set_proto_fwd(&mut self, fwd: u64) {
         self.0 = (self.0 & !Self::PROTO_FWD) | (fwd & Self::PROTO_FWD)
     }
 
     // STORAGE
 
+    #[inline]
     pub fn is_auto(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_AUTO
     }
 
+    #[inline]
     pub fn is_vec2(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_VEC2
     }
 
+    #[inline]
     pub fn is_map(&self) -> bool {
         self.0 & Self::STORAGE_MASK == Self::STORAGE_MAP
     }
 
+    #[inline]
     pub fn set_vec2(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
         self.0 |= Self::STORAGE_VEC2;
     }
 
+    #[inline]
     pub fn set_auto(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
     }
 
+    #[inline]
     pub fn set_map(&mut self) {
         self.0 &= !Self::STORAGE_MASK;
         self.0 |= Self::STORAGE_MAP;
@@ -226,27 +234,33 @@ impl ScriptObjectTag {
 
     // FLAGS
 
+    #[inline]
     pub fn set_first_applied_and_clean(&mut self) {
         self.0 &= !Self::DIRTY;
         self.0 |= Self::FIRST_APPLIED;
     }
 
+    #[inline]
     pub fn is_first_applied(&self) -> bool {
         self.0 & Self::FIRST_APPLIED != 0
     }
 
+    #[inline]
     pub fn set_tracked(&mut self) {
         self.0 |= Self::TRACKED
     }
 
+    #[inline]
     pub fn is_tracked(&self) -> bool {
         self.0 & Self::TRACKED != 0
     }
 
+    #[inline]
     pub fn set_dirty(&mut self) {
         self.0 |= Self::DIRTY
     }
 
+    #[inline]
     pub fn check_and_clear_dirty(&mut self) -> bool {
         if self.0 & Self::DIRTY != 0 {
             self.0 &= !Self::DIRTY;
@@ -256,38 +270,47 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn set_string_keys(&mut self) {
         self.0 |= Self::STRING_KEYS
     }
 
+    #[inline]
     pub fn is_string_keys(&self) -> bool {
         self.0 & Self::STRING_KEYS != 0
     }
 
+    #[inline]
     pub fn set_from_eval(&mut self) {
         self.0 |= Self::FROM_EVAL
     }
 
+    #[inline]
     pub fn is_from_eval(&self) -> bool {
         self.0 & Self::FROM_EVAL != 0
     }
 
+    #[inline]
     pub fn set_static(&mut self) {
         self.0 |= Self::STATIC
     }
 
+    #[inline]
     pub fn is_static(&self) -> bool {
         self.0 & Self::STATIC != 0
     }
 
+    #[inline]
     pub fn is_notproto(&self) -> bool {
         self.0 & Self::NOTPROTO != 0
     }
 
+    #[inline]
     pub fn set_notproto(&mut self) {
         self.0 |= Self::NOTPROTO
     }
 
+    #[inline]
     pub fn is_frozen(&self) -> bool {
         self.0 & Self::FROZEN != 0
     }
@@ -299,111 +322,135 @@ impl ScriptObjectTag {
         self.0 & (Self::FROZEN | Self::STATIC) != 0
     }
 
+    #[inline]
     pub fn is_validated(&self) -> bool {
         self.0 & Self::VALIDATED != 0
     }
 
+    #[inline]
     pub fn is_map_add(&self) -> bool {
         self.0 & Self::MAP_ADD != 0
     }
 
+    #[inline]
     pub fn set_reffed(&mut self) {
         self.0 |= Self::REFFED
     }
 
+    #[inline]
     pub fn is_reffed(&self) -> bool {
         self.0 & Self::REFFED != 0
     }
 
+    #[inline]
     pub fn set_deep(&mut self) {
         self.0 |= Self::DEEP
     }
 
+    #[inline]
     pub fn clear_deep(&mut self) {
         self.0 &= !Self::DEEP
     }
 
+    #[inline]
     pub fn is_deep(&self) -> bool {
         self.0 & Self::DEEP != 0
     }
 
+    #[inline]
     pub fn is_alloced(&self) -> bool {
         return self.0 & Self::ALLOCED != 0;
     }
 
+    #[inline]
     pub fn set_alloced(&mut self) {
         self.0 |= Self::ALLOCED
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.0 = 0;
     }
 
+    #[inline]
     pub fn is_marked(&self) -> bool {
         self.0 & Self::MARK != 0
     }
 
+    #[inline]
     pub fn set_mark(&mut self) {
         self.0 |= Self::MARK
     }
 
+    #[inline]
     pub fn clear_mark(&mut self) {
         self.0 &= !Self::MARK
     }
 
     // FREEZE
 
+    #[inline]
     pub fn freeze(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN
     }
 
+    #[inline]
     pub fn freeze_type(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_api(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_module(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::MAP_ADD | Self::VEC_FROZEN | Self::NOTPROTO
     }
 
+    #[inline]
     pub fn freeze_component(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED
     }
 
+    #[inline]
     pub fn freeze_shader(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::MAP_ADD | Self::VEC_FROZEN
     }
 
+    #[inline]
     pub fn freeze_ext(&mut self) {
         self.0 &= !(Self::FREEZE_MASK);
         self.0 |= Self::FROZEN | Self::VALIDATED | Self::MAP_ADD
     }
 
+    #[inline]
     pub fn needs_checking(&self) -> bool {
         self.0 & (Self::NEED_CHECK_MASK) != 0
     }
 
+    #[inline]
     pub fn is_vec_frozen(&self) -> bool {
         self.0 & (Self::VEC_FROZEN | Self::FROZEN | Self::STATIC) != 0
     }
 
     // REF
 
+    #[inline]
     pub fn set_type_index(&mut self, ty: ScriptTypeIndex) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.0 as u64 | Self::REF_KIND_TYPE_INDEX | Self::TYPE_CHECKED;
     }
 
+    #[inline]
     pub fn as_type_index(&self) -> Option<ScriptTypeIndex> {
         if self.is_type_index() {
             Some(ScriptTypeIndex(self.0 as u32))
@@ -412,16 +459,19 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_type_index(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_TYPE_INDEX
     }
 
+    #[inline]
     pub fn set_apply_transform(&mut self, ni: NativeId) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= (ni.index as u64) | Self::REF_KIND_APPLY_TRANSFORM;
     }
 
+    #[inline]
     pub fn as_apply_transform(&self) -> Option<NativeId> {
         if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM {
             Some(NativeId {
@@ -432,10 +482,12 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_apply_transform(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_APPLY_TRANSFORM
     }
 
+    #[inline]
     pub fn set_fn(&mut self, ptr: ScriptFnPtr) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
@@ -445,6 +497,7 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn as_fn(&self) -> Option<ScriptFnPtr> {
         if self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN {
             Some(ScriptFnPtr::Script(ScriptIp::from_u40(self.0)))
@@ -457,24 +510,29 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_script_fn(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SCRIPT_FN
     }
 
+    #[inline]
     pub fn is_native_fn(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_NATIVE_FN
     }
 
+    #[inline]
     pub fn is_fn(&self) -> bool {
         self.is_script_fn() || self.is_native_fn()
     }
 
+    #[inline]
     pub fn set_pod_type(&mut self, ty: ScriptPodType) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.index as u64 | Self::REF_KIND_POD_TYPE
     }
 
+    #[inline]
     pub fn as_pod_type(&self) -> Option<ScriptPodType> {
         if self.is_pod_type() {
             Some(ScriptPodType {
@@ -485,16 +543,19 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_pod_type(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_POD_TYPE
     }
 
+    #[inline]
     pub fn set_shader_io(&mut self, ty: ShaderIoType) {
         self.0 &= !(Self::REF_DATA_MASK);
         self.0 &= !(Self::REF_KIND_MASK);
         self.0 |= ty.0 as u64 | Self::REF_KIND_SHADER_IO
     }
 
+    #[inline]
     pub fn as_shader_io(&self) -> Option<ShaderIoType> {
         if self.is_shader_io() {
             Some(ShaderIoType(self.0 as u32))
@@ -503,6 +564,7 @@ impl ScriptObjectTag {
         }
     }
 
+    #[inline]
     pub fn is_shader_io(&self) -> bool {
         self.0 & Self::REF_KIND_MASK == Self::REF_KIND_SHADER_IO
     }
@@ -577,33 +639,40 @@ impl ScriptMapTag {
     const DIRTY: u64 = 1 << 32;
 
     #[allow(dead_code)]
+    #[inline]
     fn dirty() -> Self {
         Self(Self::DIRTY)
     }
 
+    #[inline]
     fn dirty_with_order(order: u32) -> Self {
         Self(Self::DIRTY | (order as u64))
     }
 
+    #[inline]
     fn get_and_clear_dirty(&mut self) -> bool {
         let ret = self.0 & Self::DIRTY != 0;
         self.0 &= !Self::DIRTY;
         ret
     }
 
+    #[inline]
     fn set_dirty(&mut self) {
         self.0 |= Self::DIRTY;
     }
 
+    #[inline]
     pub fn order(&self) -> u32 {
         (self.0 & Self::ORDER_MASK) as u32
     }
 
     #[allow(dead_code)]
+    #[inline]
     fn set_order(&mut self, order: u32) {
         self.0 = (self.0 & !Self::ORDER_MASK) | (order as u64);
     }
 
+    #[inline]
     fn with_order_offset(self, offset: u32) -> Self {
         let new_order = self.order() + offset;
         Self((self.0 & !Self::ORDER_MASK) | (new_order as u64))
@@ -1015,6 +1084,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn map_get(&self, key: &ScriptValue) -> Option<ScriptValue> {
         if let Some(val) = self.map.get(key) {
             Some(val.value)
@@ -1023,6 +1093,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn map_get_if_dirty(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
         if self.tag.is_tracked() {
             if let Some(val) = self.map.get_mut(key) {
@@ -1035,14 +1106,17 @@ impl ScriptObjectData {
         self.map_get(key)
     }
 
+    #[inline]
     pub fn map_delete(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
         self.map.remove(key).map(|v| v.value)
     }
 
+    #[inline]
     pub fn map_len(&self) -> usize {
         self.map.len()
     }
 
+    #[inline]
     pub fn map_iter_ret<T, F: FnMut(ScriptValue, ScriptValue) -> Option<T>>(
         &self,
         mut f: F,
@@ -1056,12 +1130,14 @@ impl ScriptObjectData {
         None
     }
 
+    #[inline]
     pub fn map_iter<F: FnMut(ScriptValue, ScriptValue)>(&self, mut f: F) {
         for (key, val) in self.map.iter() {
             f(*key, val.value);
         }
     }
 
+    #[inline]
     pub fn map_iter_ordered<F: FnMut(ScriptValue, ScriptValue)>(&self, mut f: F) {
         let mut ordered: Vec<_> = self.map.iter().collect();
         ordered.sort_by_key(|(_, val)| val.tag.order());
@@ -1070,6 +1146,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn merge_map_from_other(&mut self, other: &ScriptObjectData) {
         let offset = self.map.len() as u32;
         for (k, v) in other.map.iter() {
@@ -1085,6 +1162,7 @@ impl ScriptObjectData {
 
     /// Merge map entries from other, but only if the key doesn't already exist in self.
     /// Used by the splat operator to not overwrite existing values.
+    #[inline]
     pub fn merge_map_from_other_no_overwrite(&mut self, other: &ScriptObjectData) {
         let offset = self.map.len() as u32;
         for (k, v) in other.map.iter() {
@@ -1100,11 +1178,13 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn push_vec_from_other(&mut self, other: &ScriptObjectData) {
         self.vec.extend_from_slice(&other.vec);
     }
 
     //const DONT_RECYCLE_WHEN: usize = 1000;
+    #[inline]
     pub fn with_proto(proto: ScriptValue) -> Self {
         Self {
             proto,
@@ -1112,6 +1192,7 @@ impl ScriptObjectData {
         }
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.proto = NIL;
         self.tag.clear();
