@@ -172,6 +172,7 @@ fn decode_reference_audio(
         AudioFormat::Mp3 => "mp3",
         AudioFormat::OggVorbis => "ogg",
         AudioFormat::Flac => "flac",
+        AudioFormat::Wav => "wav",
     };
     let audio = decode_audio_limited(
         bytes,
