@@ -1725,6 +1725,10 @@ fn steps(p: &Program, info: &Info, i: Var) -> (Vec<Option<i64>>, Vec<Option<i32>
                                 (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => Some(x * c as i64),
                                 _ => None,
                             },
+                            Op::Bin(Bin::ShlI, a, b) => match (st(&a), consts[b.0 as usize]) {
+                                (Some(x), Some(k)) if (0..31).contains(&k) => Some(x << k),
+                                _ => None,
+                            },
                             _ => None,
                         }
                     };

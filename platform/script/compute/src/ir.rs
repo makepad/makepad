@@ -597,6 +597,10 @@ pub fn bounds(p: &Program) -> Vec<Option<u32>> {
                         },
                         Op::Bin(Bin::AndI, a, b) => pos(consts[b.0 as usize]).or(pos(consts[a.0 as usize])).or(out[a.0 as usize]).or(out[b.0 as usize]),
                         Op::Bin(Bin::ShrUI, a, b) => consts[b.0 as usize].map(|k| out[a.0 as usize].unwrap_or(u32::MAX) >> (k as u32 & 31)),
+                        Op::Bin(Bin::ShlI, a, b) => match (out[a.0 as usize], consts[b.0 as usize]) {
+                            (Some(x), Some(k)) if (0..31).contains(&k) => x.checked_shl(k as u32).filter(|y| y >> k == x && *y <= i32::MAX as u32),
+                            _ => None,
+                        },
                         Op::Sel(_, a, b) => match (out[a.0 as usize], out[b.0 as usize]) {
                             (Some(x), Some(y)) => Some(x.max(y)),
                             _ => None,

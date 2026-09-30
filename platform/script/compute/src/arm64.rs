@@ -345,6 +345,27 @@ fn allocate(p: &Program) -> Alloc {
 /// last use it is (the backend reads every operand before writing the
 /// result).
 pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[&[u8]], slot: impl Fn(Ent) -> u32, reuse_at_def: bool) -> Alloc {
+    // With reuse, a fused multiply-add's result prefers its addend's
+    // register (the accumulator then needs no copy).
+    let mut hint: std::collections::HashMap<Ent, Ent> = std::collections::HashMap::new();
+    if reuse_at_def {
+        fn walk(b: &Block, hint: &mut std::collections::HashMap<Ent, Ent>) {
+            for s in b {
+                match s {
+                    Stmt::Def(v, Op::Fma(_, _, _, c)) => {
+                        hint.insert(Ent::Val(v.0), Ent::Val(c.0));
+                    }
+                    Stmt::If(_, t, e) => {
+                        walk(t, hint);
+                        walk(e, hint);
+                    }
+                    Stmt::Loop { body, .. } => walk(body, hint),
+                    _ => {}
+                }
+            }
+        }
+        walk(&p.body, &mut hint);
+    }
     let mut lv = Liveness { loops: Vec::new(), blocks: Vec::new(), refs: Default::default(), pos: 0, loop_count: 0, depth: 0 };
     lv.walk(&p.body);
     let mut ivs: Vec<(u32, u32, Ent)> = lv.refs.iter().map(|(e, r)| {
@@ -379,6 +400,16 @@ pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[
                     true
                 }
             });
+            let hinted = hint.get(&ent).and_then(|h| match locs.get(h) {
+                Some(Loc::Reg(r)) => free.iter().position(|x| x == r),
+                _ => None,
+            });
+            if let Some(k) = hinted {
+                let reg = free.remove(k);
+                active.push((e, ent, reg));
+                locs.insert(ent, Loc::Reg(reg));
+                continue;
+            }
             if let Some(reg) = free.pop() {
                 active.push((e, ent, reg));
                 locs.insert(ent, Loc::Reg(reg));

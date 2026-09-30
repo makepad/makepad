@@ -31,11 +31,67 @@ pub fn optimize(p: &mut Program) {
     dead_frame_stores(p);
     dead_loops(p);
     drop_wraps(p);
+    strength_reduce(p);
+    cse(p);
     dce(p);
     cluster_stores(p);
 }
 
 /// `Wrap(x, n)` of an x proven in `0..n` ([`ir::bounds`]) is x.
+/// Integer multiplies by a power of two (from `2 * h`-style index math)
+/// become shifts: the same wrapping result, shorter latency.
+pub fn strength_reduce(p: &mut Program) {
+    let mut consts: HashMap<u32, i32> = HashMap::new();
+    let mut shift_consts: Vec<(u32, u32)> = Vec::new();
+    fn find(b: &Block, consts: &mut HashMap<u32, i32>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c);
+                }
+                Stmt::If(_, t, e) => {
+                    find(t, consts);
+                    find(e, consts);
+                }
+                Stmt::Loop { body, .. } => find(body, consts),
+                _ => {}
+            }
+        }
+    }
+    find(&p.body, &mut consts);
+    fn walk(b: &mut Block, consts: &HashMap<u32, i32>, new: &mut Vec<(u32, u32)>, vals: &mut Vec<ir::Ty>) {
+        for s in b.iter_mut() {
+            match s {
+                Stmt::Def(_, op) => {
+                    if let Op::Bin(ir::Bin::MulI, x, y) = *op {
+                        let k = |v: Val| consts.get(&v.0).copied().filter(|c| *c > 1 && (*c as u32).is_power_of_two());
+                        let (a, c) = match (k(y), k(x)) {
+                            (Some(c), _) => (x, c),
+                            (None, Some(c)) => (y, c),
+                            _ => continue,
+                        };
+                        let sh = (c as u32).trailing_zeros();
+                        // A new constant for the shift amount, defined at the top.
+                        vals.push(ir::Ty::I32);
+                        let cv = vals.len() as u32 - 1;
+                        new.push((cv, sh));
+                        *op = Op::Bin(ir::Bin::ShlI, a, Val(cv));
+                    }
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, consts, new, vals);
+                    walk(e, consts, new, vals);
+                }
+                Stmt::Loop { body, .. } => walk(body, consts, new, vals),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut p.body, &consts, &mut shift_consts, &mut p.vals);
+    let defs: Vec<Stmt> = shift_consts.into_iter().map(|(v, sh)| Stmt::Def(Val(v), Op::ConstI(sh as i32))).collect();
+    p.body.splice(0..0, defs);
+}
+
 pub fn drop_wraps(p: &mut Program) {
     let b = ir::bounds(p);
     let mut map = HashMap::new();
